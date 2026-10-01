@@ -1952,13 +1952,37 @@ def _review_invocation_report(
     window_start = observed_at - timedelta(seconds=2 * window_seconds)
     sent: dict[str, tuple[datetime, dict[str, Any]]] = {}
     attested: set[str] = set()
+    # Both must be missing: the writers commit through the event store, so a
+    # post-cutover journal can hold rows with no raw file beside it.
+    if not events_path.exists() and not events_path.with_suffix(".db").exists():
+        return [
+            "fno doctor: review invocations: no event journal; "
+            "no sent attempt to lose"
+        ]
     try:
-        with Path(events_path).open(encoding="utf-8") as stream:
-            for raw in stream:
-                try:
-                    event = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
+        from contextlib import nullcontext
+        from fno.events.store_client import query_rows
+        # In-process SQL read: doctor flows must not subprocess (the
+        # raw-cargo tripwire). A torn or unreadable store reads as empty.
+        try:
+            rows = query_rows(
+                events_path, types=["review_invocation", "review_attestation"]
+            )
+        except Exception:
+            rows = []
+        if not rows:
+            try:
+                with open(events_path, encoding="utf-8") as fh:
+                    rows = [
+                        parsed
+                        for line in fh
+                        if line.strip()
+                        for parsed in (json.loads(line),)
+                    ]
+            except (OSError, json.JSONDecodeError):
+                rows = []
+        with nullcontext(rows) as stream:
+            for event in stream:
                 data = event.get("data")
                 if not isinstance(data, dict):
                     continue
@@ -1982,13 +2006,6 @@ def _review_invocation_report(
                     invocation_id = data.get("invocation_id")
                     if isinstance(invocation_id, str) and invocation_id:
                         attested.add(invocation_id)
-    except FileNotFoundError:
-        # No journal is the normal state of a fresh checkout, not an
-        # instrument failure: nothing was ever sent, so nothing is lost.
-        return [
-            "fno doctor: review invocations: no event journal; "
-            "no sent attempt to lose"
-        ]
     except OSError as exc:
         return [f"fno doctor: review invocations: unmeasurable ({exc})"]
 

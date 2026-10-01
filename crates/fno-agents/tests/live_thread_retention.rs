@@ -77,6 +77,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         pane_activity: None,
         reach: Default::default(),
         dnd: false,
+        ..Default::default()
     };
     assert_eq!(sideline.harness_session_id.as_deref(), Some(session_id));
 

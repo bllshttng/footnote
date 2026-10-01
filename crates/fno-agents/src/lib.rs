@@ -221,6 +221,8 @@ pub mod king_verdict_inputs;
 pub mod lane_heal;
 pub mod launch_workdir;
 pub mod law_match;
+pub mod ledger_axes;
+pub(crate) mod ledger_workers;
 mod lifecycle_child;
 pub mod list_row;
 pub mod live_store_fence;
@@ -358,6 +360,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
 pub mod scoreboard;
+pub mod scoreboard_provider;
 pub mod scrape;
 pub mod scratch;
 pub mod screen;
@@ -370,6 +373,7 @@ pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod skill_drift;
 pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
@@ -407,6 +411,7 @@ pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
 pub mod test_delta;
+pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
 pub mod tracker;
@@ -1378,6 +1383,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Spawn coordinator: the durable accepted record written BEFORE
     // any backend launch; not a birth, correlated to it by spawn_id.
     "agent_spawn_accepted",
+    // A launch the spawn gate or the dispatch door refused before any
+    // worker existed; the feed projects it so a refused launch shows.
+    "agent_spawn_refused",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",

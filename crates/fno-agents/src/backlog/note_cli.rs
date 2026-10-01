@@ -21,6 +21,7 @@ struct NoteArgs {
     stdin: bool,
     read: bool,
     clear: bool,
+    replace: bool,
     quiet: bool,
     json_out: bool,
     if_revision: Option<u64>,
@@ -45,6 +46,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
         stdin: false,
         read: false,
         clear: false,
+        replace: false,
         quiet: false,
         json_out: false,
         if_revision: None,
@@ -81,6 +83,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
             "--stdin" => out.stdin = true,
             "--read" => out.read = true,
             "--clear" => out.clear = true,
+            "--replace" => out.replace = true,
             "--quiet" => out.quiet = true,
             "--json" | "-J" => out.json_out = true,
             "--if-revision" => {
@@ -173,8 +176,10 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
 }
 
 /// The main entry: parse, load, route, refuse-or-write, print the
-/// JSON receipt on stdout. Exit 2 usage, 1 missing graph/node, 3 the
-/// nobody-bound refusal (nothing written), 5 graph read failed, 0 written.
+/// JSON receipt on stdout. Exit 2 usage, 1 missing graph/node, 3 a refusal
+/// that wrote nothing (the cross-session guard, or a stale --if-revision;
+/// the bridge adds the nobody-bound walk on this code), 5 graph read
+/// failed, 0 written.
 pub fn run_note(args: &[String]) -> i32 {
     let parsed = match parse_args(args) {
         Ok(p) => p,
@@ -564,6 +569,35 @@ fn write_human(
     if body.is_empty() && !parsed.clear {
         eprintln!("Error: note text is empty");
         return 1;
+    }
+    // The cross-session guard: a note replaces the ONE current state, so a
+    // write (a new note, or --clear) over a revision this session cannot
+    // prove it wrote refuses until --replace names it deliberate. Write
+    // policy, not delivery: --quiet does not bypass it. Nothing is written
+    // on a refusal.
+    let prior = node_state::read_state(entry);
+    if let Some(p) = &prior {
+        if !parsed.replace && p.source_session_id != parsed.self_session {
+            let author = p
+                .source_session_id
+                .as_deref()
+                .unwrap_or("an unknown session");
+            let owned = p
+                .source_harness
+                .as_deref()
+                .map(|h| format!(" (harness {h})"))
+                .unwrap_or_default();
+            eprintln!(
+                "Error: note refused: current state on {node_id} is revision {}, \
+written by session {author}{owned} at {}. Nothing was written.\n\
+Append instead of replacing: read the current text with `fno backlog get {node_id}`, \
+combine it with yours, and resubmit with --replace.\n\
+Every replaced revision stays readable: fno backlog notes history {node_id}",
+                p.revision,
+                p.updated_at.as_deref().unwrap_or("an unknown time"),
+            );
+            return 3;
+        }
     }
     if parsed.clear {
         let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);

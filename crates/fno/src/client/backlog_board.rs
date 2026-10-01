@@ -1176,18 +1176,19 @@ impl View {
 pub(crate) fn cycle_sideline_view(view: &mut View) {
     match view.sideline_view {
         crate::view_store::SidelineView::Backlog => {
-            view.backlog_board = None;
-            view.board_full = false;
-            crate::view_store::save_board_full(false);
-            set_sideline_view(view, crate::view_store::SidelineView::Agents);
+            super::org_board::open(view);
         }
         crate::view_store::SidelineView::Agents => {
             if !view.experimental_backlog {
-                view.set_notice("experimental backlog view is off (sidebar menu)".into());
+                super::org_board::open(view);
                 return;
             }
             backlog_board_open_fresh(view);
             set_sideline_view(view, crate::view_store::SidelineView::Backlog);
+        }
+        crate::view_store::SidelineView::Org => {
+            view.org_board = None;
+            set_sideline_view(view, crate::view_store::SidelineView::Agents);
         }
     }
 }
@@ -1195,6 +1196,7 @@ pub(crate) fn cycle_sideline_view(view: &mut View) {
 /// A fresh board view at the next generation (the stale fold of a
 /// previous open can never land).
 fn backlog_board_open_fresh(view: &mut View) {
+    view.org_board = None;
     let gen = view
         .backlog_board
         .as_ref()

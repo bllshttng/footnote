@@ -740,7 +740,11 @@ pub(crate) fn first_cwd_row(path: &Path) -> Option<String> {
         let Ok(row) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(cwd) = row.get("cwd").and_then(|v| v.as_str()) {
+        if let Some(cwd) = row
+            .get("cwd")
+            .or_else(|| row.pointer("/payload/cwd"))
+            .and_then(|v| v.as_str())
+        {
             return Some(cwd.to_string());
         }
     }

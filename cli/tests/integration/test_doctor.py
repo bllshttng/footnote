@@ -194,7 +194,7 @@ def test_check_wip_caps_absent_is_clean(tmp_path: Path, monkeypatch: pytest.Monk
 def test_check_wip_caps_flags_malformed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Quoted-string, negative, and boolean caps are each reported (ab-554d37ef).
 
-    These are exactly the values render_html._load_wip_caps silently drops, so
+    These are exactly the values the global wip_caps read silently drops, so
     doctor is the place a user finds out a cap stopped working."""
     from fno.setup.doctor import check_wip_caps
     f = tmp_path / "global.yaml"

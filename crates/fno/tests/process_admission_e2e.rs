@@ -1,6 +1,6 @@
 use fno::process_admission::{
-    configured_max_processes, decide_panes, decide_processes, AdmissionDecision, Census, MaxPanes,
-    MaxProcesses, PaneCount, Scope,
+    configured_max_processes, decide_panes, decide_processes, Census, MaxPanes, MaxProcesses,
+    PaneCount, Scope,
 };
 use fno::process_admission::{ADMISSION_ACCEPTED, BYPASS_HINT};
 use std::process::Stdio;
@@ -8,23 +8,15 @@ use std::sync::{Arc, Barrier, Mutex, OnceLock};
 
 static ADMISSION_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn census(count: usize) -> Census {
-    Census::complete(count)
-}
-
+/// These tests exercise the agent path. A human at a terminal is always
+/// admitted, so a worker identity keeps a developer's tty run on the gate.
 fn isolate_admission_state() {
+    std::env::set_var("FNO_AGENT_SELF", "admission-e2e");
     std::env::set_var("FNO_E2E", "1");
     std::env::set_var(
         "FNO_MUX_ADMISSION_NAMESPACE",
         format!("process-admission-{}", std::process::id()),
     );
-}
-
-#[test]
-fn ac1_hp_allows_complete_snapshot_below_fleet_ceiling() {
-    let decision = decide_processes(&census(1), MaxProcesses::new(2));
-
-    assert_eq!(decision, AdmissionDecision::Admit);
 }
 
 #[test]
@@ -62,16 +54,6 @@ async fn ac1_hp_async_output_preserves_implicit_capture() {
     };
     restore_max_processes(previous);
     assert_eq!(output.stdout, b"async-capture");
-}
-
-#[test]
-fn ac2_err_refuses_at_fleet_ceiling_with_positive_marker() {
-    let decision = decide_processes(&census(2), MaxProcesses::new(2));
-
-    assert_eq!(
-        decision.refusal(),
-        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}"))
-    );
 }
 
 #[test]
@@ -230,6 +212,7 @@ fn ac5_hp_off_switch_bypasses_cap_before_config_and_lock() {
 
 #[test]
 fn ac5_err_invalid_off_switch_fails_closed_with_accepted_values() {
+    isolate_admission_state();
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()

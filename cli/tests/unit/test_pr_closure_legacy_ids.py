@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fno.graph._constants import is_wellformed_node_id
 from fno.graph._reconcile import bind_pr_rows
-from fno.graph.render_html import LEAK_PATTERNS
+from fno.graph.roadmap_public import LEAK_PATTERNS
 from fno.pr.closure import branch_node_ids, render_pr_closure_trailer
 
 REPO = Path(__file__).resolve().parents[3]

@@ -104,8 +104,6 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_measured_at: None,
-        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -127,6 +125,7 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
+        ..Default::default()
     }
 }
 

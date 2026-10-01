@@ -73,6 +73,39 @@ pub(crate) fn lattice_glyph(s: LatticeState) -> (char, u8) {
     (st.glyph, st.flags)
 }
 
+/// The frames a Working row's status glyph turns through, so a working row
+/// moves and a done row is still. Only the interactive client turns them
+/// ([`start_spin`]); a snapshot, a test, or reduced motion draws the still `●`.
+pub(crate) const SPIN: [char; 4] = ['◐', '◓', '◑', '◒'];
+pub(crate) const SPIN_FRAME_MS: u64 = 250;
+static SPIN_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Start the spin for this process, unless the splash's motion gate says no
+/// (not a TTY, CI, or `REDUCED_MOTION`).
+pub(crate) fn start_spin() {
+    if crate::splash::animated() {
+        SPIN_EPOCH.get_or_init(std::time::Instant::now);
+    }
+}
+
+/// When the spin started; `None` while it is off.
+pub(crate) fn spin_epoch() -> Option<std::time::Instant> {
+    SPIN_EPOCH.get().copied()
+}
+
+pub(crate) fn spin_frame(elapsed_ms: u64) -> char {
+    SPIN[(elapsed_ms / SPIN_FRAME_MS) as usize % SPIN.len()]
+}
+
+/// The status-cell glyph: a spin frame for a Working row while the spin
+/// runs, else the lattice glyph.
+pub(crate) fn status_glyph(s: LatticeState) -> char {
+    match (s, spin_epoch()) {
+        (LatticeState::Working, Some(t0)) => spin_frame(t0.elapsed().as_millis() as u64),
+        _ => lattice_glyph(s).0,
+    }
+}
+
 /// The status column's word per lattice state, shortened to fit the
 /// 5-column cell (operator, 2026-09-21; the fleet's mail vocabulary keeps
 /// the long forms). `Unmeasured` and `Empty` keep their glyphs.

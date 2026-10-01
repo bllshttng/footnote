@@ -1,6 +1,6 @@
 //! The write-time title leak gate.
 //!
-//! The public roadmap render refuses leaky titles (`render_html.LEAK_PATTERNS`
+//! The public roadmap render refuses leaky titles (`roadmap_public.LEAK_PATTERNS`
 //! on the Python side), but that gate fires at PUBLISH time: the push to the
 //! live page dies and the site quietly serves stale content until a human
 //! notices. This gate runs at the publication seam instead, so a leaking
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_vocabulary_matches_the_render_gate() {
-        // Byte-for-byte with cli/src/fno/graph/render_html.py LEAK_PATTERNS:
+        // Byte-for-byte with cli/src/fno/graph/roadmap_public.py LEAK_PATTERNS:
         // the probe and the gate can never disagree about what a leak is.
         assert_eq!(title_leak_classes("PR #2612"), vec!["pr-reference"]);
         assert_eq!(title_leak_classes("x-aaaa epic"), vec!["node-id"]);

@@ -11,7 +11,7 @@ use std::path::Path;
 // -----------------------------------------------------------------------
 
 #[test]
-fn print_help_lists_every_routable_verb() {
+fn help_rows() {
     // Mirror of RUST_CLIENT_VERBS (cli/src/fno/agents/rust_runtime.py).
     // The Python parity test guards client.rs<->router; this guards the
     // `--help` display list so a routable verb can't be missing from it.
@@ -59,10 +59,7 @@ fn print_help_lists_every_routable_verb() {
         expected.len(),
         "CLIENT_VERB_USAGE has an extra or duplicate verb vs RUST_CLIENT_VERBS"
     );
-}
 
-#[test]
-fn verb_usage_resolves_known_and_rejects_unknown() {
     // Verbs that ab-351427cb added must each resolve a usage line (host/
     // promote retired at G4).
     for verb in [
@@ -84,10 +81,7 @@ fn verb_usage_resolves_known_and_rejects_unknown() {
     assert!(verb_usage("loop").unwrap().starts_with("loop run"));
     assert!(verb_usage("loop-check").unwrap().starts_with("loop-check"));
     assert!(verb_usage("definitely-not-a-verb").is_none());
-}
 
-#[test]
-fn rm_usage_names_the_claude_cascade_and_worktree() {
     let usage = verb_usage("rm").expect("rm usage line");
     assert!(
         usage.contains("claude rm"),
@@ -98,17 +92,11 @@ fn rm_usage_names_the_claude_cascade_and_worktree() {
         usage.to_ascii_lowercase().contains("worktree"),
         "rm help must say a removal can remove a worktree"
     );
-}
 
-#[test]
-fn rm_runs_the_same_daemon_drift_probe_as_list() {
     assert!(warns_on_daemon_drift("list"));
     assert!(warns_on_daemon_drift("rm"));
     assert!(!warns_on_daemon_drift("spawn"));
-}
 
-#[test]
-fn rm_preserves_internal_audit_context_flags() {
     let (method, params) = build_request(
         "rm",
         &[
@@ -132,6 +120,34 @@ fn rm_preserves_internal_audit_context_flags() {
     assert_eq!(params["audit_request_id"], "merge-cleanup-1");
     assert_eq!(params["audit_worktree_touched"], true);
     assert_eq!(params["audit_reclaimed_bytes"], 42);
+
+    // ab-351427cb review (gemini HIGH / codex P2): a `--help` in the verb's
+    // own options is a help request; a `--help` after an `--argv`/`--`
+    // boundary belongs to the spawned command and must NOT be captured.
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+
+    // Verb's own --help / -h -> help request.
+    assert!(is_help_request(&s(&["wk", "--help"])));
+    assert!(is_help_request(&s(&["--help"])));
+    assert!(is_help_request(&s(&["-h"])));
+
+    // --help inside a spawn/host argv payload -> NOT a help request.
+    assert!(!is_help_request(&s(&[
+        "wk",
+        "--harness",
+        "codex",
+        "--argv",
+        "--",
+        "tool",
+        "--help"
+    ])));
+    assert!(!is_help_request(&s(&["wk", "--argv", "tool", "--help"])));
+
+    // --help after a bare `--` end-of-options separator -> NOT a help request.
+    assert!(!is_help_request(&s(&["wk", "--", "--help"])));
+
+    // No help flag at all.
+    assert!(!is_help_request(&s(&["wk", "--harness", "codex"])));
 }
 
 // -----------------------------------------------------------------------
@@ -148,7 +164,7 @@ fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String
 }
 
 #[test]
-fn maybe_run_spawn_infers_provider_from_single_marker() {
+fn spawn_infer_rows() {
     assert_eq!(
         infer_dispatch_provider(env_of(&[("CLAUDE_CODE_SESSION_ID", "abc")])),
         "claude"
@@ -165,10 +181,7 @@ fn maybe_run_spawn_infers_provider_from_single_marker() {
         infer_dispatch_provider(env_of(&[("OPENCODE_SESSION_ID", "ses_abc")])),
         "opencode"
     );
-}
 
-#[test]
-fn maybe_run_spawn_infers_provider_defaults_claude_when_ambiguous() {
     // Zero markers -> builtin default.
     assert_eq!(infer_dispatch_provider(env_of(&[])), "claude");
     // Whitespace-only marker is treated as absent.
@@ -204,10 +217,7 @@ fn maybe_run_spawn_infers_provider_defaults_claude_when_ambiguous() {
         ])),
         "claude"
     );
-}
 
-#[test]
-fn infer_dispatch_provider_uses_canonical_spawn_stamp() {
     assert_eq!(
         infer_dispatch_provider(env_of(&[("FNO_HARNESS_NAME", "codex")])),
         "codex"
@@ -220,10 +230,7 @@ fn infer_dispatch_provider_uses_canonical_spawn_stamp() {
         ])),
         "claude"
     );
-}
 
-#[test]
-fn harness_marker_table_is_expected() {
     // Guards Rust-internal edits to HARNESS_MARKERS (ordering is load-bearing:
     // it is the priority list). Cross-language parity with Python is enforced
     // by the pytest test_harness_markers_match_client_rs, which reads this
@@ -240,37 +247,6 @@ fn harness_marker_table_is_expected() {
     );
 }
 
-#[test]
-fn help_request_respects_argv_boundary() {
-    // ab-351427cb review (gemini HIGH / codex P2): a `--help` in the verb's
-    // own options is a help request; a `--help` after an `--argv`/`--`
-    // boundary belongs to the spawned command and must NOT be captured.
-    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
-
-    // Verb's own --help / -h -> help request.
-    assert!(is_help_request(&s(&["wk", "--help"])));
-    assert!(is_help_request(&s(&["--help"])));
-    assert!(is_help_request(&s(&["-h"])));
-
-    // --help inside a spawn/host argv payload -> NOT a help request.
-    assert!(!is_help_request(&s(&[
-        "wk",
-        "--harness",
-        "codex",
-        "--argv",
-        "--",
-        "tool",
-        "--help"
-    ])));
-    assert!(!is_help_request(&s(&["wk", "--argv", "tool", "--help"])));
-
-    // --help after a bare `--` end-of-options separator -> NOT a help request.
-    assert!(!is_help_request(&s(&["wk", "--", "--help"])));
-
-    // No help flag at all.
-    assert!(!is_help_request(&s(&["wk", "--harness", "codex"])));
-}
-
 // -----------------------------------------------------------------------
 // W7: --emit-schema unit tests (struct-drift guard + JSON parse check)
 // -----------------------------------------------------------------------
@@ -278,7 +254,7 @@ fn help_request_respects_argv_boundary() {
 /// AC2-HP: emit_schema_json() must produce valid JSON containing the
 /// required top-level keys (envelope, status, event_kinds).
 #[test]
-fn emit_schema_json_has_required_keys() {
+fn schema_rows() {
     let schema = emit_schema_json();
     assert!(schema.get("envelope").is_some(), "missing 'envelope' key");
     assert!(schema.get("status").is_some(), "missing 'status' key");
@@ -286,33 +262,12 @@ fn emit_schema_json_has_required_keys() {
         schema.get("event_kinds").is_some(),
         "missing 'event_kinds' key"
     );
-}
 
-/// AC2-HP: The emitted schema must serialize to valid JSON (round-trip check).
-#[test]
-fn emit_schema_round_trips_as_json() {
     let schema = emit_schema_json();
     let s = serde_json::to_string(&schema).expect("schema must serialize");
     let back: serde_json::Value = serde_json::from_str(&s).expect("re-parse must succeed");
     assert_eq!(schema, back);
-}
 
-/// Bidirectional struct-drift guard for AgentState + PtyStateWire.
-///
-/// Direction 1 (schema ⊆ struct): every property key in the emitted
-/// status schema must exist as a serialized AgentState field. A property
-/// added to emit_schema_json() without a corresponding struct field is
-/// caught here.
-///
-/// Direction 2 (struct ⊆ schema): every serialized AgentState field must
-/// appear in the emitted status schema properties. A new AgentState field
-/// forgotten in emit_schema_json() is caught here.
-///
-/// The same bidirectional check is applied to the pty sub-object vs the
-/// on-disk PtyStateWire flat fields (active, drive_active, drive_session_id,
-/// drive_mode, last_heartbeat_at_monotonic_ns).
-#[test]
-fn emit_schema_status_properties_match_agent_state_fields() {
     use fno_agents::state::PtyState;
 
     // --- AgentState (pty: None) ---
@@ -408,16 +363,31 @@ fn emit_schema_status_properties_match_agent_state_fields() {
             "PtyState wire field {key:?} not in emitted pty schema properties: {pty_schema_keys:?}"
         );
     }
-}
 
-/// AC2-HP: KNOWN_EVENT_KINDS must be non-empty and contain the canonical kinds.
-#[test]
-fn known_event_kinds_are_non_empty_and_contain_canonical() {
     assert!(!KNOWN_EVENT_KINDS.is_empty());
     assert!(KNOWN_EVENT_KINDS.contains(&"agent_spawned"));
     assert!(KNOWN_EVENT_KINDS.contains(&"daemon_started"));
     assert!(KNOWN_EVENT_KINDS.contains(&"event_payload_too_large"));
 }
+
+/// AC2-HP: The emitted schema must serialize to valid JSON (round-trip check).
+
+/// Bidirectional struct-drift guard for AgentState + PtyStateWire.
+///
+/// Direction 1 (schema ⊆ struct): every property key in the emitted
+/// status schema must exist as a serialized AgentState field. A property
+/// added to emit_schema_json() without a corresponding struct field is
+/// caught here.
+///
+/// Direction 2 (struct ⊆ schema): every serialized AgentState field must
+/// appear in the emitted status schema properties. A new AgentState field
+/// forgotten in emit_schema_json() is caught here.
+///
+/// The same bidirectional check is applied to the pty sub-object vs the
+/// on-disk PtyStateWire flat fields (active, drive_active, drive_session_id,
+/// drive_mode, last_heartbeat_at_monotonic_ns).
+
+/// AC2-HP: KNOWN_EVENT_KINDS must be non-empty and contain the canonical kinds.
 
 // -----------------------------------------------------------------------
 // Task 2.1: format_success per-verb output (stop/rm stdout parity)
@@ -425,21 +395,14 @@ fn known_event_kinds_are_non_empty_and_contain_canonical() {
 
 /// A codex thread stop names the interrupt outcome; `no-turn` stays silent.
 #[test]
-fn format_success_stop_names_the_interrupt_outcome() {
+fn stop_rows() {
     let result = json!({"stopped": true, "backend": "codex-thread", "interrupt": "interrupted"});
     let out = format_success("stop", "t", &result, false, true, false).expect("stop line");
     assert_eq!(out, "stopped: t (turn interrupted)");
     let no_turn = json!({"stopped": true, "backend": "codex-thread", "interrupt": "no-turn"});
     let out = format_success("stop", "t", &no_turn, false, true, false).expect("stop line");
     assert_eq!(out, "stopped: t");
-}
 
-/// (x-6678) A refused stop never prints the word "stopped". The daemon
-/// answers `stopped: false` over a turn its interrupt never settled, and
-/// the old formatter read only `interrupt`, so it printed
-/// "stopped: t (turn timeout-turn-still-running)" over a live worker.
-#[test]
-fn format_success_stop_refused_never_claims_a_stop() {
     let result = json!({
         "stopped": false,
         "backend": "codex-thread",
@@ -454,27 +417,28 @@ fn format_success_stop_refused_never_claims_a_stop() {
         out,
         "stop refused: t is still running (timeout-turn-still-running)"
     );
-}
 
-/// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
-#[test]
-fn format_success_stop_with_short_id() {
     let result = json!({"stopped": true, "short_id": "fo-1a2b"});
     let out = format_success("stop", "foo", &result, false, true, false);
     assert_eq!(out, Some("stopped: foo (fo-1a2b)".to_string()));
-}
 
-/// AC1-HP: stop fallback when short_id absent -> "stopped: <name>"
-#[test]
-fn format_success_stop_without_short_id() {
     let result = json!({"stopped": true});
     let out = format_success("stop", "foo", &result, false, true, false);
     assert_eq!(out, Some("stopped: foo".to_string()));
 }
 
+/// (x-6678) A refused stop never prints the word "stopped". The daemon
+/// answers `stopped: false` over a turn its interrupt never settled, and
+/// the old formatter read only `interrupt`, so it printed
+/// "stopped: t (turn timeout-turn-still-running)" over a live worker.
+
+/// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
+
+/// AC1-HP: stop fallback when short_id absent -> "stopped: <name>"
+
 /// A verified Claude cascade names both surfaces in the receipt.
 #[test]
-fn format_success_rm() {
+fn rm_flow_rows() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -484,13 +448,7 @@ fn format_success_rm() {
     });
     let out = format_success("rm", "bar-agent", &result, false, true, false);
     assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
-}
 
-/// The transport-failure line names the row and answers from the registry
-/// verdict the caller passed, never from the past-tense pre-exec banner. An
-/// unread store (`None`) says so instead of wearing an absent verdict.
-#[test]
-fn rm_failure_line_names_the_row_and_the_registry_verdict() {
     assert_eq!(
         rm_failure_line("bar-agent", "protocol: connection closed", Some(true)),
         "fno-agents: rm bar-agent: protocol: connection closed; \
@@ -506,10 +464,7 @@ fn rm_failure_line_names_the_row_and_the_registry_verdict() {
         "fno-agents: rm bar-agent: protocol: connection closed; \
          the registry could not be read to confirm whether anything was removed"
     );
-}
 
-#[test]
-fn format_success_rm_warns_when_a_worktree_was_removed() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -526,17 +481,7 @@ fn format_success_rm_warns_when_a_worktree_was_removed() {
         "worktree deletion must be visible: {out}"
     );
     assert!(out.to_ascii_lowercase().contains("worktree"), "{out}");
-}
 
-/// A reap that really removed a harness row names the verb that puts it
-/// back. Asserted on the literal `fno agents adopt` string, not merely on
-/// the receipt being longer: an absence has two explanations.
-/// A codex row carries no short_id, so `harness_row_id` degrades to the
-/// first eight chars of a time-prefixed id -- which collides across
-/// same-window sessions. The hint must name the full id instead, or it
-/// points an operator at a sibling session.
-#[test]
-fn format_success_rm_adopt_hint_prefers_the_full_session_id() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -552,10 +497,7 @@ fn format_success_rm_adopt_hint_prefers_the_full_session_id() {
         "{out}"
     );
     assert!(!out.contains("adopt 01a02125\n"), "{out}");
-}
 
-#[test]
-fn format_success_rm_names_the_adopt_reversal() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -574,10 +516,7 @@ fn format_success_rm_names_the_adopt_reversal() {
         "{out}"
     );
     assert!(out.contains("resume handle"), "{out}");
-}
 
-#[test]
-fn resume_and_adopt_usage_advertise_recovery_flags() {
     let resume = verb_usage("resume").expect("resume usage");
     assert!(resume.contains("--cross-project"), "{resume}");
     assert!(resume.contains("--cwd <existing-checkout>"), "{resume}");
@@ -587,12 +526,7 @@ fn resume_and_adopt_usage_advertise_recovery_flags() {
 
     let adopt = verb_usage("adopt").expect("adopt usage");
     assert!(adopt.contains("--cross-project"), "{adopt}");
-}
 
-/// No row id means no handle to name, so the receipt stays exactly as it
-/// was rather than printing `fno agents adopt unknown`.
-#[test]
-fn format_success_rm_omits_the_hint_without_a_row_id() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -601,10 +535,7 @@ fn format_success_rm_omits_the_hint_without_a_row_id() {
     });
     let out = format_success("rm", "bar-agent", &result, false, true, false);
     assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
-}
 
-#[test]
-fn format_success_rm_never_claims_an_unread_harness_is_gone() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -622,8 +553,23 @@ fn format_success_rm_never_claims_an_unread_harness_is_gone() {
     );
 }
 
+/// The transport-failure line names the row and answers from the registry
+/// verdict the caller passed, never from the past-tense pre-exec banner. An
+/// unread store (`None`) says so instead of wearing an absent verdict.
+
+/// A reap that really removed a harness row names the verb that puts it
+/// back. Asserted on the literal `fno agents adopt` string, not merely on
+/// the receipt being longer: an absence has two explanations.
+/// A codex row carries no short_id, so `harness_row_id` degrades to the
+/// first eight chars of a time-prefixed id -- which collides across
+/// same-window sessions. The hint must name the full id instead, or it
+/// points an operator at a sibling session.
+
+/// No row id means no handle to name, so the receipt stays exactly as it
+/// was rather than printing `fno agents adopt unknown`.
+
 #[test]
-fn format_success_rm_names_a_forced_mux_orphan() {
+fn rm_edge_rows() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -642,12 +588,7 @@ fn format_success_rm_names_a_forced_mux_orphan() {
                 .to_string()
         )
     );
-}
 
-// x-9485: a confirmed pane stop prints its measurement - the pid that died -
-// not a bare surface name.
-#[test]
-fn format_success_rm_names_the_confirmed_pane_death() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -668,10 +609,7 @@ fn format_success_rm_names_the_confirmed_pane_death() {
                 .to_string()
         )
     );
-}
 
-#[test]
-fn format_success_rm_names_an_event_write_failure() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -685,10 +623,7 @@ fn format_success_rm_names_an_event_write_failure() {
         out,
         Some("removed: bar-agent (fno + claude; event record not written: disk full)".to_string())
     );
-}
 
-#[test]
-fn format_success_rm_names_a_forced_codex_survivor() {
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -705,13 +640,7 @@ fn format_success_rm_names_a_forced_codex_survivor() {
                 .to_string()
         )
     );
-}
 
-/// AC2-HP: unknown verb returns None (falls back to pretty-print).
-/// `spawn` is NOT unknown post-x-3ab8 (it renders a receipt, covered by
-/// `format_success_spawn_emits_compact_receipt`); use a truly unhandled verb.
-#[test]
-fn format_success_unknown_verb_returns_none() {
     let result = json!({"spawned": true});
     assert_eq!(
         format_success("bogus-verb", "worker", &result, false, true, false),
@@ -724,11 +653,18 @@ fn format_success_unknown_verb_returns_none() {
     );
 }
 
+// x-9485: a confirmed pane stop prints its measurement - the pid that died -
+// not a bare surface name.
+
+/// AC2-HP: unknown verb returns None (falls back to pretty-print).
+/// `spawn` is NOT unknown post-x-3ab8 (it renders a receipt, covered by
+/// `format_success_spawn_emits_compact_receipt`); use a truly unhandled verb.
+
 // ab-1891cdff: `restart` outcome rendering (AC2-HP / AC2-EDGE / AC2-FR)
 // -----------------------------------------------------------------------
 
 #[test]
-fn render_restart_reports_old_to_new() {
+fn restart_rows() {
     // AC2-HP: a swap reports `restarted: pid OLD -> NEW` on stdout, exit 0.
     let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(91627),
@@ -739,10 +675,7 @@ fn render_restart_reports_old_to_new() {
     assert_eq!(out.as_deref(), Some("restarted: pid 91627 -> 91999"));
     assert_eq!(err, None);
     assert_eq!(code, 0);
-}
 
-#[test]
-fn render_restart_forced_says_killed() {
     // x-3498: a --force swap must read as a KILL, not a drain.
     let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(91627),
@@ -753,10 +686,7 @@ fn render_restart_forced_says_killed() {
     assert_eq!(out.as_deref(), Some("forced: killed pid 91627 -> 91999"));
     assert_eq!(err, None);
     assert_eq!(code, 0);
-}
 
-#[test]
-fn render_restart_note_rides_stderr_at_zero() {
     // --force declining a recycled pid is a report, not a failure.
     let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(7),
@@ -771,10 +701,7 @@ fn render_restart_note_rides_stderr_at_zero() {
         "the refusal is heard"
     );
     assert_eq!(code, 0, "the restart itself succeeded");
-}
 
-#[test]
-fn render_restart_reports_fresh_when_down() {
     // AC2-EDGE: no daemon was running -> started fresh, no error, exit 0.
     let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: None,
@@ -788,10 +715,7 @@ fn render_restart_reports_fresh_when_down() {
     );
     assert_eq!(err, None);
     assert_eq!(code, 0);
-}
 
-#[test]
-fn render_restart_escalated_says_escalated() {
     // AC1-HP: an escalation after a starved SIGTERM reads as a restart that
     // had to kill, with the note on stderr, exit 0.
     let note = "pid 91627 kept serving 30s after SIGTERM; escalated to SIGKILL".to_string();
@@ -807,10 +731,7 @@ fn render_restart_escalated_says_escalated() {
     );
     assert_eq!(err.as_deref(), Some(note.as_str()), "the note is heard");
     assert_eq!(code, 0);
-}
 
-#[test]
-fn render_restart_failure_is_loud() {
     // AC2-FR: a SIGTERM failure carries a stderr line naming the pid + reason
     // and a nonzero exit; no false "restarted" on stdout.
     let (out, err, code) =
@@ -837,33 +758,20 @@ fn render_restart_failure_is_loud() {
 
 /// AC1-HP (create): ask with created=true in result prints "<short_id>\n" only.
 #[test]
-fn format_success_bg_create_prints_short_id() {
+fn ask_rows() {
     let result = json!({"created": true, "short_id": "cx-1a2b3c"});
     let out = format_success("ask", "myagent", &result, false, true, false);
     assert_eq!(out, Some("cx-1a2b3c".to_string()));
-}
 
-/// AC1-HP (follow-up): ask without created prints the reply verbatim (no added newline).
-#[test]
-fn format_success_ask_followup_prints_reply_verbatim() {
     let reply = "Here is my answer to your question.";
     let result = json!({"reply": reply, "backend": "pty"});
     let out = format_success("ask", "myagent", &result, false, true, false);
     assert_eq!(out, Some(reply.to_string()));
-}
 
-/// AC2-ERR: ask follow-up with empty reply prints empty string (not None).
-#[test]
-fn format_success_ask_followup_empty_reply() {
     let result = json!({"reply": "", "backend": "pty"});
     let out = format_success("ask", "myagent", &result, false, true, false);
     assert_eq!(out, Some(String::new()));
-}
 
-/// The codex-thread bounded-ask receipt: `reply: null` + in_flight prints
-/// the in-flight line, never an empty line that reads as an empty answer.
-#[test]
-fn format_success_ask_in_flight_prints_the_turn_not_nothing() {
     let result = json!({
         "reply": null,
         "backend": "codex-thread",
@@ -874,13 +782,7 @@ fn format_success_ask_in_flight_prints_the_turn_not_nothing() {
         .expect("in_flight formats a line");
     assert!(out.contains("turn-9"), "names the turn: {out}");
     assert!(out.contains("in flight"), "names the state: {out}");
-}
 
-/// AC3-HP: build_request accepts --from-name, --yolo, --timeout without error.
-/// These flags are forwarded to the daemon so `ask` can be called with full
-/// Python-parity flag surface without exit 2 (unknown flag).
-#[test]
-fn ask_accepts_from_name_yolo_timeout_flags() {
     let args = vec![
         "myagent".to_string(),
         "hello there".to_string(),
@@ -901,16 +803,7 @@ fn ask_accepts_from_name_yolo_timeout_flags() {
     assert_eq!(params["from_name"], "fno");
     assert_eq!(params["yolo"], true);
     assert_eq!(params["timeout"], 30u64);
-}
 
-/// Codex P2 (PR #379): with `ask` unconditionally auto-routed, the binary
-/// must accept the Click/Typer `--flag=value` equals form for EVERY
-/// value-carrying option. Without the normalization, `--cwd=/repo` /
-/// `--timeout=30` / `--from-name=bot` would regress to "unknown flag"
-/// instead of reaching the dispatch. The harness axis is `--harness`
-/// (wire param `provider`); `--provider=...` is a tombstone (AC3).
-#[test]
-fn ask_accepts_equals_form_for_all_value_flags() {
     let args = vec![
         "myagent".to_string(),
         "hello there".to_string(),
@@ -951,190 +844,7 @@ fn ask_accepts_equals_form_for_all_value_flags() {
     .unwrap_err();
     assert!(err.contains("split at the axis rename"), "got: {err}");
     assert!(err.contains("--harness/-H"), "got: {err}");
-}
 
-/// codex P2 (PR #73): `--model` must reach the request, else
-/// `spawn --harness agy --once --model <name>` fails with "unknown flag"
-/// before dispatch_agy_once sees it. Both space- and equals-form parse.
-#[test]
-fn spawn_forwards_model_flag() {
-    let (_m, space) = build_request(
-        "spawn",
-        &[
-            "wk".to_string(),
-            "--harness".to_string(),
-            "agy".to_string(),
-            "--once".to_string(),
-            "--model".to_string(),
-            "Gemini 3.5 Flash (High)".to_string(),
-        ],
-    )
-    .expect("--model must parse");
-    assert_eq!(space["model"], "Gemini 3.5 Flash (High)");
-    let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--model=pro".to_string()])
-        .expect("--model= must parse");
-    assert_eq!(eq["model"], "pro");
-}
-
-#[test]
-fn spawn_accepts_squad_placement_aliases() {
-    let (_method, short) = build_request(
-        "spawn",
-        &[
-            "reviewer".to_string(),
-            "-s".to_string(),
-            "reviews".to_string(),
-            "-x".to_string(),
-            "right".to_string(),
-        ],
-    )
-    .expect("mobile placement aliases must parse");
-    assert_eq!(short["squad"], "reviews");
-    assert_eq!(short["split"], "right");
-
-    let (_method, long) = build_request(
-        "spawn",
-        &[
-            "reviewer".to_string(),
-            "--squad=reviews".to_string(),
-            "--split=right".to_string(),
-        ],
-    )
-    .expect("long placement options must parse");
-    assert_eq!(short, long);
-}
-
-#[test]
-fn spawn_placement_is_pane_only() {
-    // The thread lane (bg on the wire) carries the placement flags only
-    // when --portal names the pane the thread hosts: without it the
-    // placement has nothing to place, and headless never hosts a session.
-    let params = serde_json::json!({"squad": "reviews", "split": "Right"});
-    assert_eq!(
-        validate_spawn_placement(&params, "bg"),
-        Err("--workspace/-s, --split/-x, and --tab on --substrate \
-             thread need --portal N: a thread hosts no pane until a portal \
-             opens one, so the placement has nothing to place"
-            .to_string())
-    );
-    assert_eq!(
-        validate_spawn_placement(&serde_json::json!({"portal": 1u8}), "pane"),
-        Err(
-            "--portal applies only to --substrate thread; a pane hosts its \
-             own geometry and headless hosts no session at all"
-                .to_string()
-        )
-    );
-    assert!(
-        validate_spawn_placement(
-            &serde_json::json!({"portal": 1u8, "split": "right", "tab": "3"}),
-            "bg"
-        )
-        .is_ok(),
-        "portal + placement on the thread lane is the legal combination"
-    );
-}
-
-/// x-dfa4: `--permission-mode` parses in both space and equals form so the
-/// pane re-exec (raw args) and the bg/headless reader (maybe_run_spawn) both
-/// see it; an unknown-flag rejection would otherwise block the pane path.
-#[test]
-fn spawn_forwards_permission_mode_flag() {
-    let (_m, space) = build_request(
-        "spawn",
-        &[
-            "wk".to_string(),
-            "--harness".to_string(),
-            "claude".to_string(),
-            "--substrate".to_string(),
-            "bg".to_string(),
-            "--permission-mode".to_string(),
-            "acceptEdits".to_string(),
-        ],
-    )
-    .expect("--permission-mode must parse");
-    assert_eq!(space["permission_mode"], "acceptEdits");
-    let (_m2, eq) = build_request(
-        "spawn",
-        &["wk".to_string(), "--permission-mode=plan".to_string()],
-    )
-    .expect("--permission-mode= must parse");
-    assert_eq!(eq["permission_mode"], "plan");
-}
-
-// x-d012: --account parses into params (space + equals form) so the spawn
-// arm can route an account spawn to the Python resolver instead of erroring
-// as an unknown flag.
-#[test]
-fn spawn_forwards_account_flag() {
-    let (_m, space) = build_request(
-        "spawn",
-        &[
-            "wk".to_string(),
-            "--account".to_string(),
-            "readyrule".to_string(),
-        ],
-    )
-    .expect("--account must parse");
-    assert_eq!(space["account"], "readyrule");
-    let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--account=makers".to_string()])
-        .expect("--account= must parse");
-    assert_eq!(eq["account"], "makers");
-}
-
-// x-b6e2 (US1): the Tier-3 passthrough flags land in params under their
-// snake_case keys, in both space and equals form.
-#[test]
-fn spawn_forwards_tier3_flags() {
-    let (_m, p) = build_request(
-        "spawn",
-        &[
-            "wk".to_string(),
-            "--add-dir".to_string(),
-            "/work".to_string(),
-            "--agent".to_string(),
-            "reviewer".to_string(),
-            "--tools".to_string(),
-            "Read,Edit".to_string(),
-            "--deny-tools".to_string(),
-            "Bash".to_string(),
-        ],
-    )
-    .expect("tier-3 flags must parse");
-    assert_eq!(p["add_dir"], "/work");
-    assert_eq!(p["agent"], "reviewer");
-    assert_eq!(p["tools"], "Read,Edit");
-    assert_eq!(p["deny_tools"], "Bash");
-    // Equals form (VALUE_FLAGS normalization) is equivalent.
-    let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--add-dir=/extra".to_string()])
-        .expect("--add-dir= must parse");
-    assert_eq!(eq["add_dir"], "/extra");
-}
-
-#[test]
-fn spawn_forwards_effort_flag() {
-    let (_method, params) = build_request(
-        "spawn",
-        &[
-            "wk".to_string(),
-            "--harness".to_string(),
-            "codex".to_string(),
-            "--substrate".to_string(),
-            "headless".to_string(),
-            "--effort".to_string(),
-            "high".to_string(),
-        ],
-    )
-    .expect("--effort must parse");
-    assert_eq!(params["effort"], "high");
-}
-
-/// ab-3ff64151 AC1 (Rust-path parity) + x-bab1 AC6: `agents ask` accepts the
-/// surviving phone shorts `-c`/`-t` and the global `-Y`, with the harness axis
-/// short `-H` (renamed from `-p`). `-p` was the provider short; off spawn it
-/// is now a loud tombstone, never silently bound to a harness.
-#[test]
-fn ask_accepts_phone_short_flags() {
     // -H/-c/-t/-Y build the byte-identical request the long flags would.
     let short = build_request(
         "ask",
@@ -1193,27 +903,202 @@ fn ask_accepts_phone_short_flags() {
     assert!(err.contains("--harness/-H"), "got: {err}");
 }
 
+/// AC1-HP (follow-up): ask without created prints the reply verbatim (no added newline).
+
+/// AC2-ERR: ask follow-up with empty reply prints empty string (not None).
+
+/// The codex-thread bounded-ask receipt: `reply: null` + in_flight prints
+/// the in-flight line, never an empty line that reads as an empty answer.
+
+/// AC3-HP: build_request accepts --from-name, --yolo, --timeout without error.
+/// These flags are forwarded to the daemon so `ask` can be called with full
+/// Python-parity flag surface without exit 2 (unknown flag).
+
+/// Codex P2 (PR #379): with `ask` unconditionally auto-routed, the binary
+/// must accept the Click/Typer `--flag=value` equals form for EVERY
+/// value-carrying option. Without the normalization, `--cwd=/repo` /
+/// `--timeout=30` / `--from-name=bot` would regress to "unknown flag"
+/// instead of reaching the dispatch. The harness axis is `--harness`
+/// (wire param `provider`); `--provider=...` is a tombstone (AC3).
+
+/// codex P2 (PR #73): `--model` must reach the request, else
+/// `spawn --harness agy --once --model <name>` fails with "unknown flag"
+/// before dispatch_agy_once sees it. Both space- and equals-form parse.
+#[test]
+fn spawn_flag_rows() {
+    let (_m, space) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--harness".to_string(),
+            "agy".to_string(),
+            "--once".to_string(),
+            "--model".to_string(),
+            "Gemini 3.5 Flash (High)".to_string(),
+        ],
+    )
+    .expect("--model must parse");
+    assert_eq!(space["model"], "Gemini 3.5 Flash (High)");
+    let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--model=pro".to_string()])
+        .expect("--model= must parse");
+    assert_eq!(eq["model"], "pro");
+
+    let (_method, short) = build_request(
+        "spawn",
+        &[
+            "reviewer".to_string(),
+            "-s".to_string(),
+            "reviews".to_string(),
+            "-x".to_string(),
+            "right".to_string(),
+        ],
+    )
+    .expect("mobile placement aliases must parse");
+    assert_eq!(short["squad"], "reviews");
+    assert_eq!(short["split"], "right");
+
+    let (_method, long) = build_request(
+        "spawn",
+        &[
+            "reviewer".to_string(),
+            "--squad=reviews".to_string(),
+            "--split=right".to_string(),
+        ],
+    )
+    .expect("long placement options must parse");
+    assert_eq!(short, long);
+
+    // The thread lane (bg on the wire) carries the placement flags only
+    // when --portal names the pane the thread hosts: without it the
+    // placement has nothing to place, and headless never hosts a session.
+    let params = serde_json::json!({"squad": "reviews", "split": "Right"});
+    assert_eq!(
+        validate_spawn_placement(&params, "bg"),
+        Err("--workspace/-s, --split/-x, and --tab on --substrate \
+             thread need --portal N: a thread hosts no pane until a portal \
+             opens one, so the placement has nothing to place"
+            .to_string())
+    );
+    assert_eq!(
+        validate_spawn_placement(&serde_json::json!({"portal": 1u8}), "pane"),
+        Err(
+            "--portal applies only to --substrate thread; a pane hosts its \
+             own geometry and headless hosts no session at all"
+                .to_string()
+        )
+    );
+    assert!(
+        validate_spawn_placement(
+            &serde_json::json!({"portal": 1u8, "split": "right", "tab": "3"}),
+            "bg"
+        )
+        .is_ok(),
+        "portal + placement on the thread lane is the legal combination"
+    );
+
+    let (_m, space) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--harness".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+            "--permission-mode".to_string(),
+            "acceptEdits".to_string(),
+        ],
+    )
+    .expect("--permission-mode must parse");
+    assert_eq!(space["permission_mode"], "acceptEdits");
+    let (_m2, eq) = build_request(
+        "spawn",
+        &["wk".to_string(), "--permission-mode=plan".to_string()],
+    )
+    .expect("--permission-mode= must parse");
+    assert_eq!(eq["permission_mode"], "plan");
+
+    let (_m, space) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--account".to_string(),
+            "readyrule".to_string(),
+        ],
+    )
+    .expect("--account must parse");
+    assert_eq!(space["account"], "readyrule");
+    let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--account=makers".to_string()])
+        .expect("--account= must parse");
+    assert_eq!(eq["account"], "makers");
+
+    let (_m, p) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--add-dir".to_string(),
+            "/work".to_string(),
+            "--agent".to_string(),
+            "reviewer".to_string(),
+            "--tools".to_string(),
+            "Read,Edit".to_string(),
+            "--deny-tools".to_string(),
+            "Bash".to_string(),
+        ],
+    )
+    .expect("tier-3 flags must parse");
+    assert_eq!(p["add_dir"], "/work");
+    assert_eq!(p["agent"], "reviewer");
+    assert_eq!(p["tools"], "Read,Edit");
+    assert_eq!(p["deny_tools"], "Bash");
+    // Equals form (VALUE_FLAGS normalization) is equivalent.
+    let (_m2, eq) = build_request("spawn", &["wk".to_string(), "--add-dir=/extra".to_string()])
+        .expect("--add-dir= must parse");
+    assert_eq!(eq["add_dir"], "/extra");
+
+    let (_method, params) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--harness".to_string(),
+            "codex".to_string(),
+            "--substrate".to_string(),
+            "headless".to_string(),
+            "--effort".to_string(),
+            "high".to_string(),
+        ],
+    )
+    .expect("--effort must parse");
+    assert_eq!(params["effort"], "high");
+}
+
+/// x-dfa4: `--permission-mode` parses in both space and equals form so the
+/// pane re-exec (raw args) and the bg/headless reader (maybe_run_spawn) both
+/// see it; an unknown-flag rejection would otherwise block the pane path.
+
+// x-d012: --account parses into params (space + equals form) so the spawn
+// arm can route an account spawn to the Python resolver instead of erroring
+// as an unknown flag.
+
+// x-b6e2 (US1): the Tier-3 passthrough flags land in params under their
+// snake_case keys, in both space and equals form.
+
+/// ab-3ff64151 AC1 (Rust-path parity) + x-bab1 AC6: `agents ask` accepts the
+/// surviving phone shorts `-c`/`-t` and the global `-Y`, with the harness axis
+/// short `-H` (renamed from `-p`). `-p` was the provider short; off spawn it
+/// is now a loud tombstone, never silently bound to a harness.
+
 /// ab-3ff64151 AC2 (Rust-path parity): the global-register boolean shorts
 /// the client recognizes (`-A` --all, `-F` --force) parse identically to the
 /// long forms on the verbs that use them. `-J` --json is client-side (not a
 /// build_request param) and is covered by the json-detection path.
 #[test]
-fn global_register_boolean_shorts_parse() {
+fn parse_rows() {
     let (_m, all_params) = build_request("list", &["-A".to_string()]).expect("-A must parse");
     assert_eq!(all_params["all"], true);
     let (_m, force_params) =
         build_request("rm", &["myagent".to_string(), "-F".to_string()]).expect("-F must parse");
     assert_eq!(force_params["force"], true);
-}
 
-/// The lifecycle verbs' store heal resolves through the project-confinement
-/// refusal that prescribes `--cross-project`, so `fno agents rm|stop <id>
-/// --cross-project` must PARSE (the old surface died with "unknown flag:
-/// --cross-project" before any resolution ran). The flag rides to the daemon
-/// as `cross_project`, where entry_for_lifecycle hands it to the scoped
-/// resolver; verbs that take no such flag keep refusing it.
-#[test]
-fn rm_accepts_cross_project_as_prescribed() {
     let (method, params) = build_request(
         "rm",
         &["myagent".to_string(), "--cross-project".to_string()],
@@ -1232,12 +1117,7 @@ fn rm_accepts_cross_project_as_prescribed() {
     assert_eq!(stop_params["cross_project"], true);
     let err = build_request("list", &["--cross-project".to_string()]).unwrap_err();
     assert!(err.contains("unknown flag: --cross-project"), "got: {err}");
-}
 
-/// x-c5cc: the spawn-gate flags parse on the spawn verb (--force already
-/// shared with stop/rm; --no-wait is gate-only).
-#[test]
-fn spawn_gate_flags_parse() {
     let args = vec![
         "w1".to_string(),
         "--harness".to_string(),
@@ -1250,14 +1130,7 @@ fn spawn_gate_flags_parse() {
     let (_m, params) = build_request("spawn", &args).expect("gate flags must parse");
     assert_eq!(params["force"], true);
     assert_eq!(params["no_wait"], true);
-}
 
-/// Both gate constructions (the daemon-bound codex-thread gate and the
-/// shared one) read their flags through `gate_flags_from_params`: a
-/// hardcoded `GateFlags { force: false, .. }` refused a `--force` spawn at
-/// capacity and made `--no-wait` queue for a slot.
-#[test]
-fn gate_flags_read_from_params_for_both_gate_constructions() {
     let forced = gate_flags_from_params(&serde_json::json!({"force": true, "no_wait": true}));
     assert!(forced.force);
     assert!(forced.no_wait);
@@ -1266,8 +1139,23 @@ fn gate_flags_read_from_params_for_both_gate_constructions() {
     assert!(!defaults.no_wait);
 }
 
+/// The lifecycle verbs' store heal resolves through the project-confinement
+/// refusal that prescribes `--cross-project`, so `fno agents rm|stop <id>
+/// --cross-project` must PARSE (the old surface died with "unknown flag:
+/// --cross-project" before any resolution ran). The flag rides to the daemon
+/// as `cross_project`, where entry_for_lifecycle hands it to the scoped
+/// resolver; verbs that take no such flag keep refusing it.
+
+/// x-c5cc: the spawn-gate flags parse on the spawn verb (--force already
+/// shared with stop/rm; --no-wait is gate-only).
+
+/// Both gate constructions (the daemon-bound codex-thread gate and the
+/// shared one) read their flags through `gate_flags_from_params`: a
+/// hardcoded `GateFlags { force: false, .. }` refused a `--force` spawn at
+/// capacity and made `--no-wait` queue for a slot.
+
 #[test]
-fn rust_owned_substrates_append_spawn_payload_brevity_but_python_pane_does_not() {
+fn payload_rows() {
     let original = "$fno:target --no-merge x-1234";
     for substrate in ["bg", "headless"] {
         let enriched = effective_spawn_message(original, substrate);
@@ -1275,11 +1163,7 @@ fn rust_owned_substrates_append_spawn_payload_brevity_but_python_pane_does_not()
         assert_eq!(enriched.matches("<fno_relay_compression>").count(), 1);
     }
     assert_eq!(effective_spawn_message(original, "pane"), original);
-}
 
-/// AC4-HP: spawn with provider and no --argv succeeds (uses provider-derived argv).
-#[test]
-fn spawn_without_argv_with_known_provider_succeeds() {
     // After Task 4.1, spawn with a known --provider and no --argv should
     // build the request without error (the daemon resolves argv from the provider).
     let args = vec![
@@ -1301,21 +1185,7 @@ fn spawn_without_argv_with_known_provider_succeeds() {
         params.get("argv").is_none(),
         "argv must be absent when using provider-derived argv"
     );
-}
 
-fn argv_of(params: &Value) -> Vec<String> {
-    params["argv"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-#[test]
-fn spawn_strips_leading_double_dash_from_argv() {
     // Documented syntax: `spawn worker --argv -- sleep 60`. The `--`
     // separator must not become argv[0] (Codex P1).
     let args = vec![
@@ -1329,10 +1199,7 @@ fn spawn_strips_leading_double_dash_from_argv() {
     assert_eq!(method, "agent.spawn");
     assert_eq!(argv_of(&params), vec!["sleep", "60"]);
     assert_eq!(params["name"], "worker");
-}
 
-#[test]
-fn spawn_argv_without_separator_is_unchanged() {
     let args = vec![
         "worker".to_string(),
         "--argv".to_string(),
@@ -1341,13 +1208,7 @@ fn spawn_argv_without_separator_is_unchanged() {
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
     assert_eq!(argv_of(&params), vec!["codex", "exec"]);
-}
 
-/// Sigma-review (PR #379): the equals-form normalization must NOT touch the
-/// `--argv` payload. A downstream tool's `--timeout=5` in the provider
-/// command line must survive verbatim, not get split into `--timeout 5`.
-#[test]
-fn spawn_argv_payload_equals_form_survives_normalization() {
     let args = vec![
         "worker".to_string(),
         "--argv".to_string(),
@@ -1363,6 +1224,23 @@ fn spawn_argv_payload_equals_form_survives_normalization() {
     assert!(params.get("cwd").is_none());
 }
 
+/// AC4-HP: spawn with provider and no --argv succeeds (uses provider-derived argv).
+
+fn argv_of(params: &Value) -> Vec<String> {
+    params["argv"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sigma-review (PR #379): the equals-form normalization must NOT touch the
+/// `--argv` payload. A downstream tool's `--timeout=5` in the provider
+/// command line must survive verbatim, not get split into `--timeout 5`.
+
 fn harness_args_of(params: &Value) -> Vec<String> {
     params["harness_args"]
         .as_array()
@@ -1375,7 +1253,7 @@ fn harness_args_of(params: &Value) -> Vec<String> {
 }
 
 #[test]
-fn spawn_fence_after_a_message_is_harness_args() {
+fn fence_rows() {
     // A message already collected before the fence makes the tail provider
     // passthrough, matching the Python front's stated contract (spawn_defaults).
     let args = vec![
@@ -1399,10 +1277,7 @@ fn spawn_fence_after_a_message_is_harness_args() {
             String::new(),
         ]
     );
-}
 
-#[test]
-fn spawn_fence_without_a_message_still_seeds() {
     // No message before the fence: the tail is the seed (the fenced
     // `--timeout=5 do X` case), never provider passthrough.
     let args = vec![
@@ -1422,7 +1297,7 @@ fn spawn_fence_without_a_message_still_seeds() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn spawn_defaults_interactive_for_pty_providers() {
+fn substrate_rows() {
     // AC1-HP: spawn --provider <pty> (no --once) -> host_mode=interactive.
     // codex/gemini/agy never mint a session id (claude-only).
     for provider in ["codex", "gemini", "agy"] {
@@ -1439,10 +1314,7 @@ fn spawn_defaults_interactive_for_pty_providers() {
         );
         assert!(params.get("session_id").is_none(), "{provider} never mints");
     }
-}
 
-#[test]
-fn spawn_claude_default_is_pty_lane_with_minted_session() {
     // claude default -> PTY lane (mode=interactive) + a minted session id.
     let args = vec![
         "wk".to_string(),
@@ -1454,10 +1326,7 @@ fn spawn_claude_default_is_pty_lane_with_minted_session() {
     assert_eq!(params["mode"], "interactive");
     let sid = params["session_id"].as_str().expect("minted session_id");
     assert_eq!(sid.split('-').count(), 5, "minted a uuid: {sid}");
-}
 
-#[test]
-fn spawn_once_is_headless_byte_unchanged() {
     // AC1-EDGE: --once is the back-compat alias for --substrate headless ->
     // no host_mode, no mint, for EVERY provider; substrate=headless.
     for provider in ["claude", "codex", "gemini", "agy"] {
@@ -1482,10 +1351,7 @@ fn spawn_once_is_headless_byte_unchanged() {
             "{provider} --once: no mint"
         );
     }
-}
 
-#[test]
-fn spawn_once_after_named_message_stays_headless() {
     let args = vec![
         "--name".to_string(),
         "parity-agent".to_string(),
@@ -1503,10 +1369,7 @@ fn spawn_once_after_named_message_stays_headless() {
     assert_eq!(params["provider"], "codex");
     assert_eq!(params["substrate"], "headless");
     assert!(params.get("host_mode").is_none());
-}
 
-#[test]
-fn spawn_substrate_pane_is_default_and_interactive() {
     // AC1-UI: no --substrate -> pane -> interactive defaults applied (the
     // x-3ab8 owned-PTY behavior is the strictly-additive default).
     let args = vec![
@@ -1531,10 +1394,7 @@ fn spawn_substrate_pane_is_default_and_interactive() {
     let (_m, params) = build_request("spawn", &args).unwrap();
     assert_eq!(params["substrate"], "pane");
     assert_eq!(params["host_mode"], "interactive");
-}
 
-#[test]
-fn spawn_substrate_bg_and_headless_suppress_interactive() {
     // thread (with deprecated bg alias) + headless are client-side lanes:
     // no host_mode, no mint.
     for sub in ["thread", "bg", "headless"] {
@@ -1554,7 +1414,7 @@ fn spawn_substrate_bg_and_headless_suppress_interactive() {
 }
 
 #[test]
-fn spawn_substrate_rejects_unknown_value() {
+fn substrate_flag_rows() {
     let args = vec![
         "wk".to_string(),
         "--harness".to_string(),
@@ -1564,10 +1424,7 @@ fn spawn_substrate_rejects_unknown_value() {
     ];
     let err = build_request("spawn", &args).unwrap_err();
     assert!(err.contains("--substrate must be one of"), "got: {err}");
-}
 
-#[test]
-fn spawn_explicit_substrate_wins_over_once_alias() {
     // --substrate set explicitly is not clobbered by a trailing --once.
     let args = vec![
         "wk".to_string(),
@@ -1579,6 +1436,79 @@ fn spawn_explicit_substrate_wins_over_once_alias() {
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
     assert_eq!(params["substrate"], "thread");
+
+    // x-c772: --headless is the front for --substrate headless (identical to
+    // --once), for every provider. `-H` was reassigned to --harness (x-6de8).
+    for flag in ["--headless", "--once", "-o"] {
+        for provider in ["claude", "codex", "gemini", "agy"] {
+            let args = vec![
+                "wk".to_string(),
+                "--harness".to_string(),
+                provider.to_string(),
+                flag.to_string(),
+            ];
+            let (_m, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(
+                params.get("substrate").and_then(|v| v.as_str()),
+                Some("headless"),
+                "{provider} {flag} aliases to substrate=headless"
+            );
+            assert!(params.get("host_mode").is_none(), "{flag}: no host_mode");
+        }
+    }
+
+    // An explicit --substrate is not clobbered by a trailing --headless.
+    let args = vec![
+        "wk".to_string(),
+        "--harness".to_string(),
+        "claude".to_string(),
+        "--substrate".to_string(),
+        "bg".to_string(),
+        "--headless".to_string(),
+    ];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert_eq!(params["substrate"], "thread");
+
+    // x-6de8: -p mirrors the harnesses' own one-shot short. It takes NO value,
+    // so a stray `-p codex` must leave `codex` a positional rather than
+    // silently selecting a harness.
+    let args = vec!["wk".to_string(), "-p".to_string()];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert_eq!(
+        params.get("substrate").and_then(|v| v.as_str()),
+        Some("headless")
+    );
+    assert!(
+        params.get("provider").is_none(),
+        "-p must not set a harness"
+    );
+
+    // Off `spawn`, -p is no longer the provider short (the harness axis is
+    // --harness/-H); it is a loud tombstone, never silently bound to a harness.
+    let ask = vec![
+        "wk".to_string(),
+        "hi".to_string(),
+        "-p".to_string(),
+        "codex".to_string(),
+    ];
+    let err = build_request("ask", &ask).unwrap_err();
+    assert!(err.contains("-p is not valid here"), "got: {err}");
+    assert!(err.contains("--harness/-H"), "got: {err}");
+
+    // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
+    // daemon's provider_for_pty errors on it as before, so we must NOT force
+    // host_mode (which would change the error surface). goose is the
+    // canonical unhosted CLI (opencode joined the roster at x-51f6).
+    let args = vec![
+        "wk".to_string(),
+        "--harness".to_string(),
+        "goose".to_string(),
+    ];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert!(
+        params.get("host_mode").is_none(),
+        "unknown provider: interactive not forced"
+    );
 }
 
 #[test]
@@ -1608,30 +1538,7 @@ fn spawn_still_refuses_dry_run() {
 }
 
 #[test]
-fn spawn_headless_flag_aliases_to_substrate_headless() {
-    // x-c772: --headless is the front for --substrate headless (identical to
-    // --once), for every provider. `-H` was reassigned to --harness (x-6de8).
-    for flag in ["--headless", "--once", "-o"] {
-        for provider in ["claude", "codex", "gemini", "agy"] {
-            let args = vec![
-                "wk".to_string(),
-                "--harness".to_string(),
-                provider.to_string(),
-                flag.to_string(),
-            ];
-            let (_m, params) = build_request("spawn", &args).unwrap();
-            assert_eq!(
-                params.get("substrate").and_then(|v| v.as_str()),
-                Some("headless"),
-                "{provider} {flag} aliases to substrate=headless"
-            );
-            assert!(params.get("host_mode").is_none(), "{flag}: no host_mode");
-        }
-    }
-}
-
-#[test]
-fn spawn_harness_flag_sets_provider() {
+fn harness_flag_rows() {
     // x-6de8: --harness/-H is the CLI-binary axis. -H takes a VALUE (harness
     // name) rather than meaning headless.
     for flag in ["--harness", "-H"] {
@@ -1648,39 +1555,7 @@ fn spawn_harness_flag_sets_provider() {
             "{flag}: no headless substrate side effect"
         );
     }
-}
 
-#[test]
-fn spawn_p_short_is_headless_not_provider() {
-    // x-6de8: -p mirrors the harnesses' own one-shot short. It takes NO value,
-    // so a stray `-p codex` must leave `codex` a positional rather than
-    // silently selecting a harness.
-    let args = vec!["wk".to_string(), "-p".to_string()];
-    let (_m, params) = build_request("spawn", &args).unwrap();
-    assert_eq!(
-        params.get("substrate").and_then(|v| v.as_str()),
-        Some("headless")
-    );
-    assert!(
-        params.get("provider").is_none(),
-        "-p must not set a harness"
-    );
-
-    // Off `spawn`, -p is no longer the provider short (the harness axis is
-    // --harness/-H); it is a loud tombstone, never silently bound to a harness.
-    let ask = vec![
-        "wk".to_string(),
-        "hi".to_string(),
-        "-p".to_string(),
-        "codex".to_string(),
-    ];
-    let err = build_request("ask", &ask).unwrap_err();
-    assert!(err.contains("-p is not valid here"), "got: {err}");
-    assert!(err.contains("--harness/-H"), "got: {err}");
-}
-
-#[test]
-fn spawn_harness_name_on_the_provider_axis_is_rejected() {
     // x-6de8: --provider is the model-VENDOR axis. This lane never re-execs
     // Python cmd_spawn, so a harness name typed there must be refused BY NAME
     // here too, or it reaches the daemon as a vendor it cannot resolve.
@@ -1714,10 +1589,7 @@ fn spawn_harness_name_on_the_provider_axis_is_rejected() {
     let err = build_request("ask", &ask).unwrap_err();
     assert!(err.contains("split at the axis rename"), "got: {err}");
     assert!(err.contains("--harness/-H"), "got: {err}");
-}
 
-#[test]
-fn spawn_model_short_m_parses_like_long() {
     // x-c772: -m is the mobile short for --model.
     for flag in ["--model", "-m"] {
         let args = vec![
@@ -1739,40 +1611,7 @@ fn spawn_model_short_m_parses_like_long() {
 }
 
 #[test]
-fn spawn_explicit_substrate_wins_over_headless_flag() {
-    // An explicit --substrate is not clobbered by a trailing --headless.
-    let args = vec![
-        "wk".to_string(),
-        "--harness".to_string(),
-        "claude".to_string(),
-        "--substrate".to_string(),
-        "bg".to_string(),
-        "--headless".to_string(),
-    ];
-    let (_m, params) = build_request("spawn", &args).unwrap();
-    assert_eq!(params["substrate"], "thread");
-}
-
-#[test]
-fn spawn_unknown_provider_does_not_force_interactive() {
-    // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
-    // daemon's provider_for_pty errors on it as before, so we must NOT force
-    // host_mode (which would change the error surface). goose is the
-    // canonical unhosted CLI (opencode joined the roster at x-51f6).
-    let args = vec![
-        "wk".to_string(),
-        "--harness".to_string(),
-        "goose".to_string(),
-    ];
-    let (_m, params) = build_request("spawn", &args).unwrap();
-    assert!(
-        params.get("host_mode").is_none(),
-        "unknown provider: interactive not forced"
-    );
-}
-
-#[test]
-fn format_success_spawn_emits_compact_receipt() {
+fn cwd_rows() {
     // x-3ab8: a daemon-routed spawn must emit the one-line JSON receipt that
     // advance.py / dispatch-node.sh parse for short_id (line-by-line
     // json.loads needs it compact, not pretty-printed).
@@ -1789,6 +1628,27 @@ fn format_success_spawn_emits_compact_receipt() {
     assert_eq!(parsed["short_id"], "ab12cd34");
     assert_eq!(parsed["harness"], "claude");
     assert_eq!(parsed["status"], "live");
+
+    let mut params = json!({"name": "w", "provider": "codex"});
+    ensure_request_cwd("agent.spawn", &mut params, Path::new("/work/proj"));
+    assert_eq!(params["cwd"], "/work/proj");
+
+    // An explicit --cwd (already in params) must never be overwritten.
+    let mut params = json!({"name": "w", "provider": "codex", "cwd": "/explicit"});
+    ensure_request_cwd("agent.spawn", &mut params, Path::new("/work/proj"));
+    assert_eq!(params["cwd"], "/explicit");
+
+    // gemini `ask` falls through to the daemon's auto-spawn path, which has
+    // the same cwd fallback; the client must forward cwd for agent.ask too.
+    let mut params = json!({"name": "g", "provider": "gemini"});
+    ensure_request_cwd("agent.ask", &mut params, Path::new("/work/proj"));
+    assert_eq!(params["cwd"], "/work/proj");
+
+    // list/stop/rm carry no worker launch; leave params untouched so a
+    // `--cwd` *filter* on list is the only thing that sets cwd there.
+    let mut params = json!({"status": "live"});
+    ensure_request_cwd("agent.list", &mut params, Path::new("/work/proj"));
+    assert!(params.get("cwd").is_none());
 }
 
 // -----------------------------------------------------------------------
@@ -1798,39 +1658,6 @@ fn format_success_spawn_emits_compact_receipt() {
 // requests. Without this, a spawn from project A opens the provider in the
 // daemon's home project B.
 // -----------------------------------------------------------------------
-
-#[test]
-fn ensure_request_cwd_stamps_caller_dir_for_spawn() {
-    let mut params = json!({"name": "w", "provider": "codex"});
-    ensure_request_cwd("agent.spawn", &mut params, Path::new("/work/proj"));
-    assert_eq!(params["cwd"], "/work/proj");
-}
-
-#[test]
-fn ensure_request_cwd_explicit_cwd_wins() {
-    // An explicit --cwd (already in params) must never be overwritten.
-    let mut params = json!({"name": "w", "provider": "codex", "cwd": "/explicit"});
-    ensure_request_cwd("agent.spawn", &mut params, Path::new("/work/proj"));
-    assert_eq!(params["cwd"], "/explicit");
-}
-
-#[test]
-fn ensure_request_cwd_covers_ask_first_contact() {
-    // gemini `ask` falls through to the daemon's auto-spawn path, which has
-    // the same cwd fallback; the client must forward cwd for agent.ask too.
-    let mut params = json!({"name": "g", "provider": "gemini"});
-    ensure_request_cwd("agent.ask", &mut params, Path::new("/work/proj"));
-    assert_eq!(params["cwd"], "/work/proj");
-}
-
-#[test]
-fn ensure_request_cwd_skips_non_spawn_methods() {
-    // list/stop/rm carry no worker launch; leave params untouched so a
-    // `--cwd` *filter* on list is the only thing that sets cwd there.
-    let mut params = json!({"status": "live"});
-    ensure_request_cwd("agent.list", &mut params, Path::new("/work/proj"));
-    assert!(params.get("cwd").is_none());
-}
 
 // -----------------------------------------------------------------------
 // x-85fe: canonical-by-default cwd precedence (inverts ab-77b691dc)
@@ -1845,7 +1672,7 @@ fn pb(s: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn effective_cwd_default_resolves_canonical() {
+fn effective_cwd_rows() {
     // No flags: the inverted default lands on canonical (AC1-HP).
     let got = fno_agents::spawn_cwd::effective_worker_cwd(
         None,
@@ -1855,10 +1682,7 @@ fn effective_cwd_default_resolves_canonical() {
         pb("/wt"),
     );
     assert_eq!(got, pb("/canon"));
-}
 
-#[test]
-fn effective_cwd_fresh_is_noop_alias() {
     // --fresh is an accepted no-op alias: identical to passing nothing, the
     // default already being canonical (AC2-EDGE).
     let with_fresh = fno_agents::spawn_cwd::effective_worker_cwd(
@@ -1877,10 +1701,7 @@ fn effective_cwd_fresh_is_noop_alias() {
     );
     assert_eq!(with_fresh, without);
     assert_eq!(with_fresh, pb("/canon"));
-}
 
-#[test]
-fn effective_cwd_here_keeps_caller() {
     // --here is the explicit opt-in to stay in the caller's worktree (AC2-HP).
     let got = fno_agents::spawn_cwd::effective_worker_cwd(
         None,
@@ -1890,18 +1711,12 @@ fn effective_cwd_here_keeps_caller() {
         pb("/wt"),
     );
     assert_eq!(got, pb("/wt"));
-}
 
-#[test]
-fn effective_cwd_unresolved_canonical_falls_back_to_caller() {
     // Ambiguous / git-missing canonical resolution -> caller cwd, the safe
     // side (AC1-ERR; Failure Modes > Boundaries: never guess canonical).
     let got = fno_agents::spawn_cwd::effective_worker_cwd(None, false, false, None, pb("/wt"));
     assert_eq!(got, pb("/wt"));
-}
 
-#[test]
-fn effective_cwd_explicit_cwd_wins_over_everything() {
     // --cwd is the highest-priority cwd source and wins over --here/--fresh
     // (AC2-ERR; Failure Modes > Invariants).
     let got = fno_agents::spawn_cwd::effective_worker_cwd(
@@ -1912,10 +1727,7 @@ fn effective_cwd_explicit_cwd_wins_over_everything() {
         pb("/wt"),
     );
     assert_eq!(got, pb("/explicit"));
-}
 
-#[test]
-fn build_request_parses_fresh_and_here_flags() {
     // --fresh / --here / --in-place are plumbed into params for spawn/ask.
     let (_m, p) = build_request(
         "spawn",
@@ -1945,7 +1757,7 @@ fn build_request_parses_fresh_and_here_flags() {
 /// advertises, and an out-of-range --portal refuses with the range, never
 /// the catch-all "unknown flag".
 #[test]
-fn spawn_placement_flags_are_parsed_and_bounded() {
+fn placement_rows() {
     let (method, p) = build_request(
         "spawn",
         &[
@@ -1981,12 +1793,7 @@ fn spawn_placement_flags_are_parsed_and_bounded() {
         );
         assert!(!err.contains("unknown flag"), "{err}");
     }
-}
 
-/// The equals form parses the same way: a routed `--portal=1` must not
-/// regress to "unknown flag" (the PR 379/371 regression class).
-#[test]
-fn spawn_portal_equals_form_parses() {
     let (_m, p) = build_request(
         "spawn",
         &["w".into(), "--portal=1".into(), "--tab=2".into()],
@@ -1995,6 +1802,9 @@ fn spawn_portal_equals_form_parses() {
     assert_eq!(p["portal"], Value::from(1u8));
     assert_eq!(p["tab"], Value::String("2".into()));
 }
+
+/// The equals form parses the same way: a routed `--portal=1` must not
+/// regress to "unknown flag" (the PR 379/371 regression class).
 
 // (canonical_repo_root unit tests live in src/paths.rs, where the shared
 // resolver now lives -- ab-77b691dc.)
@@ -2005,24 +1815,17 @@ fn spawn_portal_equals_form_parses() {
 
 /// AC1-HP: list --status is parsed into daemon params (not rejected as unknown)
 #[test]
-fn list_status_flag_is_parsed() {
+fn list_flag_rows() {
     let args = vec!["--status".to_string(), "live".to_string()];
     let (method, params) = build_request("list", &args).unwrap();
     assert_eq!(method, "agent.list");
     assert_eq!(params["status"], Value::String("live".to_string()));
-}
 
-#[test]
-fn list_progress_flag_is_parsed() {
     let args = vec!["--progress".to_string(), "parked".to_string()];
     let (method, params) = build_request("list", &args).unwrap();
     assert_eq!(method, "agent.list");
     assert_eq!(params["progress"], Value::String("parked".to_string()));
-}
 
-/// AC1-HP: list --cwd and --provider are forwarded to daemon params
-#[test]
-fn list_filter_flags_are_forwarded() {
     let args = vec![
         "--cwd".to_string(),
         "/tmp/myproject".to_string(),
@@ -2032,7 +1835,23 @@ fn list_filter_flags_are_forwarded() {
     let (_method, params) = build_request("list", &args).unwrap();
     assert_eq!(params["cwd"], Value::String("/tmp/myproject".to_string()));
     assert_eq!(params["provider"], Value::String("codex".to_string()));
+
+    // --json must be captured by build_request as a recognized flag
+    // but NOT appear in the daemon params object.
+    // build_request itself should not error on --json.
+    let args = vec!["--json".to_string()];
+    let result = build_request("list", &args);
+    // Must succeed (not return Err "unknown flag: --json")
+    assert!(result.is_ok(), "build_request must accept --json for list");
+    let (_method, params) = result.unwrap();
+    // --json must NOT be forwarded to the daemon
+    assert!(
+        params.get("json").is_none(),
+        "--json must not appear in daemon params"
+    );
 }
+
+/// AC1-HP: list --cwd and --provider are forwarded to daemon params
 
 /// A non-live filter reaches the discovered rows instead of discarding the
 /// whole lane.
@@ -2044,7 +1863,7 @@ fn list_filter_flags_are_forwarded() {
 /// for orphaned rows answer differently through Rust than through Python
 /// for the same registry.
 #[test]
-fn discovered_rows_are_filtered_by_their_own_verdict() {
+fn discovered_rows() {
     let row = |name: &str, verdict: &str| json!({"name": name, "status": verdict});
     let all = vec![
         row("live-one", "live"),
@@ -2066,10 +1885,7 @@ fn discovered_rows_are_filtered_by_their_own_verdict() {
     let mut unfiltered = all.clone();
     retain_discovered_by_status(&mut unfiltered, None);
     assert_eq!(unfiltered.len(), 3);
-}
 
-#[test]
-fn discovered_rows_are_filtered_by_progress_independently() {
     let mut rows = vec![
         json!({"name": "active", "status": "live", "progress": "advancing"}),
         json!({"name": "wedged", "status": "live", "progress": "unknown"}),
@@ -2082,26 +1898,10 @@ fn discovered_rows_are_filtered_by_progress_independently() {
 }
 
 /// AC1-HP: --json is NOT forwarded to daemon params (it is a client-side rendering flag)
-#[test]
-fn list_json_flag_is_not_forwarded_to_daemon() {
-    // --json must be captured by build_request as a recognized flag
-    // but NOT appear in the daemon params object.
-    // build_request itself should not error on --json.
-    let args = vec!["--json".to_string()];
-    let result = build_request("list", &args);
-    // Must succeed (not return Err "unknown flag: --json")
-    assert!(result.is_ok(), "build_request must accept --json for list");
-    let (_method, params) = result.unwrap();
-    // --json must NOT be forwarded to the daemon
-    assert!(
-        params.get("json").is_none(),
-        "--json must not appear in daemon params"
-    );
-}
 
 /// AC2-HP: render_list_json produces the Python-matching shape with correct keys
 #[test]
-fn render_list_json_shape_matches_python_contract() {
+fn render_list_rows() {
     // Simulate the full daemon RPC result so envelope metadata cannot be
     // reconstructed independently by the outward client renderer.
     let result = json!({
@@ -2181,56 +1981,7 @@ fn render_list_json_shape_matches_python_contract() {
     }
     assert_eq!(row["pid"], 4242, "pid passes through");
     assert!(row["live_status"].is_null(), "live_status retained as null");
-}
 
-#[test]
-fn empty_effort_is_rejected_but_opencode_values_are_passed_through() {
-    assert_eq!(
-        validate_effort_for_spawn("claude", "headless", Some("")),
-        Err("--effort must be non-empty".to_string())
-    );
-    assert_eq!(
-        validate_effort_for_spawn("codex", "bg", Some("")),
-        Err("--effort must be non-empty".to_string())
-    );
-    assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
-}
-
-/// The effort deny set must be the same in both spelling maps: the Python
-/// lane (`effort_tokens`, `--substrate pane`) allows agy, so the Rust lane
-/// refusing it made one harness two-valued by substrate. agy carries its
-/// own `--effort (low|medium|high)`; gemini genuinely has no surface. The
-/// FLAG_OWNERS row for `--effort` names both maps.
-#[test]
-fn agy_effort_is_accepted_and_gemini_is_still_refused() {
-    assert!(validate_effort_for_spawn("agy", "headless", Some("high")).is_ok());
-    assert!(validate_effort_for_spawn("agy", "bg", Some("low")).is_ok());
-    assert!(validate_effort_for_spawn("agy", "pane", Some("nonsense-still-forwarded")).is_ok());
-    assert!(validate_effort_for_spawn("gemini", "headless", Some("high")).is_err());
-}
-
-/// The deny set is the ONE owner's (effort_surface.rs): cursor-agent and an
-/// undeclared harness refuse on the thread and headless lanes too, with the
-/// same string the Python bridge raises. The pane lane still forwards.
-#[test]
-fn effort_deny_set_matches_the_owner_on_every_non_pane_lane() {
-    let cursor = validate_effort_for_spawn("cursor-agent", "headless", Some("high"));
-    assert!(cursor.unwrap_err().contains("cursor-agent"));
-    let undeclared = validate_effort_for_spawn("ghosth", "bg", Some("high"));
-    assert!(undeclared
-        .unwrap_err()
-        .starts_with("--effort is not available for harness"));
-    assert!(validate_effort_for_spawn("cursor-agent", "pane", Some("high")).is_ok());
-    assert_eq!(
-        validate_effort_for_spawn("gemini", "thread", Some("high")),
-        Err("harness 'gemini' has no reasoning-effort surface; omit --effort".to_string())
-    );
-}
-
-/// ab-098967b4: render_list_json folds in the discovered lane (additive
-/// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
-#[test]
-fn render_list_with_discovered_lane() {
     let agents = json!([]);
     let filters = json!({"cwd": null, "provider": null, "status": null});
     let discovered = vec![json!({
@@ -2282,12 +2033,7 @@ fn render_list_with_discovered_lane() {
     assert!(table.contains("aaaa1111"));
     assert!(table.contains("fno-aaaa1111"));
     assert!(table.contains("busy"));
-}
 
-/// A codex-filtered list folds the loaded-thread block into the JSON
-/// envelope; the key carries the retired verb's exact payload shape.
-#[test]
-fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
     let agents = json!([]);
     let filters = json!({"cwd": null, "provider": "codex", "status": null});
     let block = fno_agents::codex_inject::loaded_threads_block(Ok(vec![
@@ -2313,13 +2059,7 @@ fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
         "019f4d0c-full"
     );
     assert_eq!(parsed["codex_loaded"]["threads"][0]["cwd"], "/repo");
-}
 
-/// AC1/AC7: the operator's ten columns in order, ROW is the served ordinal,
-/// and SESSION is the full id, never truncated. Positive strings, never a
-/// shorter output.
-#[test]
-fn render_list_table_shows_the_ten_roster_columns() {
     let agents = json!([
         {
             "name": "pane-worker",
@@ -2387,12 +2127,7 @@ fn render_list_table_shows_the_ten_roster_columns() {
         !legacy.contains("abc12345"),
         "short Claude transport id must not be shown as full session: {legacy}"
     );
-}
 
-/// AC3/AC6: an observation outranks the stored request, and every PR
-/// absence names its reason.
-#[test]
-fn render_list_table_qualifies_model_and_pr_cells() {
     let agents = json!([
         {
             "name": "sub-worker",
@@ -2422,20 +2157,7 @@ fn render_list_table_qualifies_model_and_pr_cells() {
     let graph = table.lines().find(|l| l.contains("graph-worker")).unwrap();
     assert!(graph.contains("gpt-5.6-luna (observed)"), "{graph}");
     assert!(graph.contains("? (graph-unreadable)"), "{graph}");
-}
 
-/// AGE renders the transcript's newest-activity age and LAST
-/// MESSAGE the flattened last-turn text. The registry timestamp this column
-/// was wired to for its whole life was null on many rows while the worker
-/// was mid-sentence, so a "last message" column that never showed a
-/// message. Absent readings render `unknown` / `-`, never a fresh age: an
-/// unread transcript is not health.
-///
-/// The state fixture key is omitted on purpose (see the address test
-/// above): the identifier ratchet in check-plan-rung-authority counts over
-/// inline tests too, and the assertions below never read it.
-#[test]
-fn render_list_table_has_event_age_and_last_message_columns() {
     let fresh = (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
     let agents = json!([
         {
@@ -2494,13 +2216,7 @@ fn render_list_table_has_event_age_and_last_message_columns() {
         !gone.contains("0s"),
         "absent stamp never reads fresh: {gone}"
     );
-}
 
-/// x-e3cc: a total probe outage is named in the table, not left to read as a
-/// wall of `unknown` statuses. The daemon's stderr WARN is write-only; this
-/// line is the receipt the operator actually sees.
-#[test]
-fn render_list_table_names_a_total_probe_outage() {
     let agents = json!([
         {
             "name": "any-worker",
@@ -2536,7 +2252,74 @@ fn render_list_table_names_a_total_probe_outage() {
 }
 
 #[test]
-fn format_age_secs_compact_units() {
+fn effort_rows() {
+    assert_eq!(
+        validate_effort_for_spawn("claude", "headless", Some("")),
+        Err("--effort must be non-empty".to_string())
+    );
+    assert_eq!(
+        validate_effort_for_spawn("codex", "bg", Some("")),
+        Err("--effort must be non-empty".to_string())
+    );
+    assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
+
+    assert!(validate_effort_for_spawn("agy", "headless", Some("high")).is_ok());
+    assert!(validate_effort_for_spawn("agy", "bg", Some("low")).is_ok());
+    assert!(validate_effort_for_spawn("agy", "pane", Some("nonsense-still-forwarded")).is_ok());
+    assert!(validate_effort_for_spawn("gemini", "headless", Some("high")).is_err());
+
+    // The deny set is the ONE owner's (effort_surface.rs): cursor-agent and
+    // an undeclared harness refuse on the thread and headless lanes too,
+    // with the same string the Python bridge raises. The pane lane forwards.
+    let cursor = validate_effort_for_spawn("cursor-agent", "headless", Some("high"));
+    assert!(cursor.unwrap_err().contains("cursor-agent"));
+    let undeclared = validate_effort_for_spawn("ghosth", "bg", Some("high"));
+    assert!(undeclared
+        .unwrap_err()
+        .starts_with("--effort is not available for harness"));
+    assert!(validate_effort_for_spawn("cursor-agent", "pane", Some("high")).is_ok());
+    assert_eq!(
+        validate_effort_for_spawn("gemini", "thread", Some("high")),
+        Err("harness 'gemini' has no reasoning-effort surface; omit --effort".to_string())
+    );
+}
+
+/// The effort deny set must be the same in both spelling maps: the Python
+/// lane (`effort_tokens`, `--substrate pane`) allows agy, so the Rust lane
+/// refusing it made one harness two-valued by substrate. agy carries its
+/// own `--effort (low|medium|high)`; gemini genuinely has no surface. The
+/// FLAG_OWNERS row for `--effort` names both maps.
+
+/// ab-098967b4: render_list_json folds in the discovered lane (additive
+/// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
+
+/// A codex-filtered list folds the loaded-thread block into the JSON
+/// envelope; the key carries the retired verb's exact payload shape.
+
+/// AC1/AC7: the operator's ten columns in order, ROW is the served ordinal,
+/// and SESSION is the full id, never truncated. Positive strings, never a
+/// shorter output.
+
+/// AC3/AC6: an observation outranks the stored request, and every PR
+/// absence names its reason.
+
+/// AGE renders the transcript's newest-activity age and LAST
+/// MESSAGE the flattened last-turn text. The registry timestamp this column
+/// was wired to for its whole life was null on many rows while the worker
+/// was mid-sentence, so a "last message" column that never showed a
+/// message. Absent readings render `unknown` / `-`, never a fresh age: an
+/// unread transcript is not health.
+///
+/// The state fixture key is omitted on purpose (see the address test
+/// above): the identifier ratchet in check-plan-rung-authority counts over
+/// inline tests too, and the assertions below never read it.
+
+/// x-e3cc: a total probe outage is named in the table, not left to read as a
+/// wall of `unknown` statuses. The daemon's stderr WARN is write-only; this
+/// line is the receipt the operator actually sees.
+
+#[test]
+fn misc_rows() {
     // AC2-EDGE: compact single-unit ages across the threshold boundaries.
     assert_eq!(format_age_secs(3), "3s");
     assert_eq!(format_age_secs(59), "59s");
@@ -2546,10 +2329,7 @@ fn format_age_secs_compact_units() {
     assert_eq!(format_age_secs(86400), "1d");
     // Clock skew (future timestamp) clamps to 0s, never negative.
     assert_eq!(format_age_secs(-5), "0s");
-}
 
-#[test]
-fn render_checked_handles_never_and_unparseable() {
     let now = chrono::Utc::now();
     // AC2-UI: never reconciled.
     assert_eq!(render_checked(None, now), "never");
@@ -2558,11 +2338,7 @@ fn render_checked_handles_never_and_unparseable() {
     assert_eq!(render_checked(Some(&recent), now), "5s");
     // An unparseable stored value is explicit `?`, never blank or a panic.
     assert_eq!(render_checked(Some("not-a-timestamp"), now), "?");
-}
 
-/// AC4-HP: render_reconcile_json produces the Python-matching key set
-#[test]
-fn render_reconcile_json_shape_matches_python_contract() {
     let daemon_result = json!({
         "scanned": 3,
         "orphaned": [{"name": "gone-agent", "provider": "claude", "id": "cl-123"}],
@@ -2582,12 +2358,14 @@ fn render_reconcile_json_shape_matches_python_contract() {
     assert_eq!(parsed["scanned"], 3);
 }
 
+/// AC4-HP: render_reconcile_json produces the Python-matching key set
+
 // -----------------------------------------------------------------------
 // x-f1ab / x-90a9 task 0.1: the spawn seam gate (spawn_needs_python_seam)
 // -----------------------------------------------------------------------
 
 #[test]
-fn spawn_seam_gate_sends_unmarked_direct_spawns_back() {
+fn seam_rows() {
     // AC22 (positive gate marker): an argv that never crossed the Python seam
     // parses with no defaults_applied param, and the gate is true.
     let (_m, params) = build_request(
@@ -2605,10 +2383,7 @@ fn spawn_seam_gate_sends_unmarked_direct_spawns_back() {
     .expect("plain spawn parses");
     assert!(params.get("defaults_applied").is_none());
     assert!(spawn_needs_python_seam(&params));
-}
 
-#[test]
-fn spawn_seam_gate_passes_marked_spawns_through_in_both_value_forms() {
     // AC23/AC27 (positive dispatch markers): both spellings parse, the gate
     // is false, and the marker token is consumed - it never reaches the seed.
     for token in ["--defaults-applied", "--defaults-applied=enforced"] {
@@ -2646,10 +2421,7 @@ fn spawn_seam_gate_passes_marked_spawns_through_in_both_value_forms() {
     .expect("unenforced marker parses");
     assert_eq!(params["defaults_applied"], "unenforced");
     assert!(!spawn_needs_python_seam(&params));
-}
 
-#[test]
-fn spawn_seam_bridge_shaped_argv_parses_once_and_stays_clean() {
     // AC24 (bridge case): the exact argv shape rust_spawn.py builds - marker
     // straight after the verb, seed behind the fence. One parse, gate false,
     // message intact: no re-entry recursion and no prompt contamination.
@@ -2675,10 +2447,7 @@ fn spawn_seam_bridge_shaped_argv_parses_once_and_stays_clean() {
     assert!(!spawn_needs_python_seam(&params));
     assert_eq!(params["message"], "/target x-90a9");
     assert_eq!(params["node"], "x-90a9");
-}
 
-#[test]
-fn spawn_seam_marker_rejects_an_unknown_verdict() {
     // A typo'd marker must refuse loudly, not degrade to unenforced: the
     // value is the binary's only record of the seam's policy decision.
     let err = build_request(
@@ -2736,7 +2505,7 @@ fn place_thread_portal_after_spawn_routes_through_fno_bin() {
 }
 
 #[test]
-fn harness_arg_parses_repeatable_into_params() {
+fn harness_arg_rows() {
     let (_m, params) = build_request(
         "spawn",
         &[
@@ -2756,10 +2525,7 @@ fn harness_arg_parses_repeatable_into_params() {
         serde_json::json!(["-c", "key=1"]),
         "both spellings land in one array"
     );
-}
 
-#[test]
-fn a_codex_thread_add_dir_leads_the_state_dirs() {
     let mut params = serde_json::json!({"add_dir": "/tmp/x"});
     fno_agents::codex_thread::attach_codex_thread_state_dirs(&mut params);
     assert_eq!(
@@ -2811,7 +2577,7 @@ fn attention_row(
 /// one Rust predicate - an unobserved arm is in it, an observed fresh no-op
 /// is not, an observed stale or failed arm is.
 #[test]
-fn status_payload_publishes_the_rust_owned_arms_attention() {
+fn status_rows() {
     let unobserved = attention_row(
         "a_unobserved",
         fno_agents::tick_ledger::ProducerEvidence::Unobserved,
@@ -2848,13 +2614,7 @@ fn status_payload_publishes_the_rust_owned_arms_attention() {
     assert!(!attention.contains(&"a_fresh_no_op"), "{attention:?}");
     assert!(attention.contains(&"a_stale"), "{attention:?}");
     assert!(attention.contains(&"a_failing"), "{attention:?}");
-}
 
-/// AC4: the degraded payload carries the stuck_work read beside
-/// arms_attention, whatever the machine answers - the two finding lists on a
-/// readable host, the error shape on a blind one.
-#[test]
-fn degraded_payload_carries_the_stuck_work_shape() {
     let payload = degraded_status_payload(&[]);
     let stuck = &payload["stuck_work"];
     assert!(stuck.is_object(), "{stuck}");
@@ -2866,12 +2626,7 @@ fn degraded_payload_carries_the_stuck_work_shape() {
         assert!(stuck["hung_verbs"].is_array(), "{stuck}");
         assert!(stuck["dead_holders"].is_array(), "{stuck}");
     }
-}
 
-/// AC4-HP/EDGE at the render seam: findings print as a stuck work block,
-/// a clean read prints nothing, an error read prints its reason.
-#[test]
-fn stuck_work_render_lines_block_or_nothing() {
     let value = serde_json::json!({
         "hung_verbs": ["hung verb pid 7 1h fno backlog advance (over 1800s)"],
         "dead_holders": ["dead holder flight:x holder h pid 9 absent held 10m"],
@@ -2889,6 +2644,13 @@ fn stuck_work_render_lines_block_or_nothing() {
     let lines = fno_agents::stuck_work::render_lines(&err);
     assert_eq!(lines, vec!["stuck work: unreadable (ps exited 1)"]);
 }
+
+/// AC4: the degraded payload carries the stuck_work read beside
+/// arms_attention, whatever the machine answers - the two finding lists on a
+/// readable host, the error shape on a blind one.
+
+/// AC4-HP/EDGE at the render seam: findings print as a stuck work block,
+/// a clean read prints nothing, an error read prints its reason.
 
 // -----------------------------------------------------------------------
 // x-1961: `resume` inside the client runtime must not panic

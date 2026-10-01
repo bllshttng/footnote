@@ -61,6 +61,9 @@ enum Role {
     AgentsAlias(fno::agents_alias::Org),
     /// An attach invocation with no TTY: print the notice, exit 0.
     NotTty,
+    /// `fno uninstall`: native, because it removes the Python wheel it would
+    /// otherwise forward to.
+    Uninstall(fno::uninstall::Opts),
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
@@ -154,6 +157,9 @@ enum Role {
     /// `fno inbox decisions ...`: the native listing read, classified beside
     /// the law verbs; the Python `inbox` tree keeps every other name.
     InboxDecisions(Vec<OsString>),
+    /// `fno board-render`: the local board's snapshot writer, a native front
+    /// verb because the page and the read model both live in this crate.
+    BoardRender(Vec<String>),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -224,6 +230,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::law_cli::classify_inbox_law(args) {
         return Role::InboxLaw(rest);
     }
+    if let Some(rest) = fno::backlog_snapshot::classify(args) {
+        return Role::BoardRender(rest);
+    }
     if let Some(rest) = fno::law_cli::classify_inbox_decisions(args) {
         return Role::InboxDecisions(rest);
     }
@@ -243,6 +252,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Role::MuxUsage(message)
         }
         FrontDoor::Version { json } => Role::MuxVersion(json),
+        FrontDoor::Uninstall(opts) => Role::Uninstall(opts),
         FrontDoor::Attach {
             name,
             explicit_socket,
@@ -359,6 +369,7 @@ fn main() {
             std::process::exit(2);
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
+        Role::Uninstall(opts) => std::process::exit(fno::uninstall::run_uninstall(opts)),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(kill_req) => {
             if kill_req.stale_idle || kill_req.all {
@@ -395,6 +406,7 @@ fn main() {
         }
         Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
+        Role::BoardRender(rest) => std::process::exit(fno::backlog_snapshot::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
