@@ -7083,7 +7083,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         entry_name = Some(entry.name.clone());
         if let Some(rep) = &report_for_store {
             if let Some(prev) = &entry.inside_leg {
-                if seq <= prev.seq {
+                if !prev.yields_to(rep) {
                     outcome = Outcome::StaleSeq { last: prev.seq };
                     return;
                 }

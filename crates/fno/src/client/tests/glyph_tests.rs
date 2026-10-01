@@ -43,7 +43,20 @@ fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
     let states = [
         Working, Idle, Blocked, DoneUnseen, Exited, Unmeasured, Empty,
     ];
-    let glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
+    // The Working spin frames count as glyphs too: each must read apart from
+    // every other state's glyph, and the spin turns through all of them.
+    let mut glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
+    glyphs.extend(crate::lattice::SPIN);
+    let step = crate::lattice::SPIN_FRAME_MS;
+    let turned: Vec<char> = (0..4)
+        .map(|i| crate::lattice::spin_frame(i * step))
+        .collect();
+    assert_eq!(turned, crate::lattice::SPIN);
+    assert_eq!(
+        status_glyph(Working),
+        lattice_glyph(Working).0,
+        "no spin outside the client loop"
+    );
     // Pairwise distinct: every state pair reads differently by GLYPH alone,
     // so a monochrome/weak-BOLD terminal never collapses two states
     // (AC1-ERR / AC1-EDGE).

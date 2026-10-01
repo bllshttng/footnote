@@ -561,6 +561,13 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("ctx"), "{text:?}");
     assert!(text.contains("up"), "{text:?}");
+    for name in ["king-a", "w1"] {
+        assert!(
+            text.lines()
+                .any(|line| line.contains(name) && line.contains("●Work")),
+            "Working row {name} keeps its still spinner beside the state word: {text:?}"
+        );
+    }
     let now = crate::digest_overlay::now_secs();
     assert_eq!(row_meter::ctx_cell(None), "-");
     assert_eq!(row_meter::ctx_cell(Some(0)), "0%▫▫▫");
