@@ -806,6 +806,20 @@ mod tests {
         (guard, tmp)
     }
 
+    /// The pins pinned_sandbox (and the CODEX_HOME seed) leave in the
+    /// process env: remove them, or a later test in this binary reads this
+    /// test's world.
+    fn clear_sandbox_env() {
+        for key in [
+            "FNO_GLOBAL_SETTINGS_PATH",
+            "FNO_AGENTS_HOME",
+            "FNO_STATE_DIR",
+            "CODEX_HOME",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
     #[test]
     fn explicit_keys_are_never_gathered_again_ac7_edge() {
         let cwd = std::path::Path::new("/nonexistent-gather-cwd");
@@ -829,10 +843,17 @@ mod tests {
             "plan_model": "fallback-m",
         });
         let (guard, tmp) = pinned_sandbox("dispatch-precedence", "");
+        // The tier leg consults the codex catalog when it resolves a codex
+        // model; a seeded empty catalog keeps the chain free of the
+        // catalog-unreadable notice this sandbox cannot fetch.
+        let codex_home = tmp.join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(codex_home.join("models_cache.json"), r#"{"models": []}"#).unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
         let out = run_mode(&payload, &tmp);
-        drop(guard);
         assert_eq!(out["source"], "task-difficulty(high)");
-        assert_eq!(out["chain"][0], "task-difficulty(high)");
+        // The chain carries the tier leg's own head vocabulary.
+        assert_eq!(out["chain"][0], "tier(high)");
         // A plan pin outranks a plan difficulty but not the task rungs.
         let out = run_mode(
             &json!({"mode": "dispatch_model", "plan_model": "pm", "plan_difficulty": "low"}),
@@ -841,6 +862,8 @@ mod tests {
         assert_eq!(out["source"], "plan-default");
         let out = run_mode(&json!({"mode": "dispatch_model"}), &tmp);
         assert_eq!(out["source"], "provider-default(no-difficulty)");
+        drop(guard);
+        clear_sandbox_env();
     }
 
     #[test]
@@ -851,6 +874,7 @@ mod tests {
         );
         let out = run_mode(&json!({"mode": "policy"}), &tmp);
         drop(guard);
+        clear_sandbox_env();
         assert_eq!(out["enforce_inventory"], json!(true));
         assert_eq!(out["operator_access"], "local");
     }
@@ -861,9 +885,15 @@ mod tests {
         let inv = run_mode(&json!({"mode": "inventory"}), &tmp);
         let pol = run_mode(&json!({"mode": "policy"}), &tmp);
         drop(guard);
+        clear_sandbox_env();
         assert_eq!(inv["declared"], json!(false));
         assert_eq!(inv["objective"], "cheapest-that-clears");
-        assert_eq!(inv["rows"], json!([]));
+        // An unparseable config degrades to the BUILT-IN rows (a tier
+        // request stays answerable); declared stays false.
+        assert!(
+            inv["rows"].as_array().is_some_and(|rows| !rows.is_empty()),
+            "the built-in rows answer an unreadable config"
+        );
         assert_eq!(pol["enforce_inventory"], json!(false));
         assert_eq!(pol["operator_access"], "unknown");
     }

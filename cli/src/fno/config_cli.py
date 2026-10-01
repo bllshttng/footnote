@@ -852,6 +852,7 @@ def _report_band_routing() -> None:
     ]
     if len(empty_verbs) < len(read_verbs):
         return
+    settings = None
     try:
         from fno.config import load_settings
 

@@ -15,8 +15,6 @@ import re
 import sys
 from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 
-from fno.config._dispatch_verbs import is_verb_seed, parse_verb_token
-
 # Flags that consume the FOLLOWING token. Scanning for our three flags skips a
 # value flag's value so a value that looks like `--model` / `--effort` can never
 # masquerade as one of ours. Mirrors client.rs VALUE_FLAGS + the short aliases

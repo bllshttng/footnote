@@ -4626,6 +4626,13 @@ mod tests {
             let guard = claims::test_env_lock()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            // The claude fallback lane names the AMBIENT harness, so a
+            // session marker an earlier test in this process leaked would
+            // read as codex or gemini and decline the lane. Scrub the same
+            // ambient identity set a spawned child scrubs.
+            for name in claims::AMBIENT_IDENTITY_NAMES {
+                std::env::remove_var(name);
+            }
             let dir = tempfile::tempdir().expect("tempdir");
             let cfg = dir.path().join("config.toml");
             std::fs::write(&cfg, format!("state_dir = '{}'\n", dir.path().display())).unwrap();
@@ -4633,6 +4640,13 @@ mod tests {
             std::fs::write(&state, state_json).unwrap();
             std::env::set_var("FNO_CONFIG", &cfg);
             std::env::set_var("FNO_RUNTIME_STATE_PATH", &state);
+            // Pin the whole state world: a var an earlier test in this
+            // process set without cleaning up (FNO_STATE_DIR, the global
+            // settings pin, the agents home) would otherwise answer the
+            // walk's capacity and identity reads.
+            std::env::set_var("FNO_STATE_DIR", dir.path());
+            std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
+            std::env::remove_var("FNO_AGENTS_HOME");
             match fno_bin {
                 Some(path) => std::env::set_var("FNO_BIN", path),
                 None => std::env::remove_var("FNO_BIN"),
@@ -4650,6 +4664,7 @@ mod tests {
         fn drop(&mut self) {
             std::env::remove_var("FNO_CONFIG");
             std::env::remove_var("FNO_RUNTIME_STATE_PATH");
+            std::env::remove_var("FNO_STATE_DIR");
         }
     }
 

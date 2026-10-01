@@ -121,7 +121,7 @@ def _inventory_from_answer(answer: Mapping[str, Any]) -> Inventory:
 def resolve_inventory() -> Inventory:
     """Read the declared inventory from config. Never raises: an unloadable
     config or a missing verb is an EMPTY inventory, not a dead spawn."""
-    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
+    from fno.route_slot_client import route_slot_call
 
     try:
         return _inventory_from_answer(route_slot_call({"mode": "inventory"}))
