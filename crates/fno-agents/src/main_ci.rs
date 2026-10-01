@@ -54,9 +54,11 @@ const STALE_REPORT_WINDOW_DAYS: i64 = 14;
 /// One verdict token for the check-in line, from the workflow-run history on
 /// main, judged at the branch head only: the verdict reduces rows whose
 /// head sha equals `head_sha` - `at_sha` carries those push runs, and the
-/// branch page is filtered to the head too, so a workflow_dispatch run fired
-/// at the current head counts. A run on an OLDER commit never sets the
-/// verdict, however fresh the workflow: a release run that failed or was
+/// branch page is filtered to the head and to push-event rows, so only push
+/// CI at the head sets the verdict: a schedule-event nightly release failing
+/// at the head never reads main red while the head's push CI is green. A run
+/// on an OLDER commit never sets the verdict, however fresh the workflow: a
+/// release run that failed or was
 /// cancelled days ago on an old sha must not read main red while the head
 /// is clean. Such failures ride the token's `stale` list instead and the
 /// check-in names each on its own line with its age. Per workflow with head
@@ -74,9 +76,17 @@ fn main_ci_token_from_pages<'a>(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Value {
     let at_head = |run: &Value| run.get("head_sha").and_then(Value::as_str) == Some(head_sha);
+    // The verdict is main's push CI at the head. A schedule-event nightly
+    // release failing at the head is a release-engineering concern, never
+    // main red while the head's push CI is green; only rows the API lists as
+    // push events fold into the verdict.
+    let is_push = |run: &Value| run.get("event").and_then(Value::as_str) == Some("push");
     let mut head: Vec<(&'a str, &'a Value, Option<&'a Value>)> = Vec::new();
     fold_page(&mut head, at_sha.iter());
-    fold_page(&mut head, on_main.iter().filter(|run| at_head(run)));
+    fold_page(
+        &mut head,
+        on_main.iter().filter(|run| at_head(run) && is_push(run)),
+    );
     let mut older: Vec<(&'a str, &'a Value, Option<&'a Value>)> = Vec::new();
     fold_page(&mut older, on_main.iter().filter(|run| !at_head(run)));
     let window_start = now - chrono::Duration::days(STALE_REPORT_WINDOW_DAYS);
@@ -196,8 +206,8 @@ pub(crate) fn r_main_ci() -> Result<Value, String> {
 pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
     // Judge at main's current head: the verdict reduces only rows whose head
     // sha equals the branch head, so the head's own push runs are read
-    // directly, the branch page contributes its head-sha rows (dispatch
-    // events at the head count) and its older rows only ever feed the stale
+    // directly, the branch page contributes its head-sha push-event rows
+    // only, and its older rows only ever feed the stale
     // list, never the verdict.
     let head_raw = crate::pr_push::gh_api("gh", &cwd, "repos/{owner}/{repo}/branches/main", &[])
         .map_err(|error| {
@@ -322,9 +332,22 @@ mod tests {
     /// The workflow-run rows an `/actions/runs` page carries, in the fields
     /// the reducer reads; row order is free.
     fn wf_run(name: &str, sha: &str, status: &str, conclusion: &str, created: &str) -> Value {
+        wf_run_event(name, sha, status, conclusion, created, "push")
+    }
+
+    /// The same row with an explicit trigger event: push rows set the
+    /// verdict, anything else (the nightly's `schedule`) never does.
+    fn wf_run_event(
+        name: &str,
+        sha: &str,
+        status: &str,
+        conclusion: &str,
+        created: &str,
+        event: &str,
+    ) -> Value {
         serde_json::json!({
             "name": name, "head_sha": sha, "status": status,
-            "conclusion": conclusion, "created_at": created,
+            "conclusion": conclusion, "created_at": created, "event": event,
         })
     }
 
@@ -341,6 +364,10 @@ mod tests {
         )
     }
 
+    /// An old-commit failure - push or a dispatch-only nightly the head
+    /// never fires - never sets the verdict: a clean head reads the plain
+    /// green word while the failure rides the stale list with its age, and
+    /// past the report window the failure is archaeology and rides no list.
     #[test]
     fn an_old_commit_failure_rides_the_stale_list_and_never_sets_the_verdict() {
         let at_sha = vec![
@@ -381,11 +408,68 @@ mod tests {
                 ]
             })
         );
+        // A cancelled dispatch-only release on an older commit rides the
+        // stale list the same way.
+        let head_rows = vec![wf_run(
+            "guards",
+            "head",
+            "completed",
+            "success",
+            "2026-09-28T08:00:00Z",
+        )];
+        let cancelled = vec![
+            wf_run(
+                "guards",
+                "head",
+                "completed",
+                "success",
+                "2026-09-28T08:00:00Z",
+            ),
+            wf_run_event(
+                "release",
+                "oldsha",
+                "completed",
+                "cancelled",
+                "2026-09-26T03:35:00Z",
+                "workflow_dispatch",
+            ),
+        ];
+        assert_eq!(
+            token_at("head", &head_rows, &cancelled),
+            serde_json::json!({
+                "verdict": "green",
+                "stale": [
+                    {"workflow": "release", "sha": "oldsha", "created_at": "2026-09-26T03:35:00Z"}
+                ]
+            })
+        );
+        // Past the report window the failure is archaeology: it rides no
+        // list and the token is the plain word.
+        let ancient = vec![
+            wf_run(
+                "guards",
+                "head",
+                "completed",
+                "success",
+                "2026-09-28T08:00:00Z",
+            ),
+            wf_run(
+                "release",
+                "oldsha",
+                "completed",
+                "cancelled",
+                "2026-08-01T03:35:00Z",
+            ),
+        ];
+        assert_eq!(
+            token_at("head", &head_rows, &ancient),
+            serde_json::json!({"verdict": "green"})
+        );
     }
 
-    /// A head workflow whose newest run is still in flight reads pending even
-    /// when its newest completed run passed, and no head rows at all reads
-    /// pending too - never green.
+    /// A workflow whose newest head run is still in flight reads pending -
+    /// never green, and with no head rows at all too - while an old-commit
+    /// failure only rides the stale list, never the verdict.
     #[test]
     fn main_ci_reads_pending_when_a_workflows_newest_run_is_in_flight() {
         let runs = vec![
@@ -406,13 +490,6 @@ mod tests {
             token_at("b2", &[], &[]),
             serde_json::json!({"verdict": "pending"})
         );
-    }
-
-    /// An old-commit failure never outranks anything: the head's own
-    /// in-flight run reads pending while the old failure rides the stale
-    /// list - the verdict is judged at the head only.
-    #[test]
-    fn an_in_flight_head_run_reads_pending_while_the_old_failure_rides_the_stale_list() {
         let at_sha = vec![wf_run(
             "cli-ci",
             "b3",
@@ -506,64 +583,59 @@ mod tests {
         );
     }
 
-    /// The node's acceptance shape: a failed (or cancelled) run on an older
-    /// commit - here a dispatch-only release workflow the head never fires -
-    /// with a clean head reads green and names the old failure on the stale
-    /// list instead of reading main red.
+    /// The filed bug's shape: the nightly release fired on `schedule` and
+    /// failed at the head sha while the head's push cli-ci was green. The
+    /// verdict is the push CI only: green, never red off the scheduled run,
+    /// and a schedule run still in flight at the head does not hold pending.
     #[test]
-    fn an_old_release_failure_on_a_clean_head_reads_green_and_names_the_old_failure() {
+    fn a_schedule_release_failure_at_the_head_never_reads_main_red() {
         let at_sha = vec![wf_run(
-            "guards",
+            "cli-ci",
             "head",
             "completed",
             "success",
-            "2026-09-28T08:00:00Z",
+            "2026-09-30T05:00:00Z",
         )];
-        let on_main = vec![
+        let push_and_nightly = vec![
             wf_run(
-                "guards",
+                "cli-ci",
                 "head",
                 "completed",
                 "success",
-                "2026-09-28T08:00:00Z",
+                "2026-09-30T05:00:00Z",
             ),
-            wf_run(
+            wf_run_event(
                 "release",
-                "oldsha",
+                "head",
                 "completed",
-                "cancelled",
-                "2026-09-26T03:35:00Z",
+                "failure",
+                "2026-09-30T03:00:00Z",
+                "schedule",
             ),
         ];
         assert_eq!(
-            token_at("head", &at_sha, &on_main),
-            serde_json::json!({
-                "verdict": "green",
-                "stale": [
-                    {"workflow": "release", "sha": "oldsha", "created_at": "2026-09-26T03:35:00Z"}
-                ]
-            })
+            token_at("head", &at_sha, &push_and_nightly),
+            serde_json::json!({"verdict": "green"})
         );
-        // Past the report window the failure is archaeology: it rides no
-        // list and the token is the plain word.
-        let ancient = vec![
+        let nightly_in_flight = vec![
             wf_run(
-                "guards",
+                "cli-ci",
                 "head",
                 "completed",
                 "success",
-                "2026-09-28T08:00:00Z",
+                "2026-09-30T05:00:00Z",
             ),
-            wf_run(
+            wf_run_event(
                 "release",
-                "oldsha",
-                "completed",
-                "cancelled",
-                "2026-08-01T03:35:00Z",
+                "head",
+                "in_progress",
+                "",
+                "2026-09-30T06:00:00Z",
+                "schedule",
             ),
         ];
         assert_eq!(
-            token_at("head", &at_sha, &ancient),
+            token_at("head", &at_sha, &nightly_in_flight),
             serde_json::json!({"verdict": "green"})
         );
     }
