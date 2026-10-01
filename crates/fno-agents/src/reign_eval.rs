@@ -225,6 +225,7 @@ fn fold_transcript(
     until: Option<String>,
     compaction_ceiling: i64,
     bus: &BusIndex,
+    witness: &mut crate::operator_witness::SubmitIndex,
 ) -> Result<Fold, String> {
     let file = std::fs::File::open(transcript)
         .map_err(|e| format!("{}: unreadable transcript: {e}", transcript.display()))?;
@@ -392,7 +393,25 @@ fn fold_transcript(
         };
         if let Some(text) = user_text {
             if !text.is_empty() {
-                let provenance = crate::provenance::classify_turn(&row, bus, session);
+                let mut provenance = crate::provenance::classify_turn(&row, bus, session);
+                // The witness join, intel's own: an unshaped turn binds to the
+                // earliest unconsumed operator_submit in the window and reads
+                // operator; a bound command consumes the submit but stays a
+                // command.
+                if matches!(
+                    provenance,
+                    crate::provenance::Provenance::Unknown
+                        | crate::provenance::Provenance::Harness(
+                            crate::provenance::HarnessKind::CommandInvocation
+                        )
+                ) {
+                    let bound = ts_epoch
+                        .and_then(|at| witness.bind(session, (at * 1000.0) as i64))
+                        .is_some();
+                    if bound && provenance == crate::provenance::Provenance::Unknown {
+                        provenance = crate::provenance::Provenance::Operator;
+                    }
+                }
                 if let Some(machine) = crate::wake_meter::wake_class(provenance.clone()) {
                     let class = provenance.label();
                     add(&mut fold.windows[window_idx].wakes, class);
@@ -780,6 +799,7 @@ pub fn run(args: &[String]) -> i32 {
     }
     let mut reports = Vec::new();
     let bus = bus_index();
+    let mut witness = crate::operator_witness::SubmitIndex::load(&home.events_jsonl());
     for session in sessions {
         let Some((harness, transcript)) = reign_transcript(&session) else {
             eprintln!(
@@ -821,6 +841,7 @@ pub fn run(args: &[String]) -> i32 {
             parsed.until.clone(),
             ceiling,
             &bus,
+            &mut witness,
         ) {
             Ok(fold) => fold,
             Err(error) => {
@@ -1417,6 +1438,7 @@ mod tests {
             Some("2026-01-01T02:30:00Z".into()),
             3,
             &BusIndex::empty(),
+            &mut crate::operator_witness::SubmitIndex::empty(),
         )
         .unwrap();
         assert_eq!(fold.harness, "claude");
@@ -1552,6 +1574,7 @@ mod tests {
             None,
             3,
             &BusIndex::empty(),
+            &mut crate::operator_witness::SubmitIndex::empty(),
         )
         .unwrap();
         assert_eq!(fold.harness, "codex");
