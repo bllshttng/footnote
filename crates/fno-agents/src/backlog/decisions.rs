@@ -316,24 +316,61 @@ fn insert_event(connection: &Connection, event: &Value) -> Result<String, String
 }
 
 fn attach_subject(connection: &Connection, event: &Value, event_id: &str) -> Result<(), String> {
-    let Some(node_id) = event
+    let Some(subject) = event
         .get("data")
         .and_then(|data| data.get("subject"))
         .and_then(Value::as_str)
     else {
         return Ok(());
     };
-    let node_exists: bool = connection
+    // Exact id first, then the resolver's next tiers (slug, then the
+    // casefolded id): the deleted Python projection attached a ruling to the
+    // node its subject RESOLVED to, so `fno backlog decide closed-one ...`
+    // lands on the node view the same way an exact id does. Exact-only
+    // would print a node receipt the node view does not carry.
+    let resolved: Option<String> = connection
         .query_row(
-            "SELECT 1 FROM nodes WHERE id = ?1",
-            params![node_id],
-            |_| Ok(()),
+            "SELECT id FROM nodes WHERE id = ?1",
+            params![subject],
+            |row| row.get::<_, String>(0),
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .is_some();
-    if node_exists {
-        attach_node(connection, node_id, event_id)?;
+        .or_else(|| {
+            connection
+                .query_row(
+                    "SELECT id FROM nodes WHERE slug = ?1",
+                    params![subject],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+        })
+        .or_else(|| {
+            connection
+                .query_row(
+                    "SELECT id FROM nodes WHERE lower(id) = ?1",
+                    params![subject.to_lowercase()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+        })
+        .or_else(|| {
+            connection
+                .query_row(
+                    "SELECT id FROM nodes WHERE lower(slug) = ?1",
+                    params![subject.to_lowercase()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+        });
+    if let Some(node_id) = resolved {
+        attach_node(connection, &node_id, event_id)?;
     }
     Ok(())
 }
@@ -381,6 +418,35 @@ mod tests {
                 "subject": "x-node",
             },
         })
+    }
+
+    #[test]
+    fn a_slug_subject_attaches_the_ruling_to_the_node_it_resolves_to() {
+        let temp = TempDir::new().unwrap();
+        let graph = temp.path().join("graph.json");
+        let mut connection = crate::backlog::open(&graph).unwrap();
+        let node = crate::backlog::model::Node::from_json(&serde_json::json!({
+            "id": "x-slug1",
+            "slug": "closed-one",
+            "title": "Node",
+            "type": "feature",
+            "status": "ready",
+            "priority": "p2"
+        }))
+        .unwrap();
+        crate::backlog::nodes::save(&mut connection, &node).unwrap();
+        let decision = serde_json::json!({
+            "ts": "2026-10-01T00:00:01Z",
+            "type": DECISION_EVENT,
+            "source": "target",
+            "data": {
+                "decision_id": "d-slug0001",
+                "decision": "recorded under the slug",
+                "subject": "closed-one",
+            },
+        });
+        record(&connection, &decision).unwrap();
+        assert_eq!(node_decisions(&connection, "x-slug1").unwrap().len(), 1);
     }
 
     #[test]

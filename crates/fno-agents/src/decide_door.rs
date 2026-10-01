@@ -162,6 +162,10 @@ pub(crate) fn parse_decide_door(args: &[String]) -> Result<DecideDoor, String> {
                 if door.subject.is_some() {
                     return Err("pass either <subject> or --subject (deprecated), not both".into());
                 }
+                eprintln!(
+                    "warning: --subject is deprecated; use <subject> instead. \
+The alias will be removed in a future release."
+                );
                 door.subject = Some(v);
             }
             "--decision" => {
@@ -171,6 +175,10 @@ pub(crate) fn parse_decide_door(args: &[String]) -> Result<DecideDoor, String> {
                         "pass either <decision> or --decision (deprecated), not both".into(),
                     );
                 }
+                eprintln!(
+                    "warning: --decision is deprecated; use <decision> instead. \
+The alias will be removed in a future release."
+                );
                 door.decision = Some(v);
             }
             "--question-id" => door.question_id = Some(take(&mut i)?),
