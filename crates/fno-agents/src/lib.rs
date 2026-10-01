@@ -357,6 +357,7 @@ pub mod route_inventory;
 pub mod route_recovery;
 pub mod route_slot;
 pub mod row_truth;
+pub mod row_verdict;
 pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
