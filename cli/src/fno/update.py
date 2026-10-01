@@ -1455,7 +1455,9 @@ def _render_update_status() -> None:
     from fno.paths import global_events_json
 
     try:
-        rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES), limit=1000)
+        # No cap: the filtered type set is small and retention-managed, and a
+        # capped read can hide the newest row behind its own horizon.
+        rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES))
     except EventStoreUnavailable as exc:
         typer.echo(f"fno doctor update --status: the event store is unreadable: {exc}", err=True)
         raise typer.Exit(1)
