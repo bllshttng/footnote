@@ -1449,18 +1449,14 @@ def _emit_update_event(type_name: str, **data) -> None:
 
 
 def _last_update_event() -> Optional[dict]:
-    """The newest journaled update event, or None.
-
-    Read through `--check`'s readiness payload: the flag ratchet bars a new
-    Python flag, and `fno doctor event find` answers the same question for a
-    caller that wants raw rows. A store that cannot be read degrades to None,
-    never raises: readiness is advisory and every input degrades."""
+    """The newest journaled update event, or None; rides --check's readiness
+    payload (the flag ratchet bars a new Python flag). No cap: the filtered
+    type set is small and retention-managed, and a capped read can hide the
+    newest row behind its own horizon. An unreadable store degrades to None."""
     try:
         from fno.events.store_client import query_rows
         from fno.paths import global_events_json
 
-        # No cap: the filtered type set is small and retention-managed, and a
-        # capped read can hide the newest row behind its own horizon.
         rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES))
     except Exception:  # noqa: BLE001
         return None
@@ -1487,16 +1483,11 @@ def _installed_event_argv(fno_bin: str, rev: Optional[str], old_rev: Optional[st
 
 
 def _shell_fail_prologue(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
-    """An EXIT-trap prologue prefixed to the exec'd shell line: on a nonzero
-    exit anywhere in the line it journals the failure, mails the crowns, and
-    lets the shell exit with its own code.
-
-    A `|| { ...; }` suffix is not enough: `_uv_retry_sh` fails with a bare
-    `exit` from inside a loop, and `exit` skips every trailing command and
-    every `||` chain. The trap is the one mechanism that fires on all of
-    them. The handler performs NO explicit exit, so the shell keeps the
-    original status; the JSON is assembled by `printf` with `$rc` as the one
-    substitution."""
+    """An EXIT-trap prologue on the exec'd shell line: any nonzero exit
+    journals the failure and mails the crowns. A `||` suffix cannot do this:
+    `_uv_retry_sh` fails with a bare `exit` inside a loop, which skips every
+    trailing command. The handler performs no explicit exit, so the shell
+    keeps its own status; printf substitutes `$rc` into the JSON."""
     template = json.dumps(
         {
             "reason": "install exited %s",
@@ -1752,14 +1743,8 @@ def update_command(
         )
         raise typer.Exit(1)
 
-    # Machine-global mutations start here, so this is where the update gets a
-    # journal trail: started now, built after the cargo leg, installed/failed
-    # from the post-install chain (Unix) or in-process (Windows). This is also
-    # where the cargo legs are marked as an install build:
-    # law d-829648bb - nothing stops fno loading for the user - so the
-    # admission doors (crates/fno-agents/src/test_run.rs) let them past the
-    # tests hold and the worker run-slot queue; they serialize only on the
-    # one-at-a-time build:cargo claim.
+    # Machine-global mutations start here: the journal trail begins, and the
+    # cargo legs wear the install-build mark the admission doors read.
     os.environ["FNO_INSTALL_BUILD"] = "1"
     old_rev = _read_current_installed_rev()
     _emit_update_event(
@@ -1771,9 +1756,7 @@ def update_command(
 
     rust_outcome = None
     if not no_rust:
-        # Outcome still never branches control flow (locked decision 4:
-        # warn-and-continue); it rides the fno_update_built row so a lead
-        # reading the journal sees what the cargo leg concluded.
+        # Warn-and-continue holds: the outcome never branches, it journals.
         rust_outcome = _refresh_rust_bins(resolved, force=rust, dry_run=False)
         _emit_update_event(
             "fno_update_built",
