@@ -1,7 +1,6 @@
 //! The pane-send audit row: the record `fno mux pane send` writes so
 //! "who told this worker to do that" is one grep, not a transcript sweep.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::mux_cli::{
@@ -131,18 +130,13 @@ impl PaneSendAudit {
     }
 }
 
-/// One O_APPEND line to the agents events journal, creating the parent dir.
-/// The raw row append both the pane-send floor and the `operator_submit`
-/// witness share; each write is best-effort and names its own failure.
+/// One committed row in the agents journal's store. The raw row append both
+/// the pane-send floor and the `operator_submit` witness share; each write
+/// is best-effort and names its own failure.
 pub(crate) fn append_agents_event(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{row}")
+    crate::event_store::append_envelope(path, &row.to_string(), None)
+        .map(|_| ())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
 /// A submit key is a control byte, not a dispatch: the CRs, Tabs and ESC
@@ -255,11 +249,13 @@ mod tests {
     }
 
     fn read_audit_rows(path: &std::path::Path, needle: &str) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path)
+        // The rows commit into the store beside the journal; the raw file is
+        // legacy bytes the writer no longer touches.
+        crate::event_store::query_events(path, &crate::event_store::EventQuery::default())
             .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains(needle))
-            .map(|line| serde_json::from_str(line).expect("audit row is one JSON object"))
+            .iter()
+            .filter(|row| row.line.contains(needle))
+            .filter_map(|row| serde_json::from_str(&row.line).ok())
             .collect()
     }
 

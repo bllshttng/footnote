@@ -280,7 +280,7 @@ fn animated_env(is_tty: bool, ci: Option<&str>, reduced: Option<&str>) -> bool {
         && !reduced.map_or(false, |v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
 }
 
-fn animated() -> bool {
+pub(crate) fn animated() -> bool {
     animated_env(
         std::io::stdout().is_terminal(),
         std::env::var("CI").ok().as_deref(),
