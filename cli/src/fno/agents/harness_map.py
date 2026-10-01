@@ -526,18 +526,9 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         raise DispatchResolveError(
             "harness capability contract harness set is empty or not a table"
         )
-    # Subset, not equality: the roster is wider than the capability table on
-    # purpose (hermes, openclaw carry no row); a row naming an unrostered
-    # harness would advertise a lane no evidence supports.
-    # In-function: a module-level from-import resolves the served attr at import time.
-    from fno.harness_names import KNOWN_HARNESSES
-
-    absent = set(harnesses) - set(KNOWN_HARNESSES)
-    if absent:
-        raise DispatchResolveError(
-            "harness capability contract harness set contains names absent "
-            f"from KNOWN_HARNESSES: {', '.join(sorted(absent))}"
-        )
+    # The rows-stay-a-subset-of-the-roster pin lives on the Rust side (the
+    # provider round-trip test reads this table's source): a roster read
+    # here would fire on the module-level parse below, which is an import.
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
     return version, harnesses
