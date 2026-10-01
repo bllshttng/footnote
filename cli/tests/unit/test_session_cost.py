@@ -2,7 +2,7 @@
 """Tests for the in-package fno.cost._session_cost module (the former
 scripts/metrics/session-cost.py).
 
-Run: python3 tests/test_session_cost.py   OR   pytest tests/test_session_cost.py
+Run: fno doctor test cli/tests/unit/test_session_cost.py
 """
 import sys
 

@@ -10,8 +10,7 @@ on a live transcript: 502 assistant lines -> 185 unique pairs).
 Covers AC1-HP / AC1-ERR / AC1-UI / AC1-EDGE / AC1-FR plus the Boundaries
 and Invariants failure modes from the cost-accuracy plan.
 
-Run: python3 tests/metrics/test_session_cost_dedup.py
- OR: cd cli && uv run pytest ../tests/metrics/test_session_cost_dedup.py -q
+Run: fno doctor test cli/tests/unit/test_session_cost_dedup.py
 """
 
 import contextlib

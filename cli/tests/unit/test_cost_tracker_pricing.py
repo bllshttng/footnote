@@ -7,15 +7,13 @@ Covers AC2-HP / AC2-ERR / AC2-EDGE / AC2-FR from the cost-accuracy plan
 Boundaries failure modes (suffixed IDs, versions beyond the table) and the
 never-silently-reprice-history invariant.
 
-Run: python3 tests/lib/test_cost_tracker_pricing.py
- OR: cd cli && uv run pytest ../tests/lib/test_cost_tracker_pricing.py -q
+Run: fno doctor test cli/tests/unit/test_cost_tracker_pricing.py
 """
 
 import contextlib
 import io
 import subprocess
 import sys
-from pathlib import Path
 
 # Family goldens live under cli/tests (the cost family child owns them);
 # fno resolves through the pinned worktree PYTHONPATH.
