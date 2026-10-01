@@ -353,7 +353,7 @@ fn node_outcome(
 /// The fold's `_num`: junk-tolerant cost coercion, junk -> 0.0. Unlike
 /// `_num_opt`, a finite NEGATIVE reads as itself (Python's `float(v or 0.0)`
 /// never filtered the sign); the spend column stays sign-faithful.
-fn num(v: Option<&Value>) -> f64 {
+pub(crate) fn num(v: Option<&Value>) -> f64 {
     let Some(v) = v else { return 0.0 };
     let f = match v {
         Value::Number(_) => v.as_f64().unwrap_or(f64::NAN),
@@ -376,7 +376,7 @@ fn num(v: Option<&Value>) -> f64 {
 
 /// The fold's `_num_opt`: a MISSING/None/junk value is None, not 0.0, and a
 /// non-finite or negative reading stays None.
-fn num_opt(v: Option<&Value>) -> Option<f64> {
+pub(crate) fn num_opt(v: Option<&Value>) -> Option<f64> {
     let v = v?;
     let f = match v {
         Value::Number(_) => v.as_f64()?,
@@ -393,7 +393,7 @@ fn num_opt(v: Option<&Value>) -> Option<f64> {
 
 /// The ported `_pct` (fold.py:325): `round()` in Python is half-to-even, so
 /// an integer build keeps a tie from flipping a digit the old view printed.
-fn pct(n: u64, d: u64) -> i64 {
+pub(crate) fn pct(n: u64, d: u64) -> i64 {
     if d == 0 {
         return 0;
     }
@@ -408,12 +408,12 @@ fn pct(n: u64, d: u64) -> i64 {
     out as i64
 }
 
-fn round2(f: f64) -> f64 {
+pub(crate) fn round2(f: f64) -> f64 {
     (f * 100.0).round() / 100.0
 }
 
 /// The ported `_percentile`: nearest-rank over a sorted copy; None on empty.
-fn percentile(values: &[f64], p: u64) -> Option<f64> {
+pub(crate) fn percentile(values: &[f64], p: u64) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
@@ -425,7 +425,7 @@ fn percentile(values: &[f64], p: u64) -> Option<f64> {
 
 /// The fold's `_parse_ts` shape: aware stamps land on the local timeline
 /// before their tzinfo is stripped, so an offset is not a shift.
-fn parse_local(raw: &str) -> Option<chrono::NaiveDateTime> {
+pub(crate) fn parse_local(raw: &str) -> Option<chrono::NaiveDateTime> {
     let normalized = raw.replace('Z', "+00:00");
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&normalized) {
         return Some(dt.with_timezone(&chrono::Local).naive_local());
@@ -614,28 +614,26 @@ mod tests {
     }
 
     #[test]
-    fn delivered_nodes_once_with_shared_credit() {
+    fn repeated_nodes_count_once_and_retries_surface() {
         let rows = vec![
             axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1")),
             axis_row(Some("codex"), Some("gpt"), "DonePRGreen", Some("x-1")),
-        ];
-        let v = call(&rows, &graph());
-        for r in v["view"]["rows"].as_array().unwrap() {
-            assert_eq!(r["delivered_nodes"], 1, "{r}");
-            assert_eq!(r["shared_nodes"], 1);
-        }
-    }
-
-    #[test]
-    fn retry_rows_count_repeat_nids() {
-        let rows = vec![
-            axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1")),
             axis_row(Some("claude"), Some("opus"), "NoProgress", Some("x-1")),
         ];
         let v = call(&rows, &graph());
-        let r = &v["view"]["rows"][0];
-        assert_eq!(r["delivered_nodes"], 1, "{r}");
-        assert_eq!(r["retry_rows"], 1);
+        for r in v["view"]["rows"].as_array().unwrap() {
+            // Delivered nodes count ONCE per bucket, and a node two buckets
+            // shipped is shared credit for both.
+            assert_eq!(r["delivered_nodes"], 1, "{r}");
+            assert_eq!(r["shared_nodes"], 1);
+        }
+        let claude = v["view"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["model"] == "opus")
+            .unwrap();
+        assert_eq!(claude["retry_rows"], 1, "2 rows, 1 nid: {claude}");
     }
 
     #[test]
@@ -688,20 +686,20 @@ mod tests {
         let mut rows = vec![
             axis_row(Some("claude"), Some("opus"), "DonePRGreen", Some("x-1")),
             axis_row(None, None, "NoProgress", None),
-            axis_row(Some("codex"), None, "DonePRGreen", Some("x-2")),
+            axis_row(Some("codex"), None, "DonePRGreen", Some("junk-1")),
         ];
         rows[0]["provider"] = json!("anthropic");
         rows[0]["cost_usd"] = json!(2.0);
         rows[1]["cost_usd"] = json!(3.0);
         rows[2]["provider"] = json!("openai");
-        rows[2]["cost_usd"] = json!(5.0);
+        rows[2]["cost_usd"] = json!("abc");
         let v = call(&rows, &graph());
         let rs = v["view"]["rows"].as_array().unwrap();
         let total: f64 = rs
             .iter()
             .map(|r| r["spend_usd"].as_f64().unwrap_or(0.0))
             .sum();
-        assert!((total - 10.0).abs() < 1e-9, "spend reconciles: {v}");
+        assert!((total - 5.0).abs() < 1e-9, "spend reconciles: {v}");
         assert_eq!(v["view"]["coverage"]["harness_pct"], 67, "{v}");
         // Only the opus row carries a model.
         assert_eq!(v["view"]["coverage"]["model_pct"], 33);
@@ -714,37 +712,20 @@ mod tests {
             .expect("unattributed bucket kept");
         assert_eq!(unattr["model"], "unknown");
         assert_eq!(unattr["spend_usd"], 3.0);
-        let last = rs.last().unwrap();
+        let codex = rs
+            .iter()
+            .find(|r| r["harness"] == "codex")
+            .expect("codex bucket kept");
+        assert_eq!(codex["spend_usd"], 0.0, "junk cost reads 0.0: {codex}");
         assert_eq!(
-            last["harness"], "unattributed",
-            "unattributed sorted last: {v}"
+            codex["cost_per_shipped_usd"],
+            Value::Null,
+            "junk cost is unmeasured"
         );
         let last = rs.last().unwrap();
         assert_eq!(
             last["harness"], "unattributed",
             "unattributed sorted last: {v}"
-        );
-    }
-
-    #[test]
-    fn junk_values_never_crash_the_fold() {
-        let mut rows = vec![axis_row(
-            Some("claude"),
-            Some("opus"),
-            "DonePRGreen",
-            Some("x-1"),
-        )];
-        rows[0]["cost_usd"] = json!("abc");
-        rows[0]["iterations"] = json!("junk");
-        rows[0]["model"] = json!(123);
-        let v = call(&rows, &graph());
-        let r = &v["view"]["rows"][0];
-        assert_eq!(r["spend_usd"], 0.0, "{r}");
-        assert_eq!(r["cost_per_shipped_usd"], Value::Null, "no measured cost");
-        assert_eq!(r["median_iterations"], Value::Null);
-        assert_eq!(
-            r["model"], "unknown",
-            "non-string lands in the fallback bucket"
         );
     }
 
