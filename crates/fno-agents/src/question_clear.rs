@@ -172,6 +172,71 @@ mod tests {
         );
     }
 
+    /// A rerun clear on a store carrying recovery history must resume from
+    /// the raw stored line: journal_text re-renders committed rows with
+    /// `_store_seq`/`_history_only`, and hashing that annotated text misses
+    /// the stored row_hash, so the mirror falls back to decision_id and
+    /// appends the annotated render as a second row.
+    #[test]
+    fn recovery_store_rerun_resumes_the_raw_line_without_a_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(&tmp, "q-recovery", Some("ship it"));
+        seed_question(&req, &ask("q-recovery", "which lane?", None, None));
+        let stored = decision("q-recovery", "d-recovery1", "ship it");
+        let raw_line = stored.to_string();
+        crate::backlog::api::decision_record(&crate::backlog::api::Store::new(&req.graph), stored)
+            .unwrap();
+        crate::event_store::append_envelope(&req.journal_path, &raw_line, None).unwrap();
+        crate::event_store::append_envelope(&req.decisions_path, &raw_line, None).unwrap();
+        let old_close = json!({
+            "ts": "2026-09-23T00:02:00Z",
+            "type": "operator_question_closed",
+            "source": "target",
+            "data": {
+                "question_id": "q-recovery",
+                "answer": "ship it",
+                "closed_by": "test-agent",
+            },
+        });
+        crate::event_store::append_envelope(&req.journal_path, &old_close.to_string(), None)
+            .unwrap();
+        for path in [&req.journal_path, &req.decisions_path] {
+            let store = crate::event_store::store_path(path);
+            let mut conn = Connection::open(&store).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL);
+                 INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events;",
+            )
+            .unwrap();
+        }
+
+        let result = run_clear(&req);
+
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        assert!(result.lines[0].contains("(decision d-recovery1 resumed)"));
+        for path in [&req.journal_path, &req.decisions_path] {
+            let store = crate::event_store::store_path(path);
+            let conn = Connection::open(&store).unwrap();
+            let (count, line): (i64, String) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(MAX(line), '') FROM events
+                     WHERE type = 'operator_decision'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "one decision row in {}", store.display());
+            assert_eq!(
+                line, raw_line,
+                "the mirror stores the raw envelope, not the annotated render"
+            );
+        }
+        assert_eq!(
+            rows(&req.journal_path, &["operator_question_closed"]).len(),
+            1
+        );
+    }
+
     #[test]
     fn a_different_answer_refuses_unless_it_overrides_a_coordination_row() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1064,8 +1129,12 @@ fn find_decision(path: &Path, decision_id: &str) -> Option<(Value, String)> {
 }
 
 fn append_decision_mirror(path: &Path, line: &str, decision_id: &str) -> Result<(), String> {
-    let event_id = stored_event_id(path, line)?.unwrap_or_else(|| decision_id.to_string());
-    crate::event_store::append_envelope(path, line, Some(&event_id)).map(|_| ())
+    // A recovery-annotated read re-mirrors only its raw stored envelope: the
+    // mirror row must stay byte-identical to the first append, so identity
+    // hashes the stored bytes, never the annotated render.
+    let line = crate::event_store::raw_stored_line(path, line)?.unwrap_or_else(|| line.to_string());
+    let event_id = stored_event_id(path, &line)?.unwrap_or_else(|| decision_id.to_string());
+    crate::event_store::append_envelope(path, &line, Some(&event_id)).map(|_| ())
 }
 
 fn stored_event_id(path: &Path, line: &str) -> Result<Option<String>, String> {
@@ -1296,8 +1365,12 @@ fn close_event(req: &ClearRequest, qid: &str, answer: Option<&str>) -> (Value, S
 }
 
 fn append_close(journal: &Path, line: &str, qid: &str) -> Result<(), String> {
-    let event_id = stored_event_id(journal, line)?.unwrap_or_else(|| format!("close:{qid}"));
-    crate::event_store::append_envelope(journal, line, Some(&event_id)).map(|_| ())
+    // Same recovery rule as the decision mirror: a close read back through
+    // journal_text re-appends only as its raw stored envelope.
+    let line =
+        crate::event_store::raw_stored_line(journal, line)?.unwrap_or_else(|| line.to_string());
+    let event_id = stored_event_id(journal, &line)?.unwrap_or_else(|| format!("close:{qid}"));
+    crate::event_store::append_envelope(journal, &line, Some(&event_id)).map(|_| ())
 }
 
 fn question_text(question: &Value) -> String {
