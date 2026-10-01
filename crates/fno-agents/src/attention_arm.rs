@@ -714,6 +714,7 @@ fn answer_text_of(item: &AttentionItem, answer: &FileAnswer) -> String {
             .unwrap_or_else(|| format!("option {n}")),
         FileAnswer::Words(w) => w.clone(),
         FileAnswer::Done => "done".to_string(),
+        FileAnswer::Delegate => crate::attention_file::DELEGATE_TEXT.to_string(),
         FileAnswer::None | FileAnswer::TwoTicked => String::new(),
     }
 }
@@ -1420,6 +1421,11 @@ pub(crate) fn append_answer_row(
         crate::attention_file::FileAnswer::Option(n) => (Some(*n as i64), String::new(), false),
         crate::attention_file::FileAnswer::Words(w) => (None, w.clone(), false),
         crate::attention_file::FileAnswer::Done => (None, String::new(), true),
+        crate::attention_file::FileAnswer::Delegate => (
+            None,
+            crate::attention_file::DELEGATE_TEXT.to_string(),
+            false,
+        ),
         crate::attention_file::FileAnswer::None | crate::attention_file::FileAnswer::TwoTicked => {
             (None, String::new(), false)
         }
@@ -1463,6 +1469,9 @@ pub(crate) fn append_answer_row(
             format!("Recorded: words ({sink})")
         }
         (crate::attention_file::FileAnswer::Done, false) => format!("Recorded: done ({sink})"),
+        (crate::attention_file::FileAnswer::Delegate, false) => {
+            format!("Recorded: delegated to the crown ({sink})")
+        }
         (
             crate::attention_file::FileAnswer::None | crate::attention_file::FileAnswer::TwoTicked,
             false,
@@ -1489,6 +1498,7 @@ pub(crate) fn append_answer_row(
             "attested_by": attested_by,
             "mapped_by": mapped_by,
             "superseded": already_won,
+            "delegate": matches!(answer, crate::attention_file::FileAnswer::Delegate),
             "decision_id": null,
         }
     });

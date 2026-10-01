@@ -608,8 +608,6 @@ fn click_rows() {
         );
         assert!(opened, "the Project picker opened");
     }
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     let l = v.launcher.as_ref().unwrap();
     let picker = l.picker.as_ref().expect("the picker is open");
@@ -631,18 +629,7 @@ fn click_rows() {
                 })
         })
         .expect("the picker's esc chip carries a hit span");
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: hit_row,
-        col: hit_col,
-        shift: false,
-    };
-    rt.block_on(async {
-        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-            .await
-            .unwrap();
-        assert!(consumed, "a click on the picker's esc chip is consumed");
-    });
+    rt.block_on(super::click_close(&mut v, (hit_row, hit_col)));
     let l = v.launcher.as_ref().unwrap();
     assert!(l.picker.is_none(), "the chip click closed the picker");
     assert_eq!(l.draft.message, "keep me", "the draft keeps its value");
