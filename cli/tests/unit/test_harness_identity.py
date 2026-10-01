@@ -597,22 +597,36 @@ def test_row_owning_session_id_self_binding_disagreement_still_owner(tmp_path):
     )
 
 
-def test_row_owning_session_id_walk_proven_family_is_self(tmp_path):
-    """A restart re-registers the same row in place (same name, same
-    session id, still live). When the caller's walk names the row's harness
-    family, that row is the restarted session's own row, never contention.
-    The self-blind shapes survive: a walk that is silent or names another
-    family leaves the row an owner (the round-1 P1 refusal)."""
+def test_row_owning_session_id_walk_proven_dead_pid_row_is_self(tmp_path):
+    """A restart re-registers the same row in place (same name, same session
+    id, still live) and leaves its spawn-time pid dead. When the caller's walk
+    names the row's harness family and the row pid is dead (or names this
+    process's own harness ancestor), that row is the restarted session's own,
+    never contention. Every self-blind shape survives: a walk that is silent
+    or names another family, a row whose pid leg never resolved, and a live
+    foreign pid all leave the row an owner (the round-1 P1 refusal)."""
+    import json
+
     from fno.agents.registry import row_owning_session_id
 
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
     name, reg = _register(tmp_path, sid, provider="claude")
+
+    def _set_pid(pid):
+        data = json.loads(reg.read_text())
+        for row in data.get("agents", []):
+            if row.get("harness_session_id") == sid:
+                row["pid"] = pid
+        reg.write_text(json.dumps(data))
+
+    _set_pid(99999999)
     assert (
         row_owning_session_id(
             sid, registry_path=reg, self_binding=None, walk_harness="claude"
         )
         is None
     )
+    # A silent or foreign walk keeps the refusal.
     assert (
         row_owning_session_id(
             sid, registry_path=reg, self_binding=None, walk_harness=None
@@ -622,6 +636,22 @@ def test_row_owning_session_id_walk_proven_family_is_self(tmp_path):
     assert (
         row_owning_session_id(
             sid, registry_path=reg, self_binding=None, walk_harness="codex"
+        )
+        == name
+    )
+    # A row whose pid leg never resolved keeps the refusal (fail-closed).
+    _set_pid(None)
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=None, walk_harness="claude"
+        )
+        == name
+    )
+    # A live foreign pid keeps the refusal: a live session owns the id.
+    _set_pid(1)
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=None, walk_harness="claude"
         )
         == name
     )

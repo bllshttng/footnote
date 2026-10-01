@@ -1642,11 +1642,10 @@ def row_owning_session_id(
     an ownership-live status count; an exited row's id is free.
 
     ``walk_harness`` is the process-tree walk's harness answer. A restart
-    re-registers the same row in place, so the env id then meets its OWN row;
-    the self-blind posture refused every restarted named row. A row of the
-    walked family holding the id is self, never contention; the None default
-    keeps the round-1 P1 refusal for a walk that is silent or names another
-    family.
+    re-registers the row in place leaving its spawn-time pid dead, so a
+    walk-proven family row whose pid is dead (or names this process's own
+    harness ancestor, the revival re-mint) is self, never contention. A live
+    foreign pid, silent or foreign walk, or unresolved pid keeps the refusal.
 
     Degrade-safe by contract (AC4-ERR): an absent, unreadable, or alien-shape
     registry returns None (cannot prove a collision) rather than raising, so an
@@ -1671,8 +1670,13 @@ def row_owning_session_id(
     if own and own[1] == needle and own[0] == row_harness:
         return None
     walked = (walk_harness or "").strip().lower()
-    if walked and walked == row_harness:
-        return None
+    row_pid = getattr(entry, "pid", None)
+    if walked and walked == row_harness and row_pid:
+        from fno.agents.lock import _pid_is_alive
+        from fno.claims.session_pid import resolve_session_pid
+
+        if not _pid_is_alive(row_pid) or row_pid == resolve_session_pid():
+            return None
     return entry.name
 
 

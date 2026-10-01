@@ -57,9 +57,8 @@ def resolve_self_identity(
     the ambient marker under test - that pair would assert exactly what the
     marker claims, and a leaked marker meeting its owner's live row would
     read as self (round-1 P1). The bounded exception lives in the registry:
-    its ``walk_harness`` ground accepts a row of the walk's own family
-    holding the id, the restart-re-registered row; a leak the walk cannot
-    place still refuses. A name_only
+    its ``walk_harness`` ground accepts a walk-proven family row whose pid
+    is dead or names this process, the restart-re-registered row. A name_only
     worker resolves when an
     independent ground witnesses its marker: the attester's ancestry read,
     the rollout fd, the spawn-minted name row (keyed by FNO_AGENT_SELF /

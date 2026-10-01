@@ -244,6 +244,8 @@ def test_restarted_session_resolves_through_its_own_row(monkeypatch):
         status = "live"
         harness_session_id = sid
         aliases = ()
+        # The restart signature: the spawn-time pid is dead after the resume.
+        pid = 99999999
 
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_harness",
