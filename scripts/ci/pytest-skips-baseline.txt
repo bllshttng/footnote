@@ -243,3 +243,4 @@ cli/tests/unit/test_pr_closure_producer.py::_native_supersede::pytest.skip  # na
 cli/tests/agents/test_rust_runtime.py::test_spawn_seam_injects_config_defaults::pytest.skip  # native door: the compose reads the config FILE through the fno-agents binary; without a dev build there is no door to pin
 cli/tests/agents/test_spawn_defaults.py::_pin_world::pytest.skip  # native door: the compose parity drives the fno-agents binary; without a dev build there is no door to pin
 cli/tests/agents/test_dispatch_harness_stage_table.py::test_spawn_door_answers_the_same_harness::pytest.skip  # native door: both doors drive the fno-agents binary; without a dev build there is no door to pin
+cli/tests/unit/test_evidence_refusal_remedy.py::test_unmeasured_refusal_names_only_remedies_the_verbs_support::pytest.skip  # front-binary probe: CI builds crates/fno, a bare checkout has none
