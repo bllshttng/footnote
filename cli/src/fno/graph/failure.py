@@ -104,10 +104,16 @@ def merge_event_histories(*histories: Iterable[dict]) -> list[dict]:
     return [rec for _, rec in merged]
 
 
-def read_events(path: Optional[Path] = None) -> list[dict]:
+def read_events(
+    path: Optional[Path] = None,
+    types: Optional[list[str]] = None,
+) -> list[dict]:
     """Read raw event envelopes across retained rotation, oldest first; the
     ``.1`` generation is read first so order survives rotation. A truncated
-    or non-JSON line is skipped; absent files yield []."""
+    or non-JSON line is skipped; absent files yield []. ``types`` narrows the
+    store-side read to those envelopes; the failure readers pass
+    ``FAILURE_EVENT_TYPES`` because ``_classify`` answers nothing else, and
+    the unfiltered read costs seconds per spawn on a grown store."""
     targets = [path] if path is not None else _default_event_paths()
     histories: list[list[dict]] = []
     for target in targets:
@@ -116,7 +122,7 @@ def read_events(path: Optional[Path] = None) -> list[dict]:
         # rotated generation, so no per-file walk remains here.
         from fno.events.store_client import query_rows
 
-        histories.append(query_rows(target))
+        histories.append(query_rows(target, types=list(types) if types is not None else None))
     return merge_event_histories(*histories)
 
 
@@ -183,6 +189,15 @@ def consecutive_failures(node_id: str, events: Iterable[object]) -> int:
 
 
 _ADVANCE_FAILED_TYPE = "advance_failed"
+
+#: Every envelope kind the failure readers classify; the types filter the
+#: store-side reads pass so a spawn never pulls the whole event store.
+FAILURE_EVENT_TYPES: tuple[str, ...] = (
+    _FAIL_TYPE,
+    _UNDEFER_TYPE,
+    _CLOSE_TYPE,
+    _ADVANCE_FAILED_TYPE,
+)
 
 
 def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
