@@ -401,8 +401,10 @@ fn discover() -> Vec<Item> {
 
     // A scheduler, so it goes with launchd before anything it could respawn.
     // An unreadable crontab stays untouched: the action re-reads and refuses.
+    // The probe is the strip itself, so an item is discovered only when the
+    // action can actually remove it.
     if let Ok(Some(text)) = crontab_list() {
-        if text.contains(CRON_BEGIN) {
+        if strip_crontab(&text).is_some() {
             add("autocorrect crontab block".into(), Action::StripCrontab);
         }
     }
@@ -711,7 +713,7 @@ fn residue() -> Vec<String> {
         ));
     }
     if let Ok(Some(text)) = crontab_list() {
-        if text.contains(CRON_BEGIN) {
+        if strip_crontab(&text).is_some() {
             left.push(format!("crontab: {} block still present", CRON_BEGIN));
         }
     }
