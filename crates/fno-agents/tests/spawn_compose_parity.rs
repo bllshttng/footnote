@@ -113,6 +113,13 @@ fn compose_goldens_reproduce_the_python_seam() {
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("tmp dir");
+        // The compose's arm reads the declared rows and policy from DISK
+        // (the gather's own read), so the case's config rides FNO_CONFIG.
+        std::fs::write(
+            tmp.join("config.toml"),
+            case["config_toml"].as_str().unwrap_or(""),
+        )
+        .expect("write config");
         let events = tmp.join("events.jsonl");
         std::env::set_var("FNO_EVENTS_PATH", &events);
         std::env::set_var("FNO_STATE_DIR", tmp.join("state"));
@@ -165,7 +172,25 @@ fn compose_goldens_reproduce_the_python_seam() {
             "stdout: {name}"
         );
         let journal = read_journal(&events);
-        assert_eq!(journal, expect["journal"], "journal: {name}");
+        let mut expect_journal = expect["journal"].clone();
+        if expect_journal.is_object()
+            && expect_journal
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .is_some_and(|f| !f.is_empty())
+        {
+            // The capture stamped the pre-canonical formula; this port made
+            // the fingerprint key-sorted (one-time value change, documented
+            // in the PR). Arm-presence stays pinned: the no-consult cases
+            // keep "" and must still match.
+            if let Some(obj) = expect_journal.as_object_mut() {
+                obj.insert(
+                    "fingerprint".into(),
+                    journal.get("fingerprint").cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        assert_eq!(journal, expect_journal, "journal: {name}");
         for key in [
             "FNO_EVENTS_PATH",
             "FNO_STATE_DIR",

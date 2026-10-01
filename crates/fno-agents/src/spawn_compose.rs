@@ -229,8 +229,6 @@ pub(crate) struct Axes {
     pub has_permission: bool,
     pub flag_node: Option<String>,
     pub seed: Option<String>,
-    pub seed_index: Option<u64>,
-    pub seed_form: Option<String>,
     pub account_flag_present: bool,
     pub tab_flag_present: bool,
     pub name: Option<String>,
@@ -264,8 +262,6 @@ fn scan_of(scan: &Value) -> Axes {
         has_permission: b("has_permission"),
         flag_node: s("flag_node"),
         seed: s("seed"),
-        seed_index: scan.get("seed_index").and_then(Value::as_u64),
-        seed_form: s("seed_form"),
         account_flag_present: b("account_flag_present"),
         tab_flag_present: b("tab_flag_present"),
         name: s("name"),
@@ -382,10 +378,11 @@ struct Seam {
 }
 
 impl Seam {
+    /// A refusal. The trailing "refusing; no worker launched" line is the
+    /// caller's vocabulary (only some Python refusals printed it), never a
+    /// fixture of this function.
     fn refuse(&mut self, line: String) {
         self.stderr.push(line);
-        self.stderr
-            .push("fno agents spawn: refusing; no worker launched".to_string());
         self.exit = Some(2);
     }
 
@@ -451,9 +448,16 @@ pub fn compose(inputs: &Inputs) -> Answer {
         ..Default::default()
     };
     compose_body(inputs, scan, &mut seam);
+    // Python printed one stderr line per visual line; a refusal composed
+    // with embedded newlines lands as separate entries.
+    let stderr = seam
+        .stderr
+        .iter()
+        .flat_map(|line| line.split('\n').map(str::to_string))
+        .collect();
     Answer {
         argv: seam.argv.take().unwrap_or_default(),
-        stderr: seam.stderr,
+        stderr,
         exit: seam.exit.unwrap_or(0),
         stdout: seam.stdout.take(),
         events: seam.events,
@@ -462,6 +466,17 @@ pub fn compose(inputs: &Inputs) -> Answer {
 }
 
 fn compose_body(inputs: &Inputs, scan: Axes, seam: &mut Seam) {
+    // Python's passthrough gates: a non-spawn head, or -h/--help before the
+    // --argv boundary, returns unchanged and journals nothing.
+    let help_rides = inputs
+        .argv
+        .iter()
+        .skip(1)
+        .take_while(|a| a.as_str() != "--argv")
+        .any(|a| a == "-h" || a == "--help");
+    if inputs.argv.first().map(String::as_str) != Some("spawn") || help_rides {
+        return;
+    }
     let (verb, profile_verb, profile) = match resolve_profile(inputs, &scan) {
         Ok(found) => found,
         Err(lines) => {
@@ -608,20 +623,28 @@ fn walk_stage(stage: &mut Stage, seam: &mut Seam) {
         || scan.explicit_route
         || above_defaults(&model_rung)
         || above_defaults(&route_rung);
-    // The consult runs whenever the model axis is free, a strict policy is
-    // on, or lanes are configured: the walk owns the verdict and its
-    // terminal rides the applied receipt. An occupied axis with nothing to
-    // judge never consults (Python skipped it; the walk prints nothing).
+    // Python's arm: the walk consults when lanes are configured, the model
+    // axis is free, or strict routing is on. An occupied axis over a
+    // lane-less profile stands down loudly: one grid receipt, no walk.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let enforced = crate::route_gather::policy_for(&cwd)["enforce_inventory"]
         .as_bool()
         .unwrap_or(false);
-    if model_occupied && !lanes_present && !enforced {
+    if !(lanes_present || !model_occupied || enforced) {
+        if stage.node_id_present {
+            seam.applied
+                .push(json!(["grid", "grid=model-axis-occupied", "routing"]));
+        }
         return;
     }
     let mut grid_node_entry: Option<Value> = None;
-    if !model_occupied && stage.node_id_present {
+    if !model_occupied || enforced {
         grid_node_entry = stage.inputs.node_row.clone();
+    }
+    // No lanes, no node to grid on, nothing strict: the walk has no
+    // question to answer.
+    if !(lanes_present || grid_node_entry.is_some() || enforced) {
+        return;
     }
     let grid_role = if stage.verb == "blueprint" || stage.verb == "think" {
         Some("planning".to_string())
@@ -687,7 +710,10 @@ fn apply_walk_answer(stage: &mut Stage, seam: &mut Seam, out: &Value) {
     if let Some(refusal) = out.get("refusal_terminal").filter(|r| !r.is_null()) {
         let text = refusal.get("text").and_then(Value::as_str).unwrap_or("");
         if !text.is_empty() {
-            seam.refuse(format!("fno agents spawn: {text}"));
+            seam.refuse(format!(
+                "fno agents spawn: {text}\nfno agents spawn: refusing; no \
+                 worker launched"
+            ));
             return;
         }
     }
@@ -717,16 +743,17 @@ fn apply_walk_answer(stage: &mut Stage, seam: &mut Seam, out: &Value) {
             return;
         }
     }
-    // A slot=-terminal receipts under the slot arm (the pin override); a
-    // plain terminal receipts the pick, and only when a candidate was
-    // picked (declines like grid=no-inventory-declared receipt nothing).
+    // A slot=-terminal receipts under the slot arm (the pin override); any
+    // other non-empty terminal receipts under the grid arm - the no-lanes
+    // grid vocabulary (grid=no-inventory-declared, ...) needs no candidate
+    // behind it.
     if terminal.starts_with("slot=") {
         seam.applied.push(json!([
             "slot",
             terminal.trim_start_matches("slot="),
             "routing"
         ]));
-    } else if !terminal.is_empty() && candidate.is_some() {
+    } else if !terminal.is_empty() {
         seam.applied.push(json!(["grid", terminal, "routing"]));
     }
     stage.slot_candidate = candidate.cloned();
@@ -758,7 +785,6 @@ pub(crate) struct Fields {
     pub route: Field,
     pub account: Field,
     pub pane_group: Field,
-    pub effort_seamed: bool,
 }
 
 fn read_fields(stage: &Stage) -> Fields {
@@ -792,7 +818,6 @@ fn read_fields(stage: &Stage) -> Fields {
         route: f("route"),
         account: f("account"),
         pane_group: f("pane_group"),
-        effort_seamed: false,
     }
 }
 
@@ -875,11 +900,6 @@ fn resolved_harness(stage: &mut Stage) -> Option<String> {
             Some(stage.inputs.ambient_harness.clone())
         };
     }
-    stage.harness.clone()
-}
-
-/// Read-only view for stages that must not mutate the cache.
-fn resolved_harness_view(stage: &Stage) -> Option<String> {
     stage.harness.clone()
 }
 
@@ -1222,6 +1242,8 @@ fn mechanical_axes(stage: &mut Stage, seam: &mut Seam) {
             permission = re_read;
         }
     }
+    // Python's prov: explicit -H, then the config field read, then ambient
+    // inference - the cached resolved_harness, never the grid pick.
     let prov = resolved_harness(stage).unwrap_or_default();
     let substrate_unknown = !substrate.0.is_empty() && !SUBSTRATES.contains(&substrate.0.as_str());
     let substrate_ok = !prov.is_empty()
@@ -1498,6 +1520,10 @@ fn overlay_payload(table: &toml::Table) -> Value {
         for (name, block) in harness {
             if let Some(b) = block.as_table() {
                 let mut view = Map::new();
+                // Python sent harness blocks verbatim (`dict(block)`), so
+                // only PRESENT keys ride: an empty placeholder here would
+                // read as a declared lane field and the overlay guard
+                // refuses its own synthetic key.
                 for key in [
                     "provider",
                     "model",
@@ -1508,7 +1534,10 @@ fn overlay_payload(table: &toml::Table) -> Value {
                     "account",
                     "pane_group",
                 ] {
-                    view.insert(key.to_string(), json!(cfg_str(Some(b), key)));
+                    let value = cfg_str(Some(b), key);
+                    if !value.is_empty() {
+                        view.insert(key.to_string(), json!(value));
+                    }
                 }
                 if let Some(args) = b.get("args").and_then(toml::Value::as_array) {
                     view.insert(

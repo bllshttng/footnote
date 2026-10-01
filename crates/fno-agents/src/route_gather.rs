@@ -114,32 +114,6 @@ fn profile_fields(table: Option<&toml::Table>) -> Value {
     Value::Object(out)
 }
 
-/// One config lane as the payload carries it: every ranked field of the
-/// slot-lane vocabulary, empty-string padded, plus `args` verbatim. The
-/// Python seam dumped typed lane models, so absent fields read "" rather
-/// than being absent.
-fn lane_entry(table: &toml::Value) -> Value {
-    let mut out = Map::new();
-    for field in crate::route_slot::lane_vocabulary()
-        .fields
-        .iter()
-        .filter(|f| f.as_str() != "args")
-    {
-        let value = toml_str(table.get(field));
-        out.insert(field.clone(), json!(value));
-    }
-    if let Some(args) = table.get("args").and_then(toml::Value::as_array) {
-        let items: Vec<Value> = args
-            .iter()
-            .map(|a| json!(a.as_str().unwrap_or_default()))
-            .collect();
-        if !items.is_empty() {
-            out.insert("args".into(), Value::Array(items));
-        }
-    }
-    Value::Object(out)
-}
-
 /// One lanes_raw entry: the lane rides VERBATIM (a string stays a string; a
 /// table converts as-is). The padded vocabulary view is `slot_by_verb`'s
 /// business, never the walk's input.

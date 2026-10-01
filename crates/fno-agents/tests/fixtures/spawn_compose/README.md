@@ -47,3 +47,10 @@ The capture script (kept out of the repo; its shape is the recipe):
 The `slot-exhausted-queue` stub and the planted `node_row`s are the only
 non-live inputs; every other expected value was produced by the unmodified
 merge-base Python and binary.
+
+## Post-capture drift applied
+
+One case was refreshed after main moved under the capture: main merged
+`56456eba70` (declare zcode a harness) after the goldens were taken, so the
+`harness-unknown-config-provider` case's `valid:` roster grew `zcode`. The
+composition did not change.
