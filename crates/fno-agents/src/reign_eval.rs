@@ -26,6 +26,7 @@ struct Window {
     activity: Activity,
     activity_fold: ActivityFold,
     summary: Option<String>,
+    token_base: Option<crate::session_activity::Tokens>,
 }
 
 impl Window {
@@ -41,6 +42,7 @@ impl Window {
             activity: Activity::default(),
             activity_fold: ActivityFold::default(),
             summary: None,
+            token_base: None,
         }
     }
 
@@ -89,6 +91,7 @@ struct RepeatedRefusal {
 struct Fold {
     session: String,
     transcript: PathBuf,
+    harness: &'static str,
     since: Option<String>,
     until: Option<String>,
     compaction_ceiling: i64,
@@ -203,8 +206,20 @@ fn bus_index() -> BusIndex {
     BusIndex::load(&path)
 }
 
+/// The transcript of a reign holder under either harness: claude first, then
+/// the codex rollout store.
+fn reign_transcript(session: &str) -> Option<(&'static str, PathBuf)> {
+    crate::king_history::hygiene_transcript_for_holder("claude", session)
+        .map(|path| ("claude", path))
+        .or_else(|| {
+            crate::king_history::hygiene_transcript_for_holder("codex", session)
+                .map(|path| ("codex", path))
+        })
+}
+
 fn fold_transcript(
     session: &str,
+    harness: &'static str,
     transcript: &Path,
     since: Option<String>,
     until: Option<String>,
@@ -216,6 +231,7 @@ fn fold_transcript(
     let mut fold = Fold {
         session: session.to_string(),
         transcript: transcript.to_path_buf(),
+        harness,
         since,
         until,
         compaction_ceiling,
@@ -235,6 +251,8 @@ fn fold_transcript(
     let since_epoch = fold.since.as_deref().and_then(timestamp_epoch);
     let until_epoch = fold.until.as_deref().and_then(timestamp_epoch);
     let mut first_after_boundary = false;
+    let mut codex_total = crate::session_activity::Tokens::default();
+    let codex = harness == "codex";
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|e| format!("{}: read error: {e}", transcript.display()))?;
         if line.trim().is_empty() {
@@ -259,10 +277,26 @@ fn fold_transcript(
             fold.windows
                 .push(Window::new(window_no, Some(boundary_ts.to_string())));
             first_after_boundary = true;
+            if codex {
+                let summary = row
+                    .pointer("/payload/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !summary.is_empty() {
+                    fold.windows.last_mut().unwrap().summary = Some(summary.to_string());
+                }
+            }
         }
         if !ts.is_empty() {
             fold.first_ts.get_or_insert_with(|| ts.to_string());
             fold.last_ts = Some(ts.to_string());
+        }
+        // The cumulative codex total updates before the --since skip, so a
+        // window cut by --since still bases its delta on the right total.
+        if codex {
+            if let Some(total) = crate::session_activity::codex_token_total(&row) {
+                codex_total = total;
+            }
         }
         if since_epoch.is_some_and(|since| ts_epoch.is_some_and(|at| at < since)) {
             continue;
@@ -270,6 +304,9 @@ fn fold_transcript(
         let window_idx = fold.windows.len() - 1;
         {
             let window = &mut fold.windows[window_idx];
+            if window.token_base.is_none() {
+                window.token_base = Some(codex_total);
+            }
             if window.start.is_none() && !ts.is_empty() {
                 window.start = Some(ts.to_string());
             }
@@ -286,7 +323,19 @@ fn fold_transcript(
         }
         fold.windows[window_idx].activity_fold.row(&row);
         let prior_entries = fold.entries.len();
-        crate::reign_hygiene::claude_row_entries(&row, &mut fold.entries);
+        if codex {
+            crate::reign_hygiene::codex_row_entries(&row, &mut fold.entries)
+                .map_err(|error| format!("{}:{}: {error}", transcript.display(), line_no + 1))?;
+        } else {
+            crate::reign_hygiene::claude_row_entries(&row, &mut fold.entries);
+        }
+        let codex_tool_name = if codex {
+            row.get("payload")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+        } else {
+            None
+        };
         for entry in &fold.entries[prior_entries..] {
             if entry.kind != "tool_use" {
                 continue;
@@ -294,7 +343,7 @@ fn fold_transcript(
             fold.windows[window_idx].tool_calls += 1;
             add(
                 &mut fold.windows[window_idx].tools,
-                entry.tool.as_deref().unwrap_or(""),
+                codex_tool_name.unwrap_or_else(|| entry.tool.as_deref().unwrap_or("")),
             );
             if entry.tool.as_deref() == Some("Bash") {
                 if let Some((verb, subverb)) = fno_verb(&entry.target) {
@@ -326,9 +375,22 @@ fn fold_transcript(
             } else if entry.tool.as_deref() == Some("Agent") {
                 fold.spawns.push(json!({"ts": ts, "target": entry.target}));
             }
+            if codex && codex_tool_name == Some("spawn_agent") {
+                fold.spawns.push(json!({"ts": ts, "target": entry.target}));
+            }
         }
-        if row.get("type").and_then(Value::as_str) == Some("user") {
-            let text = row_text(&row);
+        let user_text = if codex {
+            if crate::provenance::is_user_turn(&row) {
+                Some(crate::provenance::turn_text(&row))
+            } else {
+                None
+            }
+        } else if row.get("type").and_then(Value::as_str) == Some("user") {
+            Some(row_text(&row))
+        } else {
+            None
+        };
+        if let Some(text) = user_text {
             if !text.is_empty() {
                 let provenance = crate::provenance::classify_turn(&row, bus, session);
                 if let Some(machine) = crate::wake_meter::wake_class(provenance.clone()) {
@@ -344,37 +406,62 @@ fn fold_transcript(
                 }
             }
         }
-        if let Some(content) = row.pointer("/message/content").and_then(Value::as_array) {
+        if codex {
+            let ptype = row
+                .get("payload")
+                .and_then(|p| p.get("type"))
+                .and_then(Value::as_str);
+            if matches!(
+                ptype,
+                Some("custom_tool_call_output") | Some("function_call_output")
+            ) {
+                let payload = row.get("payload").unwrap_or(&Value::Null);
+                let text = crate::session_activity::codex_output_text(payload);
+                note_refusal_text(&mut fold, window_idx, &text);
+            }
+        } else if let Some(content) = row.pointer("/message/content").and_then(Value::as_array) {
             for block in content {
                 if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                     continue;
                 }
                 let text = content_text(block.get("content").unwrap_or(&Value::Null));
-                let buckets = crate::refusal_rate::buckets_of(&text).collect::<Vec<_>>();
-                for bucket in &buckets {
-                    add(&mut fold.windows[window_idx].buckets, bucket);
-                }
-                if !buckets.is_empty() {
-                    let key = normalized_lead(&text);
-                    let refusal = fold
-                        .repeated_refusals
-                        .entry(key.clone())
-                        .or_insert_with(|| RepeatedRefusal {
-                            lead: key,
-                            count: 0,
-                            windows: BTreeSet::new(),
-                        });
-                    refusal.count += 1;
-                    refusal.windows.insert(fold.windows[window_idx].n);
-                }
+                note_refusal_text(&mut fold, window_idx, &text);
             }
         }
     }
     for window in &mut fold.windows {
         window.activity = std::mem::take(&mut window.activity_fold).finish();
+        if codex {
+            window.activity.tokens = window
+                .activity
+                .tokens
+                .since(window.token_base.unwrap_or_default());
+        }
     }
     fold.subagents = fold_subagents(transcript, session)?;
     Ok(fold)
+}
+
+/// One tool-result text into the window's refusal buckets and the fold's
+/// repeated-refusal table; shared by the claude and codex row shapes.
+fn note_refusal_text(fold: &mut Fold, window_idx: usize, text: &str) {
+    let buckets = crate::refusal_rate::buckets_of(text).collect::<Vec<_>>();
+    for bucket in &buckets {
+        add(&mut fold.windows[window_idx].buckets, bucket);
+    }
+    if !buckets.is_empty() {
+        let key = normalized_lead(text);
+        let refusal = fold
+            .repeated_refusals
+            .entry(key.clone())
+            .or_insert_with(|| RepeatedRefusal {
+                lead: key,
+                count: 0,
+                windows: BTreeSet::new(),
+            });
+        refusal.count += 1;
+        refusal.windows.insert(fold.windows[window_idx].n);
+    }
 }
 
 fn fold_subagents(transcript: &Path, session: &str) -> Result<Value, String> {
@@ -547,6 +634,7 @@ fn fold_json(fold: &Fold) -> Value {
     json!({
         "session": fold.session,
         "transcript": fold.transcript,
+        "harness": fold.harness,
         "since": fold.since,
         "until": fold.until,
         "span_h": span_hours(all_start, all_end),
@@ -618,6 +706,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 }
             }
             flag if crate::json_output::is_flag(flag) => parsed.json = true,
+            "--windows" => {}
             "--write" => {
                 let path = args
                     .get(i + 1)
@@ -675,7 +764,7 @@ pub fn run(args: &[String]) -> i32 {
         if row.get("type").and_then(Value::as_str) != Some(crate::king_history::REIGN_CHECKIN) {
             continue;
         }
-        let Some(session) = row.pointer("/data/session_id").and_then(Value::as_str) else {
+        let Some(session) = checkin_holder(row) else {
             continue;
         };
         checkins_by_session
@@ -692,17 +781,9 @@ pub fn run(args: &[String]) -> i32 {
     let mut reports = Vec::new();
     let bus = bus_index();
     for session in sessions {
-        let Some(transcript) =
-            crate::king_history::hygiene_transcript_for_holder("claude", &session)
-        else {
-            if crate::king_history::hygiene_transcript_for_holder("codex", &session).is_some() {
-                eprintln!(
-                    "fno-agents intel --windows: the windows fold reads claude transcripts; codex rollout windows are not read yet"
-                );
-                return 2;
-            }
+        let Some((harness, transcript)) = reign_transcript(&session) else {
             eprintln!(
-                "fno-agents intel --windows: transcript not found for claude session {session}"
+                "fno-agents intel --windows: transcript not found for session {session} (claude or codex)"
             );
             return 3;
         };
@@ -734,6 +815,7 @@ pub fn run(args: &[String]) -> i32 {
         };
         let mut fold = match fold_transcript(
             &session,
+            harness,
             &transcript,
             parsed.since.clone(),
             parsed.until.clone(),
@@ -784,6 +866,7 @@ pub fn run(args: &[String]) -> i32 {
 
 fn print_text(report: &Value) {
     println!("session {}", report["session"].as_str().unwrap_or(""));
+    println!("harness {}", report["harness"].as_str().unwrap_or(""));
     println!("# start end hours tools errors typed machine");
     for window in report["windows"].as_array().into_iter().flatten() {
         println!(
@@ -1153,8 +1236,7 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     let Some(session) = due.first() else {
         return (0, Some("not_due".into()), "none due".into());
     };
-    let Some(transcript) = crate::king_history::hygiene_transcript_for_holder("claude", session)
-    else {
+    let Some((_harness, transcript)) = reign_transcript(session) else {
         return (0, Some("no_eval_root".into()), "eval root not found".into());
     };
     let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
@@ -1166,7 +1248,7 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     };
     let session_checkins = checkins
         .iter()
-        .filter(|row| row.pointer("/data/session_id").and_then(Value::as_str) == Some(session))
+        .filter(|row| checkin_holder(row) == Some(session))
         .cloned()
         .collect::<Vec<_>>();
     let root = match default_eval_dir_for(session, &session_checkins, &cwd) {
@@ -1211,9 +1293,14 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     }
 }
 
+/// The check-in row's holder: the harness session id, written since 2e427c3717.
+/// `data.session_id` holds a loop job id and never names a real session.
+fn checkin_holder(row: &Value) -> Option<&str> {
+    row.pointer("/data/holder_session").and_then(Value::as_str)
+}
+
 fn session_has_eval(session: &str) -> Result<bool, String> {
-    let Some(transcript) = crate::king_history::hygiene_transcript_for_holder("claude", session)
-    else {
+    let Some((_harness, transcript)) = reign_transcript(session) else {
         return Ok(true);
     };
     let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
@@ -1250,7 +1337,7 @@ pub(crate) fn due_sessions(
 ) -> Vec<String> {
     let mut last = HashMap::<String, chrono::DateTime<chrono::Utc>>::new();
     for row in checkin_rows {
-        let Some(session) = row.pointer("/data/session_id").and_then(Value::as_str) else {
+        let Some(session) = checkin_holder(row) else {
             continue;
         };
         let Some(ts) = row
@@ -1324,6 +1411,7 @@ mod tests {
         }
         let fold = fold_transcript(
             "test-session",
+            "claude",
             file.path(),
             None,
             Some("2026-01-01T02:30:00Z".into()),
@@ -1331,6 +1419,7 @@ mod tests {
             &BusIndex::empty(),
         )
         .unwrap();
+        assert_eq!(fold.harness, "claude");
         assert_eq!(fold.windows.len(), 3);
         assert_eq!(fold.windows[0].tool_calls, 1);
         assert_eq!(fold.windows[0].activity.tool_errors.get("other"), Some(&1));
@@ -1350,6 +1439,15 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.text.contains("Base directory for this skill")));
+        let parsed = parse_args(&[
+            "--session".to_string(),
+            "s".to_string(),
+            "--windows".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.session.as_deref(), Some("s"));
+        assert!(parsed.json);
     }
 
     #[test]
@@ -1362,6 +1460,7 @@ mod tests {
         let fold = Fold {
             session: "12345678-0000-4000-8000-000000000000".into(),
             transcript: root.path().join("transcript.jsonl"),
+            harness: "claude",
             since: None,
             until: None,
             compaction_ceiling: 3,
@@ -1391,10 +1490,10 @@ mod tests {
     #[test]
     fn due_sessions_skip_live_written_and_fresh_reigns() {
         let rows = vec![
-            json!({"ts":"2026-01-01T10:00:00Z","data":{"session_id":"live"}}),
-            json!({"ts":"2026-01-01T10:00:00Z","data":{"session_id":"written"}}),
-            json!({"ts":"2026-01-01T10:00:00Z","data":{"session_id":"due"}}),
-            json!({"ts":"2026-01-01T10:30:00Z","data":{"session_id":"fresh"}}),
+            json!({"ts":"2026-01-01T10:00:00Z","data":{"holder_session":"live"}}),
+            json!({"ts":"2026-01-01T10:00:00Z","data":{"holder_session":"written"}}),
+            json!({"ts":"2026-01-01T10:00:00Z","data":{"holder_session":"due"}}),
+            json!({"ts":"2026-01-01T10:30:00Z","data":{"holder_session":"fresh"}}),
         ];
         let live = BTreeSet::from(["live".to_string()]);
         let due = due_sessions(
@@ -1404,5 +1503,73 @@ mod tests {
             parse_time("2026-01-01T10:40:00Z"),
         );
         assert_eq!(due, vec!["due".to_string()]);
+    }
+
+    #[test]
+    fn codex_rollout_windows_split_at_compacted_rows() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let tok = |out: u64, cache: u64, ts: &str| {
+            json!({"type":"event_msg","timestamp":ts,"payload":{"type":"token_count",
+                    "info":{"total_token_usage":{"input_tokens":out/10,
+                            "output_tokens":out,"cached_input_tokens":cache}}}})
+        };
+        let rows = vec![
+            json!({"type":"session_meta","timestamp":"2026-01-01T00:00:00Z",
+                   "payload":{"type":"session_meta","cwd":"/tmp/proj"}}),
+            tok(100, 1000, "2026-01-01T00:01:00Z"),
+            json!({"type":"response_item","timestamp":"2026-01-01T00:02:00Z",
+                   "payload":{"type":"custom_tool_call","name":"exec",
+                              "input":"fno backlog get x"}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T00:03:00Z",
+                   "payload":{"type":"custom_tool_call_output","output":[
+                       {"type":"input_text",
+                        "text":"{\"exit_code\":1,\"output\":\"Usage: fno backlog get\"}"}]}}),
+            json!({"type":"compacted","timestamp":"2026-01-01T01:00:00Z",
+                   "payload":{"message":"window 1 summary"}}),
+            tok(250, 2000, "2026-01-01T01:05:00Z"),
+            json!({"type":"event_msg","timestamp":"2026-01-01T01:06:00Z",
+                   "payload":{"type":"token_count","info":null}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T01:07:00Z",
+                   "payload":{"type":"function_call","name":"spawn_agent",
+                              "arguments":"{\"agent\":\"worker\"}"}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T01:10:00Z",
+                   "payload":{"type":"message","role":"user",
+                              "content":[{"type":"text","text":"typed request"}]}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T01:11:00Z",
+                   "payload":{"type":"message","role":"user",
+                              "content":[{"type":"text",
+                              "text":"<fno_mail from=\"p\" to=\"s\">run the sweep</fno_mail>"}]}}),
+            tok(300, 3000, "2026-01-01T01:15:00Z"),
+        ];
+        for row in rows {
+            writeln!(file, "{row}").unwrap();
+        }
+        let fold = fold_transcript(
+            "codex-session",
+            "codex",
+            file.path(),
+            None,
+            None,
+            3,
+            &BusIndex::empty(),
+        )
+        .unwrap();
+        assert_eq!(fold.harness, "codex");
+        assert_eq!(fold.windows.len(), 2);
+        let w1 = &fold.windows[0];
+        assert_eq!(w1.tool_calls, 1);
+        assert_eq!(w1.tools.get("exec"), Some(&1));
+        assert_eq!(w1.activity.tool_errors.get("command_failed"), Some(&1));
+        assert_eq!(w1.activity.tokens.output, 100);
+        assert_eq!(w1.activity.tokens.cache_read, 1000);
+        assert_eq!(w1.summary.as_deref(), Some("window 1 summary"));
+        let w2 = &fold.windows[1];
+        assert_eq!(w2.tools.get("spawn_agent"), Some(&1));
+        assert_eq!(fold.spawns.len(), 1);
+        assert_eq!(w2.wakes.get("unknown"), Some(&1));
+        assert_eq!(w2.wakes.get("relay_fno_mail"), Some(&1));
+        assert_eq!(fold.typed_turns.len(), 1);
+        assert_eq!(w2.activity.tokens.output, 200);
+        assert_eq!(w2.activity.tokens.cache_read, 2000);
     }
 }
