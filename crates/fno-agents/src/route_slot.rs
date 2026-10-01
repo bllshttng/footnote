@@ -4649,7 +4649,7 @@ mod tests {
             // read as codex or gemini and decline the lane. Scrub the same
             // ambient identity set a spawned child scrubs; identity vars
             // are not state roots, so the snapshot restores them on drop.
-            let mut saved: Saved = claims::AMBIENT_IDENTITY_NAMES
+            let saved: Saved = claims::AMBIENT_IDENTITY_NAMES
                 .iter()
                 .map(|n| (*n, std::env::var_os(n)))
                 .collect();
