@@ -82,6 +82,7 @@ pub mod canonical_check;
 pub mod capability_leaves;
 pub mod cargo_build_dirs;
 pub mod census;
+pub mod chats;
 pub mod check_supersession;
 pub mod claim_queue;
 pub mod claim_store;

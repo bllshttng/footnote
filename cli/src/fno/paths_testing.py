@@ -37,6 +37,12 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     # Wire the env var so load_settings() finds the tmp file
     monkeypatch.setenv("FNO_CONFIG", str(settings))  # type: ignore[attr-defined]
 
+    # Pin the Rust-side state root too: the chats record door shells the
+    # fno-agents binary, whose state_dir() reads FNO_STATE_DIR first and has
+    # no FNO_CONFIG settings bridge. Without this, a bus-appending test would
+    # record into the operator's live ~/.fno/chats store.
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_state))  # type: ignore[attr-defined]
+
     # Calling this fixture IS a root declaration, so say so. It covers the lane
     # that reproduces a test outside pytest, where no conftest stamps the pin.
     if os.environ.get("FNO_TEST_HERMETIC") is None:

@@ -171,8 +171,10 @@ class Envelope:
 
 
 def new_msg_id() -> str:
-    """Generate a 'msg-XXXXXX' id (6 hex chars), matching the inbox store."""
-    return "msg-" + secrets.token_hex(3)
+    """Generate a 'fmail-XXXXXXXXXXXX' id (12 hex chars); the Rust twin is
+    announce.rs::new_msg_id. Pre-widening 'msg-XXXXXX' ids stay legal
+    forever and resolve through the migrated chats rows."""
+    return "fmail-" + secrets.token_hex(6)
 
 
 def _now_iso() -> str:
@@ -392,6 +394,29 @@ def _rotate_locked(live: Path) -> None:
     os.replace(str(live), f"{live}.1")
 
 
+#: Bus kinds recorded as conversation messages in the chats store (the Rust
+#: twin is chats.rs MESSAGE_KINDS). Everything else is control traffic or a
+#: receipt.
+CHATS_MESSAGE_KINDS = frozenset({"send", "announce"})
+
+
+def _chats_record(line: str) -> None:
+    """Forward one serialized bus line to the chats record door (the JSONL
+    conversation store; rust_binary is the one Python door to the binary).
+
+    Raises on any failure so the caller applies the seam's ordering:
+    message kinds abort the send (fail closed, what was never recorded is
+    never sent), receipts warn and continue (a receipt must never break an
+    ack flow).
+    """
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        verb_call(["chats", "append"], json.loads(line), timeout=30)
+    except VerbUnavailable as why:
+        raise RuntimeError(f"chats record door failed: {why}") from why
+
+
 def append(env: Envelope) -> None:
     """Append one envelope to the log under the sidecar flock.
 
@@ -403,10 +428,16 @@ def append(env: Envelope) -> None:
     covered by the cursor fallback: a cursor whose message-id is not found in the
     retained scan rescans all segments rather than declaring loss, so a message
     is at most delayed by one drain cycle, never dropped.
+
+    The record seam: message kinds record through the chats door BEFORE the
+    bus write and abort the send on failure (fail closed); receipts record
+    after the bus write and warn on failure.
     """
     live = bus_log_path()
     line = to_json_line(env) + "\n"
     data = line.encode("utf-8")
+    if env.kind in CHATS_MESSAGE_KINDS and not env.delivery:
+        _chats_record(to_json_line(env))
     with _Flock(_lock_path()):
         try:
             if live.exists() and live.stat().st_size >= _max_bytes():
@@ -440,6 +471,11 @@ def append(env: Envelope) -> None:
                 written += n
         finally:
             os.close(fd)
+    if env.delivery in (HOSTED_DELIVERY, TYPED_DELIVERY) or env.kind == LANDED_KIND:
+        try:
+            _chats_record(to_json_line(env))
+        except Exception as why:  # a receipt must never break an ack flow
+            print(f"bus log: chats record (receipt) failed: {why}", file=sys.stderr)
 
 
 #: The tombstone kind. A withdrawal cannot delete a line (the log is

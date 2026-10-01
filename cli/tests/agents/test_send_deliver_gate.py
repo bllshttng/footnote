@@ -204,7 +204,7 @@ def test_deliver_live_codex_daemon_delivered_true(
     assert result.delivery == "hosted", (
         f"daemon delivered=true must produce delivery='hosted', got {result.delivery!r}"
     )
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     # Bus demotion (node x-1f23): a hosted delivery is self-recording (transcript),
     # NOT also queued durable.
@@ -251,7 +251,7 @@ def test_deliver_live_codex_daemon_delivered_false(
     )
 
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     threads = read_all_threads("deadbeef")
     assert len(threads) == 1
@@ -292,7 +292,7 @@ def test_deliver_live_codex_daemon_unreachable(
     )
 
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     threads = read_all_threads("deadbeef")
     assert len(threads) == 1
@@ -431,7 +431,7 @@ def test_cmd_send_codex_delivered_hosted_stdout(
     )
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    assert out.startswith("msg-"), f"stdout: {out!r}"
+    assert out.startswith("fmail-"), f"stdout: {out!r}"
     assert "delivered (hosted)" in out, f"stdout: {out!r}"
     assert "queued" not in out
 

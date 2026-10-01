@@ -119,11 +119,36 @@ def _candidate_stores() -> list[tuple[str, str]]:
     return out
 
 
+def _sender_from_chats_store(msg_id: str) -> Optional[str]:
+    """Ask the chats record store who sent ``msg_id`` (the durable record
+    plane; rust_binary is the one Python door to the binary).
+
+    ``None`` on any miss (no record, no binary, unreadable answer) so the
+    caller falls through to the transcript scan, which stays exactly as it
+    was for pre-store deliveries.
+    """
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        answer = verb_call(["chats", "resolve", "--prefix", msg_id], {}, timeout=30)
+    except (VerbUnavailable, ValueError):
+        return None
+    if not isinstance(answer, dict):
+        return None
+    sender = answer.get("from_key")
+    return sender if isinstance(sender, str) and sender else None
+
+
 def resolve_live_sender(msg_id: str) -> Optional[str]:
-    """Find ``msg_id``'s sender address by scanning this session's own transcript.
+    """Find ``msg_id``'s sender address: the chats record store first, then
+    this session's own transcript scan.
 
     Returns the envelope's full ``from_session`` when it carries one, else its
     ``from`` handle (node).
+
+    The record store answers from the JSONL conversations recorded since the
+    store landed; the transcript fallback keeps resolving pre-store deliveries
+    and a failed record-door call exactly as before.
 
     Searches every candidate store and accepts the one holding a RECEIPT: an
     envelope carrying both ``id="<msg_id>"`` and a ``to=`` equal to that store's
@@ -131,9 +156,12 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     was never addressed to cannot produce one, so a wrong candidate is excluded
     by evidence and not by precedence.
 
-    ``None`` on any miss (no marker, unreadable store, id absent) so the caller
-    falls through to its existing not-on-bus error path.
+    ``None`` on any miss (no record, no marker, unreadable store, id absent) so
+    the caller falls through to its existing not-on-bus error path.
     """
+    sender = _sender_from_chats_store(msg_id)
+    if sender is not None:
+        return sender
     for harness, session_id in _candidate_stores():
         path = _transcript_path(harness, session_id)
         if path is None:

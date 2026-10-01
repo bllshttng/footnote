@@ -161,7 +161,7 @@ def test_dispatch_send_happy_path_live_claude(
     )
 
     # stdout contract: "msg-<id> delivered (hosted)"
-    assert result.msg_id.startswith("msg-"), f"Bad msg_id: {result.msg_id!r}"
+    assert result.msg_id.startswith("fmail-"), f"Bad msg_id: {result.msg_id!r}"
     assert result.delivery == "hosted", f"Expected hosted, got {result.delivery!r}"
 
     # Exactly one live delivery attempt, carrying the paired <fno_mail> envelope.
@@ -209,7 +209,7 @@ def test_cmd_send_happy_path_stdout_format(
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
     # "msg-<id> delivered (hosted)"
-    assert out.startswith("msg-"), f"stdout: {out!r}"
+    assert out.startswith("fmail-"), f"stdout: {out!r}"
     assert "delivered (hosted)" in out, f"stdout: {out!r}"
     assert "queued" not in out, "stdout must not say 'queued' for a live delivery"
 
@@ -1125,7 +1125,7 @@ def test_dispatch_send_durable_queued_output(tmp_path: Path, monkeypatch) -> Non
     )
 
     assert result.delivery == "durable", f"Expected durable, got {result.delivery!r}"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
 
 def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
@@ -1158,7 +1158,7 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
     )
 
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
 
 def test_dispatch_send_stale_orphaned_status_uses_live_family1(
@@ -1355,7 +1355,7 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
     )
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    assert out.startswith("msg-"), f"stdout: {out!r}"
+    assert out.startswith("fmail-"), f"stdout: {out!r}"
     assert "queued (durable)" in out, f"stdout: {out!r}"
     assert "delivered" not in out, "stdout must not say 'delivered' for durable path"
 
@@ -1396,7 +1396,7 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
         cwd=cwd,
     )
 
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
     threads = read_all_threads("abcd1234")
     assert len(threads) == 1
     stored_body = threads[0].messages[0].body
@@ -1473,7 +1473,7 @@ def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) 
 
     # Durable fallback, not a hard failure
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     # Exactly ONE attempt, no retry storm
     assert inject_attempt_count[0] == 1, f"Expected 1 inject attempt, got {inject_attempt_count[0]}"
@@ -1562,7 +1562,7 @@ def test_dispatch_send_codex_peer_queued_durable(tmp_path: Path, monkeypatch) ->
     )
 
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     # Envelope is in the store
     threads = read_all_threads("deadbeef")
