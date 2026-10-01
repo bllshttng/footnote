@@ -621,13 +621,13 @@ mod tests {
             &serde_json::json!({
                 "mode": "tag",
                 "from_session": session,
-                "id": "msg-rename-probe"
+                "id": "fmail-0badc0de1234"
             }),
             &home.registry_json(),
         )
         .unwrap();
         assert!(
-            envelope.starts_with("`@bob · msg-rename-probe ·"),
+            envelope.starts_with("`@bob · fmail-0badc0de1234 ·"),
             "{envelope}"
         );
         assert_eq!(

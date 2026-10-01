@@ -6,6 +6,13 @@
 map_version = 23
 
 [harness.claude]
+# THE DELIVERED-MAIL HEADER FORM. Every delivered mail opens with one
+# backticked header line. `mail_header_at = true` renders the sender as the
+# `@name` mention form; `false` renders plain `name`, for a harness whose
+# composer opens a mention picker on a bare `@` or reads it as an address.
+# The value is the composer check's verdict (tests/mail-header-composer-smoke.sh),
+# read as data by the renderer - never a branch in code.
+mail_header_at = true
 permission_bypass = ["--dangerously-skip-permissions"]
 # LAUNCHER CHOICE LISTS. The mux composer's picker chips read these. Three
 # states: key ABSENT = no surface at all (the chip reads "not offered");
@@ -197,6 +204,7 @@ state = "native"
 state = "native"
 
 [harness.codex]
+mail_header_at = true
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 # efforts: the keys of model_switch_strategy.effort_labels below.
 # permission_modes: the two shortcuts plus every <sandbox>:<approval> pair
@@ -399,6 +407,7 @@ state = "native"
 state = "native"
 
 [harness.gemini]
+mail_header_at = true
 permission_bypass = ["--yolo"]
 # No efforts key: the spawn refuses a gemini effort. permission_modes: the
 # `--approval-mode` choices off `gemini --help` plus the `--yolo` spelling.
@@ -500,6 +509,7 @@ state = "absent"
 state = "capable"
 
 [harness.agy]
+mail_header_at = true
 permission_bypass = ["--dangerously-skip-permissions"]
 # efforts: agy's own `--effort (low|medium|high)`. permission_modes: exactly
 # the vocabulary permission_pane_tokens maps (codex_posture.rs).
@@ -662,6 +672,7 @@ takes_add_dir = true
 clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 
 [harness.opencode]
+mail_header_at = true
 permission_bypass = ["--dangerously-skip-permissions"]
 # efforts EMPTY: the door passes provider values through, so the picker
 # offers free text rather than a list.
@@ -826,6 +837,7 @@ measured_by = { reader = "daemon-kept attach journey", date = "2026-09-03" }
 # identity is the pair (cwd, session_id) and never the id alone. A resume issued
 # from the canonical checkout will not see a session started in a worktree.
 [harness.pi]
+mail_header_at = true
 # pi ships NO permission popups. Its own docs/usage.md says so in as many
 # words, and `pi --help` carries no bypass flag: `--approve`/`-a` trusts
 # project-local FILES for a run, which is a different axis. So there is no
@@ -1359,6 +1371,7 @@ takes_model = true
 takes_add_dir = true
 
 [harness.grok]
+mail_header_at = true
 permission_bypass = ["--always-approve"]
 # permission_modes: grok's own --help (1.0.13) names this set for
 # --permission-mode. efforts EMPTY: --reasoning-effort exists but the help
@@ -1526,6 +1539,7 @@ takes_effort = true
 # journey. No keeper arm = the thread substrate refuses with the TUI-dead
 # evidence.
 [harness.zcode]
+mail_header_at = true
 permission_bypass = ["--mode=yolo"]
 # permission_modes: zcode's own --mode values (zcode-cli arguments; the
 # trial doc measured `--mode yolo` live). efforts EMPTY: zcode has no
