@@ -461,6 +461,21 @@ fn human_at_tty() -> bool {
         && io::stderr().is_terminal()
 }
 
+/// Set while the client's TUI owns the terminal. A warning written then
+/// lands on top of the screen, so admission warnings stay silent until the
+/// terminal is handed back.
+static TERMINAL_OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_terminal_owned(owned: bool) {
+    TERMINAL_OWNED.store(owned, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn warn(line: std::fmt::Arguments<'_>) {
+    if !TERMINAL_OWNED.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{line}");
+    }
+}
+
 /// The brake check every admit shares. A `human` caller passes with one
 /// warning per armed brake instead of a refusal; a long-lived server still
 /// logs each new brake it waives. The brake is a world fact the arm
@@ -472,10 +487,10 @@ fn brake_check(scope: Scope, ceiling: usize, human: bool) -> Result<(), Admissio
     if human {
         static WARNED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if WARNED_UNTIL.swap(until, std::sync::atomic::Ordering::Relaxed) != until {
-            eprintln!(
+            warn(format_args!(
                 "fno: {}; admitting a human's own start anyway",
                 describe_brake(until, &value)
-            );
+            ));
         }
         return Ok(());
     }
@@ -583,6 +598,9 @@ pub fn admit_shell_pane() -> Result<AdmissionPermit, AdmissionFailure> {
 }
 
 fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
+    if human {
+        return Ok(admit_human());
+    }
     match admission_disabled() {
         Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
         Ok(false) => {}
@@ -594,7 +612,7 @@ fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
             ))
         }
     }
-    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human)?;
+    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, false)?;
     let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -614,7 +632,7 @@ fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Fleet, 0, ceiling.get()));
     }
-    let lock = match acquire_lock() {
+    let lock = match acquire_lock(true) {
         Ok(lock) => Some(lock),
         // A fact, not a race: with no descriptor left, the census behind the
         // lock would fail the same way. Admit, and let the spawn below name
@@ -665,6 +683,57 @@ fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
     }
 }
 
+/// A human's own start or attach always gets in. Gates may warn or slow
+/// agents, never refuse the user's own fno. So this door never waits on the
+/// lock (it never queues behind agent spawns) and turns every refusal into
+/// one warning a minute. When the lock is free the census runs, so an
+/// over-full fleet is named, and the permit still records children, so
+/// agents count the human's panes.
+fn admit_human() -> AdmissionPermit {
+    let ceiling = configured_max_processes()
+        .unwrap_or(MaxProcesses::new(DEFAULT_MAX_PROCESSES))
+        .get();
+    let permit = |lock, count| AdmissionPermit {
+        _lock: lock,
+        scope: Scope::Fleet,
+        count,
+        ceiling,
+        #[cfg(test)]
+        track_children: true,
+    };
+    // Waived brakes warn inside the check.
+    let _ = brake_check(Scope::Fleet, ceiling, true);
+    #[cfg(test)]
+    if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
+        return test_permit(Scope::Fleet, 0, ceiling);
+    }
+    if matches!(admission_disabled(), Ok(true)) {
+        return permit(None, 0);
+    }
+    // A held lock means an agent is mid-census: skip ours rather than wait,
+    // and rewrite no marker ledger under its feet.
+    let Ok(lock) = acquire_lock(false) else {
+        return permit(None, 0);
+    };
+    let census = process_census();
+    if let Some(refusal) = decide_processes(&census, MaxProcesses::new(ceiling)).refusal() {
+        static WARNED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = WARNED_AT.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 60 {
+            WARNED_AT.store(now, std::sync::atomic::Ordering::Relaxed);
+            let refusal = refusal.strip_suffix(BYPASS_HINT).unwrap_or(&refusal);
+            warn(format_args!(
+                "fno: {refusal}; admitting a human's own start anyway"
+            ));
+        }
+    }
+    permit(Some(lock), census.count().unwrap_or(0))
+}
+
 /// When the census died to descriptor exhaustion, the refusal is the
 /// open-file ceiling, not a broken measurement: the same wall the pty spawn
 /// names, so the operator reads one diagnostic wherever the wall surfaces.
@@ -703,7 +772,7 @@ pub fn admit_tab(
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Tab, pane_count, ceiling.get()));
     }
-    let lock = match acquire_lock() {
+    let lock = match acquire_lock(true) {
         Ok(lock) => Some(lock),
         // Same famine door as admit_fleet: the pane count needs no snapshot,
         // and the spawn below names its own limit. The cap itself still
@@ -795,7 +864,7 @@ pub fn admit_pane(
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Fleet, 0, fleet_ceiling.get()));
     }
-    let lock = match acquire_lock() {
+    let lock = match acquire_lock(true) {
         Ok(lock) => Some(lock),
         // Same famine door as admit_fleet: with no descriptor left, the
         // census behind the lock would fail the same way. The tab cap still
@@ -882,7 +951,18 @@ pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comman
 }
 
 pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process::Child> {
-    let permit = admit_fleet().map_err(admission_io_error)?;
+    spawn_permitted(command, admit_fleet().map_err(admission_io_error)?)
+}
+
+/// A spawn on a human's attach path, which never waits on or meets a gate.
+pub fn std_spawn_for_human(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    spawn_permitted(command, admit_human())
+}
+
+fn spawn_permitted(
+    command: &mut std::process::Command,
+    permit: AdmissionPermit,
+) -> io::Result<std::process::Child> {
     let track_child = !is_root_program(command.get_program());
     let mut child = command.spawn()?;
     if track_child {
@@ -1001,7 +1081,9 @@ fn no_descriptor_left(error: &io::Error) -> bool {
     )
 }
 
-fn acquire_lock() -> Result<File, AcquireFailure> {
+/// `wait: false` takes the lock only if it is free right now, and answers
+/// `Other` when an agent holds it: a human never queues behind a spawn.
+fn acquire_lock(wait: bool) -> Result<File, AcquireFailure> {
     let path = admission_lock_path()
         .map_err(|e| AcquireFailure::Other(format!("cannot prepare admission state: {e}")))?;
     let file = OpenOptions::new()
@@ -1029,8 +1111,13 @@ fn acquire_lock() -> Result<File, AcquireFailure> {
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
         loop {
             // SAFETY: `fd` is an open file descriptor owned by `file`; the
-            // blocking exclusive lock serializes census plus spawn.
-            let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            // exclusive lock serializes census plus spawn.
+            let op = if wait {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_EX | libc::LOCK_NB
+            };
+            let rc = unsafe { libc::flock(fd, op) };
             if rc == 0 {
                 break;
             }
@@ -1906,24 +1993,17 @@ mod tests {
         );
     }
 
-    /// The NoSource admit is the whole point of the third outcome.
+    /// No source and no descriptor both admit: neither is headroom or a
+    /// refusal, and the famine never reads as an absent host.
     #[test]
-    fn a_census_with_no_source_admits() {
-        let decision = decide_processes(
-            &Census::no_source("cannot read /proc"),
-            MaxProcesses::new(2),
-        );
-        assert_eq!(decision, AdmissionDecision::Admit);
-    }
-
-    /// The fourth outcome admits too, and never reads as an absent host.
-    #[test]
-    fn a_census_with_descriptors_exhausted_admits() {
-        let decision = decide_processes(
-            &Census::descriptors_exhausted("descriptors-exhausted (cannot read /proc)"),
-            MaxProcesses::new(2),
-        );
-        assert_eq!(decision, AdmissionDecision::Admit);
+    fn a_census_with_no_source_or_no_descriptor_admits() {
+        for census in [
+            Census::no_source("cannot read /proc"),
+            Census::descriptors_exhausted("descriptors-exhausted (cannot read /proc)"),
+        ] {
+            let decision = decide_processes(&census, MaxProcesses::new(2));
+            assert_eq!(decision, AdmissionDecision::Admit, "{census:?}");
+        }
     }
 
     /// The guard against retry-then-hold-forever: a NoSource answer stops
