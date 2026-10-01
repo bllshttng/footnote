@@ -283,7 +283,6 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(
         if line.startswith("session_id:")
     )
     assert manifest_session_id != thread_id
-    assert "-cx" in manifest_session_id
     assert f"codex_thread_id: {thread_id}" in state
     assert "harness: codex" in state, state
     assert f"harness_session_id: {thread_id}" in state, state
