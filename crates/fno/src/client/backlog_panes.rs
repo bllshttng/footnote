@@ -220,7 +220,14 @@ pub(crate) fn paint(
             );
         }
         let sel = b.detail.as_ref().map(|d| d.sel);
-        let (ls, f) = node_detail::pane_lines(b, &node, sel, detail_inner_w);
+        // The frame spends two body columns on side pad: wrap the text to
+        // the columns it paints, so no line loses its tail.
+        let text_w = if framed {
+            detail_inner_w.saturating_sub(2)
+        } else {
+            detail_inner_w
+        };
+        let (ls, f) = node_detail::pane_lines(b, &node, sel, text_w);
         let body = ls
             .iter()
             .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_inner_w)))

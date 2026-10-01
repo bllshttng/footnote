@@ -3052,12 +3052,13 @@ fn split_flag_entry(entry: &str) -> (String, bool) {
     }
 }
 
-/// The flags picker's anchor: one row under the editor block, where the
-/// pills row lives.
+/// The flags picker's anchor: one row under the editor block's last pills
+/// row.
 fn pills_anchor(l: &Launcher, view: &View) -> Option<(u16, u16)> {
     let sl = l.sheet_layout(view)?;
+    let last_pill_y = sl.pills.last().map_or(sl.pills_y, |r| r.y);
     Some((
-        (sl.origin.0 as usize + 1 + sl.pills_y as usize + 1) as u16,
+        (sl.origin.0 as usize + 1 + last_pill_y as usize + 1) as u16,
         (sl.origin.1 as usize + 1) as u16,
     ))
 }
@@ -3757,8 +3758,13 @@ impl Launcher {
         } else {
             (Vec::new(), Vec::new(), 0)
         };
-        let other = facts_rows + top_rows + 1 + 1 + pill_rows + bottom_rows + keybar.len() + 1;
-        // cwd, top chips, 2 blanks, pills rows, bottom chips, keybar, footer
+        // top chips, 2 blanks, pills rows, bottom chips, keybar, footer
+        let rest = top_rows + 1 + 1 + pill_rows + bottom_rows + keybar.len() + 1;
+        // The facts rows give way first on a short terminal, so the keybar and
+        // its esc word never fall off the bottom; one row and one editor row
+        // always stay.
+        let facts_rows = facts_rows.min(rows.saturating_sub(2 + rest + 1).max(1));
+        let other = facts_rows + rest;
         let editor_rows = (rows.saturating_sub(2 + other)).clamp(1, 6);
         let framed_h = 2 + other + editor_rows;
         let origin = (
