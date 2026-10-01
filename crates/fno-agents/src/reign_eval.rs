@@ -1591,8 +1591,10 @@ mod tests {
         assert_eq!(w1.activity.tool_errors.get("command_failed"), Some(&1));
         assert_eq!(w1.activity.tokens.output, 100);
         assert_eq!(w1.activity.tokens.cache_read, 1000);
-        assert_eq!(w1.summary.as_deref(), Some("window 1 summary"));
         let w2 = &fold.windows[1];
+        // The compacted row opens this window; its payload.message is the
+        // summary.
+        assert_eq!(w2.summary.as_deref(), Some("window 1 summary"));
         assert_eq!(w2.tools.get("spawn_agent"), Some(&1));
         assert_eq!(fold.spawns.len(), 1);
         assert_eq!(w2.wakes.get("unknown"), Some(&1));
