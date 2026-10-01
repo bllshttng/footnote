@@ -7782,7 +7782,10 @@ fn peek_overlay_lines(
         header.push_str(&format!(" · PR #{pr}"));
     }
     if a.started_at.is_some() {
-        header.push_str(&format!(" · up {}", row_meter::up_cell(a.started_at, now_secs)));
+        header.push_str(&format!(
+            " · up {}",
+            row_meter::up_cell(a.started_at, now_secs)
+        ));
     }
     let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
@@ -12248,9 +12251,9 @@ mod court_block;
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
 
-mod row_meter;
 mod card_line;
 mod node_link;
+mod row_meter;
 #[path = "client/sideline.rs"]
 mod sideline;
 

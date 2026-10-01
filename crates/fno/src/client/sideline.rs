@@ -655,8 +655,9 @@ impl View {
                     String::new()
                 };
                 // A card names its model on line 2; the token is the list's.
-                if let Some(tok) = sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
-                    .filter(|_| !card)
+                if let Some(tok) =
+                    sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
+                        .filter(|_| !card)
                 {
                     suffix.push_str(&format!(" {tok}"));
                 }
@@ -980,7 +981,14 @@ impl View {
 
     /// The card bar's fill in theme colors: the brand, red once the window
     /// nears auto-compact. A banded row keeps the band's own pair.
-    fn paint_ctx_fill(&self, cells: &mut [Cell], at: usize, text_w: usize, rect: RtRect, a: &AgentRow) {
+    fn paint_ctx_fill(
+        &self,
+        cells: &mut [Cell],
+        at: usize,
+        text_w: usize,
+        rect: RtRect,
+        a: &AgentRow,
+    ) {
         let (Some(fill), Some(pct)) = (
             card_line::meter_node(a, rect.width as usize).fill,
             a.context_used_pct,

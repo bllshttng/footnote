@@ -191,7 +191,10 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_l
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
     v.layout.agents[1].context_used_pct = Some(129);
     let over_window = frame_text(&v.compose());
-    assert!(over_window.contains("[129%|########] x-4310"), "{over_window:?}");
+    assert!(
+        over_window.contains("[129%|########] x-4310"),
+        "{over_window:?}"
+    );
     v.layout.agents[1].context_used_pct = None;
     let unmeasured = frame_text(&v.compose());
     let dash = format!(" -{}x-4310", " ".repeat(15));
@@ -227,8 +230,15 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
         plan_path: None,
         head: false,
     };
-    assert_eq!(card_line::slug(&a, &[card("x-5316", "gc-sweep")]), "t-gc-sweep");
-    assert_eq!(card_line::slug(&a, &[]), "t-x-5316", "no slug keeps the node");
+    assert_eq!(
+        card_line::slug(&a, &[card("x-5316", "gc-sweep")]),
+        "t-gc-sweep"
+    );
+    assert_eq!(
+        card_line::slug(&a, &[]),
+        "t-x-5316",
+        "no slug keeps the node"
+    );
     a.name = "t-x4fb5-glm".into();
     a.node = Some("x-4fb5".into());
     a.model = Some("glm-5.3-flash[1m]".into());
