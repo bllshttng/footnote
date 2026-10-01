@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_capability_keys_are_a_nonempty_subset_of_the_complete_roster():
     """Adding a capability row is a coupled change: the name lands in
@@ -28,8 +30,11 @@ def test_capability_keys_are_a_nonempty_subset_of_the_complete_roster():
 def test_the_complete_roster_carries_the_evidence_backed_hosts():
     """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the nine
     capability-backed names plus hermes and openclaw, which host real sessions
-    per docs/SETUP-*.md. scripts/ci/check-harness-roster-parity.py holds this
-    union against the shipped evidence surfaces in CI."""
+    per docs/SETUP-*.md. Since x-bd68 the roster lives in Rust
+    (provider.rs KNOWN_HARNESSES) and this import proxies it through the
+    fno-agents harness-roster read, so this assertion proves a Python reader
+    accepts a Rust-added name; scripts/ci/check-harness-roster-parity.py
+    holds the evidence surfaces as subsets of the same Rust source."""
     from fno.harness_names import KNOWN_HARNESSES
 
     assert set(KNOWN_HARNESSES) == {
@@ -47,7 +52,7 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
     }
     from fno.agents.harness_map import known_harnesses
 
-    # The capability-backed roster stays at eight; the wider names ride the
+    # The capability-backed roster stays at nine; the wider names ride the
     # roster only, which is the asymmetry this change exists to declare.
     assert set(known_harnesses()) == {
         "claude",
@@ -114,6 +119,51 @@ def test_thread_refusal_renders_from_the_roster_without_the_runtime():
     assert "NONE" in result.stdout, (
         f"the refusal builder dragged the runtime: {result.stdout.strip()}"
     )
+
+
+def test_the_roster_is_read_once_per_process(monkeypatch):
+    """x-bd68: the roster read is cached in the module globals, so the
+    graph-store and doctor regexes that run per write never pay a subprocess
+    per call - one read per process, wherever the first touch lands."""
+    import fno.harness_names as hn
+
+    calls = []
+
+    def fake_read(verb, args=(), *, timeout=60, binary=None):
+        calls.append(verb)
+        return (None, {"known": ("alpha", "beta")})
+
+    monkeypatch.setattr(hn, "KNOWN_HARNESSES", None, raising=False)
+    monkeypatch.setattr(hn, "call_binary_json", fake_read)
+    assert hn.known_harnesses() == ("alpha", "beta")
+    assert hn.KNOWN_HARNESSES == ("alpha", "beta")
+    assert hn.known_harnesses() == ("alpha", "beta")
+    assert calls == ["harness-roster"]
+
+
+def test_the_roster_read_refuses_closed_without_a_binary(monkeypatch):
+    """No binary, no roster: the door raises naming the remedy, never an
+    empty list that reads as agreement."""
+    import fno.harness_names as hn
+    from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(hn, "KNOWN_HARNESSES", None, raising=False)
+    monkeypatch.setattr(
+        hn, "call_binary_json", lambda *a, **k: ("fno-agents binary not found", None)
+    )
+    with pytest.raises(VerbUnavailable, match="fno doctor update"):
+        hn.known_harnesses()
+
+
+def test_an_unusable_roster_answer_refuses(monkeypatch):
+    """A parsed answer with no usable roster fails closed too."""
+    import fno.harness_names as hn
+    from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(hn, "KNOWN_HARNESSES", None, raising=False)
+    monkeypatch.setattr(hn, "call_binary_json", lambda *a, **k: (None, {"known": []}))
+    with pytest.raises(VerbUnavailable, match="no usable roster"):
+        hn.known_harnesses()
 
 
 def test_importing_dispatch_flags_does_not_drag_the_runtime():

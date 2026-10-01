@@ -152,7 +152,11 @@ def resolve_binary() -> Optional[Path]:
 
 
 def call_binary_json(
-    verb: str, args: Sequence[str] = (), *, timeout: Optional[float] = 60
+    verb: str,
+    args: Sequence[str] = (),
+    *,
+    timeout: Optional[float] = 60,
+    binary: Optional[Path] = None,
 ) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
 
@@ -160,11 +164,16 @@ def call_binary_json(
     binary, non-zero exit, timeout, or unparseable stdout yields a short error
     text and a None payload. Callers keep the failure shape theirs (refuse
     closed, raise, or exit) - this seam only standardizes the door.
+
+    ``binary`` accepts a pre-resolved binary so a caller can apply the
+    dev-checkout-outranks-stale-install rule :func:`verb_call` states: the
+    default resolution puts PATH (the installed copy) ahead of this
+    checkout's build, which answers a just-ported verb with "unknown verb".
     """
     import json
     import subprocess
 
-    binary = resolve_binary()
+    binary = binary or resolve_binary()
     if binary is None:
         return ("fno-agents binary not found", None)
     try:
