@@ -976,7 +976,8 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
                 &live_config,
                 rotate,
             );
-            let node_of = |row: &Value| row.get("node_id").and_then(Value::as_str).unwrap_or("");
+            let node_of =
+                |row: &Value| -> &str { row.get("node_id").and_then(Value::as_str).unwrap_or("") };
             let root_of = |row: &Value| {
                 row.get("cwd")
                     .and_then(Value::as_str)
