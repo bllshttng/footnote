@@ -150,7 +150,13 @@ pub fn run(args: SnapshotArgs) -> i32 {
         "light" => crate::theme::theme_footnote_paper(),
         _ => crate::theme::Theme::default_theme(),
     };
-    let frame = live_frame(&args.server, args.squad.as_deref(), args.size, args.fit, chrome);
+    let frame = live_frame(
+        &args.server,
+        args.squad.as_deref(),
+        args.size,
+        args.fit,
+        chrome,
+    );
     match frame.and_then(|f| write(&f, &args)) {
         Ok(()) => {
             println!("{}", args.out.display());
