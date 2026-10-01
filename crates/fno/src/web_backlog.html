@@ -1784,10 +1784,17 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     recentEl.appendChild(clear);
     recentEl.hidden = false;
   }
+  // The blur-hide timer cancels on focus: a quick blur-then-refocus (or a
+  // row press, which preventDefault keeps in the input) must not hide the
+  // list the new focus just drew.
+  let recentHideTimer = 0;
   searchInput.addEventListener("focus", () => {
+    clearTimeout(recentHideTimer);
     drawRecent();
   });
-  searchInput.addEventListener("blur", () => setTimeout(hideRecent, 150));
+  searchInput.addEventListener("blur", () => {
+    recentHideTimer = setTimeout(hideRecent, 150);
+  });
   document.getElementById("sheetclose").addEventListener("click", () => { sheetEl.hidden = true; });
   sheetEl.addEventListener("click", (ev) => {
     if (ev.target === sheetEl) sheetEl.hidden = true;
