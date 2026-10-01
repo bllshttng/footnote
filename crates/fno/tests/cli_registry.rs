@@ -43,6 +43,15 @@ fn typed_native_verbs_parse_and_refuse() {
         cli_args::classify(&[OsString::from("version"), OsString::from("--json")]),
         cli_args::FrontDoor::Version { json: true }
     );
+    // Native, never forwarded: uninstall removes the Python wheel it would
+    // forward to.
+    assert_eq!(
+        cli_args::classify(&[OsString::from("uninstall"), OsString::from("--dry-run")]),
+        cli_args::FrontDoor::Uninstall(fno::uninstall::Opts {
+            dry_run: true,
+            ..Default::default()
+        })
+    );
     // A malformed native shape is usage, never a forward (AC3-ERR): the
     // refusal is one command-qualified line.
     assert!(matches!(
