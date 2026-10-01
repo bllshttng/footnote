@@ -414,6 +414,12 @@ pub(crate) fn brake_path() -> PathBuf {
 /// arms the brake, so a hold here means fno's own fan-out. A missing,
 /// unreadable, or expired file holds nothing.
 pub fn brake_holds() -> Option<String> {
+    // Test seam, same shape as the footprint probe's: with no pinned brake
+    // file, tests never read the live machine's brake.
+    #[cfg(test)]
+    if std::env::var_os("FNO_MACHINE_BRAKE").is_none() {
+        return None;
+    }
     let text = std::fs::read_to_string(brake_path()).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let until = value.get("until_epoch")?.as_u64()?;

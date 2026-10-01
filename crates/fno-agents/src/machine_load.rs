@@ -69,11 +69,12 @@ pub struct OutsideGroup {
     pub pids: Vec<u32>,
 }
 
-/// The group label for a process command: a path under `X.app/` groups
-/// under the app name `X` (paths carry spaces, so the probe reads the
-/// whole command); anything else groups under the argv0 basename.
+/// The group label for a process command: only the bundle's executable
+/// region (`.app/Contents/`) names the app `X` - a process that merely
+/// reads a file inside X.app is not X. Anything else groups under the
+/// argv0 basename.
 fn app_group_name(command: &str) -> String {
-    if let Some(idx) = command.find(".app/") {
+    if let Some(idx) = command.find(".app/Contents/") {
         let before = &command[..idx];
         return before.rsplit('/').next().unwrap_or(before).to_string();
     }
@@ -116,7 +117,7 @@ pub fn outside_groups(procs: &[ProcRow], fleet_pids: &HashSet<u32>) -> Vec<Outsi
         if owned.contains(&row.pid) || row.pid == 0 {
             continue;
         }
-        let bundle = row.command.contains(".app/");
+        let bundle = row.command.contains(".app/Contents/");
         let name = app_group_name(&row.command);
         let entry = groups.entry(name.clone()).or_insert_with(|| OutsideGroup {
             name,
@@ -643,6 +644,13 @@ mod tests {
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             ),
             row(31, 1, 10.0, 100_000, "yes"),
+            row(
+                32,
+                1,
+                3.0,
+                1_000,
+                "tail -f /Applications/OrbStack.app/Contents/Resources/log",
+            ),
         ];
         let mut fleet = HashSet::new();
         fleet.insert(10_u32);
@@ -651,7 +659,11 @@ mod tests {
         assert_eq!(groups[0].name, "OrbStack", "{groups:?}");
         assert!(groups[0].bundle);
         assert_eq!(groups[0].cpu_pct, 120.0);
-        assert_eq!(groups[0].pids, vec![20, 21]);
+        assert_eq!(
+            groups[0].pids,
+            vec![20, 21],
+            "a reader of the bundle is not the app"
+        );
         assert_eq!(groups[1].name, "Google Chrome");
         assert!(!groups.iter().any(|g| g.name.contains("fno")));
         assert!(!groups.iter().any(|g| g.name == "sh helper"));
