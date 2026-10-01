@@ -532,7 +532,7 @@ fn queue_rows() {
     );
     assert!(bound_node_posture(&repo, "ab-legacy").is_err());
     // A manifest path that is not a file is unreadable, never permission.
-    let manifest = crate::state_path::resolve("target-state", wt).expect("target-state resolves");
+    let manifest = crate::state_path::resolve("target-state", &wt).expect("target-state resolves");
     std::fs::remove_file(&manifest).unwrap();
     std::fs::create_dir_all(&manifest).unwrap();
     assert!(matches!(read_bound_manifest(&wt), BoundRead::Unreadable(_)));
@@ -550,9 +550,12 @@ fn queue_rows() {
     std::fs::create_dir_all(repo.join(".fno")).unwrap();
     std::fs::write(
         repo.join(".fno").join("config.toml"),
-        "[auto_merge]\nenabled = true\n",
+        "[auto_merge]\nenabled = true\ngrant = \"dispatch\"\n",
     )
     .unwrap();
+    // Pin the config read to the fixture file: the queue verdict needs the
+    // live-config gate to answer true regardless of the runner's own env.
+    let _cfg = EnvRestore::set("FNO_CONFIG", repo.join(".fno").join("config.toml"));
     let entries = vec![json!({
         "id": "ab-qbound", "title": "t", "slug": "ab-qbound", "type": "feature",
         "status": "ready", "priority": "p2",
@@ -711,6 +714,30 @@ impl Drop for HomeGuard {
         match self.spaces.take() {
             Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
             None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+    }
+}
+
+/// Set one env var for the guarded span, restoring the previous value on
+/// drop even through a panic.
+struct EnvRestore {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvRestore {
+    fn set(key: &'static str, value: std::path::PathBuf) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
         }
     }
 }
