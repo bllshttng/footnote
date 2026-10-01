@@ -610,7 +610,26 @@ impl InsideLegReport {
             None => false,
         }
     }
+
+    /// True when `new` replaces this stored report. A higher seq wins. A lower
+    /// or equal seq is a reordered or duplicate sibling and drops, unless it
+    /// arrives more than [`SEQ_REORDER_HORIZON_S`] after this one. The claude
+    /// hook's seq is the host monotonic clock, which restarts at zero on
+    /// reboot: without the horizon a row stored before a reboot drops every
+    /// report until the new uptime passes the old one, which takes days. An
+    /// unparseable stamp falls back to the plain seq rule.
+    pub fn yields_to(&self, new: &InsideLegReport) -> bool {
+        new.seq > self.seq
+            || rfc3339_like_to_secs(&self.received_at)
+                .zip(rfc3339_like_to_secs(&new.received_at))
+                .is_some_and(|(old, now)| now.saturating_sub(old) > SEQ_REORDER_HORIZON_S)
+    }
 }
+
+/// How far a reordered sibling report can trail the one stored before it.
+/// Each report's hook process is short and bounded (a 2s RPC cap), so two
+/// minutes covers a stalled hook with margin.
+pub const SEQ_REORDER_HORIZON_S: u64 = 120;
 
 /// True when a badge report ENTERS `target` from a different prior state.
 /// This is the whole episode gate for the OS-notification wire: firing only on
