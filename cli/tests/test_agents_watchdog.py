@@ -3647,7 +3647,7 @@ def test_ac6_pr_age_boundary_and_verb():
     by_number = {finding.pr_number: finding for finding in snap.findings}
     assert all(f.kind == uw.KIND_PR for f in snap.findings)
     assert all(
-        f.clear_command == f"/fno:pr check {f.pr_number}" for f in snap.findings
+        f.clear_command == f"/fno:ship pr check {f.pr_number}" for f in snap.findings
     )
     assert "pull/101" in by_number[101].basis
     assert by_number[101].age_s == pytest.approx(24 * 3600 + 1)

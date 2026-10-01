@@ -117,7 +117,7 @@ def harvest_carveouts(
             continue
         if want is not None and rec.get("session_id") not in want:
             continue
-        # `backfill` carve-outs are routed to /fno:pr merged's backfill
+        # `backfill` carve-outs are routed to /fno:ship pr merged's backfill
         # slot, NOT generic retro triage. Skipping them here keeps them out of
         # the classified/landed node set AND out of the harvested-ids the caller
         # consumes, so they SURVIVE in the ledger for post-merge to read and
@@ -748,7 +748,7 @@ def addressed_ids_from_threads(threads: list[dict]) -> "set[str]":
 
 # --- author "Skipped" reply table (AC2-FR cross-check) ---------------------
 #
-# `/pr check` posts one consolidated reply comment with a "### Skipped" table:
+# `/fno:ship pr check` posts one consolidated reply comment with a "### Skipped" table:
 #   | Reviewer | File | Issue | Reason |
 # It carries no comment ids, so we map rows back to threads by file path. The
 # mapping powers ONLY the discrepancy warning (author says skipped but the

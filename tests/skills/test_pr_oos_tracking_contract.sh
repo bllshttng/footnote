@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 GATE="$REPO_ROOT/scripts/ci/check-oos-tracked.sh"
 
 SURFACES=(
-  "$REPO_ROOT/skills/pr/references/create.md"
+  "$REPO_ROOT/skills/ship/references/create.md"
 )
 
 PASS=0

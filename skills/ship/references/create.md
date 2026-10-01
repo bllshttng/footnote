@@ -18,7 +18,7 @@ RESULT: BLOCKED step=<step-name> reason=<one line> draft=.fno/pr-body.md
 | Failure | Detected by | Action |
 |---|---|---|
 | no upstream | nothing; `fno do pr push` sets it | proceed |
-| no remote | `git remote` prints nothing, or push exit 4 naming fetch | draft, `BLOCKED step=push`, name `git remote add origin <url>` then re-run `/pr create` |
+| no remote | `git remote` prints nothing, or push exit 4 naming fetch | draft, `BLOCKED step=push`, name `git remote add origin <url>` then re-run `/fno:ship pr create` |
 | dirty tree | `git status --short` non-empty | draft from committed work only, list dirty paths, `BLOCKED step=clean-tree` |
 | detached HEAD | `git rev-parse --abbrev-ref HEAD` prints `HEAD` | draft, `BLOCKED step=branch`, name one `git switch -c <name>` from the first commit subject |
 | no base ref | `origin/main` does not resolve | base = first of `origin/HEAD`, `main`, `master` that resolves, else the root commit; the draft names it |
@@ -390,7 +390,7 @@ On success:
 ```
 PR #[NUMBER] created: https://github.com/[owner]/[repo]/pull/[NUMBER]
 
-Next step: Run /pr check [NUMBER] to wait for external review
+Next step: Run /fno:ship pr check [NUMBER] to wait for external review
 
 RESULT: SUCCESS pr=#[NUMBER] url=https://github.com/[owner]/[repo]/pull/[NUMBER]
 ```
@@ -439,12 +439,12 @@ gh pr view --json number,url
 ## Integration with Workflow
 
 ```
-/think → /blueprint → /execute → /review → /pr create → /pr check
+/think → /blueprint → /execute → /review → /fno:ship pr create → /fno:ship pr check
 ```
 
 **Flow:**
-1. `/pr create` runs this flow inline in the invoking session
-2. `/pr check` polls for external review and processes feedback
+1. `/fno:ship pr create` runs this flow inline in the invoking session
+2. `/fno:ship pr check` polls for external review and processes feedback
 3. Human reviewer merges
 
 ---
@@ -456,4 +456,4 @@ gh pr view --json number,url
 - **Clear PR titles** - Start with type based on commit types
 - **Meaningful descriptions** - Derived from actual changes made
 - **Reference Linear tickets** - Extract from commits if present (only when `config.linear.enabled`)
-- **Output PR number clearly** - Needed for `/pr check`
+- **Output PR number clearly** - Needed for `/fno:ship pr check`

@@ -530,6 +530,8 @@ struct NeedsArgs {
     option: Option<u32>,
     words: Option<String>,
     done: bool,
+    delegate: bool,
+    archive: Vec<String>,
     sink: Option<String>,
     events_override: Vec<PathBuf>,
     ledger_override: Option<PathBuf>,
@@ -544,6 +546,8 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
     let mut option: Option<u32> = None;
     let mut words: Option<String> = None;
     let mut done = false;
+    let mut delegate = false;
+    let mut archive: Vec<String> = Vec::new();
     let mut sink: Option<String> = None;
     let mut events_override: Vec<PathBuf> = Vec::new();
     let mut ledger_override: Option<PathBuf> = None;
@@ -577,6 +581,8 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
             }
             "--words" => words = Some(it.next().ok_or("--words needs the answer text")?),
             "--done" => done = true,
+            "--delegate" => delegate = true,
+            "--archive" => archive.push(it.next().ok_or("--archive needs an item id")?),
             "--sink" => sink = Some(it.next().ok_or("--sink needs a sink name")?),
             "--events" => {
                 events_override.push(PathBuf::from(it.next().ok_or("--events needs a path")?))
@@ -596,6 +602,8 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
         option,
         words,
         done,
+        delegate,
+        archive,
         sink,
         events_override,
         ledger_override,
@@ -849,10 +857,15 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
 /// delivery (the clear, the resume, the crown escalation) on its next beat;
 /// the door never delivers.
 fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) -> i32 {
-    let picks = [args.option.is_some(), args.words.is_some(), args.done];
+    let picks = [
+        args.option.is_some(),
+        args.words.is_some(),
+        args.done,
+        args.delegate,
+    ];
     if picks.iter().filter(|p| **p).count() != 1 {
         eprintln!(
-            "fno-agents: needs --answer needs exactly one of --option <n>, --words <text>, --done"
+            "fno-agents: needs --answer needs exactly one of --option <n>, --words <text>, --done, --delegate"
         );
         return 2;
     }
@@ -906,6 +919,12 @@ fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) ->
             return 2;
         }
         crate::attention_file::FileAnswer::Done
+    } else if args.delegate {
+        if let Err(reason) = delegable(item, cwd) {
+            eprintln!("fno-agents: {reason}");
+            return 2;
+        }
+        crate::attention_file::FileAnswer::Delegate
     } else {
         crate::attention_file::FileAnswer::Words(args.words.clone().unwrap_or_default())
     };
@@ -922,6 +941,91 @@ fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) ->
             1
         }
     }
+}
+
+/// Whether the agents may decide `item` for the user: a question (a pin has
+/// nothing to decide), recorded reversible as `yes` or `costly` (an
+/// irreversible or unstated call stays the user's), and a live crown over
+/// its node to decide it (else the question would close with nobody on it).
+fn delegable(item: &crate::attention::AttentionItem, cwd: &Path) -> Result<(), String> {
+    let id = &item.id;
+    if item.kind == "pin" {
+        return Err(format!("a pin has no delegate: {id}"));
+    }
+    match item.reversible.as_deref().map(str::trim) {
+        Some("yes" | "costly") => {}
+        Some("no") => return Err(format!("irreversible: the user decides {id}")),
+        _ => return Err(format!("reversibility not recorded: the user decides {id}")),
+    }
+    if crate::attention_reply::crown_holder(item, cwd).is_none() {
+        let node = item.node.as_deref().unwrap_or("its node");
+        return Err(format!("no live crown covers {node}; answer it yourself"));
+    }
+    Ok(())
+}
+
+/// The `--archive` door: withdraw open items with no answer through the
+/// in-process clear core, the same close `fno inbox outstanding clear` writes.
+/// An id that is not open is refused by name and closes nothing; the rest
+/// close. Prints one JSON receipt. `caller` is `None` outside tests, so the
+/// clear resolves who is at the door from the process itself.
+fn run_archive(
+    home: &AgentsHome,
+    cwd: &Path,
+    args: &NeedsArgs,
+    caller: Option<crate::question_clear::ClearCaller>,
+) -> i32 {
+    if args.sink.as_deref() != Some("mux") {
+        eprintln!("fno-agents: needs --archive accepts only --sink mux");
+        return 2;
+    }
+    let fno_dir = home
+        .root()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".fno"));
+    let (items, _, _) = crate::attention_arm::read_items_at(&fno_dir, cwd);
+    let mut lines = Vec::new();
+    let mut ids = Vec::new();
+    for id in &args.archive {
+        match items.iter().find(|i| &i.id == id) {
+            None => lines.push(format!("not found: {id}")),
+            Some(i) if i.state != "open" => {
+                lines.push(format!("not open: {id} (state {})", i.state))
+            }
+            Some(_) => ids.push(id.clone()),
+        }
+    }
+    let refused = lines.len();
+    let (mut code, mut archived) = (0, 0);
+    if !ids.is_empty() {
+        let answer = crate::question_clear::run_clear(&crate::question_clear::ClearRequest {
+            ids,
+            answer: None,
+            cap: crate::question_intake::QUESTION_CAP,
+            provenance: json!({}),
+            closed_by: Some("mux".to_string()),
+            caller,
+            journal_path: crate::paths::space_dir(cwd).join("events.jsonl"),
+            index_path: fno_dir.join("questions.jsonl"),
+            decisions_path: fno_dir.join("decisions.jsonl"),
+            graph: crate::backlog::settings::graph_path(),
+            repo_root: cwd.to_path_buf(),
+        });
+        code = answer.exit_code;
+        archived = answer.closed.len();
+        lines.extend(answer.lines);
+    }
+    println!("{}", json!({"archived": archived, "lines": lines}));
+    if refused > 0 {
+        for line in &lines[..refused] {
+            eprintln!("fno-agents: {line}");
+        }
+        if code == 0 {
+            code = 2;
+        }
+    }
+    code
 }
 
 /// One held node: the node an open question blocks, that question, and when
@@ -1494,6 +1598,13 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // The --items leg reads the attention projection; everything else is the
     // session-needs fold (never touches the ledger).
+    if !args.archive.is_empty() {
+        if args.answer.is_some() {
+            eprintln!("fno-agents: needs --archive and --answer are separate doors; pass one");
+            return 2;
+        }
+        return run_archive(home, &cwd, &args, None);
+    }
     if let Some(id) = args.answer.clone() {
         return run_answer(home, &cwd, &args, &id);
     }
@@ -2700,6 +2811,8 @@ mod tests {
             option: Some(2),
             words: None,
             done: false,
+            delegate: false,
+            archive: vec![],
             sink: Some("mux".to_string()),
             events_override: vec![],
             ledger_override: None,
@@ -2752,6 +2865,21 @@ mod tests {
         // --done on a question.
         args.done = true;
         assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        // --delegate on an unstated, an irreversible, and a reversible call
+        // with no live crown over its node: each stays the user's.
+        args.done = false;
+        args.delegate = true;
+        assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        let space = crate::paths::space_dir(&cwd).join("events.jsonl");
+        for (id, rev) in [("q-rev-no", "no"), ("q-rev-yes", "yes")] {
+            let ask = serde_json::json!({
+                "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "agent",
+                "data": {"question_id": id, "question": "pick", "asker": "w1", "node": "x-1",
+                         "options": ["a", "b"], "context": {"reversible": rev}}
+            });
+            crate::event_store::append_envelope(&space, &ask.to_string(), None).unwrap();
+            assert_eq!(run_answer(&home, &cwd, &args, id), 2, "{id}");
+        }
         // Nothing landed: the door writes nothing on a refusal.
         let home2 = crate::paths::AgentsHome::from_env();
         let raw =
@@ -2759,6 +2887,54 @@ mod tests {
         assert!(
             !raw.contains("attention_answer"),
             "refusals write nothing: {raw}"
+        );
+    }
+
+    #[test]
+    fn the_archive_door_withdraws_open_items_and_refuses_the_rest() {
+        let (dir, _root, mut args) = door_setup("needs_door_archive_");
+        let cwd = dir.path().join("repo");
+        let home = crate::paths::AgentsHome::from_env();
+        let space = crate::paths::space_dir(&cwd).join("events.jsonl");
+        let index = crate::provider_cap::questions_path(&home);
+        let ask = |id: &str| {
+            serde_json::json!({
+                "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "agent",
+                "data": {"question_id": id, "question": "pick one", "asker": "w1",
+                         "session_id": "s1", "cwd": "/repo/fno", "options": ["a", "b"]}
+            })
+        };
+        crate::event_store::append_envelope(&space, &ask("q-two").to_string(), None).unwrap();
+        for id in ["q-door", "q-two"] {
+            crate::provider_cap::append_questions_row(&index, &ask(id)).unwrap();
+        }
+        args.answer = None;
+        args.archive = vec!["q-door".into(), "q-two".into(), "q-none".into()];
+        // An unknown id is refused by name; the open ones still close.
+        assert_eq!(run_archive(&home, &cwd, &args, Some(Default::default())), 2);
+        let closes = |path: &Path| {
+            crate::event_store::journal_text(path, &[])
+                .matches("operator_question_closed")
+                .count()
+        };
+        assert_eq!(closes(&space), 2, "one project close each");
+        assert_eq!(closes(&index), 2, "one index close each");
+        let fno_dir = home.root().parent().map(Path::to_path_buf).unwrap();
+        let (items, _, _) = crate::attention_arm::read_items_at(&fno_dir, &cwd);
+        assert!(items.iter().all(|i| i.state != "open"), "{items:?}");
+        // A closed id is refused and writes nothing more.
+        args.archive = vec!["q-door".into()];
+        assert_eq!(run_archive(&home, &cwd, &args, Some(Default::default())), 2);
+        assert_eq!(closes(&index), 2);
+        // --archive beside --answer is a usage error.
+        let rest: Vec<String> = ["--archive", "q-door", "--answer", "q-door", "--sink", "mux"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(run_needs(&rest, &home)),
+            2
         );
     }
 
@@ -2785,5 +2961,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second.1, true, "the second row records superseded");
+        // A delegate row carries the flag and the delegate sentence as words.
+        crate::attention_arm::append_answer_row(
+            "q-dlg",
+            "mux",
+            &crate::attention_file::FileAnswer::Delegate,
+            "sink",
+            "mux",
+        )
+        .unwrap();
+        let home = crate::paths::AgentsHome::from_env();
+        let raw =
+            crate::event_store::journal_text(&crate::provider_cap::questions_path(&home), &[]);
+        let row = raw.lines().find(|l| l.contains("q-dlg")).unwrap();
+        assert!(row.contains("\"delegate\":true"), "{row}");
+        assert!(row.contains(crate::attention_file::DELEGATE_TEXT), "{row}");
     }
 }

@@ -272,9 +272,8 @@ impl View {
         // active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
         let (block_rows, block_lines) = self.court_block_layout(rows);
-        let (q_rows, q_lines) = questions::block_rows(self, rows)
-            .map(|b| (b.n, b.lines))
-            .unwrap_or((0, Vec::new()));
+        let q_block = questions::block_rows(self, rows);
+        let q_rows = q_block.as_ref().map_or(0, |b| b.n);
         let list_rows = rows.saturating_sub(block_rows).saturating_sub(q_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
         // the terminal minus the bottom chrome row; the widget area must
@@ -305,7 +304,10 @@ impl View {
         let table_area = RtRect::new(0, 0, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
-        let mut st = self.sideline_state.get().with_selected(self.selector);
+        let mut st = self
+            .sideline_state
+            .get()
+            .with_selected(self.list_selector());
         let mut off = st.offset();
         let rects = self.worker_column_rects(text_w as u16);
         if density != Density::Slim {
@@ -447,7 +449,8 @@ impl View {
                 self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
             }
             let chosen = matches!(drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) && !a.exited);
-            let mut highlit = chosen || self.selector == Some(i) || self.hover_row == Some(i);
+            let mut highlit =
+                chosen || self.list_selector() == Some(i) || self.hover_row == Some(i);
             if card {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
@@ -549,7 +552,9 @@ impl View {
         if sticky_footer && !new_squad_visible {
             self.paint_new_squad_footer(cells, list_rows - 1, cols, text_w, panel_w);
         }
-        questions::paint_block(q_lines, cells, list_rows, rows, cols, text_w);
+        if let Some(b) = q_block {
+            questions::paint_block(b, cells, list_rows, (rows, cols, text_w), &self.theme);
+        }
         court_block::paint_court_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - US1.
@@ -1071,14 +1076,14 @@ impl View {
     ) -> bool {
         match display.get(i) {
             Some(DisplayRow::CardDetail(..)) => {
-                base || self.selector == Some(i)
+                base || self.list_selector() == Some(i)
                     || self.hover_row == Some(i)
-                    || self.selector == Some(i.saturating_sub(1))
+                    || self.list_selector() == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
             }
             Some(DisplayRow::Agent(_)) => {
                 base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(..)))
-                    && (self.selector == Some(i + 1) || self.hover_row == Some(i + 1))
+                    && (self.list_selector() == Some(i + 1) || self.hover_row == Some(i + 1))
             }
             _ => base,
         }

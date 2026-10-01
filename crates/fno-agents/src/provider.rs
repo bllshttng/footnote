@@ -2640,7 +2640,10 @@ mod tests {
             opencode_run_tail("build feature X"),
             vec!["--", "build feature X"]
         );
-        assert_eq!(opencode_run_tail("/fno:pr"), vec!["--command", "fno:pr"]);
+        assert_eq!(
+            opencode_run_tail("/fno:ship"),
+            vec!["--command", "fno:ship"]
+        );
         // A non-dash args tail keeps the one-positional shape: multiword
         // free-text args reach the command unsplit (round 11).
         assert_eq!(

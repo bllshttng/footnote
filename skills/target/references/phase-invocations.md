@@ -35,13 +35,13 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 | 2. Execute | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`); load `fno:test-audit` authoring mode beside `fno:tdd` for the execute phase |
 | 2. Execute | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
-| 3. Review | Before `/fno:pr create`, on the final local HEAD | `/fno:review <size> --comment` (Codex `$fno:review`) runs in this session; see [phase-bodies.md](phase-bodies.md). Size: medium under 300 changed lines, high above, xhigh for risky surfaces. Findings hold on branch and HEAD and post when the PR opens |
+| 3. Review | Before `/fno:ship pr create`, on the final local HEAD | `/fno:review <size> --comment` (Codex `$fno:review`) runs in this session; see [phase-bodies.md](phase-bodies.md). Size: medium under 300 changed lines, high above, xhigh for risky surfaces. Findings hold on branch and HEAD and post when the PR opens |
 | 4. Validate | Always (BEFORE PUSH) | `domain_phases.validate` (default: project-detected); CI green on the PR is verified by the loop-check verb at promise time |
 | 4.5 Docs | **Default: YES** (skip only with `--no-docs` or config) | `domain_phases.docs` (default: `fno:ship-docs`); docs MUST land BEFORE ship so they ride in the same PR |
 | 5. Browser | If `has_ui` (skip with `--no-browser`) | `fno:tdd` (browser-testing reference); advisory run-and-log, never gates completion and is not a loop-check input; run BEFORE ship so any findings ride in the same PR |
-| 6. Ship | Default YES (skip with `--no-ship`) | `domain_phases.ship` (default: `fno:pr create`); run AFTER docs + browser |
+| 6. Ship | Default YES (skip with `--no-ship`) | `domain_phases.ship` (default: `fno:ship pr create`); run AFTER docs + browser |
 | 6a. Pre-ship rebase | Only if `auto_merge_approved: true` | `fno do pr rebase` |
-| 7. External | **Default: YES** (skip only with `--no-external` or config) | `domain_phases.external` (default: `fno:pr check {pr_number}`) |
+| 7. External | **Default: YES** (skip only with `--no-external` or config) | `domain_phases.external` (default: `fno:ship pr check {pr_number}`) |
 | 7a. Post-review merge | Only if `auto_merge_approved: true` AND external review done | `fno do pr merge --invoker=target "$PR_NUMBER"` |
 
 See [auto-merge-mechanics.md](auto-merge-mechanics.md) for the full pre-ship rebase + post-review merge protocol.
@@ -66,7 +66,7 @@ This check applies to the review, validate, ship, external, and docs phases — 
 If the linear plugin is installed and the plan has a `linear:` field in 00-INDEX.md, sync status at phase transitions:
 - `/execute waves` start sets "In Progress"
 - After `/review` syncs progress
-- After `/pr create` adds PR link comment
+- After `/fno:ship pr create` adds PR link comment
 - After docs sets "Done"
 
 If the linear plugin is not installed, skip all Linear sync steps.

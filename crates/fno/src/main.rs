@@ -127,6 +127,11 @@ enum Role {
     /// recorded start token, then SIGINTs (the bridge's graceful exit) with a
     /// SIGKILL escalation for a wedged one.
     MuxWeb(fno::web::WebArgs),
+    /// `mux serve --snapshot ...`: compose one frame (a staged demo fleet, or
+    /// a live server through the observer attach) and write it as
+    /// html, svg or png. Carries the serve tail; `client::snapshot::parse`
+    /// owns its flags.
+    MuxSnapshot(Vec<OsString>),
     /// `mux web reap [--json]`: the corpse sweep for the `--web` bridge marker.
     MuxWebCtl(fno::cli_args::WebOp),
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
@@ -312,9 +317,14 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             cli_args::MuxCmd::Layout { common: _, op } => Role::MuxLayout(op),
             cli_args::MuxCmd::Web { op } => Role::MuxWebCtl(op),
             cli_args::MuxCmd::Workspace { op } => Role::MuxWorkspace(op),
+            cli_args::MuxCmd::Serve(t) if fno::client::snapshot::wants_snapshot(&t.tail) => {
+                Role::MuxSnapshot(t.tail)
+            }
             cli_args::MuxCmd::Serve(t) => match parse_web_args(&t.tail) {
                 Some(w) => Role::MuxWeb(w),
-                None => Role::MuxUsage("fno mux serve: needs --web, --stop, or --status".into()),
+                None => Role::MuxUsage(
+                    "fno mux serve: needs --web, --stop, --status, or --snapshot".into(),
+                ),
             },
             cli_args::MuxCmd::Rows(t) => Role::MuxRows(t.tail),
             cli_args::MuxCmd::Where(t) => Role::MuxWhere(t.tail),
@@ -408,6 +418,13 @@ fn main() {
         Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
         Role::BoardRender(rest) => std::process::exit(fno::backlog_snapshot::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
+        Role::MuxSnapshot(tail) => match fno::client::snapshot::parse(&tail) {
+            Ok(args) => std::process::exit(fno::client::snapshot::run(args)),
+            Err(usage) => {
+                eprintln!("{usage}");
+                std::process::exit(2)
+            }
+        },
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
             // resolution recorded must surface NOW: exit_mux would print it
@@ -1004,6 +1021,41 @@ mod tests {
             decide_role(&os(&["mux", "serve", "--web"]), false),
             Role::MuxWeb(_)
         ));
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "serve", "--snapshot", "--out", "a.svg"]),
+                false
+            ),
+            Role::MuxSnapshot(os(&["--snapshot", "--out", "a.svg"]))
+        );
+        // Its flags parse in client::snapshot; a bad value names the valid ones.
+        let snap = |a: &[&str]| fno::client::snapshot::parse(&os(a));
+        let ok = snap(&[
+            "--snapshot",
+            "--server",
+            "demo",
+            "--out",
+            "x.png",
+            "--theme",
+            "light",
+        ])
+        .unwrap();
+        assert!(ok.server == "demo" && ok.theme.bg == (0xf7, 0xf7, 0xf7));
+        assert!(matches!(ok.format, fno::client::snapshot::Format::Png));
+        for (flag, value, named) in [
+            ("--theme", "neon", "dark, light or macchiato"),
+            ("--format", "gif", "html, svg or png"),
+        ] {
+            let err =
+                snap(&["--snapshot", "--server", "d", "--out", "x", flag, value]).unwrap_err();
+            assert!(err.contains(named), "{err}");
+        }
+        assert!(snap(&["--snapshot"])
+            .unwrap_err()
+            .contains("--out is required"));
+        // No server: the refusal names the demo script, the one public source.
+        let err = snap(&["--snapshot", "--out", "x.svg"]).unwrap_err();
+        assert!(err.contains("mux-demo-snapshot.sh"), "{err}");
         assert_eq!(
             decide_role(&os(&["mux", "squad"]), false),
             Role::MuxRemoved("squad".into())

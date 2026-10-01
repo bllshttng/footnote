@@ -205,6 +205,9 @@ struct StoreFile {
     /// absent = hidden (one dim count line instead).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions_show_done: Option<serde_json::Value>,
+    /// The questions view's list pane width, in percent. Default absent = 45.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    questions_split: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -359,6 +362,32 @@ pub fn save_questions_height(height: u16) {
     let clamped = height.clamp(2, 60);
     mutate(|file| {
         file.questions_height = serde_json::to_value(clamped).ok();
+    });
+}
+
+/// The questions view's shipped list pane width, in percent.
+pub const QUESTIONS_DEFAULT_SPLIT: u8 = 45;
+
+/// Read the questions view's list/detail split. Absent, corrupt, or out of
+/// range reads as the shipped default.
+pub fn load_questions_split() -> u8 {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return QUESTIONS_DEFAULT_SPLIT;
+    }
+    read_raw()
+        .questions_split
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u8::try_from(v).ok())
+        .filter(|p| (20..=80).contains(p))
+        .unwrap_or(QUESTIONS_DEFAULT_SPLIT)
+}
+
+/// Persist the questions view's split, clamped to the legal range.
+pub fn save_questions_split(pct: u8) {
+    let clamped = pct.clamp(20, 80);
+    mutate(|file| {
+        file.questions_split = serde_json::to_value(clamped).ok();
     });
 }
 
@@ -963,7 +992,7 @@ mod tests {
         assert!(!load_questions_show_done(), "absent reads hidden");
         std::fs::write(
             view_path(),
-            r#"{"questions_block":"sure","questions_height":99,"questions_show_done":3}"#,
+            r#"{"questions_block":"sure","questions_height":99,"questions_show_done":3,"questions_split":95}"#,
         )
         .unwrap();
         assert!(load_questions_block(), "corrupt reads visible");
@@ -973,6 +1002,9 @@ mod tests {
             "corrupt height reads the default"
         );
         assert!(!load_questions_show_done(), "corrupt reads hidden");
+        assert_eq!(load_questions_split(), QUESTIONS_DEFAULT_SPLIT);
+        save_questions_split(95);
+        assert_eq!(load_questions_split(), 80, "an out-of-range save clamps");
         save_questions_block(false);
         save_questions_height(12);
         save_questions_show_done(true);

@@ -3,7 +3,7 @@
 The dispatch lives in fno.post_merge_route: one warm/cold/defer decision
 (:func:`decide_post_merge_route`), a durable receipt (:func:`emit_receipt`),
 marker + claim dedup, and a verb-first cold path that runs
-``fno do pr ritual <n> --autonomous`` directly (no bg thread, no ``/fno:pr merged``
+``fno do pr ritual <n> --autonomous`` directly (no bg thread, no ``/fno:ship pr merged``
 LL wrapper). The ``run_verb`` and ``warm_inject`` seams are injected so no real
 subprocess or inject fires.
 """
@@ -718,7 +718,7 @@ def test_cross_detector_one_handoff_per_sha(tmp_path, monkeypatch):
 
 def test_no_bg_or_merged_wrapper_in_production_post_merge():
     """AC10-EDGE: production post-merge code contains zero ``--substrate bg``,
-    ``pr-merged-<n>`` worker names, or ``/fno:pr merged`` LLM wrappers, and the
+    ``pr-merged-<n>`` worker names, or ``/fno:ship pr merged`` LLM wrappers, and the
     mechanical verb ``fno do pr ritual`` is the cold path."""
     import inspect
 
@@ -728,7 +728,7 @@ def test_no_bg_or_merged_wrapper_in_production_post_merge():
     assert "--substrate bg" not in body
     assert "pr-merged-" not in body
     assert "fno do pr ritual" in body  # the verb-first cold + warm command
-    assert "/fno:pr merged" not in body  # no whole-ritual LLM wrapper
+    assert "/fno:ship pr merged" not in body  # no whole-ritual LLM wrapper
 
 
 def test_sole_production_dispatch_entrypoint():

@@ -459,29 +459,19 @@ pub(crate) async fn mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Left) => {
-            let close = view
-                .feed_detail
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col));
-            if close {
-                view.feed_detail = None;
-                return Ok(());
-            }
-            match hit_at(view, rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.feed_detail.as_mut() {
-                        m.popup.select(t);
-                    }
-                    execute_selected(view, sock_w).await?;
+        MouseKind::Press(MouseButton::Left) => match hit_at(view, rep.row, rep.col) {
+            Some(t) => {
+                if let Some(m) = view.feed_detail.as_mut() {
+                    m.popup.select(t);
                 }
-                None => {
-                    if !block_contains(view, rep.row, rep.col) {
-                        view.feed_detail = None;
-                    }
+                execute_selected(view, sock_w).await?;
+            }
+            None => {
+                if !block_contains(view, rep.row, rep.col) {
+                    view.feed_detail = None;
                 }
             }
-        }
+        },
         _ => {}
     }
     Ok(())

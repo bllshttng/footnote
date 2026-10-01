@@ -34,8 +34,8 @@ class Decision:
     """The watcher's verdict for one PR at one point in time.
 
     ``kind`` is the action to take:
-    - ``"merge"``  -- fire /fno:pr merged headlessly for this PR.
-    - ``"review"`` -- fire /fno:pr check headlessly (new reviewer activity).
+    - ``"merge"``  -- fire /fno:ship pr merged headlessly for this PR.
+    - ``"review"`` -- fire /fno:ship pr check headlessly (new reviewer activity).
     - ``"noop"``   -- no action needed; update the watermark timestamp only.
     - ``"park"``   -- the PR is closed or stale; remove it from the polling
                       set (task 1.2 will implement the parking-lot write).

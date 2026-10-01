@@ -73,9 +73,9 @@ fi
 
 See the repo-root `docs/preflight.md` for the full convention.
 
-## Link PR→node (right after /pr create, before any merge)
+## Link PR→node (right after /fno:ship pr create, before any merge)
 
-The moment `/pr create` returns the new PR number/URL - for EVERY ship run,
+The moment `/fno:ship pr create` returns the new PR number/URL - for EVERY ship run,
 including `no-merge` - link it to the backlog node so the selection guard
 (`_has_unmerged_open_pr`, `cli/src/fno/graph/cli.py:68`) sees the node is in
 flight. Without this, a `no-merge` worker opens the PR, exits, its PID-based

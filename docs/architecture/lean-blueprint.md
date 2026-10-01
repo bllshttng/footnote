@@ -27,7 +27,7 @@ Each transition corresponds to a pipeline phase:
 | `design` | `/think` at doc creation time |
 | `ready` | `/blueprint` after appending execution sections |
 | `in_progress` | `/execute` or `/target` when execution starts |
-| `in_review` | `/pr create` on PR creation |
+| `in_review` | `/fno:ship pr create` on PR creation |
 | `done` | the merge, via the write-time projection |
 
 ## Section ownership
@@ -60,7 +60,7 @@ Any attempt to write outside this set exits with code 2 and names the offending 
 | kill_criteria | `/blueprint` |
 | Implementation Log | `/execute` or `/target` |
 | Review Verdicts | `/review sigma` |
-| Ship Record | `/pr create` and `/ship` |
+| Ship Record | `/fno:ship pr create` and `/ship` |
 
 For the full section-ownership reference including valid/invalid transition examples, atomic-mutation contract, and greenfield/brownfield auto-detect logic, see [skills/blueprint/references/single-doc-spec.md](../../skills/blueprint/references/single-doc-spec.md).
 

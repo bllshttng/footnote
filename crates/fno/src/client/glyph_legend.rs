@@ -29,7 +29,10 @@ fn lattice_label(s: LatticeState) -> &'static str {
 /// skip, Enter cannot fire, click swallowed) - the popup's documented
 /// disabled-Entry semantics.
 pub(super) fn legend_rows() -> Vec<PopupRow> {
-    let mut rows = vec![PopupRow::Header("sideline glyphs".into())];
+    let mut rows = vec![
+        PopupRow::Header(String::new()),
+        PopupRow::Header("sideline glyphs".into()),
+    ];
     rows.extend(SEVERITY_ORDER.iter().map(|&s| PopupRow::Entry {
         glyph: lattice_glyph(s).0.to_string(),
         label: lattice_label(s).to_string(),

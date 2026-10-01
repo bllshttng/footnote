@@ -47,12 +47,12 @@ use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, Swee
 use self::rename_overlay::RenameTarget;
 use row_menu::{build_row_menu, build_tab_menu};
 
-// The placement pickers (attach `p`, portal `P`) and the launch moment
-// (terminal guard + splash) live in their own modules; client.rs is
-// shrink-only under the file-budget gate.
+// Pickers, the launch moment and the snapshot action live in their own
+// modules: client.rs is shrink-only under the file-budget gate.
 pub(crate) mod attach_handshake;
 mod launch;
 mod placement_pickers;
+pub mod snapshot;
 
 use self::placement_pickers::{
     attach_place_keys, portal_pick_keys, AttachPlace, PortalPick, PortalPickDecision,
@@ -89,8 +89,7 @@ pub(crate) use overlay_paint::family_b_origin;
 use sideline::sideline_column_rects;
 
 mod row_stamp;
-// (v75) The sideline's density width rules, moved out under the file-budget
-// ratchet while the SessionRetired arms landed.
+// The sideline's density width rules.
 mod density_width;
 mod name_fit;
 use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, RowArm, RowStamp};
@@ -976,6 +975,7 @@ struct View {
     /// question answer and a MINE write are independent, so one in flight
     /// never blocks the other).
     question_action: Option<(String, crate::needs_overlay::AnswerPick)>,
+    question_archive: Option<Vec<String>>,
     question_acting: bool,
     /// Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
@@ -1127,6 +1127,9 @@ struct View {
     /// A left-button release paired with a click on a modal's close chip must
     /// stay swallowed after that click closes the modal.
     modal_release_swallow: bool,
+    /// The esc-close spans the last compose painted: the one list a tap
+    /// checks, whichever overlay drew them.
+    close_chips: std::cell::RefCell<Vec<chrome::CloseSpan>>,
     /// The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -1422,6 +1425,7 @@ mod frame_tick;
 mod pane_paint;
 // Region input ownership + the mouse pre-pass, moved out of handle_stdin
 // under the file-budget ratchet.
+mod esc_close;
 mod region_focus;
 pub(crate) use needs_view::needs_overlay_lines;
 
@@ -1892,6 +1896,7 @@ mod chrome_hit;
 mod config_set;
 mod lane_entry;
 mod node_detail;
+pub(crate) use node_detail::wrap_line;
 mod org_board;
 mod org_detail;
 mod org_graph;
@@ -2074,6 +2079,7 @@ impl View {
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
+            question_archive: None,
             question_acting: false,
             needs_want: false,
             needs_inflight: false,
@@ -2125,6 +2131,7 @@ impl View {
             press_hold: None,
             confirm: None,
             modal_release_swallow: false,
+            close_chips: Default::default(),
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -2668,7 +2675,7 @@ impl View {
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
-        self.keys_modal = Some(keys_modal::build_keys_modal());
+        self.keys_modal = Some(keys_modal::build_keys_modal().fit(self.term.1));
         self.keys_modal_esc.clear();
     }
 
@@ -3122,29 +3129,6 @@ impl View {
             .unwrap_or(false)
     }
 
-    /// True when `(row, col)` lands on any of a popup's `esc`-close hit spans:
-    /// the footer's `esc close` words, the Full title bar's ` esc ` chip, or a
-    /// Bare menu's inline bottom-border chip - every one of them is
-    /// `ESC_CLOSE_HIT`-tagged by `chrome::frame`/`top_border`/`bottom_border`,
-    /// so one generic scan over the rendered line's hits covers all three.
-    /// Checked BEFORE the entry hit routers so a close target is never
-    /// mistaken for a row index.
-    fn chrome_close_hit(&self, popup: &Popup, row: u16, col: u16) -> bool {
-        let r = popup.render(self.term);
-        let (r0, c0) = r.origin;
-        let (Some(li), Some(cc)) = (
-            (row as usize).checked_sub(r0),
-            (col as usize).checked_sub(c0),
-        ) else {
-            return false;
-        };
-        r.lines.get(li).is_some_and(|line| {
-            line.hits.iter().any(|(t, off, len)| {
-                *t == crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
-            })
-        })
-    }
-
     fn active_overlay_layout(&self) -> Option<OverlayLayout> {
         let rows = self.term.0 as usize;
         if let Some(action) = &self.confirm {
@@ -3186,30 +3170,6 @@ impl View {
             return Some(self.peek_overlay_layout(rows, peek));
         }
         None
-    }
-
-    fn cancel_active_overlay(&mut self) {
-        if self.confirm.take().is_some() {
-            return;
-        }
-        if self.create.take().is_some() {
-            self.create_esc.clear();
-            return;
-        }
-        if self.rename.take().is_some() {
-            self.rename_esc.clear();
-            return;
-        }
-        if self.recruit.take().is_some() {
-            self.recruit_esc.clear();
-            return;
-        }
-        if self.connections.take().is_some() {
-            return;
-        }
-        if self.peek.is_some() {
-            self.clear_peek();
-        }
     }
 
     /// Apply a `PeekBody` under the seq guard (AC1-FR): store `lines`
@@ -5162,6 +5122,7 @@ impl View {
         let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
+        chrome::close_chips_begin();
 
         let agents_full =
             self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
@@ -5465,6 +5426,7 @@ impl View {
                 }
             }
         }
+        *self.close_chips.borrow_mut() = chrome::close_chips_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,
@@ -8249,13 +8211,7 @@ async fn attach_and_run(
         // The questions block's kick: one fold every 10 s while the sideline
         // is shown, single-flight like the feed fold.
         questions::maybe_kick(&mut view, &questions_tx);
-        if let Some((qid, pick)) = view.question_action.take() {
-            let tx = question_act_tx.clone();
-            tokio::spawn(async move {
-                let result = crate::needs_overlay::answer(&qid, pick).await;
-                let _ = tx.send(result);
-            });
-        }
+        questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
             view.yard_want = false;
             view.yard_inflight = true;
@@ -9296,30 +9252,16 @@ fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
 }
 
 /// Family-B name and confirmation overlays own every pointer event while open.
-/// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
-/// cannot dismiss the modal or reach a pane underneath it. The Connections
-/// modal joins them. Peek does NOT: it is deliberately click-through (a
-/// right-press under it still opens the row's menu), so only its footer's
-/// close words are intercepted and every other event falls through.
+/// The pre-pass's esc-chip tap cancels them; outside clicks are swallowed so
+/// they cannot dismiss the modal or reach a pane underneath it. The
+/// Connections modal joins them. Peek does NOT: it is deliberately
+/// click-through (a right-press under it still opens the row's menu).
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
     let peek_open = view.peek.is_some();
     if !peek_open && consume_modal_close_gesture(view, rep.kind) {
         return true;
     }
-    let Some(layout) = view.active_overlay_layout() else {
-        return false;
-    };
-    if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
-        && layout.hit_at(rep.row, rep.col) == Some(crate::chrome::ESC_CLOSE_HIT)
-    {
-        view.cancel_active_overlay();
-        view.modal_release_swallow = true;
-        return true;
-    }
-    if peek_open {
-        return false;
-    }
-    true
+    view.active_overlay_layout().is_some() && !peek_open
 }
 
 /// Route one stdin chunk: the selector consumes keys while open (AC6-FR
@@ -10109,17 +10051,6 @@ async fn row_menu_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, bottom-border chip
-            // on a Bare menu) closes the popup; checked before the entry
-            // routers.
-            if view
-                .row_menu
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.row_menu = None;
-                return Ok(());
-            }
             match view.row_menu_hit(rep.row, rep.col) {
                 Some(t) => {
                     if let Some(m) = view.row_menu.as_mut() {
@@ -10218,7 +10149,7 @@ async fn execute_aux_action(
             view.aux_esc.clear();
         }
         AuxAction::OpenUpdate => {
-            view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
+            view.aux = Some(build_update_modal(view.update_outcome.as_ref()).fit(view.term.1));
             view.aux_esc.clear();
         }
         AuxAction::OpenSweep => {
@@ -10470,20 +10401,6 @@ async fn aux_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the popup; checked before the entry routers. A dismiss
-            // while a lane text entry is armed drops the buffer with it, so
-            // the entry can never outlive the modal and capture keys later.
-            if view
-                .aux
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.lane.clear_entry();
-                theme_import_ui::reset(view);
-                view.aux = None;
-                return Ok(StdinFlow::Continue);
-            }
             match view.aux_hit(rep.row, rep.col) {
                 Some(t) => {
                     // While a lane text entry owns the keyboard, row
@@ -10857,6 +10774,9 @@ async fn selector_keys(
         let Some(cur) = view.selector else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
+        if questions::selector_key(view, k, cur) {
+            continue;
+        }
         // Any key other than a J/K reorder drops the cursor-follow intent, so a
         // later Layout re-anchors normally instead of chasing a stale squad.
         if k != b'J' && k != b'K' {
