@@ -113,7 +113,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     let layout = c.wait_layout(10, "directional pane-run", |l| {
@@ -158,7 +159,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     c.wait_layout(10, "split fallback adds a tab", |l| {
@@ -713,7 +715,8 @@ fn exact_placement(at: u64, split: Dir) -> PanePlacement {
         thread_pane: false,
         fit: false,
     }
-}
+
+    human: false,}
 
 #[test]
 fn exact_current_places_beside_anchor_not_focus() {
@@ -742,7 +745,8 @@ fn exact_current_places_beside_anchor_not_focus() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     let layout = c.wait_layout(10, "two panes", |l| l.panes.len() == 2 && l.focus == pane2);
@@ -793,7 +797,8 @@ fn exact_current_refuses_stale_anchor_selector_and_min_size() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     c.wait_layout(10, "two panes", |l| l.panes.len() == 2);
@@ -863,7 +868,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     let layout = c.wait_layout(10, "two panes focus on pane2", |l| {
@@ -889,7 +895,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     assert!(
@@ -922,7 +929,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     c.wait_layout(10, "legacy fallback adds a tab", |l| {
@@ -994,7 +1002,8 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-        },
+        
+            human: false,},
     )
     .unwrap();
     let layout = c.wait_layout(10, "two panes", |l| l.panes.len() == 2 && l.focus == pane2);
