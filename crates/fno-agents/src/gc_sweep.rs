@@ -1218,13 +1218,13 @@ pub(crate) fn mux_pane_kill_stop(
     }
 }
 
-/// Positive death evidence for a claude row, read off the `claude agents
-/// --json --all` snapshot. The decision itself moved to
-/// `daemon::roster_death::row_death_reason` so rm, the merge reaper, the
-/// pane-stop fallback, and the sweep share one fno-first verdict; the
-/// sweep's own wiring (verdict plus drift event) lives in its row pass.
-///
-/// `blocked` is NOT terminal: the session is waiting for input, so it holds.
+// Positive death evidence for a claude row, read off the `claude agents
+// --json --all` snapshot. The decision itself moved to
+// `daemon::roster_death::row_death_reason` so rm, the merge reaper, the
+// pane-stop fallback, and the sweep share one fno-first verdict; the
+// sweep's own wiring (verdict plus drift event) lives in its row pass.
+//
+// `blocked` is NOT terminal: the session is waiting for input, so it holds.
 
 /// The three witnesses that say a worker finished. Any one suffices: a
 /// transcript older than the grace window, a held pid that answers ESRCH,

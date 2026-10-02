@@ -209,11 +209,16 @@ fn fleet_rows_from(
             }
         }
     }
+    // One pass over the vendor rows: sid -> row, so the spine join is a
+    // map lookup, not a rescan per spine entry.
+    let mut vendor_by_sid: BTreeMap<String, &Value> = BTreeMap::new();
+    for r in &raw.rows {
+        if let Some(sid) = raw_row_sid(r) {
+            vendor_by_sid.entry(sid).or_insert(r);
+        }
+    }
     for (sid, e) in spine.iter() {
-        let vendor = raw
-            .rows
-            .iter()
-            .find(|r| raw_row_sid(r).as_deref() == Some(*sid));
+        let vendor = vendor_by_sid.get(*sid).copied();
         let (state, warn) = match vendor {
             Some(r) => row_state(r),
             None => row_state(&json!({"status": status_word(e.status)})),
