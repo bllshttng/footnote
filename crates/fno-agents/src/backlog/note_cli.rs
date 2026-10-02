@@ -1264,9 +1264,9 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The comment tests read the claims state through `notice_holder`'s
+    /// The comment test reads the claims state through `notice_holder`'s
     /// holder probe; the hermetic guard demands a temp root, and the env is
-    /// process-global, so the three tests serialize on one mutex.
+    /// process-global, so the tests serialize on one mutex.
     fn claims_root_pin() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         let guard = LOCK
@@ -1279,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_post_names_the_holder_pointer() {
+    fn comment_thread_cli_contract() {
         let (_lock, _root) = claims_root_pin();
         let (_dir, graph) = comment_graph();
         let graph = graph.to_string_lossy().into_owned();
@@ -1293,9 +1293,11 @@ mod tests {
         ]));
         assert_eq!(rc, 0, "a user comment posts");
         let store = super::super::api::Store::new(graph.as_ref());
-        let thread =
+        let read = || {
             super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
-                .unwrap();
+                .unwrap()
+        };
+        let thread = read();
         assert_eq!(thread.nodes.len(), 1);
         assert_eq!(
             thread.nodes[0].extras.get("author").and_then(Value::as_str),
@@ -1305,21 +1307,6 @@ mod tests {
             thread.nodes[0].extras.get("state").and_then(Value::as_str),
             Some("open")
         );
-    }
-
-    #[test]
-    fn comment_reply_done_without_ref_exits_one() {
-        let (_lock, _root) = claims_root_pin();
-        let (_dir, graph) = comment_graph();
-        let graph_path = graph.clone();
-        let graph = graph.to_string_lossy().into_owned();
-        run_comment(&argv(&[
-            "--graph", &graph, "x-t1", "ask", "--author", "user",
-        ]));
-        let store = super::super::api::Store::new(graph_path.as_ref());
-        let thread =
-            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
-                .unwrap();
         let cid = thread.nodes[0]
             .extras
             .get("comment_id")
@@ -1330,27 +1317,6 @@ mod tests {
             "--graph", &graph, "x-t1", "--reply", &cid, "--state", "done", "landed",
         ]));
         assert_eq!(rc, 1, "done without a ref refuses");
-    }
-
-    #[test]
-    fn comment_reply_moves_the_thread_head() {
-        let (_lock, _root) = claims_root_pin();
-        let (_dir, graph) = comment_graph();
-        let graph_path = graph.clone();
-        let graph = graph.to_string_lossy().into_owned();
-        run_comment(&argv(&[
-            "--graph", &graph, "x-t1", "ask", "--author", "user",
-        ]));
-        let store = super::super::api::Store::new(graph_path.as_ref());
-        let thread =
-            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
-                .unwrap();
-        let cid = thread.nodes[0]
-            .extras
-            .get("comment_id")
-            .and_then(Value::as_str)
-            .unwrap()
-            .to_string();
         let rc = run_comment(&argv(&[
             "--graph",
             &graph,
@@ -1363,10 +1329,8 @@ mod tests {
             "node x-9 filed",
             "on it",
         ]));
-        assert_eq!(rc, 0);
-        let thread =
-            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
-                .unwrap();
+        assert_eq!(rc, 0, "an accepted reply with a ref lands");
+        let thread = read();
         assert_eq!(thread.nodes.len(), 2);
         assert_eq!(
             thread.nodes[0].extras.get("state").and_then(Value::as_str),
