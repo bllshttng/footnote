@@ -248,6 +248,7 @@ pub fn select_lane_fill(
 
     let mut selected: Vec<Value> = Vec::new();
     let mut picked_ids: BTreeSet<String> = BTreeSet::new();
+    let mut failed_ids: BTreeSet<String> = BTreeSet::new();
     let fill = (|| -> Result<(), String> {
         while selected.len() < max_lanes {
             // A fresh ready list per pick keeps distinctness recomputed after
@@ -267,7 +268,7 @@ pub fn select_lane_fill(
                 let Some(nid) = node.get("id").and_then(Value::as_str) else {
                     continue;
                 };
-                if picked_ids.contains(nid) {
+                if picked_ids.contains(nid) || failed_ids.contains(nid) {
                     continue;
                 }
                 let Some(reason) = classify_lane_candidate(
@@ -351,7 +352,11 @@ pub fn select_lane_fill(
                     }
                     Err(_) => {
                         push_excluded(&mut report, &pick_excluded);
-                        continue; // slot contended: try the next candidate
+                        // Excluding the candidate terminates the fill: a
+                        // bare continue re-picks the same node forever when
+                        // the store errors every round.
+                        failed_ids.insert(node_id.clone());
+                        continue;
                     }
                 }
             }
