@@ -557,11 +557,16 @@ async fn header_rows() {
         crate::client::region_focus::RegionOwner::Pane,
         "closing returns typing to the pane"
     );
-    // A lone Esc through the same fold closes too.
+    // A lone Esc through the same fold closes too: the fold carries a lone
+    // ESC, and the quiet-window flush (the empty read) releases it.
     let mut v = view_with_rows(vec![]);
     v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
     v.region_owner = crate::client::region_focus::RegionOwner::Feed;
     feed_view::feed_keys(&mut v, &[0x1b], &mut writer)
+        .await
+        .unwrap();
+    assert!(v.feed.is_some(), "the carried Esc has not fired yet");
+    feed_view::feed_keys(&mut v, &[], &mut writer)
         .await
         .unwrap();
     assert!(v.feed.is_none(), "esc closes the focused panel");
