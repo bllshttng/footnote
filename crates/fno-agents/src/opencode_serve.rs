@@ -75,7 +75,24 @@ pub struct ServeHandle {
 /// the headless lane and every other fno worker lane; without it every tool
 /// call that opencode does not allow by config evaluates to `ask`, and an
 /// unanswered ask is a hang, not a refusal.
-const SERVE_CONFIG_JSON: &str = r#"{"permission":{"*":"allow"}}"#;
+///
+/// The key is contract-specific: 1.x reads a `permission` MAP; 2.x reads an
+/// ordered `permissions` RULE LIST (Config.md "Permissions", rule shape
+/// `{action, resource, effect}`), so a v2 serve handed the 1.x map reads no
+/// rules and every tool call lands on `ask` - a hang, not a refusal.
+const SERVE_CONFIG_JSON_V1: &str = r#"{"permission":{"*":"allow"}}"#;
+const SERVE_CONFIG_JSON_V2: &str =
+    r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}"#;
+
+/// The serve config for the contract the serve binary reports. One bounded
+/// `--version`; an unknown version renders the 2.x posture, matching the
+/// installer's v2-default.
+fn serve_config_json(bin: &str) -> &'static str {
+    match crate::opencode_install::classify_contract(bin) {
+        (crate::opencode_install::OpencodeContract::V2, _) => SERVE_CONFIG_JSON_V2,
+        (crate::opencode_install::OpencodeContract::V1, _) => SERVE_CONFIG_JSON_V1,
+    }
+}
 
 /// Budgets: how long to wait for a fresh serve to print its port, and the
 /// per-call HTTP timeouts. A serve boot is a node CLI start (~1-2s measured);
@@ -339,7 +356,7 @@ impl crate::harness_daemon::HarnessDaemonAdapter for OpenCodeDaemonAdapter<'_> {
         if let Some(parent) = config.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir for serve config: {e}"))?;
         }
-        std::fs::write(&config, SERVE_CONFIG_JSON)
+        std::fs::write(&config, serve_config_json("opencode"))
             .map_err(|e| format!("write serve config {:?}: {e}", config))?;
         // Fresh token per serve: Basic-auth material for every request (the serve
         // is booted with OPENCODE_SERVER_PASSWORD), generated from /dev/urandom.
@@ -466,6 +483,26 @@ fn permission_rules_for(dirs: &[String]) -> serde_json::Value {
                 "permission": "external_directory",
                 "pattern": pattern,
                 "action": "allow",
+            }));
+        }
+    }
+    serde_json::json!(rules)
+}
+
+/// The 2.x twin of [`permission_rules_for`], same `<dir>` + `<dir>/*`
+/// boundary pair. v2's session PATCH (openapi.json `session.update`) accepts
+/// a `permissions` rule list shaped `{action, resource, effect}`, so the
+/// grant ports 1:1: `external_directory` allow rows with the dir and its
+/// `/*` boundary as `resource` (Permissions.md "Directories"; `~`/`$HOME`
+/// expand at load, so absolute paths pass through raw).
+fn permission_rules_for_v2(dirs: &[String]) -> serde_json::Value {
+    let mut rules = Vec::new();
+    for d in dirs.iter().filter(|d| !d.is_empty()) {
+        for pattern in [d.clone(), format!("{d}/*")] {
+            rules.push(serde_json::json!({
+                "action": "external_directory",
+                "resource": pattern,
+                "effect": "allow",
             }));
         }
     }
@@ -718,11 +755,20 @@ fn dispatch_opencode_serve_inner(
     // The serve-level config already allows; these rules are the scoped
     // record, so a merge failure is a named note, not a dead spawn.
     if !state_dirs.is_empty() {
+        let contract = crate::opencode_install::classify_contract("opencode").0;
+        let body = match contract {
+            crate::opencode_install::OpencodeContract::V2 => {
+                serde_json::json!({"permissions": permission_rules_for_v2(&state_dirs)})
+            }
+            crate::opencode_install::OpencodeContract::V1 => {
+                serde_json::json!({"permission": permission_rules_for(&state_dirs)})
+            }
+        };
         match http_json(
             &serve.base_url,
             "PATCH",
             &format!("/session/{session_id}"),
-            Some(&serde_json::json!({"permission": permission_rules_for(&state_dirs)})),
+            Some(&body),
             Some(&serve.token),
             HTTP_CALL_TIMEOUT,
         ) {
@@ -1397,12 +1443,17 @@ pub enum ArchiveOutcome {
     Survived,
 }
 
-/// Compare the leading three dotted integers of `reported` against `min`. An
-/// unparseable version answers false: a version nobody can read is not
-/// evidence of a supported one.
+/// Compare the leading three dotted integers of `reported` against `min`.
+/// Anything before the first digit is skipped (`opencode v2.0.19`, bare
+/// `1.18.33`); an unparseable version answers false: a version nobody can
+/// read is not evidence of a supported one.
 pub(crate) fn version_at_least(reported: &str, min: (u32, u32, u32)) -> bool {
-    let nums: Vec<u32> = reported
-        .trim()
+    let trimmed = reported.trim();
+    let from_digit = match trimmed.find(|c: char| c.is_ascii_digit()) {
+        Some(i) => &trimmed[i..],
+        None => "",
+    };
+    let nums: Vec<u32> = from_digit
         .trim_start_matches('v')
         .split('.')
         .take(3)
@@ -1576,6 +1627,54 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn serve_config_and_grant_match_the_serve_binary_contract() {
+        let base =
+            std::env::temp_dir().join(format!("fno-ocserve-contract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let stub = |name: &str, version: &str| {
+            let path = base.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            path
+        };
+        let v1 = stub("oc-v1", "1.18.33");
+        let v2 = stub("oc-v2", "2.0.19");
+        // 1.x: the serve config is byte-identical to the shipped 1.x posture,
+        // and the session grant keeps the 1.x pattern-row shape.
+        assert_eq!(
+            serve_config_json(v1.to_str().unwrap()),
+            SERVE_CONFIG_JSON_V1
+        );
+        let rules = permission_rules_for(&["/state".to_string()]);
+        assert_eq!(rules[0]["permission"], "external_directory");
+        assert_eq!(rules[0]["pattern"], "/state");
+        // 2.x: the config carries the ordered `permissions` list (one
+        // allow-all rule, no `permission` key) and the grant rows carry the
+        // v2 `{action, resource, effect}` shape.
+        assert_eq!(
+            serve_config_json(v2.to_str().unwrap()),
+            SERVE_CONFIG_JSON_V2
+        );
+        let grant = permission_rules_for_v2(&["/state".to_string()]);
+        let arr = grant.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["action"], "external_directory");
+        assert_eq!(arr[0]["resource"], "/state");
+        assert_eq!(arr[1]["resource"], "/state/*");
+        for rule in arr {
+            assert_eq!(rule["effect"], "allow");
+            assert!(rule.get("permission").is_none());
+            assert!(rule.get("pattern").is_none());
+        }
+        assert!(permission_rules_for_v2(&[]).as_array().unwrap().is_empty());
     }
 
     #[test]
