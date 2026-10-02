@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn reconcile_status_projects_from_an_archived_node() {
-        // x-4e31: the node shipped and was archived - still projectable.
+        // The node shipped and was archived - still projectable.
         // Archive residents are rows carrying archived_at, not a second file;
         // here the archive file itself carries the row.
         let dir = tempfile::tempdir().unwrap();

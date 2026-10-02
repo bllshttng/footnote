@@ -217,7 +217,7 @@ impl SweepResult {
 
 /// Scan every `*.md` in *plans_dir*, classify + (if apply) rewrite drift.
 /// Each file's read-decide-write runs under its sidecar `PlanDocLock`, so a
-/// concurrent projection is never clobbered (closes x-0d24).
+/// concurrent projection is never clobbered mid-rewrite.
 pub fn sweep(plans_dir: &Path, apply: bool, status_map: &HashMap<String, String>) -> SweepResult {
     let mut res = SweepResult::default();
     if !plans_dir.is_dir() {
@@ -682,8 +682,8 @@ mod tests {
     #[test]
     fn plan_link_id_unwraps_single_element_list() {
         let f = |kv: &str| fields_of(kv);
-        assert_eq!(f("claims: [x-1d91]"), Some("x-1d91".to_string()));
-        assert_eq!(f("node: [x-aa95]"), Some("x-aa95".to_string()));
+        assert_eq!(f("claims: [t-1d91]"), Some("t-1d91".to_string()));
+        assert_eq!(f("node: [t-aa95]"), Some("t-aa95".to_string()));
     }
 
     #[test]
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn plan_link_id_returns_none_for_unusable_link_shapes() {
-        assert_eq!(plan_link_id(&fields_of("claims: [x-1d91, x-aa95]")), None);
+        assert_eq!(plan_link_id(&fields_of("claims: [t-1d91, t-aa95]")), None);
         assert_eq!(plan_link_id(&fields_of("claims: []")), None);
         assert_eq!(plan_link_id(&fields_of("claims:")), None);
     }
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn sweep_leaves_both_vocabularies_untouched() {
-        // x-3ad5: mid-migration, one doc on each spelling. Both are known, so
+        // Mid-migration: one doc on each spelling. Both are known, so
         // the sweep rewrites neither - a retired spelling is valid input, not
         // drift.
         let dir = tmp_dir("vocab");

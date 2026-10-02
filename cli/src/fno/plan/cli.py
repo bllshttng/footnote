@@ -579,8 +579,8 @@ def reconcile_status(
         typer.echo(f"  ! plan-doc writer unreachable ({exc}); run `fno doctor`", err=True)
         raise typer.Exit(code=1) from exc
     except RuntimeError as exc:
-        # A stale keeper predates the op (x-d149's stamp-client pattern): a
-        # skipped sweep must not read as a clean run.
+        # A stale keeper predates the op (the plan-doc stamp clients'
+        # stale-keeper pattern): a skipped sweep must not read as a clean run.
         if "unknown store method" not in str(exc) and "unknown plan_docs op" not in str(exc):
             raise
         typer.echo(f"  ! {exc} - run `fno doctor update`", err=True)
