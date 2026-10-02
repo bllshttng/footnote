@@ -24,6 +24,7 @@ from paths import MANIFEST, RUNS, WS
 HARBOR = ["uvx", "--from", "harbor==0.23.0", "harbor"]
 SMOKE_TASK = "terminal-bench/adaptive-rejection-sampler"
 MODEL = "glm-5.3-flash"
+CLAUDE_MODEL = f"{MODEL}[1m]"
 ZAI_ANTHROPIC = "https://api.z.ai/api/anthropic"
 ZAI_OPENAI = "https://api.z.ai/api/coding/paas/v4"
 ARMS = ["claude-code", "opencode", "pi", "terminus-2", "zcode"]
@@ -48,10 +49,11 @@ def agent(arm: str, key: str) -> tuple[dict, list[str]]:
     """Return (agent config, container env rows) for one arm."""
     if arm == "claude-code":
         env = [f"ANTHROPIC_BASE_URL={ZAI_ANTHROPIC}", f"ANTHROPIC_AUTH_TOKEN={key}", "API_TIMEOUT_MS=600000"]
-        env += [f"{v}={MODEL}" for v in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                                         "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                                         "ANTHROPIC_DEFAULT_FABLE_MODEL")]
-        return ({"import_path": "harbor.agents.installed.claude_code:ClaudeCode", "model_name": MODEL,
+        # Amendment 10: Claude Code takes the 1M context window from the `[1m]` suffix.
+        env += [f"{v}={CLAUDE_MODEL}" for v in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                                                "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL")]
+        env.append(f"ANTHROPIC_DEFAULT_HAIKU_MODEL={MODEL}")
+        return ({"import_path": "harbor.agents.installed.claude_code:ClaudeCode", "model_name": CLAUDE_MODEL,
                  "kwargs": {"reasoning_effort": "high"}}, env)
     if arm == "opencode":
         return ({"import_path": "harbor.agents.installed.opencode:OpenCode",

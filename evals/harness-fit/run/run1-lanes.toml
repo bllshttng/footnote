@@ -8,8 +8,8 @@ subagents = 1
 [[routing.models]]
 name = "harness-fit-claude"
 harness = "claude"
-model = "glm-5.3-flash"
-route = "zai/glm-5.3-flash"
+model = "glm-5.3-flash[1m]"
+route = "zai/glm-5.3-flash[1m]"
 effort = "high"
 account = "zai"
 band = "medium"
