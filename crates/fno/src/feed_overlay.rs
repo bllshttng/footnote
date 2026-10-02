@@ -214,7 +214,9 @@ pub fn event_fields(item: &FeedItem, ctx: &EventCtx) -> crate::search_query::Fie
     let mut f = Fields::new();
     let push = |f: &mut Fields, key: &str, val: Option<String>| {
         if let Some(v) = val.filter(|v| !v.is_empty()) {
-            let v = v.to_lowercase();
+            // Stamps stay as stored: the page's stamp parser reads the
+            // RFC3339 markers case-sensitively.
+            let v = if key == "ts" { v } else { v.to_lowercase() };
             let slot = f.entry(key.to_string()).or_default();
             if !slot.contains(&v) {
                 slot.push(v);

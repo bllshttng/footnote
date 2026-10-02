@@ -514,11 +514,11 @@ function splitAlts(value) {
 // a bare date - the same inputs crate search_query.rs answers.
 function stampEpoch(s) {
   s = String(s);
-  if (/(Z|[+-]\d{2}:\d{2})$/.test(s)) {
+  if (/(Z|[+-]\d{2}:\d{2})$/i.test(s)) {
     const t = Date.parse(s);
     return isNaN(t) ? null : Math.floor(t / 1000);
   }
-  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2}))?/.exec(s);
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2}))?/i.exec(s);
   if (!m) return null;
   return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)) / 1000;
 }
@@ -2366,6 +2366,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     searchInput.value = "";
     searchClear.hidden = true;
     state.q = "";
+    reparse();
     hideRecent();
     syncUrl();
     fetchBoard();

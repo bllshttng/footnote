@@ -1800,7 +1800,14 @@ pub(crate) fn search_fields(
 /// One lowercase value into a field slot, deduplicated, blanks dropped.
 fn push_val(f: &mut crate::search_query::Fields, key: &str, val: Option<String>) {
     if let Some(v) = val.filter(|v| !v.is_empty()) {
-        let v = v.to_lowercase();
+        // Stamps stay as stored: the page's stamp parser reads the
+        // RFC3339 `T`/`Z` case-sensitively, and a lowercased stamp would
+        // lose the time of day on the static page.
+        let v = if matches!(key, "created" | "updated" | "done" | "ts") {
+            v
+        } else {
+            v.to_lowercase()
+        };
         let slot = f.entry(key.to_string()).or_default();
         if !slot.contains(&v) {
             slot.push(v);
