@@ -1094,6 +1094,11 @@ pub(crate) fn resolve_prefix(prefix: &str) -> Result<Resolved, String> {
 mod tests {
     use super::*;
 
+    /// One temp root per test; env-mutating tests share the process, so the
+    /// mutex keeps FNO_* pins from racing.
+    static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
+
     fn temp_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "chats-test-{name}-{}-{}",
@@ -1116,6 +1121,13 @@ mod tests {
 
     #[test]
     fn chats_store_contracts() {
+        // The recipient-key read resolves the registry through AgentsHome;
+        // pin a declared test root or the home-fallback fence fires.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home_pin = std::env::temp_dir().join(format!("chats-test-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home_pin).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &home_pin);
+
         // --- derivation: pair symmetry, width, channel divergence (AC3).
         let ab = chat_id_for_pair("alpha", "beta");
         assert_eq!(
@@ -1230,6 +1242,8 @@ mod tests {
         record_at(&chats, &db, &bus, &other2).unwrap();
         let err = resolve_prefix_at(&db, &chats, "fmail-11111111").unwrap_err();
         assert!(err.contains("ambiguous"), "{err}");
+        let dd = bus_line("fmail-dddddddddddd", "sess-a", "sess-e", "send");
+        record_at(&chats, &db, &bus, &dd).unwrap();
         let ok = resolve_prefix_at(&db, &chats, "fmail-dddddddddddd").unwrap();
         assert_eq!(ok.id, "fmail-dddddddddddd");
         assert_eq!(ok.from_key, "sess-a", "the reply adapter reads from_key");
