@@ -70,8 +70,8 @@ button, select, input { font: inherit; }
 .bars { display: flex; align-items: flex-end; gap: 2px; height: 32px; }
 .bars .bar { width: 7px; background: var(--subtext0); }
 .bars .bar.partial { opacity: .4; }
-#main { flex: 1 1 auto; overflow: auto; padding: 14px 16px 40px; }
-#board { display: grid; gap: 10px; width: max-content; min-width: 100%; }
+#main { flex: 1 1 auto; overflow: auto; padding: 0 16px 40px; }
+#board { display: grid; gap: 10px; width: max-content; min-width: 100%; margin-top: 14px; }
 .hcell { position: sticky; top: 0; z-index: 5; background: var(--base); color: var(--text); font-weight: 700; padding: 5px 2px; border-bottom: 1px solid var(--text); }
 .hcell.corner { left: 0; z-index: 6; color: var(--overlay1); }
 .lcell { position: sticky; left: 0; z-index: 4; background: var(--base); font-weight: 700; padding: 6px 2px; align-self: start; max-width: 150px; overflow-wrap: anywhere; }
@@ -90,6 +90,7 @@ button, select, input { font: inherit; }
 .more { color: var(--overlay1); font-size: 11px; padding: 2px 9px; }
 .empty { color: var(--overlay1); padding: 10px 2px; }
 #panel { position: fixed; top: var(--fno-nav-h, 0px); right: 0; bottom: 0; width: min(480px, 46vw); background: var(--mantle); border-left: 1px solid var(--surface1); overflow-y: auto; padding: 10px 14px 24px; z-index: 500; }
+#panelgrip { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
 #panel[hidden] { display: none; }
 #panelhead { display: flex; justify-content: flex-end; margin-bottom: 4px; }
 #panelclose { font-size: 11px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 26px; }
@@ -140,17 +141,19 @@ button, select, input { font: inherit; }
 .lfill { display: block; height: 100%; background: var(--green); }
 .lrows { display: flex; flex-direction: column; }
 .lsec.closed .lrows { display: none; }
-.lrow { display: grid; grid-template-columns: 92px 10ch minmax(0,1fr) 5ch auto; gap: 12px; align-items: baseline; text-align: left; background: none; color: var(--text); border: 0; border-top: 1px solid var(--surface0); padding: 6px 12px; cursor: pointer; }
+.lrow { display: grid; grid-template-columns: 92px 10ch minmax(0,1fr) 5ch 11ch 4ch 4ch 12ch 10ch 10ch; gap: 12px; align-items: baseline; text-align: left; background: none; color: var(--text); border: 0; border-top: 1px solid var(--surface0); padding: 6px 12px; cursor: pointer; }
+.lrow.lhdr { position: sticky; top: 0; z-index: 6; background: var(--base); border-bottom: 1px solid var(--surface1); }
 .lrow:hover { background: var(--base); }
 .lid { font-size: 11.5px; color: var(--subtext0); font-weight: 700; }
 .ltitle { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
 .lmeta { color: var(--overlay1); font-size: 11px; }
 .lrow.blocked .ltitle { color: var(--red); }
+.lrow.open, .card.open { background: var(--surface0); }
 .lrow.lchild .lid, .lrow.lchild .ltitle { padding-left: 2ch; }
 .lrow.lchild .ltitle { font-weight: 500; }
 .lrow > * { grid-row: 1; }
-.lrow > .lid { grid-column: 1; } .lrow > .ktag { grid-column: 2; } .lrow > .ltitle { grid-column: 3; } .lrow > .vote-pill { grid-column: 4; text-align: right; } .lrow > .lmeta { grid-column: 5; text-align: right; }
-@media (max-width: 720px) { .lrow { grid-template-columns: 7ch minmax(0,1fr) 5ch; } .lrow > .ktag, .lrow > .lmeta { display: none; } .lrow > .ltitle { grid-column: 2; } .lrow > .vote-pill { grid-column: 3; } }
+.lrow > .lid { grid-column: 1; } .lrow > .ktag { grid-column: 2; } .lrow > .ltitle { grid-column: 3; } .lrow > .vote-pill { grid-column: 4; text-align: right; } .lrow > .lstatus { grid-column: 5; } .lrow > .lprio { grid-column: 6; } .lrow > .lsize { grid-column: 7; } .lrow > .lking { grid-column: 8; } .lrow > .lcreated { grid-column: 9; } .lrow > .lupdated { grid-column: 10; text-align: right; }
+@media (max-width: 720px) { .lrow { grid-template-columns: 92px minmax(0,1fr) 5ch; } .lrow > .ktag, .lrow > .lstatus, .lrow > .lprio, .lrow > .lsize, .lrow > .lking, .lrow > .lcreated, .lrow > .lupdated { display: none; } .lrow > .ltitle { grid-column: 2; } .lrow > .vote-pill { grid-column: 3; } }
 .vote-pill { font: inherit; font-size: 10.5px; padding: 0; border: 0; color: var(--subtext0); cursor: pointer; background: none; }
 .vote-pill:hover { color: var(--text); }
 .vote-pill.z { color: var(--overlay1); }
@@ -187,14 +190,19 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
 #f-q-clear { flex: 0 0 auto; font-size: 12px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 30px; }
 #f-q-clear:hover { color: var(--text); border-color: var(--text); }
 #f-q-clear[hidden] { display: none; }
+#f-fuzzy { flex: 0 0 auto; font-size: 12px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 30px; }
+#f-fuzzy:hover { color: var(--text); border-color: var(--text); }
+#f-fuzzy.active { background: var(--text); color: var(--base); border-color: var(--text); }
 .controls { transition: background .3s; }
 .controls.pulse { background: var(--surface0); }
-/* A tapped node id copies itself; the row it sits in still opens. */
-.cidcopy { cursor: copy; }
-.cidcopy:hover { text-decoration: underline; color: var(--text); }
+/* A tapped node id copies itself; the row it sits in still opens. The hover
+   cue names the affordance without moving the row. */
+.cidcopy { cursor: pointer; position: relative; text-decoration: underline dotted var(--overlay1); text-underline-offset: 2px; }
+.cidcopy:hover { color: var(--text); }
+.cidcopy:hover::after { content: "copy"; position: absolute; left: 0; bottom: 100%; font-size: 10px; padding: 0 4px; background: var(--text); color: var(--base); pointer-events: none; }
 /* The j/k selection reads as a doubled border, so a blocked card's red edge
    and the selection stay visible at once. */
-.card.sel, .lrow.sel { box-shadow: inset 0 0 0 1px var(--text); }
+.card.sel, .lrow.sel { box-shadow: inset 0 0 0 2px var(--blue); }
 #toast { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); background: var(--text); color: var(--base); padding: 6px 14px; font-size: 12px; z-index: 1500; opacity: 0; transition: opacity .15s; pointer-events: none; }
 #toast.show { opacity: 1; }
 #sheet { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--crust); opacity: .92; z-index: 1200; }
@@ -206,7 +214,7 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
 #sheetclose { margin-top: 12px; font-size: 11px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 26px; }
 #sheetclose:hover { color: var(--text); border-color: var(--text); }
 @media (prefers-reduced-motion: reduce) { .card { transition: none; } #toast { transition: none; } }
-@media (max-width: 720px) { #panel { width: auto; left: 0; } .mark { flex-basis: 100%; } }
+@media (max-width: 720px) { #panel { width: auto !important; left: 0; } #panelgrip { display: none; } .mark { flex-basis: 100%; } }
 </style>
 </head>
 <body>
@@ -215,18 +223,19 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
 <div id="searchbar">
   <span class="slabel">find</span>
   <div id="searchbox">
-    <input id="f-q" type="search" placeholder="search id, title, label" autocomplete="off" spellcheck="false">
+    <input id="f-q" type="search" placeholder="search id, title, label, session" autocomplete="off" spellcheck="false">
     <kbd id="searchkey" title="focus search (/)">/</kbd>
     <div id="recent" hidden></div>
   </div>
   <button id="f-q-clear" type="button" hidden title="clear search">clear</button>
+  <button id="f-fuzzy" type="button" title="toggle fzf-style fuzzy matching">fuzzy</button>
 </div>
 <div class="controls" id="controls">
   <span class="mark">Ｆ<b>[no]</b> backlog</span>
   <span class="lbl">view <kbd title="switch kanban and list">tab</kbd></span>
   <button type="button" data-view="kanban">kanban</button>
   <button type="button" data-view="list">list</button>
-  <span class="lbl">lanes</span>
+  <span class="lbl">lanes <kbd title="cycle lanes">l</kbd></span>
   <button type="button" data-lanes="project">project</button>
   <button type="button" data-lanes="epic">epic</button>
   <button type="button" data-lanes="none">none</button>
@@ -238,6 +247,14 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
   <label>size <select id="f-size" multiple size="1"><option value="">any</option></select></label>
   <label>kind <select id="f-kind" multiple size="1"><option value="">any</option></select></label>
   <label>lead <select id="f-king" multiple size="1"><option value="">any</option></select></label>
+  <label>date <select id="f-dfield">
+    <option>created_at</option><option>updated_at</option><option>completed_at</option>
+  </select>
+  <select id="f-dop"><option>&gt;=</option><option>&gt;</option><option>=</option><option>&lt;</option><option>&lt;=</option>
+  </select>
+  <input id="f-ddate" type="date">
+  <button type="button" id="f-dadd" title="add the date filter">add</button>
+  <span id="f-dchips"></span>
   <label><input id="f-all" type="checkbox"> all projects</label>
   <button type="button" id="sheetbtn" title="keyboard shortcuts (?)">?</button>
 </div>
@@ -247,6 +264,7 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
 <div id="tiles" hidden></div>
 <div id="main"><div id="board"></div></div>
 <aside id="panel" hidden>
+  <div id="panelgrip" title="drag to resize"></div>
   <div id="panelhead"><button id="panelclose" type="button">close</button></div>
   <div id="panelbody"></div>
 </aside>
@@ -256,7 +274,8 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
     <table><tbody>
       <tr><td class="k">/  ctrl/cmd K</td><td>focus search</td></tr>
       <tr><td class="k">esc</td>  <td>clear search, then close details</td></tr>
-      <tr><td class="k">j / k</td><td>move the selection</td></tr>
+      <tr><td class="k">j / k  ↓ / ↑</td><td>move the selection</td></tr>
+      <tr><td class="k">l</td>    <td>cycle lanes (project, epic, none)</td></tr>
       <tr><td class="k">enter</td><td>open the selected details</td></tr>
       <tr><td class="k">y</td>    <td>copy the selected id</td></tr>
       <tr><td class="k">tab</td>  <td>switch kanban and list</td></tr>
@@ -291,11 +310,6 @@ function mergeBoard(last, next, now) {
 // What a session row can do from this page: the attach or resume command to
 // copy, or null when the row renders dim with the reason the model sent.
 // The page copies; it never launches.
-// The upvote command for one node: operator vote, evidence the operator
-// names. The snapshot page copies it; the served page posts the same argv.
-function voteText(id) {
-  return "fno backlog encounter " + id + " --operator --evidence \"REPLACE: what it cost\"";
-}
 // The toast line for one copied node id.
 function copiedToast(id) {
   return "copied " + id;
@@ -336,6 +350,9 @@ function shortcutAction(key, mods, ctx) {
   if ((key === "k" || key === "K") && (mods.meta || mods.ctrl)) return "focus-search";
   if (key === "j") return "sel-next";
   if (key === "k") return "sel-prev";
+  if (key === "ArrowDown") return "sel-next";
+  if (key === "ArrowUp") return "sel-prev";
+  if (key === "l") return "cycle-lanes";
   if (key === "Enter") return ctx.hasSelection ? "open" : null;
   if (key === "y") return ctx.hasSelection ? "copy" : null;
   if (key === "Tab") return "toggle-view";
@@ -381,20 +398,93 @@ function cardKeeps(card, nodes, state) {
       !(card.king && state.king.includes(card.king.name))) return false;
   if (state.epic && state.epic.length &&
       !(state.epic.includes(card.id) || state.epic.includes(card.parent))) return false;
+  if (!dateKeeps(card, state.date || [])) return false;
   if (state.q) {
     const needle = state.q.toLowerCase();
     const details = (nodes[card.id] || {}).details;
-    const hay = [card.id, card.slug, card.title, typeof details === "string" ? details : JSON.stringify(details)].join(" ").toLowerCase();
-    if (!hay.includes(needle)) return false;
+    const detailText = typeof details === "string" ? details : JSON.stringify(details);
+    if (state.fuzzy) {
+      const fields = [card.id, card.slug, card.title, card.parent_title,
+        ...(card.session_ids || [])];
+      const wordHit = String(detailText).split(/\s+/).some((w) => fuzzyHit(needle, w));
+      if (!fields.some((f) => f && fuzzyHit(needle, String(f))) && !wordHit) return false;
+    } else {
+      const hay = [card.id, card.slug, card.title, ...(card.session_ids || []), detailText]
+        .join(" ").toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
   }
   return true;
 }
-// One card's lane under the three lanes modes, from the embedded cards
-// alone. The epic rule mirrors the model: a card sits in its own lane when
-// other cards parent to it; an open parent's lane otherwise; "no epic" last.
-// The list's inline children: a card whose parent sits beside it renders
-// directly under that parent, indented one step. Cards whose parent lives
-// in another cell keep their own top-level row.
+// One fzf-style hit: needle characters appear in order, gaps allowed,
+// case-insensitive. The exact mode never reaches here.
+function fuzzyHit(needle, field) {
+  const n = String(needle || "").toLowerCase();
+  const f = String(field || "").toLowerCase();
+  if (!n) return true;
+  let i = 0;
+  for (const ch of f) {
+    if (ch === n[i]) i++;
+    if (i === n.length) return true;
+  }
+  return i === n.length;
+}
+// Stored status values keep underscores; every label reads them with spaces.
+function statusLabel(s) {
+  return String(s || "").replace(/_/g, " ");
+}
+// One date filter: `<field><op><YYYY-MM-DD>`, the same grammar the model's
+// split_date_filter parses, so a shared URL filters the same cards on both
+// renderers.
+function parseDateFilter(s) {
+  const m = /^(created_at|updated_at|completed_at)(>=|<=|>|<|=)(\d{4}-\d{2}-\d{2})$/.exec(String(s || ""));
+  return m ? { field: m[1], op: m[2], date: m[3] } : null;
+}
+// The date filters over one card: a missing stamp drops it, the first 10
+// characters compare (lexicographic is correct for YYYY-MM-DD).
+function dateKeeps(card, list) {
+  return (list || []).every((raw) => {
+    const f = parseDateFilter(raw);
+    if (!f) return true;
+    const stamp = card[f.field];
+    if (!stamp) return false;
+    const head = String(stamp).slice(0, 10);
+    if (f.op === ">=") return head >= f.date;
+    if (f.op === "<=") return head <= f.date;
+    if (f.op === ">") return head > f.date;
+    if (f.op === "<") return head < f.date;
+    return head === f.date;
+  });
+}
+// The list's display sort: "" keeps model order, "<key>" sorts ascending,
+// "-<key>" descending. Keys: id kind title encounters status priority size
+// lead created_at updated_at. Missing values sort last in both directions;
+// ties keep input order (a stable sort).
+function sortCards(cards, sort) {
+  if (!sort) return cards.slice();
+  const SIZE_RANK = { XS: 0, S: 1, M: 2, L: 3, XL: 4 };
+  const desc = sort.startsWith("-");
+  const key = desc ? sort.slice(1) : sort;
+  const rank = (card) => {
+    if (key === "lead") return card.king && card.king.name ? card.king.name : null;
+    if (key === "size") return card.size ? (SIZE_RANK[card.size] ?? null) : null;
+    const v = card[key];
+    return v === undefined || v === null || v === "" ? null : v;
+  };
+  return cards.slice().sort((a, b) => {
+    const va = rank(a), vb = rank(b);
+    // Missing values sort last whichever way the column runs.
+    const missing = (va === null) - (vb === null);
+    if (missing) return missing;
+    if (va === vb) return 0;
+    const cmp = va < vb ? -1 : 1;
+    return desc ? -cmp : cmp;
+  });
+}
+// The list's inline children, lane-wide and recursive: a child whose parent
+// is anywhere in the input nests under it at depth + 1 (a visited set guards
+// cycles); children keep input order; each entry carries the count of the
+// parent's children the filters or another lane hide.
 function nestChildren(cards) {
   const present = new Set(cards.map((c) => c.id));
   const kids = new Map();
@@ -405,13 +495,27 @@ function nestChildren(cards) {
     }
   }
   const out = [];
-  for (const c of cards) {
-    if (c.parent && kids.has(c.parent)) continue;
-    out.push({ card: c, depth: 0 });
-    for (const k of kids.get(c.id) || []) out.push({ card: k, depth: 1 });
-  }
+  const visited = new Set();
+  const add = (c, depth) => {
+    if (visited.has(c.id)) return;
+    visited.add(c.id);
+    const children = kids.get(c.id) || [];
+    out.push({ card: c, depth, hidden: (c.child_count || 0) - children.length });
+    for (const k of children) add(k, depth + 1);
+  };
+  // Roots first, so a sort that placed a child before its parent still
+  // nests: the parent's recursion claims it before the walk reaches it.
+  for (const c of cards) if (!(c.parent && present.has(c.parent))) add(c, 0);
+  for (const c of cards) add(c, 0);
   return out;
 }
+// The detail pane's width, clamped to a usable range: 320 px up to 90% of
+// the window; a non-number reads as the default 480.
+function clampPanelWidth(w, vw) {
+  if (typeof w !== "number" || !isFinite(w)) return 480;
+  return Math.max(320, Math.min(Math.round(vw * 0.9), Math.round(w)));
+}
+// One card's lane under the three lanes modes, from the embedded cards
 function laneKeyOf(card, lanesBy, parents, byId) {
   if (lanesBy === "none") return { key: "all", title: "all" };
   if (lanesBy === "epic") {
@@ -441,14 +545,25 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   const state = {
     lanes: initial.get("lanes") || "project",
     view: initial.get("view") || "kanban",
-    project: initial.getAll("project"), epic: initial.getAll("epic"),
-    status: initial.getAll("status"), priority: initial.getAll("priority"),
-    size: initial.getAll("size"), king: initial.getAll("king"),
-    kind: initial.getAll("kind"),
-    q: initial.get("q") || "", all: initial.get("all") === "1", };
+    project: initial.getAll("project").filter(Boolean),
+    epic: initial.getAll("epic").filter(Boolean),
+    status: initial.getAll("status").filter(Boolean),
+    priority: initial.getAll("priority").filter(Boolean),
+    size: initial.getAll("size").filter(Boolean),
+    king: initial.getAll("king").filter(Boolean),
+    kind: initial.getAll("kind").filter(Boolean),
+    date: initial.getAll("date").filter((s) => parseDateFilter(s)),
+    sort: initial.get("sort") || "",
+    q: initial.get("q") || "",
+    fuzzy: initial.get("match") === "fuzzy",
+    all: initial.get("all") === "1",
+  };
   // Collapse state survives the 10 s poll's rebuild: the lane keys whose
   // list section is closed.
   const closedLanes = new Set();
+  // The pane children the status chips hide; page-level, so it survives the
+  // openNode re-renders and the poll. Never written to the URL.
+  const hiddenChildStatuses = new Set();
   let board = null;
   let seenVersion;
   let pollTimer = 0;
@@ -560,6 +675,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       lanes: lanes,
       stats: stats,
       facets: snap.facets || {},
+      leads_at: snap.leads_at,
       unavailable: [],
     };
   }
@@ -570,7 +686,10 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     if (state.lanes && state.lanes !== "project") p.set("lanes", state.lanes);
     if (state.view && state.view !== "kanban") p.set("view", state.view);
     for (const k of FILTER_KEYS) for (const v of state[k]) p.append(k === "kind" ? "type" : k, v);
+    for (const v of state.date || []) p.append("date", v);
+    if (state.sort) p.set("sort", state.sort);
     if (state.q) p.set("q", state.q);
+    if (state.fuzzy) p.set("match", "fuzzy");
     if (state.all) p.set("all", "1");
     return p;
   }
@@ -599,6 +718,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const any = document.createElement("option");
     any.value = "";
     any.textContent = "any";
+    any.selected = !(current || []).length;
     sel.appendChild(any);
     for (const p of pairs) {
       const o = document.createElement("option");
@@ -608,7 +728,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       sel.appendChild(o);
     }
     // A bookmarked filter that matches nothing on the board still shows.
-    for (const v of current || []) {
+    for (const v of (current || []).filter(Boolean)) {
       if (!pairs.some((p) => p.v === v)) {
         const o = document.createElement("option");
         o.value = v;
@@ -630,13 +750,14 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     fillSelect("f-project", (f.projects || []).map((v) => ({ v: v, l: v })), state.project);
     fillSelect("f-epic", (f.epics || []).map((e) =>
       ({ v: e.id, l: e.title ? e.id + " " + e.title : e.id })), state.epic);
-    fillSelect("f-status", (f.statuses || []).map((v) => ({ v: v, l: v })), state.status);
+    fillSelect("f-status", (f.statuses || []).map((v) => ({ v: v, l: statusLabel(v) })), state.status);
     fillSelect("f-priority", (f.priorities || []).map((v) => ({ v: v, l: v })), state.priority);
     fillSelect("f-size", (f.sizes || []).map((v) => ({ v: v, l: v })), state.size);
     fillSelect("f-kind", (f.kinds || []).map((v) => ({ v: v, l: v })), state.kind);
     fillSelect("f-king", (f.kings || []).map((v) => ({ v: v, l: v })), state.king);
     document.getElementById("f-q").value = state.q;
     searchClear.hidden = !state.q;
+    document.getElementById("f-fuzzy").classList.toggle("active", state.fuzzy);
     document.getElementById("f-all").checked = state.all;
   }
   function draw() {
@@ -644,6 +765,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     drawHeader();
     drawStats();
     drawTiles();
+    drawDateChips();
     visibleIds = [];
     if (state.view === "list") drawList();
     else drawGrid();
@@ -670,7 +792,13 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     hdrEl.textContent = "";
     if (!board) return;
     const line = document.createElement("div");
-    line.textContent = "backend: " + board.backend + " · scope: " + board.scope;
+    let text = "backend: " + board.backend + " · scope: " + board.scope;
+    if (SNAPSHOT) {
+      text += board.leads_at
+        ? " · leads as of " + new Date(board.leads_at * 1000).toLocaleTimeString()
+        : " · leads unavailable";
+    }
+    line.textContent = text;
     hdrEl.appendChild(line);
     for (const u of board.unavailable || []) {
       const d = document.createElement("div");
@@ -829,6 +957,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     }
     b.dataset.id = card.id;
     if (card.id === selId) b.classList.add("sel");
+    if (card.id === openId) b.classList.add("open");
     visibleIds.push(card.id);
     b.addEventListener("click", () => openNode(card.id));
     return b;
@@ -854,8 +983,43 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     // span the page, not the content's widest row.
     gridEl.style.gridTemplateColumns = "minmax(0, 1fr)";
     gridEl.style.width = "100%";
+    gridEl.appendChild(sortHeader());
     for (const lane of lanes) gridEl.appendChild(listSection(lane));
     mainEl.scrollTop = top;
+  }
+  // The sticky header row of sortable column buttons, one grid like the
+  // list rows. A click cycles none -> ascending -> descending -> none, rides
+  // the page URL, and redraws from the answer already held (no refetch).
+  function sortHeader() {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "lrow lhdr";
+    const th = (cls, key, label) => {
+      const s = document.createElement("span");
+      s.className = cls;
+      s.textContent = label + (state.sort === key ? " ▲" : state.sort === "-" + key ? " ▼" : "");
+      s.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (state.sort === key) state.sort = "-" + key;
+        else if (state.sort === "-" + key) state.sort = "";
+        else state.sort = key;
+        syncUrl();
+        board = SNAPSHOT ? refreshSnapshot() : board;
+        draw();
+      });
+      row.appendChild(s);
+    };
+    th("lid", "id", "id");
+    th("ktag", "kind", "kind");
+    th("ltitle", "title", "title");
+    th("vote-pill", "encounters", "");
+    th("lstatus", "status", "each status reads with spaces");
+    th("lprio", "priority", "prio");
+    th("lsize", "size", "size");
+    th("lking", "lead", "lead");
+    th("lcreated", "created_at", "created");
+    th("lupdated", "updated_at", "updated");
+    return row;
   }
   function listSection(lane) {
     const sec = document.createElement("section");
@@ -888,15 +1052,16 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     });
     const rows = document.createElement("div");
     rows.className = "lrows";
-    for (const cell of lane.cells || []) {
-      for (const { card, depth } of nestChildren(cell.cards || [])) {
-        rows.appendChild(listRow(card, depth));
-      }
+    let laneCards = [];
+    for (const cell of lane.cells || []) laneCards.push(...(cell.cards || []));
+    if (state.sort) laneCards = sortCards(laneCards, state.sort);
+    for (const { card, depth, hidden } of nestChildren(laneCards)) {
+      rows.appendChild(listRow(card, depth, hidden));
     }
     sec.append(head, rows);
     return sec;
   }
-  function listRow(card, depth) {
+  function listRow(card, depth, hidden) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "lrow" + (card.blocked ? " blocked" : "") + (depth ? " lchild" : "");
@@ -904,24 +1069,39 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     lidEl.className = "lid";
     lidEl.textContent = card.id;
     bindIdCopy(lidEl, card.id);
+    if (depth) lidEl.style.paddingLeft = depth * 2 + "ch";
     b.appendChild(lidEl);
     const title = document.createElement("span");
     title.className = "ltitle";
     title.textContent = card.title;
+    if (depth) title.style.paddingLeft = depth * 2 + "ch";
     b.appendChild(title);
-    const meta = [];
-    if (card.status) meta.push(card.status);
-    if (card.priority) meta.push(card.priority);
-    if (card.size) meta.push(card.size);
-    if (card.created_at) meta.push(card.created_at.slice(0, 10));
-    const m = document.createElement("span");
-    m.className = "lmeta";
-    m.textContent = meta.join(" · ");
-    b.appendChild(m);
+    if ((card.child_count || 0) > 0) {
+      const chip = document.createElement("span");
+      chip.className = "ktag k-other";
+      const shown = card.child_count - (hidden || 0);
+      chip.textContent = shown + "/" + card.child_count + " children";
+      chip.title = (hidden || 0) + " hidden by filters or in another lane";
+      title.appendChild(chip);
+    }
+    const col = (cls, text, title) => {
+      const s = document.createElement("span");
+      s.className = cls;
+      s.textContent = text;
+      if (title) s.title = title;
+      b.appendChild(s);
+    };
+    col("lstatus", statusLabel(card.status));
+    col("lprio", card.priority || "");
+    col("lsize", card.size || "");
+    col("lking", (card.king && card.king.name) || "");
+    col("lcreated", card.created_at ? card.created_at.slice(0, 10) : "");
+    col("lupdated", card.updated_at ? card.updated_at.slice(0, 10) : "");
     addKindTag(b, card.kind);
     addVotePill(b, card);
     b.dataset.id = card.id;
     if (card.id === selId) b.classList.add("sel");
+    if (card.id === openId) b.classList.add("open");
     visibleIds.push(card.id);
     b.addEventListener("click", () => openNode(card.id));
     return b;
@@ -962,7 +1142,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "tile" + (state.status.includes(t.status) ? " active" : "");
-      b.textContent = t.status + " " + t.total;
+      b.textContent = statusLabel(t.status) + " " + t.total;
       b.addEventListener("click", () => {
         toggleStatus(t.status);
         syncUrl();
@@ -1046,6 +1226,8 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   async function openNode(id) {
     const seq = ++openSeq;
     openId = id;
+    if (visibleIds.includes(id)) setSel(id);
+    markOpen(id);
     syncUrl();
     panel.hidden = false;
     if (SNAPSHOT) {
@@ -1082,11 +1264,12 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     renderPanel(view);
   }
   // A Link button: <id> <title> (<column>), each part only when present.
-  function renderLink(box, link) {
+  // An optional prefix names the child's status.
+  function renderLink(box, link, prefix) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "linkbtn";
-    b.textContent = link.id + (link.title ? " " + link.title : "") + (link.column ? " (" + link.column + ")" : "");
+    b.textContent = (prefix || "") + link.id + (link.title ? " " + link.title : "") + (link.column ? " (" + link.column + ")" : "");
     b.addEventListener("click", () => openNode(link.id));
     box.appendChild(b);
   }
@@ -1101,6 +1284,46 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     box.className = "links";
     g.appendChild(box);
     for (const item of items) render(box, item);
+    panelBody.appendChild(g);
+  }
+  // The children group: one toggle chip per distinct child status (all on by
+  // default; tapping toggles that status's children), then the child links,
+  // each naming its status.
+  function addChildrenGroup(panelBody, children) {
+    if (!children || !children.length) return;
+    const g = document.createElement("div");
+    g.className = "pgroup";
+    const h = document.createElement("h3");
+    h.textContent = "children";
+    g.appendChild(h);
+    const byStatus = new Map();
+    for (const c of children) {
+      const s = c.status || "";
+      if (!byStatus.has(s)) byStatus.set(s, []);
+      byStatus.get(s).push(c);
+    }
+    const chips = document.createElement("div");
+    chips.className = "actrow";
+    for (const [s, group] of byStatus) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "tile" + (hiddenChildStatuses.has(s) ? "" : " active");
+      chip.textContent = statusLabel(s) + " " + group.length;
+      chip.addEventListener("click", () => {
+        if (hiddenChildStatuses.has(s)) hiddenChildStatuses.delete(s);
+        else hiddenChildStatuses.add(s);
+        openNode(openId);
+      });
+      chips.appendChild(chip);
+    }
+    g.appendChild(chips);
+    const box = document.createElement("div");
+    box.className = "links";
+    for (const c of children) {
+      if (hiddenChildStatuses.has(c.status || "")) continue;
+      renderLink(box, c, c.status ? "[" + statusLabel(c.status) + "] " : "");
+    }
+    g.appendChild(box);
     panelBody.appendChild(g);
   }
   // The act group: title, priority, size, status, rank and launches, drawn
@@ -1283,7 +1506,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     g.appendChild(grid);
     const king = card.king && card.king.name;
     addFieldRow(grid, "column", card.column);
-    addFieldRow(grid, "status", card.status);
+    addFieldRow(grid, "status", card.status ? statusLabel(card.status) : null);
     addFieldRow(grid, "priority", card.priority);
     addFieldRow(grid, "size", card.size);
     addFieldRow(grid, "project", card.project);
@@ -1295,9 +1518,8 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     addFieldRow(grid, "lead", king);
     addFieldRow(grid, "plan_path", view.plan_path);
     panelBody.appendChild(g);
-    // Demand: the encounter count with the agent/operator split, and the
-    // upvote action: a POST on the served board, the command to copy on a
-    // snapshot page (no server to POST to).
+    // Demand: the encounter count with the agent/operator split. The
+    // served loopback board keeps its real upvote POST under act.
     const en = (card.encounters || 0), eo = (card.encounters_operator || 0);
     const dg = document.createElement("div");
     dg.className = "pgroup";
@@ -1309,12 +1531,6 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const dspan = document.createElement("span");
     dspan.textContent = en + " encounters (" + (en - eo) + " agent, " + eo + " operator)";
     dline.appendChild(dspan);
-    const dbtn = document.createElement("button");
-    dbtn.type = "button";
-    dbtn.className = "copybtn";
-    dbtn.textContent = SNAPSHOT ? "copy upvote" : "copy command";
-    dbtn.addEventListener("click", () => copyText(voteText(card.id), dbtn));
-    dline.appendChild(dbtn);
     dg.appendChild(dline);
     if (view.origin) {
       const oline = document.createElement("div");
@@ -1388,7 +1604,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
         box.appendChild(b);
       });
     }
-    addLinkGroup(panelBody, "children", view.children, renderLink);
+    addChildrenGroup(panelBody, view.children);
     addLinkGroup(panelBody, "contained", view.contained, renderLink);
     addLinkGroup(panelBody, "blocked_by", view.blocked_by, renderLink);
     addLinkGroup(panelBody, "blocks", view.blocks, renderLink);
@@ -1495,6 +1711,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     openSeq++;
     panel.hidden = true;
     panelBody.textContent = "";
+    markOpen("");
     syncUrl();
   }
   function addFieldRow(grid, key, value) {
@@ -1615,11 +1832,46 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   }
   for (const k of FILTER_KEYS) {
     document.getElementById("f-" + k).addEventListener("change", (ev) => {
-      state[k] = [...ev.target.selectedOptions].map((o) => o.value);
+      const vals = [...ev.target.selectedOptions].map((o) => o.value);
+      state[k] = vals.includes("") ? [] : vals;
       syncUrl();
       fetchBoard();
     });
   }
+  // The date group: add pushes one `<field><op><date>` filter when it
+  // parses; each active filter draws as a chip button that removes itself.
+  function drawDateChips() {
+    const box = document.getElementById("f-dchips");
+    box.textContent = "";
+    for (const raw of state.date || []) {
+      const f = parseDateFilter(raw);
+      if (!f) continue;
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "tile";
+      chip.textContent = f.field + " " + f.op + " " + f.date + " ×";
+      chip.title = "remove this date filter";
+      chip.addEventListener("click", () => {
+        state.date = state.date.filter((d) => d !== raw);
+        syncUrl();
+        fetchBoard();
+      });
+      box.appendChild(chip);
+    }
+  }
+  document.getElementById("f-dadd").addEventListener("click", () => {
+    const field = document.getElementById("f-dfield").value;
+    const op = document.getElementById("f-dop").value;
+    const date = document.getElementById("f-ddate").value;
+    const raw = field + op + date;
+    if (!parseDateFilter(raw)) {
+      toast("pick a date first");
+      return;
+    }
+    if (!state.date.includes(raw)) state.date.push(raw);
+    syncUrl();
+    fetchBoard();
+  });
   let debounce = 0;
   searchInput.addEventListener("input", (ev) => {
     clearTimeout(debounce);
@@ -1634,6 +1886,11 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   });
   document.getElementById("f-all").addEventListener("change", (ev) => {
     state.all = ev.target.checked;
+    syncUrl();
+    fetchBoard();
+  });
+  document.getElementById("f-fuzzy").addEventListener("click", () => {
+    state.fuzzy = !state.fuzzy;
     syncUrl();
     fetchBoard();
   });
@@ -1688,6 +1945,14 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       el.scrollIntoView({ block: "nearest" });
     }
   }
+  // The open node's row reads as open, wherever it sits in the draw.
+  function markOpen(id) {
+    const prev = gridEl.querySelector(".open");
+    if (prev) prev.classList.remove("open");
+    if (!id) return;
+    const el = gridEl.querySelector('[data-id="' + id + '"]');
+    if (el) el.classList.add("open");
+  }
   function moveSel(delta) {
     if (!visibleIds.length) return;
     let i = visibleIds.indexOf(selId);
@@ -1697,6 +1962,13 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   }
   function setView(v) {
     state.view = v;
+    syncUrl();
+    fetchBoard();
+  }
+  // `l` cycles the lanes mode project -> epic -> none -> project.
+  function cycleLanes() {
+    const order = ["project", "epic", "none"];
+    state.lanes = order[(order.indexOf(state.lanes) + 1) % order.length];
     syncUrl();
     fetchBoard();
   }
@@ -1812,7 +2084,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       panelOpen: !panel.hidden,
       sheetOpen: !sheetEl.hidden,
       view: state.view,
-      hasSelection: !!selId,
+      hasSelection: !!(selId || openId),
     });
     if (!action) return;
     if (action === "clear-search" || action === "close-panel") return;
@@ -1824,13 +2096,36 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     else if (action === "close-sheet") sheetEl.hidden = true;
     else if (action === "sel-next") moveSel(1);
     else if (action === "sel-prev") moveSel(-1);
-    else if (action === "open") openNode(selId);
-    else if (action === "copy") copyId(selId);
+    else if (action === "open") openNode(selId || openId);
+    else if (action === "copy") copyId(selId || openId);
     else if (action === "toggle-view") setView(state.view === "list" ? "kanban" : "list");
+    else if (action === "cycle-lanes") cycleLanes();
     else if (action === "filters") openFilters();
     else if (action === "sheet") openSheet();
   });
   document.getElementById("panelclose").addEventListener("click", closePanel);
+  // The pane's drag handle: pointer capture follows the pointer, the width
+  // stores on release, a stored value restores on load. A refused
+  // localStorage leaves the default width.
+  const PANEL_WIDTH_KEY = "fno-backlog-panel-width";
+  const storedWidth = Number(lsGet(PANEL_WIDTH_KEY));
+  if (storedWidth > 0) panel.style.width = clampPanelWidth(storedWidth, innerWidth) + "px";
+  const grip = document.getElementById("panelgrip");
+  grip.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    grip.setPointerCapture(ev.pointerId);
+    const move = (e) => {
+      panel.style.width = clampPanelWidth(innerWidth - e.clientX, innerWidth) + "px";
+    };
+    const up = (e) => {
+      grip.releasePointerCapture(e.pointerId);
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      lsSet(PANEL_WIDTH_KEY, String(clampPanelWidth(innerWidth - e.clientX, innerWidth)));
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
   if (!SNAPSHOT) {
     pollTimer = setInterval(() => {
       if (!document.hidden) fetchBoard();
