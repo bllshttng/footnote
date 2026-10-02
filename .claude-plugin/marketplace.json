@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Set a target and walk away. Say f[no] to mostly done.",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "plugins": [
     {
