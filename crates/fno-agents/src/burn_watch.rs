@@ -855,18 +855,27 @@ fn sample_session(
     node: &str,
     cwd: &str,
     facts: &HashMap<String, NodeFacts>,
+    home: &AgentsHome,
     runner: Runner,
 ) -> Sample {
     let (head, commits) = git_progress(cwd, runner);
     Sample {
-        cost_usd: Some(crate::loopcheck::session_cost_from_ledger(
+        cost_usd: session_cost_exact(
+            &home.otel_dir().join("otel.db"),
             &crate::paths::ledger_path(Path::new(cwd)),
             sid,
-        )),
+        ),
         head,
         commits,
         touched_at: facts.get(node).and_then(|f| f.touched_at),
     }
+}
+
+/// OTel rows are exact cost; the transcript-parsed ledger estimate answers
+/// only when no row exists for the session.
+fn session_cost_exact(otel_db: &Path, ledger: &Path, sid: &str) -> Option<f64> {
+    crate::otel_ingest::session_cost_usd(otel_db, sid)
+        .or_else(|| Some(crate::loopcheck::session_cost_from_ledger(ledger, sid)))
 }
 
 /// The pass body, behind `maybe_tick`'s cadence gate. `runner` and
@@ -921,7 +930,7 @@ fn run_pass(
         }
         sampled.insert(sid.clone());
         let prev = load_state(home, sid);
-        let sample = sample_session(sid, node, cwd, &facts, runner);
+        let sample = sample_session(sid, node, cwd, &facts, home, runner);
         let (decision, mut next) = decide(prev.as_ref(), &sample, now_epoch, idle_s, spend_min);
         match decision {
             Decision::FirstSight => {}
@@ -2132,5 +2141,39 @@ mod tests {
                 .collect();
             assert_eq!(notes.len(), 1, "the note is sent once across two passes");
         }
+    }
+
+    #[test]
+    fn exact_cost_reads_otel_first_then_ledger() {
+        let td = tempfile::tempdir().unwrap();
+        let otel_db = td.path().join("otel.db");
+        let conn = rusqlite::Connection::open(&otel_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE api_requests (dedupe_key TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                cost_usd_micros INTEGER)",
+        )
+        .unwrap();
+        for (key, micros) in [("k1", 1_500), ("k2", 2_500)] {
+            conn.execute(
+                "INSERT INTO api_requests VALUES (?1, 'sess-1', ?2)",
+                rusqlite::params![key, micros],
+            )
+            .unwrap();
+        }
+        let ledger = td.path().join("ledger.json");
+        std::fs::write(
+            &ledger,
+            r#"[{"session_id": "sess-1", "cost_usd": 9.99}, {"session_id": "sess-2", "cost_usd": 3.5}]"#,
+        )
+        .unwrap();
+        // Rows exist: the OTel sum wins, exact.
+        assert_eq!(session_cost_exact(&otel_db, &ledger, "sess-1"), Some(0.004));
+        // No rows for the session: the ledger estimate, exactly as before.
+        assert_eq!(session_cost_exact(&otel_db, &ledger, "sess-2"), Some(3.5));
+        // No db at all: ledger again.
+        assert_eq!(
+            session_cost_exact(&td.path().join("absent.db"), &ledger, "sess-2"),
+            Some(3.5)
+        );
     }
 }
