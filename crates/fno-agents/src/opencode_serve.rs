@@ -1608,29 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_rules_cover_dir_children_and_no_siblings() {
-        let rules = permission_rules_for(&["/Users/x/.fno".to_string()]);
-        let arr = rules.as_array().unwrap();
-        // TWO rules per dir: exact + children. opencode's `*` is `.*` (crosses
-        // `/`), so the pair covers the dir, its top-level files (graph.json),
-        // and nested state - while a single `<dir>*` would also have matched
-        // the sibling `/Users/x/.fno-backup`.
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["pattern"], "/Users/x/.fno");
-        assert_eq!(arr[1]["pattern"], "/Users/x/.fno/*");
-        for rule in arr {
-            assert_eq!(rule["permission"], "external_directory");
-            assert_eq!(rule["action"], "allow");
-        }
-        assert!(permission_rules_for(&[]).as_array().unwrap().is_empty());
-        assert!(permission_rules_for(&[String::new()])
-            .as_array()
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn serve_config_and_grant_match_the_serve_binary_contract() {
+    fn permission_rules_and_serve_config_follow_the_contract() {
         let base =
             std::env::temp_dir().join(format!("fno-ocserve-contract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -1647,18 +1625,33 @@ mod tests {
         };
         let v1 = stub("oc-v1", "1.18.33");
         let v2 = stub("oc-v2", "2.0.19");
-        // 1.x: the serve config is byte-identical to the shipped 1.x posture,
-        // and the session grant keeps the 1.x pattern-row shape.
+        // 1.x: TWO rules per dir, exact + children. opencode's `*` is `.*`
+        // (crosses `/`), so the pair covers the dir, its top-level files
+        // (graph.json), and nested state - while a single `<dir>*` would also
+        // have matched the sibling `/Users/x/.fno-backup`. The serve config is
+        // byte-identical to the shipped 1.x posture, and the grant keeps the
+        // 1.x pattern-row shape.
+        let rules = permission_rules_for(&["/Users/x/.fno".to_string()]);
+        let arr = rules.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["pattern"], "/Users/x/.fno");
+        assert_eq!(arr[1]["pattern"], "/Users/x/.fno/*");
+        for rule in arr {
+            assert_eq!(rule["permission"], "external_directory");
+            assert_eq!(rule["action"], "allow");
+        }
+        assert!(permission_rules_for(&[]).as_array().unwrap().is_empty());
+        assert!(permission_rules_for(&[String::new()])
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(
             serve_config_json(v1.to_str().unwrap()),
             SERVE_CONFIG_JSON_V1
         );
-        let rules = permission_rules_for(&["/state".to_string()]);
-        assert_eq!(rules[0]["permission"], "external_directory");
-        assert_eq!(rules[0]["pattern"], "/state");
         // 2.x: the config carries the ordered `permissions` list (one
         // allow-all rule, no `permission` key) and the grant rows carry the
-        // v2 `{action, resource, effect}` shape.
+        // v2 `{action, resource, effect}` shape over the same dir boundary.
         assert_eq!(
             serve_config_json(v2.to_str().unwrap()),
             SERVE_CONFIG_JSON_V2
