@@ -50,7 +50,8 @@ pub fn run(args: &[String]) -> i32 {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return 0;
     }
-    let payload: serde_json::Value = serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
     process(&harness, &event, &payload);
     0
 }
@@ -183,10 +184,7 @@ fn emit_markers(markers: &[&str]) {
         return;
     }
     let sink = tty_sink();
-    let bytes: Vec<u8> = markers
-        .iter()
-        .flat_map(|m| m.as_bytes().to_vec())
-        .collect();
+    let bytes: Vec<u8> = markers.iter().flat_map(|m| m.as_bytes().to_vec()).collect();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::Write;
@@ -276,7 +274,10 @@ fn is_pane_host(session_id: &str) -> bool {
     let safe_server: String = if server.is_empty() {
         "_".to_string()
     } else {
-        server.chars().map(|c| if c == '/' || c == '.' { '_' } else { c }).collect()
+        server
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '_' } else { c })
+            .collect()
     };
     let pane = std::env::var("FNO_PANE").unwrap_or_default();
     let epoch = std::env::var("FNO_PANE_EPOCH").unwrap_or_default();
@@ -449,11 +450,9 @@ pub(crate) fn process(harness: &str, event: &str, payload: &serde_json::Value) {
     // Marker lane: mux panes only, and independent of the parse (a malformed
     // payload still emits via the presence-gate degrade), so a pane's block
     // scanner segments every turn even when the report cannot fly.
-    if std::env::var_os("FNO_PANE").is_some_and(|v| !v.is_empty()) && is_pane_host(&ev.session_id)
-    {
+    if std::env::var_os("FNO_PANE").is_some_and(|v| !v.is_empty()) && is_pane_host(&ev.session_id) {
         let manifest = repo_root().join(".fno/target-state.md");
-        let markers =
-            marker_bytes(decision.state, &ev.event, manifest.is_file());
+        let markers = marker_bytes(decision.state, &ev.event, manifest.is_file());
         emit_markers(&markers);
     }
     // The report needs a parsed session id; a malformed/empty payload already

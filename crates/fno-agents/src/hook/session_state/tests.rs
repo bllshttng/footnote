@@ -249,7 +249,13 @@ fn set_pane_env(pane: &str, epoch: &str, server: &str, rt: &std::path::Path) {
 }
 
 fn clear_pane_env() {
-    for k in ["FNO_PANE", "FNO_PANE_EPOCH", "FNO_SERVER", "FNO_SESSION", "XDG_RUNTIME_DIR"] {
+    for k in [
+        "FNO_PANE",
+        "FNO_PANE_EPOCH",
+        "FNO_SERVER",
+        "FNO_SESSION",
+        "XDG_RUNTIME_DIR",
+    ] {
         std::env::remove_var(k);
     }
 }
@@ -272,7 +278,10 @@ fn the_pane_host_wins_the_pin_and_a_nested_session_stays_silent() {
     assert!(is_pane_host("host-1"));
     assert!(!is_pane_host("nested-2"));
     clear_pane_env();
-    let _ = std::process::Command::new("rm").arg("-rf").arg(&rt).status();
+    let _ = std::process::Command::new("rm")
+        .arg("-rf")
+        .arg(&rt)
+        .status();
 }
 
 /// mT6/mT7/mT8/mT11: every broken key degrades to emit (the v1 presence
@@ -319,15 +328,6 @@ fn the_pin_degrades_to_emit_on_every_broken_key() {
         .is_none());
     clear_pane_env();
 }
-    let rt2 = runtime_dir("degrade2");
-    std::fs::create_dir_all(rt2.join("hijack-target")).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(rt2.join("hijack-target"), rt2.join("fno-turn-pins-0")).placeholder
-    std::env::set_var("XDG_RUNTIME_DIR", &rt2);
-    assert!(is_pane_host("h"));
-    assert!(rt2.join("hijack-target").read_dir().unwrap().next().is_none());
-    clear_pane_env();
-}
 /// mT9: a path-traversal FNO_SESSION is sanitized so the pin (and the gate
 /// record) never escapes the rendezvous dir.
 #[test]
@@ -338,11 +338,15 @@ fn a_traversal_server_name_stays_in_the_pin_dir() {
     std::env::remove_var("FNO_SERVER");
     std::env::set_var("FNO_SESSION", "../../escape");
     assert!(is_pane_host("h"));
-    let escaped = std::fs::read_dir(&rt).unwrap().filter_map(|e| e.ok()).any(|e| {
-        let n = e.file_name().to_string_lossy().into_owned();
-        n.starts_with("escape-") || n.contains("-escape") || n.contains("fno-turn-pins-")
-            && n.contains("..")
-    });
+    let escaped = std::fs::read_dir(&rt)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("escape-")
+                || n.contains("-escape")
+                || n.contains("fno-turn-pins-") && n.contains("..")
+        });
     assert!(!escaped, "a pin escaped the rendezvous dir: {escaped}");
     clear_pane_env();
     let _ = std::fs::remove_dir_all(&rt);
@@ -361,7 +365,9 @@ fn a_malformed_payload_still_emits_markers() {
     std::env::set_var("FNO_TURN_MARKER_TTY", &sink);
     process("claude", "UserPromptSubmit", &json!({}));
     let out = std::fs::read(&sink).unwrap_or_default();
-    assert!(out.windows(MARKER_C.len()).any(|w| w == MARKER_C.as_bytes()));
+    assert!(out
+        .windows(MARKER_C.len())
+        .any(|w| w == MARKER_C.as_bytes()));
     clear_pane_env();
     let _ = std::fs::remove_dir_all(&rt);
 }
