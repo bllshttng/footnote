@@ -333,6 +333,7 @@ pub mod registry_json;
 pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
+pub mod release_notes;
 pub mod removals;
 pub mod rename;
 pub mod repeated_asks;
