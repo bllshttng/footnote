@@ -741,6 +741,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::sandbox_probe::run_sandbox_probe(&args[1..]);
     }
 
+    // `release-notes`: the update modal's PR-grouped release notes (see
+    // release_notes.rs). Python's `fno doctor update --check` resolver calls
+    // it through the verb seam; it answers `{"notes": null}` on any git
+    // failure rather than refusing - the payload never blocks on it.
+    if verb == "release-notes" {
+        return fno_agents::release_notes::run_release_notes(&args[1..]);
+    }
+
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
     // Python resolves config and paths and serializes the candidate links;
     // this verb reads the provider runtime-state file, derives headroom
