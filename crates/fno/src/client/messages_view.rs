@@ -563,6 +563,8 @@ impl MessagesBoard {
         let part_w = (width / 4).max(14).min(width.saturating_sub(tree_w) / 2);
         let thread_w = width.saturating_sub(tree_w + part_w);
         let body_h = height.saturating_sub(2);
+        // The cursor's painted line follows the window, so a long tree keeps
+        // the selection visible and the click map's window matches the paint.
         super::backlog_style::paint_panel_at(
             cells,
             rows,
@@ -572,7 +574,7 @@ impl MessagesBoard {
             tree_w,
             body_h,
             &tree,
-            None,
+            Some(2 + b.cursors[0]),
             &view.theme,
         );
         super::backlog_style::paint_panel_at(
@@ -584,7 +586,7 @@ impl MessagesBoard {
             part_w,
             body_h,
             &partners,
-            None,
+            Some(1 + b.cursors[1]),
             &view.theme,
         );
         super::backlog_style::paint_panel_at(
@@ -596,7 +598,7 @@ impl MessagesBoard {
             thread_w,
             body_h,
             &thread,
-            None,
+            Some(thread.len().saturating_sub(1)),
             &view.theme,
         );
     }
@@ -677,12 +679,14 @@ fn split(width: usize) -> (usize, usize) {
 }
 
 /// The screen rows a column's lines painted at, given its scroll start.
-fn column_rect(lines: usize, body_h: usize, cursor: usize) -> (usize, usize) {
+fn column_rect(lines: usize, body_h: usize, follow_line: usize) -> (usize, usize) {
     let len = lines.max(1);
     let start = if len <= body_h {
         0
     } else {
-        (cursor + 1).saturating_sub(body_h).min(len - body_h)
+        follow_line
+            .saturating_sub(body_h - 1)
+            .min(len.saturating_sub(body_h))
     };
     (start, body_h.min(len))
 }
@@ -969,9 +973,10 @@ pub(crate) async fn mouse(
                 .map(|b| b.tree_rows().len())
                 .unwrap_or(0);
             let (start, _) = column_rect(
-                len,
+                len + 2,
                 body_h,
-                view.messages_board
+                2 + view
+                    .messages_board
                     .as_ref()
                     .map(|b| b.cursors[0])
                     .unwrap_or(0),
@@ -994,9 +999,10 @@ pub(crate) async fn mouse(
                 })
                 .unwrap_or(0);
             let (start, _) = column_rect(
-                len,
+                len + 1,
                 body_h,
-                view.messages_board
+                1 + view
+                    .messages_board
                     .as_ref()
                     .map(|b| b.cursors[1])
                     .unwrap_or(0),
