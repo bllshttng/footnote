@@ -655,8 +655,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         # suite and sample the top processes every 15s between them. The last
         # MEM-SAMPLE before a stop names the process that grew.
         "free -m\ndf -h\n"
-        "(while true; do echo MEM-SAMPLE; ps -eo pid,ppid,rss,comm --sort=-rss"
-        " | head -21; sleep 15; done) &\n"
+        "(while true; do echo MEM-SAMPLE; ps -eo pid,ppid,rss,args --sort=-rss"
+        " | head -21 | cut -c1-200; sleep 15; done) &\n"
         "sampler=$!\n"
         "status=0\n"
         "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup "

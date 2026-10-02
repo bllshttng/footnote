@@ -44,6 +44,7 @@ fn lane_fill_door_stays_under_the_stated_peak_rss() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(["backlog", "lane-fill", "--json", "--claim", "--max", "2"])
+        .envs(fno_agents::test_run::self_owner_env())
         .env("HOME", &home)
         .env("FNO_STATE_DIR", home.join(".fno"))
         .env("FNO_CLAIMS_ROOT", &claims)
