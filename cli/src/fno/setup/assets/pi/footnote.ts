@@ -84,6 +84,9 @@ function runBounded(
         (err, stdout) => resolve(err ? "" : String(stdout)),
       )
       if (stdin !== undefined && child.stdin) {
+        // A fast-exiting child can close the pipe before the payload lands;
+        // the resulting EPIPE is an uncaught exception without this.
+        child.stdin.on("error", () => {})
         child.stdin.write(stdin)
         child.stdin.end()
       }

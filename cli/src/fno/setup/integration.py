@@ -326,6 +326,15 @@ def _agy_crown_adapter_path() -> "Optional[Path]":
     return p if p.is_file() else None
 
 
+def _agy_guard_adapter_path() -> "Optional[Path]":
+    # Same load-shape for the PreToolUse lead guard shim; it translates agy's
+    # payload to the shared king guard through `king-guard --wire agy`.
+    from fno.paths import resolve_plugin_script
+
+    p = resolve_plugin_script("hooks/agy-king-guard.sh")
+    return p if p.is_file() else None
+
+
 def _agy_is_installed() -> bool:
     from fno.rust_binary import call_binary_json
 
@@ -342,6 +351,9 @@ def _agy_is_installed() -> bool:
         args += ["--adapter", str(adapter)]
     if crown is not None:
         args += ["--crown", str(crown)]
+    guard = _agy_guard_adapter_path()
+    if guard is not None:
+        args += ["--guard", str(guard)]
     error, payload = call_binary_json("plugin-install", args)
     if error is not None or not isinstance(payload, dict):
         return False
@@ -389,6 +401,9 @@ def _agy_install() -> IntegrationResult:
     crown = _agy_crown_adapter_path()
     if crown is not None:
         args += ["--crown", str(crown)]
+    guard = _agy_guard_adapter_path()
+    if guard is not None:
+        args += ["--guard", str(guard)]
     error, payload = call_binary_json("plugin-install", args)
     if error is not None:
         if "not found" in error:
