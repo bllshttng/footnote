@@ -213,7 +213,7 @@ fn build_bench() -> Bench {
 
     // The org manifest the lead paths resolve.
     write(
-        &space.join("leads/latency-fixture.md"),
+        &space.join("kings/latency-fixture.md"),
         &format!(
             "---\nfno_id: 20260915T190000Z-lg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
         ),

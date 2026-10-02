@@ -1862,7 +1862,7 @@ mod verdict_tests {
             ],
         )
         .unwrap();
-        let manifest = root.join("leads/x-bbbb.md");
+        let manifest = root.join("kings/x-bbbb.md");
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             &manifest,

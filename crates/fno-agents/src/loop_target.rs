@@ -671,7 +671,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             eprintln!(
                 "fno-agents loop run: --driver lead needs --scope <scope> (the teamed \
                  territory to respawn a lead over; the manifest is \
-                 <space>/leads/<scope>.md)"
+                 <space>/kings/<scope>.md)"
             );
             return Ok(2);
         };

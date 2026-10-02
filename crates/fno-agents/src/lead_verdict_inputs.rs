@@ -631,7 +631,7 @@ mod tests {
     }
 
     fn generation_setup(dir: &Path, registry_rows: &[Value]) -> (PathBuf, PathBuf) {
-        let manifest = dir.join("leads/x-root.md");
+        let manifest = dir.join("kings/x-root.md");
         fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         fs::write(
             &manifest,
@@ -754,7 +754,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("no-created-at");
-        let path = dir.join("leads/x-root.md");
+        let path = dir.join("kings/x-root.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -778,7 +778,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("bad-created-at");
-        let path = dir.join("leads/x-root.md");
+        let path = dir.join("kings/x-root.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,

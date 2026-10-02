@@ -130,7 +130,7 @@ fn lead_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         .join(".fno")
         .join("spaces")
         .join(fno_agents::paths::space_slug(dir.path()))
-        .join("leads");
+        .join("kings");
     let lib_dir = dir.path().join("lib");
     let bin_dir = dir.path().join("bin");
     fs::create_dir_all(&leads_dir).unwrap();
@@ -325,7 +325,7 @@ fn lead_cancel_refusal_names_its_file_age_and_clear_command() {
         .join(".fno")
         .join("spaces")
         .join(fno_agents::paths::space_slug(dir.path()))
-        .join("leads/k.cancelled");
+        .join("kings/k.cancelled");
     fs::write(&sentinel, "").unwrap();
     let sentinel = sentinel.canonicalize().unwrap();
 

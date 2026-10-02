@@ -286,7 +286,7 @@ fn matches_scope_now(
                 .unwrap_or(false)
         })
         .any(|row| match scope {
-            "leads" => row
+            "kings" => row
                 .get("crown_level")
                 .map(|c| !c.is_null())
                 .unwrap_or(false),
@@ -307,10 +307,10 @@ fn resolve_audience(
         let Some(sid) = row_session_id(row) else {
             continue;
         };
-        if scope == "leads" && row.get("crown_level").map(|c| c.is_null()).unwrap_or(true) {
+        if scope == "kings" && row.get("crown_level").map(|c| c.is_null()).unwrap_or(true) {
             continue;
         }
-        if scope != "all" && scope != "leads" {
+        if scope != "all" && scope != "kings" {
             let held = row_str(row, "crown_scope");
             let team_ok = team_answers(held, scope, projects);
             // project:<p> also matches rows WORKING in that project (their cwd
@@ -1246,7 +1246,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_audience("leads", &[row], Some(&HashMap::new())),
+            resolve_audience("kings", &[row], Some(&HashMap::new())),
             vec![session.to_string()]
         );
     }
@@ -1261,7 +1261,7 @@ mod tests {
         );
 
         assert!(matches_scope_now(
-            "leads",
+            "kings",
             session,
             &[row],
             Some(&HashMap::new())
@@ -1415,7 +1415,7 @@ mod tests {
                 json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
             ),
         ];
-        let mut flags = send_flags("leads");
+        let mut flags = send_flags("kings");
         flags[3] = "lead";
         flags[5] = "agent";
         let (code, id) = send_via(&f.paths, &flags, "from the team", &rows);
@@ -1442,7 +1442,7 @@ mod tests {
             "eeee5555-5555-5555-5555-555555555555",
             json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
         )];
-        let mut flags = send_flags("leads");
+        let mut flags = send_flags("kings");
         flags[3] = "lead";
         flags[5] = "agent";
         let (code, message) = send_via(&f.paths, &flags, "no audience", &rows);

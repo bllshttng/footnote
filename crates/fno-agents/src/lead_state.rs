@@ -1220,8 +1220,8 @@ mod tests {
         let team = |scope: &str, level: &str, file: &str| {
             let body = format!(
                 "---\nscope: x\nshape: pass\nharness: claude\n\
-                 harness_session_id: sess-{file}\nteam_scope: {scope}\n\
-                 crown_level: {level}\nteam_grantor: operator\n---\n"
+                 harness_session_id: sess-{file}\ncrown_scope: {scope}\n\
+                 crown_level: {level}\ncrown_grantor: operator\n---\n"
             );
             fs::write(leads.join(file), body).unwrap();
         };
@@ -1262,7 +1262,7 @@ mod tests {
         // A manifest naming no session falls back to the file stem.
         fs::write(
             leads.join("stem.md"),
-            "---\nteam_scope: delta\nteam_level: 0\n---\n",
+            "---\ncrown_scope: delta\ncrown_level: 0\n---\n",
         )
         .unwrap();
         let out = org_vacancies(
@@ -1287,7 +1287,7 @@ mod tests {
         let body = format!(
             "---\nscope: {scope}\nshape: pass\nharness: claude\n\
              harness_session_id: {session}\nowner_pid: 1\ncreated_at: {created_at}\n\
-             crown_scope: {scope}\nteam_level: 2\nteam_grantor: operator\n---\n"
+             crown_scope: {scope}\ncrown_level: 2\ncrown_grantor: operator\n---\n"
         );
         fs::write(&path, body).unwrap();
         path
@@ -1407,7 +1407,7 @@ mod tests {
         for scope in ["zzz-scope", "aaa-scope"] {
             fs::write(
                 leads.join(format!("{scope}.md")),
-                format!("---\nteam_scope: {scope}\nteam_level: 0\n---\n"),
+                format!("---\ncrown_scope: {scope}\ncrown_level: 0\n---\n"),
             )
             .unwrap();
         }
@@ -1514,7 +1514,7 @@ mod tests {
             format!(
                 "---\nscope: x-key\nshape: pass\nharness: claude\n\
                  harness_session_id: {older_sess}\nowner_pid: 1\ncreated_at: {}\n\
-                 crown_scope: x-key\nteam_level: 2\nteam_grantor: operator\n---\n",
+                 crown_scope: x-key\ncrown_level: 2\ncrown_grantor: operator\n---\n",
                 stamp(13)
             ),
         )
@@ -1620,7 +1620,7 @@ mod tests {
             "---\nscope: x-codex\nshape: pass\nharness: codex\n\
              harness_session_id: cccc9999-0000-4000-8000-000000000009\n\
              owner_pid: 1\ncreated_at: 2026-09-18T21:00:00Z\n\
-             crown_scope: x-codex\nteam_level: 2\n---\n",
+             crown_scope: x-codex\ncrown_level: 2\n---\n",
         )
         .unwrap();
         let roster = || {

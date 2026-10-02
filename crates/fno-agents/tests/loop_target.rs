@@ -1271,7 +1271,7 @@ fn write_lead_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceilin
     let leads = dir
         .join("spaces")
         .join(fno_agents::paths::space_slug(dir))
-        .join("leads");
+        .join("kings");
     fs::create_dir_all(&leads).unwrap();
     let content = format!(
         "---\nfno_id: {fno_id}\nscope: {scope}\nharness: claude\nharness_session_id: k-sess\nbudget_max_iterations: 40\nrespawn_count: {count}\nrespawn_ceiling: {ceiling}\n---\n"
@@ -1563,7 +1563,7 @@ fn lead_walk_dispatches_past_a_prior_lead_terminal_and_bills_one_respawn() {
         dir.path()
             .join("spaces")
             .join(fno_agents::paths::space_slug(dir.path()))
-            .join("leads")
+            .join("kings")
             .join("epic-x.md"),
     )
     .unwrap();
@@ -1640,7 +1640,7 @@ fn lead_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
         dir.path()
             .join("spaces")
             .join(fno_agents::paths::space_slug(dir.path()))
-            .join("leads")
+            .join("kings")
             .join("epic-x.md"),
     )
     .unwrap();

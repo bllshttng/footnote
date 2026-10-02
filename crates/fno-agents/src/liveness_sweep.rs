@@ -1266,16 +1266,16 @@ mod tests {
         lead.crown_level = Some(1);
         let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
         org.status = AgentStatus::Busy;
-        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead-walk"));
         joiner.status = AgentStatus::Busy;
-        let mut handoff = row("sob-t-x-2-glm", "s-t", Some("s-lead"));
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some("s-lead-walk"));
         handoff.status = AgentStatus::Busy;
         let plain = row("solo-x-2", "s-solo", None);
-        let lead = row("t-x-1-lead", "s-lead", None);
+        let walk = row("t-x-1-lead", "s-lead-walk", None);
         let entries = vec![
             lead.clone(),
             org.clone(),
-            lead.clone(),
+            walk.clone(),
             joiner.clone(),
             handoff.clone(),
             plain.clone(),
