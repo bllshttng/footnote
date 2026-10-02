@@ -212,8 +212,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-session-start",
-            "timeout": 50
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-session-start"
           },
           {
             "type": "command",
@@ -221,8 +220,7 @@
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh",
-            "timeout": 4
+            "command": "${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
           }
         ]
       },

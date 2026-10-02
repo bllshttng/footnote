@@ -76,10 +76,19 @@ hook_budget_secs() {
 # hook_run_optional CMD [ARGS...]: run an optional hook's query under the
 # load-aware budget. A skip or a fired bound reads as silence (empty output,
 # status 0); any other status passes through with the child's stdout. Stdin
-# passes through, so pipeline callers keep working.
+# passes through, so pipeline callers keep working. A caller whose failure is
+# DATA (a failed read must print its report, never read as an empty result)
+# sets HOOK_BUDGET_FLOOR_SECS before calling: the skip tier then runs the
+# child bounded at the floor instead of skipping, so a hang still dies at the
+# bound and a fast failure still reports.
 hook_run_optional() {
     local budget out rc=0
     budget=$(hook_budget_secs)
+    local floor="${HOOK_BUDGET_FLOOR_SECS:-0}"
+    case "$floor" in '' | *[!0-9]*) floor=0 ;; esac
+    if [[ "$budget" -lt "$floor" ]]; then
+        budget="$floor"
+    fi
     case "$budget" in
         '' | 0) return 0 ;;
     esac
@@ -164,6 +173,8 @@ hook_cache_serve() {
         return "$rc"
     fi
     # The live query skipped or expired: serve the stale copy, never nothing.
+    # The status still propagates: a failed read is the caller's data, and
+    # swallowing it here would read the failure as an empty result.
     [[ -n "$payload" ]] && printf '%s' "$payload"
-    return 0
+    return "$rc"
 }
