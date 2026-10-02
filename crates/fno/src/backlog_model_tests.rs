@@ -32,6 +32,24 @@ fn lanes_query_refuses_unknown_and_parses_known_values() {
     let q = Query::from_pairs(&p).unwrap();
     assert!(q.all, "empty all reads true");
     assert!(q.project.is_empty());
+    let p = vec![("date".to_string(), "created_at>=2026-09-20".to_string())];
+    let q = Query::from_pairs(&p).unwrap();
+    assert_eq!(q.date, ["created_at>=2026-09-20"], "date parses");
+    for bad in [
+        "created_at~2026-09-20",
+        "title>=2026-09-20",
+        "created_at>=26-9-2",
+    ] {
+        let p = vec![("date".to_string(), bad.to_string())];
+        assert!(
+            Query::from_pairs(&p).is_err(),
+            "a malformed date filter refuses: {bad}"
+        );
+    }
+    let p = vec![("match".to_string(), "fuzzy".to_string())];
+    assert!(Query::from_pairs(&p).unwrap().fuzzy, "fuzzy parses");
+    let p = vec![("match".to_string(), "sideways".to_string())];
+    assert!(Query::from_pairs(&p).is_err(), "unknown match refuses");
 }
 
 #[test]
@@ -127,19 +145,51 @@ fn list_view_answers_uncapped_cells() {
 
 #[test]
 fn cards_carry_created_at_for_the_list_rows() {
-    let rows = vec![json!({
-        "id": "x-a", "slug": "a", "status": "ready",
-        "priority": "p2", "created_at": "2026-09-24T18:00:00Z"
-    })];
+    let rows = vec![
+        json!({
+            "id": "x-a", "slug": "a", "status": "ready",
+            "priority": "p2", "created_at": "2026-09-24T18:00:00Z",
+            "touched_at": "2026-09-25T10:00:00Z"
+        }),
+        json!({
+            "id": "x-b", "slug": "b", "status": "ready", "priority": "p2",
+            "created_at": "2026-09-24T09:00:00Z"
+        }),
+        json!({
+            "id": "x-k1", "status": "ready", "priority": "p2", "parent": "x-a"
+        }),
+        json!({
+            "id": "x-k2", "status": "ready", "priority": "p2", "parent": "x-a"
+        }),
+    ];
+    rows[0]["sessions"] = json!([
+        {"phase": "execute", "session_id": "s1",
+         "started_at": "2026-09-25T08:00:00Z", "ended_at": "2026-09-26T12:00:00Z"},
+        {"phase": "blueprint"}
+    ]);
     let inp = fixture(rows);
     let b = board(&inp, &Query::default());
-    let card = b.lanes[0]
-        .cells
+    let cards: Vec<Card> = b
+        .lanes
         .iter()
-        .flat_map(|c| c.cards.iter())
-        .next()
-        .expect("the fixture's one card is on the board");
-    assert_eq!(card.created_at.as_deref(), Some("2026-09-24T18:00:00Z"));
+        .flat_map(|l| l.cells.iter())
+        .flat_map(|c| c.cards.iter().cloned())
+        .collect();
+    let a = cards.iter().find(|c| c.id == "x-a").expect("x-a on board");
+    let b = cards.iter().find(|c| c.id == "x-b").expect("x-b on board");
+    assert_eq!(a.created_at.as_deref(), Some("2026-09-24T18:00:00Z"));
+    assert_eq!(
+        a.updated_at.as_deref(),
+        Some("2026-09-26T12:00:00Z"),
+        "updated_at picks the newest stamp, a session ended_at here"
+    );
+    assert_eq!(
+        b.updated_at.as_deref(),
+        Some("2026-09-24T09:00:00Z"),
+        "updated_at falls back to created_at"
+    );
+    assert_eq!(a.child_count, 2, "two children name x-a");
+    assert_eq!(b.child_count, 0);
 }
 
 fn epic_fixture() -> Vec<Value> {
@@ -211,6 +261,34 @@ fn project_and_priority_filters_narrow_cards_and_totals() {
     assert_eq!(cards, vec!["x-1"]);
     let now = b.stats.open.iter().find(|t| t.column == "Now").unwrap();
     assert_eq!(now.total, 1, "totals count the filtered set only");
+    // The date filter: a completed_at range keeps only the in-range card
+    // and drops one with no completed_at stamp.
+    let rows2 = vec![
+        json!({"id": "x-1", "status": "ready", "priority": "p1", "project": "fno",
+               "completed_at": "2026-09-15T00:00:00Z"}),
+        json!({"id": "x-2", "status": "ready", "priority": "p2", "project": "fno"}),
+        json!({"id": "x-3", "status": "ready", "priority": "p1", "project": "fno",
+               "completed_at": "2026-10-05T00:00:00Z"}),
+    ];
+    let inp2 = fixture(rows2);
+    let q2 = Query::from_pairs(&[
+        ("date".into(), "completed_at>=2026-09-01".into()),
+        ("date".into(), "completed_at<=2026-09-30".into()),
+    ])
+    .unwrap();
+    let b2 = board(&inp2, &q2);
+    let kept: Vec<&str> = b2
+        .lanes
+        .iter()
+        .flat_map(|l| l.cells.iter())
+        .flat_map(|c| c.cards.iter())
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(
+        kept,
+        vec!["x-1"],
+        "the in-range card stays, the stampless one drops"
+    );
 }
 
 #[test]
@@ -479,6 +557,20 @@ fn moved_helpers_still_answer() {
         king_of(std::slice::from_ref(&king), "x-1", Some("x-9"), None),
         Some(("kd".into(), 2))
     );
+    let mut node_crown = row(None);
+    node_crown.name = "node-lead".into();
+    node_crown.crown_level = Some(1);
+    node_crown.crown_scope = Some("x-9".into());
+    let mut project_crown = row(None);
+    project_crown.name = "project-lead".into();
+    project_crown.crown_level = Some(2);
+    project_crown.crown_scope = Some("fno".into());
+    let both = [project_crown, node_crown];
+    assert_eq!(
+        king_of(&both, "x-9", None, Some("fno")),
+        Some(("node-lead".into(), 1)),
+        "a node-scope crown beats an earlier project-scope crown"
+    );
     assert_eq!(king_of(&[row(None)], "x-1", None, None), None);
     assert_eq!(
         session_action(None),
@@ -552,20 +644,79 @@ fn search_matches_details_text_not_id_slug_title_only() {
             "status": "ready", "priority": "p2",
             "details": "the launch code is needle-in-pocket"
         }),
+        json!({
+            "id": "x-sess", "slug": "sess", "title": "Session child",
+            "status": "ready", "priority": "p2",
+            "source_session_id": "af8e03f2-e896-4d17-8600-213fca3dfb55"
+        }),
         json!({"id": "x-miss", "slug": "miss", "title": "Another card",
                "status": "ready", "priority": "p2"}),
     ];
     let inp = fixture(rows);
+    let kept = |q: &Query| -> Vec<String> {
+        board(&inp, q)
+            .lanes
+            .iter()
+            .flat_map(|l| l.cells.iter())
+            .flat_map(|c| c.cards.iter())
+            .map(|c| c.id.clone())
+            .collect()
+    };
     let q = Query::from_pairs(&[("q".into(), "needle".into())]).unwrap();
-    let b = board(&inp, &q);
-    let kept: Vec<&str> = b
+    assert_eq!(kept(&q), ["x-hit"], "the details-only match stays");
+    // A full session id and its 8-character head match in exact mode.
+    let q =
+        Query::from_pairs(&[("q".into(), "af8e03f2-e896-4d17-8600-213fca3dfb55".into())]).unwrap();
+    assert_eq!(kept(&q), ["x-sess"], "the full session id matches");
+    let q = Query::from_pairs(&[("q".into(), "af8e03f2".into())]).unwrap();
+    assert_eq!(kept(&q), ["x-sess"], "the 8-character head matches");
+    // Fuzzy mode: an in-order subsequence of the title, and a needle spread
+    // across two details words drops (one word must hold it all).
+    let q = Query::from_pairs(&[
+        ("q".into(), "wbsrt".into()),
+        ("match".into(), "fuzzy".into()),
+    ])
+    .unwrap();
+    let mut with_title = Vec::from(&rows[..]);
+    with_title.insert(
+        0,
+        json!({
+            "id": "x-wbsrt", "slug": "w", "title": "Web board list: every column sorts",
+            "status": "ready", "priority": "p2"
+        }),
+    );
+    let inp2 = fixture(with_title);
+    let kept2: Vec<String> = board(&inp2, &q)
         .lanes
         .iter()
         .flat_map(|l| l.cells.iter())
         .flat_map(|c| c.cards.iter())
-        .map(|c| c.id.as_str())
+        .map(|c| c.id.clone())
         .collect();
-    assert_eq!(kept, ["x-hit"], "the details-only match stays");
+    assert_eq!(
+        kept2,
+        ["x-wbsrt"],
+        "the title subsequence matches in fuzzy mode"
+    );
+    let spread = json!({
+        "id": "x-spread", "slug": "sp", "title": "Plain title",
+        "status": "ready", "priority": "p2",
+        "details": "launch needle pocket"
+    });
+    let inp3 = fixture(vec![spread]);
+    let spread_q = Query::from_pairs(&[
+        ("q".into(), "edlep".into()),
+        ("match".into(), "fuzzy".into()),
+    ])
+    .unwrap();
+    let kept3: Vec<String> = board(&inp3, &spread_q)
+        .lanes
+        .iter()
+        .flat_map(|l| l.cells.iter())
+        .flat_map(|c| c.cards.iter())
+        .map(|c| c.id.clone())
+        .collect();
+    assert!(kept3.is_empty(), "a needle across two details words drops");
 }
 
 #[test]
