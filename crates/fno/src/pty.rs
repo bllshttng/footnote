@@ -1227,6 +1227,18 @@ fn keeper_handshake_quiet() -> std::time::Duration {
     std::time::Duration::from_millis(150)
 }
 
+/// A connect that can only mean the path holds no live keeper: a socket
+/// file whose listener is gone (power loss) answers ECONNREFUSED; a plain
+/// leftover FILE at the socket path answers ENOTSOCK, and macOS folds that
+/// into EINVAL - the os error 22 the spawn road used to surface bare after
+/// burning the whole connect budget.
+fn stale_connect(e: &std::io::Error) -> bool {
+    match e.kind() {
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::InvalidInput => true,
+        _ => e.raw_os_error() == Some(libc::ENOTSOCK),
+    }
+}
+
 /// Connect to a keeper and run the Identify handshake synchronously.
 /// Returns (stream, IdentifyReply json, ring bytes). The stream is returned
 /// with blocking reads restored. `None`-valued Ok means the socket never
@@ -1260,13 +1272,7 @@ fn keeper_handshake(
     let mut stream = loop {
         match std::os::unix::net::UnixStream::connect(sock_path) {
             Ok(s) => break s,
-            Err(e)
-                if stale_is_final
-                    && e.kind() == std::io::ErrorKind::ConnectionRefused
-                    && sock_path.exists() =>
-            {
-                return Ok(None)
-            }
+            Err(e) if stale_is_final && stale_connect(&e) && sock_path.exists() => return Ok(None),
             Err(_) if std::time::Instant::now() < hand_deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
