@@ -392,8 +392,7 @@ class Ritual:
         # mismatched; reconcile's own repo scoping still fails closed on a
         # bare-number match when this resolution comes up empty (never left
         # to cwd inference to guess).
-        # The native door, not fno-py: the Python verb is deleted, and the
-        # mux owns `fno backlog` outright.
+        # The native door, not fno-py: the mux owns `fno backlog` outright.
         argv = [*fno_cmd(), "backlog", "reconcile", "--pr-number", str(self.ctx.pr), "--json"]
         from fno.graph._reconcile import resolve_current_repo_slug
 
