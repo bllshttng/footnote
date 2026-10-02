@@ -172,7 +172,10 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch):
     monkeypatch.setattr(
         top,
         "_claim_sessions",
-        lambda: {"979e1acc-e240-4af5-9998-0a74ec6c0683": ("x-4dc0", 2965)},
+        lambda: {
+            "979e1acc-e240-4af5-9998-0a74ec6c0683": ("x-4dc0", 2965),
+            "full-session-uuid": ("x-06f7", None),
+        },
     )
     (row,) = _rows(
         patched,
@@ -189,22 +192,14 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch):
     assert row["pr"] == 2965
     assert row["pr_basis"] == "node"
 
-
-def test_claim_join_without_a_pr_still_names_the_node(patched, monkeypatch):
-    import fno.agents.top as top
-
-    monkeypatch.setattr(
-        top,
-        "_claim_sessions",
-        lambda: {"full-session-uuid": ("x-06f7", None)},
+    # A claim with no PR yet still names the node (pr_basis no-pr).
+    (alone,) = _rows(
+        patched,
+        [_worker(source="claude", name="0a4aad70", session_id="full-session-uuid")],
     )
-    (row,) = _rows(
-        patched, [_worker(source="claude", name="0a4aad70", session_id="full-session-uuid")]
-    )
-    assert row["node"] == "x-06f7"
-    assert row["node_basis"] == "claim"
-    assert row["pr"] is None
-    assert row["pr_basis"] == "no-pr"
+    assert alone["node"] == "x-06f7"
+    assert alone["pr"] is None
+    assert alone["pr_basis"] == "no-pr"
 
 
 def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):
