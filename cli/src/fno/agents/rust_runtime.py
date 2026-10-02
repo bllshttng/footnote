@@ -244,14 +244,12 @@ RUST_CLIENT_VERBS = frozenset(
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         # The second spelling is the one-release alias the binary still dispatches.
         "org-vacancies", "court-orphans",
-        # Crown scope fold for `fno agents court --nodes`: daemon-free read,
-        # graph.json and claims in, per-scope fold out; Python passes the
-        # crowns gather_court already adjudicated.
+        # Crown scope fold for `fno agents court --nodes`: daemon-free read;
+        # graph.json and claims in, per-scope fold out; Python passes the crowns.
         "org-fold", "court-fold",
-        # Crown-scope reign_checkin readback for `fno agents king history`:
-        # daemon-free read; Python resolves the caller's crown scope and
-        # passes every journal paths.event_journals resolves, then invokes
-        # the binary directly (not via `fno agents` routing).
+        # Crown-scope checkin readback for `fno agents king history`:
+        # daemon-free read; Python resolves the caller's crown scope, passes
+        # every journal paths.event_journals resolves, and invokes the binary.
         "lead-history", "king-history",
         # Failure-pattern leaderboard fold for `fno doctor evals macro`:
         # daemon-free read; Python resolves the journal list and forwards the
