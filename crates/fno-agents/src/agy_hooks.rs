@@ -317,6 +317,40 @@ pub fn install(
             }));
         }
     }
+    // The session-state reporter ships beside the stop adapter in the same
+    // plugin stage; when the sibling exists on disk, register it under
+    // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
+    // event's decision contract). Append-once like the crown.
+    let report = adapter
+        .parent()
+        .map(|dir| dir.join("agy-session-report.sh"))
+        .filter(|path| path.is_file());
+    if let Some(report) = report {
+        match fn_map.get("PreInvocation") {
+            Some(Value::Array(_)) => {}
+            None => {
+                fn_map.insert("PreInvocation".to_string(), Value::Array(Vec::new()));
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{}: footnote.PreInvocation is present but not a list; fix \
+                     it or move the file aside, then rerun `fno config setup`",
+                    hooks_file.display()
+                ))
+            }
+        }
+        if !has_handler(fn_map.get("PreInvocation"), &report) {
+            let pre = fn_map
+                .get_mut("PreInvocation")
+                .and_then(Value::as_array_mut)
+                .expect("array checked above");
+            pre.push(json!({
+                "type": "command",
+                "command": report.display().to_string(),
+                "timeout": 10
+            }));
+        }
+    }
     let text = match serde_json::to_string_pretty(&Value::Object(root)) {
         Ok(t) => t,
         Err(e) => {
@@ -439,12 +473,23 @@ mod tests {
     fn install_creates_absent_file_with_parents() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deep/nested/hooks.json");
-        let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
-        install(&path, adapter, None, None).expect("install into absent path");
+        // A real adapter dir with the session-state reporter as a sibling:
+        // install registers the reporter under PreInvocation beside the
+        // crown, append-once.
+        let adapter_dir = dir.path().join("stage").join("hooks");
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        let adapter = adapter_dir.join("footnote-agy-target-stop-hook.sh");
+        std::fs::write(&adapter, "#!/usr/bin/env bash\n").unwrap();
+        let report = adapter_dir.join("agy-session-report.sh");
+        std::fs::write(&report, "#!/usr/bin/env bash\n").unwrap();
+        install(&path, &adapter, None, None).expect("install into absent path");
         let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = data["footnote"]["PreInvocation"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "the reporter registers once");
+        assert_eq!(pre[0]["command"], report.display().to_string());
         assert_eq!(
             data["footnote"]["Stop"][0]["command"],
-            "/plugin/hooks/footnote-agy-target-stop-hook.sh"
+            adapter.display().to_string()
         );
     }
 

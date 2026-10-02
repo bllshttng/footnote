@@ -159,6 +159,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("wave") {
+        std::process::exit(fno_agents::wave::run(&args[1..]));
+    }
     // cli/src/fno/pr/_sync_canonical.py transports HERE through verb_call:
     // the post-merge canonical sync + its catch-up sweep and staleness
     // alarm, native. Registers no verb (the shrink law allows no new
@@ -669,9 +672,20 @@ async fn run(args: Vec<String>) -> i32 {
     // `mail-threads`: the mux Messages tab's thread read model (see
     // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
     // read must work when the daemon is wedged. Hidden from help and from
-    // ALL_CLIENT_ACTIONS, like court-fold (d-aef0ed7b).
+    // ALL_CLIENT_ACTIONS, like court-fold.
     if verb == "mail-threads" {
         return fno_agents::mail_threads::run_mail_threads(&args[1..]);
+    }
+
+    // `update-journal`: the `fno doctor update` lifecycle's one Rust door
+    // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
+    // lifecycle rows land even when the daemon is wedged, which is the
+    // failure the node exists to name. Never registered in
+    // ALL_CLIENT_ACTIONS (the action list is shrink-only); the update
+    // lifecycle execs the binary directly, the dispatch rides the
+    // `verb ==` arm.
+    if verb == "update-journal" {
+        return fno_agents::update_journal::run_update_journal(&args[1..]);
     }
 
     // `capabilities` / `target-family` (change 2): read-only leaves

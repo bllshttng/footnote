@@ -1,6 +1,6 @@
 ---
 name: execute
-description: "Execute a plan. Routes between a lightweight single-session executor (flat, default) and full wave orchestration (waves). Use when: 'do this plan', 'execute the plan', 'run the waves'."
+description: Execute an approved plan in a flat run or coordinated waves.
 argument-hint: "[flat|waves] <plan-path>"
 metadata:
   requires:

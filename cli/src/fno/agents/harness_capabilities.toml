@@ -1894,3 +1894,43 @@ reason = "no fno hook registration for zcode (no plugin hook file and no capabil
 [harness.zcode.hooks.lead_reinject]
 state = "missing"
 reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane)"
+
+[harness.claude.hooks.session_state]
+state = "supported"
+via = ["hooks/inside-leg-report.sh", "hooks/hooks.json"]
+
+[harness.codex.hooks.session_state]
+state = "supported"
+via = ["hooks/inside-leg-report.sh", "hooks/codex-hooks.json"]
+
+[harness.footnote.hooks.session_state]
+state = "supported"
+via = ["crates/fno-agents/src/footnote_harness/mod.rs"]
+
+[harness.agy.hooks.session_state]
+state = "supported"
+via = ["hooks/agy-session-report.sh", "crates/fno-agents/src/agy_hooks.rs"]
+
+[harness.opencode.hooks.session_state]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js"]
+
+[harness.pi.hooks.session_state]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts"]
+
+[harness.gemini.hooks.session_state]
+state = "missing"
+reason = "no session-state push for gemini (no fno hook registration; the per-harness report adapters land with the session-state push work)"
+
+[harness.cursor-agent.hooks.session_state]
+state = "missing"
+reason = "no session-state push for cursor-agent (no fno hook registration; the per-harness report adapters land with the session-state push work)"
+
+[harness.grok.hooks.session_state]
+state = "missing"
+reason = "no session-state push for grok (no fno hook registration; the per-harness report adapters land with the session-state push work)"
+
+[harness.zcode.hooks.session_state]
+state = "missing"
+reason = "no session-state push for zcode (no fno hook registration; the per-harness report adapters land with the session-state push work)"

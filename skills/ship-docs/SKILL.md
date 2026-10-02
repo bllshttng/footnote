@@ -1,6 +1,6 @@
 ---
 name: ship-docs
-description: "Generate and maintain project documentation - architecture docs, how-to guides, API references. Use when: 'document this', 'architecture docs', 'API contract', 'runbook', 'user guide', 'how-to', shipping documentation for a feature."
+description: Write or maintain project documentation, guides, API references, and runbooks.
 ---
 
 # Ship Docs

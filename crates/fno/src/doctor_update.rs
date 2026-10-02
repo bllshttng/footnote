@@ -378,6 +378,58 @@ fn source_pin_call(sub: &str, extra: &[String], input: Option<&str>) -> Option<V
     }
 }
 
+/// The machine-global events journal: the store every `update-journal`
+/// envelope lands in and `--check` reads back. Same resolution Python's
+/// `paths.state_dir() / "events.jsonl"` applied.
+fn events_journal() -> PathBuf {
+    crate::model_catalog::state_dir().join("events.jsonl")
+}
+
+/// One `fno-agents update-journal` door call: best-effort, 60s bounded, a
+/// wedged door warns through its own stderr and never blocks the step's
+/// verdict. Fields ride as `--flag value` pairs (`-` for `_`).
+fn journal_call(type_name: &str, fields: &[(&str, String)], mail_from: Option<&str>) {
+    let mut args = vec![
+        "update-journal".to_string(),
+        "--events".to_string(),
+        events_journal().to_string_lossy().into_owned(),
+        "--type".to_string(),
+        type_name.to_string(),
+    ];
+    for (flag, value) in fields {
+        args.push(format!("--{}", flag.replace('_', "-")));
+        args.push(value.clone());
+    }
+    if let Some(from) = mail_from {
+        args.push("--mail-from".into());
+        args.push(from.to_string());
+    }
+    let _ = run_bounded(&fno_agents_bin(), &args, Duration::from_secs(60), None);
+}
+
+/// The newest `fno_update_*` row in the machine journal, or None. Bounded
+/// read of the last 1 MiB: the journal is machine-global and unbounded, so
+/// --check must not read it whole on every TUI refresh. An update row older
+/// than 1 MiB of fleet traffic reads as None until the next update writes
+/// a fresh one.
+fn last_update_event() -> Option<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const WINDOW: u64 = 1024 * 1024;
+    let path = events_journal();
+    let mut file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(WINDOW);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    text.lines()
+        .rev()
+        .filter(|line| line.contains("fno_update_"))
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+}
+
 /// One native resolution: path, eligibility evidence, allow/refuse, warning.
 fn resolve_source_pin(override_path: Option<&Path>) -> Option<Value> {
     let mut extra: Vec<String> = Vec::new();
@@ -1491,8 +1543,40 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         return code;
     }
 
+    // The lifecycle journal opens here, matching the deleted Python leg:
+    // started after the claim, built on the rust leg's own verdict,
+    // installed or failed at the end. The install-build mark rides every
+    // cargo child from here on, so the test-run doors admit the update's
+    // own builds past the tests hold and the worker slots.
+    let old_rev = read_marker(&installed_rev_file());
+    let started_fields: Vec<(&str, String)> = {
+        let mut f: Vec<(&str, String)> = Vec::new();
+        if let Some(r) = &rev {
+            f.push(("new_rev", r.clone()));
+        }
+        if let Some(o) = &old_rev {
+            f.push(("old_rev", o.clone()));
+        }
+        f.push(("source_path", resolved.to_string_lossy().into_owned()));
+        f
+    };
+    journal_call("started", &started_fields, None);
+    std::env::set_var("FNO_INSTALL_BUILD", "1");
+
     if !flags.no_rust {
         refresh_rust_bins(&resolved, flags.rust, false, &mut failed);
+        let built_fields: Vec<(&str, String)> = {
+            let mut f: Vec<(&str, String)> = Vec::new();
+            if let Some(r) = rust_subtree_rev(&resolved) {
+                f.push(("rust_rev", r));
+            }
+            f.push((
+                "outcome",
+                if failed.is_empty() { "ok" } else { "failed" }.to_string(),
+            ));
+            f
+        };
+        journal_call("built", &built_fields, None);
     }
 
     let cmd: Vec<String> = if which_uv().is_some() {
@@ -1520,6 +1604,7 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     } else {
         eprintln!("Neither `uv` nor `pip` is available on PATH.");
         release_update_claim();
+        journal_call("failed", &[("rc", "1".to_string())], None);
         return 1;
     };
 
@@ -1550,8 +1635,24 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     release_update_claim();
 
     if failed.is_empty() {
+        let installed_fields: Vec<(&str, String)> = {
+            let mut f: Vec<(&str, String)> = Vec::new();
+            if let Some(r) = &rev {
+                f.push(("new_rev", r.clone()));
+            }
+            if let Some(o) = &old_rev {
+                f.push(("old_rev", o.clone()));
+            }
+            f
+        };
+        let front_door = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+        journal_call("installed", &installed_fields, front_door.as_deref());
         0
     } else {
+        let rc = "1";
+        journal_call("failed", &[("rc", rc.to_string())], None);
         println!(
             "fno doctor update: completed with failed step(s): {}",
             failed.join(", ")
@@ -1973,6 +2074,7 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     serde_json::json!({
         "update_ready": update_ready,
         "source_pin": pin,
+        "last_update_event": last_update_event(),
         "installed_rev": installed_rev,
         "source_rev": src_rev,
         "python_tool": {

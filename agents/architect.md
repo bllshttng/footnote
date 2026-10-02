@@ -1,6 +1,6 @@
 ---
 name: architect
-description: "Blueprint author. Runs fno:blueprint for one node as tech lead, researcher and product manager, and writes and reads back its own plan file. Plans what archer builds."
+description: Research a node and produce its implementation plan without editing source files.
 model: opus
 color: blue
 sandbox_mode: workspace-write

@@ -40,9 +40,8 @@ const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 /// The fno hook jobs a harness row must declare beside its pane mechanics.
 /// The loop job is NOT one of them: `loop_participation` and
 /// `loop_extension` already declare it, and the wire-gate below derives the
-/// loop's state from that pair instead of a second field. Wave 2 adds
-/// `session_state` after the session-state push lands its remaining waves.
-pub const HOOK_JOBS: [&str; 2] = ["lead_guard", "lead_reinject"];
+/// loop's state from that pair instead of a second field.
+pub const HOOK_JOBS: [&str; 3] = ["lead_guard", "lead_reinject", "session_state"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
 
@@ -1402,7 +1401,7 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
                 harness,
                 "hooks",
                 &format!(
-                    "unknown hook job {job:?}; declared jobs are lead_guard and lead_reinject"
+                    "unknown hook job {job:?}; declared jobs are lead_guard, lead_reinject and session_state"
                 ),
             ));
         }
@@ -1774,6 +1773,12 @@ mod tests {
             validate_row("claude", &probe).is_err(),
             "an undeclared job refuses"
         );
+        // The session_state job obeys the same gate: an undeclared entry on a
+        // wired row refuses naming the job (AC16's shape).
+        let mut probe = wired.clone();
+        probe.hooks.remove("session_state");
+        let err = validate_row("claude", &probe).expect_err("an undeclared session_state refuses");
+        assert!(err.0.contains("session_state"), "{err:?}");
         let unwired = contract.capabilities("gemini").unwrap().clone();
         assert!(
             validate_row("gemini", &unwired).is_ok(),

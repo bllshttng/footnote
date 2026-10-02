@@ -1,6 +1,6 @@
 ---
 name: frontend-executor
-description: Full /impeccable pipeline executor. Synthesizes the shape brief from the /think design doc + per-task AC list, selects /impeccable stages per task content, runs production-readiness passes (craft/polish/critique/harden/audit/layout), classifies findings, and returns a two-tier verdict with deferred_findings for operator to parse.
+description: Run frontend readiness passes, classify findings, and report deferred risks.
 model: sonnet
 color: magenta
 tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]

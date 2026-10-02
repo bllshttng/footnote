@@ -1,6 +1,6 @@
 ---
 name: dnd
-description: "Do-not-disturb (DND) for this session: hold incoming agent mail on a fixed wall clock while the user talks to you, then deliver it as one digest. Use when: 'turn on DND', 'do not disturb', 'do not interrupt me', 'hold my mail', 'quiet window', 'I need your time for 20 minutes', 'DND off', 'cancel DND', or 'allow mail'."
+description: Hold incoming agent mail during a quiet window, then deliver one digest.
 argument-hint: "[minutes | off | cancel | status | idle <minutes>]"
 metadata:
   internal: false

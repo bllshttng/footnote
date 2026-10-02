@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from fno.observer import fold, isolation
 from tests.fixtures.graph_seed import seed_graph
 
@@ -94,6 +96,7 @@ def _strategy_plan(wave_mode: str, shared: bool) -> str:
     )
 
 
+@pytest.mark.dev_build
 def test_collision_free_rides_the_validator():
     # AC2-HP: shared surface inside one parallel wave fails; the same pair
     # split across sequential waves passes, matching validate_execution.
@@ -127,6 +130,7 @@ def test_collision_free_is_a_gap_not_a_fabricated_pass_without_waves():
     assert fold.score_blueprint_item({}, plan_text=plan_text)["collision_free"] is None
 
 
+@pytest.mark.dev_build
 def test_replay_path_scores_structural_only_and_none_without_plan():
     # A1: replay item omits shipped_outcome; plan_text=None -> gap.
     item = {"include_shipped_outcome": False}
