@@ -208,6 +208,38 @@ fn ac5_hp_off_switch_bypasses_cap_before_config_and_lock() {
 
     restore_env("FNO_PROCESS_ADMISSION", previous_mode);
     restore_env("FNO_PROCESS_ADMISSION_MAX", previous_max);
+
+    // The human exemption is the other bypass: an armed runaway brake
+    // warns for a human's own pane run and still refuses the agent path.
+    isolate_admission_state();
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 600;
+    let brake = std::env::temp_dir().join(format!("brake-e2e-{}.json", std::process::id()));
+    std::fs::write(
+        &brake,
+        format!(r#"{{"until_epoch":{until},"reason":"machine runaway: hot for 3600s"}}"#),
+    )
+    .unwrap();
+    let previous_brake = std::env::var_os("FNO_MACHINE_BRAKE");
+    std::env::set_var("FNO_MACHINE_BRAKE", &brake);
+
+    let human = fno::process_admission::admit_pane_for(true, 0, None);
+    let agent = fno::process_admission::admit_pane_for(false, 0, None);
+
+    restore_env("FNO_MACHINE_BRAKE", previous_brake);
+    let _ = std::fs::remove_file(&brake);
+
+    let human_err = human.as_ref().err().map(|e| e.to_string());
+    assert!(
+        human.is_ok(),
+        "a human's own pane run is never held by the brake: {}",
+        human_err.unwrap_or_default(),
+    );
+    let error = agent.err().expect("the agent path still refuses");
+    assert!(error.to_string().contains("machine-runaway"), "{error}");
 }
 
 #[test]
@@ -250,45 +282,4 @@ fn restore_max_processes(previous: Option<std::ffi::OsString>) {
         Some(value) => std::env::set_var("FNO_PROCESS_ADMISSION_MAX", value),
         None => std::env::remove_var("FNO_PROCESS_ADMISSION_MAX"),
     }
-}
-
-/// The composer's `!` line: a pane run the caller knows a human asked for
-/// passes an ARMED machine runaway brake with a warning, the same exemption
-/// the user's own attach carries, while the same call without `human` still
-/// refuses.
-#[test]
-fn human_pane_admission_passes_an_armed_runaway_brake() {
-    isolate_admission_state();
-    let _env_lock = ADMISSION_ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let until = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 600;
-    let brake = std::env::temp_dir().join(format!("brake-e2e-{}.json", std::process::id()));
-    std::fs::write(
-        &brake,
-        format!(r#"{{"until_epoch":{until},"reason":"machine runaway: hot for 3600s"}}"#),
-    )
-    .unwrap();
-    let previous_brake = std::env::var_os("FNO_MACHINE_BRAKE");
-    std::env::set_var("FNO_MACHINE_BRAKE", &brake);
-
-    let human = fno::process_admission::admit_pane_for(true, 0, None);
-    let agent = fno::process_admission::admit_pane_for(false, 0, None);
-
-    restore_env("FNO_MACHINE_BRAKE", previous_brake);
-    let _ = std::fs::remove_file(&brake);
-
-    let human_err = human.as_ref().err().map(|e| e.to_string());
-    assert!(
-        human.is_ok(),
-        "a human's own pane run is never held by the brake: {}",
-        human_err.unwrap_or_default(),
-    );
-    let error = agent.err().expect("the agent path still refuses");
-    assert!(error.to_string().contains("machine-runaway"), "{error}");
 }

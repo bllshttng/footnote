@@ -260,6 +260,10 @@ pub(crate) struct Launcher {
     pub runtime_flags: Vec<crate::client::harness_flags::FlagRow>,
     /// The harness `runtime_flags` was captured for.
     pub runtime_flags_harness: String,
+    /// The harness-flags capture is in flight (the same one-in-flight
+    /// discipline as the catalog probe). Dies with the launcher: a capture
+    /// landing after a close is dropped, and the next open probes fresh.
+    pub flags_inflight: bool,
     /// The mouse rests on the Project chip: the cwd facts line shows.
     pub project_hover: bool,
     /// A chip-owned pill (`--model`) awaiting its value: the flag rides the
@@ -737,6 +741,7 @@ pub(crate) fn open(view: &mut View) {
             show_detail: false,
             runtime_flags: Vec::new(),
             runtime_flags_harness: String::new(),
+            flags_inflight: false,
             project_hover: false,
             pending_chip_pin: None,
             picker: None,

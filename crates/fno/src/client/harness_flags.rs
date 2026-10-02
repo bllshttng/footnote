@@ -12,6 +12,15 @@ use std::time::Duration;
 /// description beside it.
 pub(crate) type FlagRow = (String, String);
 
+/// The capture channel: the launcher's kick hands the sender to the pump in
+/// `attach_and_run`, whose select arm lands rows through [`land`].
+pub(super) fn channel() -> (
+    tokio::sync::mpsc::Sender<(String, Option<Vec<FlagRow>>)>,
+    tokio::sync::mpsc::Receiver<(String, Option<Vec<FlagRow>>)>,
+) {
+    tokio::sync::mpsc::channel(4)
+}
+
 /// Flags the composer, the door or help itself owns: never suggestions.
 const OWNED: &[&str] = &[
     "--harness",
@@ -62,12 +71,9 @@ pub(crate) async fn capture(harness: &str) -> Option<Vec<FlagRow>> {
 /// The harness whose `--help` rows are missing, when a probe may run: one
 /// in flight, and the selected harness differs from the captured one.
 pub(super) fn probe_due(view: &super::View) -> Option<String> {
-    if view.flags_inflight {
-        return None;
-    }
     view.launcher
         .as_ref()
-        .filter(|l| l.runtime_flags_harness != l.draft.harness())
+        .filter(|l| !l.flags_inflight && l.runtime_flags_harness != l.draft.harness())
         .map(|l| l.draft.harness())
 }
 
@@ -79,7 +85,9 @@ pub(super) fn kick(
     let Some(harness) = probe_due(view) else {
         return;
     };
-    view.flags_inflight = true;
+    if let Some(l) = view.launcher.as_mut() {
+        l.flags_inflight = true;
+    }
     tokio::spawn(async move {
         let rows = capture(&harness).await;
         let _ = tx.send((harness, rows)).await;
@@ -88,10 +96,12 @@ pub(super) fn kick(
 
 /// Land a finished capture: rows only ever join the launcher whose
 /// harness still matches; a failed read lands as an empty row set (the
-/// toml capture shows) so a missing binary never loops the probe.
+/// toml capture shows) so a missing binary never loops the probe. A capture
+/// racing a closed launcher lands nowhere - the flag died with the
+/// instance, and the next open probes fresh.
 pub(super) fn land(view: &mut super::View, harness: &str, rows: Option<Vec<FlagRow>>) {
-    view.flags_inflight = false;
     if let Some(l) = view.launcher.as_mut() {
+        l.flags_inflight = false;
         if l.draft.harness() == harness {
             l.runtime_flags = rows.unwrap_or_default();
             l.runtime_flags_harness = harness.to_string();
@@ -152,7 +162,7 @@ fn read_cache(path: &PathBuf) -> Option<Vec<FlagRow>> {
 /// puts the description on the next line; codex keeps it beside). A flag
 /// with no description yet still becomes a row, so a two-column help is not
 /// required.
-fn parse_help(text: &str) -> Vec<FlagRow> {
+pub(super) fn parse_help(text: &str) -> Vec<FlagRow> {
     let mut rows: Vec<FlagRow> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pending: Option<String> = None;
@@ -193,36 +203,4 @@ fn parse_help(text: &str) -> Vec<FlagRow> {
         rows.push((entry, String::new()));
     }
     rows
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_help_reads_beside_and_next_line_descriptions() {
-        let text = "\
-Usage: claude [options] [prompt]
-
-Options:
-  --version          Show version number
-  --add-dir <directories...>
-                     Directories the session may read
-  --dangerously-skip-permissions
-  --model, -m <model>
-                     Model override
-";
-        let rows = parse_help(text);
-        assert_eq!(
-            rows,
-            vec![
-                (
-                    "--add-dir <directories...>".to_string(),
-                    "Directories the session may read".to_string()
-                ),
-                ("--dangerously-skip-permissions".to_string(), String::new()),
-            ],
-            "owned flags never suggest; beside and next-line descriptions both land",
-        );
-    }
 }

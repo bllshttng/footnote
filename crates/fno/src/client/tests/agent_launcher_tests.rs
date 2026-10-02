@@ -2893,11 +2893,15 @@ fn keyed(
 
 // -- KillLeft (Ctrl+U / Cmd+Backspace) --------------------------------------
 
-/// The kill line, every layer in one walk: the fold maps both Cmd+Backspace
-/// spellings (and Shift+Enter's CSI-u), the composer draft kills only the
-/// row left of the cursor, and the InputField forms kill their head.
+/// The composer's contract, one walk: the fold maps both Cmd+Backspace
+/// spellings (and Shift+Enter's CSI-u), the kill line edits every editor
+/// layer, admission refusals map to canned one-sentence heads with the raw
+/// text behind Ctrl+O, `?` opens the help sheet on an empty input and stays
+/// text once words exist, and the runtime flags parser reads beside and
+/// next-line descriptions while never suggesting a flag the doors own.
 #[test]
-fn kill_line_folds_and_every_editor_honors_it() {
+fn composer_keys_refusals_help_and_flag_parsing_contract() {
+    // -- the key fold ------------------------------------------------------
     let mut esc = LauncherEsc::default();
     assert_eq!(
         esc.fold(b"\x15"),
@@ -2916,6 +2920,7 @@ fn kill_line_folds_and_every_editor_honors_it() {
         vec![super::agent_launcher::LKey::ShiftEnter]
     );
 
+    // -- the draft and the InputField editors ------------------------------
     let mut v = plain_view();
     open(&mut v);
     let l = v.launcher.as_mut().unwrap();
@@ -2938,15 +2943,8 @@ fn kill_line_folds_and_every_editor_honors_it() {
     f.feed(b"\x1b[D\x1b[D"); // cursor after "z"
     f.feed(b"\x15");
     assert_eq!(f.text(), "ai");
-}
 
-// -- refusal sentence + Ctrl+O detail ---------------------------------------
-
-/// The footer's refusal text: admission refusals map to canned one-sentence
-/// heads (through the same first_sentence the footer calls), anything else
-/// keeps its first line, and Ctrl+O swaps the raw text in.
-#[test]
-fn refused_footer_maps_admissions_and_toggles_raw() {
+    // -- refusal heads and the Ctrl+O raw toggle ---------------------------
     use super::agent_launcher::first_sentence;
     assert_eq!(
         first_sentence("process admission refused: count=unknown, ceiling=29, reason=measurement-unavailable"),
@@ -2978,15 +2976,10 @@ fn refused_footer_maps_admissions_and_toggles_raw() {
         "refused: process admission refused: count=unknown, ceiling=29",
         "Ctrl+O shows the raw text"
     );
-}
 
-#[test]
-fn question_mark_opens_help_on_empty_input_and_types_otherwise() {
+    // -- ? opens help on empty input, types otherwise ----------------------
     let mut v = plain_view();
     open(&mut v);
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"?", &mut sock).await;
     });
@@ -3014,4 +3007,28 @@ fn question_mark_opens_help_on_empty_input_and_types_otherwise() {
         "? is text once the input holds words"
     );
     assert!(l.picker.is_none());
+
+    // -- the runtime flags parser ------------------------------------------
+    let rows = super::harness_flags::parse_help(
+        "Usage: claude [options] [prompt]\n\
+         \n\
+         Options:\n\
+         \x20 --version          Show version number\n\
+         \x20 --add-dir <directories...>\n\
+         \x20                    Directories the session may read\n\
+         \x20 --dangerously-skip-permissions\n\
+         \x20 --model, -m <model>\n\
+         \x20                    Model override\n",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "--add-dir <directories...>".to_string(),
+                "Directories the session may read".to_string()
+            ),
+            ("--dangerously-skip-permissions".to_string(), String::new()),
+        ],
+        "owned flags never suggest; beside and next-line descriptions both land",
+    );
 }
