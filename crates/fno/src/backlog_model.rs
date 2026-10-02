@@ -231,22 +231,34 @@ pub struct Card {
 /// characters (`YYYY-MM-DDTHH:MM:SS`, so `Z` and `+00:00` forms compare
 /// equal); the original string is returned.
 fn newest_stamp(e: &Value) -> Option<String> {
-    let mut best: Option<&str> = None;
-    let mut keep = |s: Option<&str>| {
-        if let Some(s) = s.filter(|s| !s.is_empty()) {
-            let newer = best.is_none_or(|b| &s[..s.len().min(19)] > &b[..b.len().min(19)]);
-            if newer {
-                best = Some(s);
-            }
-        }
-    };
+    let mut stamps: Vec<&str> = Vec::new();
     for field in ["touched_at", "created_at", "completed_at"] {
-        keep(e.get(field).and_then(Value::as_str));
+        if let Some(s) = e
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            stamps.push(s);
+        }
     }
     if let Some(sessions) = e.get("sessions").and_then(Value::as_array) {
         for s in sessions {
-            keep(s.get("started_at").and_then(Value::as_str));
-            keep(s.get("ended_at").and_then(Value::as_str));
+            for field in ["started_at", "ended_at"] {
+                if let Some(v) = s
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                {
+                    stamps.push(v);
+                }
+            }
+        }
+    }
+    let mut best: Option<&str> = None;
+    for s in stamps {
+        let newer = best.is_none_or(|b| &s[..s.len().min(19)] > &b[..b.len().min(19)]);
+        if newer {
+            best = Some(s);
         }
     }
     best.map(str::to_string)
