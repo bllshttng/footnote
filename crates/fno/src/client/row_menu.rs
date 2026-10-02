@@ -590,6 +590,13 @@ pub(super) async fn execute_row_menu_action(
             return Ok(());
         }
     };
+    // The chooser refuses an exited row at open, but the row can die between
+    // open and pick, and every one of its six arms would place a dead
+    // session. The same refusal the builder gave, at the execute end.
+    if from_chooser && a.exited {
+        view.set_notice(format!("{} has exited", a.name));
+        return Ok(());
+    }
     // The chooser remembers: the pick that just executed is the pre-selected
     // row next time. Only the chooser's own six mappings persist
     // (`pick_of_action` answers None for everything else).
