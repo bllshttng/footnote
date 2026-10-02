@@ -314,6 +314,13 @@ fn agents_history_live_row_suppresses_stale_receipt_and_reused_names_sort_newest
     assert!(!live_card.contains("receipts/stale.json"));
     assert!(live_card.contains("receipt:    not recorded (row is live; reap receipt suppressed)"));
 
+    // The row's fno handle (the head of its fno_id) also finds the row.
+    sources.registry = Ok(vec![json!({
+        "harness_session_id": SID, "name": "worker", "harness": "claude", "status": "working",
+        "fno_id": "9c1d2e3f-2222-4222-8222-222222222223"
+    })]);
+    let resolved = resolve("9c1d2e3f", &sources);
+    assert_eq!(resolved.sessions, vec![SID.to_string()]);
     sources.registry = Ok(Vec::new());
     let resolved = resolve("worker", &sources);
     assert_eq!(resolved.sessions.len(), 3);
