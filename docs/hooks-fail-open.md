@@ -1,0 +1,58 @@
+# Optional hooks fail open fast
+
+A hook that waits blocks a turn. Context that arrives late is worth less than a turn that starts on time. When the machine is busy, every optional footnote hook runs under one load-aware budget that pays LESS attention to context, never more.
+
+## The budget
+
+`scripts/lib/hook-budget.sh` is the one budget. It reads the one-minute load average and the online core count, then picks a tier:
+
+| Machine state | Budget | Meaning |
+|---|---|---|
+| Idle: load1 <= cores | 3s | the generous read |
+| Loaded: load1 > cores | 1s | shorten, do not lengthen |
+| Load unreadable | 3s | fail open; the wall-clock bound still caps |
+
+There is no skip tier. CI runners proved why: under shard load, a zero budget silenced hooks whose contracts require the read to run, and five suites caught it. The busy tier's 1s bound is the floor. A fired bound reads as silence: exit 0 with empty output. A turn never inherits an error from optional context. The bound rides `with_timeout` from `scripts/lib/with-timeout.sh`, which needs no coreutils `timeout` and works on stock macOS.
+
+Three probes sit outside the budget because their EXIT CODE is the data. `frontdoor-nudge-session-start`: 2 means fno-py, 124 means a wedged socket that still proves the Rust door. `worktree-peers-session-start`: 124 reads as staleness-unknown. `inject-fno-agent-whoami`: the suite pins the cap's duration. Each keeps its fixed `with_timeout` bound from before the budget existed. A fired bound can land on a loaded runner's fork latency. A probe whose answer rides the exit code must not shorten its bound with the load.
+
+## Which hooks ride the budget
+
+The optional families: context, nudge, inject, announce. That covers `prompt-outstanding`, `born-with-why-offer-inject`, `inject-mail-notify`, `inject-announce`, `law-stage-inject`, `inject-fno-agent-whoami`, `inject-mail-drain-session-start`, `outstanding-session-start`, `worktree-peers-session-start`, `frontdoor-nudge-session-start`, `agy-crown-inject`, `context-nudge` (reads), and `operator-capture-nudge`. Both `hooks/hooks.json` and `hooks/codex-hooks.json` set each one's `timeout` entry as a BACKSTOP just above the internal budget. A wedged hook that ignores its own bound still dies at the harness layer.
+
+Two Stop-path context reads also serve from a stale-while-revalidate cache: the context nudge probe and the operator-capture queue depth. A fresh copy costs milliseconds. A served copy past two thirds of its life arms a detached refresher, so the refresh happens off the turn path. A live read that skipped or expired under load serves the stale copy rather than nothing. The nudge probe carries a fingerprint of the transcript (size and mtime) inside the cache file. A grown transcript always re-measures, so the gate never serves pressure truth stale by choice. Keys are per session or per transcript. Files live under `~/.fno/cache/hook-budget/`.
+
+## Gates that decide keep their own budgets
+
+These hooks decide something, so they do not ride the load budget. A decision here blocks, refuses, attests, or delivers control. The list: `target-stop-hook.sh`, every PreToolUse guard, `edit-integrity.sh`, `code-review-attest.sh`, `target-subagent-guard.sh`, `target-stopfailure.sh`, `inject-control-drain-tool-boundary.sh`, and the SessionStart runner `context-run.sh`. The PreToolUse guards by name: `graph-write-protect`, `claude-config-write-guard`, `worktree-write-protect`, `generated-write-guard`, `join-partition-write-guard`, `plan-location-guard`, `king-delegation-guard`, `pretooluse-bash-dispatch`, `effect-guard-dispatch`, `subagent-worktree-guard`, and `review-hold`. The runner's producers carry their own 45s bound. `inject-control-drain-tool-boundary.sh` is control-lane delivery. `inside-leg-report.sh` and `register-session-start.sh` are status and state writers, not optional context. Both keep their own bounds too.
+
+## Third-party hooks: give yours the same budget
+
+If you add your own hook, wrap it in the same fail-open budget. Do not trust the harness ceiling. The hook can be a codegraph prompt-hook, a project linter, anything that shells out:
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+# Point this at the plugin's copy, or vendor scripts/lib/with-timeout.sh
+# and scripts/lib/hook-budget.sh into your project.
+source /path/to/footnote/scripts/lib/hook-budget.sh 2>/dev/null || exit 0
+hook_run_optional your-command --with args
+exit 0
+```
+
+`hook_run_optional` applies the tier table and turns a skip or a fired bound into silence. Then set a small `timeout` backstop for that hook in `settings.json`, just above the 3s idle budget. The backstop exists for the day the wrapper does not finish in milliseconds.
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {"type": "command", "command": "your-wrapper.sh", "timeout": 4}
+        ]
+      }
+    ]
+  }
+}
+```

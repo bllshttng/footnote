@@ -26,8 +26,10 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
 # Run whoami; suppress stderr (warnings would otherwise leak into the
-# injection blob). Cap at 2s wall-clock so a hung fno never blocks
-# session start. `|| true` swallows the timeout status cleanly.
+# injection blob). Cap at 2s wall-clock so a hung fno never blocks session
+# start - the cap's duration is PINNED by the harness suite (scenario 4
+# measures the elapsed time), so this probe keeps its fixed bound rather
+# than the load-aware budget. `|| true` swallows the timeout status cleanly.
 OUTPUT=$(with_timeout 2 fno whoami 2>/dev/null || true)
 [[ -z "$OUTPUT" ]] && exit 0
 
