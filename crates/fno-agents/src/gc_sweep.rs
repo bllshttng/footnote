@@ -1219,37 +1219,12 @@ pub(crate) fn mux_pane_kill_stop(
 }
 
 /// Positive death evidence for a claude row, read off the `claude agents
-/// --json --all` snapshot. `Some(reason)` proves the session finished - the
-/// same standard rm's live gate accepts. A finished claude agent never
-/// leaves the roster; it stays listed with state `done`, so absence can
-/// never be the proof here. `blocked` is NOT terminal: the session is
-/// waiting for input, so it holds.
-pub(crate) fn claude_death_reason(
-    e: &state::RegistryEntry,
-    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
-) -> Option<String> {
-    if e.harness_name() != "claude" {
-        return None;
-    }
-    let row_id = crate::daemon::claude_row_id(e)?;
-    let row = agents.find(&row_id)?;
-    if let Some(state) = row
-        .state
-        .as_deref()
-        .filter(|state| crate::claude_roster::is_terminal_roster_state(state))
-    {
-        return Some(format!("row {row_id} present, state {state}"));
-    }
-    if let Some(pid) = row.pid {
-        // ESRCH or nothing: a failed lookup is not death, so the verdict
-        // needs the existence-specific probe, not start_time's conflated
-        // None (two Nones also prove a persistent failure).
-        if crate::daemon::pid_is_gone(pid) {
-            return Some(format!("row {row_id} pid {pid} is gone"));
-        }
-    }
-    None
-}
+/// --json --all` snapshot. The decision itself moved to
+/// `daemon::roster_death::row_death_reason` so rm, the merge reaper, the
+/// pane-stop fallback, and the sweep share one fno-first verdict; the
+/// sweep's own wiring (verdict plus drift event) lives in its row pass.
+///
+/// `blocked` is NOT terminal: the session is waiting for input, so it holds.
 
 /// The three witnesses that say a worker finished. Any one suffices: a
 /// transcript older than the grace window, a held pid that answers ESRCH,
@@ -2480,7 +2455,18 @@ pub(crate) fn run_with_release(
         let death = if e.harness_name() == "claude" {
             let mut memo = agents_memo.borrow_mut();
             let snapshot = memo.get_or_insert_with(&agents_read);
-            claude_death_reason(e, snapshot)
+            let (death, drift) = crate::daemon::row_death_and_drift(e, snapshot);
+            if death.is_none() {
+                if let Some(detail) = drift {
+                    // fno holds the row live the vendor would retire: the
+                    // disagreement is one operator event, never an override.
+                    let _ = emitter.emit(
+                        "row_liveness_drift",
+                        &json!({"row": row_handle(e), "detail": detail}),
+                    );
+                }
+            }
+            death
         } else {
             None
         };
@@ -4143,6 +4129,33 @@ mod tests {
         assert!(!worker_finished(&e, Some(20), grace, None));
         // An unresolved transcript is not a quiet one.
         assert!(!worker_finished(&e, None, grace, None));
+        // Witness 3's producer decides fno-first: an fno-Live row holds
+        // against a vendor `done` and names the disagreement as drift; an
+        // fno-Finished row retires on fno's word alone, no roster read
+        // needed; an Unknown row still takes the vendor's positive witness,
+        // and an unread roster proves nothing on its own.
+        let mut held = state::RegistryEntry::default();
+        held.harness = Some("claude".into());
+        held.harness_session_id = Some("9a1b2c3d-0000-0000-0000-000000000000".into());
+        held.pid = Some(std::process::id());
+        let listed = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+            crate::claude_roster::ClaudeAgentRow::new("9a1b2c3d", Some("done")),
+        ]);
+        let (death, drift) = crate::daemon::row_death_and_drift(&held, &listed);
+        assert!(death.is_none());
+        assert!(drift.is_some_and(|d| d.contains("done")));
+        held.status = crate::AgentStatus::Exited;
+        let (death, drift) = crate::daemon::row_death_and_drift(&held, &listed);
+        assert!(death.is_some());
+        assert!(drift.is_none());
+        held.status = crate::AgentStatus::Idle;
+        held.pid = None;
+        assert!(crate::daemon::row_death_reason(&held, &listed).is_some());
+        assert!(crate::daemon::row_death_reason(
+            &held,
+            &crate::claude_roster::ClaudeAgentsSnapshot::unknown("timed out")
+        )
+        .is_none());
     }
 
     // change 1: the non-pane stop arms name the arm and the process
