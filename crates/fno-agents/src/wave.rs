@@ -352,13 +352,327 @@ fn run_check(args: &[String]) -> i32 {
     }
 }
 
-/// Transport entrypoint: `fno-agents wave check <plan.md>`.
-pub fn run(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) == Some("check") {
-        return run_check(&args[1..]);
+fn wave_slug(path: &Path) -> String {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("plan")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn task_branch(repo: &Path, plan: &Path, wave: &str, task: &str) -> Result<String, String> {
+    let branch = git_text(repo, &["branch", "--show-current"])?;
+    let prefix = branch.trim_start_matches("feature/").replace('/', "-");
+    Ok(format!(
+        "wave/{prefix}/{}/{}/{}",
+        wave_slug(plan),
+        wave,
+        task.replace('.', "-")
+    ))
+}
+
+fn select_wave(strategy: &Strategy, number: &str) -> Result<&Wave, String> {
+    strategy
+        .waves
+        .iter()
+        .find(|wave| wave.number == number)
+        .ok_or_else(|| format!("wave '{number}' is not declared in the plan"))
+}
+
+fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, String> {
+    if cwd.join(".git").is_dir() {
+        return Err("wave fork requires a linked target worktree; main checkout refused".into());
     }
-    eprintln!("usage: fno-agents wave check <plan>");
-    2
+    let status = git_text(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
+    if !status.is_empty() {
+        return Err("wave fork requires a clean target worktree".into());
+    }
+    let strategy = parse_strategy(plan)?;
+    let wave = select_wave(&strategy, number)?;
+    if wave.mode != "parallel" || wave.tasks.len() < 2 {
+        return Err("wave fork requires a parallel wave with at least two tasks".into());
+    }
+    let base = git_text(cwd, &["rev-parse", "HEAD"])?;
+    let parent = cwd
+        .parent()
+        .ok_or("target worktree has no parent directory")?;
+    let target_name = cwd.file_name().and_then(OsStr::to_str).unwrap_or("target");
+    let mut lines = vec![format!("B\t{base}")];
+    let mut created = Vec::new();
+    for task_id in &wave.tasks {
+        let branch = task_branch(cwd, plan, number, task_id)?;
+        let worktree = parent.join(format!(
+            "{target_name}-wave-{number}-{}",
+            task_id.replace('.', "-")
+        ));
+        if worktree.exists() {
+            for (path, prior_branch) in created.iter().rev() {
+                let _ = git(
+                    cwd,
+                    &[
+                        OsStr::new("worktree"),
+                        OsStr::new("remove"),
+                        path.as_os_str(),
+                    ],
+                );
+                let _ = git(
+                    cwd,
+                    &[
+                        OsStr::new("branch"),
+                        OsStr::new("-D"),
+                        OsStr::new(prior_branch),
+                    ],
+                );
+            }
+            return Err(format!(
+                "wave task worktree already exists: {}",
+                worktree.display()
+            ));
+        }
+        let add_args = [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-b"),
+            OsStr::new(&branch),
+            worktree.as_os_str(),
+            OsStr::new(&base),
+        ];
+        let out = git(cwd, &add_args)?;
+        if !out.status.success() {
+            for (path, prior_branch) in created.iter().rev() {
+                let _ = git(
+                    cwd,
+                    &[
+                        OsStr::new("worktree"),
+                        OsStr::new("remove"),
+                        path.as_os_str(),
+                    ],
+                );
+                let _ = git(
+                    cwd,
+                    &[
+                        OsStr::new("branch"),
+                        OsStr::new("-D"),
+                        OsStr::new(prior_branch),
+                    ],
+                );
+            }
+            return Err(format!(
+                "could not create task {} worktree: {}",
+                task_id,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        created.push((worktree.clone(), branch.clone()));
+        lines.push(format!(
+            "O\t{}\t{}\t{}",
+            task_id,
+            worktree.display(),
+            branch
+        ));
+    }
+    Ok(lines)
+}
+
+fn run_fork(plan: &Path, number: &str) -> Result<Vec<String>, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    run_fork_at(&cwd, plan, number)
+}
+
+fn append_off_surface(root: &Path, files: &[(String, String)]) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let summary = root.join(".fno/SUMMARY.md");
+    if let Some(parent) = summary.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut body = fs::read_to_string(&summary).unwrap_or_default();
+    if !body.contains("## Off-surface writes") {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("\n## Off-surface writes\n");
+    }
+    for (task, file) in files {
+        body.push_str(&format!("- task {task}: {file}\n"));
+    }
+    fs::write(summary, body).map_err(|e| format!("could not update SUMMARY.md: {e}"))
+}
+
+fn run_verify(root: &Path, task: &Task) -> Result<(), String> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&task.verify)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("task {} verify could not start: {e}", task.id))?;
+    if !output.status.success() {
+        return Err(format!("task {} verify failed: {}", task.id, task.verify));
+    }
+    Ok(())
+}
+
+fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<String>, String> {
+    let strategy = parse_strategy(plan)?;
+    let wave = select_wave(&strategy, number)?;
+    let dirty = git_text(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
+    if !dirty.is_empty() {
+        return Err("wave join requires a clean target worktree".into());
+    }
+    let current = git_text(cwd, &["rev-parse", "HEAD"])?;
+    if current != base {
+        return Err(format!("wave base moved: expected {base}, found {current}"));
+    }
+    let mut off_surface = Vec::new();
+    let mut branches = Vec::new();
+    for task_id in &wave.tasks {
+        let task = strategy
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| format!("task {task_id} is missing"))?;
+        let branch = task_branch(cwd, plan, number, task_id)?;
+        let branch_head = git_text(
+            cwd,
+            &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        )
+        .map_err(|_| format!("task {task_id} branch is missing: {branch}"))?;
+        if branch_head == base {
+            return Err(format!("task {task_id} has no committed work"));
+        }
+        let changed = git_text(cwd, &["diff", "--name-only", &format!("{base}..{branch}")])?;
+        for file in changed.lines().map(normalize) {
+            let allowed = task.surfaces.iter().any(|surface| {
+                let surface = normalize(surface);
+                if has_glob(&surface) {
+                    glob_matches(&surface, &file)
+                } else {
+                    surface == file
+                }
+            });
+            if !allowed {
+                off_surface.push((task_id.clone(), file));
+            }
+        }
+        branches.push((task_id.clone(), branch, branch_head));
+    }
+    let mut lines = Vec::new();
+    for (task_id, branch, _) in &branches {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["merge", "--no-ff", "--no-edit", branch])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let conflict =
+                git_text(cwd, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            let _ = git_text(cwd, &["merge", "--abort"]);
+            let _ = git_text(cwd, &["reset", "--hard", base]);
+            let file = conflict.lines().next().unwrap_or("unknown file");
+            return Err(format!(
+                "task {task_id} merge conflict in {file}; worktree retained"
+            ));
+        }
+        lines.push(format!("M\t{task_id}\t{branch}"));
+    }
+    for (task_id, _, _) in &branches {
+        let task = strategy.tasks.get(task_id).expect("task checked above");
+        if let Err(error) = run_verify(cwd, task) {
+            let _ = git_text(cwd, &["reset", "--hard", base]);
+            return Err(error);
+        }
+    }
+    append_off_surface(cwd, &off_surface)?;
+    for (_, branch, _) in &branches {
+        let out = git(
+            cwd,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("list"),
+                OsStr::new("--porcelain"),
+            ],
+        )?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        for block in text.split("\n\n") {
+            if block
+                .lines()
+                .any(|line| line == format!("branch refs/heads/{branch}"))
+            {
+                if let Some(path) = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("worktree "))
+                {
+                    let remove = git(
+                        cwd,
+                        &[
+                            OsStr::new("worktree"),
+                            OsStr::new("remove"),
+                            OsStr::new(path),
+                        ],
+                    )?;
+                    if !remove.status.success() {
+                        return Err(format!("could not remove task worktree {path}"));
+                    }
+                }
+            }
+        }
+        let deleted = git(
+            cwd,
+            &[OsStr::new("branch"), OsStr::new("-d"), OsStr::new(branch)],
+        )?;
+        if !deleted.status.success() {
+            return Err(format!("could not remove merged task branch {branch}"));
+        }
+    }
+    for (task_id, file) in &off_surface {
+        lines.push(format!("OFF\t{task_id}\t{file}"));
+    }
+    Ok(lines)
+}
+
+fn run_join(plan: &Path, number: &str, base: &str) -> Result<Vec<String>, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    run_join_at(&cwd, plan, number, base)
+}
+
+/// Transport entrypoint: `fno-agents wave check|fork|join ...`.
+pub fn run(args: &[String]) -> i32 {
+    let Some(command) = args.first().map(String::as_str) else {
+        eprintln!("usage: fno-agents wave check|fork|join ...");
+        return 2;
+    };
+    let rest = &args[1..];
+    let result = match command {
+        "check" => return run_check(rest),
+        "fork" if rest.len() == 3 && rest[1] == "--wave" => run_fork(Path::new(&rest[0]), &rest[2]),
+        "join" if rest.len() == 5 && rest[1] == "--wave" && rest[3] == "--base" => {
+            run_join(Path::new(&rest[0]), &rest[2], &rest[4])
+        }
+        _ => {
+            eprintln!("usage: fno-agents wave check <plan> | fork <plan> --wave <n> | join <plan> --wave <n> --base <sha>");
+            return 2;
+        }
+    };
+    match result {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            0
+        }
+        Err(error) => {
+            println!("E\t{error}");
+            1
+        }
+    }
 }
 
 #[cfg(test)]
@@ -397,5 +711,132 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "E\tparallel tasks share surface 'src/fold.py': 1.1, 1.2"));
+    }
+
+    #[test]
+    fn wave_fork_join_two_task_wave() {
+        let dir = tempdir().unwrap();
+        let main = dir.path().join("main");
+        let target = dir.path().join("target");
+        fs::create_dir_all(&main).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&main, &["init", "-q"]).status.success());
+        assert!(git(&main, &["config", "user.email", "test@example.com"])
+            .status
+            .success());
+        assert!(git(&main, &["config", "user.name", "Test"])
+            .status
+            .success());
+        fs::write(main.join(".gitignore"), ".fno/\n").unwrap();
+        fs::write(main.join("a.txt"), "base\n").unwrap();
+        assert!(git(&main, &["add", ".gitignore", "a.txt"]).status.success());
+        assert!(git(&main, &["commit", "-qm", "base"]).status.success());
+        assert!(git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/target",
+                target.to_str().unwrap()
+            ]
+        )
+        .status
+        .success());
+        let plan_path = dir.path().join("wave-plan.md");
+        fs::write(&plan_path, plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'\n  - id: '1.2'\n    surface: ['b.txt']\n    verify: 'git diff --quiet'" )).unwrap();
+        let fork = run_fork_at(&target, &plan_path, "1").unwrap();
+        assert_eq!(
+            fork.iter().filter(|line| line.starts_with("O\t")).count(),
+            2
+        );
+        let worktrees: Vec<(String, PathBuf)> = fork
+            .iter()
+            .filter_map(|line| {
+                let columns: Vec<&str> = line.split('\t').collect();
+                (columns.len() == 4).then(|| (columns[1].to_string(), PathBuf::from(columns[2])))
+            })
+            .collect();
+        let wt1 = &worktrees[0].1;
+        let wt2 = &worktrees[1].1;
+        fs::write(wt1.join("a.txt"), "task one\n").unwrap();
+        assert!(git(&wt1, &["add", "a.txt"]).status.success());
+        assert!(git(&wt1, &["commit", "-qm", "task one"]).status.success());
+        fs::write(wt2.join("b.txt"), "task two\n").unwrap();
+        assert!(git(&wt2, &["add", "b.txt"]).status.success());
+        fs::write(wt2.join("c.txt"), "off surface\n").unwrap();
+        assert!(git(&wt2, &["add", "c.txt"]).status.success());
+        assert!(git(&wt2, &["commit", "-qm", "task two"]).status.success());
+        let base = fork[0].strip_prefix("B\t").unwrap();
+        let lines = run_join_at(&target, &plan_path, "1", base).unwrap();
+        assert_eq!(
+            lines.iter().filter(|line| line.starts_with("M\t")).count(),
+            2
+        );
+        assert!(lines.iter().any(|line| line == "OFF\t1.2\tc.txt"));
+        assert!(fs::read_to_string(target.join(".fno/SUMMARY.md"))
+            .unwrap()
+            .contains("- task 1.2: c.txt"));
+        assert!(target.join("b.txt").is_file());
+        assert!(worktrees.iter().all(|(_, path)| !path.exists()));
+        for task_id in ["1.1", "1.2"] {
+            let branch = task_branch(&target, &plan_path, "1", task_id).unwrap();
+            assert!(
+                git(
+                    &target,
+                    &[
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}")
+                    ]
+                )
+                .status
+                .code()
+                    == Some(1)
+            );
+        }
+
+        fs::write(
+            &plan_path,
+            plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\n  - wave: 2\n    mode: parallel\n    tasks: ['2.1', '2.2']\ntasks:\n  - id: '1.1'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'\n  - id: '1.2'\n    surface: ['b.txt']\n    verify: 'git diff --quiet'\n  - id: '2.1'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'\n  - id: '2.2'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'"),
+        )
+        .unwrap();
+        let conflict_fork = run_fork_at(&target, &plan_path, "2").unwrap();
+        let conflict_worktrees: Vec<PathBuf> = conflict_fork
+            .iter()
+            .filter_map(|line| {
+                let columns: Vec<&str> = line.split('\t').collect();
+                (columns.len() == 4).then(|| PathBuf::from(columns[2]))
+            })
+            .collect();
+        fs::write(conflict_worktrees[0].join("a.txt"), "side one\n").unwrap();
+        assert!(git(&conflict_worktrees[0], &["add", "a.txt"])
+            .status
+            .success());
+        assert!(git(&conflict_worktrees[0], &["commit", "-qm", "side one"])
+            .status
+            .success());
+        fs::write(conflict_worktrees[1].join("a.txt"), "side two\n").unwrap();
+        assert!(git(&conflict_worktrees[1], &["add", "a.txt"])
+            .status
+            .success());
+        assert!(git(&conflict_worktrees[1], &["commit", "-qm", "side two"])
+            .status
+            .success());
+        let conflict_base = conflict_fork[0].strip_prefix("B\t").unwrap();
+        let error = run_join_at(&target, &plan_path, "2", conflict_base).unwrap_err();
+        assert!(error.contains("task 2.2 merge conflict in a.txt"));
+        assert_eq!(
+            git_text(&target, &["rev-parse", "HEAD"]).unwrap(),
+            conflict_base
+        );
+        assert!(conflict_worktrees.iter().all(|path| path.exists()));
     }
 }
