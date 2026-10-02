@@ -1072,6 +1072,9 @@ fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
 }
 
 /// The pure half of [`held_rows`], over newline-joined journal contents.
+/// Test-only since the fold moved to [`HeldFold`]: the fixtures pin the raw
+/// spelling directly.
+#[cfg(test)]
 fn held_rows_from_raw(raw: &str) -> Vec<HeldRow> {
     let mut fold = HeldFold::default();
     fold.absorb(raw);

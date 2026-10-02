@@ -147,18 +147,14 @@ pub(super) fn detect_intent_full(transcript_path: &Path) -> Intent {
     // transcript here reaches 135MB, and a whole-file read plus a Vec of
     // every line cost a hook fire 1.4GB of churn. Grow the window only
     // while the entries it holds have not filled the lookback.
-    let mut window: Vec<String> = Vec::new();
     let mut window_bytes: u64 = 1 << 20;
-    loop {
-        window = read_tail_lines(transcript_path, window_bytes);
-        if window.len() >= 2 && enough_entries(&window) {
-            break;
-        }
-        if window_bytes >= (64u64 << 20) {
-            break;
+    let window = loop {
+        let candidate = read_tail_lines(transcript_path, window_bytes);
+        if (candidate.len() >= 2 && enough_entries(&candidate)) || window_bytes >= (64u64 << 20) {
+            break candidate;
         }
         window_bytes *= 4;
-    }
+    };
 
     let mut scanned: usize = 0;
     // `watching` is honored ONLY from the single newest assistant entry

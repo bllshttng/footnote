@@ -8,6 +8,7 @@
 const PIPE_KEEP_BYTES: usize = 64 * 1024 * 1024;
 
 fn keep_capped<R: std::io::Read>(pipe: Option<R>, name: &str) -> Vec<u8> {
+    use std::io::Read;
     let mut kept: Vec<u8> = Vec::new();
     let Some(mut pipe) = pipe else {
         return kept;
@@ -46,7 +47,6 @@ pub(crate) fn output_with_timeout_result(
     mut cmd: std::process::Command,
     secs: u64,
 ) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
     use std::os::unix::process::CommandExt;
     let mut child = cmd
         .process_group(0)
