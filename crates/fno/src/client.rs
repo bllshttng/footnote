@@ -379,6 +379,11 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // The interactive client is a human instrument. A worker identity
+    // inherited from the shell that launched it would make every composer
+    // child (a `!` line, a launched agent) read as agent-origin to the
+    // spawn gates, so the client drops it the way the server does.
+    std::env::remove_var("FNO_AGENT_SELF");
     // Resolve + record the config warning BEFORE any early exit below (the
     // nested-session guard, an invalid session name): a pinned config whose
     // dir diverged must say so on every path, not only the happy attach. The

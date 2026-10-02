@@ -189,6 +189,11 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
 /// and before any capacity math. Mail stays ungated so the incident can be
 /// announced and explained; `fno agents incident clear` reopens admission.
 fn fleet_incident_gate() -> Result<(), Refusal> {
+    // A caller with no worker identity is the human's own typed verb: their
+    // call is the recovery path, so the stop holds agent fan-out only.
+    if !gate_agent_origin() {
+        return Ok(());
+    }
     match crate::fleet_incident::verdict_for("spawns") {
         crate::fleet_incident::Verdict::Clear(_) => Ok(()),
         crate::fleet_incident::Verdict::Stopped(record) => {
@@ -215,6 +220,15 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
     }
 }
 
+/// True when this process carries a worker identity: the agent-spawn doors'
+/// one caller key. The user's own typed verb carries none, and no gate here
+/// may refuse or hold it.
+fn gate_agent_origin() -> bool {
+    std::env::var_os("FNO_AGENT_SELF")
+        .filter(|name| !name.is_empty())
+        .is_some()
+}
+
 /// The second admission boundary: the agent-spawn door's opt-in. The default
 /// is admit, and only a caller carrying `FNO_AGENT_SELF` is held; the same
 /// verb typed at a human's shell admits. An unexpired machine brake holds
@@ -226,10 +240,7 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
 /// arms the brake, so a hold here means fno's own fan-out; the user's pane
 /// taps admit through the default door.
 fn process_admission_gate() -> Result<(), Refusal> {
-    let agent_origin = std::env::var_os("FNO_AGENT_SELF")
-        .filter(|name| !name.is_empty())
-        .is_some();
-    if !agent_origin {
+    if !gate_agent_origin() {
         return Ok(());
     }
     match crate::machine_watch::brake_holds() {
@@ -1473,6 +1484,16 @@ fn decide_gate(
         for w in &lane_warnings {
             eprintln!("{w}");
         }
+    }
+
+    // A caller with no worker identity is the human's own typed verb: no
+    // capacity gate below may refuse or hold it. The slot acquire stays
+    // best-effort so the spawned worker still joins the roster accounting.
+    if !gate_agent_origin() {
+        if substrate == "headless" {
+            acquire_worker_slot(&mut guard, name, &holder, holder_pid, route_provider, false).ok();
+        }
+        return Ok(guard);
     }
 
     // The lane cap binds the provider axis only; an unrouted spawn is
@@ -3266,10 +3287,15 @@ MemAvailable:    8000000 kB\n";
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 
+        // The stop holds an agent-origin caller only; the human's own typed
+        // verb is the recovery path and passes.
+        std::env::set_var("FNO_AGENT_SELF", "incident-test-worker");
         assert_eq!(
             fleet_incident_gate().err().map(|r| r.exit_code),
             Some(EXIT_FLEET_STOP)
         );
+        std::env::remove_var("FNO_AGENT_SELF");
+        assert!(fleet_incident_gate().is_ok(), "no identity, no hold");
         match saved {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
