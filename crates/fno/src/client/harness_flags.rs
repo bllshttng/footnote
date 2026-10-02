@@ -46,6 +46,11 @@ pub(crate) async fn capture(harness: &str) -> Option<Vec<FlagRow>> {
     }
     let text = run_capture(harness, &["--help"]).await?;
     let rows = parse_help(&text);
+    // An empty parse is a transient misread, not a fact about the binary:
+    // never cache it, so the next open retries the capture.
+    if rows.is_empty() {
+        return Some(rows);
+    }
     let _ = std::fs::create_dir_all(cache.parent()?);
     let _ = std::fs::write(
         &cache,

@@ -254,10 +254,6 @@ pub(crate) struct Launcher {
     /// A refused or unknown footer shows the full raw reason instead of its
     /// one-sentence head. Toggled with Ctrl+O; a fresh attempt clears it.
     pub show_detail: bool,
-    /// Force is armed for the next launch: shift+enter or the `--force` row
-    /// sets it, the request carries it once, and it clears on submit. The
-    /// server journals the override with the user as the actor.
-    pub force: bool,
     /// The selected harness's `--help` flag rows (entry spelling + one-line
     /// description), captured once per binary version and cached on disk.
     /// Empty or harness-mismatched means the toml capture shows instead.
@@ -590,11 +586,6 @@ fn pill_is_chip_owned(flag: &str) -> bool {
 /// the pill, and open value capture so the next word lands as its value.
 /// A chip-owned flag never stores a pill; its value pins the chip.
 fn commit_verbatim_pill(l: &mut Launcher) {
-    // Typing --force + Space arms the same override the picker row does:
-    // the request field carries it (journaled), never a bare argv token.
-    if trailing_word(&l.draft.message) == Some("--force") {
-        l.force = true;
-    }
     let Some(word) = trailing_word(&l.draft.message).map(str::to_string) else {
         return;
     };
@@ -744,7 +735,6 @@ pub(crate) fn open(view: &mut View) {
             next_request_id: 1,
             shell: false,
             show_detail: false,
-            force: false,
             runtime_flags: Vec::new(),
             runtime_flags_harness: String::new(),
             project_hover: false,
@@ -974,6 +964,27 @@ pub(crate) fn close(view: &mut View) {
 /// through the existing command path).
 pub(crate) fn apply_launch_update(view: &mut View, update: AgentLaunchUpdate) -> Option<u64> {
     let request_id = update.request_id;
+    // A launch that actually rode the override spent it: the force pill
+    // clears on the terminal Launched state. A refusal or an Unknown keeps
+    // it armed for the operator's retry.
+    if let LaunchState::Launched { .. } = update.state {
+        let mut spent = false;
+        if let Some(l) = view.launcher.as_mut() {
+            if let Some(at) = l.draft.pills.iter().position(|(f, _)| f == "--force") {
+                l.draft.pills.remove(at);
+                l.draft.bump();
+                spent = true;
+            }
+        }
+        if !spent {
+            if let Some(l) = view.launcher_closed.as_mut() {
+                if let Some(at) = l.draft.pills.iter().position(|(f, _)| f == "--force") {
+                    l.draft.pills.remove(at);
+                    l.draft.bump();
+                }
+            }
+        }
+    }
     // The seed note folds in here, once, from the same update the rest of
     // the state derives from - never re-derived from a moved-out value.
     let seed_note: Option<&'static str>;
@@ -1165,8 +1176,7 @@ async fn submit(
     request.extra_flags = extra_flags;
     request.worktree = worktree;
     request.branch = branch;
-    request.force = l.force;
-    l.force = false;
+    request.force = l.draft.pills.iter().any(|(f, _)| f == "--force");
     if (request.provider.is_some() || request.route.is_some() || !request.extra_flags.is_empty())
         && !supports_launch_extra_axes(&view.session)
     {
@@ -1828,7 +1838,12 @@ pub(crate) async fn launcher_keys(
                     .unwrap_or((Focus::Message, false, false));
                 if !pending && focus == Focus::Message && !shell {
                     if let Some(l) = view.launcher.as_mut() {
-                        l.force = true;
+                        // The pill IS the armed state: visible, removable,
+                        // and it survives a refusal for the retry.
+                        if !l.draft.pills.iter().any(|(f, _)| f == "--force") {
+                            l.draft.pills.push(("--force".to_string(), None));
+                            l.draft.bump();
+                        }
                     }
                     if let Some(l) = view.launcher.as_mut() {
                         finalize_pill_value(l);
@@ -3144,7 +3159,11 @@ pub(crate) fn picker_rows(
             push_entry(
                 &mut rows,
                 &mut actions,
-                if l.force { "\u{2713}" } else { "\u{2022}" },
+                if l.draft.pills.iter().any(|(f, _)| f == "--force") {
+                    "\u{2713}"
+                } else {
+                    "\u{2022}"
+                },
                 "--force",
                 "past the admission brake and the spawn gate; journaled",
                 true,
@@ -3647,9 +3666,8 @@ fn commit_picker_action(
         PickerAction::OpenMore => open_more(l, catalog, anchor),
         PickerAction::ShowSteps { title, lines } => show_steps(l, title, lines, anchor),
         PickerAction::Force => {
-            // Armed once: the pill shows the state, the request field
-            // carries it, submit clears it. Picking twice stays one arm.
-            l.force = true;
+            // The pill is the armed state: visible, removable, and it
+            // survives a refusal. Picking twice stays one arm.
             if !l.draft.pills.iter().any(|(f, _)| f == "--force") {
                 l.draft.pills.push(("--force".to_string(), None));
                 l.draft.bump();

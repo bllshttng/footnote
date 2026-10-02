@@ -30,7 +30,7 @@ A `!` on an empty input turns the composer into a one-line shell prompt. The lin
 
 A refusal shows as one sentence naming the limit and the way out, for example `process limit: machine runaway brake on`. The raw gate text is never painted mid-word. Ctrl-O swaps the raw text in, and the journal row (`composer_shell_refused`, `composer_launch_forced`) always carries it.
 
-Force is a deliberate user gesture. Shift+enter arms it, and so does the `--force` row in the picker's fno section. The armed state shows as a `--force` pill. The request carries `force` once (v100). The server journals `composer_launch_forced` with the user as the actor. It runs the door with `--force` and admits the door child under the human exemption. Cap, RAM floor and the CPU ceiling stand down. The provider cap and the blueprint axis stay enforced. The armed state clears on submit.
+Force is a deliberate user gesture. Shift+enter arms it, and so does the `--force` row in the picker's fno section. The armed state shows as a `--force` pill. The request carries `force` once (v100), and the pill clears when a launch actually rides it; a refusal keeps it for the retry. The server journals `composer_launch_forced` with the user as the actor. It runs the door with `--force` and admits the door child under the human exemption. Cap, RAM floor and the CPU ceiling stand down. The provider cap and the blueprint axis stay enforced. The armed state clears on submit.
 
 ## What the composer owns, and what it does not
 

@@ -261,10 +261,10 @@ enum BirthCheck {
     Unreadable,
 }
 
-/// The first registry row born at `since_secs` or later (30s slack for a
-/// clock skew between the writer and this read) in `cwd`, named. A missing
-/// or unparseable registry is `Unreadable`: the timeout stays unresolved
-/// rather than flattened into a no-birth claim.
+/// The first registry row born at `since_secs` or later in `cwd`, named.
+/// Both clocks are this machine's, so no row that predates the attempt can
+/// read as the birth. A missing or unparseable registry is `Unreadable`:
+/// the timeout stays unresolved rather than flattened into a no-birth claim.
 async fn registry_birth_since(cwd: &str, since_secs: u64) -> BirthCheck {
     let raw = match tokio::task::spawn_blocking(|| {
         std::fs::read_to_string(crate::agents_view::registry_path()).ok()
@@ -279,7 +279,7 @@ async fn registry_birth_since(cwd: &str, since_secs: u64) -> BirthCheck {
     };
     match rows
         .iter()
-        .find(|r| r.cwd == cwd && r.started_at.is_some_and(|t| t + 30 >= since_secs))
+        .find(|r| r.cwd == cwd && r.started_at.is_some_and(|t| t >= since_secs))
     {
         Some(row) => BirthCheck::Yes(row.name.clone()),
         None => BirthCheck::No,

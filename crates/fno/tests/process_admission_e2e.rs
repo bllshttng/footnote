@@ -255,7 +255,7 @@ fn restore_max_processes(previous: Option<std::ffi::OsString>) {
 /// The composer's `!` line: a pane run the caller knows a human asked for
 /// passes an ARMED machine runaway brake with a warning, the same exemption
 /// the user's own attach carries, while the same call without `human` still
-/// refuses (x-e047).
+/// refuses.
 #[test]
 fn human_pane_admission_passes_an_armed_runaway_brake() {
     isolate_admission_state();

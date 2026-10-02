@@ -982,15 +982,17 @@ mod tests {
         forced.force = true;
         let argv = launch_spawn_argv("fno", &forced, "work");
         assert!(
-            argv.contains(&"--force"),
+            argv.iter().any(|a| a == "--force"),
             "a forced request carries --force: {argv:?}"
         );
+        let without: Vec<String> = argv
+            .iter()
+            .filter(|a| a.as_str() != "--force")
+            .cloned()
+            .collect();
         assert_eq!(
             launch_spawn_argv("fno", &req, "work"),
-            argv.iter()
-                .filter(|a| *a != "--force")
-                .copied()
-                .collect::<Vec<_>>(),
+            without,
             "force adds nothing else"
         );
         let configured_route = AgentLaunchRequest {
