@@ -25,6 +25,7 @@ HARBOR = ["uvx", "--from", "harbor==0.23.0", "harbor"]
 SMOKE_TASK = "terminal-bench/adaptive-rejection-sampler"
 MODEL = "glm-5.3-flash"
 CLAUDE_MODEL = f"{MODEL}[1m]"
+CLAUDE_VERSION = "2.1.286"  # Amendment 11: the Run 1 pin, in the Run 0 container too
 ZAI_ANTHROPIC = "https://api.z.ai/api/anthropic"
 ZAI_OPENAI = "https://api.z.ai/api/coding/paas/v4"
 ARMS = ["claude-code", "opencode", "pi", "terminus-2", "zcode"]
@@ -54,7 +55,7 @@ def agent(arm: str, key: str) -> tuple[dict, list[str]]:
                                                 "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL")]
         env.append(f"ANTHROPIC_DEFAULT_HAIKU_MODEL={MODEL}")
         return ({"import_path": "harbor.agents.installed.claude_code:ClaudeCode", "model_name": CLAUDE_MODEL,
-                 "kwargs": {"reasoning_effort": "high"}}, env)
+                 "kwargs": {"reasoning_effort": "high", "version": CLAUDE_VERSION}}, env)
     if arm == "opencode":
         return ({"import_path": "harbor.agents.installed.opencode:OpenCode",
                  "model_name": f"zai-coding-plan/{MODEL}",

@@ -145,6 +145,21 @@ The user moved the study to the Intel iMac on 2026-10-02. Both runs started clea
 - pi in Run 1. Every pi attempt ends before a worker starts: the headless substrate has no pi lane on this branch. The lane reads `unavailable` on both machines.
 - Every other rule stays.
 
+## Amendment 11 (2026-10-02, one load rule for every arm, before any results commit)
+
+The user ruled: "the key is consistency. i hope the trials all have similiar conditions." A process storm starved the iMac from about 18:07Z to 18:38Z. A study shim made a cleanup command call itself, and about 9,000 processes piled up. No trial was killed.
+
+- Rule. A Run 0 trial or Run 1 attempt is excluded as infrastructure and run again when the 5-minute load average passed 16 during it. Any one sample between its start and its end is enough. 16 is two per physical core on the iMac. The sampler reads once a minute.
+- Scope. The rule applies to every arm and lane on the iMac, finished or not. A re-run uses the same arm, job and settings.
+- When it was set. The threshold was chosen after reading the load series and before reading any outcome. Before 18:00Z the 5-minute load never passed 12.0. It passed 16 from 18:21Z to 18:38Z and peaked at 43.4.
+- Why the 5-minute load. One build can spike the 1-minute load. It touched 17.7 in normal running, where the 5-minute load stayed under 12.
+- In-flight trials. A trial already running in a bad window finishes and is then set aside. Nothing is killed for the rule.
+- Concurrency. Run 0 stays at 4 trials for every remaining arm, as the pi arm ran.
+- Claude Code version. The Run 0 claude-code container now installs Claude Code 2.1.286, the Run 1 pin. The 16:03Z smoke had installed 2.1.287.
+- Images. Unused task images were removed at 18:29Z to free disk. Later arms pull them again. A pull happens in environment setup, before the agent timer starts.
+- No setting, image or environment changes mid-arm from here, unless the machine is at risk.
+- Every other rule stays.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
