@@ -25,6 +25,7 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 - [guides/cross-project-inbox.md](guides/cross-project-inbox.md) - messaging between projects
 - [guides/worktrees.md](guides/worktrees.md) - isolate each feature in its own worktree
 - [guides/utilities.md](guides/utilities.md) - debug, code review
+- [guides/buddy.md](guides/buddy.md) - the companion mod above the Claude Code prompt
 - [guides/reading-shipped-plans.md](guides/reading-shipped-plans.md) - the completion-stamp format
 
 ## Configuration
