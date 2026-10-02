@@ -24,10 +24,11 @@ impl Core {
 
     /// Teardown: capture the topology, then record the stop in the journal
     /// so a restart bounce that closes nothing still names itself in the
-    /// feed. Every serve-loop break is Flow::Shutdown, so the cause word
-    /// is fixed.
-    pub(super) fn record_exit(&mut self) {
+    /// feed. Every serve-loop break sets its own cause word first; the tail
+    /// passes it here, so the server_stopped event names why the server
+    /// went away instead of the fixed word `shutdown`.
+    pub(super) fn record_exit(&mut self, cause: &str) {
         self.capture_topology_now();
-        self.emit_server_stopped("shutdown");
+        self.emit_server_stopped(cause);
     }
 }
