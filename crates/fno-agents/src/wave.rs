@@ -157,7 +157,8 @@ fn git_text(cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 fn normalize(path: &str) -> String {
     let mut parts = Vec::new();
-    for part in path.trim().replace('\\', "/").split('/') {
+    let normalized = path.trim().replace('\\', "/");
+    for part in normalized.split('/') {
         match part {
             "" | "." => {}
             ".." => {
@@ -649,7 +650,7 @@ fn task_worktree_path(repo: &Path, task: &str) -> Result<PathBuf, String> {
     Ok(parent.join(format!("{name}-t{}", task.replace('.', "-"))))
 }
 
-fn select_wave(strategy: &Strategy, number: &str) -> Result<&Wave, String> {
+fn select_wave<'a>(strategy: &'a Strategy, number: &str) -> Result<&'a Wave, String> {
     strategy
         .waves
         .iter()
