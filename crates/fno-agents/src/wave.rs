@@ -4,7 +4,7 @@
 //! validation and `/execute waves`; it is not an advertised `fno` verb.
 
 use serde_yaml_ng::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ use std::process::{Command, Output};
 struct Task {
     id: String,
     surfaces: Vec<String>,
+    blocked_by: Vec<String>,
     verify: String,
 }
 
@@ -40,6 +41,14 @@ fn value_text(value: &Value) -> Option<String> {
 
 fn mapping_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     value.as_mapping()?.get(&Value::String(key.to_string()))
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Sequence(items)) => items.iter().filter_map(value_text).collect(),
+        Some(item) => value_text(item).into_iter().collect(),
+        None => Vec::new(),
+    }
 }
 
 fn parse_strategy(path: &Path) -> Result<Strategy, String> {
@@ -75,10 +84,10 @@ fn parse_strategy(path: &Path) -> Result<Strategy, String> {
             let Some(id) = mapping_value(row, "id").and_then(value_text) else {
                 continue;
             };
-            let surfaces = mapping_value(row, "surface")
-                .and_then(Value::as_sequence)
-                .map(|items| items.iter().filter_map(value_text).collect())
-                .unwrap_or_default();
+            let surfaces = string_list(mapping_value(row, "surface"));
+            let blocked_by = string_list(
+                mapping_value(row, "blocked_by").or_else(|| mapping_value(row, "depends_on")),
+            );
             let verify = mapping_value(row, "verify")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
@@ -88,6 +97,7 @@ fn parse_strategy(path: &Path) -> Result<Strategy, String> {
                 Task {
                     id,
                     surfaces,
+                    blocked_by,
                     verify,
                 },
             );
@@ -103,10 +113,7 @@ fn parse_strategy(path: &Path) -> Result<Strategy, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("sequential")
                 .to_string();
-            let task_refs = mapping_value(row, "tasks")
-                .and_then(Value::as_sequence)
-                .map(|items| items.iter().filter_map(value_text).collect())
-                .unwrap_or_default();
+            let task_refs = string_list(mapping_value(row, "tasks"));
             waves.push(Wave {
                 number,
                 mode,
@@ -210,23 +217,163 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
     table[p.len()][v.len()]
 }
 
-fn repository_files(root: &Path) -> Vec<String> {
+#[derive(Clone)]
+enum GlobToken {
+    Star,
+    Any,
+    Literal(char),
+    Class {
+        negate: bool,
+        ranges: Vec<(u32, u32)>,
+    },
+}
+
+fn glob_tokens(pattern: &str) -> Vec<GlobToken> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '*' => tokens.push(GlobToken::Star),
+            '?' => tokens.push(GlobToken::Any),
+            '[' => {
+                if let Some(relative_end) = chars[index + 1..].iter().position(|c| *c == ']') {
+                    let end = index + 1 + relative_end;
+                    let class = &chars[index + 1..end];
+                    let negate = class.first().is_some_and(|c| *c == '!' || *c == '^');
+                    let mut ranges = Vec::new();
+                    let mut cursor = if negate { 1 } else { 0 };
+                    while cursor < class.len() {
+                        if cursor + 2 < class.len() && class[cursor + 1] == '-' {
+                            ranges.push((class[cursor] as u32, class[cursor + 2] as u32));
+                            cursor += 3;
+                        } else {
+                            let value = class[cursor] as u32;
+                            ranges.push((value, value));
+                            cursor += 1;
+                        }
+                    }
+                    tokens.push(GlobToken::Class { negate, ranges });
+                    index = end;
+                } else {
+                    tokens.push(GlobToken::Literal('['));
+                }
+            }
+            literal => tokens.push(GlobToken::Literal(literal)),
+        }
+        index += 1;
+    }
+    tokens
+}
+
+fn token_accepts(token: &GlobToken, character: char) -> bool {
+    match token {
+        GlobToken::Star | GlobToken::Any => true,
+        GlobToken::Literal(expected) => *expected == character,
+        GlobToken::Class { negate, ranges } => {
+            let value = character as u32;
+            ranges
+                .iter()
+                .any(|(start, end)| *start <= value && value <= *end)
+                != *negate
+        }
+    }
+}
+
+fn overlapping_character(left: &GlobToken, right: &GlobToken) -> Option<char> {
+    for character in ['a', 'x', '0', '/', '_', '-', '.', '!', ' '] {
+        if token_accepts(left, character) && token_accepts(right, character) {
+            return Some(character);
+        }
+    }
+    let mut boundaries = vec![0x20, 0xd800, 0xe000, 0x110000];
+    for token in [left, right] {
+        match token {
+            GlobToken::Literal(character) => {
+                let value = *character as u32;
+                boundaries.push(value);
+                boundaries.push(value + 1);
+            }
+            GlobToken::Class { ranges, .. } => {
+                for (start, end) in ranges {
+                    boundaries.push(*start);
+                    boundaries.push(end.saturating_add(1));
+                }
+            }
+            GlobToken::Star | GlobToken::Any => {}
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    for value in boundaries {
+        let Some(character) = char::from_u32(value) else {
+            continue;
+        };
+        if !character.is_control()
+            && token_accepts(left, character)
+            && token_accepts(right, character)
+        {
+            return Some(character);
+        }
+    }
+    None
+}
+
+fn overlapping_glob_witness(left: &str, right: &str) -> Option<String> {
+    let left = glob_tokens(left);
+    let right = glob_tokens(right);
+    let mut queue = VecDeque::from([(0usize, 0usize, false, String::new())]);
+    let mut visited = BTreeSet::new();
+    while let Some((left_at, right_at, nonempty, witness)) = queue.pop_front() {
+        if !visited.insert((left_at, right_at, nonempty)) {
+            continue;
+        }
+        if left_at == left.len() && right_at == right.len() && nonempty {
+            return Some(witness);
+        }
+        if matches!(left.get(left_at), Some(GlobToken::Star)) {
+            queue.push_back((left_at + 1, right_at, nonempty, witness.clone()));
+        }
+        if matches!(right.get(right_at), Some(GlobToken::Star)) {
+            queue.push_back((left_at, right_at + 1, nonempty, witness.clone()));
+        }
+        let (Some(left_token), Some(right_token)) = (left.get(left_at), right.get(right_at)) else {
+            continue;
+        };
+        if let Some(character) = overlapping_character(left_token, right_token) {
+            let mut next_witness = witness;
+            next_witness.push(character);
+            let next_left = if matches!(left_token, GlobToken::Star) {
+                left_at
+            } else {
+                left_at + 1
+            };
+            let next_right = if matches!(right_token, GlobToken::Star) {
+                right_at
+            } else {
+                right_at + 1
+            };
+            queue.push_back((next_left, next_right, true, next_witness));
+        }
+    }
+    None
+}
+
+fn repository_files(root: &Path) -> Result<Vec<String>, String> {
     let args = [
         OsStr::new("ls-files"),
         OsStr::new("-co"),
         OsStr::new("--exclude-standard"),
     ];
-    git(root, &args)
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(normalize)
-                .filter(|line| !line.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+    let out = git(root, &args)?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(normalize)
+        .filter(|line| !line.is_empty())
+        .collect())
 }
 
 fn surface_paths(surface: &str, files: &[String]) -> BTreeSet<String> {
@@ -242,32 +389,113 @@ fn surface_paths(surface: &str, files: &[String]) -> BTreeSet<String> {
     }
 }
 
-fn missing_verify_path(command: &str, root: &Path) -> Option<String> {
-    let tokens: Vec<String> = command
-        .split_whitespace()
-        .map(|token| {
-            token
-                .trim_matches(|c| c == '\'' || c == '"' || c == '`')
-                .to_string()
-        })
-        .collect();
-    let mut candidates = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
-        if matches!(token.as_str(), "bash" | "sh" | "python" | "python3") {
-            if let Some(path) = tokens.get(index + 1).filter(|p| !p.starts_with('-')) {
-                candidates.push(path.clone());
+fn path_candidate(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.contains('/')
+        || token
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty())
+}
+
+fn missing_verify_path(command: &str, surfaces: &[String], root: &Path) -> Option<String> {
+    for segment in command.split(|c| matches!(c, '&' | '|' | ';')) {
+        let tokens: Vec<String> = segment
+            .split_whitespace()
+            .map(|token| {
+                token
+                    .trim_matches(|c: char| "'\"`,;|&()".contains(c))
+                    .to_string()
+            })
+            .collect();
+        let mut skip_output_target = false;
+        for (index, raw) in tokens.iter().enumerate() {
+            if skip_output_target {
+                skip_output_target = false;
+                continue;
             }
-        }
-    }
-    for candidate in candidates {
-        let path = Path::new(&candidate);
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            root.join(path)
-        };
-        if !resolved.is_file() {
-            return Some(candidate);
+            if matches!(raw.as_str(), ">" | ">>" | "1>" | "1>>" | "2>" | "2>>") {
+                skip_output_target = true;
+                continue;
+            }
+            if raw.starts_with('>') || raw.starts_with("1>") || raw.starts_with("2>") {
+                continue;
+            }
+            let mut token = raw.clone();
+            if let Some(path) = token.strip_prefix('<') {
+                token = path.to_string();
+            } else if let Some(path) = token.strip_prefix("0<") {
+                token = path.to_string();
+            }
+            if let Some((flag, value)) = token.split_once('=') {
+                if flag.starts_with('-') {
+                    token = value.to_string();
+                } else {
+                    continue;
+                }
+            }
+            if let Some((path, _)) = token.split_once("::") {
+                token = path.to_string();
+            }
+            if token.is_empty()
+                || token.starts_with('-')
+                || token.starts_with("$(")
+                || token == "origin/main"
+                || token.starts_with("origin/main..")
+                || token.contains("://")
+                || !path_candidate(&token)
+            {
+                continue;
+            }
+            if surfaces.iter().any(|surface| {
+                let surface = normalize(surface);
+                let token_path = normalize(&token);
+                if has_glob(&surface) {
+                    glob_matches(&surface, &token_path)
+                } else {
+                    surface == token_path
+                }
+            }) {
+                continue;
+            }
+            let interpreted_script = tokens[..index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, prior)| matches!(prior.as_str(), "bash" | "sh" | "python" | "python3"))
+                .is_some_and(|(at, _)| {
+                    tokens[at + 1..index]
+                        .iter()
+                        .all(|argument| argument.starts_with('-'))
+                });
+            let has_extension = token
+                .rsplit('/')
+                .next()
+                .and_then(|name| name.rsplit_once('.'))
+                .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty());
+            let resolved = if token.starts_with("${REPO_ROOT}/") {
+                root.join(token.trim_start_matches("${REPO_ROOT}/"))
+            } else if token.starts_with("$REPO_ROOT/") {
+                root.join(token.trim_start_matches("$REPO_ROOT/"))
+            } else if let Some(rest) = token.strip_prefix("~/") {
+                std::env::var_os("HOME").map(PathBuf::from)?.join(rest)
+            } else if token.starts_with('$') {
+                continue;
+            } else {
+                let path = Path::new(&token);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    root.join(path)
+                }
+            };
+            if !resolved.exists() || ((interpreted_script || has_extension) && !resolved.is_file())
+            {
+                return Some(token);
+            }
         }
     }
     None
@@ -275,22 +503,47 @@ fn missing_verify_path(command: &str, root: &Path) -> Option<String> {
 
 fn check_plan(plan: &Path, root: &Path) -> Result<Vec<String>, String> {
     let strategy = parse_strategy(plan)?;
-    let files = repository_files(root);
+    let files = repository_files(root)?;
     let mut lines = Vec::new();
-    for wave in &strategy.waves {
+    let task_waves: BTreeMap<String, usize> = strategy
+        .waves
+        .iter()
+        .enumerate()
+        .flat_map(|(index, wave)| wave.tasks.iter().map(move |task| (task.clone(), index)))
+        .collect();
+    let task_surfaces: Vec<String> = strategy
+        .tasks
+        .values()
+        .flat_map(|task| task.surfaces.iter().cloned())
+        .collect();
+    for (wave_index, wave) in strategy.waves.iter().enumerate() {
         let mut seen = BTreeMap::<String, Vec<(String, bool)>>::new();
+        let mut glob_details = BTreeMap::<String, (String, String)>::new();
+        let mut surfaces = Vec::<(String, String, bool)>::new();
         for task_id in &wave.tasks {
             let Some(task) = strategy.tasks.get(task_id) else {
                 continue;
             };
+            for dependency in &task.blocked_by {
+                if task_waves
+                    .get(dependency)
+                    .is_some_and(|dependency_wave| *dependency_wave > wave_index)
+                {
+                    lines.push(format!(
+                        "E\ttask '{}' depends on later-wave task '{}'",
+                        task.id, dependency
+                    ));
+                }
+            }
             for surface in &task.surfaces {
                 let normalized = normalize(surface);
                 let glob = has_glob(&normalized);
+                surfaces.push((task.id.clone(), normalized.clone(), glob));
                 for file in surface_paths(&normalized, &files) {
                     seen.entry(file).or_default().push((task.id.clone(), glob));
                 }
             }
-            if let Some(path) = missing_verify_path(&task.verify, root) {
+            if let Some(path) = missing_verify_path(&task.verify, &task_surfaces, root) {
                 lines.push(format!(
                     "X\tverify command for task '{}' names missing path '{}'",
                     task.id, path
@@ -298,6 +551,38 @@ fn check_plan(plan: &Path, root: &Path) -> Result<Vec<String>, String> {
             }
         }
         if wave.mode == "parallel" {
+            for left in 0..surfaces.len() {
+                for right in left + 1..surfaces.len() {
+                    let (left_id, left_path, left_glob) = &surfaces[left];
+                    let (right_id, right_path, right_glob) = &surfaces[right];
+                    if left_id == right_id {
+                        continue;
+                    }
+                    if *left_glob && *right_glob {
+                        if let Some(witness) = overlapping_glob_witness(left_path, right_path) {
+                            let owners = seen.entry(witness.clone()).or_default();
+                            owners.push((left_id.clone(), true));
+                            owners.push((right_id.clone(), true));
+                            glob_details.insert(witness, (left_path.clone(), right_path.clone()));
+                        }
+                        continue;
+                    }
+                    if left_glob == right_glob {
+                        continue;
+                    }
+                    let (pattern, exact, pattern_id, exact_id) = if *left_glob {
+                        (left_path, right_path, left_id, right_id)
+                    } else {
+                        (right_path, left_path, right_id, left_id)
+                    };
+                    if glob_matches(pattern, exact) {
+                        let owners = seen.entry(exact.clone()).or_default();
+                        owners.push((pattern_id.clone(), true));
+                        owners.push((exact_id.clone(), false));
+                        glob_details.insert(exact.clone(), (pattern.clone(), exact.clone()));
+                    }
+                }
+            }
             for (path, owners) in seen {
                 let ids: BTreeSet<String> = owners.iter().map(|(id, _)| id.clone()).collect();
                 if ids.len() < 2 {
@@ -307,6 +592,10 @@ fn check_plan(plan: &Path, root: &Path) -> Result<Vec<String>, String> {
                 if owners.iter().all(|(_, glob)| !glob) {
                     lines.push(format!(
                         "E\tparallel tasks share surface '{path}': {id_list}"
+                    ));
+                } else if let Some((left, right)) = glob_details.get(&path) {
+                    lines.push(format!(
+                        "X\tparallel tasks share surface glob '{path}' (patterns '{left}' ~ '{right}'): {id_list}"
                     ));
                 } else {
                     lines.push(format!(
@@ -386,6 +675,38 @@ fn select_wave(strategy: &Strategy, number: &str) -> Result<&Wave, String> {
         .ok_or_else(|| format!("wave '{number}' is not declared in the plan"))
 }
 
+fn cleanup_created_wave_worktrees(root: &Path, created: &[(PathBuf, String, bool)]) {
+    for (path, branch, new_branch) in created.iter().rev() {
+        let _ = git(
+            root,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("remove"),
+                path.as_os_str(),
+            ],
+        );
+        if *new_branch {
+            let _ = git(
+                root,
+                &[OsStr::new("branch"), OsStr::new("-D"), OsStr::new(branch)],
+            );
+        }
+    }
+}
+
+fn branch_descends_from(root: &Path, base: &str, branch: &str) -> bool {
+    git(
+        root,
+        &[
+            OsStr::new("merge-base"),
+            OsStr::new("--is-ancestor"),
+            OsStr::new(base),
+            OsStr::new(branch),
+        ],
+    )
+    .is_ok_and(|output| output.status.success())
+}
+
 fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, String> {
     if cwd.join(".git").is_dir() {
         return Err("wave fork requires a linked target worktree; main checkout refused".into());
@@ -405,7 +726,7 @@ fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, Str
         .ok_or("target worktree has no parent directory")?;
     let target_name = cwd.file_name().and_then(OsStr::to_str).unwrap_or("target");
     let mut lines = vec![format!("B\t{base}")];
-    let mut created = Vec::new();
+    let mut planned = Vec::new();
     for task_id in &wave.tasks {
         let branch = task_branch(cwd, plan, number, task_id)?;
         let worktree = parent.join(format!(
@@ -413,64 +734,85 @@ fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, Str
             task_id.replace('.', "-")
         ));
         if worktree.exists() {
-            for (path, prior_branch) in created.iter().rev() {
-                let _ = git(
-                    cwd,
-                    &[
-                        OsStr::new("worktree"),
-                        OsStr::new("remove"),
-                        path.as_os_str(),
-                    ],
-                );
-                let _ = git(
-                    cwd,
-                    &[
-                        OsStr::new("branch"),
-                        OsStr::new("-D"),
-                        OsStr::new(prior_branch),
-                    ],
-                );
+            let registered = worktree_for_branch(cwd, &branch)?;
+            let current_branch = git_text(&worktree, &["branch", "--show-current"])?;
+            if registered.as_deref() != Some(worktree.as_path()) || current_branch != branch {
+                return Err(format!(
+                    "wave task worktree is occupied: {}",
+                    worktree.display()
+                ));
             }
+            if !branch_descends_from(cwd, &base, &branch) {
+                return Err(format!(
+                    "task {task_id} branch does not descend from wave base"
+                ));
+            }
+            if !git_text(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )?
+            .is_empty()
+            {
+                return Err(format!("task {task_id} worktree has uncommitted changes"));
+            }
+            planned.push((task_id.clone(), branch, worktree, true, false));
+            continue;
+        }
+        if let Some(registered) = worktree_for_branch(cwd, &branch)? {
             return Err(format!(
-                "wave task worktree already exists: {}",
-                worktree.display()
+                "task {task_id} branch is already checked out at {}",
+                registered.display()
             ));
         }
-        let add_args = [
-            OsStr::new("worktree"),
-            OsStr::new("add"),
-            OsStr::new("-b"),
-            OsStr::new(&branch),
-            worktree.as_os_str(),
-            OsStr::new(&base),
-        ];
-        let out = git(cwd, &add_args)?;
-        if !out.status.success() {
-            for (path, prior_branch) in created.iter().rev() {
-                let _ = git(
-                    cwd,
-                    &[
-                        OsStr::new("worktree"),
-                        OsStr::new("remove"),
-                        path.as_os_str(),
-                    ],
-                );
-                let _ = git(
-                    cwd,
-                    &[
-                        OsStr::new("branch"),
-                        OsStr::new("-D"),
-                        OsStr::new(prior_branch),
-                    ],
-                );
-            }
+        let ref_name = format!("refs/heads/{branch}");
+        let branch_exists = git(
+            cwd,
+            &[
+                OsStr::new("show-ref"),
+                OsStr::new("--verify"),
+                OsStr::new("--quiet"),
+                OsStr::new(&ref_name),
+            ],
+        )?
+        .status
+        .success();
+        if branch_exists && !branch_descends_from(cwd, &base, &branch) {
             return Err(format!(
-                "could not create task {} worktree: {}",
-                task_id,
-                String::from_utf8_lossy(&out.stderr).trim()
+                "task {task_id} branch does not descend from wave base"
             ));
         }
-        created.push((worktree.clone(), branch.clone()));
+        planned.push((task_id.clone(), branch, worktree, false, branch_exists));
+    }
+    let mut created = Vec::<(PathBuf, String, bool)>::new();
+    for (task_id, branch, worktree, reused, branch_exists) in planned {
+        if !reused {
+            let add_args = if branch_exists {
+                vec![
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    worktree.as_os_str(),
+                    OsStr::new(&branch),
+                ]
+            } else {
+                vec![
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("-b"),
+                    OsStr::new(&branch),
+                    worktree.as_os_str(),
+                    OsStr::new(&base),
+                ]
+            };
+            let out = git(cwd, &add_args)?;
+            if !out.status.success() {
+                cleanup_created_wave_worktrees(cwd, &created);
+                return Err(format!(
+                    "could not create task {task_id} worktree: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            created.push((worktree.clone(), branch.clone(), !branch_exists));
+        }
         lines.push(format!(
             "O\t{}\t{}\t{}",
             task_id,
@@ -520,6 +862,33 @@ fn run_verify(root: &Path, task: &Task) -> Result<(), String> {
     Ok(())
 }
 
+fn worktree_for_branch(root: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+    let out = git(
+        root,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("list"),
+            OsStr::new("--porcelain"),
+        ],
+    )?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for block in text.split("\n\n") {
+        if block
+            .lines()
+            .any(|line| line == format!("branch refs/heads/{branch}"))
+        {
+            return Ok(block
+                .lines()
+                .find_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from));
+        }
+    }
+    Ok(None)
+}
+
 fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<String>, String> {
     let strategy = parse_strategy(plan)?;
     let wave = select_wave(&strategy, number)?;
@@ -544,6 +913,17 @@ fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<
             &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
         )
         .map_err(|_| format!("task {task_id} branch is missing: {branch}"))?;
+        let worktree = worktree_for_branch(cwd, &branch)?
+            .ok_or_else(|| format!("task {task_id} worktree is missing: {branch}"))?;
+        let worktree_status = git_text(
+            &worktree,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        if !worktree_status.is_empty() {
+            return Err(format!(
+                "task {task_id} has uncommitted changes; worktree retained"
+            ));
+        }
         if branch_head == base {
             return Err(format!("task {task_id} has no committed work"));
         }
@@ -568,7 +948,7 @@ fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<
         let out = Command::new("git")
             .arg("-C")
             .arg(cwd)
-            .args(["merge", "--no-ff", "--no-edit", branch])
+            .args(["merge", "--no-ff", "--no-edit", branch.as_str()])
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
@@ -590,38 +970,22 @@ fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<
             return Err(error);
         }
     }
-    append_off_surface(cwd, &off_surface)?;
+    if let Err(error) = append_off_surface(cwd, &off_surface) {
+        let _ = git_text(cwd, &["reset", "--hard", base]);
+        return Err(error);
+    }
     for (_, branch, _) in &branches {
-        let out = git(
-            cwd,
-            &[
-                OsStr::new("worktree"),
-                OsStr::new("list"),
-                OsStr::new("--porcelain"),
-            ],
-        )?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        for block in text.split("\n\n") {
-            if block
-                .lines()
-                .any(|line| line == format!("branch refs/heads/{branch}"))
-            {
-                if let Some(path) = block
-                    .lines()
-                    .find_map(|line| line.strip_prefix("worktree "))
-                {
-                    let remove = git(
-                        cwd,
-                        &[
-                            OsStr::new("worktree"),
-                            OsStr::new("remove"),
-                            OsStr::new(path),
-                        ],
-                    )?;
-                    if !remove.status.success() {
-                        return Err(format!("could not remove task worktree {path}"));
-                    }
-                }
+        if let Some(path) = worktree_for_branch(cwd, branch)? {
+            let remove = git(
+                cwd,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("remove"),
+                    path.as_os_str(),
+                ],
+            )?;
+            if !remove.status.success() {
+                return Err(format!("could not remove task worktree {}", path.display()));
             }
         }
         let deleted = git(
@@ -706,6 +1070,59 @@ mod tests {
             .iter()
             .any(|line| line.contains("task '1.1' names missing path 'scripts/missing.sh'")));
 
+        fs::write(
+            &file,
+            plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['src/*.py']\n    verify: 'cargo test'\n  - id: '1.2'\n    surface: ['src/not-created.py']\n    verify: 'cargo test'"),
+        )
+        .unwrap();
+        let lines = check_plan(&file, &repo).unwrap();
+        assert!(lines.iter().any(|line| {
+            line.starts_with("X\tparallel tasks share surface glob 'src/not-created.py': 1.1, 1.2")
+        }));
+
+        fs::write(
+            &file,
+            plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['src/*.py']\n    verify: 'cargo test'\n  - id: '1.2'\n    surface: ['src/not*.py']\n    verify: 'cargo test'"),
+        )
+        .unwrap();
+        let lines = check_plan(&file, &repo).unwrap();
+        assert!(lines.iter().any(|line| {
+            line.starts_with("X\tparallel tasks share surface glob 'src/not.py': 1.1, 1.2")
+        }));
+
+        fs::write(
+            &file,
+            plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['a[!a-z].txt']\n    verify: 'cargo test'\n  - id: '1.2'\n    surface: ['a[!0-9].txt']\n    verify: 'cargo test'"),
+        )
+        .unwrap();
+        let lines = check_plan(&file, &repo).unwrap();
+        assert!(lines.iter().any(|line| {
+            line.starts_with("X\tparallel tasks share surface glob 'a/.txt': 1.1, 1.2")
+        }));
+
+        fs::write(
+            &file,
+            plan("execution_mode: sequential\nwaves:\n  - wave: 1\n    mode: sequential\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['other.py']\n    verify: 'bash -e scripts/generated.sh'\n  - id: '1.2'\n    surface: ['scripts/generated.sh']\n    verify: 'curl https://example.com && uv run pytest cli/tests/not-there.py'"),
+        )
+        .unwrap();
+        let lines = check_plan(&file, &repo).unwrap();
+        assert!(lines.iter().any(|line| {
+            line.contains("task '1.2' names missing path 'cli/tests/not-there.py'")
+        }));
+        assert!(lines
+            .iter()
+            .all(|line| !line.contains("scripts/generated.sh")));
+
+        fs::write(
+            &file,
+            plan("execution_mode: sequential\nwaves:\n  - wave: 1\n    mode: sequential\n    tasks: ['1.1']\n  - wave: 2\n    mode: sequential\n    tasks: ['2.1']\ntasks:\n  - id: '1.1'\n    surface: ['a.py']\n    blocked_by: ['2.1']\n    verify: 'cargo test'\n  - id: '2.1'\n    surface: ['b.py']\n    verify: 'cargo test'"),
+        )
+        .unwrap();
+        let lines = check_plan(&file, &repo).unwrap();
+        assert!(lines
+            .iter()
+            .any(|line| { line == "E\ttask '1.1' depends on later-wave task '2.1'" }));
+
         fs::write(&file, plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['src/fold.py']\n    verify: 'cargo test'\n  - id: '1.2'\n    surface: ['./src/fold.py']\n    verify: 'cargo test'" )).unwrap();
         let lines = check_plan(&file, &repo).unwrap();
         assert!(lines
@@ -750,7 +1167,7 @@ mod tests {
         .status
         .success());
         let plan_path = dir.path().join("wave-plan.md");
-        fs::write(&plan_path, plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'\n  - id: '1.2'\n    surface: ['b.txt']\n    verify: 'git diff --quiet'" )).unwrap();
+        fs::write(&plan_path, plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['a.txt']\n    verify: 'printf x >> .fno/verify-one.log'\n  - id: '1.2'\n    surface: ['b.txt']\n    verify: 'printf x >> .fno/verify-two.log'" )).unwrap();
         let fork = run_fork_at(&target, &plan_path, "1").unwrap();
         assert_eq!(
             fork.iter().filter(|line| line.starts_with("O\t")).count(),
@@ -773,6 +1190,10 @@ mod tests {
         fs::write(wt2.join("c.txt"), "off surface\n").unwrap();
         assert!(git(&wt2, &["add", "c.txt"]).status.success());
         assert!(git(&wt2, &["commit", "-qm", "task two"]).status.success());
+        let task_one_commit = git_text(wt1, &["rev-parse", "HEAD"]).unwrap();
+        let task_two_commit = git_text(wt2, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(run_fork_at(&target, &plan_path, "1").unwrap(), fork);
+        fs::create_dir_all(target.join(".fno")).unwrap();
         let base = fork[0].strip_prefix("B\t").unwrap();
         let lines = run_join_at(&target, &plan_path, "1", base).unwrap();
         assert_eq!(
@@ -784,6 +1205,22 @@ mod tests {
             .unwrap()
             .contains("- task 1.2: c.txt"));
         assert!(target.join("b.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join(".fno/verify-one.log")).unwrap(),
+            "x"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(".fno/verify-two.log")).unwrap(),
+            "x"
+        );
+        for commit in [&task_one_commit, &task_two_commit] {
+            assert!(git(
+                &target,
+                &["merge-base", "--is-ancestor", commit.as_str(), "HEAD",]
+            )
+            .status
+            .success());
+        }
         assert!(worktrees.iter().all(|(_, path)| !path.exists()));
         for task_id in ["1.1", "1.2"] {
             let branch = task_branch(&target, &plan_path, "1", task_id).unwrap();
@@ -831,6 +1268,10 @@ mod tests {
             .status
             .success());
         let conflict_base = conflict_fork[0].strip_prefix("B\t").unwrap();
+        fs::write(conflict_worktrees[1].join("dirty.txt"), "uncommitted\n").unwrap();
+        let dirty_error = run_join_at(&target, &plan_path, "2", conflict_base).unwrap_err();
+        assert!(dirty_error.contains("task 2.2 has uncommitted changes"));
+        fs::remove_file(conflict_worktrees[1].join("dirty.txt")).unwrap();
         let error = run_join_at(&target, &plan_path, "2", conflict_base).unwrap_err();
         assert!(error.contains("task 2.2 merge conflict in a.txt"));
         assert_eq!(
