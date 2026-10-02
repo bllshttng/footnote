@@ -3122,3 +3122,20 @@ def test_guard_refuses_probe_and_mass_drop_on_shared_root(
     monkeypatch.setenv("FNO_REGISTRY_ALLOW_ROW_LOSS", "1")
     write_registry([probe_row("fixture-probe")], path=shared)
     assert len(load_registry(path=shared)) == 1
+
+    # The removal accounting (x-9663): the deliberate drop journaled every
+    # dropped row with the remover and the reason, in the daemon envelope
+    # shape, beside the registry it dropped them from. The refused writes
+    # above persisted nothing, so they emit nothing.
+    events = [
+        json.loads(line)
+        for line in (agents_home / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    removed = [e for e in events if e["type"] == "registry_row_removed"]
+    lost = [e for e in events if e["type"] == "registry_rows_lost"]
+    assert {e["data"]["name"] for e in removed} == {f"worker-{i}" for i in range(5)}
+    assert all(e["data"]["receipt_staged"] is False for e in removed)
+    assert all(e["data"]["reason"] == "removed by a python write_registry" for e in removed)
+    assert lost and lost[-1]["data"]["writer"] == "python"
+    assert len(lost[-1]["data"]["lost"]) == 5

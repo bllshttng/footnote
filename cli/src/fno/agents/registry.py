@@ -1364,6 +1364,93 @@ def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: 
         )
 
 
+def _account_for_removed_rows(target: Path, raw: Optional[dict], entries: list) -> None:
+    """Journal every row this write dropped, mirroring Rust's
+    ``account_for_removed_rows`` (state.rs) at the write choke point.
+
+    The 2026-10-02 specimen: a live worker's registry row was removed with no
+    event anywhere. The Rust save path has accounted since then; this Python
+    primitive was the silent door. A row counts as removed only when NO
+    surviving row shares any identity token (harness_session_id, short_id,
+    name or alias), so a rename or session backfill never false-positives.
+    Best-effort: an emission failure never fails the write.
+    """
+    before = [r for r in (raw or {}).get("agents", []) if isinstance(r, dict)]
+    if not before:
+        return
+    after_sids = {
+        e.harness_session_id for e in entries if e.harness_session_id
+    }
+    after_short_ids = {e.short_id for e in entries if e.short_id}
+    after_names = {
+        name for e in entries for name in [e.name, *e.aliases] if name
+    }
+
+    def _row_tokens(r: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        sid = r.get("harness_session_id")
+        short = r.get("short_id")
+        names = {r.get("name"), *(r.get("aliases") or [])}
+        return sid or None, short or None, names
+
+    removed = []
+    for r in before:
+        sid, short, names = _row_tokens(r)
+        sid_matched = sid is not None and sid in after_sids
+        short_matched = short is not None and short in after_short_ids
+        if not (sid_matched or short_matched or (names & after_names)):
+            removed.append(r)
+    if not removed:
+        return
+    verb = " ".join(str(a) for a in sys.argv[:6])[:200]
+    for r in removed:
+        _emit_removal_envelope(
+            "registry_row_removed",
+            {
+                "name": r.get("name") or "",
+                "short_id": r.get("short_id") or "",
+                "harness": r.get("harness") or "",
+                "harness_session_id": r.get("harness_session_id") or "",
+                "remover": Path(sys.argv[0]).name if sys.argv[0] else "python",
+                "reason": "removed by a python write_registry",
+                "receipt_staged": False,
+                "pid": os.getpid(),
+            },
+            target,
+        )
+    _emit_removal_envelope(
+        "registry_rows_lost",
+        {
+            "writer": "python",
+            "pid": os.getpid(),
+            "verb": verb,
+            "lost": [
+                {
+                    "harness_session_id": r.get("harness_session_id") or "",
+                    "name": r.get("name") or "",
+                }
+                for r in removed
+            ],
+        },
+        target,
+    )
+
+
+def _emit_removal_envelope(kind: str, data: dict, target: Path) -> None:
+    """One daemon-envelope record beside the registry the write touched."""
+    record = {
+        "ts": _utc_now_iso(),
+        "type": kind,
+        "source": "python",
+        "data": data,
+    }
+    try:
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(record, target.parent / "events.jsonl")
+    except Exception as exc:  # noqa: BLE001 - audit is best-effort
+        print(f"fno agents: warning: registry removal event {kind}: {exc}", file=sys.stderr)
+
+
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
     """Atomically write the registry to disk.
 
@@ -1398,6 +1485,9 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+    # Removal accounting runs AFTER the write persisted, mirroring the Rust
+    # choke point: a removal that failed to persist never happened.
+    _account_for_removed_rows(target, raw, entries)
 
 
 #: Constructor keys of ``AgentEntry``, derived rather than listed so a new
