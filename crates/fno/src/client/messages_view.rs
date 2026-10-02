@@ -105,6 +105,7 @@ impl MessagesBoard {
 
 /// Column 1's rows, derived fresh per paint from the org tree and the
 /// projection's participants.
+#[derive(Debug)]
 pub(crate) enum TreeRow {
     /// A `# <scope>` broadcast channel.
     Channel(String),
@@ -127,12 +128,11 @@ pub(crate) enum TreeRow {
     Archived { name: String, key: String },
     /// A live mail participant outside every crown's tree.
     Unowned { name: String, key: String },
-    /// A dim hint line (empty states).
-    Hint(String),
 }
 
 /// Column 2's rows for the selected agent: partner threads plus the ONE
 /// System row.
+#[derive(Debug)]
 pub(crate) enum PartnerRow {
     /// The session's aggregated system mail, inbound only.
     System { n: usize },
@@ -413,13 +413,6 @@ impl MessagesBoard {
             .unwrap_or_default()
     }
 
-    /// The user's read mark for a chat id.
-    fn read_mark(&self, chat_id: &str) -> Option<String> {
-        crate::view_store::load_messages_read_marks()
-            .get(chat_id)
-            .cloned()
-    }
-
     /// The three columns' lines.
     pub(crate) fn columns(&self, w: usize) -> (Vec<BLine>, Vec<BLine>, Vec<BLine>) {
         let tree = self.tree_column(w);
@@ -472,7 +465,6 @@ impl MessagesBoard {
                 TreeRow::Unowned { name, .. } => {
                     BLine::of(&[seg("  ", BRole::Meta), seg(name.clone(), BRole::Body)])
                 }
-                TreeRow::Hint(t) => BLine::meta(t.clone()),
             };
             line.band = i == self.cursors[0];
             lines.push(line);
@@ -842,7 +834,6 @@ async fn act(
                         .await
                         .map_err(|e| format!("resume send failed: {e}"))?;
                 }
-                TreeRow::Hint(_) => {}
             }
         }
         Col::Partners => {
@@ -1063,8 +1054,6 @@ pub(crate) async fn mouse(
 #[cfg(test)]
 #[path = "tests/messages_fixture.rs"]
 mod fixtures;
-#[cfg(test)]
-pub(super) use fixtures::check_fixture;
 
 fn board_now() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64
