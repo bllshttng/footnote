@@ -867,6 +867,18 @@ pub fn admit_pane(
     admit_pane_for(human_at_tty(), pane_count, requested_cap)
 }
 
+/// [`admit_pane_for`] with the spawn-refusal shape the mux server answers
+/// with: the placement carries the human ask, and the failure maps to the
+/// control error code the composer prints. `placement.max_panes` stays the
+/// requested tab cap.
+pub fn admit_pane_for_spawn(
+    placement: &crate::proto::PanePlacement,
+    pane_count: usize,
+) -> Result<AdmissionPermit, (u32, String)> {
+    admit_pane_for(placement.human, pane_count, placement.max_panes)
+        .map_err(|e| (crate::proto::err_code::SPAWN_FAILED, e.to_string()))
+}
+
 /// [`admit_pane`] for a pane the caller knows a human asked for. The mux
 /// server has no TTY, so `human_at_tty` reads false there even for a click
 /// from the user's own attached client. The server passes that fact here, and
@@ -1076,6 +1088,26 @@ pub fn tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Co
 
 pub fn tokio_spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
     let permit = admit_fleet().map_err(admission_io_error)?;
+    let track_child = !is_root_program(command.as_std().get_program());
+    let mut child = command.spawn()?;
+    if track_child {
+        if let Some(pid) = child.id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        }
+    }
+    Ok(child)
+}
+
+/// [`tokio_spawn`] for a human's own request: the runaway brake warns
+/// instead of refusing and the census still gates, the same exemption the
+/// user's own attach carries. The composer's force gesture rides this.
+pub fn tokio_spawn_for_human(
+    command: &mut tokio::process::Command,
+) -> io::Result<tokio::process::Child> {
+    let permit = admit_human();
     let track_child = !is_root_program(command.as_std().get_program());
     let mut child = command.spawn()?;
     if track_child {

@@ -113,6 +113,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -158,6 +160,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -712,6 +716,7 @@ fn exact_placement(at: u64, split: Dir) -> PanePlacement {
         max_panes: None,
         thread_pane: false,
         fit: false,
+        human: false,
     }
 }
 
@@ -742,6 +747,8 @@ fn exact_current_places_beside_anchor_not_focus() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -793,6 +800,8 @@ fn exact_current_refuses_stale_anchor_selector_and_min_size() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -863,6 +872,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -889,6 +900,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -922,6 +935,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
@@ -994,6 +1009,8 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+
+            human: false,
         },
     )
     .unwrap();
