@@ -1188,6 +1188,10 @@ pub(crate) fn cycle_sideline_view(view: &mut View) {
             super::org_board::open(view);
         }
         crate::view_store::SidelineView::Agents => {
+            // R15: Messages sits right after Agents in the V cycle.
+            super::messages_view::open(view);
+        }
+        crate::view_store::SidelineView::Messages => {
             if !view.experimental_backlog {
                 super::org_board::open(view);
                 return;

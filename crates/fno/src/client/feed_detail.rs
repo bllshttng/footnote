@@ -149,6 +149,17 @@ pub(crate) fn modal(view: &View, item: FeedItem) -> FeedDetailModal {
     }
 }
 
+/// The one label-and-value row builder both modals share: a value the
+/// source lacks prints nothing (the ruling that retired NOT RECORDED).
+pub(crate) fn info_row(label: &str, value: Option<String>, rows: &mut Vec<PopupRow>) {
+    if let Some(v) = value.filter(|v| !v.is_empty()) {
+        rows.push(PopupRow::Info {
+            label: label.to_string(),
+            value: v,
+        });
+    }
+}
+
 /// The modal's parts against one roster reading: the framed popup, the
 /// per-target actions, and the per-target copyable values. Free of `View`
 /// so the tests can build it from plain rows.
@@ -170,17 +181,9 @@ pub(crate) fn build(
     )));
     rows.push(PopupRow::Rule);
 
-    // One inert field row. Absent prints nothing - the ruling that retired
-    // NOT RECORDED - so the modal's height says what the source holds.
-    let info = |label: &str, value: Option<String>, rows: &mut Vec<PopupRow>| {
-        if let Some(v) = value.filter(|v| !v.is_empty()) {
-            rows.push(PopupRow::Info {
-                label: label.to_string(),
-                value: v,
-            });
-        }
-    };
-
+    // One inert field row per call below; the builder is shared with the
+    // Messages details modal so the two cannot drift.
+    let info = super::feed_detail::info_row;
     info("harness", item.harness.clone(), &mut rows);
     info("timestamp", Some(local_ts(&item.ts)), &mut rows);
     info("model", item.model.clone(), &mut rows);

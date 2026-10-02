@@ -208,6 +208,12 @@ struct StoreFile {
     /// The questions view's list pane width, in percent. Default absent = 45.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions_split: Option<serde_json::Value>,
+    /// The Messages tab's per-thread read marks: chat id -> the ts of the
+    /// last row the user opened (a ts, not a row id: fmail ids are random
+    /// hex, so only a ts answers "rows newer than the mark"). Persisted like
+    /// every other pref; absent reads as all-unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    messages_read_marks: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -218,6 +224,7 @@ struct StoreFile {
 pub enum SidelineView {
     #[default]
     Agents,
+    Messages,
     Backlog,
     Org,
 }
@@ -295,6 +302,28 @@ pub fn load_sideline_view() -> SidelineView {
 pub fn save_sideline_view(v: SidelineView) {
     mutate(|file| {
         file.sideline_view = serde_json::to_value(v).ok();
+    });
+}
+
+/// The Messages tab's read marks, keyed by chat id, valued by the ts of the
+/// last row the user opened. Corrupt or absent reads as all-unread.
+pub fn load_messages_read_marks() -> std::collections::BTreeMap<String, String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return Default::default();
+    }
+    read_raw()
+        .messages_read_marks
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Record one thread as read: the chat id's mark moves to `ts`. Best-effort.
+pub fn save_messages_read_mark(chat_id: &str, ts: &str) {
+    mutate(|file| {
+        let mut marks = load_messages_read_marks();
+        marks.insert(chat_id.to_string(), ts.to_string());
+        file.messages_read_marks = serde_json::to_value(marks).ok();
     });
 }
 
@@ -975,6 +1004,19 @@ mod tests {
         }
         save_sideline_view(SidelineView::Agents);
         assert_eq!(load_sideline_view(), SidelineView::Agents);
+        // The Messages read marks: absent reads all-unread, save/load
+        // round-trips, and a second mark leaves the first standing.
+        assert!(load_messages_read_marks().is_empty(), "absent = unread");
+        save_messages_read_mark("chat-a", "2026-10-01T09:05:00Z");
+        save_messages_read_mark("chat-b", "2026-10-01T10:00:00Z");
+        let marks = load_messages_read_marks();
+        assert_eq!(marks.get("chat-a").map(String::as_str), Some("2026-10-01T09:05:00Z"));
+        assert_eq!(marks.get("chat-b").map(String::as_str), Some("2026-10-01T10:00:00Z"));
+        save_messages_read_mark("chat-a", "2026-10-01T11:00:00Z");
+        let marks = load_messages_read_marks();
+        assert_eq!(marks.get("chat-a").map(String::as_str), Some("2026-10-01T11:00:00Z"));
+        assert_eq!(marks.get("chat-b").map(String::as_str), Some("2026-10-01T10:00:00Z"));
+        assert_eq!(marks.len(), 2);
     }
 
     // The questions block prefs: absent reads shipped defaults (visible,

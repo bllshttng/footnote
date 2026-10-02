@@ -158,6 +158,11 @@ pub(super) async fn route(
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
     }
+    if view.messages_board.is_some() {
+        // The Messages tab is a full-surface view: it owns the keyboard
+        // unconditionally while open, the same rule a full-screen board keeps.
+        return Some(messages_view::route_keys(view, scanner, bytes, sock_w).await);
+    }
     if view.org_board.is_some()
         && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
     {
@@ -195,6 +200,10 @@ pub(super) async fn flush_released_chord(
             return super::agent_launcher::launcher_keys(view, chunk, sock_w)
                 .await
                 .map(|_| ());
+        }
+    } else if view.messages_board.is_some() {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return messages_view::keys(view, chunk, sock_w).await.map(|_| ());
         }
     } else if view.org_board.is_some()
         && view.input_owner() == super::region_focus::RegionOwner::Board

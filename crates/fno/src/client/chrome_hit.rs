@@ -25,6 +25,21 @@ impl View {
                 None => {}
             }
         }
+        // The sideline's strip row (`Agents  Messages`, R15): the words
+        // switch the view; the rest of the row is dead strip. Checked
+        // before the Agents-only guard so every view's strip answers.
+        let top = self.sideline_top();
+        if row as usize + 1 == top {
+            let pw = self.sideline_paint_w();
+            if pw > 0 && (col as usize) < pw.saturating_sub(1) {
+                for (start, w, view) in self.top_row_spans() {
+                    if (col as usize) >= start && (col as usize) < start + w {
+                        return Some(ChromeHit::TopRow(view));
+                    }
+                }
+            }
+            return None;
+        }
         // Tab strip (row 0, scoped to the content columns since US1): it
         // begins at `panel_w`, walking the same spans the renderer paints (with
         // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
@@ -64,7 +79,6 @@ impl View {
         }
         // Full-screen sideline paints below the strip; invert the same
         // offset the painter used.
-        let top = self.sideline_top();
         if (row as usize) < top {
             return None;
         }
