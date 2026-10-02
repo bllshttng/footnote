@@ -64,10 +64,19 @@ pub fn actor_kind(session: Option<&str>, source: &str) -> &'static str {
 }
 
 /// The span id mint for hops with no natural id of their own. A row that
-/// already carries one (question_id, decision_id) reuses it instead.
+/// already carries one (question_id, decision_id) reuses it instead. On
+/// entropy failure the id mixes clock and pid rather than emitting
+/// colliding all-zero ids; a span id is a journal row handle, not the
+/// session identity mint_fno_id guards.
 pub fn new_span_id() -> String {
     let mut b = [0u8; 4];
-    getrandom::fill(&mut b).ok();
+    if getrandom::fill(&mut b).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        b = (nanos as u32 ^ std::process::id()).to_le_bytes();
+    }
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!("s-{hex}")
 }
