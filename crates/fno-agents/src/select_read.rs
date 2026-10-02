@@ -363,7 +363,10 @@ pub fn run(args: &[String]) -> i32 {
                 index += 2;
             }
             // The fill seam's flags ride to the door, which parses them.
-            "--claim" | "--json" | "-J" => forwarded.push(args[index].clone()),
+            "--claim" | "--json" | "-J" => {
+                forwarded.push(args[index].clone());
+                index += 1;
+            }
             _ => {
                 usage();
                 return 2;
