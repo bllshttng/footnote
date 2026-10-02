@@ -614,10 +614,11 @@ mod tests {
         }
     }
 
-    /// AC3/AC4 in one read: the split classifies unreadable and
-    /// fleet-majority as Fleet and a minority share as Outside, and the top
-    /// groups exclude fleet pids, fno descendants, and the fno binaries
-    /// themselves, naming app bundles by app name.
+    /// AC3/AC4/AC8 in one read: the split classifies unreadable and
+    /// fleet-majority as Fleet and a minority share as Outside, the top
+    /// groups exclude fleet pids, fno descendants, bundle readers, and the
+    /// fno binaries themselves, and the budget guess matches the node's
+    /// example box on band defaults and on measured p75.
     #[test]
     fn classify_and_outside_groups_split_the_box_correctly() {
         assert_eq!(classify(None), LoadSource::Fleet);
@@ -672,11 +673,6 @@ mod tests {
         assert_eq!(groups[1].name, "Google Chrome");
         assert!(!groups.iter().any(|g| g.name.contains("fno")));
         assert!(!groups.iter().any(|g| g.name == "sh helper"));
-    }
-
-    /// AC8-HP: the band-default guess on the node's example box.
-    #[test]
-    fn budget_uses_band_defaults_and_matches_the_node_example() {
         let b = budget(Some(8.0), Some(32.0), None);
         assert_eq!(b.max_live, 10);
         assert_eq!(b.leads, 2);
@@ -753,11 +749,11 @@ mod tests {
             Some(v) => std::env::set_var("FNO_MACHINE_LOAD_ASK", v),
             None => std::env::remove_var("FNO_MACHINE_LOAD_ASK"),
         }
+        // The leave and unknown answers act on nothing, and an answer for a
+        // group no longer running pauses nothing.
+        leave_and_unknown_answers_act_on_nothing();
     }
 
-    /// The leave answer and an unknown answer act on nothing, and an
-    /// answer for a group no longer running records as gone.
-    #[test]
     fn leave_and_unknown_answers_act_on_nothing() {
         let mut pending = PendingAsk {
             kind: "outside-load".into(),

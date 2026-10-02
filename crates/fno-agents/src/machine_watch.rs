@@ -872,6 +872,9 @@ mod tests {
         let (verdict, reason) = decide(&sample(Some(0.487), Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "hot");
         assert!(reason.contains("30.2 per core crosses load band 10"));
+        // An unreadable reading never reads as calm.
+        let (verdict, _) = decide(&sample(None, Some(2.0)), 0.9, 10.0, None);
+        assert_eq!(verdict, "unreadable");
 
         let mut state = MachineWatchState::default();
         let mut absolute = sample(Some(0.0), Some(1.0));
@@ -900,12 +903,6 @@ mod tests {
             notices, 2,
             "runaway escalation pages despite the hot notice throttle"
         );
-    }
-
-    #[test]
-    fn unreadable_never_reads_calm() {
-        let (verdict, _) = decide(&sample(None, Some(2.0)), 0.9, 10.0, None);
-        assert_eq!(verdict, "unreadable");
     }
 
     #[test]

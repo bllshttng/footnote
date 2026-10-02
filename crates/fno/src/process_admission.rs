@@ -1854,7 +1854,8 @@ mod tests {
     /// The measured 2026-09-02 wedge: one alive-but-unreadable marker pid
     /// took the whole census down and refused every spawn on the machine.
     /// Our own pid stands in for it (alive, not a zombie, not confirmed
-    /// dead) paired with a reader that never resolves a start time.
+    /// dead) paired with a reader that never resolves a start time. The
+    /// malformed-line case prunes the torn line and keeps the readable one.
     #[test]
     fn unreadable_marker_pid_is_skipped_and_pruned_not_fatal() {
         let (_guard, path) = isolate("marker-unreadable");
@@ -1869,6 +1870,18 @@ mod tests {
             !path.exists(),
             "the unreadable entry must be pruned from the ledger"
         );
+        let (_guard, path) = isolate("marker-malformed");
+        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
+
+        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
+            .expect("a torn ledger line must not collapse the census");
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{pid}:777\n")
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A readable marker still counts, so the skip above is a targeted drop
@@ -1907,25 +1920,6 @@ mod tests {
             .expect("an unreadable start time must not fail the spawn");
 
         assert!(!path.exists(), "no marker line may be written");
-    }
-
-    /// The ledger is appended to by concurrent spawns, so a torn line is
-    /// possible. One must not refuse every spawn on the machine.
-    #[test]
-    fn malformed_ledger_line_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-malformed");
-        let pid = std::process::id();
-        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
-
-        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
-            .expect("a torn ledger line must not collapse the census");
-
-        assert_eq!(count, 1);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            format!("{pid}:777\n")
-        );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// A recovery switch that refuses on a plausible spelling strands the
@@ -2051,9 +2045,10 @@ mod tests {
     }
 
     /// The guard against retry-then-hold-forever: a NoSource answer stops
-    /// the loop on its first answer, with no wait spent.
+    /// Both stopping answers end the loop on their first answer, with no
+    /// wait spent.
     #[test]
-    fn census_stops_at_the_first_no_source_answer() {
+    fn census_stops_at_the_first_stopping_answer() {
         let mut calls = 0;
         let census = census_with(
             || {
@@ -2065,11 +2060,6 @@ mod tests {
         );
         assert_eq!(census, Census::no_source("no /proc on this host"));
         assert_eq!(calls, 1);
-    }
-
-    /// The famine answer stops the loop the same way.
-    #[test]
-    fn census_stops_at_the_first_descriptors_exhausted_answer() {
         let mut calls = 0;
         let census = census_with(
             || {

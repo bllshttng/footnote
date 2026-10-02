@@ -3225,7 +3225,8 @@ MemAvailable:    8000000 kB\n";
 
     /// AC3-HP (Rust side): an active stop refuses at the FIRST boundary -
     /// this call runs before `run_gate`'s `FNO_SPAWN_GATE=0` return, so the
-    /// bypass env cannot wave a spawn through.
+    /// bypass env cannot wave a spawn through. AC2-HP: the machine brake
+    /// door one step later refuses the same way and admits an expired one.
     #[test]
     fn fleet_incident_gate_refuses_a_stopped_record() {
         let _guard = crate::claims::test_env_lock()
@@ -3261,15 +3262,8 @@ MemAvailable:    8000000 kB\n";
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
         }
-    }
-
-    /// AC2-HP: the machine brake door refuses before any capacity math, and
-    /// an expired brake proceeds.
-    #[test]
-    fn machine_brake_gate_refuses_while_armed_and_proceeds_when_expired() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // The machine brake door one boundary later: armed refuses with the
+        // same exit code and a machine-runaway reason; expired admits.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
         let now = std::time::SystemTime::now()
