@@ -1817,7 +1817,7 @@ proof = "goal-active"
 
 [harness.claude.hooks.lead_guard]
 state = "supported"
-via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/king_guard.rs"]
+via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.claude.hooks.lead_reinject]
 state = "supported"
@@ -1825,7 +1825,7 @@ via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
 
 [harness.codex.hooks.lead_guard]
 state = "supported"
-via = ["hooks/codex-hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/king_guard.rs"]
+via = ["hooks/codex-hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.codex.hooks.lead_reinject]
 state = "supported"
@@ -1833,7 +1833,7 @@ via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
 
 [harness.agy.hooks.lead_guard]
 state = "supported"
-via = ["hooks/agy-king-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/fno-agents/src/hook/king_guard.rs"]
+via = ["hooks/agy-king-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.agy.hooks.lead_reinject]
 state = "impossible"
@@ -1849,7 +1849,7 @@ via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-postcompact-
 
 [harness.pi.hooks.lead_guard]
 state = "supported"
-via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/hook/king_guard.rs"]
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.pi.hooks.lead_reinject]
 state = "supported"

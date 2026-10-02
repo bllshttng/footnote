@@ -165,7 +165,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // 7. Mode knob: refuse (default) | warn | off.
-    let mode = config_lookup(&root, &["lead", "implementation_guard"])
+    let mode = config_lookup(&root, &["king", "implementation_guard"])
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "refuse".to_string());
     if mode == "off" {
@@ -176,7 +176,7 @@ pub fn run(args: &[String]) -> i32 {
     //    unresolvable state, so the never-block contract needs no escape
     //    hatch here: outside the repo allows, whatever it is.
     let repo_root = crate::paths::worktree_repo_root(&root);
-    let roots = write_roots(config_lookup(&root, &["lead", "write_roots"]), &repo_root);
+    let roots = write_roots(config_lookup(&root, &["king", "write_roots"]), &repo_root);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload
@@ -1300,7 +1300,7 @@ mod tests {
         assert!(text.contains("operates the machine and does not author it"));
         assert!(text.contains("fno config plugin install"));
         assert!(text.contains("Delegate the edit or escalate"));
-        assert!(text.contains("config.lead.write_roots"));
+        assert!(text.contains("config.king.write_roots"));
     }
 
     #[test]

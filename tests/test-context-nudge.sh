@@ -321,7 +321,7 @@ run_hook "$(payload "$SBX/low.jsonl")"
 assert_contains "AC14: orphan decision block" "$OUT" '"decision":"block"'
 assert_contains "AC14: names worker kfad-a" "$OUT" 'kfad-a'
 assert_contains "AC14: names worker kfad-b" "$OUT" 'kfad-b'
-assert_contains "AC14: names resolution 1 (court)" "$OUT" 'stay as org'
+assert_contains "AC14: names resolution 1 (court)" "$OUT" 'stay as court'
 # Succession moved into spawn: a sitting king spawning its heir over its own scope
 # transfers the crown in the write that vacates its own. The verb this line used to
 # name, and the flag it used to pass, were both deleted; an assertion pinning them

@@ -3534,7 +3534,7 @@ fn list_row_emits_absent_optional_fields_as_null() {
     // returns Null for a missing index), which is the very defect being
     // guarded. Assert presence first, then the value.
     let obj = row.as_object().unwrap();
-    for key in ["mux", "team", "crown_level"] {
+    for key in ["mux", "crown", "crown_level"] {
         assert!(obj.contains_key(key), "row omits key: {key}");
         assert!(obj[key].is_null(), "key {key} should be null on a bare row");
     }
