@@ -1,8 +1,8 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, RARITY_COLORS, RARITY_STARS, STAT_NAMES, embody, hatch, restore } from './companion'
+import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, STAT_NAMES, embody, hatch, restore } from './companion'
 import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
-import { type FeedRow, cleanReaction, narrate, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
+import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityPrompt, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
 const BUBBLE_MS = 12_000
@@ -62,10 +62,28 @@ async function load($: EngineInterface, now: number): Promise<void> {
     soul = null
   }
   const welcome = soul ? `${soul.name} is back. did you miss me?` : null
+  const fresh = !soul
   soul ??= hatch(newSeed(), now)
   await $.store.set('soul', soul)
   buddy = embody(soul)
   say(welcome ?? `hi. i'm ${buddy.name}.`, now)
+  if (fresh) void givePersonality($)
+}
+
+// A new buddy hatches with a placeholder; one model call then writes who it is, as the original did.
+async function givePersonality($: EngineInterface): Promise<void> {
+  const c = buddy
+  if (!c) return
+  try {
+    const reply = await $.model.complete({ model: 'haiku', prompt: personalityPrompt(c, c.seed), maxTokens: 120, timeoutMs: 20_000 })
+    const personality = reply.isAnswered ? cleanPersonality(reply.text) : null
+    if (!personality || buddy?.seed !== c.seed) return
+    const soul: Soul = { seed: c.seed, name: c.name, personality, hatchedAt: c.hatchedAt, ...(c.species ? { species: c.species } : {}) }
+    await $.store.set('soul', soul)
+    buddy = embody(soul)
+  } catch {
+    // The placeholder personality stays; the buddy still talks.
+  }
 }
 
 function newSeed(): string {
@@ -438,6 +456,7 @@ export function register(on: On) {
       await $.store.set('soul', soul)
       buddy = embody(soul)
       say(`hi. i'm ${buddy.name}.`, now)
+      void givePersonality($)
     }
     if (arg === 'pet') {
       pettedAt = now
