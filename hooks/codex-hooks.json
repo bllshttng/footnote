@@ -1,5 +1,5 @@
 {
-  "description": "Codex plugin hooks for footnote context injection, safety gates, and target loops",
+  "description": "Codex plugin hooks for footnote context injection, safety gates, and target loops. Optional context/nudge/inject/announce hooks fail open fast under scripts/lib/hook-budget.sh; their timeout entries here are backstops just above that internal budget. Gates that decide keep their own budgets; docs/hooks-fail-open.md owns the list.",
   "hooks": {
     "PreToolUse": [
       {
@@ -58,7 +58,7 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           }
         ]
       }
@@ -73,25 +73,28 @@
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
+            "command": "${PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh",
+            "timeout": 4
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/inject-mail-notify.sh"
+            "command": "${PLUGIN_ROOT}/hooks/inject-mail-notify.sh",
+            "timeout": 4
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
+            "command": "${PLUGIN_ROOT}/hooks/inject-announce.sh prompt",
+            "timeout": 4
           },
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/prompt-outstanding.sh",
-            "timeout": 2
+            "timeout": 4
           },
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           }
         ]
       }
@@ -192,11 +195,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-post-compact"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-post-compact",
+            "timeout": 50
           },
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/inject-announce.sh compact"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/inject-announce.sh compact",
+            "timeout": 4
           }
         ]
       }
@@ -207,7 +212,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-session-start"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-session-start",
+            "timeout": 50
           },
           {
             "type": "command",
@@ -215,7 +221,8 @@
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
+            "command": "${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh",
+            "timeout": 4
           }
         ]
       },

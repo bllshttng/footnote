@@ -1,5 +1,5 @@
 {
-  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection",
+  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection. Optional context/nudge/inject/announce hooks fail open fast under scripts/lib/hook-budget.sh; their timeout entries here are backstops just above that internal budget. Gates that decide (target-stop-hook.sh, the PreToolUse guards, edit-integrity.sh, code-review-attest.sh, target-subagent-guard.sh, inject-control-drain-tool-boundary.sh) keep their own budgets; docs/hooks-fail-open.md owns the list.",
   "hooks": {
     "PreToolUse": [
       {
@@ -132,25 +132,28 @@
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh",
+            "timeout": 4
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-mail-notify.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-mail-notify.sh",
+            "timeout": 4
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-announce.sh prompt",
+            "timeout": 4
           },
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           },
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prompt-outstanding.sh",
-            "timeout": 2
+            "timeout": 4
           }
         ]
       }
@@ -168,7 +171,8 @@
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh",
+            "timeout": 4
           },
           {
             "type": "command",
@@ -249,7 +253,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           }
         ]
       },
@@ -259,7 +263,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           }
         ]
       }
@@ -365,7 +369,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-run.sh claude-session-start",
-            "timeout": 60
+            "timeout": 50
           }
         ]
       }
