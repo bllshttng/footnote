@@ -35,7 +35,7 @@ fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
         .expect("agent card exists");
     let detail = rows
         .iter()
-        .position(|row| matches!(row, DisplayRow::CardDetail(a, _) if a.name == name))
+        .position(|row| matches!(row, DisplayRow::CardDetail(a) if a.name == name))
         .expect("card detail exists");
     (agent, detail)
 }
@@ -158,11 +158,11 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
         let w_old = rows
             .iter()
             .find_map(|r| match r {
-                DisplayRow::CardDetail(a, _) if a.name == "w-old" => Some(a),
+                DisplayRow::CardDetail(a) if a.name == "w-old" => Some(a),
                 _ => None,
             })
             .expect("w-old card detail exists");
-        let detail = v.card_detail_text(w_old, None, now, 80);
+        let detail = v.card_detail_text(w_old, now, 80);
         assert!(
             detail.ends_with("12m"),
             "painted age must read the sorted-on field: {detail:?}"
@@ -389,15 +389,23 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
 }
 
 #[test]
-fn a_foreign_cwd_folds_into_the_detail_line_and_never_adds_a_third_row() {
-    // x-b5b8 scope add: a foreign-cwd agent's card stays two painted rows -
-    // the subline's cwd folds into line 2 (`harness · … · cwd`), the Sub
-    // row is gone.
+fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
+    // d-36438ea4: a member with a different project or worktree path shows
+    // it inline in parens after the slug, only when it fits whole; the dim
+    // Sub line is gone. At a width that fits, the card's line 1 reads
+    // `slug (cwd)`; at a width that does not, the parens drop and the row
+    // is still one line.
     let mut agents = king_and_worker();
     agents[1].cwd_base = Some("elsewhere".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
+    let frame_text = crate::vt::frame_text(&v.compose());
+    assert!(
+        frame_text.contains("w1 (elsewhere)"),
+        "the cwd rides inline after the slug: {frame_text}"
+    );
+    // The card stays two painted rows: one Agent, one CardDetail per card.
     let rows = v.display_rows();
     let kinds: Vec<&str> = rows
         .iter()
@@ -405,31 +413,25 @@ fn a_foreign_cwd_folds_into_the_detail_line_and_never_adds_a_third_row() {
             DisplayRow::Blank => "blank",
             DisplayRow::Agent(_) => "agent",
             DisplayRow::CardDetail(..) => "detail",
-            DisplayRow::Sub(_) => "sub",
             _ => "other",
         })
         .collect();
-    assert!(
-        !kinds.contains(&"sub"),
-        "no sub row survives in card mode: {kinds:?}"
-    );
-    let detail = rows.iter().find_map(|r| match r {
-        DisplayRow::CardDetail(a, cwd) if a.name == "w1" => Some(cwd),
-        _ => None,
-    });
     assert_eq!(
-        detail,
-        Some(&Some("elsewhere".to_string())),
-        "the cwd rides the detail line"
+        kinds.iter().filter(|k| **k == "agent").count(),
+        1,
+        "one card: {kinds:?}"
     );
-    let text = v.card_detail_text(detail_agent(&rows, "w1"), Some("elsewhere"), 0, 80);
-    assert!(text.contains("elsewhere"), "line 2 names the cwd: {text:?}");
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "detail").count(),
+        1,
+        "one detail line: {kinds:?}"
+    );
 }
 
 fn detail_agent<'a>(rows: &'a [DisplayRow<'_>], name: &str) -> &'a AgentRow {
     rows.iter()
         .find_map(|r| match r {
-            DisplayRow::CardDetail(a, _) if a.name == name => Some(*a),
+            DisplayRow::CardDetail(a) if a.name == name => Some(*a),
             _ => None,
         })
         .expect("the card's detail row")

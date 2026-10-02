@@ -428,6 +428,91 @@ fn no_overlay_cuts_text_with_an_ellipsis() {
     );
 }
 
+/// The guard: no ROW cuts its text with an ellipsis. The sideline renders in
+/// both layouts and all three densities at 50, 80, 120 and 200 columns with
+/// long names, tails and cwd bases; a pane border and the backlog board
+/// render at the same widths with long fields. Every rendered line holds no
+/// `…` (ruling d-36438ea4).
+#[test]
+fn no_row_cuts_text_with_an_ellipsis() {
+    use super::tests::{agent_row, named_meta, shot_view};
+
+    let long_name = "n".repeat(120);
+    let long_tail = format!("{} end", "a long worker message ".repeat(12));
+    let long_cwd = "c".repeat(60);
+    let mut long_agent = agent_row(&long_name, 10, None, false);
+    long_agent.tail = Some(long_tail.clone());
+    long_agent.cwd_base = Some(long_cwd.clone());
+    let plain = agent_row("w", 11, None, false);
+
+    for cols in [50u16, 80, 120, 200] {
+        for density in [
+            crate::view_store::Density::Regular,
+            crate::view_store::Density::Extended,
+            crate::view_store::Density::Slim,
+        ] {
+            let mut v = shot_view(
+                (40, cols),
+                vec![named_meta(1, "footnote", &["main"], 0)],
+                vec![long_agent.clone(), plain.clone()],
+            );
+            v.density = density;
+            let text = crate::vt::frame_text(&v.compose());
+            for line in text.lines() {
+                assert!(
+                    !line.contains('\u{2026}'),
+                    "{density:?} cut a row at {cols} columns: {line:?}"
+                );
+            }
+        }
+
+        // The backlog board's stats and card lines clip too.
+        let mut b = super::backlog_board::BoardView::new(0);
+        let rows = vec![
+            serde_json::json!({"id": "x-1", "status": "ready", "priority": "p2", "title": long_tail}),
+            serde_json::json!({"id": "x-2", "status": "in_progress", "priority": "p2", "title": long_tail}),
+        ];
+        b.inputs = Some(crate::backlog_model::fixture(rows));
+        let q = b.query.to_query().expect("the default query parses");
+        b.body = Some(crate::backlog_model::board(b.inputs.as_ref().unwrap(), &q));
+        let (lines, _) = super::backlog_board::render(&b, cols as usize);
+        for line in &lines {
+            assert!(
+                !line.text.contains('\u{2026}'),
+                "board cut a row at {cols} columns: {:?}",
+                line.text
+            );
+        }
+
+        // A pane border with a long name and long edge fields.
+        let fields = crate::pane_border::EdgeFields {
+            name: &long_name,
+            status: Some(('●', "Working")),
+            model: Some("claude-opus-5-5[1m]"),
+            node: Some(&long_cwd),
+            branch: Some("feature/x-a38d-fixed-height-mux-rows"),
+            ctx: Some("ctx 48% of 1.0M"),
+        };
+        let e = crate::pane_border::edges(
+            &fields,
+            crate::tree::Rect {
+                x: 0,
+                y: 0,
+                cols,
+                rows: 12,
+            },
+            false,
+        );
+        for edge in [&e.top, &e.bottom] {
+            let text: String = edge.iter().map(|(c, _)| *c).collect();
+            assert!(
+                !text.contains('\u{2026}'),
+                "pane border cut a span at {cols} columns: {text:?}"
+            );
+        }
+    }
+}
+
 /// x-f188 AC7-EDGE: a readiness payload from an older fno with no `running`
 /// key still parses and offers no restart action.
 #[test]

@@ -80,15 +80,32 @@ pub(super) fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
 }
 
 impl View {
-    fn worker_columns(&self, text_w: u16) -> &[Constraint] {
-        if self.sideline_layout == sideline_color::SidelineLayout::List
+    fn worker_columns(&self, text_w: u16) -> Vec<Constraint> {
+        // The name takes a quarter of the surplus over the fixed cells, the
+        // description first (d-36438ea4); the message keeps the Fill(3)
+        // surplus. Both layouts use the same rule.
+        let list_wide = self.sideline_layout == sideline_color::SidelineLayout::List
             && (self.density == Density::Extended || self.sideline_full)
             // Fixed cells and six gaps leave at least eight message columns.
-            && text_w >= 5 + 22 + 6 + 6 + 7 + 4 + 6 + 8
-        {
-            &SIDELINE_COLUMNS
+            && text_w >= 5 + 22 + 6 + 6 + 7 + 4 + 6 + 8;
+        if list_wide {
+            vec![
+                CARD_COLUMNS[0],
+                Constraint::Length(row_meter::name_w(text_w, 28, 6)),
+                CARD_COLUMNS[2],
+                CARD_COLUMNS[3],
+                CARD_COLUMNS[4],
+                Constraint::Length(7),
+                Constraint::Length(4),
+            ]
         } else {
-            &CARD_COLUMNS
+            vec![
+                CARD_COLUMNS[0],
+                Constraint::Length(row_meter::name_w(text_w, 17, 4)),
+                CARD_COLUMNS[2],
+                CARD_COLUMNS[3],
+                CARD_COLUMNS[4],
+            ]
         }
     }
 
@@ -434,11 +451,27 @@ impl View {
                     header_band_text(&format!("{}{label}", view_caret(*view)), rollup, band_w),
                     header_band_flags(false),
                 )),
-                DisplayRow::Sub(sub) => Some((format!("    {sub}"), cell_flags::DIM)),
-                DisplayRow::CardDetail(a, cwd) => Some((
-                    self.card_detail_text(a, cwd.as_deref(), now, text_w),
-                    cell_flags::DIM,
-                )),
+                DisplayRow::CardDetail(a) => {
+                    Some((self.card_detail_text(a, now, text_w), cell_flags::DIM))
+                }
+                DisplayRow::Agent(a) if density == Density::Slim => {
+                    // Small mode (q-334c5e9d option 1): one line per live
+                    // agent - the animated glyph, then the slug, clipped to
+                    // the 16-column rail. Exited rows never reach here:
+                    // Slim drops them at the row fold.
+                    let lat = agent_lattice_state(a);
+                    Some((
+                        crate::chrome::clip(
+                            &format!(
+                                "{} {}",
+                                status_glyph(lat),
+                                card_line::slug(a, &self.backlog)
+                            ),
+                            text_w,
+                        ),
+                        0,
+                    ))
+                }
                 DisplayRow::TableEmpty => Some(("  no agents".to_string(), cell_flags::DIM)),
                 DisplayRow::IdleFold {
                     hidden, expanded, ..
@@ -466,6 +499,15 @@ impl View {
                         cell.flags &= !cell_flags::BOLD;
                     }
                 }
+                if matches!(drow, DisplayRow::Agent(_)) && density == Density::Slim {
+                    // The slim rail's agent lines wear the lattice color.
+                    if let DisplayRow::Agent(a) = drow {
+                        let fg = lattice_style(agent_lattice_state(a), self.theme.needs_you).fg;
+                        for cell in &mut cells[r * cols..r * cols + text_w] {
+                            cell.fg = fg;
+                        }
+                    }
+                }
             }
             if card {
                 self.paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
@@ -485,7 +527,7 @@ impl View {
             let card_pair =
                 card && matches!(drow, DisplayRow::Agent(_) | DisplayRow::CardDetail(..));
             let card_chosen = card_pair
-                && matches!(drow, DisplayRow::Agent(a) | DisplayRow::CardDetail(a, _)
+                && matches!(drow, DisplayRow::Agent(a) | DisplayRow::CardDetail(a)
                     if a.pane_id == Some(self.layout.focus) && !a.exited);
             if card_chosen {
                 // The chosen card paints its color across BOTH lines, full
@@ -635,7 +677,6 @@ impl View {
             DisplayRow::Sel(_)
             | DisplayRow::Header { .. }
             | DisplayRow::NewSquad
-            | DisplayRow::Sub(_)
             | DisplayRow::Blank
             | DisplayRow::TableEmpty
             | DisplayRow::CardDetail(..)
@@ -723,11 +764,26 @@ impl View {
                 } else {
                     a.name.clone()
                 };
+                // (US3, inline) A member with a different project or worktree
+                // path shows it inline in parens after the slug or name, only
+                // when it fits whole after the label; otherwise it drops. The
+                // dim `Sub` line under the row is gone (d-36438ea4).
+                let label = match self.foreign_base(a) {
+                    Some(base) => {
+                        let tagged = format!("{label} ({base})");
+                        if crate::chrome::str_cols(&tagged) <= base_width {
+                            tagged
+                        } else {
+                            label
+                        }
+                    }
+                    None => label,
+                };
                 let name = if suffix_width < base_width {
-                    let base = fit_name(&label, base_width - suffix_width);
+                    let base = crate::chrome::clip(&label, base_width - suffix_width);
                     format!("{prefix}{base}{suffix}")
                 } else {
-                    let base = fit_name(&label, base_width);
+                    let base = crate::chrome::clip(&label, base_width);
                     format!("{prefix}{base}")
                 };
                 // The message column reads the sentence, not the markup, and
@@ -777,7 +833,12 @@ impl View {
                             cell_flags_v,
                             true,
                         ),
-                        rt_cell(fit_name(&name, name_w), body_fg, cell_flags_v, false),
+                        rt_cell(
+                            crate::chrome::clip(&name, name_w),
+                            body_fg,
+                            cell_flags_v,
+                            false,
+                        ),
                         rt_cell(
                             if card {
                                 card_line::meter_node(a, meter_w).text
@@ -869,14 +930,7 @@ impl View {
                     }
                     out_rows.push(DisplayRow::Agent(a));
                     out_depths.push(0);
-                    let cwd = match iter.peek() {
-                        Some((DisplayRow::Sub(_), _)) => match iter.next() {
-                            Some((DisplayRow::Sub(cwd), _)) => Some(cwd),
-                            _ => unreachable!("peeked a Sub"),
-                        },
-                        _ => None,
-                    };
-                    out_rows.push(DisplayRow::CardDetail(a, cwd));
+                    out_rows.push(DisplayRow::CardDetail(a));
                     out_depths.push(0);
                     in_card = true;
                 }
@@ -918,10 +972,7 @@ impl View {
         let label = match self.footer_menu_range(panel_w) {
             Some(range) => format!(
                 "{}{FOOTER_MENU}",
-                pad_to(
-                    &crate::chrome::fit_ellipsis(&base, range.start),
-                    range.start
-                )
+                pad_to(&crate::chrome::clip(&base, range.start), range.start)
             ),
             None => base,
         };
@@ -997,8 +1048,12 @@ impl View {
         ) else {
             return;
         };
+        // Fill color from theme tokens: the brand (green), the needs-you
+        // yellow past 60, the chip red past CTX_NEAR_COMPACT_PCT.
         let fg = if pct >= row_meter::CTX_NEAR_COMPACT_PCT {
-            Color::Indexed(1)
+            self.theme.chip
+        } else if pct >= 60 {
+            self.theme.needs_you
         } else {
             self.theme.brand
         };
@@ -1007,17 +1062,13 @@ impl View {
         }
     }
 
-    /// Line 2 of a card: two spaces, then `harness/model · king · message · cwd`,
-    /// with the age right-aligned to the panel edge. Segments that are `None`
-    /// drop out of the join; a worker with no harness, king, message or
-    /// foreign cwd paints just its age.
-    pub(super) fn card_detail_text(
-        &self,
-        a: &AgentRow,
-        cwd: Option<&str>,
-        now: u64,
-        text_w: usize,
-    ) -> String {
+    /// Line 2 of a card: two spaces, then `harness/model · parent-or-role ·
+    /// message`, with `lifetime  age` right-aligned to the panel edge.
+    /// Segments that are `None` drop out of the join; a worker with no
+    /// harness, king or message paints just its right-side cells. The cwd
+    /// left line 2: a member with a different project or worktree path shows
+    /// it inline in parens after the slug (ruling d-36438ea4).
+    pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
         let mut segments: Vec<String> = Vec::new();
         if let Some(h) = card_line::harness_model(a) {
             segments.push(h);
@@ -1029,36 +1080,22 @@ impl View {
         if let Some(msg) = msg {
             segments.push(msg);
         }
-        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            segments.push(cwd.to_string());
-        }
         let mut text = String::from("  ");
         if !segments.is_empty() {
             text.push_str(&segments.join(" \u{b7} "));
         }
         let age = row_age(a, now);
-        let head_w = text_w.saturating_sub(age.width());
-        let head = if text.width() <= head_w {
-            text
+        let lifetime = row_meter::up_cell(a.started_at, now);
+        let tail = if lifetime == "-" {
+            age
         } else {
-            let limit = head_w.saturating_sub(1);
-            let mut fitted = String::new();
-            let mut width = 0;
-            for ch in text.chars() {
-                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if width + char_width > limit {
-                    break;
-                }
-                fitted.push(ch);
-                width += char_width;
-            }
-            if head_w > 0 {
-                fitted.push('…');
-            }
-            fitted
+            format!("{lifetime}  {age}")
         };
-        let padding = " ".repeat(head_w.saturating_sub(head.width()));
-        format!("{head}{padding}{age}")
+        let age_w = crate::chrome::str_cols(&tail);
+        let head_w = text_w.saturating_sub(age_w);
+        let head = crate::chrome::clip(&text, head_w);
+        let padding = " ".repeat(head_w.saturating_sub(crate::chrome::str_cols(&head)));
+        format!("{head}{padding}{tail}")
     }
 
     /// The card-mode highlight pairing: a card's lower half inverts when
@@ -1083,6 +1120,20 @@ impl View {
                     && (self.list_selector() == Some(i + 1) || self.hover_row == Some(i + 1))
             }
             _ => base,
+        }
+    }
+
+    /// (US3, inline) The foreign-cwd base an agent shows inline in parens:
+    /// `Some` only when the agent's cwd basename differs from its squad's
+    /// project basename. The dim `Sub` row's join, moved into the label.
+    pub(super) fn foreign_base(&self, a: &AgentRow) -> Option<&str> {
+        let squad_id = a.squad?;
+        let squad = self.layout.squads.iter().find(|s| s.id == squad_id)?;
+        let base = super::section_project_base(&squad.canonical_cwd);
+        if super::agent_is_foreign(a, base) {
+            a.cwd_base.as_deref()
+        } else {
+            None
         }
     }
 
