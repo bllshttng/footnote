@@ -630,11 +630,10 @@ mod tests {
             serde_json::json!("2026-10-02T00:00:00Z")
         );
         // 140 input + 14 output opus tokens.
-        let expected_cents: f64 =
-            ((140_000.0 * 4.0 + 14_000.0 * 20.0) / 1_000_000.0 * 100.0).round() as u64;
+        let expected: f64 = (140_000.0 * 4.0 + 14_000.0 * 20.0) / 1_000_000.0 * 100.0;
         assert_eq!(
             keys["session_cost_cents"],
-            serde_json::json!(expected_cents)
+            serde_json::json!(expected.round() as u64)
         );
 
         let absent = served_context_cost_keys(&RegistryEntry::default());
