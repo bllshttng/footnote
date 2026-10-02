@@ -2455,7 +2455,7 @@ pub(crate) fn run_with_release(
         let death = if e.harness_name() == "claude" {
             let mut memo = agents_memo.borrow_mut();
             let snapshot = memo.get_or_insert_with(&agents_read);
-            let (death, drift) = crate::daemon::row_death_and_drift(e, snapshot);
+            let (death, drift) = crate::daemon::roster_death::row_death_and_drift(e, snapshot);
             if death.is_none() {
                 if let Some(detail) = drift {
                     // fno holds the row live the vendor would retire: the

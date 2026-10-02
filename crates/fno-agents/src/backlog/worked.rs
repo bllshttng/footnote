@@ -165,9 +165,10 @@ fn is_live_status(status: crate::AgentStatus) -> bool {
 
 fn fleet_rows() -> (Vec<FleetRow>, Vec<String>) {
     let raw = crate::claude_roster::read_all_agents_raw();
-    let registry = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
-        .ok()
-        .map(|r| r.entries);
+    let registry =
+        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+            .ok()
+            .map(|r| r.entries);
     fleet_rows_from(raw, registry.as_deref())
 }
 
@@ -209,7 +210,10 @@ fn fleet_rows_from(
         }
     }
     for (sid, e) in spine.iter() {
-        let vendor = raw.rows.iter().find(|r| raw_row_sid(r).as_deref() == Some(*sid));
+        let vendor = raw
+            .rows
+            .iter()
+            .find(|r| raw_row_sid(r).as_deref() == Some(*sid));
         let (state, warn) = match vendor {
             Some(r) => row_state(r),
             None => row_state(&json!({"status": status_word(e.status)})),
@@ -414,7 +418,6 @@ fn raw_row_sid(r: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
-
 
 fn ledger_nodes_map() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -1202,9 +1205,12 @@ mod tests {
             .expect("stray vendor row listed");
         assert_eq!(stray.name, "stray");
         assert_eq!(stray.state, "working");
-        assert!(warnings.iter().any(|w| {
-            w.contains("vendor-only") && w.contains("0badf00d")
-        }), "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| { w.contains("vendor-only") && w.contains("0badf00d") }),
+            "{warnings:?}"
+        );
 
         // An unread registry falls back to the vendor view: the row lists
         // with no vendor-only warning, because the vendor IS the read.

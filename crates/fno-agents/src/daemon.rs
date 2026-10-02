@@ -45,9 +45,7 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
 use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
-pub(crate) use self::roster_death::{
-    claude_row_id, pid_is_gone, row_death_and_drift, row_death_reason,
-};
+pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
 mod list_rows;
 use self::list_rows::{
