@@ -104,6 +104,46 @@ fn board_render_rows() {
         lines.iter().any(|l| l.contains("no cards match")),
         "{lines:?}"
     );
+
+    // The keyed grammar reaches the board through the Find input; a bad
+    // keyed query names the parse error and keeps the previous filter.
+    let mut v = key_view(board_with(board_inputs()));
+    v.backlog_board.as_mut().expect("board open").input =
+        Some((BoardInputKind::Find, "s:ready".into()));
+    input_commit(&mut v);
+    let b = v.backlog_board.as_ref().expect("board open");
+    let total: usize = b
+        .body
+        .as_ref()
+        .unwrap()
+        .lanes
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
+        .sum();
+    assert_eq!(total, 2, "only the ready cards stay");
+    assert_eq!(b.query.q.as_deref(), Some("s:ready"));
+    let mut v = key_view(board_with(board_inputs()));
+    {
+        let b = v.backlog_board.as_mut().expect("board open");
+        b.query.q = Some("s:ready".into());
+        b.input = Some((BoardInputKind::Find, "stauts:ready".into()));
+    }
+    input_commit(&mut v);
+    let b = v.backlog_board.as_ref().expect("board open");
+    assert_eq!(
+        b.query.q.as_deref(),
+        Some("s:ready"),
+        "the previous filter stays"
+    );
+    let notice = v
+        .notice
+        .as_ref()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    assert!(
+        notice.contains("did you mean 'status:'?"),
+        "notice: {notice}"
+    );
 }
 
 // AC4-HP: the stats line counts every column and renders the flow line.

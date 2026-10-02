@@ -477,6 +477,15 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
         .last_gather
         .is_some_and(|t| t.elapsed() < backlog_model::REGATHER_AFTER);
     let agents = view.layout.agents.clone();
+    let wants_questions = b.query.q.as_deref().map_or(false, |text| {
+        crate::search_query::parse(
+            text,
+            crate::search_query::Surface::Node,
+            crate::search_query::now_secs(),
+        )
+        .map(|p| p.wants_questions())
+        .unwrap_or(false)
+    });
     tokio::spawn(async move {
         let version = tokio::task::spawn_blocking(|| store_client::version(&graph_path()))
             .await
@@ -489,7 +498,8 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
                 }
             }
         }
-        let inputs = backlog_model::gather(&graph_path(), agents).await;
+        let mut inputs = backlog_model::gather(&graph_path(), agents).await;
+        backlog_model::read_search_sources(&mut inputs, wants_questions);
         let _ = tx.send((gen, BoardMsg::Gathered { inputs }));
     });
 }
@@ -503,7 +513,21 @@ pub(crate) async fn fold_once(view: &mut View) {
         return;
     }
     backlog_board_open_fresh(view);
-    let inputs = backlog_model::gather(&graph_path(), view.layout.agents.clone()).await;
+    let mut inputs = backlog_model::gather(&graph_path(), view.layout.agents.clone()).await;
+    let wants_questions = view
+        .backlog_board
+        .as_ref()
+        .and_then(|b| b.query.q.as_deref())
+        .map_or(false, |text| {
+            crate::search_query::parse(
+                text,
+                crate::search_query::Surface::Node,
+                crate::search_query::now_secs(),
+            )
+            .map(|p| p.wants_questions())
+            .unwrap_or(false)
+        });
+    backlog_model::read_search_sources(&mut inputs, wants_questions);
     let gen = view.backlog_board.as_ref().map_or(0, |b| b.gen);
     apply_fold(view, gen, BoardMsg::Gathered { inputs });
 }
@@ -1567,10 +1591,22 @@ fn input_commit(view: &mut View) {
     let text = text.trim().to_string();
     match kind {
         BoardInputKind::Find => {
-            b.query.q = (!text.is_empty()).then_some(text);
-            let focus = cursor_card_id(b);
-            rederive(b);
-            focus_card(b, focus.as_deref());
+            // A bad keyed query never reaches the board state: the notice
+            // names the parse error and the previous filter stays applied,
+            // so rederive and the Gathered arm never drop one silently.
+            let candidate = QueryState {
+                q: (!text.is_empty()).then(|| text.clone()),
+                ..b.query.clone()
+            };
+            match candidate.to_query() {
+                Ok(_) => {
+                    b.query.q = (!text.is_empty()).then_some(text);
+                    let focus = cursor_card_id(b);
+                    rederive(b);
+                    focus_card(b, focus.as_deref());
+                }
+                Err(msg) => view.set_notice(msg),
+            }
         }
         BoardInputKind::Title => {
             if text.is_empty() {
