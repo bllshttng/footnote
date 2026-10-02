@@ -300,11 +300,14 @@ def test_every_moved_spelling_is_hidden():
         cmd = root.get_command(ctx, name)
         # x-6233: `yard` was an eager @app.command, so its release form is a
         # removed registration rather than a hidden lazy row - forwarding is
-        # owned by VERB_MOVES, not by the registry. Every OTHER moved spelling
-        # keeps a one-release registration, and any registration that exists
-        # must be hidden: an advertised moved name teaches a doomed spelling.
-        if name == "yard":
-            assert cmd is None, "yard's eager registration was removed with the move"
+        # owned by VERB_MOVES, not by the registry. `decide` joined it when
+        # the family ported native: every destination the move names is a
+        # native verb now, so a python registration would forward into
+        # nothing. Every OTHER moved spelling keeps a one-release
+        # registration, and any registration that exists must be hidden: an
+        # advertised moved name teaches a doomed spelling.
+        if name in ("decide", "yard"):
+            assert cmd is None, f"{name}'s registration was removed with the move"
             continue
         assert cmd is not None, f"moved spelling {name!r} must stay registered"
         assert getattr(cmd, "hidden", False), (

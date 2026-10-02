@@ -139,45 +139,6 @@ def test_raw_inject_event_carries_origin_without_an_envelope():
     assert event["data"]["origin"] == "peer"
 
 
-def test_operator_origin_can_be_recorded_as_relayed_agent_without_operator_authority(
-    monkeypatch,
-):
-    from fno.decide import _resolve_decider
-
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: _Identity(),
-    )
-    result = _resolve_decider(None, None, origin="operator")
-    assert result.authority_source == "agent"
-    assert result.relayed_by == "session-"
-    assert result.attested_by is None
-
-    from fno.events import operator_decision
-
-    event = operator_decision(
-        decision_id="d-test",
-        decision="answer",
-        decided_by=result.decided_by,
-        relayed_by=result.relayed_by,
-        authority_source=result.authority_source,
-        origin="operator",
-    )
-    assert event["data"]["origin"] == "operator"
-    assert "attested_by" not in event["data"]
-
-
-def test_non_operator_origin_refuses_operator_authority(monkeypatch):
-    from fno.decide import RefusedAuthorityError, _resolve_decider
-
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: _Identity(),
-    )
-    with pytest.raises(RefusedAuthorityError, match="scheduler"):
-        _resolve_decider(None, "operator", origin="scheduler")
-
-
 def test_raw_self_lookup_uses_full_codex_session_id(monkeypatch):
     import typer
 
@@ -322,7 +283,7 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):
-    from fno.decide import enforce_origin_floor
+    from fno.mail.origins import enforce_origin_floor
 
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",

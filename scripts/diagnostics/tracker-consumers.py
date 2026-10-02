@@ -415,7 +415,7 @@ def rust_graph_json_sites(text):
             sites.append((i, line))
         if re.fullmatch(r"#\[cfg\(test\)\]", stripped):
             pending_cfg_test = True
-        elif pending_cfg_test and re.match(r"mod\s+\w+", stripped):
+        elif pending_cfg_test and re.match(r"(?:pub(?:\([^)]{1,20}\))?\s+)?mod\s+\w+", stripped):
             in_test_module = True
         elif stripped:
             pending_cfg_test = False
@@ -452,7 +452,7 @@ def rust_raw_graph_read_sites(text):
                 sites.append((i, line))
         if re.fullmatch(r"#\[cfg\(test\)\]", stripped):
             pending_cfg_test = True
-        elif pending_cfg_test and re.match(r"mod\s+\w+", stripped):
+        elif pending_cfg_test and re.match(r"(?:pub(?:\([^)]{1,20}\))?\s+)?mod\s+\w+", stripped):
             in_test_module = True
         elif stripped:
             pending_cfg_test = False
@@ -511,6 +511,9 @@ def self_test() -> int:
         failures.append("rust census control: production graph.json literal not detected")
     if rust_graph_json_sites(rust_fixt):
         failures.append("rust census control: cfg(test) fixture was not skipped")
+    rust_fixt_pub = rust_fixt.replace("mod tests {", "pub(crate) mod tests {")
+    if rust_graph_json_sites(rust_fixt_pub):
+        failures.append("rust census control: visibility-qualified test mod was not skipped")
 
     # Raw graph-read detector, both edges: a read of a graph-named variable
     # and a read of a variable a graph_json_path() builder line above must
@@ -543,6 +546,8 @@ def self_test() -> int:
         failures.append("raw graph-read control: graph_json_path-built read not detected")
     if rust_raw_graph_read_sites(raw_fixt):
         failures.append("raw graph-read control: cfg(test) raw read was not skipped")
+    if rust_raw_graph_read_sites(raw_fixt.replace("mod tests {", "pub(crate) mod tests {")):
+        failures.append("raw graph-read control: visibility-qualified test mod was not skipped")
     if rust_raw_graph_read_sites(raw_other):
         failures.append("raw graph-read control: unrelated read was detected")
 

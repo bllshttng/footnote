@@ -53,7 +53,7 @@ def _build_mail_ctx(
     from fno.harness_identity import canonical_handle
 
     from_ = canonical_handle(from_session) if from_session else from_name
-    from fno.decide import enforce_origin_floor
+    from fno.mail.origins import enforce_origin_floor
 
     return _MailCtx(
         origin=enforce_origin_floor(origin),

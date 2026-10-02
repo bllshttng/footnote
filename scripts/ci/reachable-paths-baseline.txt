@@ -19,7 +19,6 @@ A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-
 A	[(](?:[yy]/[nn]|+(?:/+)+)[)]*$	py=cli/src/fno/agents/session_truth.py;rs=crates/fno-agents/src/backlog/worked.rs	# CLASSIFY protocol|msg-twin|data
 A	[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}	py=cli/src/fno/graph/_constants.py|hooks/git-protection.py;rs=crates/fno-agents/src/king_board/queues.rs	# CLASSIFY protocol|msg-twin|data
 A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck/block_reason.rs	# CLASSIFY protocol|msg-twin|data
-A	^(file|test|doc|gate|default):(?:.*)?$	py=cli/src/fno/decide/graduation.py;rs=crates/fno-agents/src/law_match.rs	# CLASSIFY protocol|msg-twin|data
 A	^:?-+:?(?:[ ]*[ ]*:?-+:?)+[ ]*$	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	^[a-za-z][a-za-z0-9+.-]*://	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/pr_link.rs	# CLASSIFY protocol|msg-twin|data
 A	^backgrounded · ([0-9a-f]{8}) ·	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
@@ -74,7 +73,6 @@ A	drop --permission-mode and pass -y/--yolo	py=cli/src/fno/agents/cli.py;rs=crat
 A	effective_context_window_percent	py=cli/src/fno/doctor.py;rs=crates/fno-agents/src/context_window.rs	# CLASSIFY protocol|msg-twin|data
 A	effort must be a non-empty string when provided	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
 A	empty supported {action}	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
-A	enforced graduation requires file:, test:, doc:, gate:, or default:	py=cli/src/fno/decide/graduation.py;rs=crates/fno-agents/src/law_match.rs	# CLASSIFY protocol|msg-twin|data
 A	error: --force requires --reason text (explain why the cross-check is bypassed)	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	error: --project must be a non-empty string	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/update_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	error: --reason cannot be blank	py=cli/src/fno/graph/lifecycle.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
@@ -118,9 +116,7 @@ A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-ag
 A	gh api failed with no message	py=cli/src/fno/pr/_rest.py;rs=crates/fno-agents/src/pr_status.rs	# CLASSIFY protocol|msg-twin|data
 A	gh api pulls/<n> returned a json value that is not an object	py=cli/src/fno/pr/_rest.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	github_approval_satisfies	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck/settings.rs	# CLASSIFY protocol|msg-twin|data
-A	graduated to enforced artifact	py=cli/src/fno/decide/__init__.py;rs=crates/fno-agents/src/backlog/decisions_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	graph unreadable: entry id is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/undispatched.rs	# CLASSIFY protocol|msg-twin|data
-A	guidance takes no graduation reference	py=cli/src/fno/decide/graduation.py;rs=crates/fno-agents/src/law_match.rs	# CLASSIFY protocol|msg-twin|data
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	https://api.anthropic.com/api/oauth/profile	py=cli/src/fno/adapters/providers/managed.py;rs=crates/fno-agents/src/claude_vault.rs	# CLASSIFY protocol|msg-twin|data
@@ -206,8 +202,6 @@ A	select seq, payload from outbox order by seq	py=cli/src/fno/approvals/store.py
 A	selector_entries_scanned	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/next.rs	# CLASSIFY protocol|msg-twin|data
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data
 A	sentence {shown} has a semicolon. split it into two sentences.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
-A	should-be-enforced-but-i-did-not	py=cli/src/fno/decide/graduation.py;rs=crates/fno-agents/src/law_match.rs	# CLASSIFY protocol|msg-twin|data
-A	should-be-enforced-but-i-did-not requires node:<id>	py=cli/src/fno/decide/graduation.py;rs=crates/fno-agents/src/law_match.rs	# CLASSIFY protocol|msg-twin|data
 A	single_flight_join_budget_seconds	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
 A	single_flight_ttl_seconds	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
 A	stale >30d, drained by maintain	py=cli/src/fno/graph/_constants.py;rs=crates/fno-agents/src/backlog/patch.rs	# CLASSIFY protocol|msg-twin|data

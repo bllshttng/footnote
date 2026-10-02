@@ -9,10 +9,9 @@ stays put here and folds into agents in a later unit, so `board_cmd` is
 registered under both `king` and `inbox` rather than moved.
 
  (d-add90c60): the human-authority verbs join the human-facing group.
-`decide`/`decisions` and the whole `law` app mount here; the `fno backlog
-decide` spellings stay registered as silent aliases of the same command
-objects, and the root `fno decide` / `fno law` spellings are VERB_MOVES
-shims.
+`decisions` and the whole `law` app are the Rust front's nested verbs (no
+Python mount), and `fno inbox decide` answers natively through the decide
+door; the root `fno decide` / `fno law` spellings are VERB_MOVES shims.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from __future__ import annotations
 import typer
 
 from fno.approvals.cli import approvals_app
-from fno.decide.cli import backlog_decide
 from fno.inbox.operator_turns import operator_app
 from fno.king.cli import board_cmd
 from fno.notify.cli import notify_app
@@ -45,4 +43,3 @@ inbox_app.add_typer(day_app, name="day")
 inbox_app.add_typer(operator_app, name="user")
 inbox_app.add_typer(operator_app, name="operator", hidden=True)
 inbox_app.command("board")(board_cmd)
-inbox_app.command("decide")(backlog_decide)
