@@ -22,13 +22,15 @@ command -v fno >/dev/null 2>&1 || exit 0
 [[ -d ".fno" ]] || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/hook-budget.sh
-source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
 # Run whoami; suppress stderr (warnings would otherwise leak into the
-# injection blob). The load-aware budget keeps a hung fno from blocking
-# session start; a skip or a fired bound reads as silence.
-OUTPUT=$(hook_run_optional fno whoami 2>/dev/null || true)
+# injection blob). Cap at 2s wall-clock so a hung fno never blocks session
+# start - the cap's duration is PINNED by the harness suite (scenario 4
+# measures the elapsed time), so this probe keeps its fixed bound rather
+# than the load-aware budget. `|| true` swallows the timeout status cleanly.
+OUTPUT=$(with_timeout 2 fno whoami 2>/dev/null || true)
 [[ -z "$OUTPUT" ]] && exit 0
 
 # Emit as a fenced block so the formatting survives the injection.

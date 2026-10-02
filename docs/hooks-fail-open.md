@@ -15,6 +15,8 @@ A hook that waits blocks a turn. Context that arrives late is worth less than a 
 
 A fired bound or a skip reads as silence: exit 0 with empty output. A turn never inherits an error from optional context. The bound rides `with_timeout` from `scripts/lib/with-timeout.sh`, which needs no coreutils `timeout` and works on stock macOS. One hook sets an exception: `operator-capture-nudge` pins `HOOK_BUDGET_FLOOR_SECS=1`. Its failure is its report, and a failed read must never read as an empty queue. Past the skip threshold it still runs the read bounded at 1s. A hang still dies at the bound.
 
+Three probes sit outside the budget because their EXIT CODE is the data. `frontdoor-nudge-session-start`: 2 means fno-py, 124 means a wedged socket that still proves the Rust door. `worktree-peers-session-start`: 124 reads as staleness-unknown. `inject-fno-agent-whoami`: the suite pins the cap's duration. Each keeps its fixed `with_timeout` bound from before the budget existed. A fired bound can land on a loaded runner's fork latency. A probe whose answer rides the exit code must not shorten its bound with the load.
+
 ## Which hooks ride the budget
 
 The optional families: context, nudge, inject, announce. That covers `prompt-outstanding`, `born-with-why-offer-inject`, `inject-mail-notify`, `inject-announce`, `law-stage-inject`, `inject-fno-agent-whoami`, `inject-mail-drain-session-start`, `outstanding-session-start`, `worktree-peers-session-start`, `frontdoor-nudge-session-start`, `agy-crown-inject`, `context-nudge` (reads), and `operator-capture-nudge`. Both `hooks/hooks.json` and `hooks/codex-hooks.json` set each one's `timeout` entry as a BACKSTOP just above the internal budget. A wedged hook that ignores its own bound still dies at the harness layer.
