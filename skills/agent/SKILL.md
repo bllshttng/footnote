@@ -1,6 +1,6 @@
 ---
 name: agent
-description: Control Footnote workers: spawn or hand off work, inspect sessions, message, drive, or stop.
+description: Control Footnote workers by spawning, handing off, inspecting, messaging, driving, or stopping sessions.
 argument-hint: "<verb> [args]  |  [handoff] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
 metadata:
   internal: false
