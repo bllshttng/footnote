@@ -413,6 +413,34 @@ pub(crate) fn brake_path() -> PathBuf {
 /// spawn gate's own door on the brake. The arm attributes load before it
 /// arms the brake, so a hold here means fno's own fan-out. A missing,
 /// unreadable, or expired file holds nothing.
+/// The hold line for an unexpired brake, `None` when none is armed: the
+/// spawn gate's own door on the brake. The arm attributes load before it
+/// arms the brake, so a hold here means fno's own fan-out. A missing,
+/// unreadable, or expired file holds nothing.
+pub fn brake_holds() -> Option<String> {
+    // Test seam, same shape as the footprint probe's: with no pinned brake
+    // file, tests never read the live machine's brake.
+    #[cfg(test)]
+    if std::env::var_os("FNO_MACHINE_BRAKE").is_none() {
+        return None;
+    }
+    let text = std::fs::read_to_string(brake_path()).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let until = value.get("until_epoch")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    (now < until).then(|| {
+        let left = until - now;
+        let reason = value
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unspecified");
+        format!("machine runaway brake holds ({left}s left): {reason}")
+    })
+}
+
 /// The runaway brake: a self-expiring file the spawn admission honors.
 /// Best-effort - a failed write costs the refusal leg, never the notice.
 /// The measured fleet/outside split rides the file, so a refusal names

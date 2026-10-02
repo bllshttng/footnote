@@ -219,31 +219,26 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
 /// is admit, and only a caller carrying `FNO_AGENT_SELF` is held; the same
 /// verb typed at a human's shell admits. An unexpired machine brake holds
 /// before the operator bypass, before `--force`, and before any capacity
-/// math; the census and the process ceiling ride the same door. The arm
-/// attributes load before it arms the brake, so this door closing means
-/// fno's own fan-out; the user's pane taps admit through the default door.
+/// math. The census and the process ceiling live in the fno crate's own
+/// agent-spawn door (this crate never links fno; it shells the binary at
+/// runtime), so a `fno`-front invocation carries all three arms and a door
+/// this verb answers carries the brake. The arm attributes load before it
+/// arms the brake, so a hold here means fno's own fan-out; the user's pane
+/// taps admit through the default door.
 fn process_admission_gate() -> Result<(), Refusal> {
-    match fno::process_admission::admit_agent_spawn() {
-        Ok(_) => Ok(()),
-        Err(failure) => {
-            let reason = match failure.decision() {
-                fno::process_admission::AdmissionDecision::Refuse { reason, .. } => match reason {
-                    fno::process_admission::AdmissionReason::OverLimit => "over-limit",
-                    fno::process_admission::AdmissionReason::MeasurementUnavailable => {
-                        "measurement-unavailable"
-                    }
-                    fno::process_admission::AdmissionReason::LockUnavailable => "lock-unavailable",
-                    fno::process_admission::AdmissionReason::EnvOverrideInvalid => {
-                        "env-override-invalid"
-                    }
-                    fno::process_admission::AdmissionReason::MachineRunaway => "machine-runaway",
-                },
-                fno::process_admission::AdmissionDecision::Admit => "admitted",
-            };
-            eprintln!("refused: {failure}; no new agent spawn is admitted");
+    let agent_origin = std::env::var_os("FNO_AGENT_SELF")
+        .filter(|name| !name.is_empty())
+        .is_some();
+    if !agent_origin {
+        return Ok(());
+    }
+    match crate::machine_watch::brake_holds() {
+        None => Ok(()),
+        Some(hold) => {
+            eprintln!("refused: {hold}; no new agent spawn is admitted while it holds");
             Err(Refusal::code(EXIT_FLEET_STOP)
-                .ev("reason", serde_json::json!(reason))
-                .ev("detail", serde_json::json!(failure.detail())))
+                .ev("reason", serde_json::json!("machine-runaway"))
+                .ev("detail", serde_json::json!(hold)))
         }
     }
 }
@@ -3282,7 +3277,7 @@ MemAvailable:    8000000 kB\n";
         // The machine admission door one boundary later: armed refuses a
         // worker identity with the same exit code and a machine-runaway
         // reason; expired admits; no identity admits under the same armed
-        // brake (the human's own typed verb is never held).
+        // brake (the human's own typed verb is never held here).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
         let now = std::time::SystemTime::now()

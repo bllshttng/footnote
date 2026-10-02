@@ -31,7 +31,7 @@ One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py
 - 80 king share
 - 81 registry schema
 - 82 and 83, the fleet incident pair, byte-parity
-- 82 also carries the machine admission door (`process_admission_gate`). It holds an agent-origin spawn on an unexpired runaway brake, an over-limit census, or an unreadable process table. The refusal names `machine-runaway`, `over-limit`, `measurement-unavailable`, `lock-unavailable`, or `env-override-invalid`. A caller with no `FNO_AGENT_SELF` admits. The default is admit.
+- 82 also carries the machine admission door (`process_admission_gate`). It holds an agent-origin spawn on an unexpired runaway brake. A caller with no `FNO_AGENT_SELF` admits. The default is admit. The census and the process ceiling live in the fno crate's own agent-spawn door, which the `fno` front runs before any forwarding.
 - 84 state root ungranted. Permanent until a human grants.
 - 85 the Python sandbox probe
 - 86 the per-territory team cap. Exit 86 is the permanent, non-queueable territory-cap refusal. Unreadable territory attribution uses the same exit. Callers do not retry it as capacity.

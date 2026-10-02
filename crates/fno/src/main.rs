@@ -362,6 +362,21 @@ fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let env_session = mux_cli::env_server();
+    // The agent-spawn door: `fno agents spawn` from a worker (a caller
+    // carrying FNO_AGENT_SELF) opts into the machine gate here, before any
+    // forwarding, so a held spawn never reaches the Python CLI. The gate
+    // verb carries the brake for every door; this front door adds the
+    // census and the ceiling. The same verb from a human's shell has no
+    // identity to carry and admits.
+    if let (Some("agents"), Some("spawn")) = (
+        args.first().and_then(|a| a.to_str()),
+        args.get(1).and_then(|a| a.to_str()),
+    ) {
+        if let Err(failure) = fno::process_admission::admit_agent_spawn() {
+            eprintln!("fno agents spawn: {failure}");
+            std::process::exit(1);
+        }
+    }
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
         Role::Backlog => bootstrap::forward_backlog(&args),
