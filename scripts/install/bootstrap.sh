@@ -84,6 +84,15 @@ emit_check() { # emit_check <name> <state> <required 0|1> <path> <detail> <fix>
 }
 
 # --- shared resolution ------------------------------------------------------
+# Sanitize probe output before it enters the report: json_escape covers the
+# four breakable characters, but a raw control char (an ANSI ESC from a
+# foreign binary's --version, say) is invalid JSON to a strict parser and
+# would break the one contract this script has. CSI sequences first, then any
+# remaining control char.
+sanitize_probe() {
+  strip_ansi "$1" | tr -d '\000-\010\013\014\016-\037\177'
+}
+
 # Locate uv: on PATH, else the well-known dirs Astral's installer uses (the
 # same list scripts/install/fno.sh carries). UV_CALL is empty when absent.
 UV_CALL=
@@ -148,7 +157,8 @@ check_wheel() {
   fi
   out="$(run_bounded 5 "$cand" --version 2>&1)"; rc=$?
   if [[ $rc -eq 0 && -n "$out" ]]; then
-    version="$(printf '%s' "$out" | head -1)"
+    version="$(printf '%s\n' "$out" | head -1)"
+    version="$(sanitize_probe "$version")"
     emit_check "wheel" "ok" 1 "$cand" "Python CLI answers: $version" ""
   elif [[ -e "$cand" ]]; then
     emit_check "wheel" "broken" 1 "$cand" "fno-py exists but --version failed (rc=$rc)." \
@@ -186,7 +196,7 @@ check_frontdoor() {
   fi
   out="$(run_bounded 5 "$cand" --version 2>&1)"; rc=$?
   if [[ $rc -eq 0 && -n "$out" ]]; then
-    emit_check "frontdoor" "ok" 1 "$cand" "front door answers mux ls and forwards --version: $(printf '%s' "$out" | head -1)" ""
+    emit_check "frontdoor" "ok" 1 "$cand" "front door answers mux ls and forwards --version: $(sanitize_probe "$(printf '%s\n' "$out" | head -1)")" ""
   else
     emit_check "frontdoor" "broken" 1 "$cand" "mux answered but --version did not forward (rc=$rc)." \
       "run this script with --repair to reinstall the wheel"
@@ -264,7 +274,7 @@ check_rust() {
   fi
   out="$(run_bounded 5 "$p" --version 2>&1)"; rc=$?
   if [[ $rc -eq 0 && -n "$out" ]]; then
-    emit_check "rust" "ok" 0 "$p" "$(printf '%s' "$out" | head -1)" ""
+    emit_check "rust" "ok" 0 "$p" "$(sanitize_probe "$(printf '%s\n' "$out" | head -1)")" ""
   else
     emit_check "rust" "broken" 0 "$p" "cargo exists but --version failed (rc=$rc)." \
       "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
@@ -335,7 +345,6 @@ mode_repair() {
   rc=$?
   say "repair: installer exit $rc."
   EXTRA_JSON=",\"repair\":{\"ran\":true,\"installer_exit\":$rc}"
-  RESTART_NEEDED=1
   return 0
 }
 
@@ -379,7 +388,6 @@ mode_from_source() {
   # it is printed for the user, never run here.
   say "from-source done. Register the plugin for your harness from $checkout yourself (Claude Code: /plugin marketplace add + /plugin install; see docs/getting-started.md)."
   EXTRA_JSON=",\"from_source\":{\"ran\":true,\"checkout\":\"$(json_escape "$checkout")\",\"actions\":[$actions]}"
-  RESTART_NEEDED=1
   return 0
 }
 

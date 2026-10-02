@@ -192,4 +192,15 @@ assert_json "$SB/report.json" \
   "d['mode'] == 'from-source' and d['from_source']['ran'] is True and d['from_source']['checkout'] == '$SB/checkout'" \
   "from-source report records the run and the checkout"
 
-echo "PASS: bootstrap report contract (7 cases)"
+### 8. Probe output carrying an ANSI ESC and raw control chars cannot break
+###    the report's JSON: the front door stub prints both; the report stays
+###    parseable and the version line is clean.
+SB="$(mk_sandbox 0 0)"
+mkdir -p "$SB/home/tools/fno/bin" "$SB/home/tools-bin"
+printf '#!/bin/sh\n[ "$1" = "mux" ] && exit 0\n[ "$1" = --version ] && { printf "fno 0.4.0\\033[0m\\001dirty\\n"; exit 0; }\nexit 1\n' > "$SB/home/tools/fno/bin/fno"
+chmod +x "$SB/home/tools/fno/bin/fno"
+RC="$(run_bs "$SB")"
+assert_json "$SB/report.json" "n['frontdoor']['state'] == 'ok'" "frontdoor still reports ok with dirty version output"
+assert_json "$SB/report.json" "'fno 0.4.0dirty' == n['frontdoor']['detail'].split(': ')[-1]" "version detail carries no escape or control chars"
+
+echo "PASS: bootstrap report contract (8 cases)"
