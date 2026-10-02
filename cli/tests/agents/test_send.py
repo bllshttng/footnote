@@ -203,7 +203,8 @@ def test_cmd_send_happy_path_stdout_format(
     cwd.mkdir()
     result = runner.invoke(
         mail_app,
-        ["send", "red", "FYI built the thing", "--cwd", str(cwd)],
+        ["send", "red", "FYI built the thing", "--cwd", str(cwd),
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
@@ -2350,7 +2351,9 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
     from fno.mail.cli import mail_app
 
     res = runner.invoke(
-        mail_app, ["send", "fno-tgt00001", "does advance() resolve cwd?"]
+        mail_app,
+        ["send", "fno-tgt00001", "does advance() resolve cwd?",
+         "--from-name", "lead"],
     )
     assert res.exit_code == 14, res.output
     assert "queued (durable)" in res.output
