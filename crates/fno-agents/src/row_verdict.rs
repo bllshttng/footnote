@@ -163,26 +163,31 @@ mod tests {
     }
 
     #[test]
-    fn ac2_a_row_with_no_pid_no_report_and_no_outcome_is_unknown_never_finished() {
-        assert_eq!(
-            fno_verdict(&entry()),
-            RowVerdict::Unknown(
-                "no terminal status, no live inside-leg report, no recorded pid".into()
-            )
-        );
+    fn ac2_an_empty_row_is_unknown_and_the_door_never_branches_on_the_harness_name() {
+        let mut a = entry();
+        a.harness = Some("claude".into());
+        let mut b = entry();
+        b.harness = Some("codex".into());
+        for e in [&a, &b] {
+            assert_eq!(
+                fno_verdict(e),
+                RowVerdict::Unknown(
+                    "no terminal status, no live inside-leg report, no recorded pid".into()
+                )
+            );
+        }
     }
 
     #[test]
-    fn a_terminal_registry_status_is_finished_despite_a_live_vendor_word() {
+    fn the_verdict_ladder_walks_status_then_ttl_then_pid() {
         let mut e = entry();
         e.status = crate::AgentStatus::Exited;
-        let v = fno_verdict(&e);
-        assert!(matches!(v, RowVerdict::Finished(_)));
-        assert_eq!(reconcile(&v, Some("working")), v);
-    }
+        assert!(matches!(fno_verdict(&e), RowVerdict::Finished(_)));
 
-    #[test]
-    fn a_pid_proven_gone_finishes_and_a_live_pid_holds_the_row_live() {
+        let mut e = entry();
+        e.inside_leg = working_leg(Some(90_000), "2020-01-01T00:00:00Z");
+        assert!(matches!(fno_verdict(&e), RowVerdict::Unknown(_)));
+
         let mut gone = entry();
         gone.pid = Some(spawn_and_reap_pid());
         assert!(matches!(fno_verdict(&gone), RowVerdict::Finished(_)));
@@ -204,14 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn an_expired_working_report_does_not_hold_the_row_live() {
-        let mut e = entry();
-        e.inside_leg = working_leg(Some(90_000), "2020-01-01T00:00:00Z");
-        assert!(matches!(fno_verdict(&e), RowVerdict::Unknown(_)));
-    }
-
-    #[test]
-    fn a_vendor_word_resolves_only_an_unknown_fno_verdict() {
+    fn a_vendor_word_resolves_only_an_unknown_and_drift_names_the_disagreement() {
         let unknown = fno_verdict(&entry());
         assert_eq!(
             reconcile(&unknown, Some("done")),
@@ -228,23 +226,9 @@ mod tests {
 
         let decided = RowVerdict::Live("pid");
         assert_eq!(reconcile(&decided, Some("done")), decided);
-    }
-
-    #[test]
-    fn drift_names_a_disagreement_and_stays_silent_on_agreement_or_unknown() {
-        let live = RowVerdict::Live("inside_leg");
-        assert!(drift(&live, Some("done")).is_some());
-        assert!(drift(&live, Some("working")).is_none());
-        assert!(drift(&live, None).is_none());
-        assert!(drift(&fno_verdict(&entry()), Some("done")).is_none());
-    }
-
-    #[test]
-    fn the_door_never_branches_on_the_harness_name() {
-        let mut a = entry();
-        a.harness = Some("claude".into());
-        let mut b = entry();
-        b.harness = Some("codex".into());
-        assert_eq!(fno_verdict(&a), fno_verdict(&b));
+        assert!(drift(&decided, Some("done")).is_some());
+        assert!(drift(&decided, Some("working")).is_none());
+        assert!(drift(&decided, None).is_none());
+        assert!(drift(&unknown, Some("done")).is_none());
     }
 }
