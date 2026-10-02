@@ -118,3 +118,31 @@ Ground truth at ship time: the fixed parser reproduced the reference tool's $31.
 2. If it is the newest opus, update `LATEST_MODERN_OPUS_TIER`.
 3. Extend the `model_tier` matrix test in `cli/tests/unit/test_cost_tracker_pricing.py`.
 4. Nothing else: the shell shim and every register-path consumer read the same table by construction.
+
+## Exact cost: the local OTel ingest
+
+When `[telemetry] claude_otel` is on (the default), the fno-agents daemon binds an OTLP/http-json receiver on 127.0.0.1 and publishes its port at `~/.fno/agents/otel/port`. Supervisor birth injects `CLAUDE_CODE_ENABLE_TELEMETRY=1`, points the OTLP logs exporter at the receiver, and sets `OTEL_LOG_TOOL_DETAILS=1` so real skill and plugin names survive. Claude Code then reports one `api_request` record per API call with `cost_usd_micros`, `session.id` and skill or plugin attribution. The receiver keeps the named columns in `~/.fno/agents/otel/otel.db` and drops the rest. Tool details carry command text. Nothing leaves the machine.
+
+The off switch: `[telemetry] claude_otel = false` in config.toml means no listener binds and no `OTEL_*` env reaches any supervisor birth. A supervisor that is already running keeps its env until restart, and an operator-set `OTEL_EXPORTER_OTLP_ENDPOINT` always wins over fno's injection.
+
+### Cost source order
+
+When OTel rows exist for a session, the burn arm (`crates/fno-agents/src/burn_watch.rs` `session_cost_exact`) reads their exact sum. It falls back to the transcript-parsed `ledger.json` estimate (`loopcheck::session_cost_from_ledger`) otherwise. The `finalize` handoff cost line stays on the ledger until OTel coverage is proven on the fleet.
+
+### Readouts
+
+Per-skill spend, exact:
+
+```sql
+SELECT skill_name, SUM(cost_usd_micros)/1e6 AS usd
+FROM api_requests GROUP BY 1 ORDER BY usd DESC;
+```
+
+Per-worker spend: sum by session, then join `session_id` to a worker via `harness_session_id` in `~/.fno/agents/registry.json`:
+
+```bash
+sqlite3 ~/.fno/agents/otel/otel.db \
+  "SELECT session_id, SUM(cost_usd_micros)/1e6 FROM api_requests GROUP BY 1"
+```
+
+A record is deduped on its `request_id` (`rid:` key). A record without a `request_id` dedupes on session, sequence and timestamp. A record with `cost_usd` but no micros converts at 1e6. A record with neither is still stored for its token counts. It contributes zero to the cost sum.

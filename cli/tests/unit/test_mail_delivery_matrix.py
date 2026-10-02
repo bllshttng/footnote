@@ -175,7 +175,7 @@ def test_cell1_inject_body_is_envelope_wrapped(runner, mailbox, monkeypatch, tmp
     runner.invoke(app, ["agents", "mail", "send", LIVE_HANDLE, "hi", "--from-name", "web"])
 
     assert bodies, "nothing was injected"
-    assert "<fno_mail" in bodies[0]
+    assert bodies[0].splitlines()[0].startswith("`@web · fmail-"), bodies[0][:80]
 
 
 def test_cell1_inject_is_attempted_before_any_durable_write(
@@ -268,7 +268,7 @@ def test_cell2_wake_prompt_is_envelope_wrapped(runner, mailbox, monkeypatch, tmp
     runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "wake up", "--from-name", "web"])
 
     assert seeds, "nothing was sent as a wake prompt"
-    assert "<fno_mail" in seeds[0]
+    assert seeds[0].splitlines()[0].startswith("`@web · fmail-"), seeds[0][:80]
 
 
 def test_cell2_receipt_names_the_revived_thread(runner, mailbox, monkeypatch, tmp_path):
@@ -826,7 +826,7 @@ def test_cell6b_retired_form_read_off_a_stored_record_is_migrated(
 
     result = runner.invoke(
         app,
-        ["mail", "reply", "--to", inbound.thread_id, "--body", "ack"],
+        ["mail", "reply", "--to", inbound.thread_id, "--body", "ack", "--from", "lead"],
     )
 
     assert result.exit_code == 14, result.output

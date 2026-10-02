@@ -263,7 +263,7 @@ def test_cli_send_to_project_durable_stdout(env, tmp_path, runner):
     )
     assert res.exit_code == 0, res.output
     out = res.stdout.strip()
-    assert out.startswith("msg-")
+    assert out.startswith("fmail-")
     assert "queued (durable) for project projA" in out
 
 

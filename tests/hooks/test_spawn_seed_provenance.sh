@@ -67,12 +67,11 @@ run_hook() {
 }
 
 # 1. startup + seed fields -> exactly one envelope, quoting the seed verbatim.
+# The envelope is the delivered header line: `@<sender> · <msg id> · <summary>`.
 out="$(run_hook startup "${seed_env[@]}")"
-opens="$(printf '%s' "$out" | grep -c '<fno_mail ' || true)"
-closes="$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
-check "startup emits one open tag" "1" "$opens"
-check "startup emits one close tag" "1" "$closes"
-if printf '%s' "$out" | grep -q 'from=\\"119e3c52-0000-7000-8000-000000000000\\"'; then
+headers="$(printf '%s' "$out" | grep -c '· msg-abc123 ·' || true)"
+check "startup emits one header line" "1" "$headers"
+if printf '%s' "$out" | grep -q '`@119e3c52-0000-7000-8000-000000000000 · msg-abc123'; then
     printf 'ok   full sender session is the reply address\n'
 else
     printf 'FAIL full sender session is the reply address\n  actual: %s\n' "$out"
@@ -90,28 +89,28 @@ fi
 # 2. compaction is silent. SessionStart fires on compact too, and emitting
 #    there puts a second copy of one spawn's envelope in the transcript.
 out="$(run_hook compact "${seed_env[@]}")"
-check "compact emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+check "compact emits no envelope" "" "$(printf '%s' "$out" | grep -o '`@119e3c52' || true)"
 
 # 3. resume is silent for the same reason.
 out="$(run_hook resume "${seed_env[@]}")"
-check "resume emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+check "resume emits no envelope" "" "$(printf '%s' "$out" | grep -o '`@119e3c52' || true)"
 
 # 4. a hand-started session has no peer sender, so there is nothing to
 #    attribute and inventing one would be the same lie in the other direction.
 out="$(run_hook startup)"
-check "no seed fields emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+check "no seed fields emits no envelope" "" "$(printf '%s' "$out" | grep -o '`@119e3c52' || true)"
 
 # 5. an unusable sidecar refuses rather than emitting a half-attributed
 #    envelope. A corrupt blob is not evidence about who sent the seed.
 out="$(run_hook startup "FNO_SEED_PROV_SEED_B64=not!valid!base64" \
     "FNO_SEED_PROV_FROM_SESSION=119e3c52-0000-7000-8000-000000000000")"
-check "corrupt seed emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+check "corrupt seed emits no envelope" "" "$(printf '%s' "$out" | grep -o '`@119e3c52' || true)"
 
 # 6. an unreadable source fails CLOSED. If the hook cannot tell a startup from a
 #    compaction it must not emit: the wrong guess duplicates the envelope on
 #    every compaction for the rest of the session.
 out="$(printf 'not json' | env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_BIN="$FNO_BIN" "${seed_env[@]}" bash "$HOOK" 2>/dev/null)"
-check "unreadable source emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+check "unreadable source emits no envelope" "" "$(printf '%s' "$out" | grep -o '`@119e3c52' || true)"
 
 # 7. a seed carrying a control byte still emits VALID JSON. The escaper covers
 #    backslash, quote, LF, CR and TAB and nothing else, so an ESC from a pasted
@@ -134,7 +133,7 @@ try:
 except Exception as exc:
     print(f"unparseable: {exc}")')"
 check "the envelope survives the strip" "1" \
-    "$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
+    "$(printf '%s' "$out" | grep -c '· msg-abc123 ·' || true)"
 
 # 8. a codex-shaped payload (valid JSON, no `.source`) DOES emit. `.source` is a
 #    claude field and codex routes compaction to PostCompact, a separate event
@@ -145,7 +144,7 @@ out="$(printf '{"cwd":"/w"}' \
     | env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_BIN="$FNO_BIN" "${seed_env[@]}" \
       bash "$HOOK" 2>/dev/null)"
 check "a payload with no source field still emits" "1" \
-    "$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
+    "$(printf '%s' "$out" | grep -c '· msg-abc123 ·' || true)"
 
 # 9. and an UNPARSEABLE payload still does not. The two absences differ: one
 #    harness does not report the field, the other input cannot be read at all,
@@ -154,6 +153,6 @@ out="$(printf 'not json at all' \
     | env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_BIN="$FNO_BIN" "${seed_env[@]}" \
       bash "$HOOK" 2>/dev/null)"
 check "an unparseable payload emits no envelope" "" \
-    "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+    "$(printf '%s' "$out" | grep -o '`@119e3c52' || true)"
 
 exit "$fail"

@@ -592,7 +592,7 @@ def test_dispatch_send_refuses_registry_name_colliding_with_store_session(
     )
 
     with pytest.raises(dispatch.DispatchAskError) as exc:
-        dispatch.dispatch_send(
+        dispatch.dispatch_send(from_name="lead", 
             name="deadbeef",
             message="do not misroute",
             provider=None,

@@ -250,7 +250,13 @@ def test_ac8_ui_heads_up_on_bus_triaged_with_provenance(inbox_and_bus, tmp_path,
             self.stdout = stdout
             self.stderr = stderr
 
+    import subprocess as _subprocess
+
+    real_run = _subprocess.run  # the stub patches the shared module attr
+
     def fake_run(cmd, *args, **kwargs):
+        if len(cmd) >= 2 and cmd[1] == "mail-envelope":
+            return real_run(cmd, *args, **kwargs)
         if cmd[:4] == ["fno-py", "backlog", "new", "--help"]:
             return _FakeRun(stdout="--source-kind --source-project --source-inbox-msg\n")
         if cmd[:3] == ["fno-py", "backlog", "new"]:

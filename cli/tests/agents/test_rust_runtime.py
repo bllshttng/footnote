@@ -892,6 +892,10 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # `fno doctor update --check` resolver shells it through
             # verb_call with a stdin JSON payload, never an argv route.
             "release-notes",
+            # `chats` is the conversation store's read model: the bus log and
+            # reply resolver shell it through verb_call with a stdin JSON
+            # payload, never an argv route.
+            "chats",
         }
     )
 
