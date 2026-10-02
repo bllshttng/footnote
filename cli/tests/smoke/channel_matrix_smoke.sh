@@ -313,7 +313,20 @@ row_codex_plugin_session() {
   # codex refuses a CODEX_HOME that does not exist yet.
   mkdir -p "$BASE/codex-home"
   export CODEX_HOME="$BASE/codex-home"
-  run_capture codex plugin marketplace add "$REPO_ROOT"
+  # Same stamp as row_claude_plugin_session: the checkout's plugin.json can
+  # lead the registry (main bumped to 0.5.0 before PyPI saw it), and a pinned
+  # install of an unpublished version degrades to a source install that has
+  # no `fno` front door. The channel math must target a real release.
+  local tree="$BASE/codex-tree"
+  copy_tree_to_scratch "$tree"
+  local version
+  version="$(newest_pypi_version)" || { miss "pypi" "could not read the newest PyPI version"; return 0; }
+  awk -v v="$version" '{
+    gsub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" v "\"")
+    print
+  }' "$tree/.claude-plugin/plugin.json" > "$tree/.claude-plugin/plugin.json.new"
+  mv "$tree/.claude-plugin/plugin.json.new" "$tree/.claude-plugin/plugin.json"
+  run_capture codex plugin marketplace add "$tree"
   if [ "$RC" -ne 0 ]; then
     miss "marketplace-add" "rc=$RC: $(printf '%s' "$OUT" | tail -1)"
     return 0
