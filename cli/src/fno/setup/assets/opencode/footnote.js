@@ -9,16 +9,21 @@
 // done) using OpenCode's plugin surface.
 //
 // One gate body, two contracts. OpenCode 1.x loads plugins that export a
-// function returning a hook object; 2.x loads a plain `{ id, setup }` object
-// and drives it through a context with hook seams. Both arms adapt their
+// function returning a hook object; 2.x (the primary contract since v2
+// became the default install) loads a plain `{ id, setup }` object and
+// drives it through a context with hook seams. Both arms adapt their
 // version's I/O into one `io` seam - `readAssistantTexts`, `sendPrompt`,
 // `sendSynthetic`, `run` - and hand it to the SAME handler, so the scheduler,
 // the transcript synthesis, the gate call and the decision branch exist
-// exactly once.
+// exactly once. The 2.x directory is `ctx.location.directory` (the 1.x
+// `ctx.directory` is the fallback), and the 2.x hook set mirrors 1.x -
+// tool before/after, shell env, prompt, system context, compaction - each
+// fed by the SAME hook body its 1.x twin uses.
 //
-// On idle (1.x `session.idle`; 2.x `session.status` with `status.type ===
-// "idle"` - the 2.x form is the only one listened to, so one idle can never
-// run the gate twice) the handler:
+// On idle (1.x `session.idle`; 2.x listens to BOTH `session.status` with
+// `status.type === "idle"` and the documented `session.idle` form, deduped
+// by a per-session latch re-armed on the next prompt, so one idle turn
+// runs the gate exactly once whichever form fires) the handler:
 //
 //   1. resolves the session's target manifest via `fno-agents state path
 //      target-state` (the space-resolved manifest; the legacy in-repo
@@ -494,6 +499,122 @@ function firstDenial(stdouts) {
   return null
 }
 
+// ---------------------------------------------------------------------------
+// Shared hook bodies. Both the 1.x server arm and the 2.x setup arm call
+// these; neither holds a copy of a hooks.json payload shape. Each takes the
+// claude-shaped fields already adapted from its version's event.
+// ---------------------------------------------------------------------------
+
+// hooks.json runner: /bin/sh with the claude-shaped payload on stdin and
+// CLAUDE_PLUGIN_ROOT pointed at the resolved root.
+function makeProcRunner(dir, root) {
+  return async (command, payload, timeoutMs) => {
+    const proc = Bun.spawn(["/bin/sh", "-c", command], {
+      cwd: dir,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: root ?? "" },
+    })
+    proc.stdin.write(payload)
+    proc.stdin.end()
+    const timer = setTimeout(() => proc.kill(), timeoutMs)
+    const stdout = await new Response(proc.stdout).text()
+    await proc.exited
+    clearTimeout(timer)
+    return stdout
+  }
+}
+
+async function runSessionStart(root, dir, runProc, queue, sid) {
+  if (!root || !sid) return false
+  const payload = { hook_event_name: "SessionStart", cwd: dir, session_id: sid }
+  const stdouts = await runHooksJson(root, "SessionStart", payload, runProc)
+  const texts = stdouts.map(hookContextText).filter(Boolean)
+  if (texts.length) {
+    const q = queue.get(sid) || []
+    q.push(...texts)
+    queue.set(sid, q)
+    return true
+  }
+  return false
+}
+
+async function runPreToolUse(root, dir, runProc, { tool, args, sessionID }) {
+  if (!root) return
+  const payload = {
+    hook_event_name: "PreToolUse",
+    tool_name: toClaudeTool(tool),
+    tool_input: args ?? {},
+    cwd: dir,
+    session_id: sessionID,
+  }
+  const stdouts = await runHooksJson(root, "PreToolUse", payload, runProc)
+  const deny = firstDenial(stdouts)
+  if (deny) throw new Error(deny.reason)
+}
+
+async function runPostToolUse(root, dir, runProc, { tool, args, sessionID }) {
+  if (!root) return
+  const payload = {
+    hook_event_name: "PostToolUse",
+    tool_name: toClaudeTool(tool),
+    tool_input: args ?? {},
+    cwd: dir,
+    session_id: sessionID,
+  }
+  await runHooksJson(root, "PostToolUse", payload, runProc)
+}
+
+async function runUserPromptSubmit(root, dir, runProc, { sessionID, prompt }) {
+  if (!root) return []
+  const payload = {
+    hook_event_name: "UserPromptSubmit",
+    cwd: dir,
+    session_id: sessionID,
+    prompt,
+  }
+  const stdouts = await runHooksJson(root, "UserPromptSubmit", payload, runProc)
+  return stdouts.map(hookContextText).filter(Boolean)
+}
+
+async function runPreCompact(root, dir, runProc, { sessionID }) {
+  if (!root) return []
+  const payload = {
+    hook_event_name: "PreCompact",
+    cwd: dir,
+    session_id: sessionID,
+  }
+  const stdouts = await runHooksJson(root, "PreCompact", payload, runProc)
+  return stdouts.map(hookContextText).filter(Boolean)
+}
+
+// The shell-env stamp both arms apply to a tool shell's environment.
+function applyShellEnv(env, sessionID) {
+  if (sessionID) env.OPENCODE_SESSION_ID = sessionID
+  for (const name of FOREIGN_SESSION_MARKERS) env[name] = ""
+  // The launcher-stamped proof pair (session_pid.py's rules): the
+  // marker alone cannot survive the owned-identity check when the
+  // tool shell's sandbox refuses the ancestry walk, so the shell gets
+  // the pid that PROVES the harness. Plugins run in-process, so
+  // process.pid is opencode itself - alive, and named a known
+  // harness, which is what the Rust stamp validation requires.
+  if (typeof process?.pid === "number" && process.pid > 0) {
+    env.FNO_SESSION_PID = String(process.pid)
+    env.FNO_SESSION_HARNESS = "opencode"
+  }
+}
+
+// Drain a session's queued context texts into a system-part sink: 1.x takes
+// plain strings, 2.x takes `{ type: "text", text }` rows.
+function drainContextQueue(queue, sid, push) {
+  const q = queue.get(sid)
+  if (q && q.length) {
+    for (const t of q) push(t)
+    queue.delete(sid)
+  }
+}
+
 // The 1.x arm: a function returning the event hook object, driven by the
 // OpenCode 1.x plugin loader.
 async function server({ directory, worktree, client, $ }) {
@@ -516,40 +637,9 @@ async function server({ directory, worktree, client, $ }) {
       // logging is best-effort
     }
   }
-  // hooks.json runner: /bin/sh with the claude-shaped payload on stdin and
-  // CLAUDE_PLUGIN_ROOT pointed at the resolved root.
-  const runProcSh = async (command, payload, timeoutMs) => {
-    const proc = Bun.spawn(["/bin/sh", "-c", command], {
-      cwd: dir,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, CLAUDE_PLUGIN_ROOT: root ?? "" },
-    })
-    proc.stdin.write(payload)
-    proc.stdin.end()
-    const timer = setTimeout(() => proc.kill(), timeoutMs)
-    const stdout = await new Response(proc.stdout).text()
-    await proc.exited
-    clearTimeout(timer)
-    return stdout
-  }
+  const runProcSh = makeProcRunner(dir, root)
   // additionalContext queued per session, drained into the system prompt.
   const contextQueue = new Map()
-  // SessionStart output queues the same way: the session's first system
-  // transform carries it.
-  const runSessionStartHooks = async (sid) => {
-    if (!root || !sid) return
-    const payload = { hook_event_name: "SessionStart", cwd: dir, session_id: sid }
-    const stdouts = await runHooksJson(root, "SessionStart", payload, runProcSh)
-    const texts = stdouts.map(hookContextText).filter(Boolean)
-    if (texts.length) {
-      const q = contextQueue.get(sid) || []
-      q.push(...texts)
-      contextQueue.set(sid, q)
-      eventLog("session.created:hooks", sid)
-    }
-  }
   const io = {
     readAssistantTexts: async (sid) => {
       const res = await client.session.messages({ path: { id: sid } })
@@ -572,7 +662,9 @@ async function server({ directory, worktree, client, $ }) {
     event: async ({ event }) => {
       if (event?.type === "session.created") {
         eventLog("session.created", event.properties?.sessionID)
-        await runSessionStartHooks(event.properties?.sessionID)
+        if (await runSessionStart(root, dir, runProcSh, contextQueue, event.properties?.sessionID)) {
+          eventLog("session.created:hooks", event.properties?.sessionID)
+        }
         return handle("created", event.properties?.sessionID)
       }
       if (event?.type !== "session.idle") return
@@ -580,44 +672,29 @@ async function server({ directory, worktree, client, $ }) {
     },
     "tool.execute.before": async (input, output) => {
       eventLog("tool.execute.before", input?.sessionID)
-      if (!root) return
-      const payload = {
-        hook_event_name: "PreToolUse",
-        tool_name: toClaudeTool(input.tool),
-        tool_input: output.args ?? {},
-        cwd: dir,
-        session_id: input.sessionID,
-      }
-      const stdouts = await runHooksJson(root, "PreToolUse", payload, runProcSh)
-      const deny = firstDenial(stdouts)
-      if (deny) throw new Error(deny.reason)
+      await runPreToolUse(root, dir, runProcSh, {
+        tool: input.tool,
+        args: output.args,
+        sessionID: input.sessionID,
+      })
     },
     "tool.execute.after": async (input) => {
-      if (!root) return
-      const payload = {
-        hook_event_name: "PostToolUse",
-        tool_name: toClaudeTool(input.tool),
-        tool_input: input.args ?? {},
-        cwd: dir,
-        session_id: input.sessionID,
-      }
-      await runHooksJson(root, "PostToolUse", payload, runProcSh)
+      await runPostToolUse(root, dir, runProcSh, {
+        tool: input.tool,
+        args: input.args,
+        sessionID: input.sessionID,
+      })
     },
     "chat.message": async (input) => {
       eventLog("chat.message", input?.sessionID)
-      if (!root) return
       const prompt = (input.message?.parts || [])
         .filter((p) => p?.type === "text" && typeof p.text === "string")
         .map((p) => p.text)
         .join("")
-      const payload = {
-        hook_event_name: "UserPromptSubmit",
-        cwd: dir,
-        session_id: input.sessionID,
+      const texts = await runUserPromptSubmit(root, dir, runProcSh, {
+        sessionID: input.sessionID,
         prompt,
-      }
-      const stdouts = await runHooksJson(root, "UserPromptSubmit", payload, runProcSh)
-      const texts = stdouts.map(hookContextText).filter(Boolean)
+      })
       if (texts.length) {
         const q = contextQueue.get(input.sessionID) || []
         q.push(...texts)
@@ -625,47 +702,26 @@ async function server({ directory, worktree, client, $ }) {
       }
     },
     "experimental.chat.system.transform": async (input, output) => {
-      const q = contextQueue.get(input?.sessionID)
-      if (q && q.length) {
-        output.system.push(...q)
-        contextQueue.delete(input.sessionID)
-      }
+      drainContextQueue(contextQueue, input?.sessionID, (t) => output.system.push(t))
     },
     "experimental.session.compacting": async (input, output) => {
-      if (!root) return
-      const payload = {
-        hook_event_name: "PreCompact",
-        cwd: dir,
-        session_id: input.sessionID,
-      }
-      const stdouts = await runHooksJson(root, "PreCompact", payload, runProcSh)
-      for (const s of stdouts) {
-        const text = hookContextText(s)
-        if (text) output.context.push(text)
-      }
+      const texts = await runPreCompact(root, dir, runProcSh, { sessionID: input.sessionID })
+      for (const t of texts) output.context.push(t)
     },
     "shell.env": (input, output) => {
       eventLog("shell.env", input?.sessionID)
-      if (input?.sessionID) output.env.OPENCODE_SESSION_ID = input.sessionID
-      for (const name of FOREIGN_SESSION_MARKERS) output.env[name] = ""
-      // The launcher-stamped proof pair (session_pid.py's rules): the
-      // marker alone cannot survive the owned-identity check when the
-      // tool shell's sandbox refuses the ancestry walk, so the shell gets
-      // the pid that PROVES the harness. Plugins run in-process, so
-      // process.pid is opencode itself - alive, and named a known
-      // harness, which is what the Rust stamp validation requires.
-      if (typeof process?.pid === "number" && process.pid > 0) {
-        output.env.FNO_SESSION_PID = String(process.pid)
-        output.env.FNO_SESSION_HARNESS = "opencode"
-      }
+      applyShellEnv(output.env, input?.sessionID)
     },
   }
 }
 
-// The 2.x arm: one event subscription whose idle form is `session.status`
-// with `status.type === "idle"`. The deprecated `session.idle` event is
-// deliberately NOT listened to, so one idle can never run the gate twice
-// (AC2-EDGE).
+// The 2.x arm: hook seams for tool before/after, shell env, prompt, system
+// context and compaction, plus one event subscription for created and idle.
+// v2 reports an idle turn as `session.status` (status.type "idle") and
+// documents `session.idle`; both are listened to and deduped by a
+// per-session latch, so one idle turn runs the gate exactly once (AC3-EDGE).
+// Each hook is registered only when its seam exists; an absent seam is
+// reported once and stays 1.x-only.
 function makeV2Io(ctx) {
   return {
     readAssistantTexts: async (sid) => {
@@ -697,20 +753,106 @@ async function setup(ctx) {
     ctx.session &&
     typeof ctx.session.hook === "function"
   if (!hasV2Seams) return () => {}
-  const dir = ctx.directory || process.cwd()
+  const dir = ctx.location?.directory || ctx.directory || process.cwd()
+  const root = resolveHookRoot()
+  if (!root) {
+    reportOnce(
+      ":no-root",
+      "[footnote] no plugin root with hooks/hooks.json resolved; hook scripts run unprotected",
+    )
+  }
+  const eventLog = (event, sid) => {
+    try {
+      ctx.app
+        ?.log?.({
+          body: { service: "footnote", level: "info", message: `${event} ${sid ?? ""}`.trim() },
+        })
+        ?.catch?.(() => {})
+    } catch {
+      // logging is best-effort
+    }
+  }
+  const runProc = makeProcRunner(dir, root)
+  // additionalContext queued per session, drained into the system context.
+  const contextQueue = new Map()
   const handle = makeHandler(makeV2Io(ctx), dir)
-  reportOnce(
-    ":v2-no-shell-env",
-    "[footnote] opencode 2.x exposes no shell.env seam; the OPENCODE_SESSION_ID identity stamp is 1.x-only",
-  )
+  // One idle turn, one gate: the latch takes the first idle report and
+  // drops the twin until the session's next prompt re-arms it.
+  const idleArmed = new Set()
+  const runIdleOnce = (sid) => {
+    if (!sid || idleArmed.has(sid)) return
+    idleArmed.add(sid)
+    handle("idle", sid)
+  }
+  const missing = []
+  // A deny throws, which 2.x surfaces as the tool failing (same as 1.x).
+  await ctx.tool.hook("execute.before", async (event) => {
+    eventLog("tool.execute.before", event.sessionID)
+    await runPreToolUse(root, dir, runProc, {
+      tool: event.tool,
+      args: event.input,
+      sessionID: event.sessionID,
+    })
+  })
+  await ctx.tool.hook("execute.after", async (event) => {
+    await runPostToolUse(root, dir, runProc, {
+      tool: event.tool,
+      args: event.input,
+      sessionID: event.sessionID,
+    })
+  })
+  if (ctx.shell && typeof ctx.shell.hook === "function") {
+    await ctx.shell.hook("create.before", (event) => {
+      eventLog("shell.env", event.sessionID)
+      applyShellEnv(event.env, event.sessionID)
+    })
+  } else {
+    missing.push("shell.hook create.before")
+  }
+  await ctx.session.hook("prompt", async (event) => {
+    const sid = event.sessionID
+    eventLog("chat.message", sid)
+    idleArmed.delete(sid) // a fresh prompt re-arms this turn's idle gate
+    const texts = await runUserPromptSubmit(root, dir, runProc, {
+      sessionID: sid,
+      prompt: event.prompt?.text ?? "",
+    })
+    if (texts.length) {
+      const q = contextQueue.get(sid) || []
+      q.push(...texts)
+      contextQueue.set(sid, q)
+    }
+  })
+  await ctx.session.hook("context", (event) => {
+    drainContextQueue(contextQueue, event.sessionID, (t) =>
+      event.system.push({ type: "text", text: t }),
+    )
+  })
+  await ctx.session.hook("compaction", async (event) => {
+    const texts = await runPreCompact(root, dir, runProc, { sessionID: event.sessionID })
+    for (const t of texts) event.system.push({ type: "text", text: t })
+  })
+  if (missing.length) {
+    reportOnce(
+      ":v2-missing-seams",
+      `[footnote] opencode 2.x seams absent: ${missing.join(", ")}; those hooks stay 1.x-only`,
+    )
+  }
   const controller = new AbortController()
   ;(async () => {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (event?.type === "session.created") {
+          if (
+            await runSessionStart(root, dir, runProc, contextQueue, event.data?.sessionID)
+          ) {
+            eventLog("session.created:hooks", event.data?.sessionID)
+          }
           handle("created", event.data?.sessionID)
+        } else if (event?.type === "session.idle") {
+          runIdleOnce(event.data?.sessionID)
         } else if (event?.type === "session.status" && event.data?.status?.type === "idle") {
-          handle("idle", event.data?.sessionID)
+          runIdleOnce(event.data?.sessionID)
         }
       }
     } catch (e) {
