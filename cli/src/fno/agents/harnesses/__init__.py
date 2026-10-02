@@ -21,10 +21,12 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 # in mux_spawn.PANE_HOSTABLE_PROVIDERS and remains wider than this tuple.
 from fno.harness_names import SPAWN_HARNESSES as SPAWN_HARNESSES  # noqa: E402
 
+READABLE_PROVIDERS: tuple[str, ...]  # annotation only; __getattr__ serves it
+
+
 def __getattr__(name: str) -> tuple[str, ...]:
     """PEP 562: READABLE_PROVIDERS (pane-hostable read set) is Rust's KNOWN_PROVIDERS."""
     if name == "READABLE_PROVIDERS":
         from fno.harness_names import known_providers
-
         return known_providers()
     raise AttributeError(name)

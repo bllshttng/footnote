@@ -790,7 +790,6 @@ pub fn dispatch_once(
         harness: Some("footnote".into()),
         substrate: Some("headless".into()),
         session_id: Some(fno_id.clone()),
-        fno_id: Some(fno_id.clone()),
         requested_model: Some(model.to_string()),
         route_provider_id: s.client.endpoint.provider_id.clone(),
         node: s.node.clone(),
@@ -806,6 +805,8 @@ pub fn dispatch_once(
         )
     };
     entry.account_record_id = Some("default".into());
+    // The session's own id is the row's fno_id; a set value is never re-minted.
+    entry.fno_id = Some(fno_id.clone());
     match update_registry(&home.registry_json(), |reg| {
         if reg.find(name).is_some() {
             return false;
