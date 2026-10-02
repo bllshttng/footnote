@@ -65,8 +65,7 @@ def sender_from_transcript_text(
 
     normalized = text.replace('\\"', '"')
     shapes = mail_shape([normalized])[0]
-    # A header turn names its sender by registry name; no session address
-    # rides the delivered text, so the receipt check applies to tags only.
+    # A header turn names its sender; no session address rides the header.
     for turn in shapes["header_turns"]:
         if turn["id"] == msg_id:
             return turn["sender"]
