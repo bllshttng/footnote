@@ -1418,7 +1418,7 @@ fn shell_mode_keys_glyph_and_placeholders() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
-    assert_painted(&v, '\u{276f}', "What do you want to work on?");
+    assert_painted(&v, '\u{276f}', "prompt \u{b7} -- flags");
 
     // AC1: the `!` is consumed as the mode switch.
     type_message(&mut v, "!");
@@ -1458,7 +1458,7 @@ fn shell_mode_keys_glyph_and_placeholders() {
         assert!(!l.shell, "the empty-line Backspace left shell mode");
         assert!(l.draft.message.is_empty());
     }
-    assert_painted(&v, '\u{276f}', "What do you want to work on?");
+    assert_painted(&v, '\u{276f}', "prompt \u{b7} -- flags");
 
     // Folded from the retired newline test: ^j inserts a newline in the
     // message and Enter never fires from inside it.
