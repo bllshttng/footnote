@@ -51,6 +51,9 @@ pub const CACHE_TTL: Duration = Duration::from_secs(15);
 /// layout subtracts and the height the painter draws cannot drift.
 pub const MINIMIZED_ROWS: usize = 3;
 
+/// CPU readings the sparkline keeps: twelve folds at the TTL is three minutes.
+const HISTORY: usize = 12;
+
 /// The census block: kings are a ROW count, tests is a PROCESS count. `None`
 /// is a read that failed, and it renders as `unknown` rather than as a zero:
 /// an operator who reads a fabricated zero as headroom is exactly the
@@ -251,9 +254,21 @@ pub struct Panel {
     retry_at: Option<Instant>,
     degraded: bool,
     inflight: bool,
+    /// `config.mux.load_readout = "detailed"`: the raw numbers. Off (the
+    /// default) is plain words.
+    detailed: bool,
+    /// Whole-machine busy fraction per landed fold, oldest first.
+    busy_history: Vec<f64>,
 }
 
 impl Panel {
+    pub fn with_detail(detailed: bool) -> Self {
+        Self {
+            detailed,
+            ..Self::default()
+        }
+    }
+
     pub fn is_expanded(&self) -> bool {
         self.expanded
     }
@@ -312,6 +327,12 @@ impl Panel {
         self.inflight = false;
         match result {
             Some(court) => {
+                if let Some(busy) = court.arm_num("whole-machine cpu", "busy_fraction") {
+                    self.busy_history.push(busy);
+                    if self.busy_history.len() > HISTORY {
+                        self.busy_history.remove(0);
+                    }
+                }
                 self.fold = Some(court);
                 self.degraded = false;
                 self.retry_at = None;
@@ -342,6 +363,14 @@ impl Panel {
             court.arm_num("cpu admission", "capacity_cores"),
             court.arm_num("cpu admission", "ceiling"),
         ) {
+            (Some(low), Some(_), Some(ceiling)) if !self.detailed => {
+                let over = if low > ceiling { " · over, new workers wait" } else { "" };
+                format!(
+                    "  agents    use {:.0}% of the CPU (limit {:.0}%){over}",
+                    low * 100.0,
+                    ceiling * 100.0
+                )
+            }
             (Some(low), Some(cores), Some(ceiling)) => {
                 // the fleet's attributed share is what decides, so
                 // that is what renders - never a load average.
@@ -373,8 +402,15 @@ impl Panel {
             court.arm_num("whole-machine cpu", "busy_fraction"),
             court.arm_num("whole-machine cpu", "capacity_cores"),
         ) {
+            (Some(busy), Some(_)) if !self.detailed => {
+                format!("  machine   {} CPU {:.0}% busy", self.spark(), busy * 100.0)
+            }
             (Some(busy), Some(cores)) => {
-                format!("  cpu       {:.0}% busy of {cores:.0} cores", busy * 100.0)
+                format!(
+                    "  cpu       {} {:.0}% busy of {cores:.0} cores",
+                    self.spark(),
+                    busy * 100.0
+                )
             }
             _ => "  cpu       unknown".to_string(),
         };
@@ -388,6 +424,16 @@ impl Panel {
             )
         };
         vec![load_line, cpu_line, census_line]
+    }
+
+    /// The CPU history as a bar per fold, on a fixed 0-100% scale so a flat
+    /// low line never stretches into a full-height graph.
+    fn spark(&self) -> String {
+        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        self.busy_history
+            .iter()
+            .map(|b| BARS[(b.clamp(0.0, 1.0) * 7.0).round() as usize])
+            .collect()
     }
 
     /// The expanded block: the full reading, in place. Three rules this
@@ -473,7 +519,8 @@ impl Panel {
                     String::new()
                 };
                 lines.push(format!(
-                    "  {label:<8} {:.0}% busy of {cores:.0} cores{saturated}",
+                    "  {label:<8} {} {:.0}% busy of {cores:.0} cores{saturated}",
+                    self.spark(),
                     busy * 100.0,
                     label = "cpu"
                 ));
@@ -878,12 +925,24 @@ mod tests {
         let lines = opened(live()).minimized_lines(&AC6_AGES);
 
         assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(
-            lines[0].contains("58% of 12 cores against 50%"),
-            "{lines:?}"
+        // The default glance is plain words, with the CPU graph.
+        assert_eq!(
+            lines[0],
+            "  agents    use 58% of the CPU (limit 50%) · over, new workers wait"
         );
-        assert!(lines[0].contains("1.2x"), "{lines:?}");
-        assert!(lines[1].contains("80% busy of 12 cores"), "{lines:?}");
+        assert_eq!(lines[1], "  machine   ▇ CPU 80% busy");
+
+        let mut panel = Panel::with_detail(true);
+        assert!(panel.take_want());
+        panel.apply(Some(live()));
+        panel.apply(Some(live()));
+        let detail = panel.minimized_lines(&AC6_AGES);
+        assert!(
+            detail[0].contains("58% of 12 cores against 50%"),
+            "{detail:?}"
+        );
+        assert!(detail[0].contains("1.2x"), "{detail:?}");
+        assert!(detail[1].contains("▇▇ 80% busy of 12 cores"), "{detail:?}");
         assert!(
             lines[2].contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age"),
             "{lines:?}"

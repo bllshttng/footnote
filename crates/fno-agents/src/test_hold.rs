@@ -264,12 +264,19 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
         }
     }
     if first {
+        // The machine arm's reason is already a plain sentence; a person's
+        // stop names who held the tests and why.
+        let lead = if record.changed_by == fleet_incident::MACHINE_ORIGIN {
+            format!(
+                "{}. Tests are paused until it cools down. New workers pause too if it stays this busy.",
+                record.reason
+            )
+        } else {
+            format!("Tests are held by {} ({}).", record.changed_by, record.reason)
+        };
         announce(
             &mut outcome,
-            &format!(
-                "Tests are held by {} ({}). Keep coding. Do not rerun tests. Wait for the all-clear.",
-                record.changed_by, record.reason
-            ),
+            &format!("{lead} Keep coding. Do not rerun tests. Wait for the all-clear."),
         );
         state.announced = outcome.announced.clone();
     }
@@ -292,7 +299,7 @@ pub fn hold_for_runaway(
     let record = fleet_incident::write_transition_with_metadata(
         &path,
         "stopped",
-        Some(&format!("tests yield first: {reason}")),
+        Some(reason),
         Some(fleet_incident::MACHINE_ORIGIN),
         vec!["tests".to_string()],
         fleet_incident::RecordMetadata {
