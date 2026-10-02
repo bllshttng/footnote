@@ -198,7 +198,7 @@ fn render_rows() {
         "unreadable store: graph.json".into(),
     ));
     let lines = feed_panel_lines(&o, false, W, ROWS, 0);
-    // At the panel's 40 columns pad_to truncates the tail; the CAUSE still
+    // At the panel's 40 columns the panel clips the tail; the CAUSE still
     // leads the line (the x-d15a contract).
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
 }

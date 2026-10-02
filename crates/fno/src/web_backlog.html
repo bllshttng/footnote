@@ -174,6 +174,15 @@ button, select, input { font: inherit; }
 #searchbox input:focus + kbd { display: none; }
 kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px solid var(--surface1); padding: 1px 5px; line-height: 14px; white-space: nowrap; }
 #searchbox kbd { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); cursor: pointer; background: var(--base); }
+/* The recent-search list: an anchored dropdown under the bar, shown on
+   focus, one row per stored query plus the one clear action. */
+#recent { position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px; background: var(--mantle); border: 1px solid var(--surface1); z-index: 900; max-height: 40vh; overflow-y: auto; }
+#recent[hidden] { display: none; }
+.recentrow { display: flex; width: 100%; align-items: baseline; text-align: left; background: none; color: var(--text); border: 0; border-top: 1px solid var(--surface0); padding: 6px 12px; font: inherit; cursor: pointer; }
+.recentrow:first-child { border-top: 0; }
+.recentrow:hover { background: var(--surface0); }
+.recentrow .rq { flex: 1 1 auto; overflow-wrap: anywhere; }
+.recentrow.recentclear { color: var(--overlay1); }
 .controls kbd { margin-left: 4px; }
 #f-q-clear { flex: 0 0 auto; font-size: 12px; cursor: pointer; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 3px 10px; min-height: 30px; }
 #f-q-clear:hover { color: var(--text); border-color: var(--text); }
@@ -208,6 +217,7 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
   <div id="searchbox">
     <input id="f-q" type="search" placeholder="search id, title, label" autocomplete="off" spellcheck="false">
     <kbd id="searchkey" title="focus search (/)">/</kbd>
+    <div id="recent" hidden></div>
   </div>
   <button id="f-q-clear" type="button" hidden title="clear search">clear</button>
 </div>
@@ -289,6 +299,19 @@ function voteText(id) {
 // The toast line for one copied node id.
 function copiedToast(id) {
   return "copied " + id;
+}
+// The recent-search store: one localStorage key per origin (the vault copy
+// and the served board each keep their own), capped at ten, newest first.
+// The pure half first, so the node tests drive it without a DOM.
+const RECENT_KEY = "fno-backlog-recent-searches";
+function pushRecent(list, q) {
+  return [q].concat(list.filter((s) => s !== q)).slice(0, 10);
+}
+function loadRecent(raw) {
+  try {
+    const v = JSON.parse(raw || "[]");
+    return Array.isArray(v) ? v.filter((s) => typeof s === "string").slice(0, 10) : [];
+  } catch (e) { return []; }
 }
 // True when the event target swallows typing: a form field or a content
 // editable. The board shortcuts never fire from inside one.
@@ -1601,8 +1624,10 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   searchInput.addEventListener("input", (ev) => {
     clearTimeout(debounce);
     searchClear.hidden = !ev.target.value;
+    if (ev.target.value) hideRecent();
     debounce = setTimeout(() => {
       state.q = ev.target.value.trim();
+      recordRecent(state.q);
       syncUrl();
       fetchBoard();
     }, 300);
@@ -1683,6 +1708,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     searchInput.value = "";
     searchClear.hidden = true;
     state.q = "";
+    hideRecent();
     syncUrl();
     fetchBoard();
     searchInput.focus();
@@ -1693,6 +1719,82 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const first = document.getElementById("f-project");
     if (first) first.focus();
   }
+  // The recent-search dropdown: stored per origin in localStorage (the
+  // vault copy and the served board each keep their own history), read on
+  // focus, rerun on tap, one clear action. Storage can refuse (private
+  // mode, disabled storage): every access is guarded and the list then
+  // just never appears.
+  const recentEl = document.getElementById("recent");
+  function lsGet(k) {
+    try { return window.localStorage.getItem(k); } catch (e) { return null; }
+  }
+  function lsSet(k, v) {
+    try { window.localStorage.setItem(k, v); } catch (e) { }
+  }
+  function recentList() {
+    return loadRecent(lsGet(RECENT_KEY));
+  }
+  function recordRecent(q) {
+    if (!q) return;
+    lsSet(RECENT_KEY, JSON.stringify(pushRecent(recentList(), q)));
+  }
+  function hideRecent() {
+    recentEl.hidden = true;
+  }
+  function drawRecent() {
+    const list = recentList();
+    recentEl.textContent = "";
+    if (!list.length) {
+      recentEl.hidden = true;
+      return;
+    }
+    for (const q of list) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "recentrow";
+      const s = document.createElement("span");
+      s.className = "rq";
+      s.textContent = q;
+      b.appendChild(s);
+      // Activate on mousedown, not click: the press would blur the input
+      // and the hide timer could swallow the click. preventDefault keeps
+      // the focus in the input, so no timer race exists.
+      b.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        recordRecent(q);
+        searchInput.value = q;
+        state.q = q;
+        searchClear.hidden = false;
+        hideRecent();
+        syncUrl();
+        fetchBoard();
+        searchInput.select();
+      });
+      recentEl.appendChild(b);
+    }
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "recentrow recentclear";
+    clear.textContent = "clear recent searches";
+    clear.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      lsSet(RECENT_KEY, "");
+      hideRecent();
+    });
+    recentEl.appendChild(clear);
+    recentEl.hidden = false;
+  }
+  // The blur-hide timer cancels on focus: a quick blur-then-refocus (or a
+  // row press, which preventDefault keeps in the input) must not hide the
+  // list the new focus just drew.
+  let recentHideTimer = 0;
+  searchInput.addEventListener("focus", () => {
+    clearTimeout(recentHideTimer);
+    drawRecent();
+  });
+  searchInput.addEventListener("blur", () => {
+    recentHideTimer = setTimeout(hideRecent, 150);
+  });
   document.getElementById("sheetclose").addEventListener("click", () => { sheetEl.hidden = true; });
   sheetEl.addEventListener("click", (ev) => {
     if (ev.target === sheetEl) sheetEl.hidden = true;

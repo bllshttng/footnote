@@ -192,9 +192,16 @@ pub fn parse(tail: &[String]) -> ParsedAdd {
     ParsedAdd::Args(args)
 }
 
-struct Refusal {
-    message: String,
-    exit: i32,
+pub(crate) struct Refusal {
+    pub(crate) message: String,
+    pub(crate) exit: i32,
+}
+
+/// What [`create_node`] answers: the minted id, or the existing row its
+/// `reuse` hook matched inside the same snapshot (nothing was written).
+pub(crate) struct Born {
+    pub(crate) id: String,
+    pub(crate) reused: Option<Value>,
 }
 
 fn refused(message: impl Into<String>, exit: i32) -> Refusal {
@@ -390,7 +397,7 @@ fn stamp_request_origin(
 /// Parent-edge provenance for a node born inside a live session. Every key
 /// degrades to None and this never fails. Origin precedence: an explicit
 /// --source-node, then the owned manifest (claude-only), then FNO_NODE.
-fn session_provenance(
+pub(crate) fn session_provenance(
     cwd: &Path,
     source_node: Option<&str>,
     known_ids: Option<&std::collections::BTreeSet<String>>,
@@ -752,8 +759,14 @@ pub fn run(tail: &[String]) -> i32 {
         }
         ParsedAdd::Args(a) => a,
     };
-    match create(&args) {
-        Ok(()) => 0,
+    match create_node(&args, &|_| None) {
+        Ok(born) => {
+            println!(
+                "{}",
+                super::render::py_json_pretty(&json!({"id": born.id, "title": args.title}))
+            );
+            0
+        }
         Err(r) => {
             eprintln!("{}", r.message);
             r.exit
@@ -761,7 +774,14 @@ pub fn run(tail: &[String]) -> i32 {
     }
 }
 
-fn create(args: &AddArgs) -> Result<(), Refusal> {
+/// The create flow without the stdout receipt. `reuse` runs over every
+/// fresh snapshot the write loop reads, before the mint: a row it returns
+/// wins and nothing is written. Because a lost publish race re-reads and
+/// re-asks, two concurrent identical births end with one node.
+pub(crate) fn create_node(
+    args: &AddArgs,
+    reuse: &dyn Fn(&[Value]) -> Option<Value>,
+) -> Result<Born, Refusal> {
     refuse_tracker_owned("add")?;
     validate_priority(&args.priority, args.blocks_everything)?;
     let difficulty = match &args.difficulty {
@@ -865,6 +885,17 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
             .filter_map(|r| r.get("id").and_then(Value::as_str))
             .map(str::to_string)
             .collect();
+        if let Some(row) = reuse(&rows) {
+            let id = row
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return Ok(Born {
+                id,
+                reused: Some(row),
+            });
+        }
 
         // Fail closed BEFORE minting: an unresolvable assertion names the flag.
         let resolved_source_node: Option<String> = match &args.source_node {
@@ -1116,12 +1147,10 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
         }
         _ => {}
     }
-
-    println!(
-        "{}",
-        super::render::py_json_pretty(&json!({"id": minted, "title": args.title}))
-    );
-    Ok(())
+    Ok(Born {
+        id: minted,
+        reused: None,
+    })
 }
 
 /// The single-entry status ladder the Python model derives on every read:
@@ -1304,15 +1333,13 @@ mod tests {
         assert!(a.blocks_everything);
         assert_eq!(a.tag, vec!["a-b".to_string(), "c-d".to_string()]);
         assert_eq!(a.related, vec!["x-f00d0003".to_string()]);
-    }
 
-    #[test]
-    fn missing_title_refuses_like_typer() {
-        let tail: Vec<String> = ["--difficulty", "low"]
+        // A missing title refuses like typer.
+        let untitled: Vec<String> = ["--difficulty", "low"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        match parse(&tail) {
+        match parse(&untitled) {
             ParsedAdd::Refusal { exit, .. } => assert_eq!(exit, 2),
             _ => panic!("refuses"),
         }
@@ -2292,5 +2319,10 @@ fn idea_create(idea: &IdeaArgs) -> Result<(), Refusal> {
 
     let mut mint = add.clone();
     mint.details = details;
-    create(&mint)
+    let born = create_node(&mint, &|_| None)?;
+    println!(
+        "{}",
+        super::render::py_json_pretty(&json!({"id": born.id, "title": mint.title}))
+    );
+    Ok(())
 }

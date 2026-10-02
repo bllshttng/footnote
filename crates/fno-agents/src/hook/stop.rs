@@ -1592,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_goal_owner_is_a_named_refusal() {
+    fn goal_owner_conflicts_and_spellings_arbitrate_honestly() {
         let fire = fire_with_goal(serde_json::json!({
             "objective": "finish the target",
             "status": "active",
@@ -1602,6 +1602,35 @@ mod tests {
         assert!(
             matches!(refusal, GoalArbitration::Refusal(reason) if reason.contains("conflicting goal truth"))
         );
+        // A live codex goal keeps the objective and owner strings it was
+        // created with: the lead spelling delegates, the pre-rename one
+        // still delegates, a foreign scope and a non-deriving owner refuse.
+        let manifest = "driver: lead\nscope: fno\nnode_id: x-aaaa\n";
+        let truth = |objective: &str, owner: &str| {
+            Some(super::goal_arbitration::GoalTruth {
+                objective: objective.to_string(),
+                status: "active".to_string(),
+                continuation_owner: owner.to_string(),
+            })
+        };
+        let arbitrate =
+            |goal| super::goal_arbitration::arbitrate_goal_truth("lead", manifest, goal);
+        assert!(matches!(
+            arbitrate(truth("$fno:lead fno", "lead:fno")),
+            GoalArbitration::Delegated
+        ));
+        assert!(matches!(
+            arbitrate(truth("$fno:reign fno", "king:fno")),
+            GoalArbitration::Delegated
+        ));
+        assert!(matches!(
+            arbitrate(truth("$fno:lead other", "lead:fno")),
+            GoalArbitration::Refusal(_)
+        ));
+        assert!(matches!(
+            arbitrate(truth("$fno:lead fno", "target:x-aaaa")),
+            GoalArbitration::Refusal(_)
+        ));
     }
 
     #[test]

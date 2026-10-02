@@ -536,12 +536,7 @@ impl Panel {
                 label = "share"
             );
             if let Some(unattributed) = share.unattributed.as_ref().filter(|u| u.count > 0) {
-                let names: Vec<&str> = unattributed.rows.iter().map(String::as_str).collect();
-                let shown = if names.len() > 3 {
-                    format!("{}…", names[..3].join(", "))
-                } else {
-                    names.join(", ")
-                };
+                let shown = unattributed.rows.join(", ");
                 line.push_str(&format!(" · {} unattributed ({shown})", unattributed.count));
             }
             lines.push(line);

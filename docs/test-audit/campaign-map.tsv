@@ -611,7 +611,6 @@ K2	cli/tests/unit/test_mux_pane_guarded.py	py	16
 K2	cli/tests/unit/test_mux_staleness.py	py	4
 K2	cli/tests/unit/test_pane_prepare_bridge.py	py	8
 K2	cli/tests/unit/test_reconcile_dispatch.py	py	16
-K2	cli/tests/unit/test_slot_lanes_contract.py	py	3
 K2	cli/tests/unit/test_spawn_account_provenance.py	py	9
 K2	cli/tests/unit/test_spawn_defaults.py	py	174
 K2	cli/tests/unit/test_spawn_headroom.py	py	21

@@ -1437,7 +1437,7 @@ def _declare_fleet(monkeypatch):
     """Declare the two-harness fleet these reachability-guard tests rely on."""
     from fno import route_resolve as rr
 
-    inv = rr.inventory_from_rows([
+    inv = _inv([
         {"name": "gpt-5.4", "harness": "codex", "model": "gpt-5.4"},
         {"name": "claude-sonnet-5", "harness": "claude", "model": "claude-sonnet-5"},
     ])
@@ -2182,3 +2182,18 @@ def test_truthful_base_names_a_timeout_apart_from_a_fetch_failure(monkeypatch):
     assert "behind=unmeasured:fetch-failed" in target_cli._truthful_base(
         Path("/repo"), "origin/main"
     )
+
+
+def _inv(rows):
+    """An Inventory declaring exactly ``rows`` (construction is all that
+    survives in Python; the fold is the verb's)."""
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""), harness=r.get("harness", ""),
+            model=r.get("model", ""), band=r.get("band", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)

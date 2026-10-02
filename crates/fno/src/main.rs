@@ -162,6 +162,9 @@ enum Role {
     /// `fno inbox decisions ...`: the native listing read, classified beside
     /// the law verbs; the Python `inbox` tree keeps every other name.
     InboxDecisions(Vec<OsString>),
+    /// `fno inbox decide ...`: the native decide record verb, classified
+    /// beside the law verbs.
+    InboxDecide(Vec<OsString>),
     /// `fno board-render`: the local board's snapshot writer, a native front
     /// verb because the page and the read model both live in this crate.
     BoardRender(Vec<String>),
@@ -240,6 +243,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::law_cli::classify_inbox_decisions(args) {
         return Role::InboxDecisions(rest);
+    }
+    if let Some(rest) = fno::law_cli::classify_inbox_decide(args) {
+        return Role::InboxDecide(rest);
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -416,6 +422,7 @@ fn main() {
         }
         Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
+        Role::InboxDecide(rest) => std::process::exit(fno::law_cli::run_decide(&rest)),
         Role::BoardRender(rest) => std::process::exit(fno::backlog_snapshot::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxSnapshot(tail) => match fno::client::snapshot::parse(&tail) {

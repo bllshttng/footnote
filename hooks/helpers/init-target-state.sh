@@ -933,10 +933,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # existing-state are exempt. Runs BEFORE the manifest write so a refusal
   # leaves no stub for the stop hook to archive. The live-double-dispatch case
   # is already caught by the claim acquire below; this closes the dead-prior-
-  # session, PR-still-open gap the free claim does not. Fail-open: refuse only
-  # on an exact in_review read - any error/empty/other-status proceeds
-  # unchanged. Graph reads run through the shipped verb (`fno backlog get`);
-  # no resolver here opens the store file.
+  # session, PR-still-open gap the free claim does not. This block only
+  # resolves the node; the binding verdict below is native. Graph reads run
+  # through the shipped verbs; no resolver here opens the store file.
   _GUARD_NODE=""
   _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens that ARE graph nodes
   _GUARD_AMBIGUOUS=0
@@ -1004,52 +1003,37 @@ if [[ ! -f "$STATE_FILE" ]]; then
   elif [[ "$_GUARD_MATCHES" == *" "* ]]; then
     _GUARD_AMBIGUOUS=1
   fi
-  if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
-    _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
-    if [[ "$_GUARD_STATUS" == "in_review" ]]; then
-      _GUARD_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
-      # `--field` prints a literal "null" for an unset field, which ${x:+ #$x}
-      # reads as present and renders as "open PR #null".
-      [[ "$_GUARD_PR" == "null" ]] && _GUARD_PR=""
-      # Adopt branch: a caller standing in the open PR's own worktree, on the
-      # PR's own head branch, is the author asking to be re-bound, not a fresh
-      # dispatch - refusing here is what strands a live worker whose manifest
-      # is gone. Every proof must READ; an unreadable one refuses exactly as
-      # below, matching the fail-closed stance of every check in this guard.
-      _ADOPT=0
-      if [[ "$_GUARD_PR" =~ ^[0-9]+$ ]]; then
-        _GITDIR="$(git rev-parse --git-dir 2>/dev/null || true)"
-        _COMMONDIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-        _BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-        if [[ -n "$_GITDIR" && -n "$_COMMONDIR" && "$_GITDIR" != "$_COMMONDIR" && -n "$_BRANCH" ]]; then
-          _PR_INFO="$(fno do pr info "$_GUARD_PR" 2>/dev/null || true)"
-          _PR_HEAD_BRANCH="$(printf '%s' "$_PR_INFO" | sed -n 's/.*"head_ref":"\([^"]*\)".*/\1/p')"
-          if [[ -n "$_PR_HEAD_BRANCH" && "$_PR_HEAD_BRANCH" == "$_BRANCH" ]]; then
-            _ADOPT=1
-          fi
+  # Which node this run may bind is decided natively (`fno backlog
+  # target-binding`): continue, adopt the open PR this worktree heads, fork
+  # follow-up scope into a child node, or refuse. `fno do target init` already
+  # asked and passes the verdict down; a direct run asks here. A refusal or a
+  # fork exits before the manifest write, so nothing is claimed.
+  TARGET_ADOPTED_PR="${TARGET_ADOPTED_PR:-}"
+  _BIND_VERDICT="${FNO_TARGET_BINDING:-}"
+  [[ "$_BIND_VERDICT" == "adopt" ]] || TARGET_ADOPTED_PR=""
+  if [[ -n "$_GUARD_NODE" && -z "$_BIND_VERDICT" ]] && command -v fno >/dev/null 2>&1; then
+    _BIND_ALLOW=""
+    [[ "${TARGET_ALLOW_IN_REVIEW:-}" == "1" ]] && _BIND_ALLOW="--allow-in-review"
+    _BIND_OUT="$(fno backlog target-binding --env --phase init --node "$_GUARD_NODE" \
+      --input "$INITIAL_INPUT" $_BIND_ALLOW)" && _bind_rc=0 || _bind_rc=$?
+    _BIND_VERDICT="$(printf '%s\n' "$_BIND_OUT" | sed -n 's/^verdict=//p')"
+    case "$_bind_rc:$_BIND_VERDICT" in
+      0:adopt) TARGET_ADOPTED_PR="$(printf '%s\n' "$_BIND_OUT" | sed -n 's/^pr=//p')" ;;
+      0:continue) ;;
+      1:refused) echo "Refusing to write state file." >&2; exit 1 ;;
+      3:forked) echo "Refusing to write state file in this tree: start the child named above." >&2; exit 3 ;;
+      *)
+        # No verdict (an fno-agents older than this hook): a node that has a
+        # PR still refuses, so a lagging binary never opens the guard.
+        _BIND_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ "$_BIND_PR" =~ ^[0-9]+$ ]]; then
+          echo "[init-target-state] REFUSED: node $_GUARD_NODE has PR #$_BIND_PR and fno backlog target-binding gave no verdict (exit $_bind_rc). Run: fno doctor update" >&2
+          exit 1
         fi
-      fi
-      if [[ "$_ADOPT" -eq 1 ]]; then
-        TARGET_ADOPTED_PR="$_GUARD_PR"
-        echo "[init-target-state] ADOPTED: re-binding this session to node $_GUARD_NODE on the open PR #$_GUARD_PR (branch $_BRANCH is that PR's head). No new PR: drive this one with /fno:ship pr check." >&2
-      else
-        cat >&2 <<EOF
-[init-target-state] REFUSED: node $_GUARD_NODE is in_review (open PR${_GUARD_PR:+ #$_GUARD_PR}).
-
-A fresh /target would redo shipped work and race a second PR against the open one.
-
-Pick ONE:
-  1) Address review on the existing PR:   /fno:ship pr check
-  2) The PR is stale/abandoned and you really want a fresh run:
-       TARGET_ALLOW_IN_REVIEW=1 <re-run your target command>
-
-Refusing to write state file.
-EOF
-        exit 1
-      fi
-    fi
+        echo "target: WARNING: fno backlog target-binding answered exit $_bind_rc (verdict '${_BIND_VERDICT:-none}'); the in_review binding guard is not running for $_GUARD_NODE" >&2 ;;
+    esac
   fi
-  unset TARGET_ALLOW_IN_REVIEW
+  unset TARGET_ALLOW_IN_REVIEW FNO_TARGET_BINDING
 
   # ── Provider + cross-project ──────────────────────────────────────
   CROSS_PROJECT="${TARGET_CROSS_PROJECT:-false}"

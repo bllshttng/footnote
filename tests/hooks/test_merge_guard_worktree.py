@@ -39,6 +39,35 @@ def _stub_pr_worktree_lookup(monkeypatch):
         lambda pr: _TEST_PR_WORKTREES.get(str(pr)),
     )
 
+    # The live switch resolves through `fno config get auto_merge.enabled`;
+    # answer it from the row's own cwd config so the rows here test the
+    # hook's verdict logic, not whether a binary is installed on the runner.
+    # Every other command passes through to the real runner.
+    real_run = git_protection.subprocess.run
+
+    def _fake_config_get(cmd, **kwargs):
+        if cmd[:4] == ["fno", "config", "get", "auto_merge.enabled"]:
+            class _R:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+
+            try:
+                text = (Path(kwargs["cwd"]) / ".fno" / "config.toml").read_text()
+            except (KeyError, OSError):
+                text = ""
+            for line in text.splitlines():
+                if line.strip() == "enabled = true":
+                    _R.returncode, _R.stdout = 0, "true\n"
+                    break
+                if line.strip() == "enabled = false":
+                    _R.returncode, _R.stdout = 0, "false\n"
+                    break
+            return _R()
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(git_protection.subprocess, "run", _fake_config_get)
+
 
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True,
@@ -347,14 +376,21 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
     fno_agents.write_text(
         '#!/usr/bin/env bash\n'
         'cat >/dev/null\n'
+        '# The hold reader also asks the one roster (the self-review floor\n'
+        '# enumerates the verbless harnesses through it); serve it beside the\n'
+        '# claim door the way the real binary does.\n'
+        'if [[ "$1" == "harness-roster" ]]; then\n'
+        '  printf \'{"known":["claude","codex","gemini","agy","opencode","pi",'
+        '"hermes","openclaw","cursor-agent","grok","zcode"]}\\n\'\n'
+        '  exit 0\n'
+        'fi\n'
         'printf \'{"worktree":"%s"}\\n\' "$PWD"\n'
     )
     fno_agents.chmod(0o755)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["FNO_AGENTS_BIN"] = str(fno_agents)
-    # FNO_HOME alone does NOT isolate the in-process hold reader: graph_json()
-    # resolves through load_settings(), which ignores FNO_HOME. $FNO_CONFIG
-    # makes one temp settings file the only candidate.
+    # $FNO_CONFIG makes one temp settings file the only candidate, so any
+    # settings read inside the hook resolves in the sandbox, not the machine.
     config = Path(fno_home).parent / "hook-settings.yaml"
     config.write_text(f"state_dir: {fno_home}\n")
     env["FNO_CONFIG"] = str(config)

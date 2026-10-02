@@ -646,7 +646,7 @@ fn title_role(q: &crate::needs_overlay::QuestionItem) -> backlog_style::BRole {
 
 /// The question page's rendered lines at the detail pane's width.
 fn page_lines(d: &Detail, w: usize, now: u64) -> Vec<backlog_style::BLine> {
-    super::node_detail::backlog_md::md_lines(&question_page(d.item(), d, now), w, usize::MAX)
+    super::node_detail::backlog_md::md_lines(&question_page(d.item(), d, now), w)
 }
 
 /// The list pane's width at a terminal size and split percent: side by

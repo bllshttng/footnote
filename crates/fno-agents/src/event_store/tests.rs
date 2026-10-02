@@ -128,39 +128,31 @@ fn rotation_overwrite_keeps_ingested_history() {
     assert_eq!(receipt.ingested, 1, "only gen 3 is new");
     assert_eq!(count_events(&receipt.store), 3);
     assert_eq!(count_type(&receipt.store, "lead_checkin"), 3);
-}
-
-#[test]
-fn a_query_for_a_renamed_kind_matches_its_stored_old_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let journal = dir.path().join("events.jsonl");
+    // The alias table rides the same read: a pre-rename row surfaces to a
+    // new-spelling query.
     append(
-        &journal,
-        &[json!({"ts": "2026-08-05T12:00:00Z", "type": "reign_checkin",
-                 "source": "loop", "data": {"scope": "fno", "change": "old spelling"}}),
-          json!({"ts": "2026-09-05T12:00:00Z", "type": "lead_checkin",
-                 "source": "loop", "data": {"scope": "fno", "change": "new spelling"}})],
+        &live,
+        &[json!({"ts": "2026-09-12T08:00:00Z", "type": "reign_checkin",
+                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}})],
     );
-    import_all(&journal).unwrap();
+    sync(&live).unwrap();
     let hits = query_events(
-        &journal,
+        &live,
         &EventQuery { types: vec!["lead_checkin".into()], ..Default::default() },
     )
     .unwrap();
-    let mut changes: Vec<String> = hits
+    let changes: Vec<String> = hits
         .iter()
         .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.line).ok())
-        .filter_map(|v| {
-            v["data"]["change"].as_str().map(|c| c.to_string())
-        })
+        .filter_map(|v| v["data"]["change"].as_str().map(|c| c.to_string()))
         .collect();
-    changes.sort();
     assert_eq!(
         changes,
-        vec!["new spelling".to_string(), "old spelling".to_string()],
-        "the alias table must surface pre-rename rows to a new-spelling query"
+        ["gen 1", "gen 2", "gen 3", "old spelling"],
+        "the alias table must surface the pre-rename row beside the new ones"
     );
 }
+
 
 #[test]
 fn gc_rewrite_dedupes_by_row_hash() {

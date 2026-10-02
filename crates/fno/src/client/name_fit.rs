@@ -43,17 +43,11 @@ pub(crate) fn fit_name(name: &str, width: usize) -> String {
     format!("{head}…{tail}")
 }
 
+/// Pad `s` with spaces to `width` columns. A longer `s` stays whole: the
+/// overlay it lands in grows to fit it, then wraps.
 pub(crate) fn pad_to(s: &str, width: usize) -> String {
-    let count = s.chars().count();
-    if count > width {
-        let mut text: String = s.chars().take(width.saturating_sub(1)).collect();
-        text.push('…');
-        text
-    } else {
-        let mut text = s.to_string();
-        text.push_str(&" ".repeat(width - count));
-        text
-    }
+    let cols = crate::chrome::str_cols(s);
+    format!("{s}{}", " ".repeat(width.saturating_sub(cols)))
 }
 
 #[cfg(test)]

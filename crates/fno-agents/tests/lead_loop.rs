@@ -204,32 +204,14 @@ fn lead_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     } else {
         "{}"
     };
-    // The board reads undispatched through this verb rather than classifying
-    // the graph in-process, so the stub owes the same answer the graph above
-    // encodes: every spec row, planned and unclaimed. An unparseable spec is
-    // the blind case, and a refusal there is what keeps it distinguishable
-    // from an empty board.
-    let undispatched = match lead_spec_rows(&spec) {
-        None => "exit 1".to_string(),
-        Some(ids) => format!(
-            "echo '{}'",
-            serde_json::json!({
-                "rows": ids
-                    .iter()
-                    .map(|id| serde_json::json!({
-                        "id": id,
-                        "priority": "p0",
-                        "plan_path": "/plans/p.md",
-                        "parent": "drain",
-                    }))
-                    .collect::<Vec<_>>(),
-            })
-        ),
-    };
+    // The board folds undispatched and ready in-process now, so this stub
+    // serves the one queue read that still rides a subprocess: the operator
+    // questions. The `*)` arm answers {} for every other verb the board or
+    // the truth probe shells.
     fs::write(
         stubs.join("fno-py"),
         format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *\"backlog undispatched\"*) {undispatched};;\n  *\"backlog ready\"*) echo '[]';;\n  *\"inbox outstanding\"*) echo '{outstanding}';;\n  *) echo '{{}}';;\nesac\n"
+            "#!/bin/sh\ncase \"$*\" in\n  *\"inbox outstanding\"*) echo '{outstanding}';;\n  *) echo '{{}}';;\nesac\n"
         ),
     )
     .unwrap();
@@ -1359,9 +1341,12 @@ fn a_clean_lead_terminal_does_not_ask_the_operator_anything() {
     );
 }
 
-/// killed read.
+/// Exactly the `fno inbox outstanding` read never answers; every other read
+/// of the same binary answers clean, so the timeout is attributable to ONE
+/// slice. (The ready selection and the undispatched fold answer in-process
+/// now; a wedged source must be one that still rides a subprocess.)
 #[test]
-fn external_read_timeout_lead_parks_named() {
+fn external_read_timeout_dies_at_its_slice_and_is_named() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let state = lead_manifest(cwd, "k-wedge");
@@ -1370,14 +1355,10 @@ fn external_read_timeout_lead_parks_named() {
     let spec = org_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
     lead_prepare_fixture(cwd, bin_dir.path(), &spec);
 
-    // Exactly the `backlog undispatched` read never answers; every other read
-    // of the same binary answers clean, so the timeout is attributable to ONE
-    // slice. (The ready selection answers in-process now; a wedged source
-    // must be one that still rides a subprocess.)
     let stubs = bin_dir.path().join("stubs");
     fs::write(
         stubs.join("fno-py"),
-        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog undispatched\"*) exec sleep 30;;\n  *) echo '{}';;\nesac\n",
+        "#!/bin/sh\ncase \"$*\" in\n  *\"inbox outstanding\"*) exec sleep 30;;\n  *) echo '{}';;\nesac\n",
     )
     .unwrap();
 
@@ -1391,18 +1372,23 @@ fn external_read_timeout_lead_parks_named() {
     );
     let elapsed = started.elapsed();
     let d = json;
-    // A slice kill is the board's own choice, not evidence, so it never
-    // blocks by itself: the drain's own undelivered count parks the lead
-    // while CI or a worker catches up (x-1867).
-    assert_eq!(d["decision"], "allow", "{d}");
-    assert_eq!(d["termination_reason"], "NoWork", "{d}");
+    // A slice kill is the board's own choice, not evidence: it never blocks
+    // by itself. The rows the board did read still decide, and the kill is
+    // named in the message instead of hiding behind them (x-1867).
+    assert_eq!(d["decision"], "block", "{d}");
+    assert!(d["termination_reason"].is_null(), "{d}");
+    let message = d["reason"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not read: ") && message.contains("killed at its"),
+        "the kill is named in the block message: {d}"
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(10),
         "a wedged source must die at its slice, not hang the fire: {elapsed:?}"
     );
     assert_eq!(
         code, 0,
-        "a park keeps the exit clean like any quiet beat: {code}"
+        "a decided beat keeps the exit clean like any quiet beat: {code}"
     );
 
     // The killed read is named where the payload carries it.
@@ -1431,13 +1417,14 @@ fn external_read_timeout_lead_parks_named() {
         .unwrap();
     let board: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
-    let undispatched_err = board["sources"]["undispatched"]["error"]
+    let outstanding_err = board["sources"]["outstanding"]["error"]
         .as_str()
         .unwrap_or("");
     assert!(
-        undispatched_err.contains("killed at its")
-            && undispatched_err.contains("slice of the board budget"),
-        "the killed source is named in the payload as a budget kill: {undispatched_err}"
+        outstanding_err.contains("killed at its")
+            && outstanding_err.contains("slice of the board budget"),
+        "the killed source is named in the payload as a budget kill: {outstanding_err} :: sources={}",
+        board["sources"]
     );
 }
 

@@ -218,7 +218,11 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
     )
 }
 
-fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -> GoalArbitration {
+pub(super) fn arbitrate_goal_truth(
+    driver: &str,
+    manifest: &str,
+    goal: Option<GoalTruth>,
+) -> GoalArbitration {
     let Some(goal) = goal else {
         return GoalArbitration::None;
     };
@@ -235,9 +239,7 @@ fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -
         );
     };
     let legacy_owner = expected_owner.replacen("lead:", "king:", 1);
-    if goal.continuation_owner != expected_owner
-        && goal.continuation_owner != legacy_owner
-    {
+    if goal.continuation_owner != expected_owner && goal.continuation_owner != legacy_owner {
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected continuation owner {expected_owner:?}, got {:?}",
             goal.continuation_owner
@@ -339,47 +341,5 @@ fn harness_output_contract(fire: &Fire, decision: &str) -> &'static str {
         "json_block"
     } else {
         "exit_2_stderr"
-    }
-}
-
-
-#[cfg(test)]
-mod goal_spellings_tests {
-    use super::*;
-
-    fn manifest() -> &'static str {
-        "driver: lead\nscope: fno\nnode_id: x-aaaa\n"
-    }
-
-    fn truth(objective: &str, owner: &str) -> Option<GoalTruth> {
-        Some(GoalTruth {
-            objective: objective.to_string(),
-            status: "active".to_string(),
-            continuation_owner: owner.to_string(),
-        })
-    }
-
-    #[test]
-    fn goal_truth_accepts_both_spellings_and_refuses_the_rest() {
-        // A live codex goal keeps the objective and owner strings it was
-        // created with; the reader cannot rewrite them. The new spelling
-        // delegates; the pre-rename one still does; a foreign scope and a
-        // non-deriving owner refuse.
-        assert!(matches!(
-            arbitrate_goal_truth("lead", manifest(), truth("$fno:lead fno", "lead:fno")),
-            GoalArbitration::Delegated
-        ));
-        assert!(matches!(
-            arbitrate_goal_truth("lead", manifest(), truth("$fno:reign fno", "king:fno")),
-            GoalArbitration::Delegated
-        ));
-        assert!(matches!(
-            arbitrate_goal_truth("lead", manifest(), truth("$fno:lead other", "lead:fno")),
-            GoalArbitration::Refusal(_)
-        ));
-        assert!(matches!(
-            arbitrate_goal_truth("lead", manifest(), truth("$fno:lead fno", "target:x-aaaa")),
-            GoalArbitration::Refusal(_)
-        ));
     }
 }

@@ -67,8 +67,6 @@ config get
 config set
 context
 cost
-decide
-decide reindex
 delivery
 do
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
@@ -84,7 +82,6 @@ inbox approvals show !--db
 inbox board
 inbox day end
 inbox day start
-inbox decide !--decision !--origin !--subject
 inbox notify
 inbox operator ack
 inbox operator list

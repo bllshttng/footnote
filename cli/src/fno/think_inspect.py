@@ -139,12 +139,14 @@ def _decisions_section(node_id: str | None) -> dict[str, Any]:
     """
     if not node_id:
         return _no_decisions()
-    from fno.decide import list_decisions
-    from fno.tracker.metadata import ExternalMetadataUnavailable
+    from fno.rust_binary import call_front_json
 
     try:
-        _label, rows, _damaged = list_decisions(node_id, limit=None, state="live")
-    except (OSError, ValueError, ExternalMetadataUnavailable) as exc:
+        answer = call_front_json(
+            {"mode": "decisions", "argv": [node_id, "--state", "live", "--json"]}
+        )
+        rows = answer.get("decisions") or []
+    except (OSError, ValueError, RuntimeError) as exc:
         return {
             "decisions": [],
             "decisions_status": "error",

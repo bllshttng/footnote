@@ -285,15 +285,18 @@ where
                 new_status,
                 // Hosted or a fresh rollout = the actor answers for it, so
                 // the measurement is served fresh instead of keeping a stale
-                // stored word standing. A quiet rollout means resumable, not
-                // running; nothing on disk is gone.
+                // stored word standing. Only a POSITIVE death proof serves
+                // the dead word: a quiet rollout is silence, so the row
+                // under it reads unmeasured - resumable, not dead - the same
+                // vocabulary the ask arm holds. The old match served "dead"
+                // over Unknown evidence, and the crown verdict read the
+                // holder terminal on it.
                 new_liveness: if alive {
                     Some("alive")
+                } else if measured == RowLiveness::Dead {
+                    Some("dead")
                 } else {
-                    match new_status {
-                        Some(AgentStatus::Exited) | Some(AgentStatus::Orphaned) => Some("dead"),
-                        _ => None,
-                    }
+                    None
                 },
                 pid_proven: false,
                 team_revive: false,

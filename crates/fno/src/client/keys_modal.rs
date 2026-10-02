@@ -156,29 +156,6 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
     }
 }
 
-impl KeysModal {
-    /// Fit the modal to a terminal `cols` wide: a row wider than the screen
-    /// wraps into inert continuation rows instead of an ellipsis, and the
-    /// row events follow their source rows (a continuation runs nothing).
-    pub(crate) fn fit(mut self, cols: u16) -> Self {
-        let w = (cols as usize).saturating_sub(chrome::Chrome::FRAME_COLS * 2);
-        let rows = std::mem::take(&mut self.popup.rows);
-        let (rows, src) = crate::popup::wrap_rows(rows, w);
-        let events = std::mem::take(&mut self.row_events);
-        let mut prev = None;
-        self.row_events = src
-            .iter()
-            .map(|&i| {
-                let first = prev != Some(i);
-                prev = Some(i);
-                events.get(i).cloned().flatten().filter(|_| first)
-            })
-            .collect();
-        self.popup.rows = rows;
-        self
-    }
-}
-
 /// One printable byte while the modal is open, in the modal's own grammar:
 /// `/` enters the live filter, j/k move the cursor (and keep scrolling into
 /// the inert tail at either end), any other byte falls through to the chord
@@ -207,17 +184,16 @@ pub(crate) fn keys_modal_byte(view: &mut View, b: u8) -> bool {
             }
         }
         if edited {
-            view.keys_modal = Some(
-                keys_modal_with_filter(view.keys_modal.as_ref().and_then(|m| m.filter.as_deref()))
-                    .fit(view.term.1),
-            );
+            view.keys_modal = Some(keys_modal_with_filter(
+                view.keys_modal.as_ref().and_then(|m| m.filter.as_deref()),
+            ));
         }
         return true;
     }
     match b {
         // The search key: enter filter mode (empty query).
         b'/' => {
-            view.keys_modal = Some(keys_modal_with_filter(Some("")).fit(view.term.1));
+            view.keys_modal = Some(keys_modal_with_filter(Some("")));
             true
         }
         // The modal's scroll keys (the footer names them). At either end of
@@ -283,17 +259,17 @@ pub(crate) async fn keys_modal_keys(
                 }
             }
             ModalKey::PageUp => {
-                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
+                let page = (view.term.0 as isize - 2).max(1);
                 if let Some(m) = view.keys_modal.as_mut() {
                     m.popup.scroll_by(-page);
-                    m.popup.clamp_sel_to_view(trows); // Enter never runs an off-screen row
+                    m.popup.clamp_sel_to_view(view.term); // Enter never runs an off-screen row
                 }
             }
             ModalKey::PageDown => {
-                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
+                let page = (view.term.0 as isize - 2).max(1);
                 if let Some(m) = view.keys_modal.as_mut() {
                     m.popup.scroll_by(page);
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::Enter => {

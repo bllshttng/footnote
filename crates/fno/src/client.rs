@@ -2686,7 +2686,7 @@ impl View {
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
-        self.keys_modal = Some(keys_modal::build_keys_modal().fit(self.term.1));
+        self.keys_modal = Some(keys_modal::build_keys_modal());
         self.keys_modal_esc.clear();
     }
 
@@ -2715,9 +2715,9 @@ impl View {
     /// get the fix. `clamp_sel_to_view` never drifted because it already routed
     /// through `viewport_h`.
     fn follow_modal_selection(&mut self) {
-        let trows = self.term.0.max(1) as usize;
+        let term = self.term;
         if let Some(m) = self.keys_modal.as_mut() {
-            m.popup.follow_sel(trows);
+            m.popup.follow_sel(term);
         }
     }
 
@@ -5433,28 +5433,13 @@ impl View {
         // The footer widens the frame to fit, so on a narrow viewport it has to
         // be clamped or the right border leaves the screen.
         chrome = chrome.fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
-        // A name longer than the body scrolls, keeping the CURSOR end visible.
-        // Stamping the head instead cuts the `_` off the right edge, so on a
-        // narrow terminal the operator types a name they cannot see - the one
-        // thing a name prompt has to get right. The shared framer truncates from
-        // the head, so the tail-keeping happens HERE, before it is handed over.
+        // A name longer than the body wraps onto more lines, so the whole name
+        // and its `_` cursor stay on screen.
         // Body width: the chrome minimum or the wider input floor, capped to
         // the viewport so a narrow terminal still fits the frame.
         let viewport_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS);
         let body_w = chrome.min_inner_w().max(40).min(viewport_w).max(1);
-        // The framer paints the two pad cells inside `body_w` and sizes the
-        // frame to the widest line, so the line arrives pre-padded to `body_w`
-        // and the text capacity is that width minus the pad.
-        let capacity = body_w.saturating_sub(2).max(1);
         let text = format!("{name}_");
-        let text = if text.chars().count() > capacity {
-            let keep = capacity.saturating_sub(1);
-            let drop = text.chars().count() - keep;
-            let kept: String = text.chars().skip(drop).collect();
-            format!("…{kept}")
-        } else {
-            text
-        };
         let line = format!("{text:<body_w$}");
         layout_lines_overlay(origin, dims, &chrome, &[line], None, OverlayAnchor::Center)
     }
@@ -7483,7 +7468,7 @@ fn header_band_flags(_active: bool) -> u8 {
 /// the panel width `w` (the caller paints it as one INVERSE band). Counts are
 /// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
 /// from the least-severe (`✗`) end - a glyph never renders without its count
-/// (AC11) - and the label truncates (via `pad_to`) only after every pair is
+/// (AC11) - and the label truncates (via `fit_ellipsis`) only after every pair is
 /// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
 /// painter), so a double-width char in a squad name aligns the band instead of
 /// overflowing it.
@@ -7514,7 +7499,7 @@ fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> 
             let label_w: usize = label.chars().map(glyph_cols).sum();
             return match w.checked_sub(label_w) {
                 Some(gap) => format!("{label}{}", section_rule(gap)),
-                None => pad_to(label, w),
+                None => crate::chrome::fit_ellipsis(label, w),
             };
         }
         let counts = pairs.join(" ");
@@ -7646,27 +7631,6 @@ fn humanize_age(secs: Option<u64>) -> String {
     format!("{body:>4}")
 }
 
-/// Wrap `s` into lines no wider than `w` display chars, breaking on spaces. A
-/// single word longer than `w` becomes its own line (pad_to ellipsizes it) - a
-/// status sentence has no such words in practice, so the simple greedy pass is
-/// enough. Always returns at least one (possibly empty) line.
-fn wrap_words(s: &str, w: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for word in s.split_whitespace() {
-        match out.last_mut() {
-            Some(line) if line.chars().count() + 1 + word.chars().count() <= w => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => out.push(word.to_string()),
-        }
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
-}
-
 /// Build the read-only peek overlay lines: a header (badge glyph + name
 /// + full wrapped status sentence), the answerable block when the row is
 /// blocked (prompt + numbered options, reused verbatim), a divider, then the
@@ -7726,7 +7690,13 @@ fn peek_overlay_lines(
     }
     let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
     if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
-        for wl in wrap_words(&sanitize_peek_line(reason), PEEK_OVERLAY_W - 3) {
+        let mut wrapped = Vec::new();
+        wrap_line(
+            &sanitize_peek_line(reason),
+            PEEK_OVERLAY_W - 3,
+            &mut wrapped,
+        );
+        for wl in wrapped {
             lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
         }
     }
@@ -9944,13 +9914,13 @@ async fn row_menu_keys(
             ModalKey::Up => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Up);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Down => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Down);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Left => {
@@ -9966,13 +9936,13 @@ async fn row_menu_keys(
             ModalKey::PageUp => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::PageDown => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.scroll_by((trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
@@ -9995,7 +9965,7 @@ async fn row_menu_keys(
                     Some(i) => {
                         if let Some(m) = view.row_menu.as_mut() {
                             m.popup.select(i);
-                            m.popup.follow_sel(trows);
+                            m.popup.follow_sel(view.term);
                         }
                         row_menu_execute_selected(view, sock_w).await?;
                     }
@@ -10123,7 +10093,7 @@ async fn execute_aux_action(
             view.aux_esc.clear();
         }
         AuxAction::OpenUpdate => {
-            view.aux = Some(build_update_modal(view.update_outcome.as_ref()).fit(view.term.1));
+            view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
             view.aux_esc.clear();
         }
         AuxAction::OpenSweep => {
@@ -10242,13 +10212,13 @@ async fn aux_keys(
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Up);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Down => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Down);
-                    m.popup.follow_sel(trows);
+                    m.popup.follow_sel(view.term);
                 }
             }
             ModalKey::Left => {
@@ -10264,13 +10234,13 @@ async fn aux_keys(
             ModalKey::PageUp => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::PageDown => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.scroll_by((trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(trows);
+                    m.popup.clamp_sel_to_view(view.term);
                 }
             }
             ModalKey::Enter => {

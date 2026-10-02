@@ -19,15 +19,15 @@ use std::sync::OnceLock;
 const SLOT_LANES_TABLE: &str = include_str!("slot_lanes.toml");
 
 /// The inline slot-lane vocabulary, read once from the canonical table
-/// (`slot_lanes.toml`; `build.rs` projects the byte copy Python reads).
+/// (`slot_lanes.toml`, this crate's owner).
 /// Lane fields are closed: every field has resolver code behind it. Slot
 /// VERBS are the open surface instead (`SLOT_VERBS` plus profiles keys).
-struct LaneVocabulary {
-    fields: Vec<String>,
-    passthrough: Vec<String>,
+pub(crate) struct LaneVocabulary {
+    pub(crate) fields: Vec<String>,
+    pub(crate) passthrough: Vec<String>,
 }
 
-fn lane_vocabulary() -> &'static LaneVocabulary {
+pub(crate) fn lane_vocabulary() -> &'static LaneVocabulary {
     static CELL: OnceLock<LaneVocabulary> = OnceLock::new();
     CELL.get_or_init(|| {
         let raw: toml::Value =
@@ -1140,7 +1140,7 @@ fn payload_fingerprint(payload: &Value) -> String {
         "slots": payload.get("slot_by_verb").cloned().unwrap_or(json!({})),
     });
     let mut h = Sha256::new();
-    h.update(serde_json::to_string(&facts).unwrap_or_default());
+    h.update(serde_json::to_string(&crate::route_gather::canonical(&facts)).unwrap_or_default());
     let hex = format!("{:x}", h.finalize());
     hex[..12].to_string()
 }
@@ -2352,7 +2352,18 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
     if payload.get("op").and_then(Value::as_str) == Some("journal") {
         return run_route_slot_journal(&payload);
     }
-    let out = resolve_slot_payload(&payload);
+    // The gather modes answer in route_gather before the walk; `inventory`
+    // here is the GATHER's fold (the doctor leg keeps its explicit
+    // `known_harnesses` payload and flows to the walk as before).
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    if matches!(mode, "policy" | "dispatch_model")
+        || (mode == "inventory" && payload.get("known_harnesses").is_none())
+    {
+        let out = crate::route_gather::run_mode(&payload, &slot_cwd());
+        return (0, format!("{out}\n"), String::new());
+    }
+    let filled = crate::route_gather::fill(&payload, &slot_cwd());
+    let out = resolve_slot_payload(&filled);
     journal_routing_refusal(&payload, &out);
     (0, format!("{out}\n"), String::new())
 }
@@ -2478,7 +2489,7 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
 /// `spawn_gate_refused` row per refusal, `gate: "routing"` so a query
 /// separates it from the Python gate's rows. Best effort, always: a dead
 /// journal never blocks a spawn and never changes a refusal.
-fn journal_routing_refusal(payload: &Value, out: &Value) {
+pub(crate) fn journal_routing_refusal(payload: &Value, out: &Value) {
     let refused = out.get("candidate").map(Value::is_null).unwrap_or(false)
         && matches!(
             out.get("verdict").and_then(Value::as_str),
@@ -4603,9 +4614,27 @@ mod tests {
     /// A hermetic config + runtime-state env: FNO_CONFIG pins the sole config
     /// candidate (no canonical/global tier), FNO_RUNTIME_STATE_PATH pins the
     /// state file. Drop clears both.
+    type Saved = Vec<(&'static str, Option<std::ffi::OsString>)>;
+
+    /// The per-process fake world the CLAIMS root pins to, for the whole
+    /// run. The pin is SET-FOREVER and the dir never deleted: restoring it
+    /// reopens live-$HOME claims reads, and a deleted dir starves later
+    /// readers of a readable-empty world. Both shipped CI failures before
+    /// this shape landed.
+    fn fake_root() -> &'static std::path::Path {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("fno-fake-world-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        });
+        root.as_path()
+    }
+
     pub(super) struct CapacityEnv {
         _guard: std::sync::MutexGuard<'static, ()>,
         pub(super) dir: tempfile::TempDir,
+        saved: Saved,
     }
 
     impl CapacityEnv {
@@ -4615,6 +4644,18 @@ mod tests {
             let guard = claims::test_env_lock()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            // The claude fallback lane names the AMBIENT harness, so a
+            // session marker an earlier test in this process leaked would
+            // read as codex or gemini and decline the lane. Scrub the same
+            // ambient identity set a spawned child scrubs; identity vars
+            // are not state roots, so the snapshot restores them on drop.
+            let mut saved: Saved = claims::AMBIENT_IDENTITY_NAMES
+                .iter()
+                .map(|n| (*n, std::env::var_os(n)))
+                .collect();
+            for name in claims::AMBIENT_IDENTITY_NAMES {
+                std::env::remove_var(name);
+            }
             let dir = tempfile::tempdir().expect("tempdir");
             let cfg = dir.path().join("config.toml");
             std::fs::write(&cfg, format!("state_dir = '{}'\n", dir.path().display())).unwrap();
@@ -4622,6 +4663,17 @@ mod tests {
             std::fs::write(&state, state_json).unwrap();
             std::env::set_var("FNO_CONFIG", &cfg);
             std::env::set_var("FNO_RUNTIME_STATE_PATH", &state);
+            // Pin the state world to the capacity tempdir for the window
+            // (snapshot-restored on drop: a persisting empty state world
+            // shadows the tests that pin their own), and the claims root
+            // to the shared fake root SET-FOREVER (restoring it reopens
+            // live-$HOME claims reads).
+            saved.push(("FNO_STATE_DIR", std::env::var_os("FNO_STATE_DIR")));
+            std::env::set_var("FNO_STATE_DIR", dir.path());
+            saved.push(("FNO_AGENTS_HOME", std::env::var_os("FNO_AGENTS_HOME")));
+            std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents-home"));
+            std::env::set_var("FNO_CLAIMS_ROOT", fake_root());
+            std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
             match fno_bin {
                 Some(path) => std::env::set_var("FNO_BIN", path),
                 None => std::env::remove_var("FNO_BIN"),
@@ -4631,7 +4683,11 @@ mod tests {
             let providers = dir.path().join("providers");
             std::fs::create_dir_all(&providers).unwrap();
             std::fs::write(providers.join(".active-claude"), "makers").unwrap();
-            Self { _guard: guard, dir }
+            Self {
+                _guard: guard,
+                dir,
+                saved,
+            }
         }
     }
 
@@ -4639,6 +4695,12 @@ mod tests {
         fn drop(&mut self) {
             std::env::remove_var("FNO_CONFIG");
             std::env::remove_var("FNO_RUNTIME_STATE_PATH");
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
     }
 

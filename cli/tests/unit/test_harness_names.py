@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_capability_keys_are_a_nonempty_subset_of_the_complete_roster():
     """Adding a capability row is a coupled change: the name lands in
@@ -25,11 +27,19 @@ def test_capability_keys_are_a_nonempty_subset_of_the_complete_roster():
     assert known_harnesses() == sorted(known_harnesses())
 
 
-def test_the_complete_roster_carries_the_evidence_backed_hosts():
+def test_the_complete_roster_carries_the_evidence_backed_hosts(monkeypatch):
     """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the nine
     capability-backed names plus hermes and openclaw, which host real sessions
-    per docs/SETUP-*.md. scripts/ci/check-harness-roster-parity.py holds this
-    union against the shipped evidence surfaces in CI."""
+    per docs/SETUP-*.md. The roster lives in Rust (provider.rs
+    KNOWN_HARNESSES) and the import proxies it through the fno-agents
+    harness-roster read, so this assertion proves a Python reader accepts a
+    Rust-added name; scripts/ci/check-harness-roster-parity.py holds the
+    evidence surfaces as subsets of the same Rust source.
+
+    The same import pins the door mechanics (folds under the test-delta cap,
+    which counts declarations): the roster resolves once per process - two
+    known_harnesses() calls return the same object - and a failed read
+    refuses closed naming the remedy."""
     from fno.harness_names import KNOWN_HARNESSES
 
     assert set(KNOWN_HARNESSES) == {
@@ -47,7 +57,7 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
     }
     from fno.agents.harness_map import known_harnesses
 
-    # The capability-backed roster stays at eight; the wider names ride the
+    # The capability-backed roster stays at nine; the wider names ride the
     # roster only, which is the asymmetry this change exists to declare.
     assert set(known_harnesses()) == {
         "claude",
@@ -60,6 +70,34 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
         "grok",
         "zcode",
     }
+
+    # The door mechanics, folded under the test-delta declaration cap: the
+    # roster resolves once per process (two calls, one object) and a failed
+    # read refuses closed naming the remedy.
+    import fno.harness_names as hn
+
+    from fno.rust_binary import VerbUnavailable
+
+    assert hn.known_harnesses() is hn.KNOWN_HARNESSES
+
+    calls = []
+
+    def fake_read(verb, args=(), *, timeout=60, binary=None):
+        calls.append(verb)
+        return (None, {"known": ("alpha", "beta")})
+
+    monkeypatch.setattr(hn, "KNOWN_HARNESSES", None, raising=False)
+    monkeypatch.setattr(hn, "call_binary_json", fake_read)
+    assert hn.known_harnesses() == ("alpha", "beta")
+    assert hn.known_harnesses() is hn.known_harnesses()
+    assert calls == ["harness-roster"]
+
+    monkeypatch.setattr(
+        hn, "call_binary_json", lambda *a, **k: ("fno-agents binary not found", None)
+    )
+    monkeypatch.setattr(hn, "KNOWN_HARNESSES", None, raising=False)
+    with pytest.raises(VerbUnavailable, match="fno doctor update"):
+        hn.known_harnesses()
 
 
 def test_install_adapters_are_not_harness_evidence():

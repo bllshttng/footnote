@@ -196,6 +196,11 @@ fn main() {
     ) {
         std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
+    // `harness-roster`: the one-roster JSON read; Python's
+    // fno.harness_names transports here through resolve_binary.
+    if args.first().map(String::as_str) == Some("harness-roster") {
+        std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
     }
@@ -1955,13 +1960,10 @@ fn validate_effort_for_spawn(
     if value.is_empty() {
         return Err("--effort must be non-empty".to_string());
     }
-    if matches!(provider, "gemini") {
-        return Err(format!(
-            "harness {} has no reasoning-effort surface; omit --effort",
-            provider
-        ));
-    }
-    Ok(())
+    // The one effort owner (effort_surface.rs) answers the whole deny set:
+    // gemini, cursor-agent and an undeclared harness refuse on the thread and
+    // headless lanes exactly as the Python lane's bridge refuses them.
+    fno_agents::effort_surface::effort_tokens(provider, value).map(|_| ())
 }
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
@@ -2071,7 +2073,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
     Ok(())
 }
 
-/// The Python seam (rust_runtime.make_context -> inject_spawn_defaults) is
+/// The Python seam (rust_runtime.make_context -> compose_spawn_argv) is
 /// the only reader of config.agents.profiles. A spawn that skipped it carries
 /// no configured route, model, effort or account, so it goes back to the
 /// front door; the marker asserts the crossing and is parsed beside `--yolo`.
@@ -3812,7 +3814,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("yolo".into(), Value::Bool(true));
             }
             // The Python spawn seam (rust_runtime
-            // make_context -> inject_spawn_defaults) is the only reader of
+            // make_context -> compose_spawn_argv) is the only reader of
             // config.agents.profiles. This token asserts it crossed upstream
             // and carries its enforcement verdict. Consumed here - never
             // forwarded, never read past the `--` fence - so no harness argv

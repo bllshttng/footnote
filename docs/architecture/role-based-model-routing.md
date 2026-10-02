@@ -48,7 +48,7 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 
 ## The spawn seam: every launch crosses it
 
-Every `fno agents spawn` crosses the Python seam (`inject_spawn_defaults`). The binary enforces this: a direct `fno-agents spawn` without the `--defaults-applied` marker is sent back to the front door once, and a marked spawn dispatches natively. The marker carries the seam's enforcement verdict (`enforced` or `unenforced`). It records a decision the seam already made. It never grants one.
+Every `fno agents spawn` crosses the spawn seam (`compose_spawn_argv`, whose decisions the Rust compose owns). The binary enforces this: a direct `fno-agents spawn` without the `--defaults-applied` marker is sent back to the front door once, and a marked spawn dispatches natively. The marker carries the seam's enforcement verdict (`enforced` or `unenforced`). It records a decision the seam already made. It never grants one.
 
 A configured axis that was not applied says so. stderr names the dropped value, the config rung it came from, and the reason. One `spawn_defaults_applied` journal event per spawn records every resolved, applied, and suppressed axis, with empty values included. A new config-sourced spawn axis needs nothing else: route the value through the seam, and let the seam name what it did not apply.
 
@@ -245,7 +245,7 @@ The optional OpenRouter snapshot can supply a percentile for a row whose `band` 
 
 ## The spawn seam contract
 
-Every launch crosses the Python seam (`agents.spawn_defaults.inject_spawn_defaults`). The seam resolves provider, model, effort, substrate, permission-mode, route, account and pane-group from config and profile defaults, injects the flags, and marks the launch `--defaults-applied=<state>` straight after the verb. The binary reads no config: an unmarked direct `fno-agents spawn` is bounced back to the front door once, and the re-exec falls back to `fno-py` because a bare venv install ships no `fno` entrypoint.
+Every launch crosses the spawn seam (`agents.spawn_defaults.compose_spawn_argv`). The seam projects the caller's argv and facts to the Rust compose, which resolves provider, model, effort, substrate, permission-mode, route, account and pane-group from config and profile defaults; the seam applies the answer, injects the flags, and marks the launch `--defaults-applied=<state>` straight after the verb. The binary reads no config: an unmarked direct `fno-agents spawn` is bounced back to the front door once, and the re-exec falls back to `fno-py` because a bare venv install ships no `fno` entrypoint.
 
 The receipt is exactly one `spawn_defaults_applied` row per completed resolution in the agents journal (`state_dir/events.jsonl`; the `FNO_EVENTS_PATH` pin redirects it under the hermetic guard). The row keeps the flat envelope - `kind` plus named fields, no nesting - and carries `name`, `verb`, `seed`, the routing config `fingerprint`, `resolved` (every axis as value and rung, empties included: "the config read as empty here" and "the value was suppressed" are different facts), `applied`, and `suppressed` (each omitted axis with its reason). The WRITE belongs to the `route-slot journal` op, not Python: the seam resolves the journal path and feeds the payload, the verb appends. The emit can never raise: a missing binary or an unwritable journal never turns an already-valid launch into a crash, and a diagnostic failure never waives strict qualification, which is decided upstream of the emit.
 
@@ -257,7 +257,7 @@ Config is a leaf: the schema validates types only, and the spawn seam and the re
 
 ## Two keys, two axes
 
-`[[routing.models]]` is the band inventory the difficulty grid reads (`route_resolve.resolve_grid`). `model_routing.roles` is the per-role provider map spawn-env applies. They are different axes and neither seeds the other.
+`[[routing.models]]` is the band inventory the difficulty grid reads (`fno-agents route-slot`). `model_routing.roles` is the per-role provider map spawn-env applies. They are different axes and neither seeds the other.
 
 The grid stays config-first, so an undeclared inventory routes nothing. `resolve_grid` records `grid=no-inventory-declared`, the `dispatch_spawned` receipt carries that reason, and every banded plan lands on the ambient default. Having `model_routing.roles` set does not change it. That key is exactly what makes an undeclared inventory read as working. When the inventory is undeclared, `fno config doctor` prints a `band routing inactive:` line. When the roles key is also set, the line names it as the other axis.
 
