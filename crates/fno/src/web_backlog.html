@@ -378,11 +378,6 @@ function copyBySelect(text, btn) {
   btn.textContent = "selected; copy by hand";
   inp.remove();
 }
-function sessionCommand(s) {
-  if (s.action === "attach" && s.agent) return "fno agents attach " + s.agent;
-  if (s.action === "resume" && s.session_id) return "fno agents resume " + s.session_id;
-  return null;
-}
 // The snapshot's filter predicate over one embedded card, mirroring the
 // model's keeps_query so a filter keeps the same rows the served board
 // keeps; the details haystack rides the embedded node map.
@@ -1486,6 +1481,12 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     idSpan.textContent = card.id + " ";
     bindIdCopy(idSpan, card.id);
     h.appendChild(idSpan);
+    const idCopy = document.createElement("button");
+    idCopy.type = "button";
+    idCopy.className = "copybtn";
+    idCopy.textContent = "copy";
+    idCopy.addEventListener("click", () => copyText(card.id, idCopy));
+    h.appendChild(idCopy);
     const t = document.createElement("span");
     t.textContent = card.title;
     h.appendChild(t);
@@ -1632,18 +1633,35 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       table.appendChild(tbody);
       for (const s of sessions) {
         const tr = document.createElement("tr");
-        const tds = [s.phase, s.harness, s.model, s.session_id ? s.session_id.slice(0, 8) : "", s.started_at, s.ended_at, s.agent];
+        const tds = [s.phase, s.harness, s.model, s.started_at, s.ended_at, s.agent];
         for (const val of tds) {
           const td = document.createElement("td");
           td.textContent = val || "";
           tr.appendChild(td);
         }
+        const sidTd = document.createElement("td");
+        if (s.session_id) {
+          const code = document.createElement("code");
+          code.className = "sid";
+          code.textContent = s.session_id;
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "copybtn";
+          btn.textContent = "copy";
+          btn.addEventListener("click", () => copyText(s.session_id, btn));
+          sidTd.appendChild(code);
+          sidTd.appendChild(btn);
+        }
+        tr.appendChild(sidTd);
         const actionTd = document.createElement("td");
         addSessionAction(actionTd, s);
         tr.appendChild(actionTd);
         tbody.appendChild(tr);
       }
-      sg.appendChild(table);
+      const scroll = document.createElement("div");
+      scroll.style.overflowX = "auto";
+      scroll.appendChild(table);
+      sg.appendChild(scroll);
     }
     const prs = view.prs || [];
     if (prs.length) {
@@ -1751,7 +1769,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   }
   // One session row's action cell: the command to copy, or the dim reason.
   function addSessionAction(td, s) {
-    const cmd = sessionCommand(s);
+    const cmd = s.command;
     if (!cmd) {
       td.className = "dim";
       td.textContent = s.reason || "";

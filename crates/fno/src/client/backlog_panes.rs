@@ -275,7 +275,7 @@ pub(crate) fn paint(
     // The hint bar: two unframed rows of the wrapped hint text.
     let hint_top = top + h - hint_h;
     let hint = if focus_pane {
-        "j/k link · enter open · PgUp/PgDn scroll · esc board · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
+        "j/k link · enter open · y copy id · Y copy cmd · PgUp/PgDn scroll · esc board · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
     } else {
         "hjkl move · [ ] lane · L lanes · Tab list/kanban · / search · f filter · enter details · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
     };

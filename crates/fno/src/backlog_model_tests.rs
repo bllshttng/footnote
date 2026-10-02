@@ -295,7 +295,8 @@ fn project_and_priority_filters_narrow_cards_and_totals() {
 fn node_lists_children_blockers_and_live_sessions() {
     // AC7-HP.
     let mut rows = vec![
-        json!({"id": "x-top", "status": "ready", "priority": "p1", "blocked_by": ["x-blk"]}),
+        json!({"id": "x-top", "status": "ready", "priority": "p1", "blocked_by": ["x-blk"],
+               "cwd": "/tmp/it's here"}),
         json!({"id": "x-kid1", "status": "ready", "priority": "p2", "parent": "x-top"}),
         json!({"id": "x-kid2", "status": "ready", "priority": "p2", "parent": "x-top"}),
         json!({"id": "x-blk", "status": "ready", "priority": "p2"}),
@@ -303,6 +304,7 @@ fn node_lists_children_blockers_and_live_sessions() {
     rows[0]["sessions"] = json!([
         {"phase": "execute", "session_id": "s-live"},
         {"phase": "execute", "session_id": "s-dead"},
+        {"phase": "execute", "session_id": "s-park"},
         {"phase": "plan"},
         {"phase": "ship", "session_id": "s-live"},
         {"phase": "ship", "session_id": "s-dead"}
@@ -310,16 +312,36 @@ fn node_lists_children_blockers_and_live_sessions() {
     rows[3]["blocked_by"] = json!(["x-top"]);
     let mut agents = vec![row(Some("s-live"))];
     agents[0].pane_id = Some(3);
+    let mut park = row(Some("s-park"));
+    park.resumable = true;
     let mut inp = fixture(rows);
     inp.agents = agents;
+    inp.agents.push(park);
     let view = node(&inp, "x-top").expect("the node resolves");
     assert_eq!(view.children.len(), 2);
     assert_eq!(view.blocked_by.len(), 1);
     assert_eq!(view.blocks.len(), 1, "x-blk is blocked by x-top");
-    assert_eq!(view.sessions.len(), 5);
+    assert_eq!(view.sessions.len(), 6);
     assert_eq!(view.sessions[0].action, "attach");
     assert_eq!(view.sessions[0].agent.as_deref(), Some("w1"));
+    assert_eq!(
+        view.sessions[0].command.as_deref(),
+        Some("fno agents attach w1")
+    );
     assert_eq!(view.sessions[1].action, "none");
+    assert_eq!(
+        view.sessions[1].command.as_deref(),
+        Some("fno agents adopt s-dead --cross-project")
+    );
+    assert_eq!(view.sessions[2].action, "resume");
+    assert_eq!(
+        view.sessions[2].command.as_deref(),
+        Some("fno agents resume s-park --cross-project --cwd '/tmp/it'\\''s here'")
+    );
+    assert_eq!(
+        view.sessions[3].command, None,
+        "a row with no session id carries no command"
+    );
     assert!(view.card.blocked, "x-top has an open dependency");
     let mut lead = row(Some("lead-session"));
     lead.name = "finch".into();
@@ -340,8 +362,8 @@ fn node_lists_children_blockers_and_live_sessions() {
     assert_eq!(tree.leads[0].nodes.len(), 2);
     assert_eq!(
         tree.leads[0].nodes[0].current.len(),
-        1,
-        "two phase rows of one live session list one worker"
+        2,
+        "the live session dedupes its two phase rows; the parked row is a second worker"
     );
     assert_eq!(
         tree.leads[0].nodes[0].former.len(),
@@ -384,8 +406,8 @@ fn node_lists_children_blockers_and_live_sessions() {
     let tree = crate::org_model::derive(&org, 100).unwrap();
     assert_eq!(
         tree.leads[0].nodes[0].current.len(),
-        1,
-        "ambiguous prefixes and exited rows are former"
+        2,
+        "only the live and parked sessions are current; ambiguous prefixes and exited rows are former"
     );
     assert_eq!(tree.leads[0].nodes[0].former.len(), 3);
     assert_eq!(tree.leads[0].left[0].view.card.id, "x-left");
@@ -398,8 +420,8 @@ fn node_lists_children_blockers_and_live_sessions() {
     let tree = crate::org_model::derive(&org, 100).unwrap();
     assert_eq!(
         tree.leads[0].nodes[0].current.len(),
-        2,
-        "a unique short id joins"
+        3,
+        "a unique short id joins (the parked row stays current)"
     );
     let mut same_label = row(Some("distinct-session"));
     same_label.node = Some("x-top".into());
@@ -410,8 +432,8 @@ fn node_lists_children_blockers_and_live_sessions() {
     let tree = crate::org_model::derive(&org, 100).unwrap();
     assert_eq!(
         tree.leads[0].nodes[0].current.len(),
-        3,
-        "equal labels with distinct session identities stay visible"
+        4,
+        "equal labels with distinct session identities stay visible (plus the parked row)"
     );
     assert_eq!(
         tree.leads[0].left[0].current.len(),
