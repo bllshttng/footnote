@@ -1,5 +1,8 @@
 {
   "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection",
+  "modules": [
+    "./buddy/register.ts"
+  ],
   "hooks": {
     "PreToolUse": [
       {
