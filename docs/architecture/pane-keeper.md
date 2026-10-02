@@ -45,7 +45,7 @@ At startup, before serving, the server scans `<state-root>/mux/panes/*.sock`. Se
 
 Re-adoption is not respawn. The proof below pins the SAME child pid across the server's death.
 
-**After a restart.** The adoption handshake runs under one 3 s wall-clock deadline, on both roads: the fresh-launch road retries a not-yet-bound socket for that long, and the adopt road treats a refused connect on an existing socket file as final, unlinking it at once instead of waiting. A stale socket from a power loss costs nothing. A wedged keeper costs at most 3 s, and the failure names the socket. When a keeper dies mid-handshake anyway, the spawn road's failure message names the exit status (`keeper exited: signal 9`), so the log never shows a bare `Invalid argument` again.
+**After a restart.** The adoption handshake runs under one 3 s wall-clock deadline. Both roads share it. The fresh-launch road retries a not-yet-bound socket for that long. The adopt road treats a refused connect on an existing socket file as final, unlinking it at once instead of waiting. A stale socket from a power loss costs nothing. A wedged keeper costs at most 3 s, and the failure names the socket. When a keeper dies mid-handshake anyway, the spawn road's failure message names the exit status (`keeper exited: signal 9`). The log never shows a bare `Invalid argument` again.
 
 ## The reaper contract
 
