@@ -168,8 +168,9 @@ def test_style_exception_flag_lets_the_body_through_without_a_ledger(
     )
     result = _prepare(body, "--style-exception", "quoted operator text")
     assert result.exit_code == 0, result.output
-    assert "</fno_mail>" in result.output
-    envelope_id = re.search(r'id="([^"]+)"', result.output)
+    header = result.output.strip().splitlines()[0]
+    assert header.startswith("`@") and " · fmail-" in header, result.output[:120]
+    envelope_id = re.search(r"fmail-[0-9a-f]{12}", header)
     assert envelope_id, result.output
     assert not (paths.bus_dir() / "word-budget").exists()
 

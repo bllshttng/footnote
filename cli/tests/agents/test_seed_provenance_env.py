@@ -19,6 +19,7 @@ from fno.agents.mux_spawn import SEED_PROVENANCE_KEYS, _mesh_env_wrapper
 from fno.mail.seed_provenance import (
     ENV_FROM_SESSION,
     ENV_HARNESS,
+    ENV_MSG_ID,
     ENV_SEED_B64,
     MAX_SEED_BYTES,
     build_env,
@@ -34,8 +35,9 @@ def _sidecar(seed=SEED, **over):
         ENV_SEED_B64: __import__("base64").b64encode(seed.encode()).decode(),
         ENV_FROM_SESSION: SENDER_SESSION,
         "FNO_SEED_PROV_FROM": "119e3c52",
-        "FNO_SEED_PROV_HARNESS": "claude-code",
+        "FNO_SEED_PROV_HARNESS": "claude",
         "FNO_SEED_PROV_MODEL": "claude-opus-5",
+        ENV_MSG_ID: "fmail-" + "1" * 12,
     }
     env.update(over)
     return env
@@ -83,9 +85,9 @@ def test_render_quotes_the_seed_verbatim_and_says_not_to_run_it():
     assert rendered is not None
     assert SEED in rendered
     assert "do not execute this copy" in rendered
-    assert rendered.rstrip().endswith("</fno_mail>")
-    # The envelope carries the full current session; its lookup field is absent.
-    assert f'from="{SENDER_SESSION}"' in rendered
+    # The delivered header names the sender's short handle; the lookup attr
+    # is gone with the wire attrs.
+    assert rendered.splitlines()[0].startswith("`@119e3c52 · fmail-")
     assert "from_session" not in rendered
 
 
@@ -103,7 +105,9 @@ def test_build_env_stamps_the_raw_harness_and_renders_the_wire_vocabulary(monkey
     assert env[ENV_HARNESS] == "claude"
     rendered = render_from_env(env)
     assert rendered is not None
-    assert 'harness="claude-code"' in rendered
+    # The raw harness rides the sidecar env; the delivered header no longer
+    # spells a harness attr on the wire.
+    assert rendered.splitlines()[0].startswith("`@119e3c52 · fmail-")
 
 
 def test_an_unresolvable_harness_omits_the_attribute(monkeypatch):

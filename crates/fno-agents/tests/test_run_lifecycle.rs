@@ -782,6 +782,55 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
         "the argv must never spawn mid-incident: {stderr}"
     );
 
+    // Same stop, the install-build contract (law d-829648bb: nothing stops
+    // fno loading for the user): a plain build-admit parks at the hold while
+    // the marked install build walks straight through.
+    let wt = tmp_claims_root("fleet-recheck-wt");
+    let cargo_pid = std::process::id().to_string();
+    let mut plain = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the held plain build");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        plain.try_wait().unwrap().is_none(),
+        "a plain build must still wait at the tests hold"
+    );
+    plain.kill().expect("kill the waiting plain build");
+    let _ = plain.wait();
+
+    let start = Instant::now();
+    let out = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .env("FNO_INSTALL_BUILD", "1")
+        .output()
+        .expect("run the install build");
+    assert!(
+        out.status.success(),
+        "the install build walks past the tests hold: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the install build must not wait out the hold, took {:?}",
+        start.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("fleet stop holds tests"),
+        "the install build must not park at the hold: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&wt);
+
     let _ = holder.wait();
     let cleared = Command::new(bin())
         .args(["fleet-incident", "clear", "--reason", "queue wedge done"])

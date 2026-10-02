@@ -27,6 +27,7 @@ from fno.pr.closure import (
     known_node_ids,
     parse_closure_trailer,
     render_closure_trailer,
+    retargeted_from_ids,
     render_pr_closure_trailer,
     resolve_branch_node_id,
 )
@@ -256,6 +257,9 @@ def test_the_shared_corpus_parses_through_the_real_leg(monkeypatch):
     )
     for case in corpus["cases"]:
         assert parse_closure_trailer(case["body"]) == case["claims"], case["body"]
+        assert retargeted_from_ids(case["body"]) == case.get("retargeted_from", []), case[
+            "body"
+        ]
 
 
 def test_parse_exact_trailer_two_ids():
@@ -774,7 +778,7 @@ def test_open_binding_reverse_key_reads_additional_prs():
     assert verdicts[0].node_id == "x-1a2b"
 
 
-def test_open_binding_branch_match_still_wins_over_the_reverse_key():
+def test_open_binding_branch_match_still_wins_over_the_reverse_key(monkeypatch):
     # Locked decision 2: a branch naming a real node keeps winning; a different
     # node's back-pointer at the same number must not steal the binding.
     entries = [
@@ -784,6 +788,25 @@ def test_open_binding_branch_match_still_wins_over_the_reverse_key():
     verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
     assert verdicts[0].verdict == "missing"
     assert verdicts[0].node_id == "x-1a2b"
+
+    # A retargeted row: the body hands the branch node away, so the branch key
+    # stops resolving it and the graph back-pointer decides instead.
+    def _retarget(verb, payload, unavailable=None, **kwargs):
+        return {"ids": ["x-9z9z"], "retargeted_from": ["x-1a2b"]}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _retarget)
+    verdicts = _classify(
+        [
+            _open_row(
+                5,
+                "feature/x-1a2b",
+                body="Fixes x-9z9z\nRetarget x-1a2b x-9z9z msg-447f8f",
+            )
+        ],
+        entries,
+    )
+    assert verdicts[0].node_id != "x-1a2b"
+    assert verdicts[0].node_id == "x-9z9z"
 
 
 def test_open_binding_untracked_detail_names_the_inputs_consulted():

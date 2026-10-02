@@ -24,7 +24,7 @@ use std::time::Duration;
 /// activity.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-const NUDGE_SENDER: &str = "pr-nudge";
+const NUDGE_SENDER: &str = "fno/pr-nudge";
 const NUDGE_SENDER_LINE: &str = "Automatic retry from the fno daemon pr-nudge arm, not a person. A hold from your crown or the operator outranks it.";
 
 /// The bounded subprocess budget, shared by the PR-status read and every
@@ -1172,7 +1172,7 @@ mod tests {
             mail.get(4..8).unwrap_or(&[]),
             &[
                 "--from-name".to_string(),
-                "pr-nudge".to_string(),
+                "fno/pr-nudge".to_string(),
                 "--origin".to_string(),
                 "scheduler".to_string(),
             ][..]

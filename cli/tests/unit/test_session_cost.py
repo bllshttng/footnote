@@ -57,42 +57,27 @@ def test_render_tasks_md_pr_number_explicit_none():
     assert "#None" not in md
 
 
-def test_accumulate_entry_separates_fno_mail():
-    """fno_mail user turns must increment mail_messages, not user_messages."""
+def test_count_user_vs_mail_separates_delivered_mail():
+    """A user turn that IS delivered mail counts as mail, never operator."""
     metrics = session_cost.SessionMetrics(session_id="test-session")
 
     # Regular human operator message
-    operator_entry = {
-        "type": "user",
-        "message": {"role": "user", "content": "Please implement feature X"},
-    }
-    session_cost._accumulate_entry(operator_entry, metrics)
+    session_cost._count_user_vs_mail(metrics, ["Please implement feature X"])
     assert metrics.user_messages == 1
     assert metrics.mail_messages == 0
 
     # Peer mail message carrying <fno_mail> tag
-    mail_entry = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": '<fno_mail from="cc-12345678" harness="claude">here is the status</fno_mail>',
-        },
-    }
-    session_cost._accumulate_entry(mail_entry, metrics)
+    session_cost._count_user_vs_mail(
+        metrics,
+        ['<fno_mail from="cc-12345678" harness="claude">here is the status</fno_mail>'],
+    )
     assert metrics.user_messages == 1
     assert metrics.mail_messages == 1
 
-    # Block content shape
-    block_mail_entry = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": '<fno_mail from="cc-87654321">peer update</fno_mail>'}
-            ],
-        },
-    }
-    session_cost._accumulate_entry(block_mail_entry, metrics)
+    # A delivered header line reads as mail too
+    session_cost._count_user_vs_mail(
+        metrics, ["`@candor · fmail-abc123def456 · peer update`"]
+    )
     assert metrics.user_messages == 1
     assert metrics.mail_messages == 2
 

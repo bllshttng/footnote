@@ -149,6 +149,10 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno doctor update` and root `fno update`: the native updater (the
+    /// Python leg is deleted in the same change). Args from the verb name
+    /// onward.
+    DoctorUpdate(Vec<OsString>),
     /// `fno agents history ... --graph ...`: the native session-card reader.
     AgentsHistory(Vec<OsString>),
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
@@ -217,6 +221,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    if let Some(rest) = fno::doctor_update::classify(args) {
+        return Role::DoctorUpdate(rest);
     }
     if let Some(rest) = fno::agents_history::classify(args) {
         return Role::AgentsHistory(rest);
@@ -426,6 +433,7 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::AgentsAlias(fno::agents_alias::Org::Forward(argv)) => bootstrap::forward(&argv),
         Role::AgentsAlias(fno::agents_alias::Org::Help(text)) => {

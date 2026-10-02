@@ -195,9 +195,6 @@ Last, and it is the one a control does not save you from: believe the reading on
 ### Metrics and Health
 
 ```bash
-# Track session costs
-./scripts/metrics/cost-tracker.sh
-
 # Register a completed task
 python scripts/metrics/register-task.py --task-id 1.1 --status done
 

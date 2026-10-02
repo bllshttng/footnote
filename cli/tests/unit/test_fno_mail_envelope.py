@@ -58,106 +58,44 @@ def test_harness_for_provider_preserves_known_and_unrecognized_nonblank():
     assert harness_for_provider("opencode") == "opencode"
 
 
-def test_open_tag_is_lowercase_quoted_attrs_from_first():
-    # Lowercase tag, key="value" double-quoted attrs; `from` renders FIRST.
+def test_wrap_opens_with_the_delivered_header():
+    # The one delivered shape: a backticked header line, then the whole body.
     assert (
-        fno_mail_open(from_="7d1f8bdc", node="x-synth")
-        == '<fno_mail from="7d1f8bdc" node="x-synth">'
+        wrap_fno_mail("ship it", from_="7d1f8bdc", id="fmail-abc123def456")
+        == "`@7d1f8bdc · fmail-abc123def456 · ship it`\nship it"
     )
-
-
-def test_open_tag_renders_harness_through_the_wire_vocabulary():
-    # D1/D6: the raw harness rides the tag spelled through
-    # harness_for_provider, and renders only when set.
-    assert (
-        fno_mail_open(from_="7d1f8bdc", harness="claude")
-        == '<fno_mail from="7d1f8bdc" harness="claude-code">'
-    )
-    assert (
-        fno_mail_open(from_="7d1f8bdc", harness="codex")
-        == '<fno_mail from="7d1f8bdc" harness="codex">'
-    )
-    assert fno_mail_open(from_="7d1f8bdc", harness=None) == '<fno_mail from="7d1f8bdc">'
-
-
-def test_open_tag_renders_ranks_after_their_side():
-    # D1 order: from, harness, from_rank, to, to_rank, id, reply_to,
-    # node, origin. Sender facts, then reader facts, then threading.
-    assert (
-        fno_mail_open(
-            from_="647b3a9c-6544-43fe-899e-704382f3d973",
-            harness="claude",
-            from_rank="Lead of epic-scope",
-            to="278c9a89",
-            to_rank="Head of fno",
-            id="msg-5a760f",
-        )
-        == '<fno_mail from="647b3a9c" '
-        'harness="claude-code" from_rank="Lead of epic-scope" to="278c9a89" '
-        'to_rank="Head of fno" id="msg-5a760f">'
-    )
-
-
-def test_open_tag_holds_one_full_id_address():
-    # A caller can pass the already-selected full reply address.
-    full = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
-    tag = fno_mail_open(from_=full, id="msg-fea270", to="08e8c104", origin="peer")
-    assert tag == f'<fno_mail from="{full}" to="08e8c104" id="msg-fea270">'
-    assert "from_session" not in tag
-
-
-def test_open_tag_renders_origin_last_and_drops_peer():
-    # origin is a machine enum on the tag; a peer origin costs no attribute.
-    assert (
-        fno_mail_open(from_="a", origin="operator")
-        == '<fno_mail from="a" origin="operator">'
-    )
-    assert fno_mail_open(from_="a", origin="peer") == '<fno_mail from="a">'
-
-
-def test_absent_id_is_byte_identical_to_pre_change():
-    # id=None adds nothing.
-    assert fno_mail_open(
-        from_="7d1f8bdc", node="x-synth"
-    ) == fno_mail_open(
-        from_="7d1f8bdc",
-        node="x-synth",
-        id=None,
-    )
-
-
-def test_absent_reply_to_is_byte_identical_to_pre_change():
-    # reply_to=None must add nothing.
-    assert fno_mail_open(
-        from_="7d1f8bdc", node="x-synth"
-    ) == fno_mail_open(
-        from_="7d1f8bdc",
-        node="x-synth",
-        reply_to=None,
-    )
-
-
-def test_wrap_is_one_line_for_a_single_line_body():
-    # The renderer emits no envelope newlines of its own, so a single-line
-    # body renders the whole envelope on one line and the live inject needs
-    # no bracketed-paste guards for it.
-    assert (
-        wrap_fno_mail("ship it", from_="7d1f8bdc", node="x-synth")
-        == '<fno_mail from="7d1f8bdc" node="x-synth">ship it</fno_mail>'
-    )
-
-
-def test_wrap_preserves_multiline_body():
     body = "line one\nline two"
-    wrapped = wrap_fno_mail(body, from_="aaaa1111")
-    assert wrapped == '<fno_mail from="aaaa1111">line one\nline two</fno_mail>'
-    assert wrapped.startswith("<fno_mail ")
-    assert wrapped.endswith("</fno_mail>")
+    wrapped = wrap_fno_mail(body, from_="aaaa1111", id="fmail-abc123def456")
+    # The summary is the first sentence (it ends at the newline); the body
+    # follows verbatim, nothing hidden.
+    assert wrapped == "`@aaaa1111 · fmail-abc123def456 · line one`\nline one\nline two"
+    # An empty body renders the (empty) summary.
+    assert wrap_fno_mail("", from_="aaaa1111", id="fmail-abc123def456") == (
+        "`@aaaa1111 · fmail-abc123def456 · (empty)`\n"
+    )
 
 
-def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path):
-    # AC1-HP: the crown lines moved INTO the header as from_rank/to_rank,
-    # read from the live registry at render time, never passed by a caller.
+def test_an_id_is_required_and_tag_mode_returns_the_bare_header():
+    import pytest
+
+    from fno.mail.envelope import ForgedEnvelopeError
+
+    with pytest.raises(ForgedEnvelopeError):
+        wrap_fno_mail("hi", from_="aaaa1111")
+    with pytest.raises(ForgedEnvelopeError):
+        fno_mail_open(from_="aaaa1111")
+    # Tag mode (the relay probe form) renders the header line alone.
+    assert fno_mail_open(from_="aaaa1111", id="fmail-abc123def456") == (
+        "`@aaaa1111 · fmail-abc123def456 · (empty)`"
+    )
+
+
+def test_the_header_carries_the_registry_name_and_no_rank_attributes(
+    monkeypatch, tmp_path
+):
+    # The crown lines left the delivered text: the sender is the registry
+    # name, and rank/name facts live on the bus row and registry, read back
+    # by the Messages tab group (x-f1f0's attributes stay there).
     import fno.mail.envelope as envelope
     registry = tmp_path / "crowned.json"
     _write_registry(
@@ -166,9 +104,6 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
             {"name":"folio", "status":"live", "harness":"claude", "cwd":"/repo",
              "harness_session_id":"647b3a9c-6544-43fe-899e-704382f3d973", "created_at":"2026-09-23T20:00:00Z",
              "crown_level":2, "crown_scope":"epic-scope"},
-            {"name":"quill", "status":"live", "harness":"claude", "cwd":"/repo",
-             "harness_session_id":"reader-session", "created_at":"2026-09-23T20:00:00Z",
-             "crown_level":1, "crown_scope":"fno"},
         ],
     )
 
@@ -177,53 +112,20 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
         "hi",
         from_="647b3a9c",
         to="278c9a89",
-        id="msg-5a760f",
+        id="fmail-abc123def456",
         from_session="647b3a9c-6544-43fe-899e-704382f3d973",
         to_session="reader-session",
         harness="claude",
     )
-    assert wrapped == (
-        '<fno_mail from="647b3a9c" harness="claude-code" '
-        'from_rank="Lead of epic-scope" from_name="folio" to="278c9a89" '
-        'to_name="quill" to_rank="Head of fno" id="msg-5a760f">'
-        "hi"
-        "</fno_mail>"
-    )
-    assert not any(line.startswith("-- ") for line in wrapped.splitlines())
+    assert wrapped.startswith("`@folio · fmail-abc123def456 · hi`")
+    for gone in ("from_rank", "from_name", "to_rank", "to_name"):
+        assert gone not in wrapped
+    # A handle that resolves to no live row keeps the raw from value.
+    plain = envelope.wrap_fno_mail("hi", from_="stranger", id="fmail-abc123def456")
+    assert plain.startswith("`@stranger · fmail-abc123def456 · hi`")
 
 
-def test_wrap_uses_the_short_handle_for_claude_and_reads_rank_by_session(
-    monkeypatch, tmp_path
-):
-    # Claude mints random UUIDv4 ids, so from= renders the 8-hex handle the
-    # fleet already types; codex alone keeps the full time-ordered id.
-    import fno.mail.envelope as envelope
-    registry = tmp_path / "claude.json"
-    full_id = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
-    _write_registry(
-        registry,
-        [{"name":"king", "status":"live", "harness":"claude", "cwd":"/repo",
-          "harness_session_id":full_id, "created_at":"2026-09-23T20:00:00Z",
-          "crown_level":1, "crown_scope":"fno"}],
-    )
-    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
-    wrapped = envelope.wrap_fno_mail(
-        "hi", from_="king", from_session=full_id
-    )
-    assert wrapped.startswith(
-        '<fno_mail from="7c9e6679" harness="claude-code" '
-        'from_rank="Head of fno" from_name="king">'
-    )
-    # A handle that resolves to no live row stays bare: no session upgrade,
-    # no rank, no name. A resolvable handle upgrades even without a session
-    # (the renderer proves the reply address off the registry row).
-    plain = envelope.wrap_fno_mail("hi", from_="stranger")
-    assert plain.startswith('<fno_mail from="stranger">')
-    assert "from_rank" not in plain
-    assert "from_name" not in plain
-
-
-def test_wrap_accepts_the_codex_full_session_reply_address(monkeypatch, tmp_path):
+def test_the_codex_row_names_the_sender(monkeypatch, tmp_path):
     import fno.mail.envelope as envelope
     registry = tmp_path / "codex.json"
     _write_registry(
@@ -237,93 +139,49 @@ def test_wrap_accepts_the_codex_full_session_reply_address(monkeypatch, tmp_path
         "hi",
         from_="quill-short",
         from_session="session-codex",
+        id="fmail-abc123def456",
         harness="codex",
     )
-    assert wrapped.startswith(
-        '<fno_mail from="session-codex" harness="codex" from_name="quill">'
-    )
+    assert wrapped.startswith("`@quill · fmail-abc123def456 · hi`")
 
 
 def test_envelope_overhead_budget(monkeypatch, tmp_path):
-    # The v2 header carries what the footers did, cheaper. Raising
-    # either bound is a decision a PR must argue, not a test fix.
+    # The header is the whole envelope: 55 characters over a 25-character
+    # body, crown-independent now that rank rides the registry. Raising the
+    # bound is a decision a PR must argue, not a test fix.
     import fno.mail.envelope as envelope
     body = "ship the compact envelope"
     full_id = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
     registry = tmp_path / "registry.json"
-    sender = {"name":"a", "status":"live", "harness":"claude", "cwd":"/repo",
-              "harness_session_id":full_id, "created_at":"2026-09-23T20:00:00Z",
-              "crown_level":2, "crown_scope":"epic-scope"}
-    reader = {"name":"b", "status":"live", "harness":"claude", "cwd":"/repo",
-              "harness_session_id":"reader", "created_at":"2026-09-23T20:00:00Z",
-              "crown_level":1, "crown_scope":"fno"}
-    _write_registry(registry, [sender, reader])
+    _write_registry(registry, [
+        {"name":"a", "status":"live", "harness":"claude", "cwd":"/repo",
+         "harness_session_id":full_id, "created_at":"2026-09-23T20:00:00Z",
+         "crown_level":2, "crown_scope":"epic-scope"},
+    ])
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     wrapped = envelope.wrap_fno_mail(
         body,
         from_="0199a1b2",
-        id="msg-fea270",
-        reply_to="msg-82c296",
-        to="08e8c104",
+        id="fmail-fea270b82c41",
         from_session=full_id,
         harness="claude",
-        to_session="reader",
     )
-    assert 'from_rank="Lead of epic-scope"' in wrapped
-    assert 'to_rank="Head of fno"' in wrapped
-    # Crowned overhead, measured 178 once from= rendered the short claude
-    # handle and from_name and to_name joined the header (176 at the
-    # reshaping, 537 before the compaction).
-    assert len(wrapped) - len(body) <= 200
-
-    sender.pop("crown_level")
-    sender.pop("crown_scope")
-    reader.pop("crown_level")
-    reader.pop("crown_scope")
-    _write_registry(registry, [sender, reader])
-    peer_wrapped = envelope.wrap_fno_mail(
-        body,
-        from_="0199a1b2",
-        id="msg-fea270",
-        reply_to="msg-82c296",
-        to="08e8c104",
-        from_session=full_id,
-        harness="codex",
+    assert wrapped.startswith(
+        "`@a · fmail-fea270b82c41 · ship the compact envelope`\n"
     )
-    assert "from_rank" not in peer_wrapped
-    assert "to_rank" not in peer_wrapped
-    # Peer overhead, measured 128 at the reshaping (311 after the compaction).
-    assert len(peer_wrapped) - len(body) <= 160
+    assert len(wrapped) - len(body) <= 80
 
 
-def test_wrap_is_paired_for_every_shape():
-    # The v2 precondition: every render through the public renderer is the
-    # paired envelope with no footer lines, whatever the shape; only the
-    # body may carry newlines.
-    shapes = [
-        dict(body="", from_="aaaa1111"),
-        dict(body="one line", from_="aaaa1111"),
-        dict(
-            body="line one\nline two",
-            from_="aaaa1111",
-            node="x-synth",
-            to="claude-bbbb2222",
-            id="msg-abc",
-            reply_to="msg-xyz",
-            harness="claude",
-            origin="peer",
-        ),
-    ]
-    for kwargs in shapes:
-        wrapped = wrap_fno_mail(**kwargs)
-        assert wrapped.startswith("<fno_mail "), wrapped
-        assert wrapped.endswith("</fno_mail>"), wrapped
-        open_end = wrapped.index(">") + 1
-        close_len = len("</fno_mail>")
-        assert wrapped[open_end:-close_len] == kwargs["body"], wrapped
-        assert not any(
-            line.startswith("-- ") for line in wrapped.splitlines()
-        ), wrapped
+def test_every_render_classifies_as_a_header_turn():
+    # Both public modes emit the one delivered shape the Rust door reads.
+    from fno.mail.envelope import mail_shape
+
+    wrapped = wrap_fno_mail(
+        "one line", from_="aaaa1111", id="fmail-abc123def456", origin="peer",
+    )
+    assert mail_shape([wrapped])[0]["framing"] == "header"
+    bare = fno_mail_open(from_="aaaa1111", id="fmail-abc123def456")
+    assert mail_shape([bare])[0]["framing"] == "header"
 
 
 def test_forged_envelope_body_is_refused_before_it_reaches_the_renderer():

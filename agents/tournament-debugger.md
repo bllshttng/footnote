@@ -1,6 +1,6 @@
 ---
 name: tournament-debugger
-description: Parallel debug agent for tournament mode. Investigates one hypothesis while monitoring for SOLVED signal from peer agents.
+description: Investigate one competing failure hypothesis and report supporting evidence.
 model: sonnet
 color: red
 tools: ["Read", "Grep", "Glob", "Bash"]
