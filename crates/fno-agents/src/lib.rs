@@ -91,6 +91,7 @@ pub mod claim_verbs;
 pub mod claims;
 pub mod claims_root;
 pub mod claude_adopt;
+pub(crate) mod adopt_identity;
 pub mod claude_ask;
 pub mod claude_attach;
 pub mod claude_config_tmp;
@@ -1406,6 +1407,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // A launch the spawn gate or the dispatch door refused before any
     // worker existed; the feed projects it so a refused launch shows.
     "agent_spawn_refused",
+    // A reaped session came back (client-emitted): one event per revive
+    // naming the verb, the actor session, the prior name and the session id.
+    "agent_revived",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",

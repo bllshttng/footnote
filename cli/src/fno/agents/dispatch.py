@@ -83,6 +83,11 @@ from fno.agents.registry import (
     resolve_registered_agent_across_sources,
     update_registry,
 )
+from fno.agents.spawn_revival import (
+    is_revival as _is_revival,
+    revival_replacement,
+    session_revival,
+)
 from fno.agents.crown import (
     calling_agent_row,
     crown_validation_error,
@@ -1847,18 +1852,7 @@ def _claude_create_path(
             # One row per session id: the same-name revival replaces its own
             # row; the short-id-named adopted row is replaced through the
             # resumed uuid it carries.
-            return [
-                entry
-                if (
-                    e.name == name
-                    or (
-                        resume_session_id
-                        and getattr(e, "harness_session_id", None) == resume_session_id
-                    )
-                )
-                else e
-                for e in entries
-            ]
+            return revival_replacement(entries, entry, name, resume_session_id)
         return entries + [entry]
 
     try:
@@ -2088,46 +2082,6 @@ def validate_spawn_name(name: str) -> None:
             f"({bad!r} would corrupt subprocess env injection)",
             exit_code=2,
         )
-
-
-def _is_revival(
-    existing: "AgentEntry", provider: str, resume_session_id: Optional[str]
-) -> bool:
-    """True iff spawning an existing row (found by name, or by the resumed
-    uuid when the row answers to another name) with ``--resume`` is a revival,
-    not a collision (Fix 3).
-
-    Gated on: the spawn carries ``--resume``, both the spawn and the row are
-    claude, the row's own recorded ``claude_session_uuid`` equals the ``--resume``
-    target, and the row's supervisor is NOT live. Liveness is a reality probe
-    (``session_is_live``), never the registry ``status`` field, so a row whose
-    supervisor is actually alive can never be revived into a second writer on one
-    transcript. Every other same-name case (live row, uuid mismatch, no
-    ``--resume``) stays fail-closed. The uuid check runs before the (heavier)
-    liveness probe so the common mismatch never pays for a socket connect.
-    """
-    if not resume_session_id or provider != "claude":
-        return False
-    if getattr(existing, "harness", None) != "claude":
-        return False
-    if getattr(existing, "harness_session_id", None) != resume_session_id:
-        return False
-    from fno.agents.harnesses import claude as claude_mod
-
-    short_id = getattr(existing, "short_id", "") or None
-    if short_id:
-        # A liveness-probe error fails SAFE toward "possibly live": never revive
-        # (--resume) into what could be a second writer on one transcript. A
-        # spurious collision refusal is retryable; a double writer is not. So a
-        # probe crash refuses the revival, it does not wave it through.
-        try:
-            if claude_mod.session_is_live(short_id):
-                return False
-        except Exception:
-            return False
-    return True
-
-
 def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str]]:
     """The route a relaunch of ``entry`` must come back on, or ``None``.
 
@@ -2660,17 +2614,12 @@ def dispatch_spawn(
                     exit_code=2,
                 )
             if resume_session_id and not revive:
-                session_row = next(
-                    (
-                        e
-                        for e in entries
-                        if getattr(e, "harness_session_id", None) == resume_session_id
-                    ),
-                    None,
-                )
-                if session_row is not None and _is_revival(
-                    session_row, harness, resume_session_id
-                ):
+                # The uuid-keyed fallback (found by name, then by the resumed
+                # uuid itself): an adopted short-id-named row revives under the
+                # caller's explicit --name too, or the row and the harness
+                # disagree.
+                session_row = session_revival(entries, harness, resume_session_id)
+                if session_row is not None:
                     existing = session_row
                     revive = True
 
