@@ -93,7 +93,6 @@ A	fno agents resume: registry read failed: {exc}	py=cli/src/fno/agents/resume_cl
 A	fno agents trace: agent name is required unless --all is set	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 A	fno backlog undispatched --json	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/next.rs|crates/fno-agents/src/backlog/undispatched.rs|crates/fno-agents/src/king_board.rs	# CLASSIFY protocol|msg-twin|data
 A	fno config set active_backlog.enabled true	py=cli/src/fno/doctor.py;rs=crates/fno-agents/src/backlog/rank_cli.rs	# CLASSIFY protocol|msg-twin|data
-A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client_tests/update_modal_tests.rs	# CLASSIFY protocol|msg-twin|data
 A	fno-agents-worker not found (set fno_agents_worker or install the runtime)	py=cli/src/fno/graph/store.py;rs=crates/fno/src/product_boundary.rs	# CLASSIFY protocol|msg-twin|data
 A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/king_board/prs.rs|crates/fno-agents/src/loopcheck/coverage_status.rs|crates/fno-agents/src/pr_status.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_agents_idle_exit_secs	py=cli/scripts/smoke/cursor-agent-keeper-journey.py;rs=crates/fno-agents/src/bin/daemon.rs	# CLASSIFY protocol|msg-twin|data
@@ -307,7 +306,6 @@ A	target-state.md.archived.*.md	py=cli/src/fno/pr/_review_hold.py;rs=crates/fno-
 A	target-state.terminal.*.md	py=cli/src/fno/pr/_review_hold.py;rs=crates/fno-agents/src/merge_grant.rs	# CLASSIFY protocol|msg-twin|data
 A	the child falls back to its account's own default.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
 A	the child receives that route's own model instead.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
-A	the resolved source failed the source-pin gate	py=cli/src/fno/update.py;rs=crates/fno-agents/src/source_pin.rs	# CLASSIFY protocol|msg-twin|data
 A	the rest reader raised an unexpected error; inspect the reader before retrying.	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	the row carries no scope or no crown level	py=cli/src/fno/agents/court.py;rs=crates/fno-agents/src/court_fold.rs	# CLASSIFY protocol|msg-twin|data
 A	this message runs {count} words. the cap is {cap} words.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
