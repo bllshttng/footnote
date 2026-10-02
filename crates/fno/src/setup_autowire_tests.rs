@@ -19,7 +19,10 @@ fn classify_claims_exactly_config_setup_auto_wire() {
 fn classify_forwards_everything_else() {
     assert_eq!(classify(&os(&["config", "setup"])), None);
     assert_eq!(classify(&os(&["config", "setup", "wizard"])), None);
-    assert_eq!(classify(&os(&["config", "setup", "auto-wire", "--json"])), None);
+    assert_eq!(
+        classify(&os(&["config", "setup", "auto-wire", "--json"])),
+        None
+    );
     assert_eq!(classify(&os(&["mux", "ls"])), None);
     assert_eq!(classify(&os(&["config", "get"])), None);
 }
@@ -31,11 +34,17 @@ fn outcome_lines_carry_the_wizard_wording() {
         "  Claude Code: installed"
     );
     assert_eq!(
-        outcome_line("Codex CLI", &Outcome::Already("fno@footnote 0.4.0; start a new Codex session".into())),
+        outcome_line(
+            "Codex CLI",
+            &Outcome::Already("fno@footnote 0.4.0; start a new Codex session".into())
+        ),
         "  Codex CLI: already installed (fno@footnote 0.4.0; start a new Codex session)"
     );
     assert_eq!(
-        outcome_line("Antigravity CLI", &Outcome::Manual("adapter ships in the plugin".into())),
+        outcome_line(
+            "Antigravity CLI",
+            &Outcome::Manual("adapter ships in the plugin".into())
+        ),
         "  Antigravity CLI: needs a manual finish - adapter ships in the plugin"
     );
     assert_eq!(
@@ -46,7 +55,9 @@ fn outcome_lines_carry_the_wizard_wording() {
 
 #[test]
 fn claude_plugin_list_ids_decide_installed() {
-    assert!(claude_list_has_fno(r#"[{"id": "fno@footnote"}, {"id": "x@y"}]"#));
+    assert!(claude_list_has_fno(
+        r#"[{"id": "fno@footnote"}, {"id": "x@y"}]"#
+    ));
     assert!(claude_list_has_fno(r#"[{"id": "fno@skills-dir"}]"#));
     assert!(!claude_list_has_fno(r#"[{"id": "x@footnote"}]"#));
     assert!(!claude_list_has_fno("not json"));
