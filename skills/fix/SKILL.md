@@ -1,6 +1,6 @@
 ---
 name: fix
-description: Repair a known issue or investigate a failure with a bounded evidence loop.
+description: Fix build failures and red tests, or investigate an error with an evidence-based loop.
 argument-hint: "[fix|investigate]  (fix: [from-debug] [--scope <glob>] [--guard <cmd>] [--category test|type|lint|build] [Iterations: N])"
 metadata:
   requires:
