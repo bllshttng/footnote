@@ -1,6 +1,6 @@
 ---
 name: roadmap-generator
-description: "Generates a prioritized task backlog from a vision document. Produces tasks with dependencies, priorities, and domain assignments for multi-session execution via megawalk."
+description: Turn a vision document into a prioritized backlog with dependencies and ownership.
 model: opus
 color: green
 tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]

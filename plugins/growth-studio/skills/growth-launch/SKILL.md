@@ -1,6 +1,6 @@
 ---
 name: growth-launch
-description: Growth-studio launch orchestrator. Drafts a four-role campaign bundle against verified product truth, runs the factual/brand/accessibility evaluators, and holds at a founder approval gate. Refuses outright when growth-studio is not activated. Dispatches no external effect.
+description: Draft and evaluate a growth campaign bundle, then stop at founder approval.
 pack: growth-studio
 metadata:
   requires:

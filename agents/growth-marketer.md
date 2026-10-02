@@ -1,6 +1,6 @@
 ---
 name: growth-marketer
-description: Marketing role subagent for growth-studio. Drafts campaign plans grounded in verified product-truth facts and on-brand voice. Holds no tool that can publish.
+description: Plan campaigns from verified product facts, audience needs, and brand voice.
 pack: growth-studio
 role: marketing
 tools: ["Read", "Write", "Glob", "Grep"]
