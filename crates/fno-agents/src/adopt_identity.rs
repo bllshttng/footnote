@@ -8,18 +8,17 @@ use crate::manifest_lookup::{find_manifest_for_session, ManifestIdentity};
 use crate::paths::AgentsHome;
 use crate::receipt::{read_reap_receipt, reap_receipt_path_for, ReapReceipt};
 use serde_json::Value;
-use std::path::Path;
 
 /// Where an adoption's evidence came from (the receipt line).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AdoptSource {
+pub(crate) enum AdoptSource {
     Registry,
     Manifest,
     HarnessStore,
 }
 
 impl AdoptSource {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             AdoptSource::Registry => "registry",
             AdoptSource::Manifest => "target manifest",
@@ -41,7 +40,8 @@ pub(crate) fn persist_manifest_identity(
     id: &ManifestIdentity,
     home: &AgentsHome,
 ) -> Result<Value, AdoptError> {
-    let mut entry = crate::client_verbs::mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
+    let mut entry =
+        crate::client_verbs::mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
     entry.last_message_at = crate::claude_adopt::transcript_stamp(id.canonical_session_id());
     // same missing-model closure as the roster adopt - the claude
     // transcript states the model; the provider comes only from the
@@ -145,7 +145,8 @@ pub(crate) fn synthesize_and_adopt(
     cross_project: bool,
 ) -> Result<(Value, Option<String>, AdoptSource), AdoptError> {
     let registry_path = home.registry_json();
-    let entries = crate::client_verbs::read_registry_entries(&registry_path).map_err(AdoptError::Io)?;
+    let entries =
+        crate::client_verbs::read_registry_entries(&registry_path).map_err(AdoptError::Io)?;
     // 1. Already registered (name / full id / short resolution, no store heal yet).
     if let Ok(e) = crate::client_verbs::find_agent_entry(&entries, session_id) {
         let fno_id = e
@@ -174,17 +175,25 @@ pub(crate) fn synthesize_and_adopt(
 /// already consulted the registry + harness stores, so this is just the manifest
 /// path. Returns the minted row (already upserted), `None` when no manifest
 /// matches, or the actual registry/serialization failure.
-pub(crate) fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Value>, AdoptError> {
+pub(crate) fn adopt_from_manifest(
+    session_id: &str,
+    home: &AgentsHome,
+) -> Result<Option<Value>, AdoptError> {
     let Ok(Some(id)) = find_manifest_for_session(session_id) else {
         return Ok(None);
     };
     persist_manifest_identity(&id, home).map(Some)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn adopt_tmpdir() -> tempfile::TempDir {
+        let td = tempfile::TempDir::new().unwrap();
+        crate::paths::pin_test_claims_root(td.path().join("claims-root").as_path());
+        td
+    }
+
     #[test]
     fn adopt_restores_the_identity_a_reap_receipt_kept() {
         let dir = adopt_tmpdir();
@@ -252,5 +261,4 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1, "only the revived session journals");
     }
-
 }

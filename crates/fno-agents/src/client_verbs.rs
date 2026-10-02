@@ -3435,7 +3435,7 @@ mod tests {
         })
         .unwrap();
 
-        let result = persist_manifest_identity(
+        let result = crate::adopt_identity::persist_manifest_identity(
             &ManifestIdentity {
                 harness: "codex".into(),
                 harness_session_id: "01a0152f-45fd-78f0-b109-78f8dffdeeca".into(),
@@ -4481,7 +4481,8 @@ mod tests {
         upsert_synthesized_row(&home.registry_json(), seeded).unwrap();
         upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t2")).unwrap();
         let (row, fno_id, source) =
-            synthesize_and_adopt("thread-seed-1234", &home, false).expect("seeded row resolves");
+            crate::adopt_identity::synthesize_and_adopt("thread-seed-1234", &home, false)
+                .expect("seeded row resolves");
         assert_eq!(source, AdoptSource::Registry);
         assert_eq!(
             row.get("harness_session_id").and_then(Value::as_str),
@@ -4513,7 +4514,11 @@ mod tests {
         let home = AgentsHome::from_env();
         // A full session id absent from the registry, from every worktree manifest
         // (cwd is a bare tempdir), and from the harness stores. No row is written.
-        let res = synthesize_and_adopt("deadbeef-1111-2222-3333-444455556666", &home, false);
+        let res = crate::adopt_identity::synthesize_and_adopt(
+            "deadbeef-1111-2222-3333-444455556666",
+            &home,
+            false,
+        );
         assert!(
             matches!(res, Err(AdoptError::NoEvidence) | Err(AdoptError::Io(_))),
             "miss must refuse, not mint; got {res:?}"
