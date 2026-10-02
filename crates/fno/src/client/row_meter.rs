@@ -43,7 +43,7 @@ pub(super) const CTX_NEAR_COMPACT_PCT: u8 = 80;
 
 pub(super) fn ctx_bar(pct: Option<u8>) -> String {
     let Some(pct) = pct else {
-        return "-".to_string();
+        return format!("{:<CTX_BAR_W$}", "-");
     };
     format!("{:<CTX_BAR_W$}", ctx_meter_text(pct, CTX_BAR_CELLS))
 }

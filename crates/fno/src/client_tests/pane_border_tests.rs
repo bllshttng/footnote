@@ -123,8 +123,9 @@ fn pane_border_renders_the_focused_frame() {
     // Rounded corners.
     assert_eq!(top[64], '╭');
     assert_eq!(top[99], '╮');
-    // Unfocused neighbour: caps-less tab, cut to 10 cols of name.
-    assert!(seg(28, 63).contains("─ king-5317… ─"), "{top:?}");
+    // Unfocused neighbour: caps-less tab, the 10-col name clips with no
+    // marker, so the last char is the name's own dash.
+    assert!(seg(28, 63).contains("─ king-5317- ─"), "{top:?}");
     // Content blits at the content origin.
     assert_eq!(lines[2][P10_CONTENT], 'a');
     assert_eq!(lines[2][65], 'b');

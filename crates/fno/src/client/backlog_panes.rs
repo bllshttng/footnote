@@ -482,13 +482,16 @@ mod tests {
     }
 
     // AC13-HP: two rows cannot hold the hint, so the tail drops with no
-    // marker (the ROW rule, d-36438ea4).
+    // marker (the ROW rule, d-36438ea4). Every painted word is whole.
     #[test]
     fn hint_drops_the_tail_when_two_rows_cannot_hold_it() {
         let long = "word ".repeat(60);
         let [a, b] = hint_rows(long.trim(), 20);
         assert!(!b.contains('\u{2026}'), "{b:?}");
-        assert!(!b.contains("word"), "the overflow word drops whole: {b:?}");
+        assert!(
+            b.split(' ').all(|w| w == "word"),
+            "no partial word survives the cut: {b:?}"
+        );
         assert!(a.chars().count() <= 20);
     }
 

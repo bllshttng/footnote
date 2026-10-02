@@ -460,10 +460,10 @@ mod tests {
 
     #[test]
     fn top_clips_the_name_at_the_floor() {
-        // 20 cols WITH a grip: the tab zone is 6, the name gets 2 => `k`.
+        // 20 cols WITH a grip: the tab zone is 6, the name gets 2 => `ki`.
         let e = edges(&full(), rect(20, 12), true);
         assert!(!s(&e.top).contains('…'), "{:?}", s(&e.top));
-        assert!(s(&e.top).contains("k "), "{:?}", s(&e.top));
+        assert!(s(&e.top).contains("ki "), "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert_eq!(cols_of(&e.top), 20);
     }
