@@ -8,7 +8,6 @@
 const PIPE_KEEP_BYTES: usize = 64 * 1024 * 1024;
 
 fn keep_capped<R: std::io::Read>(pipe: Option<R>, name: &str) -> Vec<u8> {
-    use std::io::Read;
     let mut kept: Vec<u8> = Vec::new();
     let Some(mut pipe) = pipe else {
         return kept;
