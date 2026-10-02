@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use common::{spawn_server, ClientHarness, Scratch};
 
-const HUMAN_ADMIT: &str = "admitting a human's own start anyway";
+const HUMAN_ADMIT: &str = "machine is busy; agents are slowed";
+/// The log a TTY-less server writes carries the measured detail, never the
+/// gate narration.
+const SERVER_WAIVER: &str = "reason=over-limit";
 
 /// Over the fleet ceiling, a human's `fno` still starts its server and
 /// attaches. A second live `fno` process makes the census count 1, which
@@ -45,7 +48,7 @@ fn human_attach_passes_the_fleet_process_ceiling() {
     h.wait_prompt(30);
     let log = std::fs::read_to_string(scratch.0.join("server.log")).unwrap_or_default();
     assert!(
-        log.contains(HUMAN_ADMIT),
+        log.contains(SERVER_WAIVER) && log.contains("; waived") && !log.contains("admitting"),
         "the ceiling must have been met and waived:\n{log}"
     );
 }
