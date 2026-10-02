@@ -53,4 +53,4 @@ merge-base Python and binary.
 One case was refreshed after main moved under the capture: main merged
 `56456eba70` (declare zcode a harness) after the goldens were taken, so the
 `harness-unknown-config-provider` case's `valid:` roster grew `zcode`. The
-composition did not change.
+composition did not change. Declaring `footnote` a harness grew the same roster by `footnote`, refreshed the same way.

@@ -3363,6 +3363,7 @@ mod tests {
             reason: None,
             received_at: stamp.into(),
             ttl_ms: None,
+            posture: None,
         }
     }
 

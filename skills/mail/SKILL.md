@@ -46,6 +46,7 @@ happens when that misses, and it is recovery, not delivery.**
 
 - `msg-<id> delivered (hosted)` - the live inject was accepted. It does not prove the recipient read it.
 - `msg-<id> queued (durable)` - live delivery was not confirmed. This is durable fallback, not delivery.
+- the receipt ends `landed (...)` or a `NOT LANDED` block - the send verb re-checked the recipient after a settle window, and NOT LANDED names the recovery and verify commands for that substrate and exits non-zero (14).
 
 The recipient's own `unread` / `ack` / `drain-self` verbs exist to consume that
 fallback queue, which is why they read like a mailbox. They are the recovery

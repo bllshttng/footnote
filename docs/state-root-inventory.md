@@ -146,7 +146,8 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `relay-claude/` | Claude Code itself, via a `CLAUDE_CONFIG_DIR` account alias | operator-managed harness home. Never fno state, never swept. |
 | `retro-pending/` | `paths.retro_pending_dir()`, written by `cli/src/fno/retro/sweep.py` | per-PR retro evidence awaiting harvest |
 | `review-invocations/` | `cli/src/fno/review/invocation.py`, `crates/fno-agents/src/codex_inject.rs` | one invocation record per review round |
-| `sessions/` | `scripts/save-session.py` | one transcript per saved session, written on demand |
+| `saved-sessions/` | `scripts/save-session.py` | one transcript per saved session, written on demand |
+| `sessions/<project-slug>/<fno_id>/` | `crates/fno-agents/src/footnote_harness/transcript.rs` | one dir per `-H footnote` session: `transcript.jsonl` (the record), `writer.lock`, `index.db`, `spill/`, `diag.log`. The slug is the canonical checkout's space slug, `_none` outside a repo. Permanent; never holds credentials |
 | `spaces/` | the project-space layout (`cli/src/fno/paths.py`, `crates/fno-agents/src/state_path.rs`) | permanent; detailed in the project-space section below |
 | `worktree-salvage/` | `hooks/worktree-salvage-ref.sh`, `scripts/setup/setup-worktree.sh` | salvage-mirror state per worktree |
 | `state/` | `hooks/git-protection.py` (`state/git-protection.json`), `crates/fno-agents/src/operator_notice.rs` (`state/notify-signals.json` via `place`), `hooks/worktree-peers-session-start.sh` (`state/.worktree-stranded-cache.json` + refresh stamp in the ambient branch), `crates/fno-agents/src/machine_watch.rs` (`state/machine-brake.json` via `place`; spawn admission reads the same table row in `crates/fno/src/process_admission.rs`) | rewritten runtime state; newer bytes win, and every value here is safe to delete (the next write rebuilds it) |

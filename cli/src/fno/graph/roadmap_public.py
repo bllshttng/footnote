@@ -25,30 +25,6 @@ from fno.graph.statuses import derived_status
 # The statuses a PUBLIC backlog page shows. The local board shows every row.
 PUBLIC_BACKLOG_STATUSES = ("in_progress", "ready", "blocked", "idea")
 
-GROUPS = (
-    ("agents / spawn / dispatch", r"spawn|dispatch|agent|worker|roster|registry|retask|handoff|successor"),
-    ("review & attestation", r"review|attest|coverage|verdict|finding|sigma|peer"),
-    ("PR / merge / CI", r"\bpr\b|merge|\bci\b|check|smoke|pytest|mypy|lint|guard|workflow"),
-    ("identity / session / claims", r"session|identity|claim|short.?id|uuid|lock|liveness|crown|king"),
-    ("backlog / graph / board", r"backlog|graph|node|kanban|board|rank|triage|carveout|groom"),
-    ("mux / panes / tui", r"\bmux\b|pane|tmux|tui|squad|keymap|menu"),
-    ("config / paths / install", r"config|path|install|deploy|doctor|update|version|schema"),
-    ("mail & messaging", r"mail|envelope|inbox|message|relay|notify|digest"),
-    ("providers / models / routing", r"provider|model|route|harness|codex|claude|gemini|zai|glm|account|quota"),
-    ("plans / target / loop", r"plan|target|loop|wave|blueprint|execute|phase|stop.?hook|compact"),
-    ("worktree / git", r"worktree|git\b|branch|rebase|checkout"),
-    ("observability / cost", r"metric|cost|budget|telemetry|event|observab|watchdog|monitor"),
-    ("docs / skills / prose", r"doc\b|docs|skill|readme|prose|style"),
-)
-
-
-def group_for(entry: dict) -> str:
-    haystack = f"{entry.get('title', '')} {entry.get('slug', '')}".lower()
-    for name, pattern in GROUPS:
-        if re.search(pattern, haystack):
-            return name
-    return "uncategorized"
-
 
 def load_render_entries(entries: list[dict] | None = None) -> list[dict]:
     """Overlay archive on a guarded display read or the canonical graph seam."""
@@ -344,12 +320,6 @@ def _state_file_collisions(path: Path) -> list[str]:
         return []
 
 
-def GRAPH_HTML_PATH() -> Path:
-    from fno.graph._constants import GRAPH_HTML
-
-    return Path(GRAPH_HTML)
-
-
 def _default_targets() -> "list[RenderTargetConfig]":
     """The canonical local board, as an ordinary render-target row.
 
@@ -538,6 +508,40 @@ def canonical_target() -> "RenderTargetConfig | None":
         if Path(os.path.expanduser(target.path)).resolve() == resolved:
             return target
     return None
+
+
+def render_public_backlog_html(project: str, out_path: str) -> bool:
+    """Write the public open-work page through the native front binary.
+
+    Selection and the title gate run inside ``fno board-render``'s public
+    mode, beside the output allowlist; this handoff carries only the path
+    and the project scope. True when the render wrote.
+    """
+    import json
+    import subprocess
+
+    from fno.rust_binary import resolve_front_binary
+
+    binary = resolve_front_binary()
+    if binary is None:
+        print("Warning: public backlog HTML render skipped: the native fno binary was not found",
+              file=sys.stderr)
+        return False
+    request = json.dumps({"targets": [{"path": os.path.expanduser(out_path)}],
+                          "public": {"project": project}})
+    try:
+        done = subprocess.run([str(binary), "board-render"], input=request,
+                              capture_output=True, text=True, timeout=600)
+    except Exception as exc:  # noqa: BLE001 - the caller turns False into exit 1
+        print(f"Warning: public backlog HTML render failed: {exc}", file=sys.stderr)
+        return False
+    if done.returncode != 0:
+        err = (done.stderr or "").strip()
+        if "unknown field" in err:
+            err += " (the installed fno predates the public board render; run `fno doctor update --rust`)"
+        print(f"Warning: public backlog HTML render failed: {err[:300]}", file=sys.stderr)
+        return False
+    return True
 
 
 def render_local_targets() -> int:

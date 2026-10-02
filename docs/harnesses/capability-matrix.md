@@ -27,24 +27,25 @@ Every non-native cell settles the same way: a live-tier run of the declared inst
 | cursor-agent | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) |
 | grok | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `native` (1.0.13, 2026-09-02) | `unmeasured` (no reader declared) |
 | zcode | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `native` (3.14.3, 2026-09-29) | `unmeasured` (no reader declared) |
+| footnote | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) |
 
 
 ## Journey classes
 
 The ten user-journey classes the cross-harness audits name, one row per class, one cell per harness. A cell reads unmeasured until a live-tier run earns it; nobody looked is not measured absence. The wait-for-CI row is settled by code, not by a table word: the watch lease permits only claude to idle, and every other harness reads absent with its refusal quoted.
 
-| journey | instrument | claude | codex | gemini | agy | opencode | pi | hermes | openclaw | cursor-agent | grok | zcode |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| fresh-install | the fresh-install read is the OpenCode installation surface's filtered catalog reader, which has not landed; the unfiltered catalog read is refused as blind because another plugin's mirrored fno: registrations satisfy it with no footnote install | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| spawn-turn-resume | runner: live rubric: SPAWN + IDENTITY lines (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| parent-children | the behavior it measures, a parent worker holding children under a concurrency cap, is owned by the continuation-correctness work and has not landed; until then the cell reads unmeasured, never asserted | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| send-during-active-work | runner: live rubric: MAIL BOTH WAYS line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| wait-for-ci | runner: the watch lease (loopcheck): only a claude session may idle today; every other harness reads absent with its refusal quoted (live tier) | `native` | `native` | `native` | `native` | `native` | `native` | `absent` watching ignored: harness hermes cannot idle | `absent` watching ignored: harness openclaw cannot idle | `absent` watching ignored: harness cursor-agent cannot idle | `absent` watching ignored: harness grok cannot idle | `absent` watching ignored: harness zcode cannot idle |
-| compact-reopen | runner: live rubric: SURVIVE line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| restart-viewport | no live fleet restart is part of the work that declares this journey, so the viewport restart is unprobeable here; nobody looked is not measured absence, and the cell renders unmeasured | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| review-ship | declared, never driven: the review-and-ship journey opens a review lane against a live PR, which no one-shot instrument reaches and no isolated run may open | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| native-remote-view | runner: live rubric: VIEW line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| cleanup | runner: live rubric: row-removal check (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| journey | instrument | claude | codex | gemini | agy | opencode | pi | hermes | openclaw | cursor-agent | grok | zcode | footnote |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fresh-install | the fresh-install read is the OpenCode installation surface's filtered catalog reader, which has not landed; the unfiltered catalog read is refused as blind because another plugin's mirrored fno: registrations satisfy it with no footnote install | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| spawn-turn-resume | runner: live rubric: SPAWN + IDENTITY lines (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| parent-children | the behavior it measures, a parent worker holding children under a concurrency cap, is owned by the continuation-correctness work and has not landed; until then the cell reads unmeasured, never asserted | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| send-during-active-work | runner: live rubric: MAIL BOTH WAYS line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| wait-for-ci | runner: the watch lease (loopcheck): only a claude session may idle today; every other harness reads absent with its refusal quoted (live tier) | `native` | `native` | `native` | `native` | `native` | `native` | `absent` watching ignored: harness hermes cannot idle | `absent` watching ignored: harness openclaw cannot idle | `absent` watching ignored: harness cursor-agent cannot idle | `absent` watching ignored: harness grok cannot idle | `absent` watching ignored: harness zcode cannot idle | `absent` watching ignored: harness footnote cannot idle |
+| compact-reopen | runner: live rubric: SURVIVE line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| restart-viewport | no live fleet restart is part of the work that declares this journey, so the viewport restart is unprobeable here; nobody looked is not measured absence, and the cell renders unmeasured | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| review-ship | declared, never driven: the review-and-ship journey opens a review lane against a live PR, which no one-shot instrument reaches and no isolated run may open | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| native-remote-view | runner: live rubric: VIEW line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| cleanup | runner: live rubric: row-removal check (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
 
 ## Measured over declared
 
@@ -59,6 +60,7 @@ The ten user-journey classes the cross-harness audits name, one row per class, o
 - cursor-agent: 0 of 11 measured
 - grok: 1 of 11 measured (9%)
 - zcode: 1 of 11 measured (9%)
+- footnote: 0 of 11 measured
 
 ## Readers (row legend)
 
@@ -73,3 +75,4 @@ The ten user-journey classes the cross-harness audits name, one row per class, o
 - cursor-agent: no cell carries a measurement receipt
 - grok: spawn by session-id resume journey (1.0.13, 2026-09-02)
 - zcode: spawn by session-id resume journey (3.14.3, 2026-09-29)
+- footnote: no cell carries a measurement receipt

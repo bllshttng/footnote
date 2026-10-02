@@ -506,9 +506,10 @@ mod tests {
         assert_eq!(argv[4], "--output-format");
         assert_eq!(argv[5], "stream-json");
         assert!(!argv.contains(&"--resume".to_string()));
+        resume_argv_resumes_by_session_id();
+        passthrough_args_ride_last();
     }
 
-    #[test]
     fn resume_argv_resumes_by_session_id() {
         let argv = build_argv(
             Some("sess_60de086c-9278-4b56-addb-39445b2e6636"),
@@ -528,7 +529,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn passthrough_args_ride_last() {
         let argv = build_argv(None, "seed", None, true, &["--verbose".to_string()]).unwrap();
         assert_eq!(argv.last().map(String::as_str), Some("--verbose"));

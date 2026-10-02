@@ -5,9 +5,10 @@ Enforces the monotonic progression:
 
 Speaks the same words as the graph `_status` ladder, one per rung. `idea` sits
 below `design` as the pre-design rung, and `done`/`superseded` are off-axis
-terminals. GRAPH_TO_PLAN_STATUS survives the unification because two of its
-rows are not renames at all: `blocked` and `deferred` map to None, the gate
-that keeps a graph-side pause from writing plan state.
+terminals. The graph-to-plan projection lives in the Rust keeper now
+(crates/fno-agents/src/plan_doc/status.rs); its two None rows for `blocked`
+and `deferred` are the gate that kept a graph-side pause from writing plan
+state, and the gate moved with the port.
 
 `idea` was originally absent here, justified by "`idea` has no plan doc so it
 never appears" - an assumption `scaffold_separate_plan` invalidated the moment
@@ -31,7 +32,7 @@ StatusTransitionError. No silent fallbacks.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 STATUS_PROGRESSION: tuple[str, ...] = (
     "idea",
@@ -55,46 +56,10 @@ STATUS_ALIASES: dict[str, str] = {
     "stub": "idea",
 }
 
-# The full plan-status vocabulary the reconcile sweep leaves untouched: canonical
-# axis + terminals + every retired spelling. A retired spelling is valid input,
-# not drift, so the sweep must not "correct" it.
-KNOWN_STATUSES: frozenset[str] = (
-    frozenset(STATUS_PROGRESSION) | frozenset(TERMINAL_STATUSES) | frozenset(STATUS_ALIASES)
-)
-
-# Graph derived `_status` -> plan `status` projection. Total over the
-# graph vocabulary; None means "no plan write" (a graph-side gate that must not
-# touch plan state). Identity on every rung: unified the spellings and
-# `idea`'s last non-identity row retired once `idea` became a plan-side rung. It
-# survives for its None rows, which are real behavior with no naming
-# component.
-GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
-    "idea": "idea",  # doc may exist (a decompose scaffold) but is undesigned
-    "design": "design",  # doc exists but is still a design doc
-    "ready": "ready",
-    "in_progress": None,  # a claim is reversible and the plan axis is
-    "claimed": None,  # forward-only: plan state stands, same reason as `deferred`
-    "blocked": None,  # graph-side gate; plan keeps its current state
-    "in_review": "in_review",  # PR open = implementation complete
-    "done": "done",  # merged
-    "superseded": "superseded",
-    "deferred": None,  # pause is reversible; plan state stands
-}
-
-# Forward-only ordering for the projection. Keyed by the plan vocabulary, so it
-# moves with any rename or the guard silently stops matching. `done` caps the
-# axis; `superseded` is a terminal reachable from any non-terminal state and is
-# never rank-compared. `idea` sits at -1, the same rank an unknown/absent status
-# gets from the `.get(cur, -1)` default below, so it is never a projection
-# TARGET: a graph-side `idea` can only leave a doc where it is, never demote one.
-_PROJECTION_RANK: dict[str, int] = {
-    "idea": -1,
-    "design": 0,
-    "ready": 1,
-    "in_progress": 2,
-    "in_review": 3,
-    "done": 4,
-}
+# The reconcile sweep and its projection moved to the Rust keeper
+# (crates/fno-agents/src/plan_doc/reconcile.rs); the Python copies of the
+# projection tables are gone. This module keeps the transition ladder and the
+# read-path aliases only.
 
 
 def _norm_status(raw: object) -> str:
@@ -110,31 +75,6 @@ def canonical_status(raw: object) -> str:
     """
     s = _norm_status(raw)
     return STATUS_ALIASES.get(s, s)
-
-
-def project_plan_status(current: object, graph_status: str) -> Optional[str]:
-    """Plan status to WRITE for a node in ``graph_status``, or None to leave it.
-
-    Forward-only along design < ready < in_progress < in_review < done. Returns
-    None when the graph status maps to no write, the target equals the current
-    status, or the target would be a backward move (graph wins forward, a human
-    hand-edit wins backward). ``superseded`` is written over any non-terminal
-    plan state but never over ``done`` or ``superseded``.
-    """
-    target = GRAPH_TO_PLAN_STATUS.get(graph_status)
-    if not target:
-        return None
-    cur = canonical_status(current)
-    if target == cur:
-        return None
-    if target == "superseded":
-        return None if cur in ("done", "superseded") else "superseded"
-    # target is a forward-axis status (design..done)
-    if cur in ("done", "superseded"):
-        return None  # terminal: never auto-rewritten forward off a terminal
-    if _PROJECTION_RANK[target] <= _PROJECTION_RANK.get(cur, -1):
-        return None
-    return target
 
 
 class StatusTransitionError(ValueError):
