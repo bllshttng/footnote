@@ -19,7 +19,6 @@ impl Drop for AgentSelfFixture {
     }
 }
 
-
 /// The shared admission fixture's payload for one verdict, as the probe
 /// would print it: the same file the Python suite pins, so these tests
 /// cannot grow their own reading.
