@@ -1,5 +1,7 @@
 # Lines that QUOTE `uv tool install` without running it: log/err strings,
 # user-facing hints, docstrings, and test fixtures asserting on message text.
+# the native updater runs the install from argv parts, never this literal; the string is the capped-race explanation it prints.
+crates/fno/src/doctor_update.rs::"fno: uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run."
 # Keyed <path>::<whitespace-collapsed line>. A baseline entry that matches
 # nothing anymore fails the check, so this file cannot rot silently.
 # A real run site is NOT baseline-able: it must carry --compile-bytecode.
@@ -9,13 +11,9 @@
 .claude-plugin/postinstall.sh::err "uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run."
 crates/fno/src/bootstrap.rs::const RACE_CAP_MSG: &str = "uv tool install hit the directory race (os error 66) three times. \
 cli/src/fno/config/registry.py::"dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
-cli/src/fno/update.py::f'if [ "$__sig" = 1 ]; then echo "fno: uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run." >&2; fi; '
 cli/tests/smoke/cargo_bootstrap_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 cli/tests/smoke/fno_sh_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 cli/tests/smoke/test_postinstall.sh::for needle in "uv tool install" "pip install --user" "ERROR:"; do
-cli/tests/unit/test_update.py::(l for l in output.splitlines() if "uv tool install" in l), ""
-cli/tests/unit/test_update.py::assert "uv tool install --reinstall-package fno" in line
-cli/tests/unit/test_update.py::assert line.index("uv tool install") < line.index("printf")
 # tests/ci/test_reinstall_window_narrow.sh: the fail-message below QUOTES the
 # command. The run line carries --compile-bytecode hoisted where the gate sees
 # it; the reinstall/refresh form flags live in uv_args at the call sites.
