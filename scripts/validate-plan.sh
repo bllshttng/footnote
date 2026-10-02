@@ -736,41 +736,7 @@ echo ""
 echo "--- Parallel Conflict Check ---"
 
 if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
-    wave_gate_date="2026-10-02"
-    bin=$(resolve_agents_bin)
-    if [[ -z "$bin" ]]; then
-        warn "plan: parallel wave checks NOT CHECKED (no fno-agents binary) - not a pass"
-    else
-        wave_output=""
-        wave_rc=0
-        wave_output=$("$bin" wave check "$PLAN_DIR") || wave_rc=$?
-        if [[ "$wave_rc" -ne 0 ]]; then
-            warn "plan: parallel wave checks NOT CHECKED (the check failed to run: ${wave_output##*$'\n'}) - not a pass"
-        else
-            wave_receipts=()
-            wave_created=$(_plan_created_date "$PLAN_DIR")
-            while IFS=$'\t' read -r wave_kind wave_payload; do
-                case "$wave_kind" in
-                    E) error "$wave_payload" ;;
-                    X)
-                        if [[ ! "$wave_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-                            error "$wave_payload (and no readable created: date to tell this plan from a pre-gate one)"
-                        elif [[ "$wave_created" > "$wave_gate_date" ]]; then
-                            error "$wave_payload"
-                        else
-                            warn "$wave_payload (created $wave_created, not after the $wave_gate_date wave gate)"
-                        fi ;;
-                    O) wave_receipts+=("$wave_payload") ;;
-                    U) warn "plan: parallel wave checks NOT CHECKED ($wave_payload) - not a pass" ;;
-                esac
-            done <<< "$wave_output"
-            if [[ $ERRORS -eq 0 ]]; then
-                for wave_receipt in ${wave_receipts[@]+"${wave_receipts[@]}"}; do
-                    ok "plan: $wave_receipt"
-                done
-            fi
-        fi
-    fi
+    ok "semantic wave checks run through the Rust gate in Answerer Enumeration"
 elif [[ -f "$PLAN_DIR" ]]; then
     # Find parallel waves in the Execution Strategy YAML: lines like
     # "mode: parallel" followed by tasks. Strategy: extract task IDs listed
@@ -1739,13 +1705,71 @@ check_surface_file() {
     fi
 }
 
+check_wave_file() {
+    local file="$1" label="$2"
+    local wave_gate_date="2026-10-02"
+    local base node_id node_cwd="" repo_root bin wave_output wave_rc=0
+    local wave_created kind payload
+    local wave_errors=0
+    local -a receipts=()
+    [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]] || return 0
+
+    base="$(dirname "$file")"
+    node_id="$(_plan_node_id "$file")"
+    if [[ -n "$node_id" ]] && command -v fno >/dev/null 2>&1 \
+        && node_cwd="$(fno backlog get "$node_id" --strict --field _resolved_cwd 2>/dev/null)"; then
+        [[ -d "$node_cwd" ]] && base="$node_cwd"
+    fi
+    repo_root="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$repo_root" ]] || repo_root="$(cd "$base" && pwd)"
+    bin="$(resolve_agents_bin)"
+    if [[ -z "$bin" ]]; then
+        warn "$label: parallel wave checks NOT CHECKED (no fno-agents binary) - not a pass"
+        return 0
+    fi
+
+    wave_output="$("$bin" wave check "$file" --repo "$repo_root")" || wave_rc=$?
+    if [[ "$wave_rc" -ne 0 ]]; then
+        warn "$label: parallel wave checks NOT CHECKED (the check failed to run: ${wave_output##*$'\n'}) - not a pass"
+        return 0
+    fi
+
+    wave_created="$(_plan_created_date "$file")"
+    while IFS=$'\t' read -r kind payload; do
+        case "$kind" in
+            E) error "$label: $payload"; wave_errors=$((wave_errors + 1)) ;;
+            X)
+                if _is_quick_plan; then
+                    warn "$label: $payload (quick plan)"
+                elif [[ "$wave_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ \
+                    && "$wave_created" > "$wave_gate_date" ]]; then
+                    error "$label: $payload"
+                    wave_errors=$((wave_errors + 1))
+                else
+                    warn "$label: $payload (created ${wave_created:-unknown}, not after the $wave_gate_date wave gate)"
+                fi ;;
+            O) receipts+=("$payload") ;;
+            W) warn "$label: $payload" ;;
+            U) warn "$label: parallel wave checks NOT CHECKED ($payload) - not a pass" ;;
+        esac
+    done <<< "$wave_output"
+    if [[ $wave_errors -eq 0 ]]; then
+        local receipt
+        for receipt in ${receipts[@]+"${receipts[@]}"}; do
+            ok "$label: $receipt"
+        done
+    fi
+}
+
 echo ""
 echo "--- Answerer Enumeration ---"
 
 if [[ -f "$PLAN_DIR" ]]; then
     check_surface_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+    check_wave_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
     check_surface_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
+    check_wave_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
 fi
 
 # -------------------------------------------------------------------

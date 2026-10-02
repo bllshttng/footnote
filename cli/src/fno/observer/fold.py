@@ -203,7 +203,7 @@ def _surface_collisions(plan_text: str) -> Optional[list[str]]:
             )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if result.returncode != 0 or any(line.startswith("U\t") for line in result.stdout.splitlines()):
+    if result.returncode or any(line[:2] in ("U\t", "W\t") for line in result.stdout.splitlines()):
         return None
     return [
         line.split("\t", 1)[1]
