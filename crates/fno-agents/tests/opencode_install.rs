@@ -179,6 +179,9 @@ fn install_targets_the_binary_writes_the_full_surface_and_reinstall_is_a_noop() 
     assert_eq!(receipt.skipped, 8);
     assert_eq!(mtime(&s.conf.join("commands/fno:target.md")), before);
     assert_eq!(read(&manifest_path(&s.conf)), manifest_before);
+    // Drop the env lock: the targeting legs re-scratch, and the lock is
+    // held by the live Scratch until it drops.
+    drop(s);
     // (a) The binary's debug paths chooses the root; a v2 binary renders
     // the `permissions` list there and the receipt names the binary, the
     // root source, and the reported version.
