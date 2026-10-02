@@ -1713,6 +1713,7 @@ check_wave_file() {
     local wave_errors=0
     local -a receipts=()
     [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]] || return 0
+    grep -Eq '^##[[:space:]]+Execution Strategy[[:space:]]*$' "$file" || return 0
 
     base="$(dirname "$file")"
     node_id="$(_plan_node_id "$file")"
@@ -2306,6 +2307,7 @@ validate_task_edges_check() {
             return 0
         fi
     fi
+    [[ -f "$plan_file" ]] || return 0
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
         python_bin="${_src%%|*}"

@@ -730,7 +730,7 @@ fn run_fork_at(
     let strategy = parse_strategy(plan)?;
     let wave = select_wave(&strategy, number)?;
     let task_ids = selected_task_ids(wave, requested_tasks)?;
-    if wave.mode != "parallel" || task_ids.len() < 2 {
+    if wave.mode != "parallel" || wave.tasks.len() < 2 {
         return Err("wave fork requires a parallel wave with at least two tasks".into());
     }
     let base = git_text(&cwd, &["rev-parse", "HEAD"])?;
@@ -919,6 +919,9 @@ fn run_join_at(
     let strategy = parse_strategy(plan)?;
     let wave = select_wave(&strategy, number)?;
     let task_ids = selected_task_ids(wave, requested_tasks)?;
+    if wave.mode != "parallel" || wave.tasks.len() < 2 {
+        return Err("wave join requires a parallel wave with at least two tasks".into());
+    }
     let dirty = git_text(&cwd, &["status", "--porcelain", "--untracked-files=all"])?;
     if !dirty.is_empty() {
         return Err("wave join requires a clean target worktree".into());
