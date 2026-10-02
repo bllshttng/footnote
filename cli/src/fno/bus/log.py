@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from fno.rust_binary import chats_verb
 from fno.time_budget import validate_timeout_budget
 
 
@@ -171,9 +172,7 @@ class Envelope:
 
 
 def new_msg_id() -> str:
-    """Generate a 'fmail-XXXXXXXXXXXX' id (12 hex chars); the Rust twin is
-    announce.rs::new_msg_id. Pre-widening 'msg-XXXXXX' ids stay legal
-    forever and resolve through the migrated chats rows."""
+    """A 'fmail-XXXXXXXXXXXX' id (12 hex); Rust twin announce.rs::new_msg_id."""
     return "fmail-" + secrets.token_hex(6)
 
 
@@ -394,17 +393,6 @@ def _rotate_locked(live: Path) -> None:
     os.replace(str(live), f"{live}.1")
 
 
-CHATS_MESSAGE_KINDS = frozenset({"send", "announce"})  # Rust twin: chats.rs MESSAGE_KINDS
-
-
-def _chats_record(line: str) -> None:
-    """Record one bus line through the chats door; raises on failure (the
-    caller aborts message sends, warns on receipts)."""
-    from fno.rust_binary import verb_call
-
-    verb_call(["chats", "append"], json.loads(line), timeout=30)
-
-
 def append(env: Envelope) -> None:
     """Append one envelope to the log under the sidecar flock.
 
@@ -416,14 +404,12 @@ def append(env: Envelope) -> None:
     covered by the cursor fallback: a cursor whose message-id is not found in the
     retained scan rescans all segments rather than declaring loss, so a message
     is at most delayed by one drain cycle, never dropped.
-
-    Record seam: message kinds record first (fail closed), receipts after.
     """
     live = bus_log_path()
     line = to_json_line(env) + "\n"
     data = line.encode("utf-8")
-    if env.kind in CHATS_MESSAGE_KINDS and not env.delivery:
-        _chats_record(to_json_line(env))
+    if env.kind in ("send", "announce") and not env.delivery:  # chats record kinds
+        chats_verb(["append"], json.loads(to_json_line(env)))  # record seam, fail closed
     with _Flock(_lock_path()):
         try:
             if live.exists() and live.stat().st_size >= _max_bytes():
@@ -459,9 +445,9 @@ def append(env: Envelope) -> None:
             os.close(fd)
     if env.delivery in (HOSTED_DELIVERY, TYPED_DELIVERY) or env.kind == LANDED_KIND:
         try:
-            _chats_record(to_json_line(env))
+            chats_verb(["append"], json.loads(to_json_line(env)))
         except Exception as why:  # a receipt must never break an ack flow
-            print(f"bus log: chats record (receipt) failed: {why}", file=sys.stderr)
+            print(f"bus log: chats record failed: {why}", file=sys.stderr)
 
 
 #: The tombstone kind. A withdrawal cannot delete a line (the log is

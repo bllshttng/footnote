@@ -38,7 +38,6 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     monkeypatch.setenv("FNO_CONFIG", str(settings))  # type: ignore[attr-defined]
 
     monkeypatch.setenv("FNO_STATE_DIR", str(tmp_state))  # type: ignore[attr-defined]
-
     # Calling this fixture IS a root declaration, so say so. It covers the lane
     # that reproduces a test outside pytest, where no conftest stamps the pin.
     if os.environ.get("FNO_TEST_HERMETIC") is None:

@@ -322,6 +322,12 @@ def verb_call(
         if os.environ.get("FNO_ROUTE_SLOT_DEBUG"):
             print(json.dumps({"payload": payload}), flush=True)
 
+
+def chats_verb(args: "list[str]", payload: dict) -> dict:
+    """One round trip with the chats record door (the conversation store)."""
+    return verb_call(["chats", *args], payload, timeout=30)
+
+
 def resolve_front_binary() -> Optional[Path]:
     """The native ``fno`` front binary: this checkout's build, then ``PATH``."""
     import shutil

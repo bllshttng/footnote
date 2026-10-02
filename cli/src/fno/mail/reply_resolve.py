@@ -119,19 +119,6 @@ def _candidate_stores() -> list[tuple[str, str]]:
     return out
 
 
-def _sender_from_chats_store(msg_id: str) -> Optional[str]:
-    """Who sent ``msg_id`` per the chats record store; None falls through to
-    the transcript scan."""
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        return (verb_call(["chats", "resolve", "--prefix", msg_id], {}, timeout=30) or {}).get(
-            "from_key"
-        )
-    except (VerbUnavailable, ValueError):
-        return None
-
-
 def resolve_live_sender(msg_id: str) -> Optional[str]:
     """Find ``msg_id``'s sender address by scanning this session's own transcript.
 
@@ -147,8 +134,14 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     ``None`` on any miss (no record, no marker, unreadable store, id absent) so
     the caller falls through to its existing not-on-bus error path.
     """
-    sender = _sender_from_chats_store(msg_id)
-    if sender is not None:
+    try:
+        from fno.rust_binary import VerbUnavailable, chats_verb
+
+        # Store first; a miss or a missing binary falls through to the scan.
+        sender = (chats_verb(["resolve", "--prefix", msg_id], {}) or {}).get("from_key")
+    except (ImportError, VerbUnavailable):
+        sender = None
+    if sender:
         return sender
     for harness, session_id in _candidate_stores():
         path = _transcript_path(harness, session_id)
