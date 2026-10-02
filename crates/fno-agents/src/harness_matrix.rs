@@ -16,35 +16,15 @@ pub const BLIND_REFUSAL_MARKER: &str = "reader refused as blind";
 const MATRIX_REL: &str = "docs/harnesses/capability-matrix.md";
 const VERB_MATRIX_REL: &str = "docs/harnesses/verb-matrix.md";
 
-/// The full harness roster, read from the platform data file the
-/// roster-parity gate already holds equal across the evidence surfaces.
-/// Pure data, so the renderer reads it rather than keeping a second roster
-/// in Rust.
-fn known_harnesses(root: &Path) -> Result<Vec<String>, String> {
-    let path = root.join("cli/src/fno/harness_names.py");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let start = text
-        .find("KNOWN_HARNESSES")
-        .ok_or_else(|| "the roster file names no KNOWN_HARNESSES tuple".to_string())?;
-    let open = text[start..]
-        .find('(')
-        .map(|i| start + i)
-        .ok_or_else(|| "KNOWN_HARNESSES carries no open paren".to_string())?;
-    let close = text[open..]
-        .find(')')
-        .map(|i| open + i)
-        .ok_or_else(|| "KNOWN_HARNESSES tuple never closes".to_string())?;
-    let body = &text[open + 1..close];
-    Ok(body
-        .split(',')
-        .map(|part| {
-            part.trim()
-                .trim_matches(|c| c == '"' || c == '\'')
-                .to_string()
-        })
-        .filter(|name| !name.is_empty())
-        .collect())
+/// The full harness roster: the one list, `provider::KNOWN_HARNESSES`. The
+/// renderer reads the const rather than keeping a second roster; before the
+/// one-roster move it parsed the Python tuple in `harness_names.py`, which
+/// no longer carries one.
+fn known_harnesses() -> Vec<String> {
+    crate::provider::KNOWN_HARNESSES
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
 }
 
 /// Resolve the repo root from the caller's cwd: the nearest ancestor that
@@ -538,13 +518,7 @@ pub fn run_client(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let roster = match known_harnesses(&root) {
-        Ok(roster) => roster,
-        Err(e) => {
-            eprintln!("fno doctor harness-matrix: {e}");
-            return 2;
-        }
-    };
+    let roster = known_harnesses();
     let matrix = render_matrix(&contract, &roster);
     let verb_matrix = match render_verb_matrix(&contract, &roster, &root.join("skills")) {
         Ok(text) => text,

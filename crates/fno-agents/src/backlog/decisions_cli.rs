@@ -198,7 +198,7 @@ fn decisions_jsonl() -> PathBuf {
 /// The machine-wide graph, archive included: the same read `_graph_entries`
 /// served the Python verb. An unreadable graph is the caller's degrade, not
 /// an error.
-fn read_graph_entries() -> Result<Vec<Value>, String> {
+pub(crate) fn read_graph_entries() -> Result<Vec<Value>, String> {
     crate::backlog::api::rows(&crate::backlog::api::Store::new(
         &crate::graph_get::default_graph_path(),
     ))
@@ -213,7 +213,7 @@ fn resolved_once(entries: &[Value], query: &str) -> Option<String> {
 }
 
 /// The matcher's two-call dance: the spelling, then its case-fold.
-fn resolved_twice(entries: &[Value], stripped: &str) -> Option<String> {
+pub(crate) fn resolved_twice(entries: &[Value], stripped: &str) -> Option<String> {
     resolved_once(entries, stripped)
         .or_else(|| resolved_once(entries, stripped.to_lowercase().as_str()))
 }
@@ -261,7 +261,7 @@ fn pr_expiry_ref(subject: Option<&str>) -> Option<Value> {
 
 /// The closure key a coord row proves (`_derive_coord_expiry_ref`): the row's
 /// own stamp, else the node the subject resolves to, else a PR subject.
-fn derive_coord_expiry_ref(row: &Value, entries: &[Value]) -> Option<Value> {
+pub(crate) fn derive_coord_expiry_ref(row: &Value, entries: &[Value]) -> Option<Value> {
     if let Some(r) = row.get("expiry_ref") {
         if r.is_object() {
             return Some(r.clone());

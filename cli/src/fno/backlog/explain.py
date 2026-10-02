@@ -230,7 +230,6 @@ def routing_for(node: Optional[dict]) -> dict:
         }
     profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
     try:
-        inventory = route_resolve.resolve_inventory()
         # Display, never a probe: the summary rides the verb's answer now.
         meta: dict = {}
         candidate, chain, verdict = route_resolve.resolve_slot(
@@ -238,7 +237,6 @@ def routing_for(node: Optional[dict]) -> dict:
             node,
             None,
             role=role,
-            inventory=inventory,
             meta=meta,
         )
     except Exception as exc:  # noqa: BLE001 - an unreadable grid is reported

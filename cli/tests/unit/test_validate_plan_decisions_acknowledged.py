@@ -2,14 +2,14 @@
 
 Change 3 of x-953b. `check_consolidation_file` cross-checks the plan's
 `decisions_acknowledged` list against the node's LIVE decision-index rulings
-(read directly, not through the shape model - `ConsolidationBlock` has no
-access to the index). Each fixture points a fresh subprocess at hermetic
-decision and graph stores via `$FNO_CONFIG` (the only candidate when set, per
-`fno.config._candidate_paths`) naming `config.state_dir` and
-`config.paths.graph_json` overrides, then seeds `decisions.jsonl` directly
-under it, in the envelope
-`fno.events.operator_decision` writes - so no graph or carveout root needs to
-exist for the node named in `claims:`.
+(read through the native decisions door, not through the shape model -
+`ConsolidationBlock` has no access to the index). Each fixture points a fresh
+subprocess at a hermetic decision store the way the door reads one:
+`$FNO_HOME` carries `decisions.jsonl` and `$FNO_CONFIG` names a config.toml
+whose top-level `state_dir` pins the graph read (the Rust reader parses TOML
+only, and warns on a yaml candidate), then seeds `decisions.jsonl` directly,
+in the envelope the native decide door writes - so no graph or carveout root
+needs to exist for the node named in `claims:`.
 """
 from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
@@ -27,12 +27,12 @@ _EXPIRY_REF_UNSET = object()
 
 
 def _run(plan: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
-    settings = state_dir.parent / "settings.yaml"
-    settings.write_text(
-        f"config:\n  state_dir: {state_dir}\n"
+    (state_dir.parent / "config.toml").write_text(
+        f'state_dir = "{state_dir}"\n'
     )
     env = dict(os.environ)
-    env["FNO_CONFIG"] = str(settings)
+    env["FNO_CONFIG"] = str(state_dir.parent / "config.toml")
+    env["FNO_HOME"] = str(state_dir)
     return subprocess.run(
         ["bash", str(VALIDATOR), str(plan)],
         capture_output=True,
@@ -66,8 +66,8 @@ def _seed_decision(
 
     `record_decision` also writes a durable events journal and projects onto
     a graph node - both real side effects this fixture does not want. The
-    index is the only store `list_decisions` reads, so writing it directly is
-    the smaller, correct fixture.
+    index is the only store the decisions door needs here, so writing it
+    directly is the smaller, correct fixture.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     index = state_dir / "decisions.jsonl"

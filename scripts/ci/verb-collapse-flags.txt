@@ -28,11 +28,6 @@ approvals ls !--db
 approvals show !--db
 backlog advance !--continuation
 backlog cost !--session
-backlog decide !--decision
-backlog decide !--origin
-backlog decide !--subject
-backlog decide-retract !--origin
-backlog decisions !--subject
 backlog intake !--batch
 backlog retro run !--pr
 backlog retro run !--session

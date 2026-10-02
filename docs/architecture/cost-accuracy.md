@@ -116,5 +116,5 @@ Ground truth at ship time: the fixed parser reproduced the reference tool's $31.
 
 1. Add the tier to `PRICING` in `scripts/lib/cost_tracker.py` (cite the pricing page in the header comment if rates changed).
 2. If it is the newest opus, update `LATEST_MODERN_OPUS_TIER`.
-3. Extend the `model_tier` matrix test in `tests/lib/test_cost_tracker_pricing.py`.
+3. Extend the `model_tier` matrix test in `cli/tests/unit/test_cost_tracker_pricing.py`.
 4. Nothing else: the shell shim and every register-path consumer read the same table by construction.

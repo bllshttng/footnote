@@ -288,7 +288,7 @@ class DecisionAcknowledgment(BaseModel):
     @field_validator("decision_id")
     @classmethod
     def _decision_id_is_wellformed(cls, v: str) -> str:
-        from fno.decide import looks_like_decision_id
+        from fno.plan._decision_shape import looks_like_decision_id
 
         if not looks_like_decision_id(v):
             raise ValueError("is not a decision id (expected d-<hex>, e.g. d-a4b6e1c8)")
