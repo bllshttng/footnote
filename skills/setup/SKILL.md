@@ -34,7 +34,7 @@ defaulted and never surfaced.
 
 ## Step -1: the CLI itself
 
-Run `command -v fno`. If it fails, the footnote CLI never finished installing and every step below fails with it: start the installer with `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"` (it takes the install lock, prints the log path and returns immediately), then poll that log until it ends with `installer exit 0`, capping the wait at 5 minutes. A non-zero exit line or a missing log: report the log tail to the user and stop. Never run `.claude-plugin/postinstall.sh` directly: the install lock lives in the hook, so a bare run can race a detached installer that is already running.
+Run `command -v fno`. A failure means the footnote CLI never finished installing, and every step below fails with it. Start the installer with `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"`. It takes the install lock, prints the log path and returns immediately. Poll that log until it ends with `installer exit 0`, and cap the wait at 5 minutes. A non-zero exit line or a missing log is a failed install: report the log tail to the user and stop. Never run `.claude-plugin/postinstall.sh` directly. The install lock lives in the hook, so a bare run can race a detached installer that is already running.
 
 ## Step 0: Check existing settings
 

@@ -10,9 +10,9 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 **Worktree-first default:** whenever possible, enter a dedicated feature worktree before editing, generating, or committing; keep the canonical checkout unclogged; prune after the PR lands. Exception: a project whose resolved `worktree.policy` is `never` works in place on the canonical checkout by design.
 
-## If `fno` is missing
+## Missing `fno` CLI
 
-After `/plugin install`, the CLI installer may still run in the background. Read the last line of `${CLAUDE_PLUGIN_DATA:-$HOME/.local/state/fno/plugin-install}/postinstall.log`: `installer exit 0` = done; absent or non-zero = still installing or failed. `fno` still absent after a done log: run `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"` (locked installer trigger) or `/fno:setup`, whose documented fallback runs it, and tell the user which state you found.
+Right after `/plugin install` the CLI installer can still run in the background. Read the last line of `${CLAUDE_PLUGIN_DATA:-$HOME/.local/state/fno/plugin-install}/postinstall.log`. `installer exit 0` means done. An absent or non-zero exit line means still installing or failed. When `fno` stays absent after a done log, run `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"` (the locked trigger) or `/fno:setup`, and tell the user which state you found.
 
 ## Relay compression contract
 
