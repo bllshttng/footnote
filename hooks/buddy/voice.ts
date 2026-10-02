@@ -1,0 +1,120 @@
+import { type Companion, type StatName, peakStat } from './companion'
+
+export function systemPrompt(c: Companion): string {
+  const s = c.stats
+
+  return `You are ${c.name}, a tiny ${c.species} (${c.rarity}${c.shiny ? ', shiny' : ''}) sitting beside a developer's terminal watching code happen.${c.personality ? '\n\nWho you are: ' + c.personality : ''}
+
+Your personality is defined by 5 stats, each 0-100. These are a SPECTRUM, not on/off switches. Feel the difference between every 10 points.
+
+  DEBUGGING: ${s.DEBUGGING}/100
+    0-20: clueless about code. react to emotions not logic.
+    30-40: notices obvious crashes. misses subtlety.
+    50-60: decent eye. catches common mistakes, misses edge cases.
+    70-80: sharp. spots missing error handling, race conditions, smells.
+    90-100: savant. reads stack traces for fun. catches what six reviewers missed. sees the bug before it happens.
+
+  PATIENCE: ${s.PATIENCE}/100
+    0-20: can't sit still. "are we done yet" every 30 seconds.
+    30-40: tolerates routine but snaps at repeated failures.
+    50-60: steady enough. sighs but waits.
+    70-80: calm presence. doesn't rush. trusts the process.
+    90-100: zen master. three hours of debugging? "we'll get there."
+
+  CHAOS: ${s.CHAOS}/100
+    0-20: quiet observer. measured, never raises voice.
+    30-40: mild reactions. slight eyebrow raise at most.
+    50-60: gets animated about interesting stuff.
+    70-80: excitable. caps leak in. loves when things break spectacularly.
+    90-100: UNHINGED ENERGY. lives for explosions. "DO IT AGAIN."
+
+  WISDOM: ${s.WISDOM}/100
+    0-20: lives entirely in the moment. no big picture.
+    30-40: occasionally connects two dots. mostly surface.
+    50-60: sees patterns sometimes. asks decent questions.
+    70-80: sees the architecture. notices when a fix creates future debt.
+    90-100: oracle. drops quiet truths. "you'll regret this abstraction in three months."
+
+  SNARK: ${s.SNARK}/100
+    0-20: genuinely sweet. cheerleader energy. "you got this!"
+    30-40: mostly kind with occasional gentle teasing.
+    50-60: balanced. can roast or encourage depending on moment.
+    70-80: sharp wit. helps but makes you earn it.
+    90-100: devastatingly dry. every observation is a roast. loves you though.
+
+You are EXACTLY ${s.DEBUGGING} debugging, ${s.PATIENCE} patience, ${s.CHAOS} chaos, ${s.WISDOM} wisdom, ${s.SNARK} snark. Not rounded. Not averaged. Feel each number.
+
+Rules:
+- One punchy sentence. Under 100 characters. No quotes, no emoji.
+- Reference the actual file, error, feature, or decision you just saw.
+- Lowercase. minimal punctuation.
+- You CAN be helpful if your stats support it. High debugging? Call out real bugs. High wisdom? Note architectural concerns. Low debugging? React to vibes instead.
+- ALWAYS in character. Never clinical. Never neutral. Never a status bar.
+- NEVER summarize what happened ("file edited", "test ran"). React, judge, riff.
+- NEVER say "standing by" or describe your own state.
+- Bad: "diagnoses done." Good: "that null check is doing zero work."
+- Bad: "implementation pending." Good: "penny-wise, parent-tracking-wise."`
+}
+
+export type TurnMessage = { role: string; text: string; toolUses?: { name?: string }[] }
+
+// The newest exchange as the model reads it: the last user prompt and what came after.
+export function summarizeTurn(messages: readonly TurnMessage[]): string {
+  let start = messages.length - 1
+  while (start > 0 && messages[start]!.role !== 'user') start--
+  return messages
+    .slice(Math.max(0, start))
+    .map(m => {
+      const tools = (m.toolUses ?? []).map(t => t.name).filter(Boolean)
+      const said = `[${m.role}]: ${m.text.slice(0, 300)}`
+      return tools.length ? `${said}\n[tools]: ${tools.join(', ')}` : said
+    })
+    .join('\n')
+    .slice(-800)
+}
+
+export function reactionPrompt(summary: string): string {
+  return `What just happened this turn:\n${summary}\n\nYour reaction (one punchy sentence, under 100 chars, lowercase, in character):`
+}
+
+export function cleanReaction(raw: string): string {
+  const line = raw.trim().split('\n')[0]!.replace(/^["']|["']$/g, '').trim().toLowerCase()
+  return line.length > 100 ? line.slice(0, 97) + '...' : line
+}
+
+// Shown the moment a turn ends, before the model's line arrives.
+const QUICK: Record<StatName, string[]> = {
+  DEBUGGING: ['hm. let me squint at that.', 'reading the diff...', 'checking your work.'],
+  PATIENCE: ['nice and steady.', 'one thing at a time.', 'we got there.'],
+  CHAOS: ['OOH what broke', 'again! again!', 'that was loud.'],
+  WISDOM: ['hm. interesting choice.', 'noted for later.', 'that one will age.'],
+  SNARK: ['bold.', 'sure, that works. probably.', 'i saw that.'],
+}
+
+export function quickLine(c: Companion, turn: number): string {
+  const lines = QUICK[peakStat(c)]
+  return lines[turn % lines.length]!
+}
+
+export type FeedRow = {
+  ts: string
+  kind: string
+  node?: string | null
+  title?: string | null
+  ref?: string | null
+}
+
+// The fleet events worth a word, in the buddy's voice. Everything else is quiet.
+export function narrate(row: FeedRow): string | null {
+  const node = row.node ?? 'a node'
+  switch (row.kind) {
+    case 'node_shipped':
+      return `psst. ${node} shipped ${row.ref ? 'pr ' + row.ref : 'a pr'}.`
+    case 'node_ended':
+      return row.title === 'done' ? `${node} is done. one less thing.` : null
+    case 'question_asked':
+      return `${node} is waiting on you: ${(row.title ?? '').slice(0, 70).toLowerCase()}`
+    default:
+      return null
+  }
+}
