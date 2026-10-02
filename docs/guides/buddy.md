@@ -29,7 +29,7 @@ Without the wrapper, the buddy opens a narrow pane docked on the right in the fu
 | :- | :- |
 | `/buddy` | Shows the card: species, rarity, personality and stats. `/bbb` (bring back buddy) is the same command. |
 | `/buddy pet` | Pets it |
-| `/buddy roll` | Hatches a new buddy in place of the old one |
+| `/buddy roll` | Spends a reroll to hatch a new buddy in place of the old one. You get one reroll each day and one for every 2 PRs the fleet ships, banked up to 3. The card shows the count. |
 | `/buddy statusline` | Draws the buddy beside your status line |
 | `/buddy statusline off` | Restores your status line as it was |
 | `/buddy off` | Hides it and stops every model call and feed read |

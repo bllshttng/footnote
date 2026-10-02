@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { embody, restore, rollBones } from './companion'
-import { fleetLine } from './register'
+import { fleetLine, refill } from './register'
 import { narrate, summarizeTurn } from './voice'
 
 const OLD_CONFIG = JSON.stringify({
@@ -142,6 +142,11 @@ test('a shipped node in the fleet feed becomes a line with no model call', async
   expect(await after.find({ type: 'Text', text: /: psst\. parser-fix shipped pr 42\.$/ })).toBeDefined()
   expect(modelCalls).toBe(0)
   expect(narrate({ ts: '', kind: 'session_spawned' })).toBe(null)
+  // Rerolls: one a day, one per two ships counted once however many sessions read them, banked to three.
+  expect(refill(undefined, 'd1').bank).toBe(1)
+  expect(refill({ bank: 0, day: 'd1', ships: 0, shipAt: 0 }, 'd1', [5, 5, 9])).toEqual({ bank: 1, day: 'd1', ships: 0, shipAt: 9 })
+  expect(refill({ bank: 0, day: 'd1', ships: 0, shipAt: 9 }, 'd1', [5, 9]).bank).toBe(0)
+  expect(refill({ bank: 3, day: 'd1', ships: 1, shipAt: 0 }, 'd2', [1]).bank).toBe(3)
 })
 
 test('petting a short sprite puts the hearts above it, not over its head', async ($, on) => {

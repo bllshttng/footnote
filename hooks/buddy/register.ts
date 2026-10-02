@@ -76,7 +76,44 @@ function say(text: string, now: number): void {
   bubble = { text, at: now }
 }
 
-function card(c: Companion): string {
+// Rerolls are earned: one free a day, one per SHIPS_PER_REROLL PRs the fleet ships, banked up to REROLL_BANK.
+// ponytail: fixed numbers; a [buddy] section in config.toml can own them once someone wants to tune them.
+const REROLL_BANK = 3
+const SHIPS_PER_REROLL = 2
+export type Rerolls = { bank: number; day: string; ships: number; shipAt: number }
+
+export function refill(r: Rerolls | undefined, today: string, shippedAt: number[] = []): Rerolls {
+  let { bank, day, ships, shipAt } = r ?? { bank: 0, day: '', ships: 0, shipAt: 0 }
+  if (day !== today) {
+    bank = Math.min(REROLL_BANK, bank + 1)
+    day = today
+  }
+  // shipAt is the newest ship already counted, so every session reading the same feed counts a PR once.
+  for (const at of [...shippedAt].sort((a, b) => a - b)) {
+    if (at <= shipAt) continue
+    shipAt = at
+    ships += 1
+    if (ships >= SHIPS_PER_REROLL) {
+      ships = 0
+      bank = Math.min(REROLL_BANK, bank + 1)
+    }
+  }
+  return { bank, day, ships, shipAt }
+}
+
+const today = (now: number) => new Date(now).toLocaleDateString('en-CA')
+
+async function rerolls($: EngineInterface, now: number, shippedAt: number[] = []): Promise<Rerolls> {
+  const r = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now), shippedAt)
+  await $.store.set('rerolls', r)
+  return r
+}
+
+function rerollLine(r: Rerolls): string {
+  return `rerolls: ${r.bank}/${REROLL_BANK} · one more per ${SHIPS_PER_REROLL} shipped PRs (${r.ships}/${SHIPS_PER_REROLL}) and one each day`
+}
+
+function card(c: Companion, r: Rerolls): string {
   const stats = STAT_NAMES.map(s => `${s.padEnd(9)} ${'█'.repeat(Math.round(c.stats[s] / 10)).padEnd(10, '░')} ${c.stats[s]}`)
   return [
     `${c.name} the ${c.species}  ${RARITY_STARS[c.rarity]} ${c.rarity}${c.shiny ? ' ✨ shiny' : ''}`,
@@ -87,6 +124,7 @@ function card(c: Companion): string {
     '',
     ...stats,
     '',
+    rerollLine(r),
     '/buddy pet · /buddy roll · /buddy off · /buddy statusline [off]',
   ].join('\n')
 }
@@ -216,6 +254,8 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
   if (feedOff || muted || !buddy || now - drawnAt > SEEN_MS) return
   const rows = await feedRows($, now)
   if (!rows) return
+  const before = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now)).bank
+  const after = await rerolls($, now, rows.filter(row => row.kind === 'node_shipped').map(row => Date.parse(row.ts)).filter(Number.isFinite))
   let line: string | null = null
   for (const row of rows) {
     const at = Math.floor(Date.parse(row.ts) / 1000)
@@ -223,6 +263,7 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
     feedSince = Math.max(feedSince, at + 1)
     line = narrate(row) ?? line
   }
+  if (after.bank > before) line = `${line ? line + ' ' : ''}+1 reroll (${after.bank}/${REROLL_BANK}).`
   if (line) {
     say(line, now)
     $.ui.invalidate('ui.render')
@@ -364,6 +405,9 @@ export function register(on: On) {
       await $.store.set('muted', false)
     }
     if (arg === 'roll') {
+      const r = await rerolls($, now)
+      if (r.bank < 1) return { text: `${buddy!.name} stays. ${rerollLine(r)}.` }
+      await $.store.set('rerolls', { ...r, bank: r.bank - 1 })
       const soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
@@ -374,7 +418,7 @@ export function register(on: On) {
       say('♥', now)
     }
     $.ui.invalidate('ui.render')
-    return { text: card(buddy!) }
+    return { text: card(buddy!, await rerolls($, now)) }
   })
 
   on('turn.complete', async ($, e, next) => {
