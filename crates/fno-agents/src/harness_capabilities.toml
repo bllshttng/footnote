@@ -123,14 +123,6 @@ session_binding = { strategy = "preassigned-or-session-start", required = true, 
 # never denied anything. Measured 2026-08-28: an opencode PANE worker acquired
 # a claim and delivered mail with no grant at all, so refusing it would have
 # broken a lane that works.
-# SESSION-STATE PRODUCER. Which native event feeds the `fno-agents hook
-# session-state` job, keyed by event name -> the state word it reports.
-# `blocked` names the harness's permission-prompt event; "none" would mean
-# no Waiting producer (the screen backstop keeps the row).
-[harness.claude.hooks.session_state]
-events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done", PostModelSwitch = "model" }
-blocked = "Notification"
-
 [harness.claude.state_root_grant]
 # `--add-dir`, spent by `claude_ask::build_argv` on every claude substrate.
 pane = "argv-add-dir"
@@ -294,15 +286,6 @@ submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "codex-session-index"
 session_binding = { strategy = "rollout-fd-or-daemon", required = true, timeout_ms = 60000 }
-
-# SESSION-STATE PRODUCER (claude's contract; see that row). PreToolUse is
-# the load-bearing entry: a goal-mode continuation is a user-role row, so
-# UserPromptSubmit never fires and the goal leg is only visible through its
-# tool calls. PermissionRequest is NOT wired: the payload shape was never
-# captured, so `blocked` stays "none" until one is.
-[harness.codex.hooks.session_state]
-events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done" }
-blocked = "none"
 
 [harness.codex.state_root_grant]
 # pane/headless spend `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS). The thread
@@ -1914,11 +1897,23 @@ reason = "no fno hook registration for zcode (no plugin hook file and no capabil
 
 [harness.claude.hooks.session_state]
 state = "supported"
-via = ["hooks/inside-leg-report.sh", "hooks/hooks.json"]
+via = ["hooks/session-state.sh", "hooks/hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
+
+[harness.claude.hooks.session_state.wiring]
+events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done", PostModelSwitch = "model" }
+blocked = "Notification"
 
 [harness.codex.hooks.session_state]
 state = "supported"
-via = ["hooks/inside-leg-report.sh", "hooks/codex-hooks.json"]
+via = ["hooks/session-state.sh", "hooks/codex-hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
+
+# PreToolUse is the load-bearing entry: a goal-mode continuation is a
+# user-role row, so UserPromptSubmit never fires and the goal leg is only
+# visible through its tool calls. PermissionRequest is NOT wired: the
+# payload shape was never captured, so `blocked` stays "none" until one is.
+[harness.codex.hooks.session_state.wiring]
+events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done" }
+blocked = "none"
 
 [harness.footnote.hooks.session_state]
 state = "supported"

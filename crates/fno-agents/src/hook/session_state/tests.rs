@@ -16,15 +16,19 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn job(name: &str) -> crate::harness_capabilities::HookJobDecl {
+/// The wiring a row's session_state audit declares; every call site here
+/// tests a supported row, so a missing wiring is the failure.
+fn job(name: &str) -> crate::harness_capabilities::HookWiring {
     crate::harness_capabilities::HarnessContract::packaged()
         .unwrap()
         .hook_job(name, "session_state")
         .unwrap()
+        .wiring
         .clone()
+        .unwrap()
 }
 
-fn claude_job() -> crate::harness_capabilities::HookJobDecl {
+fn claude_job() -> crate::harness_capabilities::HookWiring {
     job("claude")
 }
 

@@ -26,7 +26,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::harness_capabilities::HookJobDecl;
+use crate::harness_capabilities::HookWiring;
 use crate::hook::adapter::{self, HookEvent};
 use serde_json::json;
 use std::io::Read;
@@ -85,17 +85,17 @@ pub(crate) struct Decision {
 }
 
 /// The state word + reason for one normalized event, read off the harness
-/// row's `session_state` map. `None` = this event is not wired for the
+/// row's session-state wiring. `None` = this event is not wired for the
 /// harness (unknown event, or the row declares no session-state producer).
-pub(crate) fn decide(job: &HookJobDecl, ev: &HookEvent) -> Option<Decision> {
-    if job.blocked == ev.event {
+pub(crate) fn decide(wiring: &HookWiring, ev: &HookEvent) -> Option<Decision> {
+    if wiring.blocked == ev.event {
         return Some(Decision {
             state: "blocked",
             reason: ev.message.clone(),
             posture: ev.posture.clone(),
         });
     }
-    match job.events.get(&ev.event).map(String::as_str) {
+    match wiring.events.get(&ev.event).map(String::as_str) {
         Some("working") => Some(reclassify(ev)),
         Some("done") => Some(Decision {
             state: "done",
@@ -447,10 +447,18 @@ pub(crate) fn process(harness: &str, event: &str, payload: &serde_json::Value) {
     let Ok(contract) = crate::harness_capabilities::HarnessContract::packaged() else {
         return;
     };
+    // The audit gate reads first: a row whose session_state is not
+    // `supported` declares no producer, wiring or not.
     let Some(job) = contract.hook_job(harness, "session_state") else {
         return;
     };
-    let Some(decision) = decide(job, &ev) else {
+    if job.state != "supported" {
+        return;
+    }
+    let Some(wiring) = job.wiring.as_ref() else {
+        return;
+    };
+    let Some(decision) = decide(wiring, &ev) else {
         return;
     };
     // Marker lane: mux panes only, and independent of the parse (a malformed
