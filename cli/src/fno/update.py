@@ -1415,6 +1415,16 @@ def _crown_mail_cmd(fno_bin: str, body: str) -> list[str]:
     return [fno_bin, "agents", "mail", "team", "--scope", "kings", "--subject", "fno-update", body]
 
 
+def _update_emit_argv(fno_bin: str, type_name: str, data: dict) -> list[str]:
+    """One emit door for both journaling chains: the installed fact joins the
+    post-install line whole, and the fail trap takes the argv minus its data
+    element so `$FNO_UPDATE_FAIL_DATA` can carry the captured exit code."""
+    return [
+        fno_bin, "doctor", "event", "emit",
+        "--type", type_name, "--source", "python", "--global", "--data", json.dumps(data),
+    ]
+
+
 def _mail_crowns(fno_bin: Optional[str], body: str) -> None:
     if not fno_bin:
         return
@@ -1467,19 +1477,7 @@ def _installed_event_argv(fno_bin: str, rev: Optional[str], old_rev: Optional[st
     data: dict = {"new_rev": rev or "unknown"}
     if old_rev:
         data["old_rev"] = old_rev
-    return [
-        fno_bin,
-        "doctor",
-        "event",
-        "emit",
-        "--type",
-        "fno_update_installed",
-        "--source",
-        "python",
-        "--global",
-        "--data",
-        json.dumps(data),
-    ]
+    return _update_emit_argv(fno_bin, "fno_update_installed", data)
 
 
 def _shell_fail_prologue(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
@@ -1498,21 +1496,8 @@ def _shell_fail_prologue(fno_bin: str, old_rev: Optional[str], rev: Optional[str
     )
     # The data arg stays OUTSIDE shlex.quote: shlex.quote would escape the
     # `$`, and the whole point is shell expansion of the captured exit code.
-    emit = " ".join(
-        shlex.quote(t)
-        for t in [
-            fno_bin,
-            "doctor",
-            "event",
-            "emit",
-            "--type",
-            "fno_update_failed",
-            "--source",
-            "python",
-            "--global",
-            "--data",
-        ]
-    ) + ' "$FNO_UPDATE_FAIL_DATA"'
+    emit = " ".join(shlex.quote(t) for t in _update_emit_argv(fno_bin, "fno_update_failed", {})[:-1])
+    emit += ' "$FNO_UPDATE_FAIL_DATA"'
     mail_body = '"fno doctor update FAILED: install exited $rc."'
     mail = f"{shlex.quote(fno_bin)} agents mail team --scope kings --subject fno-update {mail_body}"
     return (
