@@ -164,41 +164,102 @@ fn is_live_status(status: crate::AgentStatus) -> bool {
 }
 
 fn fleet_rows() -> (Vec<FleetRow>, Vec<String>) {
-    let raw: RawAgents = crate::claude_roster::read_all_agents_raw();
-    let mut warnings: Vec<String> = raw.warnings;
-    let home = crate::paths::AgentsHome::from_env();
-    let registry = crate::state::load_registry(&home.registry_json()).ok();
-    let mut by_sid: BTreeMap<&str, &RegistryEntry> = BTreeMap::new();
-    if let Some(reg) = &registry {
-        for entry in &reg.entries {
-            if entry.harness.as_deref() != Some("claude") {
-                continue;
-            }
-            let sid = entry
-                .harness_session_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .or_else(|| entry.cc_session_id.as_deref().filter(|s| !s.is_empty()));
-            if let Some(sid) = sid {
-                by_sid.insert(sid, entry);
-            }
-        }
-    }
+    let raw = crate::claude_roster::read_all_agents_raw();
+    let registry = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+        .ok()
+        .map(|r| r.entries);
+    fleet_rows_from(raw, registry.as_deref())
+}
+
+/// The fleet fold, fno-first (the provenance ruling): the spine is fno's
+/// registry - every claude row it holds is listed, the vendor row joining by
+/// session id as a state column - and a vendor row with no spine row is
+/// named vendor-only, never dropped and never silent. An unread registry
+/// falls back to the vendor view; an unread VENDOR list only warns, and the
+/// fno rows stand.
+fn fleet_rows_from(
+    raw: RawAgents,
+    entries: Option<&[RegistryEntry]>,
+) -> (Vec<FleetRow>, Vec<String>) {
+    let mut warnings = raw.warnings;
     let mut ledger_nodes: Option<BTreeMap<String, String>> = None;
     let mut out: Vec<FleetRow> = Vec::new();
     let mut unmapped: BTreeSet<String> = BTreeSet::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut skipped_no_sid = 0usize;
     let mut skipped_nonclaude_no_id = 0usize;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
 
+    // The spine: every claude registry row with a session id. It is listed
+    // whether or not the vendor still lists it.
+    let mut spine: BTreeMap<&str, &RegistryEntry> = BTreeMap::new();
+    if let Some(entries) = entries {
+        for entry in entries {
+            if entry.harness.as_deref() != Some("claude") {
+                continue;
+            }
+            match claude_spine_sid(entry) {
+                Some(sid) => {
+                    spine.insert(sid, entry);
+                }
+                None => warnings.push(format!(
+                    "{ADVISORY}{UNMEASURABLE_ROW_PREFIX}harness=claude name={} (no session id)",
+                    entry.name
+                )),
+            }
+        }
+    }
+    for (sid, e) in spine.iter() {
+        let vendor = raw.rows.iter().find(|r| raw_row_sid(r).as_deref() == Some(*sid));
+        let (state, warn) = match vendor {
+            Some(r) => row_state(r),
+            None => row_state(&json!({"status": status_word(e.status)})),
+        };
+        if let Some(warn) = warn {
+            unmapped.insert(warn);
+        }
+
+        let cwd = vendor
+            .and_then(|r| r.get("cwd").and_then(Value::as_str))
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!e.cwd.is_empty()).then(|| e.cwd.clone()))
+            .unwrap_or_default();
+        let mut node = e.node.clone().filter(|n| !n.is_empty());
+        if node.is_none() && is_linked_worktree(&cwd) {
+            node = node_id_from_worktree(&cwd);
+        }
+        if node.is_none() {
+            if ledger_nodes.is_none() {
+                ledger_nodes = Some(ledger_nodes_map());
+            }
+            node = ledger_nodes.as_ref().and_then(|l| l.get(*sid).cloned());
+        }
+        out.push(FleetRow {
+            row_id: (*sid).to_string(),
+            name: if e.name.is_empty() {
+                (*sid).to_string()
+            } else {
+                e.name.clone()
+            },
+            state,
+            node,
+            cwd,
+            agent: "claude".to_string(),
+            stopped_at: e
+                .stop
+                .as_ref()
+                .and_then(|s| (!s.at.is_empty()).then(|| s.at.clone())),
+            pid: None,
+            pid_start_time: None,
+            mux: None,
+        });
+    }
+
+    // Vendor rows the spine did not claim: listed, never dropped, and named
+    // vendor-only so the registry gap is loud. When the registry itself is
+    // unreadable (entries None) the vendor view IS the read, so no warning.
     for r in &raw.rows {
-        let sid = r
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .or_else(|| r.get("session_id").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string();
-        if sid.is_empty() {
+        let Some(sid) = raw_row_sid(r) else {
             let cwd = r.get("cwd").and_then(Value::as_str).unwrap_or("");
             let name = r.get("name").and_then(Value::as_str).unwrap_or("unknown");
             let node = if is_linked_worktree(cwd) {
@@ -213,30 +274,34 @@ fn fleet_rows() -> (Vec<FleetRow>, Vec<String>) {
                 None => skipped_no_sid += 1,
             }
             continue;
+        };
+        if spine.contains_key(sid.as_str()) {
+            continue;
+        }
+        if entries.is_some() {
+            warnings.push(format!(
+                "{ADVISORY}vendor-only row: session {sid} is listed by claude agents but absent from the fno registry"
+            ));
         }
         let (state, warn) = row_state(r);
         if let Some(warn) = warn {
             unmapped.insert(warn);
         }
-        let m = by_sid.get(sid.as_str()).copied();
-        let name = match m {
-            Some(e) if !e.name.is_empty() => e.name.clone(),
-            _ => r
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&sid)
-                .to_string(),
-        };
+
+        let name = r
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&sid)
+            .to_string();
         let cwd = r
             .get("cwd")
             .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
+            .filter(|c| !c.is_empty())
             .map(str::to_string)
-            .or_else(|| m.and_then(|e| (!e.cwd.is_empty()).then(|| e.cwd.clone())))
             .unwrap_or_default();
-        let mut node = m.and_then(|e| e.node.clone()).filter(|n| !n.is_empty());
-        if node.is_none() && is_linked_worktree(&cwd) {
+        let mut node = None;
+        if is_linked_worktree(&cwd) {
             node = node_id_from_worktree(&cwd);
         }
         if node.is_none() {
@@ -252,16 +317,13 @@ fn fleet_rows() -> (Vec<FleetRow>, Vec<String>) {
             node,
             cwd,
             agent: "claude".to_string(),
-            stopped_at: m
-                .and_then(|e| e.stop.as_ref())
-                .and_then(|s| (!s.at.is_empty()).then(|| s.at.clone())),
+            stopped_at: None,
             pid: None,
             pid_start_time: None,
             mux: None,
         });
     }
-
-    for entry in registry.iter().flat_map(|r| r.entries.iter()) {
+    for entry in entries.into_iter().flatten() {
         if entry.harness.as_deref() == Some("claude") {
             continue;
         }
@@ -335,6 +397,24 @@ fn fleet_rows() -> (Vec<FleetRow>, Vec<String>) {
     warnings.extend(unmapped);
     (out, warnings)
 }
+
+/// The spine key: the row's harness session id, else its recorded session id.
+fn claude_spine_sid(e: &RegistryEntry) -> Option<&str> {
+    e.harness_session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| e.cc_session_id.as_deref().filter(|s| !s.is_empty()))
+}
+
+/// The vendor row's session id, either spelling, when nonempty.
+fn raw_row_sid(r: &Value) -> Option<String> {
+    r.get("sessionId")
+        .or_else(|| r.get("session_id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 
 fn ledger_nodes_map() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -1069,4 +1149,79 @@ fn worked_status<'a>(by_id: &BTreeMap<&str, &'a Value>, id: &str) -> &'a str {
         .get(id)
         .and_then(|e| e.get("status").and_then(Value::as_str))
         .unwrap_or("unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The fleet fold starts from fno's registry: a live claude spine row
+    // lists with an EMPTY vendor view (AC11), and a vendor row with no
+    // spine row is named vendor-only, never dropped silently (AC12).
+    #[test]
+    fn fleet_rows_start_from_the_registry_and_name_vendor_only_rows() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let spaces_backup = std::env::var_os("FNO_SPACES_DIR");
+        std::env::set_var(
+            "FNO_SPACES_DIR",
+            std::env::temp_dir().join("worked-fleet-hermetic"),
+        );
+        let mut live = crate::state::RegistryEntry::default();
+        live.harness = Some("claude".into());
+        live.name = "quill".into();
+        live.harness_session_id = Some("9a1b2c3d-0000-0000-0000-000000000000".into());
+        live.status = crate::AgentStatus::Live;
+        let empty_vendor = RawAgents {
+            rows: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let (rows, warnings) = fleet_rows_from(empty_vendor, Some(&[live.clone()]));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row_id, "9a1b2c3d-0000-0000-0000-000000000000");
+        assert_eq!(rows[0].name, "quill");
+        assert_eq!(rows[0].state, "working");
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // A vendor row with no spine row is listed with a vendor-only
+        // warning; the spine row stays.
+        let stray_vendor = RawAgents {
+            rows: vec![serde_json::json!({
+                "sessionId": "0badf00d-0000-0000-0000-000000000000",
+                "name": "stray",
+                "state": "working"
+            })],
+            warnings: Vec::new(),
+        };
+        let (rows, warnings) = fleet_rows_from(stray_vendor, Some(&[live]));
+        assert_eq!(rows.len(), 2);
+        let stray = rows
+            .iter()
+            .find(|r| r.row_id == "0badf00d-0000-0000-0000-000000000000")
+            .expect("stray vendor row listed");
+        assert_eq!(stray.name, "stray");
+        assert_eq!(stray.state, "working");
+        assert!(warnings.iter().any(|w| {
+            w.contains("vendor-only") && w.contains("0badf00d")
+        }), "{warnings:?}");
+
+        // An unread registry falls back to the vendor view: the row lists
+        // with no vendor-only warning, because the vendor IS the read.
+        let again = RawAgents {
+            rows: vec![serde_json::json!({
+                "sessionId": "0badf00d-0000-0000-0000-000000000000",
+                "name": "stray",
+                "state": "working"
+            })],
+            warnings: Vec::new(),
+        };
+        let (rows, warnings) = fleet_rows_from(again, None);
+        assert_eq!(rows.len(), 1);
+        assert!(!warnings.iter().any(|w| w.contains("vendor-only")));
+        match spaces_backup {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+    }
 }
