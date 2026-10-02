@@ -381,30 +381,6 @@ def stranded_board(tmp_path, monkeypatch):
     return graph_path
 
 
-def _reconcile(*args: str):
-    from fno.graph.cli import cli
-
-    return runner.invoke(cli, ["reconcile", *args], catch_exceptions=False)
-
-
-def test_reconcile_dry_run_previews_the_reparent(stranded_board):
-    r = _reconcile("--dry-run")
-    assert r.exit_code == 0, r.output
-    assert "Would re-parent 1 stranded child(ren)" in r.output
-    assert "x-kid -> (none)" in r.output
-    rows = _by_id_file(stranded_board)
-    assert rows["x-kid"]["parent"] == "x-donep"  # preview mutated nothing
-
-
-def test_reconcile_heals_and_carries_the_set_in_json(stranded_board):
-    r = _reconcile("--json")
-    assert r.exit_code == 0, r.output
-    payload = json.loads(r.output)
-    assert payload["reparented"] == [{"node_id": "x-kid", "parent": None}]
-    rows = _by_id_file(stranded_board)
-    assert rows["x-kid"]["parent"] is None
-
-
 def test_stranded_next_receipts_caps_and_names_the_total():
     receipts = [(f"x-{i:04x}", "dead-ancestor") for i in range(12)]
     lines = _stranded_next_receipts(receipts)

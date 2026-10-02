@@ -703,39 +703,6 @@ def test_condition_C_refuses_on_fno_done(routed, tmp_path, monkeypatch):
     assert _node(routed, "ab-prom01").get("completed_at") is None
 
 
-def test_condition_C_holds_open_on_reconcile(routed, tmp_path, monkeypatch):
-    plan = _shortfall_world(routed, tmp_path)
-    import fno.graph._reconcile as rec
-    from fno.graph._reconcile import PrMergeState
-
-    # Reconcile's resolve_promise_evidence uses the default query_pr_merge_state
-    # (not the verb shims), so stub it here too - condition C re-counts merges.
-    monkeypatch.setattr(
-        rec, "query_pr_merge_state",
-        lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None),
-    )
-
-    def _scan(entries, node_id=None, listings=None):
-        return [rec.MergeDriftRecord(
-            node_id="ab-prom01",
-            plan_path=plan,
-            pr_number=42,
-            pr_url="https://github.com/o/r/pull/42",
-            pr_state="MERGED",
-            merged_at="2026-08-09T00:00:00Z",
-        )]
-
-    monkeypatch.setattr(rec, "scan_merge_drift", _scan)
-    from fno.graph.cli import cli
-
-    r = CliRunner().invoke(cli, ["reconcile", "--json"])
-    payload = json.loads(r.output)
-    # The node is held open, not closed, and named in the sweep summary.
-    assert any(p["node_id"] == "ab-prom01" for p in payload["promise_unmet"])
-    assert all(c.get("node_id") != "ab-prom01" for c in payload["closed"])
-    assert _node(routed, "ab-prom01").get("completed_at") is None
-
-
 def _outage_world(g: Path, tmp_path: Path, monkeypatch, node_id: str = "ab-out01") -> str:
     """A node declaring 2 ships with 2 refs: the first reads MERGED, the second
     times out. The merge gate passes; the ship count is UNKNOWN, not short."""
@@ -776,7 +743,7 @@ def _reconcile_scan(monkeypatch, held_id: str, plan: str):
     monkeypatch.setattr(rec, "scan_merge_drift", _scan)
 
 
-def test_retryable_unknown_holds_open_on_all_three_verbs(routed, tmp_path, monkeypatch):
+def test_retryable_unknown_holds_open_on_done_and_the_door(routed, tmp_path, monkeypatch):
     """AC2-HP. The outage fixture through every real close caller: node stays
     open and the receipt names a retryable read failure. This is the defect -
     the gate returned ok here, so every one of these three closed the node."""
@@ -813,82 +780,6 @@ def test_retryable_unknown_holds_open_on_all_three_verbs(routed, tmp_path, monke
     assert r.exit_code == 4, r.output
     assert _node(routed, "ab-out01").get("completed_at") is None
 
-    _reconcile_scan(monkeypatch, "ab-out01", plan)
-    from fno.graph.cli import cli
-
-    r = CliRunner().invoke(cli, ["reconcile", "--json"])
-    payload = json.loads(r.output)
-    assert any(p["node_id"] == "ab-out01" for p in payload["promise_unknown"])
-    assert all(p["node_id"] != "ab-out01" for p in payload["promise_unmet"])
-    assert all(c.get("node_id") != "ab-out01" for c in payload["closed"])
-    assert _node(routed, "ab-out01").get("completed_at") is None
-    assert _node(routed, "ab-out01").get("status") != "done"
-
-
-def test_dependent_stays_blocked_until_the_read_recovers(routed, tmp_path, monkeypatch):
-    """AC2-EDGE. The same fixture: while the read is down the dependent is not
-    eligible; when the second MERGED receipt arrives, reconcile closes the node
-    once and the dependent becomes eligible through the existing mechanism."""
-    from fno.graph._reconcile import PrMergeState
-    import fno.graph._reconcile as rec
-
-    plan = _outage_world(routed, tmp_path, monkeypatch, "ab-out02")
-    entries = read_graph_strict(routed)
-    entries.append({
-        "id": "ab-dep01",
-        "title": "dependent",
-        "domain": "code",
-        "status": "ready",
-        "blocked_by": ["ab-out02"],
-        "created_at": "2026-08-09T00:00:00+00:00",
-    })
-    _seed(routed, entries)
-    _reconcile_scan(monkeypatch, "ab-out02", plan)
-    from fno.graph.cli import cli
-
-    CliRunner().invoke(cli, ["reconcile", "--json"])
-    assert _node(routed, "ab-out02").get("completed_at") is None
-    assert _node(routed, "ab-dep01").get("blocked_by") == ["ab-out02"]
-
-    # The read recovers: both refs now answer MERGED.
-    def _up(n, **kw):
-        return PrMergeState(number=n, state="MERGED", url=None, merged_at="2026-08-09T00:00:00Z")
-
-    monkeypatch.setattr(rec, "query_pr_merge_state", _up)
-    r = CliRunner().invoke(cli, ["reconcile", "--json"])
-    payload = json.loads(r.output)
-    assert any(c.get("node_id") == "ab-out02" for c in payload["closed"])
-    assert not payload["promise_unknown"]
-    assert _node(routed, "ab-out02").get("completed_at") is not None
-
-
-def test_every_read_timing_out_emits_no_closure(routed, tmp_path, monkeypatch):
-    """AC3-HP. All PR reads time out: no closure is emitted anywhere and the
-    persisted node still carries its open status. The positive control is the
-    recovery leg in the AC2-EDGE test above - without it a zero here could
-    mean the sweep never ran."""
-    from fno.graph._reconcile import ReconcileError
-    import fno.graph._reconcile as rec
-    import fno.graph.cli as graph_cli
-
-    plan = _write_plan(tmp_path / "allout.md", expected_url_count=2)
-    node = _base_node("ab-out03", str(plan))
-    node["additional_prs"] = [{"number": 43, "url": "https://github.com/o/r/pull/43"}]
-    _seed(routed, [node])
-
-    def _down(n, **kw):
-        raise ReconcileError("gh pr view timed out")
-
-    monkeypatch.setattr(graph_cli, "_done_gh_query", _down)
-    monkeypatch.setattr(rec, "query_pr_merge_state", _down)
-    _reconcile_scan(monkeypatch, "ab-out03", plan)
-    from fno.graph.cli import cli
-
-    r = CliRunner().invoke(cli, ["reconcile", "--json"])
-    payload = json.loads(r.output)
-    assert payload["closed"] == []
-    assert any(p["node_id"] == "ab-out03" for p in payload["promise_unknown"])
-    assert _node(routed, "ab-out03").get("completed_at") is None
 
 
 def test_held_open_roll_splits_refusal_from_outage():
@@ -919,7 +810,7 @@ def test_held_open_roll_never_drops_an_unenumerated_outcome():
     assert text.strip()
 
 
-def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch):
+def test_undeclared_plan_closes_on_done_and_the_door(routed, tmp_path, monkeypatch):
     """The inverse of the refusal: a plan declaring nothing closes clean on
     every close path - a regression on any single path that re-introduces an
     ungated writer is caught because the other two still close."""
@@ -945,24 +836,9 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
     assert (
         CliRunner().invoke(app, ["done", "ab-d2", "--pr", "42", "--repo", "o/r"]).exit_code == 0
     )
-    # reconcile: stub the scan to mark x-d3 closeable.
-    import fno.graph._reconcile as rec
-
-    def _scan(entries, node_id=None, listings=None):
-        return [rec.MergeDriftRecord(
-            node_id="ab-d3", plan_path=str(plan), pr_number=42,
-            pr_url="https://github.com/o/r/pull/42", pr_state="MERGED",
-            merged_at="2026-08-09T00:00:00Z",
-        )]
-
-    monkeypatch.setattr(rec, "scan_merge_drift", _scan)
-    from fno.graph.cli import cli
-
-    assert CliRunner().invoke(cli, ["reconcile", "--json"]).exit_code == 0
-    # ab-d1 closed in the door sandbox (its close is native); d2/d3 in the
+    # ab-d1 closed in the door sandbox (its close is native); d2 in the
     # wheel store.
     assert _node(routed, "ab-d2").get("completed_at") is not None
-    assert _node(routed, "ab-d3").get("completed_at") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -970,7 +846,7 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def test_condition_D_refuses_on_all_three_verbs(routed, tmp_path, monkeypatch):
+def test_condition_D_refuses_on_done_and_the_door(routed, tmp_path, monkeypatch):
     """A deferred carve-out holds the node open on every close path - the
     one-of-N decorative-guard shape this feature exists to end (a gate on a
     single verb would let a second path close around it)."""
@@ -1013,20 +889,6 @@ def test_condition_D_refuses_on_all_three_verbs(routed, tmp_path, monkeypatch):
     assert CliRunner().invoke(app, ["done", "ab-dc2", "--pr", "42"]).exit_code == 6
     assert _node(routed, "ab-dc2").get("completed_at") is None
 
-    def _scan(entries, node_id=None, listings=None):
-        return [rec.MergeDriftRecord(
-            node_id="ab-dc3", plan_path=str(plan), pr_number=42,
-            pr_url="https://github.com/o/r/pull/42", pr_state="MERGED",
-            merged_at="2026-08-09T00:00:00Z",
-        )]
-
-    monkeypatch.setattr(rec, "scan_merge_drift", _scan)
-    from fno.graph.cli import cli
-
-    payload = json.loads(CliRunner().invoke(cli, ["reconcile", "--json"]).output)
-    assert any(p["node_id"] == "ab-dc3" for p in payload["promise_unmet"])
-    assert all(c.get("node_id") != "ab-dc3" for c in payload["closed"])
-    assert _node(routed, "ab-dc3").get("completed_at") is None
 
 
 def test_condition_D_force_bypass_closes(routed, tmp_path, monkeypatch):

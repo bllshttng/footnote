@@ -595,51 +595,6 @@ class TestReapCliVerb:
 
 
 # ---------------------------------------------------------------------------
-# `fno backlog reconcile` calls the reaper (Change 6)
-# ---------------------------------------------------------------------------
-
-
-def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkeypatch):
-    """Wiring test only: cmd_reconcile must call reap_dead_claims and surface
-    its summary, not re-verify the reaper's own behavior (covered above).
-
-    The autouse `_hermetic_claim_reap` fixture (conftest.py) no-ops this leg
-    for every OTHER reconcile test so none of them touch a real claims
-    store; this test explicitly re-patches it with a distinguishable canned
-    summary to prove the call site actually reaches fno.claims.core.
-    """
-    import json as _json
-
-    import fno.graph._constants as gc
-    import fno.graph.cli as graph_cli
-    import fno.graph.store as gs
-    import fno.claims.core as claims_core
-
-    graph_path = tmp_path / "graph.json"
-    seed_graph(graph_path, _json.dumps({"entries": []}) + "\n")
-    monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
-    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "LEDGER_JSON", tmp_path / "ledger.json")
-    monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
-    monkeypatch.setattr("fno.paths.retro_pending_dir", lambda: tmp_path / "retro")
-
-    canned = {
-        "scanned": 9, "reaped": 3, "would_reap": 0, "kept_live": 2,
-        "kept_suspect": 1, "kept_offhost": 0, "corrupted": 0, "vanished": 0,
-        "contended": 0, "reap_failed": [], "apply": True, "roots": ["/canned/root"],
-    }
-    monkeypatch.setattr(claims_core, "reap_dead_claims", lambda **kw: dict(canned))
-
-    result = runner.invoke(graph_cli.cli, ["reconcile", "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = _json.loads(result.output)
-    assert payload["claim_reap"]["outcome"] == "ok"
-    assert payload["claim_reap"]["reaped"] == 3
-    assert payload["claim_reap"]["scanned"] == 9
-
-
-# ---------------------------------------------------------------------------
 # a dead one-shot holder blocks nothing (x-05be change 3)
 # ---------------------------------------------------------------------------
 
