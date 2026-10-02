@@ -226,13 +226,9 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     let head = text.trim_start();
     if opens_tag(head, "<fno_mail") {
         let open_end = head.find('>').map(|e| e + 1).unwrap_or(head.len());
-        let tag = &head[..open_end];
-        let needle = "id=\"";
-        let start = tag.find(needle)? + needle.len();
-        let rest = &tag[start..];
-        let end = rest.find('"')?;
-        let id = &rest[..end];
-        return (!id.is_empty()).then(|| id.to_string());
+        // attr_in enforces the attribute boundary (`xid="` never matches).
+        let id = attr_in(&head[..open_end], "id")?;
+        return (!id.is_empty()).then(|| id);
     }
     let line = head.lines().next()?;
     if !is_header_line(line) {
@@ -537,6 +533,12 @@ mod tests {
         );
         assert_eq!(delivered_msg_id("no id here"), None);
         assert_eq!(delivered_msg_id(release), None);
+        // The legacy id read enforces the attribute boundary: `valid_id="`
+        // never stands in for `id="`.
+        assert_eq!(
+            delivered_msg_id("<fno_mail from=\"a\" valid_id=\"x\" id=\"msg-1\">hi</fno_mail>"),
+            Some("msg-1".to_string())
+        );
         // The adapter's other read facts, per text.
         assert!(text_holds_legacy_tag(
             "prose <fno_mail from=\"a\">x</fno_mail>"

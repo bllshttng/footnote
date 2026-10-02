@@ -181,9 +181,14 @@ pub(crate) enum Verdict {
 /// the residual the join exists for IS raw slash payloads), then bare
 /// commands. `bus` is `None` for the queue, which keeps today's behavior.
 pub(crate) fn classify_text(text: &str, bus: Option<(&BusIndex, &str)>) -> Verdict {
+    // Only a turn's FIRST line reads as a header (the locked design's
+    // uncovered-case ruling): an operator quoting received mail must keep
+    // counting as an operator turn. The injection door keeps the strict
+    // any-line refusal; attribution and forgery are different contracts.
+    let head = text.trim_start().lines().next().unwrap_or("");
     if contains_fno_mail_tag_anywhere(text)
-        || crate::mail_header::body_holds_header_line(text)
-        || text.lines().any(crate::mail_header::is_held_release_line)
+        || crate::mail_header::is_header_line(head)
+        || crate::mail_header::is_held_release_line(head)
     {
         return Verdict::Injected("fno_mail");
     }
@@ -920,6 +925,12 @@ mod tests {
         assert_eq!(
             classify("2 held messages · sent 17:24 to 18:23 · held 9m\n`@a · msg-1 · hi`"),
             Err("fno_mail")
+        );
+        // Only a turn's FIRST line reads as a header: an operator quoting
+        // received mail keeps counting as an operator turn.
+        assert!(
+            classify("look at this: `@candor · fmail-abc123def456 · hi`").is_ok(),
+            "a quoted header is prose, not an injected turn"
         );
     }
 
