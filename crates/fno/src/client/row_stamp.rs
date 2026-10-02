@@ -162,10 +162,9 @@ impl View {
 
     /// The transient notice, right-aligned, clipped to the strip.
     ///
-    /// Clipping ELLIPSIZES. A silently cut notice reads as a whole sentence, so
-    /// on a 40-column strip "…is not TOML, keys are on defaults" became a path
-    /// fragment that looked like the entire message. Write notices meaning-first
-    /// for the same reason: whatever the strip cannot hold is what a narrow
+    /// The ROW rule clips with no marker (d-36438ea4): a cut tail is absence,
+    /// never a marker that misreads as part of the sentence. Write notices
+    /// meaning-first: whatever the strip cannot hold is what a narrow
     /// terminal loses.
     pub(super) fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
         let (full, _) = self.notice.as_ref()?;
@@ -174,15 +173,8 @@ impl View {
         // through this one function, so the hit test and the paint agree.
         let right = cols.saturating_sub(self.feed_panel_w() as usize);
         let room = right.saturating_sub(1);
-        let text: String = if full.chars().count() > room {
-            full.chars()
-                .take(room.saturating_sub(1))
-                .chain(std::iter::once('…'))
-                .collect()
-        } else {
-            full.clone()
-        };
-        let start = right.saturating_sub(text.chars().count() + 1);
+        let text = crate::chrome::clip(full, room);
+        let start = right.saturating_sub(crate::chrome::str_cols(&text) + 1);
         Some((start, text))
     }
 }
@@ -266,25 +258,20 @@ pub(super) fn paint_row_stamp(
         return;
     };
     let mark = if failure { "✗ " } else { "✓ " };
-    // (review) Ellipsize to leave the row's leading identity cells: a
-    // stamp that swallows the name is a placement fix that eats its own target.
+    // Clip with no marker (the ROW rule, d-36438ea4), leaving the row's
+    // leading identity cells: a stamp that swallows the name is a placement
+    // fix that eats its own target.
     let cap = text_w.saturating_sub(4);
     let full = format!("{mark}{stamp_text}");
     let mut stamp: Vec<(char, usize)> = Vec::new();
     let mut width = 0usize;
-    let mut truncated = false;
     for ch in full.chars() {
         let w = glyph_cols(ch);
         if width + w > cap {
-            truncated = true;
             break;
         }
         width += w;
         stamp.push((ch, w));
-    }
-    if truncated && width < cap {
-        stamp.push(('…', 1));
-        width += 1;
     }
     let mut start = text_w.saturating_sub(width);
     for (ch, w) in stamp {

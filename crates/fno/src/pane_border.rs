@@ -10,7 +10,7 @@
 //! hands its overlays (which keep their square corners via caller-passed
 //! corner chars).
 
-use crate::chrome::{char_cols, fit_ellipsis};
+use crate::chrome::{char_cols, clip};
 use crate::tree::{Rect, MIN_ROWS};
 
 /// A pane frames itself at this width: the grip takes the centre 3 cells, so
@@ -106,22 +106,18 @@ fn seg(row: &mut Vec<(char, Part)>, s: &str, p: Part) {
     }
 }
 
-/// Cut a span to `max_cols` display columns, ending in `…` (keeping the part
-/// of the first dropped char) when anything was cut.
+/// Cut a span to `max_cols` display columns with no marker: the ROW rule
+/// (ruling d-36438ea4). A wide glyph drops whole rather than straddling.
 fn fit_row(row: &[(char, Part)], max_cols: usize) -> Vec<(char, Part)> {
-    if cols_of(row) <= max_cols {
-        return row.to_vec();
-    }
-    let keep = max_cols.saturating_sub(1);
     let mut out = Vec::new();
     let mut used = 0;
     for (c, p) in row {
-        if used + char_cols(*c) > keep {
-            out.push(('…', *p));
-            return out;
+        let cw = char_cols(*c);
+        if used + cw > max_cols {
+            break;
         }
         out.push((*c, *p));
-        used += char_cols(*c);
+        used += cw;
     }
     out
 }
@@ -241,11 +237,11 @@ pub fn edges(f: &EdgeFields, r: Rect, grip: bool) -> Edges {
         None => inner - cols_of(&right) - usize::from(!right.is_empty()),
     };
     // The tab costs 4 around the name (caps + spaces); the name itself gets
-    // the rest, down to 1 char + ellipsis.
+    // the rest.
     let name_max = tab_room.saturating_sub(4).max(1);
     let top = {
         let mut row = vec![('╭', Part::Border)];
-        row.extend(tab(&fit_ellipsis(f.name, name_max)));
+        row.extend(tab(&clip(f.name, name_max)));
         if let Some(g) = g0 {
             let used = cols_of(&row) - 1;
             for _ in used..g - 1 {
@@ -411,11 +407,11 @@ mod tests {
     }
 
     #[test]
-    fn bottom_ellipsizes_the_node_last() {
+    fn bottom_drops_the_node_span_when_it_cannot_fit() {
         // 9 cols: even the bare node span cannot fit (`╰─` plus ` node7 `
-        // needs 9 of 7 inner); it cuts to `…`.
+        // needs 9 of 7 inner); it drops whole, no marker.
         let e = edges(&full(), rect(9, 12), false);
-        assert!(s(&e.bottom).contains('…'), "{:?}", s(&e.bottom));
+        assert!(!s(&e.bottom).contains('…'), "{:?}", s(&e.bottom));
         assert_eq!(cols_of(&e.bottom), 9);
     }
 
@@ -456,16 +452,18 @@ mod tests {
         // word drops AND the name is cut (the last resort: name_max 18).
         let e = edges(&full(), rect(28, 12), false);
         assert_eq!(e.top_step, 4, "{:?}", s(&e.top));
-        assert!(s(&e.top).contains("king-5317-succeed-…"), "{:?}", s(&e.top));
+        assert!(s(&e.top).contains("king-5317-succeed-"), "{:?}", s(&e.top));
+        assert!(!s(&e.top).contains('…'), "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert_eq!(cols_of(&e.top), 28);
     }
 
     #[test]
-    fn top_ellipsizes_the_name_at_the_floor() {
-        // 20 cols WITH a grip: the tab zone is 6, the name gets 2 => `k…`.
+    fn top_clips_the_name_at_the_floor() {
+        // 20 cols WITH a grip: the tab zone is 6, the name gets 2 => `k`.
         let e = edges(&full(), rect(20, 12), true);
-        assert!(s(&e.top).contains("k…"), "{:?}", s(&e.top));
+        assert!(!s(&e.top).contains('…'), "{:?}", s(&e.top));
+        assert!(s(&e.top).contains("k "), "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert_eq!(cols_of(&e.top), 20);
     }
@@ -500,17 +498,17 @@ mod tests {
         assert_eq!(cols_of(&e.top), 40);
         assert_eq!(s(&e.top).chars().next(), Some('╭'));
         assert_eq!(s(&e.top).chars().last(), Some('╮'));
-        assert!(s(&e.top).contains('…'));
+        assert!(!s(&e.top).contains('…'));
         let cjk = EdgeFields {
             name: "패널프레임테스트 라벨",
             ..full()
         };
         // 29 cols: the 21-col CJK name plus its tab costs 25 and the glyph
-        // span ` ●` needs 2 more of 27 inner, so the name cuts to 20 and
-        // takes the ellipsis.
+        // span ` ●` needs 2 more of 27 inner, so the name clips with no
+        // marker and the edge still closes at exactly 29.
         let e = edges(&cjk, rect(29, 12), false);
         assert_eq!(cols_of(&e.top), 29);
-        assert!(s(&e.top).contains('…'));
+        assert!(!s(&e.top).contains('…'));
         assert_eq!(cols_of(&e.bottom), 29);
     }
 
