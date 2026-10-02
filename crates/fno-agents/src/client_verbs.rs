@@ -1307,7 +1307,14 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // without a row, so nothing here observed how that session started.
         // "adopted" says that; it is not a claim that no human is sitting in
         // it, and both watchdog lanes treat it as the non-answer it is.
-        origin: Some("adopted".into()),
+        // A user-typed adopt (no ambient agent identity, attended tty) stamps
+        // `operator` instead: the origin the gc keeps, so a row the user
+        // adopted is never reaped as fleet work (x-9663 rev 2).
+        origin: if crate::claims::adopter_is_operator() {
+            Some("operator".into())
+        } else {
+            Some("adopted".into())
+        },
         // synthesized from an identity that arrived without a row; the
         // account it rode in on is unobserved, so the axis stays unknown.
         launch_account: None,

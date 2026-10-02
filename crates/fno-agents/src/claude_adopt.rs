@@ -256,7 +256,15 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 if reg.entries[i].node.is_none() {
                     reg.entries[i].node = node;
                 }
-                reg.entries[i].origin = prev.origin;
+                // An agent adopt keeps the row's prior origin (the adopt
+                // observed nothing about the birth); a user-typed adopt
+                // upgrades it to `operator`, the origin the gc keeps
+                // (x-9663 rev 2, d-79e0186b).
+                reg.entries[i].origin = if crate::claims::adopter_is_operator() {
+                    Some("operator".to_string())
+                } else {
+                    prev.origin
+                };
                 reg.entries[i].spawned_by_session = prev.spawned_by_session;
                 reg.entries[i].spawned_by_harness = prev.spawned_by_harness;
                 reg.entries[i].spawned_by_cwd = prev.spawned_by_cwd;
