@@ -1856,32 +1856,38 @@ mod tests {
     /// Our own pid stands in for it (alive, not a zombie, not confirmed
     /// dead) paired with a reader that never resolves a start time. The
     /// malformed-line case prunes the torn line and keeps the readable one.
+    /// Each case scopes its own isolate: two live guards would deadlock on
+    /// the same env lock.
     #[test]
     fn unreadable_marker_pid_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-unreadable");
         let pid = std::process::id();
-        std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
+        {
+            let (_guard, path) = isolate("marker-unreadable");
+            std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
 
-        let count = marker_count_with(&[], &HashSet::new(), |_| None)
-            .expect("an unreadable marker pid must not collapse the census");
+            let count = marker_count_with(&[], &HashSet::new(), |_| None)
+                .expect("an unreadable marker pid must not collapse the census");
 
-        assert_eq!(count, 0);
-        assert!(
-            !path.exists(),
-            "the unreadable entry must be pruned from the ledger"
-        );
-        let (_guard, path) = isolate("marker-malformed");
-        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
+            assert_eq!(count, 0);
+            assert!(
+                !path.exists(),
+                "the unreadable entry must be pruned from the ledger"
+            );
+        }
+        {
+            let (_guard, path) = isolate("marker-malformed");
+            std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
 
-        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
-            .expect("a torn ledger line must not collapse the census");
+            let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
+                .expect("a torn ledger line must not collapse the census");
 
-        assert_eq!(count, 1);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            format!("{pid}:777\n")
-        );
-        let _ = std::fs::remove_file(&path);
+            assert_eq!(count, 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{pid}:777\n")
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// A readable marker still counts, so the skip above is a targeted drop
