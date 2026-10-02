@@ -41,7 +41,7 @@ const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 /// The loop job is NOT one of them: `loop_participation` and
 /// `loop_extension` already declare it, and the wire-gate below derives the
 /// loop's state from that pair instead of a second field. Wave 2 adds
-/// `session_state` after x-3cc7's waves 2 and 3 merge.
+/// `session_state` after the session-state push lands its remaining waves.
 pub const HOOK_JOBS: [&str; 2] = ["lead_guard", "lead_reinject"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
