@@ -4425,6 +4425,10 @@ pub(super) fn claude_worker_row(name: &str, short: &str) -> state::RegistryEntry
     row.harness = Some("claude".into());
     row.harness_session_id = Some(format!("{short}-1111-2222-3333-444444444444"));
     row.origin = Some("spawn".into());
+    // The verdict door reads the stored status first (Exited would decide
+    // the row fno-Finished before the vendor word these scenarios vary);
+    // a live worker row is non-terminal.
+    row.status = crate::AgentStatus::Idle;
     row
 }
 
