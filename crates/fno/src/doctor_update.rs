@@ -1831,6 +1831,9 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     }
     let live = live_mux_rows();
     let shells_known = live.is_some();
+    if live.is_none() {
+        degraded.push("fno mux ls --json failed".into());
+    }
     let live_rows: Vec<Value> = live.unwrap_or_default();
     // Attachability is decided by the SERVER's gate, not the source consts:
     // a pre-floor generation refuses a wire inside [floor, source_wire). The
