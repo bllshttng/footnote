@@ -339,7 +339,7 @@ pub fn sweep(plans_dir: &Path, apply: bool, status_map: &HashMap<String, String>
 /// The keeper's `plan_docs op=reconcile_status` handler: builds the status map
 /// from the keeper's strict entries plus an optional archive read-through,
 /// then runs the sweep. Served by `plan_doc::keeper`'s dispatch.
-pub fn handle_reconcile_status_op(
+pub(crate) fn handle_reconcile_status_op(
     state: &crate::graph_keeper::StoreState,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, crate::graph_store::StoreError> {
