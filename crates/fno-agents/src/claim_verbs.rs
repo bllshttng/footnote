@@ -2184,6 +2184,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             served: std::collections::HashMap::new(),
+            rows: std::collections::HashMap::new(),
         }));
         let gate = witness_rec("spawn-gate:36244:w-gate", "s-king");
         let (holder_session, dispatched_by) = holder_session_fields(&gate, &index);
