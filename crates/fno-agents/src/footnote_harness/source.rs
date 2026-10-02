@@ -38,10 +38,16 @@ impl TranscriptSource for FootnoteSource {
             .into_iter()
             .flatten()
             .flatten();
-        for session in
+        for entry in
             projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten())
         {
-            let path = session.path().join("transcript.jsonl");
+            // The record is the top-level `<fno_id>.jsonl` file; the
+            // sidecar dir carries no extension and child transcripts live
+            // inside it, one level down.
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
@@ -57,7 +63,11 @@ impl TranscriptSource for FootnoteSource {
                 continue;
             }
             out.push(SessionFile {
-                session_id: session.file_name().to_string_lossy().into_owned(),
+                session_id: path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
                 path,
                 mtime,
                 size: meta.len(),

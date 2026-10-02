@@ -28,14 +28,14 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 
 ### footnote
 
-`fno agents spawn -H footnote -P zai -m glm-5.3-flash --substrate headless "<task>"` runs footnote's own loop. footnote sends each turn to the model API, runs the tools (Read, Glob, Grep, Edit, Write, Bash, Skill) under `hooks/hooks.json`, and writes every call to `~/.fno/sessions/<project-slug>/<fno_id>/transcript.jsonl` before it acts. `fno agents ask <name>` resumes by name. A resume never re-runs a started Edit, Write or Bash; it tells the model the outcome is unknown.
+`fno agents spawn -H footnote -P zai -m glm-5.3-flash --substrate headless "<task>"` runs footnote's own loop. footnote sends each turn to the model API, runs the tools (Read, Glob, Grep, Edit, Write, Bash, Skill) under `hooks/hooks.json`, and writes every call to `~/.fno/sessions/<project-slug>/<fno_id>.jsonl` before it acts. `fno agents ask <name>` resumes by name. A resume never re-runs a started Edit, Write or Bash; it tells the model the outcome is unknown.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `api.anthropic.com needs an API key` | A Claude.ai login cannot drive a third-party loop | Use `-H claude`, or set `ANTHROPIC_API_KEY` |
 | `no model endpoint` | No route env and no `-P` | Spawn with `-P <provider>`; the record lives at `config.model_routing.providers.<p>` |
 | `a dollar cap is set but <model> has no price` | The models.dev cache has no row for the model | Refresh `~/.fno/cache/models-dev.json` or drop the manifest's `budget_cost_cap_usd` |
-| `session <id> has a live writer` | Another process holds the session's `writer.lock` | `fno agents stop <name>`, then ask again |
+| `session <id> has a live writer` | Another process holds the session's `<fno_id>.lock` | `fno agents stop <name>`, then ask again |
 
 Tools run with your own permissions. There is no sandbox.
 

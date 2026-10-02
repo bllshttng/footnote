@@ -1,6 +1,8 @@
-//! The session directory and its append-only record. `transcript.jsonl` is
-//! the record; `index.db` holds one small row per line, so a store failure
-//! never loses a record. Field lists live in `schema.md` beside this file.
+//! The session record and its sidecar. The record is `<fno_id>.jsonl`
+//! beside the `<fno_id>/` sidecar dir, Claude Code style; every file in the
+//! session carries the id. `<fno_id>.index.db` holds one small row per
+//! line, so a store failure never loses a record. Field lists live in
+//! `schema.md` beside this file.
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -53,13 +55,19 @@ pub fn session_dir(root: &Path, cwd: &Path, fno_id: &str) -> PathBuf {
     root.join(project_slug(cwd)).join(fno_id)
 }
 
-/// Find a session's directory under any project slug.
+/// The record: `<fno_id>.jsonl` beside the sidecar dir.
+pub fn transcript_file(dir: &Path, fno_id: &str) -> PathBuf {
+    dir.parent().unwrap_or(dir).join(format!("{fno_id}.jsonl"))
+}
+
+/// Find a session's directory under any project slug: the sidecar dir
+/// whose record `<fno_id>.jsonl` exists beside it.
 pub fn find_session_dir(root: &Path, fno_id: &str) -> Option<PathBuf> {
     std::fs::read_dir(root)
         .ok()?
         .flatten()
         .map(|e| e.path().join(fno_id))
-        .find(|p| p.join("transcript.jsonl").is_file())
+        .find(|p| transcript_file(p, fno_id).is_file())
 }
 
 pub fn now_ts() -> String {
@@ -131,7 +139,7 @@ impl Writer {
     /// A last line with no newline is a write the killed writer never
     /// finished: it is cut off under the lock, never parsed.
     pub fn open(dir: &Path, session_id: &str) -> Result<(Writer, Vec<Value>), String> {
-        let path = dir.join("transcript.jsonl");
+        let path = transcript_file(dir, session_id);
         let mut w = Self::open_inner(dir, session_id, 0)?;
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         if !bytes.is_empty() && !bytes.ends_with(b"\n") {
@@ -150,13 +158,13 @@ impl Writer {
     }
 
     fn open_inner(dir: &Path, session_id: &str, seq: u64) -> Result<Writer, String> {
-        let lock =
-            crate::harness_daemon::try_acquire_lock(&dir.join("writer.lock")).ok_or_else(|| {
+        let lock = crate::harness_daemon::try_acquire_lock(&dir.join(format!("{session_id}.lock")))
+            .ok_or_else(|| {
                 format!(
                     "session {session_id} has a live writer; stop it with `fno agents stop <name>`"
                 )
             })?;
-        let path = dir.join("transcript.jsonl");
+        let path = transcript_file(dir, session_id);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -179,7 +187,7 @@ impl Writer {
     }
 
     pub fn transcript_path(&self) -> PathBuf {
-        self.dir.join("transcript.jsonl")
+        transcript_file(&self.dir, &self.session_id)
     }
 
     pub fn session_id(&self) -> &str {
@@ -245,7 +253,7 @@ impl Writer {
         });
         let id = rec["id"].as_str().unwrap_or("");
         if let Err(e) = crate::event_store::append_envelope(
-            &self.dir.join("index.jsonl"),
+            &self.dir.join(format!("{}.index.jsonl", self.session_id)),
             &row.to_string(),
             Some(id),
         ) {
@@ -253,11 +261,9 @@ impl Writer {
         }
     }
 
-    /// Write a full output to `spill/<name>.out`; returns (path, size, sha256).
+    /// Write a full output to `<fno_id>/<name>.out`; returns (path, size, sha256).
     pub fn spill(&self, name: &str, bytes: &[u8]) -> Result<(PathBuf, u64, String), String> {
-        let dir = self.dir.join("spill");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let path = dir.join(format!("{name}.out"));
+        let path = self.dir.join(format!("{name}.out"));
         std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok((path, bytes.len() as u64, sha256_hex(bytes)))
     }
@@ -268,9 +274,12 @@ impl Writer {
         for s in &self.secrets {
             text = text.replace(s.as_str(), "[redacted]");
         }
-        let path = self.dir.join("diag.log");
+        let path = self.dir.join(format!("{}.diag.log", self.session_id));
         if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > DIAG_CAP {
-            let _ = std::fs::rename(&path, self.dir.join("diag.log.1"));
+            let _ = std::fs::rename(
+                &path,
+                self.dir.join(format!("{}.diag.log.1", self.session_id)),
+            );
         }
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
             let _ = writeln!(

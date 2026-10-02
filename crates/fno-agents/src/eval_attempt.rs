@@ -675,10 +675,14 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
 fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Option<Observed> {
     let mut best: Option<(f64, PathBuf)> = None;
     let projects = std::fs::read_dir(root).ok()?.flatten();
-    for session in
-        projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten())
-    {
-        let path = session.path().join("transcript.jsonl");
+    for f in projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten()) {
+        // The record is the top-level `<fno_id>.jsonl` file; sidecar dirs
+        // carry no `.jsonl` extension and child transcripts live one level
+        // down, inside them.
+        let path = f.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
         let Some(mtime) = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
