@@ -132,9 +132,17 @@ def main():
     session = data.get("session_id", "")
     # The heartbeat tells the mod this session's status line runs the wrapper, whichever settings file set it.
     if session:
+        frames = os.path.join(HOME, "frames")
+        seen = os.path.join(frames, f"{session}.seen")
         try:
-            os.makedirs(os.path.join(HOME, "frames"), exist_ok=True)
-            with open(os.path.join(HOME, "frames", f"{session}.seen"), "w") as f:
+            os.makedirs(frames, exist_ok=True)
+            # A session's first run sweeps files that no session has touched for a day.
+            if not os.path.exists(seen):
+                cutoff = time.time() - 86400
+                for entry in os.scandir(frames):
+                    if entry.stat().st_mtime < cutoff:
+                        os.unlink(entry.path)
+            with open(seen, "w") as f:
                 f.write(str(int(time.time() * 1000)))
         except OSError:
             pass

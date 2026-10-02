@@ -154,9 +154,11 @@ async function statuslineOn($: EngineInterface): Promise<string> {
 async function statuslineOff($: EngineInterface): Promise<string> {
   const settings = await readSettings($)
   if (!settings) return `${settingsPath()} does not parse, so I left it alone.`
-  const saved = await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined)
+  const saved = stateDir ? await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined) : undefined
   if (isOurs(settings.statusLine)) {
-    if (saved?.statusLine) settings.statusLine = saved.statusLine
+    // Without the saved copy there is nothing to put back, and deleting the wrapper would leave no status line at all.
+    if (!saved) return `I cannot read your saved status line in ${buddyDir()}/inner.json, so I left ${settingsPath()} alone.`
+    if (saved.statusLine) settings.statusLine = saved.statusLine
     else delete settings.statusLine
     await $.fs.write(settingsPath(), JSON.stringify(settings, null, 2) + '\n')
   }
