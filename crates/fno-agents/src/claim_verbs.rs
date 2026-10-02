@@ -1819,7 +1819,9 @@ mod tests {
                     witness(&records[3]),
                     crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE)
                 ));
-                for rec in records.iter().skip(1) {
+                // The two WIRE sessions only: the fourth record is the
+                // row-verdict-live session, asserted above.
+                for rec in records.iter().skip(1).take(2) {
                     assert!(matches!(
                         witness(rec),
                         crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
