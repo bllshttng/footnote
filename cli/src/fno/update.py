@@ -1455,22 +1455,6 @@ def _run_journal_door(argv: list[str]) -> None:
         typer.echo(f"fno doctor update: WARNING: update-journal door failed: {exc}", err=True)
 
 
-
-def _last_update_event() -> Optional[dict]:
-    """The newest journaled update event, or None; rides --check's readiness
-    payload (the flag ratchet bars a new Python flag). No cap: the filtered
-    type set is small and retention-managed, and a capped read can hide the
-    newest row behind its own horizon. An unreadable store degrades to None."""
-    try:
-        from fno.events.store_client import query_rows
-        from fno.paths import global_events_json
-
-        rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES))
-    except Exception:  # noqa: BLE001
-        return None
-    return rows[-1] if rows else None
-
-
 def _last_update_event() -> Optional[dict]:
     """The newest journaled update event, or None; rides --check's readiness
     payload (the flag ratchet bars a new Python flag). No cap: the filtered
@@ -1753,7 +1737,7 @@ def update_command(
         old_rev = None
     journal = global_events_json()
     _cargo_bin = _cargo_installed_bin()
-    door = [_cargo_bin, journal]
+    door = (str(_cargo_bin or ""), journal)
     _run_journal_door(
         _journal_argv(*door, "started", new_rev=rev or "unknown", old_rev=old_rev, source_path=str(resolved))
     )
@@ -1801,7 +1785,7 @@ def update_command(
     post_install = "; ".join(post_steps) or None
 
     fail_prologue = (
-        _shell_fail_prologue(_cargo_bin, journal, old_rev, rev, _fno_bin)
+        _shell_fail_prologue(str(_cargo_bin), journal, old_rev, rev, _fno_bin)
         if _cargo_bin and _fno_bin
         else ""
     )

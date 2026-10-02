@@ -107,7 +107,7 @@ fn mail_crowns(fno_bin: &str, body: &str) {
 }
 
 pub fn run_update_journal(args: &[String]) -> i32 {
-    let args = match parse_args(args) {
+    let mut args = match parse_args(args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("fno-agents update-journal: {e}");
@@ -127,14 +127,16 @@ pub fn run_update_journal(args: &[String]) -> i32 {
         args.fields
             .entry("stage".to_string())
             .or_insert_with(|| json!("install"));
-        args.fields.entry("reason".to_string()).or_insert_with(|| {
+        if !args.fields.contains_key("reason") {
             let rc = args
                 .fields
                 .get("rc")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            json!(format!("install exited {rc}"))
-        });
+                .unwrap_or("unknown")
+                .to_string();
+            args.fields
+                .insert("reason".to_string(), json!(format!("install exited {rc}")));
+        }
     }
     let data: Value = Value::Object(args.fields.clone());
     let envelope = json!({
