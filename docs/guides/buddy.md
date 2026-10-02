@@ -65,6 +65,9 @@ You can keep 3 rerolls at most. A reroll that you earn with a full bank is lost.
 | `/buddy pane` | Puts your status line back as it was and moves the buddy to a side pane. `/buddy restore` is the same command. |
 | `/buddy off` | Hides the buddy, closes its pane, and stops every model call and feed read |
 | `/buddy on` | Shows the buddy again |
+| `/buddy bye` | Puts your status line back, closes the pane, and turns the buddy off in every session. It keeps the soul, so `/buddy on` brings the same buddy back. |
+
+While the buddy is off, it makes no model call, no feed read, and no fleet read. At session start it only reads its saved state.
 
 `/bbb` takes the same words: `/bbb roll`, `/bbb pet`, and the others. In the docked pane, press `p` to pet the buddy.
 

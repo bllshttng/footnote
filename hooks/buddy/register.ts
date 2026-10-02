@@ -126,7 +126,7 @@ function card(c: Companion, r: Rerolls): string {
     ...stats,
     '',
     rerollLine(r),
-    '/buddy pet · roll · statusline · pane · off',
+    '/buddy pet · roll · statusline · pane · off · bye',
   ].join('\n')
 }
 
@@ -356,15 +356,18 @@ export function register(on: On) {
     feedSince = Math.floor(now / 1000)
     home = (await $.env.get('HOME')) ?? ''
     sessionId = await $.session.id()
-    stateDir = await resolveStateDir($)
     await load($, now)
-    const settings = await readSettings($)
-    wrapped = isOurs(settings?.statusLine)
-    if (wrapped && stateDir) await installWrapper($).catch(() => {})
-    else if (stateDir) {
-      const saved = await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined)
-      // The user wrapped once, then ran /statusline again: ask, never re-wrap on their behalf.
-      if (saved && buddy) say(`your status line changed. /buddy statusline puts me back beside it.`, now)
+    // A buddy that is off runs nothing at start: no process, no settings read.
+    if (!muted) {
+      stateDir = await resolveStateDir($)
+      const settings = await readSettings($)
+      wrapped = isOurs(settings?.statusLine)
+      if (wrapped && stateDir) await installWrapper($).catch(() => {})
+      else if (stateDir) {
+        const saved = await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined)
+        // The user wrapped once, then ran /statusline again: ask, never re-wrap on their behalf.
+        if (saved && buddy) say(`your status line changed. /buddy statusline puts me back beside it.`, now)
+      }
     }
     $.clock.every(TICK_MS, async () => {
       tick += 1
@@ -384,7 +387,7 @@ export function register(on: On) {
     $.clock.every(FLEET_MS / 5, async () => readFleet($, await $.clock.now()))
     for (const name of COMMANDS) {
       try {
-        await $.command.register({ name, description: name === 'bbb' ? 'Bring back buddy: your terminal companion' : 'Your terminal companion: show it, pet it, roll a new one, or turn it off', argumentHint: '[pet|roll|statusline|pane|off|on]', immediate: true })
+        await $.command.register({ name, description: name === 'bbb' ? 'Bring back buddy: your terminal companion' : 'Your terminal companion: show it, pet it, roll a new one, or turn it off', argumentHint: '[pet|roll|statusline|pane|off|on|bye]', immediate: true })
       } catch {
         // A newer Claude Code may ship its own /buddy again; /bbb still works.
       }
@@ -396,7 +399,17 @@ export function register(on: On) {
     const now = await $.clock.now()
     const arg = e.args.trim().toLowerCase()
     if (!buddy) await load($, now)
+    if (!stateDir) stateDir = await resolveStateDir($)
     if (arg === 'statusline') return { text: await statuslineOn($) }
+    if (arg === 'bye') {
+      const { ok, text } = await statuslineOff($)
+      if (!ok) return { text }
+      muted = true
+      await $.store.set('muted', true)
+      await $.ui.close({ id: PANE_ID }).catch(() => {})
+      $.ui.invalidate('ui.render')
+      return { text: `${text ? text + ' ' : ''}Bye from ${buddy!.name}. It is gone from every session and makes no calls. /buddy on brings it back.` }
+    }
     if (arg === 'pane' || arg === 'restore') {
       const { ok, text } = await statuslineOff($)
       if (!ok) return { text }
