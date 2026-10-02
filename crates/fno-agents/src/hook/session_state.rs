@@ -362,8 +362,14 @@ fn should_report(session_id: &str, decision: &Decision) -> bool {
         && !prev_epoch.is_empty()
     {
         let now = now_secs();
-        let age = now.saturating_sub(prev_epoch.parse::<u64>().unwrap_or(0));
-        return age >= STATE_REFRESH_AFTER_SECS;
+        let prev = prev_epoch.parse::<u64>().unwrap_or(0);
+        // A future stamp (the clock stepped back after a mark) fails OPEN
+        // like the shell producer's `age >= 0` guard: send, never suppress
+        // on a stamp this run did not write.
+        if prev > now {
+            return true;
+        }
+        return now - prev >= STATE_REFRESH_AFTER_SECS;
     }
     true
 }

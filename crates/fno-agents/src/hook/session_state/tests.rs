@@ -390,15 +390,15 @@ fn fixture(name: &str) -> serde_json::Value {
 #[test]
 fn the_codex_fixtures_normalize_to_working_events() {
     let codex = job("codex");
-    for (name, event) in [
-        ("codex-user-prompt-submit.json", "UserPromptSubmit"),
-        ("codex-pre-tool-use.json", "PreToolUse"),
-        ("codex-goal-pre-tool-use.json", "PreToolUse"),
+    for (name, event, tool) in [
+        ("codex-user-prompt-submit.json", "UserPromptSubmit", ""),
+        ("codex-pre-tool-use.json", "PreToolUse", "Bash"),
+        ("codex-goal-pre-tool-use.json", "PreToolUse", "Bash"),
     ] {
         let payload = fixture(name);
         let e = adapter::normalize("codex", event, &payload);
         assert_eq!(e.session_id, "0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3");
-        assert_eq!(e.tool, "Bash", "{name}");
+        assert_eq!(e.tool, tool, "{name}");
         assert_eq!(decide(&codex, &e).unwrap().state, "working", "{name}");
     }
 }

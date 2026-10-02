@@ -33,7 +33,16 @@ pub(crate) fn normalize_with_root(
     // the rollout's last turn_context instead (the observed truth the row
     // should carry).
     let posture = if event == "Stop" && !session_id.is_empty() {
-        match rollout_axes(rollout_root, &session_id) {
+        // The payload's transcript_path names the rollout directly when the
+        // harness carries it; only a payload without one pays the sessions
+        // store walk (unbounded, so it stays the fallback, not the path).
+        let path = payload
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .filter(|p| std::path::Path::new(p).is_file())
+            .map(std::path::PathBuf::from)
+            .or_else(|| crate::codex_store::codex_rollout_path(rollout_root, &session_id));
+        match path.and_then(|p| rollout_axes_at(&p)) {
             Some((m, e, p)) => {
                 if model.is_empty() {
                     model = m;
@@ -62,14 +71,12 @@ pub(crate) fn normalize_with_root(
 /// The rollout's last turn_context row, as (model, effort, posture). `None`
 /// on any failure: a missing rollout is a report without observed axes,
 /// never a failed hook.
-fn rollout_axes(
-    root: Option<&std::path::Path>,
-    session_id: &str,
-) -> Option<(String, String, String)> {
-    let path = crate::codex_store::codex_rollout_path(root, session_id)?;
-    let size = std::fs::metadata(&path).ok()?.len();
-    let start = size.saturating_sub(ROLLOUT_TAIL) as usize;
-    let blob = std::fs::read(&path).ok()?;
+fn rollout_axes_at(path: &std::path::Path) -> Option<(String, String, String)> {
+    let blob = std::fs::read(path).ok()?;
+    // The file can shrink between the read and any pre-computed offset, so
+    // the tail is cut from the BLOB's length, never from a stat taken first
+    // (a slice past the end would panic a fire-and-forget hook).
+    let start = blob.len().saturating_sub(ROLLOUT_TAIL as usize);
     let text = String::from_utf8_lossy(&blob[start..]);
     let last = text
         .lines()
