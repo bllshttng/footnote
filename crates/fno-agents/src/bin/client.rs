@@ -656,7 +656,7 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `chats`: the conversation record plane (see chats.rs doc). Direct
     // dispatch like announce; no daemon RPC - a record write must work when
-    // the daemon is wedged, and the read doors back x-e118.
+    // the daemon is wedged, and the read doors back the thread read model.
     if verb == "chats" {
         return fno_agents::chats::run_chats(&args[1..]);
     }

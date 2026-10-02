@@ -37,7 +37,7 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     # Wire the env var so load_settings() finds the tmp file
     monkeypatch.setenv("FNO_CONFIG", str(settings))  # type: ignore[attr-defined]
 
-    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_state))  # Rust state root: chats door
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_state))  # type: ignore[attr-defined]
 
     # Calling this fixture IS a root declaration, so say so. It covers the lane
     # that reproduces a test outside pytest, where no conftest stamps the pin.

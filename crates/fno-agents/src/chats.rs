@@ -5,7 +5,7 @@
 //! one append-only messages.jsonl per chat under `paths.chats` (default
 //! `<state_dir>/chats`), plus a derived SQLite index at
 //! `<state_dir>/db/chats.db` that is rebuilt from the JSONL whenever lost or
-//! stale and is never authoritative (node x-a934, user ruling 2026-10-01).
+//! stale and is never authoritative (user ruling of 2026-10-01).
 //!
 //! Two record line types:
 //!   {"type":"message",  "chat_id":..., ...the bus envelope fields verbatim}
@@ -27,7 +27,7 @@
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const CHAT_PREFIX: &str = "chat-";
@@ -211,10 +211,14 @@ fn append_chat_line(chat_dir: &Path, line: &Value) -> Result<(), String> {
     line_s.push('\n');
     let chat_file = chat_dir.join("messages.jsonl");
     let _lock = ChatLock::acquire(&chat_file)?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options
         .open(&chat_file)
         .map_err(|e| format!("chat file open {}: {e}", chat_file.display()))?;
     f.write_all(line_s.as_bytes())
@@ -569,7 +573,7 @@ fn refresh_chat(conn: &Connection, chat_dir: &Path, chat_id: &str) -> Result<boo
 fn ensure_index(conn: &Connection, chats_dir: &Path) -> Result<(), String> {
     let rd = std::fs::read_dir(chats_dir).map_err(|e| format!("chats dir: {e}"))?;
     for entry in rd.flatten() {
-        let Some(chat_id) = entry.file_name().to_str() else {
+        let Ok(chat_id) = entry.file_name().into_string() else {
             continue;
         };
         let chat_file = entry.path().join("messages.jsonl");
@@ -622,7 +626,7 @@ pub(crate) fn rebuild_index_at(db: &Path, chats_dir: &Path) -> Result<String, St
     if chats_dir.is_dir() {
         let rd = std::fs::read_dir(chats_dir).map_err(|e| format!("chats dir: {e}"))?;
         for entry in rd.flatten() {
-            let Some(chat_id) = entry.file_name().to_str() else {
+            let Ok(chat_id) = entry.file_name().into_string() else {
                 continue;
             };
             if entry.path().join("messages.jsonl").is_file()
@@ -931,7 +935,7 @@ pub fn run_chats(args: &[String]) -> i32 {
                 eprintln!("chats migrate: refused, already migrated ({ts})");
                 return 1;
             }
-            match migrate_import(&dir) {
+            match migrate_import(&dir, &bus_live_path()) {
                 Ok(receipt) => {
                     let _ = set_migrated_at(
                         &conn,
@@ -1034,7 +1038,7 @@ pub fn run_chats(args: &[String]) -> i32 {
     }
 }
 
-/// One JSON line per chat, index rollup fields (the x-e118 read API).
+/// One JSON line per chat, index rollup fields (the thread read model's API).
 fn list_chats(dir: &Path) -> Result<Vec<String>, String> {
     let conn = open_index(&index_path())?;
     ensure_index(&conn, dir)?;
@@ -1270,7 +1274,7 @@ mod tests {
         assert!(imported.contains("msg-abcdef"), "original id kept");
         // A second attempt is refused (AC6-HP cutover).
         let conn = open_index(&db).unwrap();
-        assert!(migrated_at(&conn).is_some());
+        assert!(migrated_at(&conn).unwrap().is_some());
         drop(conn);
         // A lost index rebuilds from the JSONL and answers identically (AC4-HP),
         // old 6-hex ids keep resolving (AC5-ERR).
