@@ -47,10 +47,16 @@ pub fn run(args: &[String]) -> i32 {
     }
     // `mint-id` is the shell door to the crate's one session-id mint: hooks
     // and Python forwarders call it instead of minting their own, so one
-    // function owns the id's shape. Answers a value, not a path, so it rides
-    // the same pre-table dispatch as `migrate`.
+    // function owns the id's shape. The mint is unique among the handles the
+    // registry's rows already answer to; an unreadable or missing registry
+    // mints against an empty set, never an error. Answers a value, not a
+    // path, so it rides the same pre-table dispatch as `migrate`.
     if name == "mint-id" {
-        return match crate::identity::mint_fno_id() {
+        let taken =
+            crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+                .map(|registry| crate::state::taken_handles(&registry.entries))
+                .unwrap_or_default();
+        return match crate::identity::mint_unique_fno_id(&taken) {
             Ok(id) => {
                 println!("{id}");
                 0
