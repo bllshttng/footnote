@@ -2804,15 +2804,15 @@ def test_update_registry_journals_rows_lost_naming_the_writer(
     ]
 
 
-def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
+def test_update_registry_announces_a_removal_through_the_bridge(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """No resumable identity still announces the removal; the write succeeds."""
+    """update_registry hands the before-rows to the Rust choke point's
+    removal-accounting op; the write succeeds either way."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -2828,6 +2828,15 @@ def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
             ),
         ],
     )
+    calls: list[dict] = []
+
+    def fake_spawn_axes_call(payload: dict) -> dict:
+        calls.append(payload)
+        return {"removed": 1}
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_axes_client.spawn_axes_call", fake_spawn_axes_call
+    )
 
     update_registry(
         lambda es: [e for e in es if e.name != "identity-less"],
@@ -2836,13 +2845,10 @@ def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
 
     survivors = load_registry(path=registry_path)
     assert [e.name for e in survivors] == ["kept"]
-
-    removals = _removal_events(events_path)
-    assert len(removals) == 1
-    assert removals[0]["data"]["name"] == "identity-less"
-    assert removals[0]["data"]["receipt_staged"] is False
-    assert removals[0]["data"]["reason"], "the receipt-build failure is the reason"
-    assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
+    assert len(calls) == 1
+    ask = calls[0]["removal_accounting"]
+    assert ask["registry"] == str(registry_path)
+    assert [row["name"] for row in ask["before"]] == ["kept", "identity-less"]
 
 
 def test_write_registry_has_exactly_one_production_caller() -> None:
@@ -3122,20 +3128,3 @@ def test_guard_refuses_probe_and_mass_drop_on_shared_root(
     monkeypatch.setenv("FNO_REGISTRY_ALLOW_ROW_LOSS", "1")
     write_registry([probe_row("fixture-probe")], path=shared)
     assert len(load_registry(path=shared)) == 1
-
-    # The removal accounting: the deliberate drop journaled every
-    # dropped row with the remover and the reason, in the daemon envelope
-    # shape, beside the registry it dropped them from. The refused writes
-    # above persisted nothing, so they emit nothing.
-    events = [
-        json.loads(line)
-        for line in (agents_home / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    removed = [e for e in events if e["type"] == "registry_row_removed"]
-    lost = [e for e in events if e["type"] == "registry_rows_lost"]
-    assert {e["data"]["name"] for e in removed} == {f"worker-{i}" for i in range(5)}
-    assert all(e["data"]["reason"] for e in removed)
-    assert all(isinstance(e["data"]["receipt_staged"], bool) for e in removed)
-    assert lost and lost[-1]["data"]["writer"] == "python"
-    assert len(lost[-1]["data"]["lost"]) == 5

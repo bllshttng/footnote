@@ -511,8 +511,7 @@ def test_condition_c_shortfall_refuses(tmp_path: Path):
     v = resolve_promise_evidence(wave_node, query=merged)
     assert v.outcome == "promise_unmet"
     assert "promised 3 ships" in (v.reason or "")
-    assert "declared waves: 3" in (v.reason or "")
-    assert "--add-pr" in (v.reason or "")
+    assert "only 1 merged" in (v.reason or "")
 
 
 def test_condition_c_satisfied_passes(tmp_path: Path):
