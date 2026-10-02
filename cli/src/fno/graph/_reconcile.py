@@ -1009,8 +1009,21 @@ def resolve_promise_evidence(
     close_probes = frontmatter.get("close_probes")
     expected_raw = frontmatter.get("expected_url_count")
     expected = expected_raw if isinstance(expected_raw, int) else None
+    expected_basis = "expected_url_count"
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
+
+    # A plan that declares waves promises one ship per wave even without an
+    # explicit expected_url_count (the x-72c2 stamp bug: wave 1's merge closed
+    # a 3-wave node). An explicit count wins; a parse failure skips with the
+    # warning the other unread readers return.
+    if expected is None:
+        wave_count, wave_warning = _declared_wave_count(_body)
+        if wave_warning:
+            return PromiseVerdict(outcome="ok", warning=wave_warning)
+        if isinstance(wave_count, int) and wave_count >= 2:
+            expected = wave_count
+            expected_basis = "declared waves"
 
     # Condition E: an open prove-it FAIL on this node's own plan
     # artifacts is claimed work whose outcome did not hold; it needs no
@@ -1118,10 +1131,38 @@ def resolve_promise_evidence(
                 )
             return PromiseVerdict(
                 outcome="promise_unmet",
-                reason=_promise_refusal_c(node_id, plan_display, expected, merged),
+                reason=_promise_refusal_c(
+                    node_id, plan_display, expected, merged, basis=expected_basis
+                ),
             )
 
     return PromiseVerdict(outcome="ok")
+
+
+def _declared_wave_count(body: str) -> tuple[Optional[int], Optional[str]]:
+    """Waves the plan's Execution Strategy declares, or ``(None, warning)``.
+
+    The x-72c2 specimen: a 3-wave quick-plan declared neither close_probes nor
+    expected_url_count, so the promise gate skipped and wave 1's merge closed
+    the node while waves 2 and 3 were still in flight. The Execution Strategy
+    ``waves:`` list is the structured declaration /execute itself runs from,
+    not an inferred ``## Wave N`` heading, so counting it stays an explicit
+    promise. Unreadable is a skip warning, never a block: matching the
+    close_probes/expected readers' posture.
+    """
+    match = re.search(r"^## +Execution Strategy\b.*?$(.*?)(?=^## +|\Z)", body, re.M | re.S)
+    if match is None:
+        return None, None
+    try:
+        from fno.plan.brief import BriefParseError, parse_execution_strategy
+
+        parsed = parse_execution_strategy(match.group(1))
+    except Exception as exc:  # noqa: BLE001 - a failed read skips, never blocks
+        return None, f"promise gate could not parse the Execution Strategy ({exc}); wave count skipped for this close"
+    waves = parsed.get("waves")
+    if not isinstance(waves, list):
+        return None, None
+    return len(waves), None
 
 
 def _count_merged_refs(
@@ -1183,14 +1224,28 @@ def _promise_refusal_b(node_id: str, plan_display: str, detail: str) -> str:
     )
 
 
-def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: int) -> str:
+def _promise_refusal_c(
+    node_id: str,
+    plan_display: str,
+    expected: int,
+    merged: int,
+    *,
+    basis: str = "expected_url_count",
+) -> str:
+    count_line = (
+        f"  expected_url_count: {expected}    merged refs: {merged}"
+        if basis == "expected_url_count"
+        else f"  declared waves: {expected}    merged refs: {merged}"
+    )
     return (
         f"Refused: {node_id} promised {expected} ships; only {merged} merged.\n"
         f"  plan: {plan_display}\n"
-        f"  expected_url_count: {expected}    merged refs: {merged}\n"
+        f"{count_line}\n"
         f"\n"
-        f"  Two legal exits:\n"
+        f"  Legal exits:\n"
         f"    ship the rest, then close; or\n"
+        f"    record an already-open follow-up PR on the node\n"
+        f"      (`fno backlog update {node_id} --add-pr <number>`), or\n"
         f"    file the remainder (`fno backlog idea`) and close with\n"
         f"      --force --reason \"remaining ships filed as <id>\""
     )
