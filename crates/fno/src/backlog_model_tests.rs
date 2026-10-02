@@ -818,6 +818,22 @@ fn search_grammar_case_table_holds_and_drives_the_board() {
         crate::search_query::areas_for_kind("day_boundary"),
         Vec::<&str>::new()
     );
+    // Spec rule 10: the module renders its own help; each surface's keys
+    // answer, the other surface's do not.
+    let node_help = crate::search_query::help_text(crate::search_query::Surface::Node);
+    let event_help = crate::search_query::help_text(crate::search_query::Surface::Event);
+    assert!(
+        node_help.contains("s:ready status"),
+        "the node help names the key with its example: {node_help}"
+    );
+    assert!(!node_help.contains("k:question"), "k: is event-only");
+    assert!(
+        node_help.contains("in:x-3b09 s:ready,idea sort:priority"),
+        "the worked examples ride"
+    );
+    assert!(event_help.contains("k:question kind"));
+    assert!(!event_help.contains("s:ready"), "s: is node-only");
+    assert!(event_help.contains("m:glm k:node_shipped ts:>=2026-10-01"));
 }
 
 #[test]

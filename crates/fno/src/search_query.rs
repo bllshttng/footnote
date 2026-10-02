@@ -992,3 +992,71 @@ impl SessionDirectory {
         self.by_id.is_empty()
     }
 }
+
+/// One sample value per kind, for the help table's per-key example.
+fn kind_example(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Value => "ready",
+        Kind::Text => "word",
+        Kind::Date => ">=2026-09-20",
+        Kind::Number => ">3",
+        Kind::Age => ">7",
+        Kind::Flag => "open",
+        Kind::Sort => "created-desc",
+    }
+}
+
+/// The grammar renders its own help from the key table (spec rule 10): the
+/// operators, every key this surface answers with one example, and three
+/// worked examples. The mux board, the feed, the web page and the CLI's
+/// `--help` all show this one text; each surface wires its `?` key when it
+/// ships.
+pub fn help_text(surface: Surface) -> String {
+    let mut out = String::from(
+        "search grammar\n  \
+         space AND, comma OR inside one key, | OR across terms, -term NOT\n  \
+         s:in prefix, \"quoted\" exact, created:>=2026-09-20, a..b range\n  \
+         -7d relative from now, bare words fuzzy, unknown keys error\nkeys:\n",
+    );
+    for k in KEYS {
+        let answerable = match surface {
+            Surface::Node => k.node,
+            Surface::Event => k.event,
+        };
+        if !answerable {
+            continue;
+        }
+        let short = if k.names.len() > 1 {
+            k.names[1]
+        } else {
+            k.names[0]
+        };
+        let line = if k.kind == Kind::Sort {
+            format!("{}:{}", short, kind_example(k.kind))
+        } else {
+            format!("{}:{} {}", short, kind_example(k.kind), k.names[0])
+        };
+        out.push_str("  ");
+        out.push_str(&line);
+        out.push('\n');
+    }
+    let worked: &[&str] = match surface {
+        Surface::Node => &[
+            "h:codex is:open -t:epic",
+            "in:x-3b09 s:ready,idea sort:priority",
+            "created:>=2026-09-20 sid:01a0f916",
+        ],
+        Surface::Event => &[
+            "a:rowan k:question",
+            "m:glm k:node_shipped ts:>=2026-10-01",
+            "ar:mail l:heir -k:day_boundary",
+        ],
+    };
+    out.push_str("examples:\n");
+    for w in worked {
+        out.push_str("  ");
+        out.push_str(w);
+        out.push('\n');
+    }
+    out
+}
