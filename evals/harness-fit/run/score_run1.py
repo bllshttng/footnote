@@ -58,6 +58,12 @@ def wilson(k: int, n: int) -> list:
     return [round(max(c - h, 0), 3), round(min(c + h, 1), 3)]
 
 
+def family(model: str) -> str:
+    """One trailing bracket suffix dropped, the registry's model-family rule."""
+    model = model.strip().lower()
+    return model[:model.rfind("[")] if model.endswith("]") and model.rfind("[") > 0 else model
+
+
 def classify(r: dict) -> dict:
     lane = r["experiment_id"].removeprefix("harness-fit-")
     stalled = "timed out after" in (r.get("reason") or "")
@@ -65,6 +71,9 @@ def classify(r: dict) -> dict:
     if lane == "opencode" and r.get("observed_session_id"):
         model, usage = reread_opencode(r["observed_session_id"])
         lane_status = "ok" if model == r.get("requested_model") else "substituted"
+    if lane == "claude" and model and lane_status == "substituted":
+        # Amendment 10: the transcript stores the bare model, the lane asks with `[1m]`.
+        lane_status = "ok" if family(model) == family(r.get("requested_model") or "") else "substituted"
     if stalled:
         kind = "stall"
     elif "Rate limit reached" in (r.get("reason") or ""):
