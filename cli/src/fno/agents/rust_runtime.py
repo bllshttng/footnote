@@ -242,16 +242,17 @@ RUST_CLIENT_VERBS = frozenset(
         "session-start-bytes",
         "judge",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
-        "org-vacancies",
+        # The second spelling is the one-release alias the binary still dispatches.
+        "org-vacancies", "court-orphans",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read,
         # graph.json and claims in, per-scope fold out; Python passes the
         # crowns gather_court already adjudicated.
-        "org-fold",
+        "org-fold", "court-fold",
         # Crown-scope reign_checkin readback for `fno agents king history`:
         # daemon-free read; Python resolves the caller's crown scope and
         # passes every journal paths.event_journals resolves, then invokes
         # the binary directly (not via `fno agents` routing).
-        "lead-history",
+        "lead-history", "king-history",
         # Failure-pattern leaderboard fold for `fno doctor evals macro`:
         # daemon-free read; Python resolves the journal list and forwards the
         # flags, then invokes the binary directly (not via `fno agents`
@@ -260,12 +261,12 @@ RUST_CLIENT_VERBS = frozenset(
         # The check-in beat for `fno agents king checkin`: daemon-free
         # read; Python resolves the caller's crown scope and the paths
         # Python owns, then invokes the binary (not via `fno agents`).
-        "lead-checkin",
+        "lead-checkin", "king-checkin",
         # Reign ledger page renderer for `fno agents king ledger`: court JSON
         # and the graph in, one HTML page out; Python resolves the court and
         # the paths, then invokes the binary directly (not via `fno agents`
         # routing).
-        "lead-rundown",
+        "lead-rundown", "reign-ledger",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",

@@ -791,7 +791,7 @@ def test_gate_refusal_maps_the_gate_exit_family():
     """The closed gate family classifies machine-scoped; every other code is
     a node fault and returns None."""
     from fno.agents.spawn_gate import (
-        EXIT_KING_SHARE,
+        EXIT_LEAD_SHARE,
         EXIT_LOAD_REFUSED,
         EXIT_NO_WAIT,
         EXIT_PROVIDER_CAP,
@@ -806,7 +806,7 @@ def test_gate_refusal_maps_the_gate_exit_family():
         EXIT_RAM_REFUSED,
         EXIT_PROVIDER_CAP,
         EXIT_LOAD_REFUSED,
-        EXIT_KING_SHARE,
+        EXIT_LEAD_SHARE,
     ):
         refusal = adv.gate_refusal(
             adv.SpawnError(f"exited {code}", exit_code=code, detail=_GATE_LINE)
