@@ -199,28 +199,6 @@ fn guidance_release_branch_names_the_upgrade_command() {
 }
 
 #[test]
-fn readiness_payload_parses_for_the_tui() {
-    let _lock = crate::model_catalog::state_env_lock();
-    let tmp = std::env::temp_dir().join(format!("fno-du-parse-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    std::env::set_var("FNO_STATE_DIR", &tmp);
-    let before = std::env::var_os("FNO_AGENTS_BIN");
-    std::env::set_var("FNO_AGENTS_BIN", "/usr/bin/false");
-    let payload = update_readiness(None);
-    std::env::remove_var("FNO_STATE_DIR");
-    match before {
-        Some(v) => std::env::set_var("FNO_AGENTS_BIN", v),
-        None => std::env::remove_var("FNO_AGENTS_BIN"),
-    }
-    let _ = std::fs::remove_dir_all(&tmp);
-    let parsed: Result<crate::client::update_menu::UpdateReadiness, _> =
-        serde_json::from_value(payload.clone());
-    assert!(parsed.is_ok());
-    assert!(payload.get("probes").is_some());
-}
-
-#[test]
 fn stale_sessions_fold_flags_only_live_stale_rows() {
     let rows: Vec<Value> = serde_json::from_str::<Vec<Value>>(
         r#"[

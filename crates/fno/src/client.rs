@@ -1920,7 +1920,7 @@ mod release_check;
 mod settings_modal;
 mod theme_ground;
 mod theme_import_ui;
-pub(crate) mod update_menu;
+mod update_menu;
 
 use config_set::spawn_config_set;
 
