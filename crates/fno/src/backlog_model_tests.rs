@@ -635,88 +635,95 @@ fn type_filter_keeps_only_that_kind_and_facets_name_both() {
 }
 
 #[test]
-fn search_matches_details_text_not_id_slug_title_only() {
-    // AC2-HP: the needle appears only in one node's details; the board
-    // keeps that card and drops one whose fields all lack it.
-    let rows = vec![
-        json!({
-            "id": "x-hit", "slug": "hit", "title": "Unrelated title",
-            "status": "ready", "priority": "p2",
-            "details": "the launch code is needle-in-pocket"
-        }),
-        json!({
-            "id": "x-sess", "slug": "sess", "title": "Session child",
-            "status": "ready", "priority": "p2",
-            "source_session_id": "af8e03f2-e896-4d17-8600-213fca3dfb55"
-        }),
-        json!({"id": "x-miss", "slug": "miss", "title": "Another card",
-               "status": "ready", "priority": "p2"}),
-    ];
-    let inp = fixture(rows.clone());
-    let kept = |q: &Query| -> Vec<String> {
-        board(&inp, q)
-            .lanes
-            .iter()
-            .flat_map(|l| l.cells.iter())
-            .flat_map(|c| c.cards.iter())
-            .map(|c| c.id.clone())
-            .collect()
-    };
-    let q = Query::from_pairs(&[("q".into(), "needle".into())]).unwrap();
-    assert_eq!(kept(&q), ["x-hit"], "the details-only match stays");
-    // A full session id and its 8-character head match in exact mode.
-    let q =
-        Query::from_pairs(&[("q".into(), "af8e03f2-e896-4d17-8600-213fca3dfb55".into())]).unwrap();
-    assert_eq!(kept(&q), ["x-sess"], "the full session id matches");
-    let q = Query::from_pairs(&[("q".into(), "af8e03f2".into())]).unwrap();
-    assert_eq!(kept(&q), ["x-sess"], "the 8-character head matches");
-    // Fuzzy mode: an in-order subsequence of the title, and a needle spread
-    // across two details words drops (one word must hold it all).
-    let q = Query::from_pairs(&[
-        ("q".into(), "wbsrt".into()),
-        ("match".into(), "fuzzy".into()),
-    ])
-    .unwrap();
-    let mut with_title = Vec::from(&rows[..]);
-    with_title.insert(
-        0,
-        json!({
-            "id": "x-wbsrt", "slug": "w", "title": "Web board list: every column sorts",
-            "status": "ready", "priority": "p2"
-        }),
-    );
-    let inp2 = fixture(with_title);
-    let kept2: Vec<String> = board(&inp2, &q)
-        .lanes
+fn search_grammar_case_table_holds_and_drives_the_board() {
+    let cases: serde_json::Value = serde_json::from_str(include_str!("search_query_cases.json"))
+        .expect("the case file parses");
+    let now = crate::search_query::stamp_epoch(
+        cases["now"].as_str().expect("now is a stamp"),
+    )
+    .expect("now parses");
+    let rows: Vec<(String, crate::search_query::Surface, crate::search_query::Fields)> = cases["rows"]
+        .as_object()
+        .expect("rows object")
         .iter()
-        .flat_map(|l| l.cells.iter())
-        .flat_map(|c| c.cards.iter())
-        .map(|c| c.id.clone())
+        .map(|(id, r)| {
+            let surface = match r["surface"].as_str().expect("row surface") {
+                "node" => crate::search_query::Surface::Node,
+                _ => crate::search_query::Surface::Event,
+            };
+            let fields: crate::search_query::Fields =
+                serde_json::from_value(r["fields"].clone()).expect("fields parse");
+            (id.clone(), surface, fields)
+        })
         .collect();
+    let mut fails: Vec<String> = Vec::new();
+    for case in cases["cases"].as_array().expect("cases array") {
+        let q = case["q"].as_str().expect("case q");
+        let surface = match case["surface"].as_str().expect("case surface") {
+            "node" => crate::search_query::Surface::Node,
+            _ => crate::search_query::Surface::Event,
+        };
+        match crate::search_query::parse(q, surface, now) {
+            Err(msg) => match case.get("error").and_then(|e| e.as_str()) {
+                Some(want) if want == msg => {}
+                other => fails.push(format!(
+                    "q {q:?}: parser errored {msg:?}, case wanted {other:?}"
+                )),
+            },
+            Ok(p) => {
+                if let Some(want) = case.get("error").and_then(|e| e.as_str()) {
+                    fails.push(format!("q {q:?}: parsed, case wanted error {want:?}"));
+                    continue;
+                }
+                let mut kept: Vec<&str> = rows
+                    .iter()
+                    .filter(|(_, s, f)| *s == surface && p.keeps(f))
+                    .map(|(id, _, _)| id.as_str())
+                    .collect();
+                kept.sort();
+                let mut want: Vec<&str> = case["keep"].as_array().expect("keep list")
+                    .iter().filter_map(|v| v.as_str()).collect();
+                want.sort();
+                if kept != want {
+                    fails.push(format!("q {q:?}: kept {kept:?}, wanted {want:?}"));
+                }
+            }
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "case-table mismatches:\n{}",
+        fails.join("\n")
+    );
+    // The area derivation answers the case file's literal area fields.
     assert_eq!(
-        kept2,
-        ["x-wbsrt"],
-        "the title subsequence matches in fuzzy mode"
+        crate::search_query::areas_for_node(
+            "mux sideline shows fleet capacity",
+            "crates/fno/src/client/sideline.rs sidebar fix",
+            None,
+        ),
+        ["mux", "fleet"]
     );
-    let spread = json!({
-        "id": "x-spread", "slug": "sp", "title": "Plain title",
-        "status": "ready", "priority": "p2",
-        "details": "launch needle pocket"
-    });
-    let inp3 = fixture(vec![spread]);
-    let spread_q = Query::from_pairs(&[
-        ("q".into(), "edlep".into()),
-        ("match".into(), "fuzzy".into()),
-    ])
-    .unwrap();
-    let kept3: Vec<String> = board(&inp3, &spread_q)
-        .lanes
-        .iter()
-        .flat_map(|l| l.cells.iter())
-        .flat_map(|c| c.cards.iter())
-        .map(|c| c.id.clone())
-        .collect();
-    assert!(kept3.is_empty(), "a needle across two details words drops");
+    assert_eq!(
+        crate::search_query::areas_for_node(
+            "board glue",
+            "touch crates/fno/src/client/board.rs",
+            None,
+        ),
+        ["backlog", "mux"]
+    );
+    assert_eq!(
+        crate::search_query::areas_for_node("flake hunt", "the .github/workflows matrix", None),
+        ["ci"]
+    );
+    assert_eq!(
+        crate::search_query::areas_for_kind("session_reaped"),
+        ["agents"]
+    );
+    assert_eq!(
+        crate::search_query::areas_for_kind("day_boundary"),
+        Vec::<&str>::new()
+    );
 }
 
 #[test]
