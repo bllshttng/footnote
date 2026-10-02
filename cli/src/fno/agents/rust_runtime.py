@@ -251,18 +251,16 @@ RUST_CLIENT_VERBS = frozenset(
         # every journal paths.event_journals resolves, and invokes the binary.
         "lead-history",
         # Failure-pattern leaderboard fold for `fno doctor evals macro`:
-        # daemon-free read; Python resolves the journal list and forwards the
-        # flags, then invokes the binary directly (not via `fno agents`
-        # routing).
+        # daemon-free read; Python resolves the journal list and forwards
+        # the flags, then invokes the binary (not via `fno agents` routing).
         "evals-macro",
         # The check-in beat for `fno agents king checkin`: daemon-free
         # read; Python resolves the caller's crown scope and the paths
         # Python owns, then invokes the binary (not via `fno agents`).
         "lead-checkin",
-        # Reign ledger page renderer for `fno agents king ledger`: court JSON
-        # and the graph in, one HTML page out; Python resolves the court and
-        # the paths, then invokes the binary directly (not via `fno agents`
-        # routing).
+        # Rundown page renderer for `fno agents king ledger`: court JSON and
+        # the graph in, one HTML page out; Python resolves the court and the
+        # paths, then invokes the binary (not via `fno agents` routing).
         "lead-rundown",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
@@ -315,12 +313,9 @@ RUST_CLIENT_VERBS = frozenset(
     }
 )
 
-#: One-release dispatch aliases: the pre-rename verb spellings the binary
-#: still answers beside the registered names (the registered list is
-#: shrink-only, so the aliases live here until the cutover).
+#: One-release dispatch aliases the binary answers beside the registered names.
 RUST_VERB_ALIASES = frozenset({
-    "court-orphans", "court-fold", "king-history", "king-checkin", "reign-ledger",
-})
+    "court-orphans", "court-fold", "king-history", "king-checkin", "reign-ledger"})
 
 #: Verbs the Python ``agents`` app implements that do NOT auto-route to the
 #: Rust client.
