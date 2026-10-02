@@ -364,7 +364,11 @@ impl Panel {
             court.arm_num("cpu admission", "ceiling"),
         ) {
             (Some(low), Some(_), Some(ceiling)) if !self.detailed => {
-                let over = if low > ceiling { " · over, new workers wait" } else { "" };
+                let over = if low > ceiling {
+                    " · over, new workers wait"
+                } else {
+                    ""
+                };
                 format!(
                     "  agents    use {:.0}% of the CPU (limit {:.0}%){over}",
                     low * 100.0,

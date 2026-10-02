@@ -143,10 +143,10 @@ pub fn decide(
     let cores = sample
         .cores
         .map_or_else(|| "unknown".into(), |v| format!("{v:.0}"));
-    let per_core = sample.load_15m.zip(sample.cores).map_or_else(
-        || "unknown".into(),
-        |(load, cores)| num(load / cores),
-    );
+    let per_core = sample
+        .load_15m
+        .zip(sample.cores)
+        .map_or_else(|| "unknown".into(), |(load, cores)| num(load / cores));
     let reason = if sample.busy_fraction.is_none() {
         "Machine unclear: CPU use is not readable (host CPU ticks unavailable)".to_string()
     } else {
@@ -319,15 +319,7 @@ pub fn tick_machine_watch_with_thresholds(
                     verdict: "hot".into(),
                 };
             }
-            emit_notice(
-                state,
-                sample,
-                &reason,
-                now,
-                HOT_TITLE,
-                "hot",
-                &mut notify,
-            )
+            emit_notice(state, sample, &reason, now, HOT_TITLE, "hot", &mut notify)
         }
         _ => WatchOutcome {
             acted: 0,
@@ -1055,7 +1047,11 @@ mod tests {
         assert_eq!(notify_calls, 1);
         assert_eq!(brake_calls, 1, "the brake writes on the first tick");
         assert_eq!(*actions.borrow(), vec!["brake", "notify"]);
-        assert!(outcome.detail.contains("out of memory"), "{}", outcome.detail);
+        assert!(
+            outcome.detail.contains("out of memory"),
+            "{}",
+            outcome.detail
+        );
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(stored["group"]["name"], "git");

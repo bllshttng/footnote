@@ -50,7 +50,7 @@ async fn sample_macmon_line(detailed: bool) -> String {
     parsed.unwrap_or_else(|| "meter: sensor unavailable".into())
 }
 
-pub(super) fn parse_macmon_sample(raw: &[u8], detailed: bool) -> Option<String> {
+fn parse_macmon_sample(raw: &[u8], detailed: bool) -> Option<String> {
     let text = std::str::from_utf8(raw).ok()?;
     let line = text.lines().find(|l| l.trim_start().starts_with('{'))?;
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
@@ -81,4 +81,32 @@ pub(super) fn parse_macmon_sample(raw: &[u8], detailed: bool) -> Option<String> 
         line.push_str(&format!(" {w:.0}W"));
     }
     Some(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_macmon_sample;
+
+    #[test]
+    fn a_dark_macmon_sample_never_renders_a_number() {
+        // An empty or unparseable pipe parses to None; `sample_macmon_line`
+        // renders that as the unavailable line, never a zero.
+        assert_eq!(parse_macmon_sample(b"", false), None);
+        assert_eq!(parse_macmon_sample(b"not json\n", true), None);
+        let raw = br#"{"cpu_usage_pct":0.45,"sys_power":53.5,"memory":{"ram_total":103079215104,"ram_usage":30702266368}}"#;
+        let good = parse_macmon_sample(raw, true).expect("a healthy sample parses");
+        assert!(good.contains("cpu 45%"), "{good}");
+        // Decimal GB (bytes / 1e9), matching the Python arm's convention.
+        assert!(good.contains("mem 31G/103G"), "{good}");
+        assert!(good.contains("54W"), "{good}");
+        // The simple readout (the default) says the same reading in words.
+        let simple = parse_macmon_sample(raw, false).unwrap();
+        assert_eq!(simple, "CPU 45% busy · memory 30% full · 54 W");
+        // A missing memory block parses to None, which renders as the
+        // unavailable line - never a zero.
+        assert_eq!(
+            parse_macmon_sample(br#"{"cpu_usage_pct":0.45}"#, false),
+            None
+        );
+    }
 }

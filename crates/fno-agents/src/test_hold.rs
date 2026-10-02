@@ -272,7 +272,10 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
                 record.reason
             )
         } else {
-            format!("Tests are held by {} ({}).", record.changed_by, record.reason)
+            format!(
+                "Tests are held by {} ({}).",
+                record.changed_by, record.reason
+            )
         };
         announce(
             &mut outcome,
