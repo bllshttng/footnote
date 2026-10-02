@@ -325,6 +325,24 @@ pub fn needs_refresh(mtime: Option<SystemTime>, now: SystemTime) -> bool {
     }
 }
 
+/// The one stale-check-and-spawn block the composer ran inline, moved here
+/// so the mux server can run the same hour-24 fetch: pricing never depends
+/// on a user who never opens the composer. Fire-and-forget: the fetch never
+/// blocks the caller, a failed fetch keeps the old cache, and the next
+/// hour's stat is the retry.
+pub fn refresh_if_stale(state: &Path) {
+    let mtime = std::fs::metadata(cache_path(state))
+        .and_then(|m| m.modified())
+        .ok();
+    if !needs_refresh(mtime, std::time::SystemTime::now()) {
+        return;
+    }
+    let spawn_state = state.to_path_buf();
+    tokio::spawn(async move {
+        let _ = refresh(&spawn_state).await;
+    });
+}
+
 /// One refresh: fetch to `<dir>/models-dev.json.tmp.<pid>`, parse the tmp
 /// file, and rename it over the cache only when the parse succeeds. A failed
 /// fetch or parse deletes the tmp file and keeps the old cache. The composer

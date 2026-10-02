@@ -374,6 +374,10 @@ if [[ "${1:-}" == "surface-check" ]]; then
     # A clean surface receipt: zero findings, nothing on stdout.
     exit 0
 fi
+if [[ "${1:-}" == "wave" && "${2:-}" == "check" ]]; then
+    printf '%s\n' $'O\tNo parallel waves to check'
+    exit 0
+fi
 exit 3
 STUB
 chmod +x "$SEMLAWBIN/fno-agents"

@@ -1,6 +1,6 @@
 ---
 name: mail
-description: "Message background agent workers and projects from a runner-less surface (phone / Happy app). One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, and drain. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message' or 'check my unread'."
+description: Read, send, reply to, and manage Footnote agent mail from any session.
 argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  dnd [off|cancel]  |  unread|list|status [name]"
 metadata:
   internal: false

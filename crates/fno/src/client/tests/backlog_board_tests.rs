@@ -323,16 +323,17 @@ fn board_wide_rows() {
         "last column survives the cut: {header}"
     );
 
+    // The ROW rule clips with no marker (d-36438ea4): the stats line loses
+    // whole trailing text, never a word-boundary ellipsis.
     assert_eq!(
-        elide_words(
+        crate::chrome::clip(
             "In Progress 1 \u{b7} Now 1 \u{b7} Next 279 \u{b7} Later 30",
             26
         ),
-        "In Progress 1 \u{b7} Now 1 \u{b7}\u{2026}"
+        "In Progress 1 \u{b7} Now 1 \u{b7} Ne"
     );
-    assert_eq!(elide_words("short", 26), "short");
-    // One long word: no boundary exists, so the ellipsis follows a hard cut.
-    assert_eq!(elide_words("abcdefgh", 4), "abc\u{2026}");
+    assert_eq!(crate::chrome::clip("short", 26), "short");
+    assert_eq!(crate::chrome::clip("abcdefgh", 4), "abcd");
 }
 
 // `V` cycles the sideline view and the board rides with it: to backlog
