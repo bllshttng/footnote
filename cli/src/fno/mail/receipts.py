@@ -8,9 +8,12 @@ vocabulary, and the transcript-age suffix a bare live-miss carries.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 from typing import Optional
 
 # The exit a NOT LANDED receipt leaves `mail send` with : a last-line
@@ -430,7 +433,6 @@ def _escalate_to_human(
     displayed - the caller must not claim escalation; the overlay event still
     fired).
     """
-    import hashlib
 
     from fno.paths import state_dir
 
