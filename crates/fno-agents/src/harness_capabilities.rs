@@ -1389,7 +1389,7 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
                 harness,
                 "hooks",
                 &format!(
-                    "unknown hook job {job:?}; declared jobs are lead_guard and lead_reinject"
+                    "unknown hook job {job:?}; declared jobs are lead_guard, lead_reinject and session_state"
                 ),
             ));
         }
