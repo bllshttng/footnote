@@ -828,7 +828,7 @@ def _territory_stamp(node_id: str) -> dict:
     try:
         from fno.rust_binary import call_binary_json
 
-        error, verdict = call_binary_json("territory-verdict", ["--node", node_id])
+        error, verdict = call_binary_json("territory-verdict", ["--node", node_id], timeout=60)
         if error is not None:
             raise RuntimeError(error)
         return {"territory": verdict.get("territory"), "kingless": verdict.get("kingless")}
