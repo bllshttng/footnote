@@ -29,13 +29,11 @@ export PATH
 # fno shells can wedge on a stalled daemon / graph lock; bound every call with
 # the shared load-aware budget rather than the harness's 30s hook timeout.
 # Fails closed like the other injection hooks: a missing helper
-# exits 0. Past the load threshold the offer is skipped BEFORE the cursor
-# advances, so it is deferred to the next prompt, never destroyed.
+# exits 0.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/hook-budget.sh
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 OFFER_BUDGET="$(hook_budget_secs)"
-[[ "$OFFER_BUDGET" -gt 0 ]] || exit 0
 # shellcheck source=../scripts/lib/events-lock.sh
 source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 

@@ -9,11 +9,10 @@ A hook that waits blocks a turn. Context that arrives late is worth less than a 
 | Machine state | Budget | Meaning |
 |---|---|---|
 | Idle: load1 <= cores | 3s | the generous read |
-| Loaded: cores < load1 <= 2x cores | 1s | shorten, do not lengthen |
-| Past the threshold: load1 > 2x cores | skip | exit 0, empty output |
+| Loaded: load1 > cores | 1s | shorten, do not lengthen |
 | Load unreadable | 3s | fail open; the wall-clock bound still caps |
 
-A fired bound or a skip reads as silence: exit 0 with empty output. A turn never inherits an error from optional context. The bound rides `with_timeout` from `scripts/lib/with-timeout.sh`, which needs no coreutils `timeout` and works on stock macOS. One hook sets an exception: `operator-capture-nudge` pins `HOOK_BUDGET_FLOOR_SECS=1`. Its failure is its report, and a failed read must never read as an empty queue. Past the skip threshold it still runs the read bounded at 1s. A hang still dies at the bound.
+There is no skip tier. CI runners proved why: under shard load, a zero budget silenced hooks whose contracts require the read to run, and five suites caught it. The busy tier's 1s bound is the floor. A fired bound reads as silence: exit 0 with empty output. A turn never inherits an error from optional context. The bound rides `with_timeout` from `scripts/lib/with-timeout.sh`, which needs no coreutils `timeout` and works on stock macOS.
 
 Three probes sit outside the budget because their EXIT CODE is the data. `frontdoor-nudge-session-start`: 2 means fno-py, 124 means a wedged socket that still proves the Rust door. `worktree-peers-session-start`: 124 reads as staleness-unknown. `inject-fno-agent-whoami`: the suite pins the cap's duration. Each keeps its fixed `with_timeout` bound from before the budget existed. A fired bound can land on a loaded runner's fork latency. A probe whose answer rides the exit code must not shorten its bound with the load.
 

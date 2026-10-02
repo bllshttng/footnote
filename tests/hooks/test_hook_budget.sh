@@ -54,7 +54,7 @@ load_lib
 hook_load1() { printf '17.0'; }
 hook_cores() { printf '8'; }
 out="$(hook_budget_secs)"
-[[ "$out" == "0" ]] && pass "past threshold (load1 > 2x cores) -> skip" || fail "skip tier: got '$out'"
+[[ "$out" == "1" ]] && pass "past threshold (load1 > cores) -> busy floor, never skip" || fail "threshold tier: got '$out'"
 
 load_lib
 hook_load1() { printf ''; }
@@ -81,13 +81,14 @@ rc=$?
 [[ -z "$out" && "$rc" == "0" ]] && pass "fired bound reads as silence (empty, rc 0)" \
     || fail "bound: out='$out' rc=$rc"
 
-load_lib
+load_lib fast
 hook_load1() { printf '99.0'; }
 hook_cores() { printf '8'; }
 ran="$TMP/ran"
-out="$(hook_run_optional touch "$ran")"
-[[ ! -e "$ran" && -z "$out" ]] && pass "skip tier runs nothing, silent" \
-    || fail "skip: file exists or out='$out'"
+out="$(hook_run_optional bash -c 'sleep 30; echo late')"
+rc=$?
+[[ ! -e "$ran" && -z "$out" && "$rc" == "0" ]] && pass "past threshold the read still runs, bounded at the busy tier" \
+    || fail "threshold run: out='$out' rc=$rc"
 
 echo "=== hook_cache_serve ==="
 
@@ -129,14 +130,15 @@ done
     && pass "aging serve prints the copy, refresher updates off the turn path" \
     || fail "refresh: out='$out' marker=$([ -e "$marker" ] && echo yes || echo no) refreshed=$refreshed"
 
-# Expired cache + a live read that skips (past the threshold) serves stale.
+# Expired cache + a live read that expires under the busy-tier bound (a hung
+# child) serves stale.
 load_lib
 hook_load1() { printf '99.0'; }
 hook_cores() { printf '8'; }
 touch -t "$(date -v-400S +%Y%m%d%H%M.%S 2>/dev/null || date -d '400 seconds ago' +%Y%m%d%H%M.%S)" \
     "$FNO_HOOK_CACHE_DIR/k2"
-out="$(hook_cache_serve k2 300 "" -- bash -c 'echo NEVER')"
-[[ "$out" == "refreshed" ]] && pass "skip under load serves the stale copy, not nothing" \
+out="$(hook_cache_serve k2 300 "" -- bash -c 'sleep 5; echo NEVER')"
+[[ "$out" == "refreshed" ]] && pass "an expired live read serves the stale copy, not nothing" \
     || fail "stale-serve: out='$out'"
 
 echo

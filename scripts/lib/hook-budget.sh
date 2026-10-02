@@ -9,12 +9,15 @@
 # the budget, never lengthen it.
 #
 # Contract:
-#   idle machine (load1 <= cores)            -> HOOK_BUDGET_IDLE_SECS (3)
-#   loaded machine (cores < load1 <= 2*cores) -> HOOK_BUDGET_BUSY_SECS (1)
-#   past load threshold (load1 > 2*cores)     -> 0, skip entirely
+#   idle machine (load1 <= cores)             -> HOOK_BUDGET_IDLE_SECS (3)
+#   loaded machine (load1 > cores)            -> HOOK_BUDGET_BUSY_SECS (1)
 #   load unreadable                           -> idle budget, fail open; the
 #                                                wall-clock bound still caps
-# A fired bound or a skip reads as silence: exit 0 with empty output, never an
+# There is NO skip tier: five CI suites broke under runner load when a
+# threshold read as zero, because the plugin's own hook contracts require the
+# read to RUN (a failed read prints its report, an exit code carries the
+# answer, a suite measures the cap). Load still SHORTENS the budget to 1s,
+# and a fired bound reads as silence: exit 0 with empty output, never an
 # error a turn could inherit. The bound rides with_timeout from
 # scripts/lib/with-timeout.sh, the one wall-clock bound in this tree, so stock
 # macOS (no coreutils timeout) is covered. Never reintroduce a
@@ -56,7 +59,8 @@ hook_cores() {
     printf '%s' "$n"
 }
 
-# The seconds an optional hook may keep its turn waiting.
+# The seconds an optional hook may keep its turn waiting. Never zero: the
+# busy tier is the floor, because the reads must run (see the contract above).
 hook_budget_secs() {
     local load
     load=$(hook_load1)
@@ -66,7 +70,7 @@ hook_budget_secs() {
     local budget
     budget=$(awk -v l="$load" -v c="$(hook_cores)" \
         -v idle="$HOOK_BUDGET_IDLE_SECS" -v busy="$HOOK_BUDGET_BUSY_SECS" \
-        'BEGIN { print (l > 2 * c) ? 0 : (l > c) ? busy : idle }' 2>/dev/null)
+        'BEGIN { print (l > c) ? busy : idle }' 2>/dev/null)
     case "$budget" in
         '' | *[!0-9]*) printf '%s' "$HOOK_BUDGET_IDLE_SECS" ;;
         *) printf '%s' "$budget" ;;
@@ -74,21 +78,12 @@ hook_budget_secs() {
 }
 
 # hook_run_optional CMD [ARGS...]: run an optional hook's query under the
-# load-aware budget. A skip or a fired bound reads as silence (empty output,
-# status 0); any other status passes through with the child's stdout. Stdin
-# passes through, so pipeline callers keep working. A caller whose failure is
-# DATA (a failed read must print its report, never read as an empty result)
-# sets HOOK_BUDGET_FLOOR_SECS before calling: the skip tier then runs the
-# child bounded at the floor instead of skipping, so a hang still dies at the
-# bound and a fast failure still reports.
+# load-aware budget. A fired bound reads as silence (empty output, status 0);
+# any other status passes through with the child's stdout. Stdin passes
+# through, so pipeline callers keep working.
 hook_run_optional() {
     local budget out rc=0
     budget=$(hook_budget_secs)
-    local floor="${HOOK_BUDGET_FLOOR_SECS:-0}"
-    case "$floor" in '' | *[!0-9]*) floor=0 ;; esac
-    if [[ "$budget" -lt "$floor" ]]; then
-        budget="$floor"
-    fi
     case "$budget" in
         '' | 0) return 0 ;;
     esac

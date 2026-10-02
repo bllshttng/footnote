@@ -48,12 +48,7 @@ source "$WT_LIB" 2>/dev/null || exit 0
 # skipped or expired under load serves the stale copy rather than nothing.
 # The window is one minute because an ack must retire the nag promptly:
 # depth a minute old is inside this hook's resolution - it reports a count,
-# never a verdict. No fingerprint: the verb resolves its own inputs. The
-# floor stays at 1s because this hook's failure IS its report: a skip past
-# the load threshold would read a failed read as an empty queue, the exact
-# absence-as-success trap the branch below exists to prevent. A hang still
-# dies at the floor and reads as silence.
-HOOK_BUDGET_FLOOR_SECS=1
+# never a verdict. No fingerprint: the verb resolves its own inputs.
 session="$(cat 2>/dev/null | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 rc=0
 if [[ -n "$session" ]]; then
