@@ -35,6 +35,17 @@ pub(crate) enum Col {
     Thread,
 }
 
+impl Col {
+    /// Tab's column step.
+    fn next(self) -> Self {
+        match self {
+            Col::Tree => Col::Partners,
+            Col::Partners => Col::Thread,
+            Col::Thread => Col::Tree,
+        }
+    }
+}
+
 pub(crate) struct MessagesBoard {
     pub(crate) snapshot: MessagesSnapshot,
     pub(crate) tree: Option<OrgTree>,
@@ -102,6 +113,7 @@ pub(crate) enum TreeRow {
         name: String,
         role: Option<String>,
         scope: String,
+        key: String,
     },
     /// A live worker under its lead, by name and node.
     Worker {
@@ -172,7 +184,7 @@ impl MessagesBoard {
                 .holder
                 .crown_title
                 .clone()
-                .or_else(|| lead.scope.clone());
+                .or_else(|| Some(lead.scope.clone()));
             let key = lead
                 .holder
                 .harness_session_id
@@ -305,7 +317,10 @@ impl MessagesBoard {
                 rows.push(PartnerRow::System { n: sys.len() });
             }
         }
-        if let Some(threads) = proj.get("threads").and_then(Value::as_array) {
+        if let Some(threads) = proj
+            .and_then(|p| p.get("threads"))
+            .and_then(Value::as_array)
+        {
             for t in threads {
                 let parts = t.get("participants").and_then(Value::as_array);
                 let has_me =
@@ -317,7 +332,7 @@ impl MessagesBoard {
                     .map(|ps| {
                         ps.iter()
                             .filter_map(Value::as_str)
-                            .find(|s| s != agent)
+                            .find(|s| *s != agent)
                             .unwrap_or(agent)
                     })
                     .unwrap_or(agent);
@@ -408,16 +423,16 @@ impl MessagesBoard {
     /// The three columns' lines.
     pub(crate) fn columns(&self, w: usize) -> (Vec<BLine>, Vec<BLine>, Vec<BLine>) {
         let tree = self.tree_column(w);
-        let partners = self.partners_column(w);
+        let partners = self.partners_column();
         let content = self.thread_column(w);
         (tree, partners, content)
     }
 
     /// Column 1: channels, then the tree. Band rides the cursor row.
-    fn tree_column(&self, w: usize) -> Vec<BLine> {
+    fn tree_column(&self, _w: usize) -> Vec<BLine> {
         let rows = self.tree_rows();
         let mut lines = vec![
-            BLine::meta("Messages".into()),
+            BLine::meta("Messages"),
             BLine::meta(self.snapshot.error_line(board_now())),
         ];
         if self.snapshot.projection.is_none() {
@@ -426,7 +441,9 @@ impl MessagesBoard {
         for (i, row) in rows.iter().enumerate() {
             let mut line = match row {
                 TreeRow::Channel(scope) => BLine::of(&[seg(format!("# {scope}"), BRole::Label)]),
-                TreeRow::Lead { name, role, scope } => BLine::of(&[
+                TreeRow::Lead {
+                    name, role, scope, ..
+                } => BLine::of(&[
                     fold_mark(self.collapsed.contains(&format!("lead:{scope}"))),
                     seg(name.clone(), BRole::Head),
                     seg(
@@ -465,7 +482,7 @@ impl MessagesBoard {
 
     /// Column 2: the System row first, then one row per partner thread.
     fn partners_column(&self) -> Vec<BLine> {
-        let mut lines = vec![BLine::meta("Partners".into())];
+        let mut lines = vec![BLine::meta("Partners")];
         let Some(agent) = self.sel_agent.as_deref() else {
             lines.push(BLine::meta("(select an agent in column 1)"));
             return lines;
@@ -495,8 +512,8 @@ impl MessagesBoard {
 }
 impl MessagesBoard {
     fn thread_column(&self, w: usize) -> Vec<BLine> {
-        let mut lines = vec![BLine::meta("Thread".into())];
-        let Some(sel) = self.sel_thread.as_deref() else {
+        let mut lines = vec![BLine::meta("Thread")];
+        let Some(_sel) = self.sel_thread.as_deref() else {
             lines.push(BLine::meta("(select a partner in column 2)"));
             return lines;
         };
@@ -534,74 +551,72 @@ impl MessagesBoard {
     }
 }
 
-impl MessagesBoard {
-    /// The full-surface paint: three columns from row 1 (the strip owns
-    /// row 0), footer hints on the last row.
-    pub(crate) fn paint(
-        view: &View,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        width: usize,
-        height: usize,
-    ) {
-        let Some(b) = &view.messages_board else {
-            return;
-        };
-        let width = width.min(cols);
-        let height = height.min(rows);
-        if width == 0 || height < 2 {
-            return;
-        }
-        for r in 1..height {
-            for c in 0..width {
-                cells[r * cols + c] = Cell::default();
-            }
-        }
-        let (tree, partners, thread) = b.columns(width);
-        let tree_w = (width / 4).max(14).min(width / 2);
-        let part_w = (width / 4).max(14).min(width.saturating_sub(tree_w) / 2);
-        let thread_w = width.saturating_sub(tree_w + part_w);
-        let body_h = height.saturating_sub(2);
-        // The cursor's painted line follows the window, so a long tree keeps
-        // the selection visible and the click map's window matches the paint.
-        super::backlog_style::paint_panel_at(
-            cells,
-            rows,
-            cols,
-            0,
-            1,
-            tree_w,
-            body_h,
-            &tree,
-            Some(2 + b.cursors[0]),
-            &view.theme,
-        );
-        super::backlog_style::paint_panel_at(
-            cells,
-            rows,
-            cols,
-            tree_w,
-            1,
-            part_w,
-            body_h,
-            &partners,
-            Some(1 + b.cursors[1]),
-            &view.theme,
-        );
-        super::backlog_style::paint_panel_at(
-            cells,
-            rows,
-            cols,
-            tree_w + part_w,
-            1,
-            thread_w,
-            body_h,
-            &thread,
-            Some(thread.len().saturating_sub(1)),
-            &view.theme,
-        );
+/// The full-surface paint: three columns from row 1 (the strip owns
+/// row 0), footer hints on the last row.
+pub(crate) fn paint(
+    view: &View,
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    width: usize,
+    height: usize,
+) {
+    let Some(b) = &view.messages_board else {
+        return;
+    };
+    let width = width.min(cols);
+    let height = height.min(rows);
+    if width == 0 || height < 2 {
+        return;
     }
+    for r in 1..height {
+        for c in 0..width {
+            cells[r * cols + c] = Cell::default();
+        }
+    }
+    let (tree, partners, thread) = b.columns(width);
+    let tree_w = (width / 4).max(14).min(width / 2);
+    let part_w = (width / 4).max(14).min(width.saturating_sub(tree_w) / 2);
+    let thread_w = width.saturating_sub(tree_w + part_w);
+    let body_h = height.saturating_sub(2);
+    // The cursor's painted line follows the window, so a long tree keeps
+    // the selection visible and the click map's window matches the paint.
+    super::backlog_style::paint_panel_at(
+        cells,
+        rows,
+        cols,
+        0,
+        1,
+        tree_w,
+        body_h,
+        &tree,
+        Some(2 + b.cursors[0]),
+        &view.theme,
+    );
+    super::backlog_style::paint_panel_at(
+        cells,
+        rows,
+        cols,
+        tree_w,
+        1,
+        part_w,
+        body_h,
+        &partners,
+        Some(1 + b.cursors[1]),
+        &view.theme,
+    );
+    super::backlog_style::paint_panel_at(
+        cells,
+        rows,
+        cols,
+        tree_w + part_w,
+        1,
+        thread_w,
+        body_h,
+        &thread,
+        Some(thread.len().saturating_sub(1)),
+        &view.theme,
+    );
 }
 
 /// Lifecycle.
@@ -703,7 +718,7 @@ pub(crate) async fn route_keys(
     for event in scanner.scan(bytes, Instant::now()) {
         match event {
             Event::Forward(chunk) => {
-                keys(view, chunk, sock).await?;
+                keys(view, &chunk, sock).await?;
             }
             event => match dispatch_event(view, event, sock).await? {
                 DispatchFlow::Continue => {}
@@ -790,7 +805,8 @@ async fn act(
     };
     match b.col {
         Col::Tree => {
-            let Some(row) = b.tree_rows().get(b.cursors[0]) else {
+            let rows = b.tree_rows();
+            let Some(row) = rows.get(b.cursors[0]) else {
                 return Ok(());
             };
             match row {
@@ -833,7 +849,8 @@ async fn act(
             let Some(agent) = b.sel_agent.clone() else {
                 return Ok(());
             };
-            let Some(row) = b.partner_rows(&agent).get(b.cursors[1]) else {
+            let rows = b.partner_rows(&agent);
+            let Some(row) = rows.get(b.cursors[1]) else {
                 return Ok(());
             };
             match row {
@@ -861,7 +878,8 @@ fn fold_at_cursor(view: &mut View, open: bool) {
     if b.col != Col::Tree {
         return;
     }
-    let Some(row) = b.tree_rows().get(b.cursors[0]) else {
+    let rows = b.tree_rows();
+    let Some(row) = rows.get(b.cursors[0]) else {
         return;
     };
     let key = match row {
@@ -887,14 +905,15 @@ fn open_detail(view: &mut View) {
         };
         match b.col {
             Col::Tree => b.tree_rows().get(b.cursors[0]).and_then(tree_row_agent_key),
-            Col::Partners => b
-                .sel_agent
-                .as_deref()
-                .and_then(|a| b.partner_rows(a).get(b.cursors[1]))
-                .and_then(|row| match row {
-                    PartnerRow::Thread { partner_key, .. } => Some(partner_key.clone()),
-                    PartnerRow::System { .. } => None,
-                }),
+            Col::Partners => b.sel_agent.clone().and_then(|a| {
+                b.partner_rows(&a)
+                    .into_iter()
+                    .nth(b.cursors[1])
+                    .and_then(|row| match row {
+                        PartnerRow::Thread { partner_key, .. } => Some(partner_key),
+                        PartnerRow::System { .. } => None,
+                    })
+            }),
             Col::Thread => None,
         }
     };

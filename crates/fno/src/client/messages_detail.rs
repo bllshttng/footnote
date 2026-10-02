@@ -30,7 +30,7 @@ pub(crate) fn open(view: &mut View, key: String) {
         .and_then(Value::as_array)
         .and_then(|ps| {
             ps.iter()
-                .find(|p| p.get("key").and_then(Value::as_str) == Some(key.as_str))
+                .find(|p| p.get("key").and_then(Value::as_str) == Some(key.as_str()))
         })
         .cloned();
     let roster = view
