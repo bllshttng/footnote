@@ -225,7 +225,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "settled_do_rows": settled,
                 "settle_refused": pair(&summary.settle_refused),
                 "kept_operator": summary.kept_operator,
-                "kept_teamed": summary.kept_teamed,
+                "kept_crowned": summary.kept_teamed,
                 "kept_not_spawn": pair(&summary.kept_not_spawn),
                 "kept_no_provenance": summary.kept_no_provenance,
                 "kept_node_conflict": triples(&summary.kept_node_conflict),
@@ -257,7 +257,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "open_pr_rows": summary.open_pr_rows,
                 "dead_work_rows": summary.dead_work_rows,
                 "open_pr_nudge": nudge_json,
-                "teams": summary.teams,
+                "crowns": summary.teams,
                 "schema_skew": match summary.schema_skew {
                     Some((on_disk, understood)) => json!({
                         "on_disk": on_disk,
@@ -836,16 +836,16 @@ mod tests {
         );
         let json = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
-        assert_eq!(v["teams"]["vacated"][0]["scope"], "zed");
-        assert_eq!(v["teams"]["kept"][0]["reason"], "roster blocked");
+        assert_eq!(v["crowns"]["vacated"][0]["scope"], "zed");
+        assert_eq!(v["crowns"]["kept"][0]["reason"], "roster blocked");
         assert_eq!(
-            v["teams"]["successions_reverted"][0]["heir_name"],
+            v["crowns"]["successions_reverted"][0]["heir_name"],
             "gone-heir"
         );
-        // A pass that ran no team sweep renders null, never a missing key.
+        // A pass that ran no crown sweep renders null, never a missing key.
         let json = render_reap(&summary(&[]), true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
-        assert!(v["teams"].is_null());
+        assert!(v["crowns"].is_null());
 
         let mut s = summary(&[]);
         s.teams = Some(crate::team_reap::TeamReap {

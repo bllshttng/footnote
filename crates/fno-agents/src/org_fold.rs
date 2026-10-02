@@ -1534,6 +1534,12 @@ mod tests {
         registry_rows: &[Value],
         teams: &[Value],
     ) -> (tempfile::TempDir, std::path::PathBuf, Value) {
+        // The fold reads the process env through config_candidates; hold the
+        // crate env lock so a sibling test's FNO_CONFIG write cannot race the
+        // read (the tracker/territory EnvGuard discipline).
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
         std::fs::create_dir_all(dir.path().join(".fno")).unwrap();

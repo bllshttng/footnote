@@ -96,10 +96,24 @@ pub enum SpawnOrigin {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpawnOwner {
     Session(SessionRef),
-    Mission { project: String, mission: String },
-    Team { project: String, scope: String },
-    Operator { tty: String },
-    TestRun { script: String, run_id: String },
+    Mission {
+        project: String,
+        mission: String,
+    },
+    /// The wire tag stays at the pre-rename spelling until the python seam
+    /// moves in the cutover PR; both sides must read what the other writes.
+    #[serde(rename = "crown")]
+    Team {
+        project: String,
+        scope: String,
+    },
+    Operator {
+        tty: String,
+    },
+    TestRun {
+        script: String,
+        run_id: String,
+    },
 }
 
 /// Requested harness coordinates and posture. Every request-sensitive value

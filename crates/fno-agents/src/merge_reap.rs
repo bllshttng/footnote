@@ -460,7 +460,7 @@ fn run_request(
     let mut rows: Vec<state::RegistryEntry> = Vec::new();
     for entry in joined {
         if entry.crown_level.is_some() || crate::lead_state::row_holds_manifest_live_team(&entry) {
-            kept.push(format!("{}:kept_teamed", entry.name));
+            kept.push(format!("{}:kept_crowned", entry.name));
             continue;
         }
         if entry.origin.as_deref() == Some("operator") {
@@ -1652,8 +1652,8 @@ mod tests {
             .collect();
         assert!(
             kept.iter()
-                .any(|k| k.as_str().starts_with("lead-x-1:kept_teamed")),
-            "the teamed row must be named under kept_teamed: {kept:?}"
+                .any(|k| k.as_str().starts_with("lead-x-1:kept_crowned")),
+            "the teamed row must be named under kept_crowned: {kept:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
 

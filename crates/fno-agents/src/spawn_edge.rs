@@ -240,9 +240,9 @@ mod tests {
         lead.crown_level = Some(1);
         let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
         org.status = crate::AgentStatus::Busy;
-        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-other"));
         joiner.status = crate::AgentStatus::Busy;
-        let mut handoff = row("sob-t-x-2-glm", "s-t", Some(" s-lead "));
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some(" s-other "));
         handoff.status = crate::AgentStatus::Busy;
         let orphan = row("sob-t-x-3-glm", "s-t3", Some("s-gone"));
         let plain = row("solo-x-7", "s-solo", None);
