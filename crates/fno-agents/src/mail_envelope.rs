@@ -390,7 +390,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             rendered,
-            "`@folio \u{b7} msg-1 \u{b7} Fix the gate.\nFix the gate. Then ship."
+            "`@folio \u{b7} msg-1 \u{b7} Fix the gate.`\nFix the gate. Then ship."
         );
         let plain = render_at(
             &json!({

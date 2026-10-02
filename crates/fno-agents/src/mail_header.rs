@@ -170,13 +170,14 @@ pub fn is_held_release_line(line: &str) -> bool {
     let held_ok = held
         .strip_prefix("held ")
         .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit()));
-    let Some((count, sent_span)) = head.split_once(" held messages") else {
+    let Some((count, tail)) = head.split_once(" held messages") else {
         return false;
     };
     held_ok
+        && sent.starts_with("sent ")
+        && tail.is_empty()
         && !count.is_empty()
         && count.chars().all(|c| c.is_ascii_digit())
-        && sent_span.starts_with("sent ")
 }
 
 /// Classify a delivered turn's framing from its head. The one classifier the

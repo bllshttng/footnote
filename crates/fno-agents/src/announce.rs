@@ -1649,7 +1649,7 @@ mod tests {
         let out = read_render(&f.paths, session, Boundary::Prompt)
             .unwrap()
             .unwrap();
-        assert!(out.contains(&format!("id=\"{id}\"")));
+        assert!(out.contains(&format!("\u{b7} {id} \u{b7}")));
         assert!(out.contains("hello fleet"));
         let second = read_render(&f.paths, session, Boundary::Prompt).unwrap();
         assert!(second.is_none(), "cursor silences the second read");

@@ -1172,7 +1172,7 @@ mod tests {
             mail.get(4..8).unwrap_or(&[]),
             &[
                 "--from-name".to_string(),
-                "pr-nudge".to_string(),
+                "fno/pr-nudge".to_string(),
                 "--origin".to_string(),
                 "scheduler".to_string(),
             ][..]

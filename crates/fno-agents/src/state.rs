@@ -1935,17 +1935,18 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
 }
 
 /// Best-effort registry read for metadata that must not hold up delivery.
-/// Returns `None` when a writer owns the registry lock.
+/// A writer owning the lock never blocks the read: publishes are atomic
+/// (tempfile + rename), so the unlocked read still sees one whole registry.
 pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
-    let Some(lock) = try_acquire_shared(&registry_lock_path(path))? else {
-        return Ok(None);
-    };
+    let lock = try_acquire_shared(&registry_lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
         Ok(file) => read_registry_tolerant(path, &file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
         Err(error) => Err(error.into()),
     };
-    let _ = lock.unlock();
+    if let Some(lock) = lock {
+        let _ = lock.unlock();
+    }
     result.map(|(registry, _)| Some(registry))
 }
 
