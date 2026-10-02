@@ -111,7 +111,7 @@ def test_reply_delivers_though_the_registry_is_torn(
 
     result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 14, result.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1, f"reply never reached the bus: {result.output}"
     assert replies[0].to == SENDER
@@ -142,7 +142,7 @@ def test_the_reported_incident_end_to_end(runner, mailbox, monkeypatch, tmp_path
 
     result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 14, result.output
     assert [m.to for m in _bus_msgs() if m.in_reply_to == msg] == [SENDER]
 
 

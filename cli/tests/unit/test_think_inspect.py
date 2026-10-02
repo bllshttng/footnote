@@ -147,18 +147,21 @@ def test_receipt_exposes_unavailable_evidence(tmp_path: Path) -> None:
 
 
 def test_decisions_consumer_requests_live_rows(monkeypatch) -> None:
-    from fno import decide
     from fno.think_inspect import _decisions_section
 
     seen: dict[str, object] = {}
 
-    def fake_list_decisions(subject, limit=None, lane=None, state=None):
-        seen["state"] = state
-        return subject, [
-            {"decision_id": "d-live", "decision": "keep", "lifecycle": "live"},
-        ], 0
+    def fake_door(payload):
+        argv = payload["argv"]
+        seen["state"] = argv[argv.index("--state") + 1]
+        return {
+            "decisions": [
+                {"decision_id": "d-live", "decision": "keep", "lifecycle": "live"},
+            ],
+            "damaged": 0,
+        }
 
-    monkeypatch.setattr(decide, "list_decisions", fake_list_decisions)
+    monkeypatch.setattr("fno.rust_binary.call_front_json", fake_door)
     section = _decisions_section("x-4007")
 
     assert seen["state"] == "live"

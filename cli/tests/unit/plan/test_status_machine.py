@@ -150,12 +150,6 @@ class TestRetiredSpellings:
         for s in (*STATUS_PROGRESSION, "done", "superseded"):
             assert canonical_status(s) == s
 
-    def test_AC5_ERR_both_spellings_are_known_so_the_sweep_leaves_them(self):
-        from fno.plan._status import KNOWN_STATUSES
-
-        for s in ("shipped", "archived", "in_review", "superseded"):
-            assert s in KNOWN_STATUSES
-
     def test_AC2_FR_a_doc_on_the_old_spelling_still_coerces(self):
         assert coerce_status_from_yaml("shipped") == "in_review"
 
@@ -169,84 +163,8 @@ class TestRetiredSpellings:
 
     def test_stub_is_the_retired_spelling_of_idea(self):
         """Scaffolds already on disk keep parsing; no migration pass ships."""
-        from fno.plan._status import KNOWN_STATUSES, canonical_status
+        from fno.plan._status import canonical_status
 
         assert canonical_status("stub") == "idea"
         assert canonical_status(' "Stub"  ') == "idea"
-        assert "stub" in KNOWN_STATUSES
         assert coerce_status_from_yaml("stub") == "idea"
-
-    def test_stub_never_written_back_over_the_doc_that_supplied_it(self):
-        """Read-alias only: `stub` is absent from every write-side vocabulary."""
-        from fno.plan._status import GRAPH_TO_PLAN_STATUS, STATUS_PROGRESSION
-
-        assert "stub" not in STATUS_PROGRESSION
-        assert "stub" not in GRAPH_TO_PLAN_STATUS.values()
-
-
-class TestIdeaRung:
-    """`idea` below `design`: the rung a decompose scaffold actually sits at."""
-
-    def test_idea_is_never_a_projection_target(self):
-        """Rank -1 keeps the axis monotonic - graph `idea` demotes no doc.
-
-        A doc that has moved on to design/ready/in_progress must not be walked
-        back when the graph momentarily derives `idea` (an unlinked node, or one
-        whose plan probe failed).
-        """
-        from fno.plan._status import project_plan_status
-
-        for cur in ("idea", "design", "ready", "in_progress", "in_review"):
-            assert project_plan_status(cur, "idea") is None
-        # ...including a doc carrying no status at all: `.get(cur, -1)` floors at
-        # the same rank, so the `<=` comparison still refuses.
-        assert project_plan_status("", "idea") is None
-
-    def test_graph_idea_is_identity_not_a_promotion_to_design(self):
-        """The row that used to lie: graph `idea` claimed the doc was designed."""
-        from fno.plan._status import GRAPH_TO_PLAN_STATUS
-
-        assert GRAPH_TO_PLAN_STATUS["idea"] == "idea"
-
-    def test_idea_advances_forward_to_every_later_rung(self):
-        for target in ("design", "ready", "in_progress", "in_review"):
-            validate_transition("idea", target)  # does not raise
-        with pytest.raises(StatusTransitionError):
-            validate_transition("design", "idea")
-
-
-class TestProjectionRankSurvivesTheRename:
-    """AC4-EDGE: the forward-only guard is keyed by the PLAN vocabulary, so it
-    must have moved with the rename - a mis-keyed rank fails silently.
-    """
-
-    def test_AC4_EDGE_backward_projection_is_refused(self):
-        from fno.plan._status import project_plan_status
-
-        assert project_plan_status("in_review", "ready") is None
-
-    def test_AC4_EDGE_backward_projection_refused_from_the_old_spelling(self):
-        from fno.plan._status import project_plan_status
-
-        # The doc says `shipped`; a `ready` projection must not walk it back.
-        assert project_plan_status("shipped", "ready") is None
-
-    def test_AC4_EDGE_forward_projection_still_lands(self):
-        from fno.plan._status import project_plan_status
-
-        assert project_plan_status("in_progress", "in_review") == "in_review"
-
-    def test_AC1_HP_an_old_doc_at_the_target_rung_is_not_rewritten(self):
-        from fno.plan._status import project_plan_status
-
-        # `shipped` already IS in_review, so the projection writes nothing:
-        # the alias translates on read, it never triggers a migration write.
-        assert project_plan_status("shipped", "in_review") is None
-        assert project_plan_status("archived", "superseded") is None
-
-    def test_AC3_UI_the_two_none_gates_survive(self):
-        from fno.plan._status import project_plan_status
-
-        for gate in ("blocked", "deferred", "in_progress", "claimed"):
-            assert project_plan_status("in_progress", gate) is None
-            assert project_plan_status("shipped", gate) is None

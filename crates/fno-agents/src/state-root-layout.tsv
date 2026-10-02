@@ -75,6 +75,7 @@ plugin-root	install/plugin-root	marker	daemon
 # state/ - rewritten runtime state; newer mtime wins.
 notify-signals.json	state/notify-signals.json	overwrite	daemon
 git-protection.json	state/git-protection.json	overwrite	daemon
+machine-brake.json	state/machine-brake.json	overwrite	daemon
 .worktree-stranded-cache.json	state/.worktree-stranded-cache.json	overwrite	daemon
 .worktree-stranded-refresh-stamp	state/.worktree-stranded-refresh-stamp	overwrite	daemon
 # mux/ - the mux server owns these; it moves them at its own start.
@@ -97,4 +98,14 @@ graph.json.history	-	park	daemon
 .plan-sync-watermark	-	park	daemon
 convo-signals.jsonl	-	park	daemon
 groom-*.md	-	park	daemon
+# The 2026-10-01 residue batch: an empty dir ensure-global-dir.sh created
+# until this table landed (hooks, signals), session scratch (tmp, jobs-tmp),
+# and an April foreign-tool drop whose dir carries the legacy brand with a
+# leading dot, so its park row is a glob the rename guard can read. None of
+# the four had a writer.
+.abilit*	-	park	daemon
+tmp	-	park	daemon
+jobs-tmp	-	park	daemon
+hooks	-	park	daemon
+signals	-	park	daemon
 squads.json.tmp.*	-	park	mux

@@ -14,10 +14,17 @@ class SpawnOverlayUnavailable(VerbUnavailable):
     """The fno-agents binary is missing, failed, or answered malformed JSON."""
 
 
-def spawn_overlay_call(payload: dict[str, Any]) -> dict[str, Any]:
-    """One subprocess round-trip: JSON payload in, parsed JSON answer out."""
+def spawn_overlay_call(
+    payload: dict[str, Any], timeout: float = 90
+) -> dict[str, Any]:
+    """One subprocess round-trip: JSON payload in, parsed JSON answer out.
+
+    The default is 90s, not verb_call's 30s: the compose's payload can name
+    a node (a graph read) and a missing binary must not wedge a spawn either
+    way.
+    """
     # Call-time import: a module-top capture can permanently hold a test's
     # monkeypatched verb_call stub, leaking it into every later reader.
     from fno.rust_binary import verb_call
 
-    return verb_call("spawn-overlay", payload, SpawnOverlayUnavailable)
+    return verb_call("spawn-overlay", payload, SpawnOverlayUnavailable, timeout=timeout)

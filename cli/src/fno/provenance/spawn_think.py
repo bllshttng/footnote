@@ -803,7 +803,7 @@ def _spawn_think_worker(
     if resolved_model is None and node is not None:
         # Left at node_model's default resolution: this seam has NO grid
         # receiving end (the argv always carries an explicit --harness and
-        # never --node, so inject_spawn_defaults' grid stands down), and
+        # never --node, so the compose's grid stands down), and
         # resolve_difficulty=False here would silently drop a banded node's
         # band instead of deferring it (round-3 finding 1).
         resolved_model = _route_resolve.node_model(

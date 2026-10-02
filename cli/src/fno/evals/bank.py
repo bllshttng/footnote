@@ -206,13 +206,13 @@ class LaneError(ValueError):
     """A requested lane name has no matching resolved inventory row."""
 
 
-def resolve_lane(name: str, *, settings: object = None):
+def resolve_lane(name: str):
     """Resolve a named lane through the existing route_resolve inventory -
     the same fold ``agents.profiles.*.lanes`` joins against, never a second
     model/effort enum. Raises :class:`LaneError` naming known lanes on a miss."""
     from fno.route_resolve import resolve_inventory
 
-    inventory = resolve_inventory(settings=settings)
+    inventory = resolve_inventory()
     row = inventory.rows.get(name)
     if row is None:
         raise LaneError(f"unknown lane {name!r}; declared lanes: {sorted(inventory.rows)}")

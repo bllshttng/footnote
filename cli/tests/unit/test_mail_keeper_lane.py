@@ -84,7 +84,14 @@ def _send(monkeypatch, session, injector, capsys):
 
     monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve_agent)
 
-    cli._name_lane_send("ping", from_name="web", resolved=session)
+    import typer
+
+    try:
+        cli._name_lane_send("ping", from_name="web", resolved=session)
+    except typer.Exit:
+        # A durable demotion that cannot prove landing ends NOT LANDED on a
+        # non-zero exit; what it printed is still this helper's answer.
+        return recorded, capsys.readouterr()
     return recorded, capsys.readouterr()
 
 
@@ -238,7 +245,10 @@ def test_an_unknown_harness_keeps_the_fallthrough_lanes(mailbox, monkeypatch, ca
         status="live",
         agent="notaharness",
     )
-    cli._name_lane_send("ping", from_name="web", resolved=session)
+    import typer
+
+    with pytest.raises(typer.Exit):
+        cli._name_lane_send("ping", from_name="web", resolved=session)
     out = capsys.readouterr()
     assert "queued (durable)" in out.out
 

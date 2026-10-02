@@ -1,535 +1,22 @@
-"""The spawn seam's decision is visible: skips name themselves, one event.
+"""The spawn seam's end-to-end contract over the real compose.
 
-x-f1ab folded into x-90a9 task 0.1. Every assertion is on a POSITIVE marker:
-a parsed JSON row whose ``kind`` is ``spawn_defaults_applied``, or a stderr
-line naming the dropped axis. An absence (no skip line, no route flag) is
-always paired with its positive control so a pipeline loss cannot read as a
-verdict.
+The composition is characterized by the Rust goldens
+(crates/fno-agents/tests/fixtures/spawn_compose/); the seam-visibility tests
+that walked the old Python body live there now. What stays here is the path
+no golden can pin: a real `fno-agents` binary answering the transport's one
+verb call under a pinned FNO_CONFIG.
 """
 from __future__ import annotations
 
 import io
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from fno.agents import events as agent_events
-from fno.agents.spawn_defaults import inject_spawn_defaults
+import fno.agents.spawn_defaults as sd
 
-# Declared journal isolation: the conftest pin keys on this module's name
-# (see _PLAN_JOURNAL_PINNED_MODULES) and the guard
-# scripts/ci/check-tests-hermetic-events.sh proves this marker did not rot.
-FNO_EVENTS_PATH = "hermetic: this module's journal is pinned per test"
-
-
-class _Defaults:
-    def __init__(
-        self,
-        provider="",
-        model="",
-        effort="",
-        substrate="",
-        permission_mode="",
-        route="",
-        account="",
-        pane_group="",
-        lanes=None,
-        on_exhausted="",
-        by_difficulty=None,
-        on_low="prefer_healthy",
-        on_unknown="allow",
-    ):
-        self.provider = provider
-        self.model = model
-        self.effort = effort
-        self.substrate = substrate
-        self.permission_mode = permission_mode
-        self.route = route
-        self.account = account
-        self.pane_group = pane_group
-        self.lanes = [
-            _Defaults(**lane) if isinstance(lane, dict) else lane
-            for lane in (lanes or [])
-        ]
-        self.on_exhausted = on_exhausted
-        self.by_difficulty = by_difficulty or {}
-        self.on_low = on_low
-        self.on_unknown = on_unknown
-
-
-class _Routing:
-    def __init__(self, enforce_inventory=False, operator_access="unknown", models=None):
-        self.enforce_inventory = enforce_inventory
-        self.operator_access = operator_access
-        self.models = models or []
-
-
-class _Settings:
-    def __init__(self, profiles=None, model_routing=None, max_lanes=None, routing=None, **kw):
-        prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
-        self.agents = type(
-            "A",
-            (),
-            {
-                "defaults": _Defaults(**kw),
-                "profiles": prof,
-                "max_lanes": max_lanes or {},
-            },
-        )()
-        self.model_routing = model_routing
-        self.routing = routing
-
-
-@pytest.fixture
-def journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """This test's own journal: FNO_EVENTS_PATH plus a forced emit path."""
-    target = tmp_path / "events.jsonl"
-    monkeypatch.setenv("FNO_EVENTS_PATH", str(target))
-    real_emit = agent_events.emit
-    monkeypatch.setattr(
-        agent_events,
-        "emit",
-        lambda kind, **data: real_emit(kind, path=target, **data),
-    )
-    return target
-
-
-def _decision(journal: Path) -> list[dict[str, Any]]:
-    if not journal.exists():
-        return []
-    rows = [
-        json.loads(line)
-        for line in journal.read_text().splitlines()
-        if line.strip()
-    ]
-    return [r for r in rows if r.get("kind") == "spawn_defaults_applied"]
-
-
-def _inject(args, err=None, env=None, profiles=None, model_routing=None, **cfg):
-    return inject_spawn_defaults(
-        args,
-        settings=_Settings(profiles=profiles, model_routing=model_routing, **cfg),
-        stderr=err,
-        env=env or {},
-    )
-
-
-def _grid_candidate(monkeypatch, candidate, chain):
-    """Force the no-lanes grid branch to return one candidate.
-
-    resolve_slot is imported inside inject_spawn_defaults, so patching the
-    route_resolve module attribute reaches it. _grid_node is patched too: the
-    grid only runs when a node entry exists, and a synthetic one keeps this
-    fixture off the live graph.
-    """
-    import fno.route_resolve as rr
-
-    import fno.agents.spawn_defaults as sd
-
-    class _Inv:
-        pass
-
-    monkeypatch.setattr(
-        sd, "_grid_node", lambda toks, env=None: {"id": "x-test", "difficulty": "high"}
-    )
-    monkeypatch.setattr(rr, "resolve_inventory", lambda: _Inv())
-    monkeypatch.setattr(rr, "resolve_slot", lambda *a, **k: (candidate, chain, "unarmed"))
-
-
-def test_route_skip_names_caller_route_rung_and_reason(journal: Path) -> None:
-    """AC17. A profile route dropped for the caller's --route names all three."""
-    err = io.StringIO()
-    out = _inject(
-        ["spawn", "--provider", "zai", "--name", "p", "/target x-90a9"],
-        err=err,
-        profiles={"target": {"route": "zai,glm-5.3-flash[1m]"}},
-    )
-    text = err.getvalue()
-    assert "--route" not in out
-    assert "route skipped" in text
-    assert "agents.profiles.target.route" in text
-    assert "--provider 'zai'" in text
-    rows = _decision(journal)
-    assert len(rows) == 1, rows
-    suppressed = rows[0]["suppressed"]
-    route_rows = [s for s in suppressed if s[0] == "route"]
-    assert route_rows, rows
-    assert route_rows[0][1] == "zai,glm-5.3-flash[1m]"
-    assert route_rows[0][2] == "agents.profiles.target"
-    assert "provider" in route_rows[0][3]
-
-
-def test_route_skip_names_explicit_route_and_model(journal: Path) -> None:
-    """AC17 variant: --route on the argv and --model on the argv each named."""
-    import io as _io  # noqa: F401 - kept local for symmetry with siblings
-
-    for extra, marker in ((["--route", "other,v"], "--route"), (["--model", "m1"], "--model")):
-        err = _io.StringIO()
-        out = _inject(
-            ["spawn", *extra, "--name", "p", "/target x-90a9"],
-            err=err,
-            profiles={"target": {"route": "zai,glm-5.3-flash[1m]"}},
-        )
-        assert "--route zai" not in " ".join(out)
-        assert "route skipped" in err.getvalue()
-        assert marker in err.getvalue()
-        rows = _decision(journal)
-        assert rows and any(
-            s[0] == "route" and "caller passed" in s[3] for s in rows[-1]["suppressed"]
-        )
-
-
-def test_route_skip_names_grid_reason_on_defaults_rung(
-    journal: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC16. Grid suppression is reachable only from the DEFAULTS rung."""
-    import io as _io  # noqa: F401 - kept local for symmetry with siblings
-
-    _grid_candidate(
-        monkeypatch,
-        {"harness": "claude", "model": "claude-opus-5", "effort": "high"},
-        ["grid=difficulty claude/claude-opus-5"],
-    )
-    err = _io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "p", "/target x-90a9"],
-        err=err,
-        route="zai,glm-5.3-flash[1m]",
-    )
-    text = err.getvalue()
-    assert "--route" not in out
-    assert "route skipped" in text
-    assert "agents.defaults.route" in text
-    assert "capacity grid" in text
-    rows = _decision(journal)
-    assert rows and any(
-        s[0] == "route" and "capacity grid" in s[3] for s in rows[-1]["suppressed"]
-    )
-
-
-def test_route_resolved_empty_is_recorded_not_warned(journal: Path) -> None:
-    """AC18. An empty profile route is a resolved-empty fact, not a skip."""
-    import io as _io  # noqa: F401 - kept local for symmetry with siblings
-
-    err = _io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "p", "/target x-90a9"],
-        err=err,
-        profiles={"target": {"route": ""}},
-    )
-    assert "route skipped" not in err.getvalue()
-    rows = _decision(journal)
-    assert len(rows) == 1, rows
-    assert rows[0]["resolved"]["route"] == {"value": "", "rung": None}
-
-
-def test_route_applied_names_source_and_no_skip(journal: Path, monkeypatch) -> None:
-    """AC19. No suppression: the route is injected with its source rung."""
-    import io as _io  # noqa: F401 - kept local for symmetry with siblings
-
-    # The node answer is the grid resolver's business, not this test's: a
-    # verb binary that resolves the seed's shape-valid id would add the
-    # stand-down receipt segment. Only the resolver call degrades.
-    import fno.rust_binary as _rb
-    from fno.rust_binary import VerbUnavailable as _Unavailable
-
-    _real_verb_call = _rb.verb_call
-
-    def _no_node_answer(verb, payload, unavailable_cls, **kw):
-        if "spawn_node" in payload:
-            raise _Unavailable("no node answer in this test")
-        return _real_verb_call(verb, payload, unavailable_cls, **kw)
-
-    monkeypatch.setattr(_rb, "verb_call", _no_node_answer)
-
-    err = _io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "p", "/target x-90a9"],
-        err=err,
-        profiles={"target": {"route": "zai,glm-5.3-flash[1m]"}},
-    )
-    assert "--route" in out
-    assert "route skipped" not in err.getvalue()
-    assert "applied route=zai,glm-5.3-flash[1m] (agents.profiles.target.route)" in err.getvalue()
-    rows = _decision(journal)
-    assert len(rows) == 1, rows
-    assert ["route", "zai,glm-5.3-flash[1m]", "agents.profiles.target.route"] in [
-        list(a) for a in rows[0]["applied"]
-    ]
-
-
-def test_one_decision_event_per_spawn_carries_every_axis(journal: Path) -> None:
-    """AC20. Exactly one event, naming the spawn and all three axis groups."""
-    import io as _io  # noqa: F401 - kept local for symmetry with siblings
-
-    err = _io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "decision-probe", "--provider", "zai", "--model", "m", "/target x"],
-        err=err,
-        profiles={"target": {"route": "zai,glm", "model": "opus"}},
-    )
-    rows = _decision(journal)
-    assert len(rows) == 1, rows
-    row = rows[0]
-    assert row["name"] == "decision-probe"
-    assert row["verb"] == "target"
-    assert set(row["resolved"]) >= {
-        "provider", "model", "effort", "substrate",
-        "permission_mode", "route", "account", "pane_group",
-    }
-    assert any(a[0] == "model" for a in row["applied"]) is False  # explicit -m wins
-    assert out[0] == "spawn"
-
-
-def test_emit_failure_never_breaks_the_spawn(
-    journal: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC21. A raising emit (or a raising state_dir) still returns the argv."""
-    import io as _io  # noqa: F401 - kept local for symmetry with siblings
-
-    def _boom(*a, **k):
-        raise RuntimeError("journal gone")
-
-    monkeypatch.setattr(agent_events, "emit", _boom)
-    err = _io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "p", "/target x"],
-        err=err,
-        profiles={"target": {"route": "zai,glm"}},
-    )
-    assert out[0] == "spawn"
-    assert "--route" in out
-
-    monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
-    monkeypatch.delattr(agent_events, "emit", raising=False)
-    err = _io.StringIO()
-    out2 = _inject(
-        ["spawn", "--name", "p", "/target x"],
-        err=err,
-        profiles={"target": {"route": "zai,glm"}},
-    )
-    assert out2[0] == "spawn"
-
-
-# ---------------------------------------------------------------------------
-# x-90a9 task 2.1: strict qualification runs on every spawn, pins included
-# ---------------------------------------------------------------------------
-
-
-def _stub_route_slot(monkeypatch: pytest.MonkeyPatch, decision: dict) -> list[dict]:
-    """Stub the native transport, capturing every payload it was handed."""
-    import fno.route_slot_client as rsc
-
-    seen: list[dict] = []
-
-    def _call(payload: dict, **_: object) -> dict:
-        seen.append(payload)
-        if "op" in payload:
-            return {"status": "ok"}
-        answer = dict(decision)
-        # The real verb composes the refusal terminal beside the verbatim
-        # chain; the stub mirrors that composition from the same terminal.
-        chain = answer.get("chain") or []
-        terminal = chain[-1] if chain else ""
-        if terminal.startswith("slot=config "):
-            answer.setdefault(
-                "refusal_terminal",
-                {"class": "config", "text": terminal[len("slot=config "):]},
-            )
-        elif terminal.startswith("slot=strict-refusal "):
-            answer.setdefault(
-                "refusal_terminal",
-                {
-                    "class": "strict",
-                    "text": terminal[len("slot=strict-refusal "):]
-                    + " (strict routing: config routing.enforce_inventory)",
-                },
-            )
-        return answer
-
-    monkeypatch.setattr(rsc, "route_slot_call", _call)
-    return seen
-
-
-def test_strict_seam_refuses_when_the_decision_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC25. No complete decision in strict mode: named refusal, no spawn."""
-
-    import fno.route_slot_client as rsc
-
-    def _unavailable(payload: dict, **_: object) -> dict:
-        raise rsc.RouteSlotUnavailable("binary missing")
-
-    monkeypatch.setattr(rsc, "route_slot_call", _unavailable)
-    err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _inject(
-            ["spawn", "--name", "p", "/target x"],
-            err=err,
-            routing=_Routing(enforce_inventory=True),
-        )
-    assert exc.value.code == 2
-    assert "route-slot-unavailable" in err.getvalue()
-    assert "strict routing" in err.getvalue()
-    assert "refusing; no worker launched" in err.getvalue()
-
-
-def test_strict_seam_lets_an_operator_pin_override_the_lanes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC4 (law d-dd8e2743). A typed --model no declared lane names is an
-    operator pin: it overrides strict routing instead of being refused, and
-    the spawn proceeds with the pinned model on argv."""
-    _stub_route_slot(
-        monkeypatch,
-        {
-            "status": "none",
-            "candidate": None,
-            "verdict": "unarmed",
-            "chain": [
-                "slot note agents.profiles.target planless target -> blueprint eligibility (command stays target)",
-                "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)",
-            ],
-        },
-    )
-    err = io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "p", "-m", "glm", "/target x"],
-        err=err,
-        routing=_Routing(enforce_inventory=True),
-    )
-    assert out[0] == "spawn"
-    assert "-m" in out and out[out.index("-m") + 1] == "glm"
-
-
-def test_strict_seam_qualifies_explicit_pins_and_preserves_the_command(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC3/AC4 control. An allowed pin reaches the spawn primitive with the
-    original command intact; the owner saw the work-kind evidence."""
-    seen = _stub_route_slot(
-        monkeypatch,
-        {
-            "status": "pick",
-            "candidate": {
-                "harness": "claude",
-                "model": "glm",
-                "lane": "flash-x",
-                "lane_rung": "agents.profiles.target.lanes[0]",
-                "lane_index": 0,
-                "lane_fields": {"route": "zai,glm"},
-                "evidence": {"capacity": "ok"},
-            },
-            "chain": ["slot agents.profiles.target lanes walked in declared order"],
-        },
-    )
-    import fno.agents.spawn_defaults as sd
-
-    monkeypatch.setattr(
-        sd, "_grid_node", lambda toks, env=None: {"id": "x-90a9", "plan_path": ""}
-    )
-    err = io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "p", "--node", "x-90a9", "-m", "glm", "/target x"],
-        err=err,
-        routing=_Routing(enforce_inventory=True),
-        env={"FNO_NODE": "x-90a9"},
-    )
-    assert out[0] == "spawn"
-    assert "-m" in out and out[out.index("-m") + 1] == "glm"
-    assert out[-1] == "/target x"
-    payload = seen[0]
-    assert payload["work_verb"] == "target"
-    assert payload["explicit_model_value"] == "glm"
-
-
-def test_strict_seam_forwards_the_vendor_pin_to_the_slot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC4. A -P pin reaches the owner, so a slot qualifying the model on
-    another vendor's row can never launch the pinned vendor's binary."""
-    seen = _stub_route_slot(
-        monkeypatch,
-        {
-            "status": "pick",
-            "candidate": {
-                "harness": "claude",
-                "model": "glm",
-                "lane": "flash-x",
-                "lane_rung": "agents.profiles.target.lanes[0]",
-                "lane_index": 0,
-                "lane_fields": {"route": "zai/glm-5.3-flash[1m]"},
-                "evidence": {"capacity": "ok"},
-            },
-            "chain": ["slot agents.profiles.target lanes walked in declared order"],
-        },
-    )
-    import fno.agents.spawn_defaults as sd
-
-    monkeypatch.setattr(
-        sd, "_grid_node", lambda toks, env=None: {"id": "x-1", "plan_path": ""}
-    )
-    err = io.StringIO()
-    _inject(
-        ["spawn", "--name", "p", "--node", "x-1", "-P", "zai", "-m", "glm", "/target x"],
-        err=err,
-        routing=_Routing(enforce_inventory=True),
-        env={"FNO_NODE": "x-1"},
-    )
-    payload = seen[0]
-    assert payload["explicit_vendor_value"] == "zai"
-    assert payload["explicit_model_value"] == "glm"
-
-
-def test_strict_seam_forwards_the_verb_on_every_spawn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC3. The owner sees the work verb on every strict spawn, pin or not."""
-    seen = _stub_route_slot(
-        monkeypatch,
-        {
-            "status": "pick",
-            "candidate": {
-                "harness": "claude",
-                "model": "m",
-                "lane": "r",
-                "lane_rung": "agents.profiles.target.lanes[0]",
-                "lane_index": 0,
-                "lane_fields": {},
-                "evidence": {"capacity": "ok"},
-            },
-            "chain": ["slot agents.profiles.target lanes walked in declared order"],
-        },
-    )
-    import fno.agents.spawn_defaults as sd
-
-    monkeypatch.setattr(
-        sd, "_grid_node", lambda toks, env=None: {"id": "x-1", "plan_path": ""}
-    )
-    _inject(
-        ["spawn", "--name", "p", "--node", "x-1", "/target x"],
-        err=io.StringIO(),
-        routing=_Routing(enforce_inventory=True),
-        env={"FNO_NODE": "x-1"},
-    )
-    _inject(
-        ["spawn", "--name", "p", "/target x"],
-        err=io.StringIO(),
-        routing=_Routing(enforce_inventory=True),
-    )
-    # Two resolves plus the receipt journal each spawn now appends through
-    # the same transport; only the resolves carry the work verb.
-    resolves = [p for p in seen if "event" not in p]
-    assert len(resolves) == 2, seen
-    assert all(p["work_verb"] == "target" for p in resolves)
-
-
-# ---------------------------------------------------------------------------
-# x-84b2: the --node mint routes through the dispatch vocabulary
-# ---------------------------------------------------------------------------
+requires_rust = pytest.mark.dev_build
 
 
 def test_mint_node_name_is_the_source_less_manual_t_form(
@@ -538,8 +25,6 @@ def test_mint_node_name_is_the_source_less_manual_t_form(
     """A manual --node spawn carries NO source segment: provenance is stamped
     only by the path that knows it. The model rides as the mint's final
     segment over the bare node hex (x-57fe)."""
-    import fno.agents.spawn_defaults as sd
-
     monkeypatch.setattr(
         sd, "_node_slug_from_graph", lambda node: ("x-84b2", "Ab Names")
     )
@@ -547,116 +32,62 @@ def test_mint_node_name_is_the_source_less_manual_t_form(
     assert name == "t-84b2-ab-names-glm"
 
 
-# ---------------------------------------------------------------------------
-# a verbless --node spawn routes by the node's derived verb
-# ---------------------------------------------------------------------------
+def _pin_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str) -> Path:
+    """The real path: this checkout's binary, one config, one journal."""
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(config, encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(config_path))
+    journal = tmp_path / "events.jsonl"
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(journal))
+    monkeypatch.setenv("FNO_NO_CANONICAL_CONFIG", "1")
+    return journal
 
 
-def _stub_grid_node(monkeypatch: pytest.MonkeyPatch, node_id: str = "x-1") -> None:
-    import fno.agents.spawn_defaults as sd
-
-    monkeypatch.setattr(sd, "_grid_node", lambda toks, env=None: {"id": node_id, "plan_path": ""})
-
-
-def test_verbless_node_spawn_routes_by_the_derived_verb(
-    monkeypatch: pytest.MonkeyPatch,
+@requires_rust
+def test_config_provider_injects_the_harness_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC4-HP: an empty seed plus the seam's node_verb resolves the
-    blueprint profile - the resolve payload names the work verb, and the
-    journal row carries verb=blueprint with the real (still empty) seed."""
-    seen = _stub_route_slot(
-        monkeypatch,
-        {
-            "status": "pick",
-            "candidate": {
-                "harness": "claude",
-                "model": "m",
-                "lane": "r",
-                "lane_rung": "agents.profiles.blueprint.lanes[0]",
-                "lane_index": 0,
-                "lane_fields": {},
-                "evidence": {"capacity": "ok"},
-            },
-            "chain": ["slot agents.profiles.blueprint lanes walked in declared order"],
-        },
+    """One config field, one binary round trip: the argv carries --harness,
+    stderr names the applied axis with its rung, and the journal row lands."""
+    journal = _pin_world(
+        tmp_path, monkeypatch, '[agents.profiles.target]\nprovider = "codex"\n'
     )
-    _stub_grid_node(monkeypatch)
     err = io.StringIO()
-    inject_spawn_defaults(
-        ["spawn", "--name", "p", "--node", "x-1", "--substrate", "thread"],
-        settings=_Settings(),
-        stderr=err,
-        env={},
-        node_verb="blueprint",
+    out = sd.compose_spawn_argv(
+        ["spawn", "--name", "w", "/fno:target x-1"], stderr=err
     )
-    resolves = [p for p in seen if "event" not in p]
-    assert resolves, seen
-    assert all(p["work_verb"] == "blueprint" for p in resolves)
-    journals = [p for p in seen if "event" in p]
-    assert journals, seen
-    rows = [p["event"] for p in journals]
-    assert all(row["verb"] == "blueprint" for row in rows)
-    assert all(row["seed"] is None for row in rows)
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "applied harness=codex (agents.profiles.target.provider)" in err.getvalue()
+    rows = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+    applied = [r for r in rows if r.get("kind") == "spawn_defaults_applied"]
+    assert applied, "exactly the compose wrote the row"
+    assert applied[-1]["verb"] == "target"
 
 
-def test_crown_stays_crown_when_the_seam_sends_no_verb(
-    monkeypatch: pytest.MonkeyPatch,
+@requires_rust
+def test_transport_names_the_skip_when_the_verb_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC4-HP control: the same verbless spawn without node_verb keeps the
-    crown profile - the verb, not the flag, decides."""
-    seen = _stub_route_slot(monkeypatch, {"status": "no-lanes", "candidate": None, "chain": []})
-    _stub_grid_node(monkeypatch)
-    err = io.StringIO()
-    inject_spawn_defaults(
-        ["spawn", "--name", "p", "--node", "x-1", "--substrate", "thread"],
-        settings=_Settings(),
-        stderr=err,
-        env={},
-    )
-    journals = [p["event"] for p in seen if "event" in p]
-    assert journals, seen
-    assert all(row["verb"] == "crown" for row in journals)
+    """No binary: one named skip line, the normalized argv, no raise. The
+    resolver falls through a bogus FNO_AGENTS_BIN by design (a stale export
+    must not strand the binary), so the fault is raised at the transport."""
+    from fno.agents import spawn_overlay_client
 
-
-def test_yolo_pins_the_config_permission_probe(monkeypatch, journal) -> None:
-    """An explicit --yolo pins the permission axis, so the config default is
-    never injected and never probed: no mappability refusal line prints
-    (x-6c8a). The stub turns any probe into a failure."""
-    import fno.rust_binary as rb
-
-    def _no_probe(verb, payload, exc):
-        raise AssertionError("no mappability probe may run when the axis is pinned")
-
-    monkeypatch.setattr(rb, "verb_call", _no_probe)
-    err = io.StringIO()
-    _inject(
-        ["spawn", "--name", "w", "--harness", "codex", "--substrate", "thread", "--yolo", "hi"],
-        err=err,
-        permission_mode="bypassPermissions",
-    )
-    assert "permission mappability" not in err.getvalue()
-
-
-def test_unpinned_config_permission_still_refuses_on_codex(
-    monkeypatch, journal, capsys
-) -> None:
-    """Positive control: the same config default with NO explicit permission
-    axis still probes per substrate and names the refusal on stderr (x-6c8a).
-    _permission_mappable prints to process stderr, not the injected stream."""
-    import fno.rust_binary as rb
+    def boom(payload, *a, **k):
+        raise spawn_overlay_client.SpawnOverlayUnavailable("no binary")
 
     monkeypatch.setattr(
-        rb,
-        "verb_call",
-        lambda verb, payload, exc, **_kwargs: {
-            "refusal": f"{payload['provider']} --permission-mode {payload['mode']} unmappable",
-            "mappable": False,
-        },
+        spawn_overlay_client, "spawn_overlay_call", boom
     )
     err = io.StringIO()
-    _inject(
-        ["spawn", "--name", "w", "--harness", "codex", "--substrate", "thread", "hi"],
-        err=err,
-        permission_mode="bypassPermissions",
+    out = sd.compose_spawn_argv(
+        ["spawn", "--name", "w", "/fno:target x-1"], stderr=err
     )
-    assert capsys.readouterr().err.count("permission mappability refused") == 2
+    assert "config defaults skipped (spawn-overlay unavailable: no binary)" in err.getvalue()
+    assert "--name" in out

@@ -1383,6 +1383,7 @@ fn inside_leg_cross_language_round_trip_parity() {
         reason: None,
         received_at: "2026-06-27T01:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     });
     let mut reg = Registry::default();
     reg.entries.push(withrep);
@@ -1403,6 +1404,7 @@ fn inside_leg_cross_language_round_trip_parity() {
             reason: None,
             received_at: "2026-06-27T01:00:00Z".into(),
             ttl_ms: None,
+            posture: None,
         })
     );
 }
@@ -1453,6 +1455,7 @@ fn inside_leg_is_live_at_ttl_gate() {
         reason: None,
         received_at: recv.into(),
         ttl_ms: ttl,
+        posture: None,
     };
 
     // No ttl -> never ages out on its own (cleared by teardown/done/newer report).

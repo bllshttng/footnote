@@ -367,18 +367,18 @@ fn admission_disabled() -> Result<bool, String> {
     }
 }
 
-/// Where admission looks for the machine arm's runaway brake. Mirrors the
-/// fno-agents writer; `FNO_MACHINE_BRAKE` overrides the full path.
+/// Where admission looks for the machine arm's runaway brake. Resolves the
+/// same table row the fno-agents writer does, so reader and writer follow
+/// the migrated file together; `FNO_MACHINE_BRAKE` overrides the full path.
 fn brake_file_path() -> Option<std::path::PathBuf> {
     if let Some(v) = std::env::var_os("FNO_MACHINE_BRAKE").filter(|v| !v.is_empty()) {
         return Some(std::path::PathBuf::from(v));
     }
     let home = std::env::var_os("HOME")?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".fno")
-            .join("machine-brake.json"),
-    )
+    Some(crate::state_layout::place(
+        &std::path::PathBuf::from(home).join(".fno"),
+        "machine-brake.json",
+    ))
 }
 
 /// The machine arm's runaway brake, honored at admission: an unexpired brake
