@@ -68,6 +68,7 @@ def patched(monkeypatch):
     import fno.agents.top as top
 
     monkeypatch.setattr(top, "_claim_sessions", lambda: {})
+    monkeypatch.setattr(top, "_graph_session_nodes", lambda: {})
     return state
 
 
@@ -177,6 +178,11 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
             "full-session-uuid": ("x-06f7", None),
         },
     )
+    monkeypatch.setattr(
+        top,
+        "_graph_session_nodes",
+        lambda: {"released-session-uuid": ("x-4dc0", None)},
+    )
     (row,) = _rows(
         patched,
         [
@@ -200,6 +206,14 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
     assert alone["node"] == "x-06f7"
     assert alone["pr"] is None
     assert alone["pr_basis"] == "no-pr"
+
+    # The graph's sessions[] row answers when the claim is gone.
+    (from_graph,) = _rows(
+        patched,
+        [_worker(source="claude", name="0a4aad70", session_id="released-session-uuid")],
+    )
+    assert from_graph["node"] == "x-4dc0"
+    assert from_graph["node_basis"] == "graph"
 
 
 def test_claim_sessions_reads_the_real_yaml_lockfile(tmp_path, monkeypatch):

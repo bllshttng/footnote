@@ -282,10 +282,35 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     return out
 
 
+def _graph_session_nodes() -> dict[str, tuple[str, Optional[int]]]:
+    """session id -> (node, pr_number) from the graph's own ``sessions[]``
+    rows. The middle join between a live claim and the name-keyed verdict:
+    a session whose claim was released but whose node row still names it
+    renders its work order from the graph record."""
+    from fno.graph.load import load_graph
+
+    out: dict[str, tuple[str, Optional[int]]] = {}
+    try:
+        entries = load_graph()
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return {}
+    for entry in entries:
+        node_id = entry.get("id")
+        if not node_id:
+            continue
+        pr = entry.get("pr_number")
+        for row in entry.get("sessions") or []:
+            sid = str(row.get("session_id") or "").strip().lower()
+            if sid and sid not in out:
+                out[sid] = (node_id, pr)
+    return out
+
+
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
     claim_sessions = _claim_sessions()
+    graph_sessions = _graph_session_nodes()
     # One retirement read for the whole roster, keyed by the
     # REGISTRY identity: the first-8-hex census label resolves no node.
     from fno.agents.retirement import verdicts
@@ -319,9 +344,16 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
             pr: Optional[int] = claim_hit[1]
             pr_basis: Optional[str] = "node" if pr is not None else "no-pr"
         else:
-            node = v.node if v else None
-            node_basis = v.node_basis if v else None
-            pr, pr_basis = None, None
+            graph_hit = graph_sessions.get((w.session_id or "").strip().lower())
+            if graph_hit:
+                node = graph_hit[0]
+                node_basis = "graph"
+                pr = graph_hit[1]
+                pr_basis = "node" if pr is not None else "no-pr"
+            else:
+                node = v.node if v else None
+                node_basis = v.node_basis if v else None
+                pr, pr_basis = None, None
         pid = w.session_pid or w.pid
         rows.append(
             {
@@ -354,9 +386,11 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "reach_basis": row_truth.reach_basis if row_truth else None,
                 # has this worker's node already shipped. The session's own
                 # claim answers FIRST (a revived or registry-less session
-                # still renders its work order); the retirement verdict's
-                # name-keyed join is the fallback. Null node is a real
-                # answer (no claim and an unresolvable name), never a miss.
+                # still renders its work order); the graph's sessions[] row
+                # is the middle source, and the retirement verdict's
+                # name-keyed join is the last fallback. Null node is a real
+                # answer (no claim, no graph row, unresolvable name), never
+                # a miss.
                 "node": node,
                 "node_basis": node_basis,
                 # The node's primary PR when the node came from the claim
