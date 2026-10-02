@@ -187,7 +187,6 @@ def _surface_collisions(plan_text: str) -> Optional[list[str]]:
         return None
     waves = strategy.get("waves", [])
     if not waves:
-        # No waves: one task cannot collide with itself; more than one is a gap.
         tasks = strategy.get("tasks", [])
         return None if not isinstance(tasks, list) or len(tasks) > 1 else []
     binary = find_dev_binary() or resolve_binary()
@@ -199,21 +198,17 @@ def _surface_collisions(plan_text: str) -> Optional[list[str]]:
             plan_file.flush()
             result = subprocess.run(
                 [str(binary), "wave", "check", plan_file.name],
-                capture_output=True,
+                capture_output=True, text=True, timeout=15,
                 cwd=Path(__file__).resolve().parents[3],
-                text=True,
-                timeout=15,
-                check=False,
             )
     except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0 or any(line.startswith("U\t") for line in result.stdout.splitlines()):
         return None
     return [
-        payload
+        line.split("\t", 1)[1]
         for line in result.stdout.splitlines()
-        for kind, separator, payload in [line.partition("\t")]
-        if separator and kind in {"E", "X"} and payload.startswith("parallel tasks share surface")
+        if line.startswith(("E\tparallel tasks share surface", "X\tparallel tasks share surface"))
     ]
 
 
