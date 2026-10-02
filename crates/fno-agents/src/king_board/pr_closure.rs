@@ -12,6 +12,9 @@
 //! token is not a node id, the line is prose and claims nothing. The LAST
 //! matching line wins; a prose line is not a match and never erases an
 //! earlier good one.
+//!
+//! A body may also carry ONE approval hand-off line, `Retarget <from> <to>
+//! <approval>` (same keyword rule), whose grammar lives in `retarget` below.
 
 use super::queues::NODE_ID_BODY;
 use serde_json::{json, Value};
@@ -88,6 +91,86 @@ pub(crate) fn parse(body: &str) -> Vec<String> {
     last.unwrap_or_default()
 }
 
+/// One approved hand-off of a PR from the branch's node to the right one:
+/// `Retarget <from> <to> <approval>` on its own line, where approval is a
+/// mail id (`msg-...`) or a ruling id (`d-...`).
+pub(crate) struct Retarget {
+    pub from: String,
+    pub to: String,
+    pub approval: String,
+}
+
+/// The rest of `line` after a `retarget` keyword, mirroring
+/// `closure_line_rest`: keyword + colon or whitespace, glued text is prose.
+fn retarget_line_rest(line: &str) -> Option<&str> {
+    let kw = "retarget";
+    if line.len() >= kw.len()
+        && line
+            .get(..kw.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kw))
+    {
+        let rest = &line[kw.len()..];
+        return match rest.chars().next() {
+            Some(':') => Some(&rest[1..]),
+            Some(c) if c.is_whitespace() => Some(rest),
+            None => Some(rest),
+            Some(_) => None,
+        };
+    }
+    None
+}
+
+/// The LAST well-formed Retarget line of `body`. Any other shape is prose
+/// and never erases an earlier good line, as in `parse`.
+pub(crate) fn retarget(body: &str) -> Option<Retarget> {
+    let id_re = regex::Regex::new(&format!("^{NODE_ID_BODY}$")).expect("static regex");
+    let approval_re =
+        regex::Regex::new(r"^(msg-[0-9a-f]{6,}|d-[0-9a-f]{8})$").expect("static regex");
+    let mut last: Option<Retarget> = None;
+    for line in body.lines() {
+        let Some(rest) = retarget_line_rest(line) else {
+            continue;
+        };
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let (Some(from), Some(&to), Some(approval)) = (
+            tokens.first().copied(),
+            tokens.get(1),
+            tokens.get(2).copied(),
+        ) else {
+            continue;
+        };
+        if tokens.len() != 3
+            || !id_re.is_match(from)
+            || !id_re.is_match(to)
+            || from == to
+            || !approval_re.is_match(approval)
+        {
+            continue;
+        }
+        last = Some(Retarget {
+            from: from.to_string(),
+            to: to.to_string(),
+            approval: approval.to_string(),
+        });
+    }
+    last
+}
+
+/// The branch node id a body's approved Retarget line hands away: `[from]`
+/// only when the line is well formed, the closure line claims `to`, and it
+/// does not claim `from`. Otherwise the line claims nothing.
+pub(crate) fn retargeted_from(body: &str) -> Vec<String> {
+    let Some(r) = retarget(body) else {
+        return Vec::new();
+    };
+    let ids = parse(body);
+    if ids.contains(&r.to) && !ids.contains(&r.from) {
+        vec![r.from]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The one spelling writers emit: `Fixes <ids>`, deduplicated, well-formed
 /// ids only; empty when nothing well-formed remains, so a caller can append
 /// the result to a body unconditionally.
@@ -136,8 +219,11 @@ pub fn run(args: &[String]) -> i32 {
             let body = parsed.get("body").and_then(Value::as_str).unwrap_or("");
             println!(
                 "{}",
-                serde_json::to_string(&json!({ "ids": parse(body) }))
-                    .unwrap_or_else(|_| "{\"ids\":[]}".into())
+                serde_json::to_string(&json!({
+                    "ids": parse(body),
+                    "retargeted_from": retargeted_from(body),
+                }))
+                .unwrap_or_else(|_| "{\"ids\":[]}".into())
             );
             0
         }
@@ -160,7 +246,7 @@ pub fn run(args: &[String]) -> i32 {
         }
         _ => {
             eprint!(
-                "usage: fno-agents pr-closure-parse   (JSON {{body}} in; {{ids}} out)\n       fno-agents pr-closure-render  (JSON {{ids}} in; {{line}} out)\n"
+                "usage: fno-agents pr-closure-parse   (JSON {{body}} in; {{ids, retargeted_from}} out)\n       fno-agents pr-closure-render  (JSON {{ids}} in; {{line}} out)\n"
             );
             2
         }
@@ -207,6 +293,20 @@ mod tests {
                 })
                 .unwrap_or_default();
             assert_eq!(parse(body), want, "corpus case failed: {body:?}");
+            let want_gone: Vec<String> = case
+                .get("retargeted_from")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                retargeted_from(body),
+                want_gone,
+                "corpus retargeted_from failed: {body:?}"
+            );
         }
     }
 
