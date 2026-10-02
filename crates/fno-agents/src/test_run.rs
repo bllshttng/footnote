@@ -37,6 +37,16 @@ const NESTED_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// it takes the slot. Compilation is what needs one-at-a-time; a test run
 /// does not.
 const BUILD_IDLE_TAKEOVER: Duration = Duration::from_secs(30);
+
+/// True when the cargo at these doors is `fno doctor update`'s install
+/// build: update.py exports `FNO_INSTALL_BUILD=1` into its cargo legs and the
+/// env reaches this wrapper through cargo. Such a build is the user's fno
+/// loading (law d-829648bb): it bypasses the tests hold and the worker
+/// run-slot queue, and waits only at the one-at-a-time build:cargo claim,
+/// in the priority lane.
+fn install_build() -> bool {
+    std::env::var_os("FNO_INSTALL_BUILD").is_some_and(|v| v == "1")
+}
 /// Grace window for a SIGTERM to land before escalating to SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
@@ -1000,13 +1010,17 @@ fn run_build_admit(args: &[String]) -> i32 {
             ..Default::default()
         };
         let lane_of = || {
-            if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
+            if install_build() || priority_lane(None).is_some_and(|p| p.worktree == worktree) {
                 Lane::Priority
             } else {
                 Lane::Normal
             }
         };
-        let still_slotted = || holds_run_slot(cargo_pid, &holder, &slot_keys, None);
+        // An install build never claimed a run slot (admit_run_slot waived
+        // it), so the slot guard would re-queue it forever; its contract is
+        // exactly "no slot, priority at the build claim".
+        let still_slotted =
+            || install_build() || holds_run_slot(cargo_pid, &holder, &slot_keys, None);
         let result = acquire_claim_blocking_guarded(
             &[BUILD_CLAIM_KEY.to_string()],
             &holder,
@@ -1289,6 +1303,15 @@ fn holds_run_slot(cargo_pid: u32, holder: &str, keys: &[String], root: Option<&P
 
 fn admit_run_slot(cargo_pid: u32, new_worktree: &Path) -> Result<(), i32> {
     install_signal_handlers();
+    // An install build (FNO_INSTALL_BUILD=1, exported by `fno doctor update`
+    // into its cargo legs) is the user's fno loading, and law d-829648bb
+    // says nothing stops fno loading for the user. It never waits at the
+    // tests hold and never queues behind worker run slots; it serializes
+    // only on the one-at-a-time build:cargo claim, where its lane is
+    // Priority (run_build_admit below).
+    if install_build() {
+        return Ok(());
+    }
     // The tests hold parks the cargo doors instead of failing them: a
     // running cargo pauses at its next compile or test binary and resumes
     // when the hold lifts (the operator records demos against a quiet

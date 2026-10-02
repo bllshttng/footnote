@@ -18,6 +18,7 @@ from fno.events import (
     append_event,
     validate,
 )
+from fno.events.store_client import EventStoreUnavailable
 
 from .types import Claim
 
@@ -45,7 +46,13 @@ def _emit(event: dict[str, Any]) -> None:
     """
     try:
         append_event(event)
-    except (ValidationError, SchemaUnavailableError, OSError, TimeoutError) as exc:
+    except (
+        ValidationError,
+        SchemaUnavailableError,
+        OSError,
+        TimeoutError,
+        EventStoreUnavailable,
+    ) as exc:
         print(
             f"claims: failed to emit {event.get('type')!r}: {exc}",
             file=sys.stderr,

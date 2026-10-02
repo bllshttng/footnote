@@ -6907,6 +6907,71 @@ event_types:
         status:
           type: string
 
+  - name: fno_update_started
+    description: "`fno doctor update` acquired the machine-global install claim and began. The first fact of an update: a lead no longer learns an update is running only by watching the command itself."
+    sources: [python]
+    data:
+      required: [new_rev]
+      properties:
+        new_rev:
+          type: string
+          description: "Source git rev about to be installed; unknown when the source is not a checkout."
+        old_rev:
+          type: string
+          description: "Rev recorded by the previous install, when a marker exists."
+        source_path:
+          type: string
+          description: "The resolved source checkout."
+    consumers: [operator, fno doctor]
+
+  - name: fno_update_built
+    description: "The update's cargo leg finished building the rust bins. Outcome is the rust leg's own verdict string (refreshed, fresh, failed, ...); the wheel install may still be ahead."
+    sources: [python]
+    data:
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          description: "The rust leg outcome (refreshed | refreshed-no-marker | fresh | failed | skipped-... | dry-run)."
+        rust_rev:
+          type: string
+          description: "The crates/ subtree rev the build targeted."
+    consumers: [operator, fno doctor]
+
+  - name: fno_update_installed
+    description: "The installer exited 0 and the new rev marker landed. The terminal success fact a lead polls `fno doctor update --status` for."
+    sources: [python]
+    data:
+      required: [new_rev]
+      properties:
+        new_rev:
+          type: string
+          description: "Rev recorded by this install."
+        old_rev:
+          type: string
+          description: "Rev the install replaced, when a marker existed."
+    consumers: [operator, fno doctor]
+
+  - name: fno_update_failed
+    description: "The update did not complete. Every failure carries a reason; an update that died silently is the defect this row exists to name."
+    sources: [python]
+    data:
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: "What failed (installer exit code, guard refusal, marker failure)."
+        stage:
+          type: string
+          description: "Where it failed: install, marker, rust, post_install."
+        old_rev:
+          type: string
+          description: "Rev still installed after the failure."
+        new_rev:
+          type: string
+          description: "Rev the failed attempt targeted."
+    consumers: [operator, fno doctor]
+
   # ── a2a status breakpoints: task-boundary protocol family ──────────
   # Four task-boundary events carrying the extended envelope in `protocol_family`
   # below (routable fields at envelope level, not smeared into `data`). The
