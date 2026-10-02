@@ -14,7 +14,8 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 1. Install the fno plugin. The buddy hatches at the next session start.
 2. Type `/buddy` to see its card.
-3. Type `/buddy statusline` to put it beside your status line. This step is optional.
+3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
+4. If you want the buddy in a side pane, type `/buddy pane`.
 
 ## What you see
 
@@ -29,7 +30,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 The buddy has three places. It uses the first place that is available.
 
 1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge. The status area grows to 4-6 rows.
-2. **A narrow pane on the right.** If you did not type `/buddy statusline`, the buddy opens a pane docked on the right. The sprite stands at the bottom, and its words are above it. Claude Code opens this pane only in the fullscreen layout, at 144 columns or more.
+2. **A narrow pane on the right.** Type `/buddy pane` to put the buddy here. The sprite stands at the bottom, and its words are above it. Claude Code shows this pane only in the fullscreen layout, at 110 columns or more. If you never typed `/buddy statusline`, the buddy opens this pane by itself at 144 columns or more.
 3. **One line above the prompt.** If the first two places are not available, the buddy shows a one-line face above the prompt.
 
 The length of your status line does not move the buddy. The buddy always aligns to the right edge of the terminal. If a row of your status line is too wide to share, the buddy moves down one row. If 6 rows cannot hold the buddy, it changes to the one-line face.
@@ -38,7 +39,7 @@ The length of your status line does not move the buddy. The buddy always aligns 
 
 `/buddy statusline` saves your current `statusLine` setting. Then it points `statusLine` at a small wrapper. The wrapper runs your status line first, then draws the buddy beside it. If you have no status line, the left side shows the model, the folder, the context use, and the cost.
 
-`/buddy statusline off` puts your saved setting back, exactly as it was. If the buddy cannot read the saved copy, it does not change your settings.
+`/buddy pane` puts your saved setting back, exactly as it was, and moves the buddy to the side pane. `/buddy restore` does the same thing. If the buddy cannot read the saved copy, it does not change your settings.
 
 If you run `/statusline` again later, the buddy tells you at the next session start. It does not wrap the new status line automatically. Type `/buddy statusline` to put the buddy beside it again.
 
@@ -61,8 +62,8 @@ You can keep 3 rerolls at most. A reroll that you earn with a full bank is lost.
 | `/buddy pet` | Pets the buddy |
 | `/buddy roll` | Spends one reroll to hatch a new buddy |
 | `/buddy statusline` | Puts the buddy beside your status line |
-| `/buddy statusline off` | Puts your status line back as it was |
-| `/buddy off` | Hides the buddy and stops every model call and feed read |
+| `/buddy pane` | Puts your status line back as it was and moves the buddy to a side pane. `/buddy restore` is the same command. |
+| `/buddy off` | Hides the buddy, closes its pane, and stops every model call and feed read |
 | `/buddy on` | Shows the buddy again |
 
 `/bbb` takes the same words: `/bbb roll`, `/bbb pet`, and the others. In the docked pane, press `p` to pet the buddy.

@@ -80,7 +80,7 @@ test('an old buddy comes back with its name and the species its personality name
   expect(restore('{}', 0)).toBe(null)
 })
 
-test('/buddy statusline wraps the user status line, writes frames, and off restores it exactly', async ($, on) => {
+test('/buddy statusline wraps the user status line, writes frames, and pane restores it exactly', async ($, on) => {
   const mine = { type: 'command', command: '~/bin/my-status', padding: 2 }
   const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: mine })]])
   const { clock } = boot(on, OLD_CONFIG, new Map(), files)
@@ -100,7 +100,7 @@ test('/buddy statusline wraps the user status line, writes frames, and off resto
   const frame = JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!)
   expect(frame).toMatchObject({ name: 'Quip', speech: 'Quip is back. did you miss me?' })
 
-  await $.command.run({ command: 'buddy', args: 'statusline off' })
+  await $.command.run({ command: 'buddy', args: 'pane' })
   expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual(mine)
   expect(fleetLine({ live_workers: 17 },{ questions: [1, 2, 3] }, [{}, {}])).toBe('17 workers · 3 asks · 2 PRs')
   expect(fleetLine(undefined, undefined, undefined)).toBe('')

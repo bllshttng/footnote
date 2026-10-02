@@ -42,6 +42,7 @@ let sessionId = ''
 let wrapped = false
 let lastFrame = ''
 let frameAt = -Infinity
+let unwrappedAt = -Infinity
 
 const buddyDir = () => `${stateDir}/state/buddy`
 const settingsPath = () => `${home}/.claude/settings.json`
@@ -125,7 +126,7 @@ function card(c: Companion, r: Rerolls): string {
     ...stats,
     '',
     rerollLine(r),
-    '/buddy pet · /buddy roll · /buddy off · /buddy statusline [off]',
+    '/buddy pet · roll · statusline · pane · off',
   ].join('\n')
 }
 
@@ -187,25 +188,28 @@ async function statuslineOn($: EngineInterface): Promise<string> {
   wrapped = true
   await $.ui.close({ id: PANE_ID })
   return current
-    ? `${buddy!.name} now sits beside your status line. /buddy statusline off puts yours back as it was.`
-    : `${buddy!.name} now sits in a new status line. /buddy statusline off removes it.`
+    ? `${buddy!.name} now sits beside your status line. /buddy pane moves it to a side pane and puts yours back as it was.`
+    : `${buddy!.name} now sits in a new status line. /buddy pane moves it to a side pane and removes that line.`
 }
 
-async function statuslineOff($: EngineInterface): Promise<string> {
+async function statuslineOff($: EngineInterface): Promise<{ ok: boolean; text: string }> {
   const settings = await readSettings($)
-  if (!settings) return `${settingsPath()} does not parse, so I left it alone.`
+  if (!settings) return { ok: false, text: `${settingsPath()} does not parse, so I left it alone.` }
   const saved = stateDir ? await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined) : undefined
+  let text = ''
   if (isOurs(settings.statusLine)) {
     // Without the saved copy there is nothing to put back, and deleting the wrapper would leave no status line at all.
-    if (!saved) return `I cannot read your saved status line in ${buddyDir()}/inner.json, so I left ${settingsPath()} alone.`
+    if (!saved) return { ok: false, text: `I cannot read your saved status line in ${buddyDir()}/inner.json, so I left ${settingsPath()} alone.` }
     if (saved.statusLine) settings.statusLine = saved.statusLine
     else delete settings.statusLine
     await $.fs.write(settingsPath(), JSON.stringify(settings, null, 2) + '\n')
+    text = 'Your status line is back as it was.'
   }
   // inner.json marks that the user wants the buddy beside the status line; without it no re-wrap is offered.
   if (saved) await $.fs.write(`${buddyDir()}/inner.json`, '')
   wrapped = false
-  return 'Your status line is back as it was.'
+  unwrappedAt = await $.clock.now()
+  return { ok: true, text }
 }
 
 async function react($: EngineInterface): Promise<void> {
@@ -321,7 +325,9 @@ function sprite(c: Companion, now: number): string[] {
 async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
   if (!stateDir) return false
   try {
-    return now - Number(await $.fs.read(`${buddyDir()}/frames/${sessionId}.seen`)) < SEEN_MS
+    const at = Number(await $.fs.read(`${buddyDir()}/frames/${sessionId}.seen`))
+    // A beat from before /buddy pane is the old wrapper's last run, not a live one.
+    return at > unwrappedAt && now - at < SEEN_MS
   } catch {
     return false
   }
@@ -378,7 +384,7 @@ export function register(on: On) {
     $.clock.every(FLEET_MS / 5, async () => readFleet($, await $.clock.now()))
     for (const name of COMMANDS) {
       try {
-        await $.command.register({ name, description: name === 'bbb' ? 'Bring back buddy: your terminal companion' : 'Your terminal companion: show it, pet it, roll a new one, or turn it off', argumentHint: '[pet|roll|off|on|statusline [off]]', immediate: true })
+        await $.command.register({ name, description: name === 'bbb' ? 'Bring back buddy: your terminal companion' : 'Your terminal companion: show it, pet it, roll a new one, or turn it off', argumentHint: '[pet|roll|statusline|pane|off|on]', immediate: true })
       } catch {
         // A newer Claude Code may ship its own /buddy again; /bbb still works.
       }
@@ -391,7 +397,14 @@ export function register(on: On) {
     const arg = e.args.trim().toLowerCase()
     if (!buddy) await load($, now)
     if (arg === 'statusline') return { text: await statuslineOn($) }
-    if (arg === 'statusline off') return { text: await statuslineOff($) }
+    if (arg === 'pane' || arg === 'restore') {
+      const { ok, text } = await statuslineOff($)
+      if (!ok) return { text }
+      // Asked for by name, so the pane opens from 110 columns rather than the unasked 144.
+      paneAsked = true
+      await $.ui.open({ id: PANE_ID, title: buddy!.name, columns: PANE_COLUMNS }).catch(() => {})
+      return { text: `${text ? text + ' ' : ''}${buddy!.name} moved to a side pane. /buddy statusline brings it back.` }
+    }
     if (arg === 'off') {
       muted = true
       await $.store.set('muted', true)
