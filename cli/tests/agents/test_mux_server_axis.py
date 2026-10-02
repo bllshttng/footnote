@@ -103,24 +103,13 @@ def test_ac17_dedup_key_treats_both_vars_as_one_axis() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC14-HP: the inside-leg-report pin is stable across both spellings
+# AC14-HP: the session-state shim parses; the pin itself is a Rust contract
+# now (crates/fno-agents/src/hook/session_state), tested against the
+# implementation there, so the Python mirror of the pin name is gone.
 # ---------------------------------------------------------------------------
 
 
-def _pin_name(extra_env: dict[str, str]) -> str:
-    """The sanitized first pin component, computed the way the hook does."""
-    server = extra_env.get("FNO_SERVER", "")
-    legacy = extra_env.get("FNO_SESSION", "")
-    value = server or legacy or "_"
-    return value.replace("/", "_").replace(".", "_")
-
-
-def test_ac14_pin_name_matches_across_spellings() -> None:
-    assert _pin_name({"FNO_SERVER": "main"}) == _pin_name({"FNO_SESSION": "main"})
-    assert _pin_name({"FNO_SERVER": "main"}) == "main"
-
-
-@pytest.mark.parametrize("script", ["hooks/inside-leg-report.sh"])
+@pytest.mark.parametrize("script", ["hooks/session-state.sh"])
 def test_ac14_hook_script_still_parses(script: str) -> None:
     repo = Path(__file__).resolve().parents[3]
     path = repo / script

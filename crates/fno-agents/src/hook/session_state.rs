@@ -298,8 +298,9 @@ fn is_pane_host(session_id: &str) -> bool {
     // the O_EXCL create): degrade to the presence gate (emit) instead of
     // latching the host into permanent silence. A real nested session always
     // wrote a non-empty id, so it still mismatches below and stays silent.
-    if std::fs::metadata(&pin).map(|m| m.len() > 0) != Ok(true) {
-        return true;
+    match std::fs::metadata(&pin) {
+        Ok(m) if m.len() > 0 => {}
+        _ => return true,
     }
     // An unreadable/corrupt pin leaves pinned_id empty -> degrade-to-emit,
     // never latch the host silent on a read failure.

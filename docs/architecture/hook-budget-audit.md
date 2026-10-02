@@ -38,7 +38,7 @@ Other same-event groups retain their own shell or Python entry points. A wrapper
 | Claude | SessionEnd | 1 | 1 | |
 | Claude | SessionStart | 2 | 2 | |
 | Claude | **Total** | **48** | **43** | |
-| Codex | PreToolUse | 11 | 6 | Six Bash guards became one dispatcher command; five other matcher groups remain. |
+| Codex | PreToolUse | 11 | 7 | Six Bash guards became one dispatcher command; the session-state producer joined as a no-matcher group. |
 | Codex | UserPromptSubmit | 6 | 6 | |
 | Codex | Stop | 5 | 5 | |
 | Codex | PostToolUse | 4 | 4 | |
@@ -47,7 +47,7 @@ Other same-event groups retain their own shell or Python entry points. A wrapper
 | Codex | PreCompact | 2 | 2 | |
 | Codex | PostCompact | 2 | 2 | |
 | Codex | SessionStart | 4 | 4 | |
-| Codex | **Total** | **36** | **31** | |
+| Codex | **Total** | **36** | **32** | |
 
 The totals are parsed from `hooks/hooks.json` and `hooks/codex-hooks.json`, counting each `hooks[].command`. Claude PreToolUse has 10 commands after the change. Three match `Edit|Write|Bash`. Two match `Edit|Write`. One each matches `Write`, `Edit|Write|NotebookEdit|Bash`, `Bash`, no matcher, and `Skill`.
 
@@ -65,10 +65,15 @@ The table lists every distinct configured command variant. A command used by bot
 | `plan-location-guard.sh` | Claude and Codex PreToolUse (`Write`) / (`Edit|Write`) | Refuses plan writes outside the configured plans directory. |
 | `king-delegation-guard.sh` | Claude PreToolUse (`Edit|Write|NotebookEdit|Bash`) | Refuses a crowned king's direct implementation writes. |
 | `pretooluse-bash-dispatch.sh` | Claude and Codex PreToolUse (`Bash` / `^Bash$`) | Runs Git protection, deployed-binary copy protection, background-process protection, pipe-result protection, recursive-grep protection, and raw-test protection in their previous order. |
-| `inside-leg-report.sh working` | Claude PreToolUse and UserPromptSubmit; Codex UserPromptSubmit | Marks the session as working. |
-| `inside-leg-report.sh blocked` | Claude Notification (`permission_prompt|agent_needs_input`) | Marks the session as waiting for input. |
-| `inside-leg-report.sh done` | Claude and Codex Stop | Marks the session as done. |
-| `inside-leg-report.sh model` | Claude PostModelSwitch | Records the model change in the session activity view. |
+| `session-state.sh claude PreToolUse` | Claude PreToolUse (no matcher) | Marks the session as working. |
+| `session-state.sh claude UserPromptSubmit` | Claude UserPromptSubmit | Marks the session as working. |
+| `session-state.sh claude Notification` | Claude Notification (`permission_prompt|agent_needs_input`) | Marks the session as waiting for input. |
+| `session-state.sh claude Stop` | Claude Stop | Marks the session as done. |
+| `session-state.sh claude PostModelSwitch` | Claude PostModelSwitch | Records the model change in the session activity view. |
+| `session-state.sh codex UserPromptSubmit` | Codex UserPromptSubmit | Marks the session as working. |
+| `session-state.sh codex PreToolUse` | Codex PreToolUse (no matcher) | Marks the session as working; the only signal a goal-mode continuation fires. |
+| `session-state.sh codex Stop` | Codex Stop | Marks the session as done and reads the rollout's observed model, effort and sandbox posture. |
+| `hooks/inside-leg-report.sh <state>` (stub) | No registration | Tombstone kept one release for out-of-tree callers; maps the state word onto the shim and execs it. |
 | `review-hold.sh acquire` | Claude PreToolUse (`Skill`) | Records that the review skill acquired the review hold. |
 | `born-with-why-offer-inject.sh` | Claude and Codex UserPromptSubmit | Offers the born-with-why intake prompt when its state says one is due. |
 | `inject-mail-notify.sh` | Claude and Codex UserPromptSubmit | Injects unread mail notifications. |

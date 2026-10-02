@@ -92,7 +92,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude PreToolUse"
           },
           {
             "type": "command",
@@ -117,7 +117,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh blocked"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude Notification"
           }
         ]
       }
@@ -128,7 +128,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude UserPromptSubmit"
           },
           {
             "type": "command",
@@ -172,7 +172,7 @@
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude Stop"
           }
         ]
       }
@@ -182,7 +182,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh model"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude PostModelSwitch"
           }
         ]
       }

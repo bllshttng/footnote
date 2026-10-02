@@ -330,7 +330,7 @@ PY
 # Scope control: the known UserPromptSubmit hooks must all parse out, else the
 # json read broke and every check below is vacuous (AGENTS.md: an empty result is
 # a claim, not a success).
-for _known in inside-leg-report.sh born-with-why-offer-inject.sh inject-mail-notify.sh; do
+for _known in session-state.sh born-with-why-offer-inject.sh inject-mail-notify.sh; do
     grep -qx "$_known" <<<"$ups_hooks" \
         || fail "scope control: $_known missing from parsed UserPromptSubmit hooks; guard cannot run"
 done

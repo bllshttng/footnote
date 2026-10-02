@@ -61,6 +61,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/session-state.sh codex PreToolUse"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -69,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+            "command": "${PLUGIN_ROOT}/hooks/session-state.sh codex UserPromptSubmit"
           },
           {
             "type": "command",
@@ -113,7 +122,7 @@
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
+            "command": "${PLUGIN_ROOT}/hooks/session-state.sh codex Stop"
           },
           {
             "type": "command",
