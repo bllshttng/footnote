@@ -85,7 +85,7 @@ impl HookHost {
                             out.errors
                                 .push(format!("{event} {command}: exit {c}: {}", stderr.trim()));
                         }
-                        let (deny, ctx) = parse_decision(&stdout);
+                        let (deny, ctx) = parse_decision(event, &stdout);
                         if let Some(ctx) = ctx {
                             out.context.push(ctx);
                         }
@@ -111,14 +111,15 @@ fn matches(matcher: &str, tool: &str) -> bool {
 }
 
 /// `(deny reason, additional context)` from a hook's stdout.
-fn parse_decision(stdout: &str) -> (Option<String>, Option<String>) {
+fn parse_decision(event: &str, stdout: &str) -> (Option<String>, Option<String>) {
     let t = stdout.trim();
     if t.is_empty() || t == "{}" {
         return (None, None);
     }
     let Ok(v) = serde_json::from_str::<Value>(t) else {
-        // A plain-text stdout is context, the Claude rule for prompt hooks.
-        return (None, Some(t.to_string()));
+        // Claude feeds plain stdout to the model for these two events only.
+        let plain = matches!(event, "UserPromptSubmit" | "SessionStart");
+        return (None, plain.then(|| t.to_string()));
     };
     let hso = &v["hookSpecificOutput"];
     let ctx = hso["additionalContext"]

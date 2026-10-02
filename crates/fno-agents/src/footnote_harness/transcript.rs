@@ -128,9 +128,24 @@ impl Writer {
     }
 
     /// Open an existing session for resume. Returns the writer and its records.
+    /// A last line with no newline is a write the killed writer never
+    /// finished: it is cut off under the lock, never parsed.
     pub fn open(dir: &Path, session_id: &str) -> Result<(Writer, Vec<Value>), String> {
-        let records = read_records(&dir.join("transcript.jsonl"))?;
-        let w = Self::open_inner(dir, session_id, records.len() as u64)?;
+        let path = dir.join("transcript.jsonl");
+        let mut w = Self::open_inner(dir, session_id, 0)?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            let keep = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+            w.file
+                .set_len(keep as u64)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            w.diag(
+                "warn",
+                &format!("cut a torn last line ({} bytes)", bytes.len() - keep),
+            );
+        }
+        let records = read_records(&path)?;
+        w.seq = records.len() as u64;
         Ok((w, records))
     }
 

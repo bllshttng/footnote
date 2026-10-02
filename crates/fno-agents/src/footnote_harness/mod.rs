@@ -853,6 +853,14 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
             return Some(2);
         }
     };
+    let _ = update_registry(&home.registry_json(), |reg| {
+        let Some(e) = reg.find_mut(&row_name) else {
+            return false;
+        };
+        e.status = crate::AgentStatus::Busy;
+        e.pid = Some(std::process::id());
+        true
+    });
     let res = drive(&mut s, &message, "operator");
     mark_row(home, &row_name, &s);
     match res {

@@ -206,12 +206,16 @@ fn bash(input: &Value, ctx: &Ctx) -> Result<String, String> {
 
 /// Run a child with optional stdin, killed at
 /// `limit` or on an interrupt. Returns (exit code, stdout, stderr); None = killed.
+/// The child leads its own process group: a background process it leaves
+/// holding the pipes is killed with the group, or the reads never end.
 pub fn run_bounded(
     mut cmd: Command,
     stdin: Option<&str>,
     limit: Duration,
 ) -> Result<(Option<i32>, String, String), String> {
+    use std::os::unix::process::CommandExt;
     let mut child = cmd
+        .process_group(0)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -248,18 +252,30 @@ pub fn run_bounded(
         })
     })
     .collect();
+    let pgid = child.id() as libc::pid_t;
+    let kill_group = || unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    };
     let start = Instant::now();
     let code = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status.code();
         }
         if start.elapsed() > limit || crate::subprocess_ask::ask_interrupted() {
-            let _ = child.kill();
+            kill_group();
             let _ = child.wait();
             break None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    let grace = Instant::now();
+    while !readers.iter().all(|r| r.is_finished()) {
+        if grace.elapsed() > Duration::from_secs(1) {
+            kill_group();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let mut outs = readers
         .into_iter()
         .map(|r| String::from_utf8_lossy(&r.join().unwrap_or_default()).into_owned());
