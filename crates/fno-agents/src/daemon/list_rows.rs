@@ -254,6 +254,27 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
     }
 }
 
+/// The printed ADDRESS for a list row: the head of the row's fno-minted
+/// `fno_id` when the row has one, or the harness head for a legacy row whose
+/// fno_id is a harness copy, a short id or a name. The claude
+/// `transport_short` fallback stays at the caller.
+pub(super) fn row_address(e: &RegistryEntry) -> Option<String> {
+    let own: Vec<&str> = [
+        e.harness_session_id.as_deref(),
+        e.related_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    crate::identity::fno_handle(e.fno_id.as_deref(), &own).or_else(|| {
+        e.harness_session_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::identity::canonical_handle)
+    })
+}
+
+
 /// The `basis` leg beside `reachability`, worded by the batch
 /// outcome when the probe is absent: a handle the batch never measured reads
 /// `unmeasured`, a handle a clean batch resolved nothing for keeps the null

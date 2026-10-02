@@ -3646,6 +3646,31 @@ fn list_queries_pidless_row_by_bare_canonical_handle() {
         seen.into_inner(),
         vec!["019f8ff2-1111-2222-3333-444444444444"]
     );
+    // A v4 fno_id lists the row's fno handle as ADDRESS; a legacy row
+    // (fno_id equal to its harness id) keeps the harness head.
+    let minted = state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries[0]
+        .fno_id
+        .clone()
+        .expect("row-birth fill minted one");
+    let address = response.result().unwrap()["agents"][0]["address"]
+        .as_str()
+        .unwrap();
+    assert_eq!(address, &minted[..8]);
+    state::update_registry(&home.registry_json(), |registry| {
+        registry.entries[0].fno_id = Some("019f8ff2-1111-2222-3333-444444444444".into());
+    })
+    .unwrap();
+    let response = handle_list_with_truth(
+        &ctx,
+        &req,
+        per_handle(|_handle| probe_with_verdict("working", "reachable")),
+    );
+    assert_eq!(
+        response.result().unwrap()["agents"][0]["address"],
+        "019f8ff2"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }
 

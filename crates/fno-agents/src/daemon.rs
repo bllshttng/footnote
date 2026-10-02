@@ -4276,11 +4276,7 @@ where
                     .unwrap_or(Value::Null);
                 // Only Claude's short transport key is a mailbox address;
                 // other harnesses need their full session identity.
-                let address: Value = e
-                    .harness_session_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Value::String(canonical_handle(s)))
+                let address: Value = list_rows::row_address(e).map(Value::String)
                     .or_else(|| {
                         if e.harness_name() == "claude" {
                             e.transport_short().map(|s| Value::String(s.to_string()))
