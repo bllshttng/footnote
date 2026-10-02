@@ -95,7 +95,9 @@ def test_three_79_word_sends_deliver_without_a_ledger(
     )
     body = words(79)
     for _ in range(3):
-        cli._name_lane_send(body, from_name="sender", resolved=recipient)
+        # a durable demotion that cannot prove landing ends NOT LANDED, exit 14
+        with pytest.raises(typer.Exit):
+            cli._name_lane_send(body, from_name="sender", resolved=recipient)
         assert "queued (durable)" in capsys.readouterr().out
 
     registry = tmp_path / "agents.json"
@@ -184,7 +186,9 @@ def test_control_body_over_the_cap_refuses_with_the_lane_marker(monkeypatch, cap
     assert raised.value.exit_code == 1
     assert "refused: control word budget" in capsys.readouterr().err
 
-    cli._name_lane_send("control: " + words(39), from_name="sender", resolved=recipient)
+    with pytest.raises(typer.Exit) as raised_mid:
+        cli._name_lane_send("control: " + words(39), from_name="sender", resolved=recipient)
+    assert raised_mid.value.exit_code == 14
     capsys.readouterr()
     with pytest.raises(typer.Exit) as raised2:
         cli._name_lane_send("control: " + words(39), from_name="sender", resolved=recipient)

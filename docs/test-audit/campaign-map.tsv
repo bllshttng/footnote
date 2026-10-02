@@ -853,7 +853,6 @@ K4	cli/tests/agents/test_harness_claude.py	py	34
 K4	cli/tests/agents/test_harness_exec_guard.py	py	4
 K4	cli/tests/agents/test_harness_loop_participation.py	py	10
 K4	cli/tests/agents/test_harness_role_routing.py	py	5
-K4	cli/tests/agents/test_harness_roster_parity.py	py	2
 K4	cli/tests/agents/test_harness_session_migration.py	py	15
 K4	cli/tests/agents/test_harnesses_claude_read.py	py	29
 K4	cli/tests/agents/test_harnesses_codex_argv.py	py	30

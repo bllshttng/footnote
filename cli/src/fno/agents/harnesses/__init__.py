@@ -21,21 +21,12 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 # in mux_spawn.PANE_HOSTABLE_PROVIDERS and remains wider than this tuple.
 from fno.harness_names import SPAWN_HARNESSES as SPAWN_HARNESSES  # noqa: E402
 
-# The spawn/pane read-tolerance roster: harnesses a pane can HOST even without a
-# Python ask adapter. `agy` (Antigravity) and `opencode` land pane rows
-# via Rust spawn paths / the mux pane back half. NOTE: this is no longer
-# the registry LOAD gate -- load_registry now shape-checks identity, so a row
-# with any provider reads without bricking. READABLE_PROVIDERS survives as the
-# spawn-default / pane-host tolerance set (spawn_defaults.py), NOT a read gate.
-# Mirrors Rust's KNOWN_PROVIDERS in provider.rs (a cli test pins the two lists).
-READABLE_PROVIDERS: tuple[str, ...] = (
-    "claude",
-    "codex",
-    "gemini",
-    "agy",
-    "opencode",
-    "pi",
-    "cursor-agent",
-    "grok",
-    "zcode",
-)
+READABLE_PROVIDERS: tuple[str, ...]  # annotation only; __getattr__ serves it
+
+
+def __getattr__(name: str) -> tuple[str, ...]:
+    """PEP 562: READABLE_PROVIDERS (pane-hostable read set) is Rust's KNOWN_PROVIDERS."""
+    if name == "READABLE_PROVIDERS":
+        from fno.harness_names import known_providers
+        return known_providers()
+    raise AttributeError(name)

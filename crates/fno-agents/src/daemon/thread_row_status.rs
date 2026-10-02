@@ -100,6 +100,7 @@ pub(super) fn codex_thread_on_status(
                 }
                 crate::codex_thread::ThreadTurnPhase::Done => None,
             },
+            posture: None,
         };
         tokio::spawn(write_thread_inside_leg(
             registry_path.clone(),

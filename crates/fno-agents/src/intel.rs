@@ -981,7 +981,7 @@ pub fn run_intel(args: &[String]) -> i32 {
 
 /// The selected harnesses in canonical order: `all` (or nothing named) expands to every harness, otherwise the named values intersect the canonical order.
 fn selected_harnesses(spec: &[String]) -> Vec<&'static str> {
-    const ALL: [&str; 3] = ["claude", "codex", "opencode"];
+    const ALL: [&str; 4] = ["claude", "codex", "opencode", "footnote"];
     if spec.iter().any(|s| s == "all") || spec.is_empty() {
         return ALL.to_vec();
     }
@@ -1100,6 +1100,12 @@ fn fold_all(
         } else {
             sources.push(Box::new(source));
         }
+    }
+    if selected.contains(&"footnote") {
+        sources.push(Box::new(crate::footnote_harness::source::FootnoteSource {
+            sessions_root: crate::footnote_harness::transcript::sessions_root(),
+            roots: roots.clone(),
+        }));
     }
     let mut rows: Vec<SessionRow> = Vec::new();
     for source in &sources {
@@ -1482,9 +1488,10 @@ mod tests {
         assert_eq!(run_intel(&["--nonsense".to_string()]), 2);
         assert_eq!(run_intel(&["--days".to_string()]), 2);
         assert_eq!(run_intel(&["--node".to_string()]), 2);
+        harness_and_project_refusals_exit_two();
+        sample_and_categories_refusals_exit_two();
     }
 
-    #[test]
     fn harness_and_project_refusals_exit_two() {
         assert_eq!(run_intel(&["-H".into(), "codex,bogus".into()]), 2);
         assert_eq!(run_intel(&["--harness".into(), "bogus".into()]), 2);
@@ -1649,7 +1656,6 @@ mod tests {
         assert_eq!(receipt.bound, 0);
     }
 
-    #[test]
     fn sample_and_categories_refusals_exit_two() {
         // AC12-ERR, AC18-ERR flag half
         assert_eq!(run_intel(&["--sample".into(), "0".into()]), 2);

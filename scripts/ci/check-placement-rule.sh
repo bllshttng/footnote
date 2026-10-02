@@ -37,7 +37,7 @@
 #      settings.local.json (Claude Code's config, not footnote's state), and
 #      scripts/save-session.py's read of the ~/.claude/.session-context.json
 #      statusline sidecar (its OWN transcript writes were re-homed to
-#      ${FNO_HOME}/sessions - see below - so only the sidecar READ remains).
+#      ${FNO_HOME}/saved-sessions - see below - so only the sidecar READ remains).
 #      setup/cli_hooks.py WRITES ~/.claude/settings.json for the same reason
 #      its siblings write ~/.gemini/settings.json and ~/.codex/config.toml:
 #      it wires a hook into the CLI's OWN config. `claude rm` runs with no
@@ -196,7 +196,7 @@
 #     nothing under the harness dir and holds no reference to it, so CI
 #     enforces the placement rule for it with no exception.
 #   - scripts/save-session.py stays listed above under category (1): its
-#     transcript WRITES moved to ${FNO_HOME}/sessions, and its only remaining
+#     transcript WRITES moved to ${FNO_HOME}/saved-sessions, and its only remaining
 #     reference is the legitimate READ of Claude Code's own statusline sidecar.
 #
 # A file not on this list that starts referencing .claude/ must be a

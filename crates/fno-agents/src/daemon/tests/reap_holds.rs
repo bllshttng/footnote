@@ -1611,6 +1611,7 @@ fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
         reason: None,
         received_at: "2026-09-15T19:52:20Z".into(),
         ttl_ms: None,
+        posture: None,
     };
     let leg_working = state::InsideLegReport {
         state: crate::state::InsideLegState::Working,
@@ -1618,6 +1619,7 @@ fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
         reason: None,
         received_at: "2026-09-15T19:52:20Z".into(),
         ttl_ms: None,
+        posture: None,
     };
     state::update_registry(&home.registry_json(), |r| {
         // The name carries no node token, the registry node field is empty,

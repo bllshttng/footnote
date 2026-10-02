@@ -805,6 +805,8 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         // zcode: pane-less (the headless lane is the measured one), so the
         // manifest is deliberately rule-free; see manifests/zcode.toml.
         "zcode" => Some(include_str!("manifests/zcode.toml")),
+        // footnote: no pane lane, so no rules; see manifests/footnote.toml.
+        "footnote" => Some(include_str!("manifests/footnote.toml")),
         _ => None,
     }
 }

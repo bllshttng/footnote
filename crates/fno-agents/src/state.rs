@@ -480,12 +480,37 @@ pub fn find_keyed_mut<'r>(
 /// wire shape. PTY liveness (`ConnState::Exited`) always overrides
 /// this badge -- a dead pane is never resurrected by a stale inside-leg state
 /// (umbrella Locked Decision D4).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum InsideLegState {
+    #[default]
     Working,
     Blocked,
     Done,
+}
+
+/// The observed sandbox posture one inside-leg report carries, the
+/// truth_probe `observed_model` shape (`{"kind": "observed", ...}`) applied
+/// to posture: requested vs observed stay distinct facts, so a worker whose
+/// runtime posture disagrees with its spawn request reads as the
+/// disagreement it is, never as the request. `sandbox`/`approval` are the
+/// codex posture words (`workspace-write`/`on-request`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObservedPosture {
+    pub kind: String,
+    pub sandbox: String,
+    pub approval: String,
+}
+
+impl ObservedPosture {
+    /// The only kind this module stores: the report's own observation.
+    pub fn observed(sandbox: &str, approval: &str) -> Self {
+        Self {
+            kind: "observed".into(),
+            sandbox: sandbox.into(),
+            approval: approval.into(),
+        }
+    }
 }
 
 /// The stored form of one inside-leg report (contract v2: X2). The wire payload
@@ -499,7 +524,7 @@ pub enum InsideLegState {
 /// consume these fields land in E3.2/E3.3. Mirrored in Python's `AgentEntry`
 /// (`inside_leg: Optional[dict]`, a lossless passthrough) so a row round-trips
 /// across the mixed-language registry (X3 /).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct InsideLegReport {
     pub state: InsideLegState,
     pub seq: u64,
@@ -508,6 +533,12 @@ pub struct InsideLegReport {
     pub received_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+    /// The observed posture that rode THIS report (`None` on every older row
+    /// and every report that carried none); mirrored losslessly through
+    /// Python's `inside_leg: Optional[dict]` passthrough, so a row
+    /// round-trips with no Python edit (X3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<ObservedPosture>,
 }
 
 /// fno's own stop of a worker, so the harness `stopped` state it leaves
