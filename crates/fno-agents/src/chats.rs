@@ -590,7 +590,7 @@ fn ensure_index(conn: &Connection, chats_dir: &Path) -> Result<(), String> {
                 && hash.as_deref() == Some(actual.last_line_hash.as_str())
         });
         if !fresh {
-            refresh_chat(conn, &entry.path(), chat_id)?;
+            refresh_chat(conn, &entry.path(), &chat_id)?;
         }
     }
     // Index rows whose chat file vanished: refresh_chat's missing-file branch
@@ -630,7 +630,7 @@ pub(crate) fn rebuild_index_at(db: &Path, chats_dir: &Path) -> Result<String, St
                 continue;
             };
             if entry.path().join("messages.jsonl").is_file()
-                && refresh_chat(&conn, &entry.path(), chat_id)?
+                && refresh_chat(&conn, &entry.path(), &chat_id)?
             {
                 rebuilt += 1;
             }
@@ -735,10 +735,10 @@ fn migrate_import(chats_dir: &Path, bus: &Path) -> Result<MigrationReceipt, Stri
         std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut chats: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
-    let mut stage = |chats: &mut std::collections::HashMap<String, Vec<Value>>,
-                     order: &mut Vec<String>,
-                     chat_id: String,
-                     rec: Value| {
+    let stage = |chats: &mut std::collections::HashMap<String, Vec<Value>>,
+                 order: &mut Vec<String>,
+                 chat_id: String,
+                 rec: Value| {
         if !chats.contains_key(&chat_id) {
             order.push(chat_id.clone());
         }
