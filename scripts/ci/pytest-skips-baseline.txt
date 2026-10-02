@@ -148,9 +148,6 @@ cli/tests/unit/test_claims_core.py::<module>::mark.skipif  # on main before this
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_live_session_never_reads_stale::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_unresolved_names_the_witness::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_without_session_id_keeps_legacy_stale::marker.requires_rust  # on main before this ratchet
-cli/tests/unit/test_cost_characterization.py::test_parity_cost_tracker_estimate::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_cost_characterization.py::test_parity_register_task_ledger::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_cost_characterization.py::test_parity_session_cost_json::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_coverage_gate.py::test_attestation_chain_reads_a_row_that_rotated_out::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_doctor_lanes.py::test_live_macmon_smoke_answers_on_a_healthy_machine::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_failure_fixtures_wall_clock_bound_never_cost::pytest.skip  # on main before this ratchet

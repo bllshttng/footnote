@@ -35,22 +35,14 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Import shared pricing from the in-package cost_tracker. Resolving it as a
-# sibling module (not a repo-relative sys.path hack) is the whole point of the
-# move: run from the installed wheel in /tmp with no repo on disk, this binds
-# the in-package cost_tracker, never a stray repo copy.
 from fno import paths as _paths
-from fno.cost.cost_tracker import (
-    FALLBACK_MODELS_SEEN,
-    PRICING,
-    model_tier as _shared_model_tier,
-)
 
 # Dedup key for transcript lines: Claude Code writes one JSONL line per
 # content block, and every line of the same API message repeats identical
@@ -78,6 +70,7 @@ class SessionMetrics:
     first_timestamp: str = ""
     last_timestamp: str = ""
     cost_usd: float = 0.0
+    unpriced: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -110,33 +103,60 @@ class SessionMetrics:
         return max(self.models, key=lambda m: self.models[m])
 
 
-def model_tier(model_name: str, speed: str | None = None) -> str:
-    """Map model ID + optional speed to pricing tier. Delegates to shared cost_tracker."""
-    return _shared_model_tier(model_name, speed)
+def calculate_cost(metrics: SessionMetrics) -> float | None:
+    """Price the session through the one price leg.
 
-
-def calculate_cost(metrics: SessionMetrics) -> float:
-    """Calculate cost from token counts, handling mixed models."""
+    The Rust table owns the rates (models.dev, `crates/fno-agents/src/
+    model_price.rs`); this shells `fno-agents context-run --model-price` with
+    the primary model's tokens. `None` when the binary is missing, the call
+    fails, or the model is unpriced - the ledger row then carries
+    `cost_usd: null`, never a fallback-tier guess. No models at all (an
+    empty transcript) also reads unpriced, where the old code priced it as
+    sonnet.
+    """
     if not metrics.models:
-        tier = "sonnet"
-        prices = PRICING[tier]
-        return (
-            metrics.input_tokens * prices["input"]
-            + metrics.output_tokens * prices["output"]
-            + metrics.cache_read_tokens * prices["cache_read"]
-            + metrics.cache_create_tokens * prices["cache_create"]
-        ) / 1_000_000
+        metrics.unpriced = True
+        return None
+    binary = _fno_agents_binary()
+    if binary is None:
+        metrics.unpriced = True
+        return None
+    try:
+        out = subprocess.run(
+            [
+                str(binary),
+                "context-run",
+                "--model-price",
+                metrics.primary_model,
+                str(metrics.input_tokens),
+                str(metrics.output_tokens),
+                str(metrics.cache_read_tokens),
+                str(metrics.cache_create_tokens),
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        metrics.unpriced = True
+        return None
+    if out.returncode != 0:
+        metrics.unpriced = True
+        return None
+    try:
+        return float(out.stdout.decode().strip())
+    except ValueError:
+        metrics.unpriced = True
+        return None
 
-    # Per-model tracking not available at token level,
-    # use primary model for pricing (good enough - sessions rarely mix models)
-    tier = model_tier(metrics.primary_model)
-    prices = PRICING[tier]
-    return (
-        metrics.input_tokens * prices["input"]
-        + metrics.output_tokens * prices["output"]
-        + metrics.cache_read_tokens * prices["cache_read"]
-        + metrics.cache_create_tokens * prices["cache_create"]
-    ) / 1_000_000
+
+def _fno_agents_binary() -> Path | None:
+    """The fno-agents binary via the shared resolver; `None` when absent."""
+    try:
+        from fno.rust_binary import resolve_binary
+
+        return resolve_binary()
+    except Exception:
+        return None
 
 
 def find_transcript(session_id: str) -> str | None:
@@ -354,7 +374,8 @@ def parse_transcript(
             file=sys.stderr,
         )
 
-    metrics.cost_usd = calculate_cost(metrics)
+    cost = calculate_cost(metrics)
+    metrics.cost_usd = cost or 0.0
     return metrics
 
 
@@ -387,7 +408,7 @@ def get_branch_breakdown(path: str, session_id: str) -> dict[str, SessionMetrics
         print(f"Warning: {skipped_lines} malformed lines in {path}", file=sys.stderr)
 
     for m in branches.values():
-        m.cost_usd = calculate_cost(m)
+        m.cost_usd = calculate_cost(m) or 0.0
 
     return branches
 
@@ -420,6 +441,7 @@ def merge_metrics(all_metrics: list[SessionMetrics]) -> SessionMetrics:
         (m.last_timestamp for m in all_metrics if m.last_timestamp), default=""
     )
     combined.cost_usd = sum(m.cost_usd for m in all_metrics)
+    combined.unpriced = any(m.unpriced for m in all_metrics)
     return combined
 
 
@@ -456,13 +478,13 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
             "primary_model": metrics.primary_model,
             "models": metrics.models,
         }
-        # Stop-hook stderr is swallowed; surface the pricing fallback
-        # machine-visibly so drift is observable in the ledger. Optional
-        # field: present only when the fallback fired for a model in this
-        # session (existing JSON keys stay unchanged).
-        fallback = sorted(set(metrics.models) & FALLBACK_MODELS_SEEN)
-        if fallback:
-            payload["pricing_fallback_models"] = fallback
+        # Stop-hook stderr is swallowed; surface an unpriced session
+        # machine-visibly so the null lands in the ledger with its reason.
+        # Optional field: present only when the session is unpriced
+        # (existing JSON keys stay unchanged).
+        if metrics.unpriced:
+            payload["cost_usd"] = None
+            payload["unpriced_model"] = metrics.primary_model
         print(json.dumps(payload, indent=2))
         return
 
@@ -470,7 +492,10 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
     print(f"  Session:      {metrics.session_id}")
     print(f"  Model:        {metrics.primary_model}")
     print(f"  Duration:     {metrics.duration_minutes:.0f} min")
-    print(f"  Cost:         ${metrics.cost_usd:.2f}")
+    if metrics.unpriced:
+        print(f"  Cost:         unpriced ({metrics.primary_model})")
+    else:
+        print(f"  Cost:         ${metrics.cost_usd:.2f}")
     print(f"{'─' * 50}")
     print(f"  Input:        {format_tokens(metrics.input_tokens):>10}")
     print(f"  Output:       {format_tokens(metrics.output_tokens):>10}")

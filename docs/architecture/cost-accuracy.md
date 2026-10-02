@@ -1,4 +1,4 @@
-# Cost Accuracy: Transcript Dedup + Version-Aware Pricing
+# Cost Accuracy: Transcript Dedup + Catalog Pricing
 
 How session cost numbers are computed, why they were ~7.5x inflated until
 2026-06, and how to keep them honest.
@@ -10,12 +10,13 @@ How session cost numbers are computed, why they were ~7.5x inflated until
    message repeats identical `message.usage`. Summing usage per line
    overstated tokens by the duplication factor (verified on a live
    transcript: 502 assistant lines -> 185 unique messages).
-2. **Unknown-opus pricing fallback (3x per new opus release).**
-   `model_tier()` matched known opus versions explicitly and fell through to
-   the legacy opus-4.0 tier ($15/$75 per Mtok) for anything unrecognized.
-   Each new opus release (4.7, then 4.8 at $5/$25) was priced 3x high until
-   someone updated the table. `backfill-opus47-costs.py` was the first
-   cleanup; `backfill-cost-recompute.py` is the second and the general one.
+2. **Unknown-opus pricing fallback (3x per new opus release).** The old
+   hand-kept Python table (`cost_tracker.py` + `pricing.yaml`, deleted
+   2026-10-02) matched known opus versions explicitly and fell through to
+   the legacy opus-4.0 tier for anything unrecognized. Each new opus release
+   (4.7, then 4.8 at $5/$25) was priced 3x high until someone updated the
+   table. That hand step is the reason the table is gone: a catalog that
+   updates daily deletes it.
 
 The bugs multiplied: opus-4-8 sessions registered at ~7.5x true cost, and
 budget caps (`cost_cap_usd`) tripped sessions at ~13% of their real budget.
@@ -24,23 +25,27 @@ budget caps (`cost_cap_usd`) tripped sessions at ~13% of their real budget.
 
 | Surface | Role |
 |---|---|
-| `scripts/lib/cost_tracker.py` | **Single pricing source of truth.** `PRICING` table + `model_tier()` + `calculate_cost()` + the `estimate` CLI for shell callers. Pricing sources cited in the header: the Anthropic pricing page (canonical) and LiteLLM's `model_prices_and_context_window.json` (machine-readable reference, the same one community cost tools use). |
-| `scripts/metrics/session-cost.py` | Transcript parser. Dedups usage by `(message.id, requestId)`; computes `SessionMetrics`; `--json` feeds the register path. |
-| `scripts/metrics/cost-tracker.sh` | Shell shim. `estimate_cost` delegates to `cost_tracker.py estimate` - there is deliberately no shell pricing table. |
+| `crates/fno-agents/src/model_price.rs` | **Single pricing source of truth.** Reads the `<state>/cache/models-dev.json` catalog `fno` fetches daily (`crates/fno/src/model_catalog.rs`); `PriceBook::rates` + `cost()` + the running fold. No fallback tier: a nonzero token kind with no rate is unpriced. |
+| `fno-agents context-run --model-price` | The price leg's CLI door: tokens in, four-decimal dollars out; `unpriced` + exit 3 on a miss. |
+| `cli/src/fno/cost/_session_cost.py` | Transcript parser + ledger writer. Dedups usage by `(message.id, requestId)`; `calculate_cost` shells the price leg; unpriced sessions write `cost_usd: null` + `unpriced_model`. |
 | `scripts/metrics/backfill-cost-recompute.py` | One-shot historical correction for ledger.json + graph.json (idempotent, marker-based). |
 | `fno doctor --cost-check` | Opt-in drift tripwire vs the reference cost tool. |
 
 ```
 transcript JSONL ──parse (dedup by message.id+requestId)──> SessionMetrics
                                                                  │
-                                    model_tier (version-aware) ──┤
+                        context-run --model-price (models.dev) ──┤
                                                                  ▼
-stop hook ──register-session-cost.sh──> session-cost.py ──> ledger.json
+stop hook ──register-session-cost.sh──> _session_cost.py ──> ledger.json
                                                                  │
                 budget cap (loopcheck.rs cost/wall-clock caps)   ┤
                 graph.json cost_sessions (register path)─────────┤
                 ledger.md render ────────────────────────────────┘
 ```
+
+The mux card reads the same leg through the daemon's sweep
+(`liveness_sweep::measure_session_cost`), so the card's `~$` and the
+ledger's `cost_usd` cannot drift into two tables.
 
 ## Dedup semantics
 
@@ -50,30 +55,27 @@ stop hook ──register-session-cost.sh──> session-cost.py ──> ledger.j
   values) count as-is - over-counting toward the old behavior is the safe
   failure direction for a cost meter; false dedup is not.
 - The `seen` set is shared across all transcripts within one logical sum (`main()` across session IDs, one set per ledger entry in backfills). Resumed sessions copy prior history lines, with usage, into the new transcript file, so per-file dedup alone would re-count history. This is the same reason the community cost tools dedup globally.
+- The Rust running fold dedups claude usage by `message.id` (the same rule)
+  and reads codex cumulative totals instead of re-parsing.
 - Compaction detection is unaffected: duplicates carry identical usage, so
   skipping them does not change the context-size series.
 
-## Pricing fallback policy (optimistic, not pessimistic)
+## Unpriced policy (absent, not guessed)
 
-`model_tier()` extracts the opus version numerically (first digit pair after
-"opus", so the live `[1m]` context suffix never parses as a version; minors
-longer than 2 digits are date stamps, so `claude-opus-4-20250514` stays on
-the legacy tier):
+There is no fallback tier. A session prices only when every token kind with
+a nonzero count has a catalog rate:
 
-- version >= 4.5 -> exact tier if present in `PRICING`, else the **latest
-  modern tier** (`LATEST_MODERN_OPUS_TIER`)
-- version < 4.5, or `claude-3` -> legacy `opus-4.0` tier (those really were
-  $15/$75; known history is never silently repriced)
-- unparseable -> latest modern tier + one-time stderr warning, and the model
-  ID lands in `FALLBACK_MODELS_SEEN`, which `session-cost.py --json`
-  surfaces as `pricing_fallback_models` so the drift is machine-visible in
-  the ledger (stop-hook stderr is swallowed; JSON is not)
+- priced: `~$` on the card, a dollar figure in the ledger.
+- unpriced: the card shows the raw token count (`78.0M tok`), the ledger row
+  carries `cost_usd: null` plus `unpriced_model`, `_session_cost --json`
+  prints the same pair. A missing or failed catalog keeps everything
+  unpriced until the next refresh lands one; the composer and the mux server
+  re-stat hourly.
 
-Rationale: every future opus is >= 4.5. The pessimistic fallback produced
-two 3x inflation incidents; the optimistic default degrades to a small error
-only if Anthropic raises prices, which the doctor cross-check catches. When
-a new opus ships, add its tier to `PRICING` and update
-`LATEST_MODERN_OPUS_TIER`.
+`~` marks every card figure as an estimate: context-tier rates
+(`context_over_200k`), Opus fast mode and web-search fees are not priced,
+and a session that switched models prices at its primary model in the
+ledger while the card prices per model.
 
 ## Operator runbook: historical backfill
 
@@ -107,14 +109,13 @@ Opt-in (doctor's default run stays network-free and never assumes the reference 
 | Outcome | Meaning | Exit |
 |---|---|---|
 | OK | divergence <= 10% | 0 |
-| WARN | > 10% - pricing table or dedup drift; both numbers printed | 1 |
+| WARN | > 10% - catalog pricing or dedup drift; both numbers printed | 1 |
 | skipped (reason) | reference tool absent / no candidate session / reference tool error | 0 |
 
 Ground truth at ship time: the fixed parser reproduced the reference tool's $31.30 for the reference transcript to the cent at the measurement cutoff.
 
 ## Adding a new model (checklist)
 
-1. Add the tier to `PRICING` in `scripts/lib/cost_tracker.py` (cite the pricing page in the header comment if rates changed).
-2. If it is the newest opus, update `LATEST_MODERN_OPUS_TIER`.
-3. Extend the `model_tier` matrix test in `cli/tests/unit/test_cost_tracker_pricing.py`.
-4. Nothing else: the shell shim and every register-path consumer read the same table by construction.
+1. Nothing. The rates come from models.dev on the daily fetch; a model the
+   catalog prices is priced on the next refresh. A model it does not stays
+   unpriced - never add a hand tier.
