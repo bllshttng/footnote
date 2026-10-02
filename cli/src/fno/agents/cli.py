@@ -151,7 +151,10 @@ def _reclaim_if_provably_dead(
     from fno.claims.verdict import claim_verdicts
     from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
-    path = claim_path(key, root=native_claims_root(key))
+    try:
+        path = claim_path(key, root=native_claims_root(key))
+    except Exception:  # noqa: BLE001 - an unmeasurable store clears nothing
+        return None, "unreadable"
     # Take the SAME per-key recovery mutex the reaper holds while it re-verifies
     # and archives, and re-read INSIDE it. Reading, deciding, and releasing
     # outside the lock is a TOCTOU window: force_release_claim drops a claim
