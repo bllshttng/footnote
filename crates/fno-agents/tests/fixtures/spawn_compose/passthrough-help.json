@@ -1,0 +1,51 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--help"
+  ],
+  "config_toml": "",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--help"
+    ],
+    "exit": 0,
+    "journal": null,
+    "stderr": [],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": null,
+    "permission_value": null,
+    "positional_present": false,
+    "role": null,
+    "route_value": null,
+    "seed": null,
+    "seed_form": null,
+    "seed_index": null,
+    "spawn_tokens": [
+      "--help"
+    ],
+    "tab_flag_present": false
+  }
+}

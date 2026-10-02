@@ -841,24 +841,29 @@ def test_known_harnesses_covers_readable_set():
     assert set(known_harnesses()) == set(READABLE_PROVIDERS)
 
 
-def test_contract_rejects_a_row_absent_from_the_complete_roster():
-    """AC1-ERR: a capability row naming a harness KNOWN_HARNESSES does not
-    carry fails loudly at parse time, with the extra harness named. The
-    converse - a roster entry with no row - stays legal (hermes, openclaw),
-    which is why the relation is subset and not equality."""
+def test_contract_admits_a_row_absent_from_the_complete_roster():
+    """AC1-ERR, moved: the rows-stay-a-subset-of-the-roster check no longer
+    runs in this parser - a roster read here fired on the module-level parse
+    below and broke every binary-less import (the census, the lineage
+    check). The pin lives on the Rust side, in the provider round-trip test
+    that reads this same table's source; this layer only pins that the parse
+    itself stays roster-blind, so the packaged table keeps parsing."""
     from importlib.resources import files
 
     text = files("fno.agents").joinpath("harness_capabilities.toml").read_text(
         encoding="utf-8"
     )
     # Clone the claude section as [harness.ghost]: a full, well-formed row for
-    # a name the roster does not carry.
+    # a name the roster does not carry. The parse admits it; the Rust pin
+    # refuses it at the source. Cut at the next top-level harness (codex), not
+    # the next "[harness." - claude's own contract sub-tables share the prefix.
     start = text.index("[harness.claude]")
-    end = text.index("[harness.", start + 1)
-    ghost = text[start:end].replace("[harness.claude]", "[harness.ghost]", 1)
+    end = text.index("[harness.codex]")
+    ghost = text[start:end].replace("[harness.claude", "[harness.ghost")
     poisoned = text[:end] + ghost + text[end:]
-    with pytest.raises(DispatchResolveError, match=r"absent from KNOWN_HARNESSES: ghost"):
-        parse_capability_contract(poisoned)
+    version, harnesses = parse_capability_contract(poisoned)
+    assert "ghost" in harnesses
+    assert version >= 1
 
 
 def test_contract_rejects_an_empty_capability_table():

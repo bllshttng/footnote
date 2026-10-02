@@ -10,43 +10,27 @@ receipt says so, which is the AC5-CONFLICT honest marker.
 from __future__ import annotations
 
 import io
-from types import SimpleNamespace
 
 import pytest
 
-from fno.agents.spawn_defaults import inject_spawn_defaults
+from fno.agents.spawn_defaults import compose_spawn_argv
 
 requires_rust = pytest.mark.dev_build
 
 
-def _settings(profiles: dict) -> SimpleNamespace:
-    def _block(**cfg):
-        return SimpleNamespace(
-            provider=cfg.get("provider", ""),
-            model=cfg.get("model", ""),
-            effort=cfg.get("effort", ""),
-            substrate=cfg.get("substrate", ""),
-            permission_mode=cfg.get("permission_mode", ""),
-            route=cfg.get("route", ""),
-            account=cfg.get("account", ""),
-            pane_group=cfg.get("pane_group", ""),
-            lanes=cfg.get("lanes", []),
-            on_exhausted=cfg.get("on_exhausted", "refuse"),
-            by_difficulty={},
-            on_low="prefer_healthy",
-            on_unknown="allow",
-            harness=cfg.get("harness", {}),
-        )
-
-    return SimpleNamespace(
-        agents=SimpleNamespace(
-            defaults=_block(),
-            profiles={verb: _block(**cfg) for verb, cfg in profiles.items()},
-            max_lanes={},
-        ),
-        routing=SimpleNamespace(models=[]),
-        model_routing=None,
-    )
+def _pin_profile(cfg, lanes):
+    """Append [[agents.profiles.target.lanes]] blocks to the pinned config."""
+    lines = ["", "[agents.profiles.target]"]
+    for i, lane in enumerate(lanes):
+        lines.append(f"[[agents.profiles.target.lanes]]")
+        for key, value in lane.items():
+            if isinstance(value, list):
+                rendered = "[" + ", ".join(f'"{v}"' for v in value) + "]"
+                lines.append(f"{key} = {rendered}")
+            else:
+                lines.append(f'{key} = "{value}"')
+    with open(cfg, "a") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
@@ -100,6 +84,9 @@ def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None)
         os.makedirs(os.path.join(d, "providers"), exist_ok=True)
         with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
             f.write(account)
+    monkeypatch.setenv("FNO_AGENTS_HOME", d)
+    # Same dir, not a child: the identity stamps live under <state_dir>/providers.
+    monkeypatch.setenv("FNO_STATE_DIR", d)
     monkeypatch.setenv("FNO_CONFIG", cfg)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
     return cfg, state
@@ -110,23 +97,18 @@ def test_lane_bundle_reaches_the_argv_behind_the_fence(monkeypatch):
     """AC5-BUNDLE: a lane's exact argv-vector lands behind the -- fence, the
     receipt names the lane rung it came from, and resolution is labelled
     unverified rather than claimed as evidence (AC5-CONFLICT)."""
-    _pin_capacity(monkeypatch)
+    cfg, _state = _pin_capacity(monkeypatch)
+    _pin_profile(
+        cfg,
+        [
+            {"provider": "codex", "model": "gpt-5.6-sol",
+             "args": ["--profile", "sol"]},
+        ],
+    )
     err = io.StringIO()
-    out = inject_spawn_defaults(
+    out = compose_spawn_argv(
         ["spawn", "--name", "w", "/fno:target x-1"],
-        settings=_settings({
-            "target": {
-                "lanes": [
-                    {
-                        "provider": "codex",
-                        "model": "gpt-5.6-sol",
-                        "args": ["--profile", "sol"],
-                    },
-                ],
-            },
-        }),
         stderr=err,
-        env={},
     )
     i = out.index("--")
     assert out[i + 1 : i + 3] == ["--profile", "sol"]
@@ -139,30 +121,20 @@ def test_sibling_lane_selection_carries_that_lanes_bundle(monkeypatch):
     """AC5-BUNDLE: the first lane's account is exhausted, the sibling is
     selected, and the BUNDLE that reaches the argv is the sibling's - not the
     skipped lane's and not a concatenation of both."""
-    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"acct-a": "exhausted"}})
+    cfg, _state = _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"acct-a": "exhausted"}})
+    _pin_profile(
+        cfg,
+        [
+            {"provider": "claude", "model": "claude-sonnet-5",
+             "account": "acct-a", "args": ["--settings", "a.json"]},
+            {"provider": "claude", "model": "claude-opus-5",
+             "account": "acct-b", "args": ["--settings", "b.json"]},
+        ],
+    )
     err = io.StringIO()
-    out = inject_spawn_defaults(
+    out = compose_spawn_argv(
         ["spawn", "--name", "w", "/fno:target x-1"],
-        settings=_settings({
-            "target": {
-                "lanes": [
-                    {
-                        "provider": "claude",
-                        "model": "claude-sonnet-5",
-                        "account": "acct-a",
-                        "args": ["--settings", "a.json"],
-                    },
-                    {
-                        "provider": "claude",
-                        "model": "claude-opus-5",
-                        "account": "acct-b",
-                        "args": ["--settings", "b.json"],
-                    },
-                ],
-            },
-        }),
         stderr=err,
-        env={},
     )
     assert out[out.index("--model") + 1] == "claude-opus-5"
     i = out.index("--")
@@ -175,23 +147,18 @@ def test_sibling_lane_selection_carries_that_lanes_bundle(monkeypatch):
 def test_typed_fence_displaces_the_lane_bundle_by_name(monkeypatch):
     """AC5-BUNDLE displacement half: a fence the caller typed selects their
     complete bundle; the configured one is named in the skip line."""
-    _pin_capacity(monkeypatch)
+    cfg, _state = _pin_capacity(monkeypatch)
+    _pin_profile(
+        cfg,
+        [
+            {"provider": "codex", "model": "gpt-5.6-sol",
+             "args": ["--profile", "sol"]},
+        ],
+    )
     err = io.StringIO()
-    out = inject_spawn_defaults(
+    out = compose_spawn_argv(
         ["spawn", "--name", "w", "/fno:target x-1", "--", "--profile", "mine"],
-        settings=_settings({
-            "target": {
-                "lanes": [
-                    {
-                        "provider": "codex",
-                        "model": "gpt-5.6-sol",
-                        "args": ["--profile", "sol"],
-                    },
-                ],
-            },
-        }),
         stderr=err,
-        env={},
     )
     assert out.count("--") == 1
     assert "harness args skipped" in err.getvalue()
@@ -202,24 +169,18 @@ def test_typed_fence_displaces_the_lane_bundle_by_name(monkeypatch):
 def test_bundle_leaves_account_attribution_intact(monkeypatch):
     """AC5-POSTURE: the bundle rides passthrough; the lane's account pin is
     still composed and attributed, and the bundle carries no account rewrite."""
-    _pin_capacity(monkeypatch)
+    cfg, _state = _pin_capacity(monkeypatch)
+    _pin_profile(
+        cfg,
+        [
+            {"provider": "claude", "model": "claude-sonnet-5",
+             "account": "acct-a", "args": ["--settings", "a.json"]},
+        ],
+    )
     err = io.StringIO()
-    out = inject_spawn_defaults(
+    out = compose_spawn_argv(
         ["spawn", "--name", "w", "/fno:target x-1"],
-        settings=_settings({
-            "target": {
-                "lanes": [
-                    {
-                        "provider": "claude",
-                        "model": "claude-sonnet-5",
-                        "account": "acct-a",
-                        "args": ["--settings", "a.json"],
-                    },
-                ],
-            },
-        }),
         stderr=err,
-        env={},
     )
     assert out[out.index("--account") + 1] == "acct-a"
     i = out.index("--")

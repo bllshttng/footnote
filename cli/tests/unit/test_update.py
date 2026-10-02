@@ -3274,3 +3274,17 @@ def test_update_readiness_pending_update_keeps_ready_line(monkeypatch, tmp_path)
     # the sandbox cannot read degrades to None, never raises.
     assert "last_update_event" in result
 
+    # The release-notes bridge rides the same payload: the native answer
+    # passes through, and an unavailable native leg degrades to None (the
+    # payload never blocks on it).
+    notes = {"highlights": [], "groups": [], "hidden_line": None}
+    monkeypatch.setattr(update, "_release_notes", lambda installed, source: notes)
+    carried = update.update_readiness(
+        runner=_make_runner(mux_rows=[{"session": "main", "state": "live", "panes": 1, "wire_version": 47}])
+    )
+    assert carried["release_notes"] == notes
+    monkeypatch.setattr(update, "_release_notes", lambda installed, source: None)
+    degraded = update.update_readiness(
+        runner=_make_runner(mux_rows=[{"session": "main", "state": "live", "panes": 1, "wire_version": 47}])
+    )
+    assert degraded["release_notes"] is None

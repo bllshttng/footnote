@@ -1833,6 +1833,10 @@ pub(crate) enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
+    /// Open one release-notes PR in the browser. The URL is Python's
+    /// (Locked Decision 6); the modal rendered it as a tappable Entry only
+    /// because the URL existed.
+    OpenPr(String),
     /// (change 7) Queue `fno agents restart` off the UI loop. Never
     /// `--mux`, never `--force`: the modal named what survives, and the tap
     /// is the confirmation.
@@ -1940,7 +1944,7 @@ use input_folds::{
 };
 
 use mail_input::peek_input_keys;
-use update_menu::{build_sideline_menu, build_update_modal, probe_update, UpdateProbe};
+use update_menu::{build_sideline_menu, build_update_modal, UpdateProbe};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).
@@ -8195,22 +8199,9 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result, is_login));
             });
         }
-        // Kick a wanted update-readiness probe off the UI loop, at
-        // most one in flight. The select loop never blocks on it - the menu
-        // and overlay render whatever is already in `view.update_outcome`.
-        if view.update_probe_want && !view.update_probe_inflight {
-            view.update_probe_want = false;
-            view.update_probe_inflight = true;
-            let tx = update_tx.clone();
-            tokio::spawn(async move {
-                let outcome = probe_update().await;
-                let _ = tx.send(outcome);
-            });
-        }
-        // Kick a wanted update verb off the UI loop, at most one in flight.
-        if let (false, Some(channel)) = (view.update_verb_inflight, view.update_verb_want) {
-            update_menu::kick_upgrade(&mut view, restart_tx.clone(), channel);
-        }
+        // Kick any wanted update probe/verb off the UI loop (one in flight
+        // each); the update surface owns the discipline.
+        update_menu::pump_wants(&mut view, &update_tx, &restart_tx);
         // Kick a wanted harness-catalog probe, same one-in-flight
         // discipline as the update probe.
         if view.catalog_want && !view.catalog_inflight {
@@ -10096,6 +10087,7 @@ async fn execute_aux_action(
             view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
             view.aux_esc.clear();
         }
+        AuxAction::OpenPr(url) => update_menu::open_pr(view, url).await,
         AuxAction::OpenSweep => {
             view.aux = None;
             if view.sweep_inflight {

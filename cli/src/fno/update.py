@@ -510,6 +510,28 @@ def _changelog_subjects(
     return [line for line in proc.stdout.splitlines() if line.strip()][:10]
 
 
+def _release_notes(
+    installed_rev: str,
+    source: Path,
+) -> Optional[dict]:
+    """Release notes for the update modal, built by the native leg
+    (crates/fno-agents/src/release_notes.rs) through the verb seam: one line
+    per merged PR between ``installed_rev`` and source HEAD, grouped by
+    user-facing area, churn hidden behind a count. None on any failure - the
+    payload never blocks on this (same contract as ``_changelog_subjects``)."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        answer = verb_call(
+            "release-notes",
+            {"installed_rev": installed_rev, "source": str(source)},
+            VerbUnavailable,
+        )
+    except VerbUnavailable:
+        return None
+    return answer.get("notes") or None
+
+
 def _wire_label(wires: list[int]) -> str:
     return "/".join(f"v{w}" for w in wires) if wires else "unknown"
 
@@ -671,8 +693,10 @@ def update_readiness(
     shells_ended = shells if wire_bump else 0
 
     changelog: list[str] = []
+    release_notes: Optional[dict] = None
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
+        release_notes = _release_notes(installed_rev, resolved_source)
 
     # Census rows; never the name `running`: python_tool owns it.
     census_rows = running_components(runner)
@@ -741,6 +765,7 @@ def update_readiness(
         "shells_ended": shells_ended if shells_known else None,
         "sessions": sessions if shells_known else None,
         "changelog": changelog,
+        "release_notes": release_notes,
         "guidance": guidance,
         "degraded": degraded_reason,
         "running": running_rows,

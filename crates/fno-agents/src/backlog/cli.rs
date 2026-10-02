@@ -37,7 +37,7 @@ struct Resolved<'a> {
 /// Native auxiliary vocabulary: commands the dispatcher routes by engine
 /// contract that the Python catalog never carried (the note corpus/history
 /// reader rode the folded `backlog-notes` action, not a catalog command).
-const NATIVE_AUX: &[&str] = &["notes"];
+const NATIVE_AUX: &[&str] = &["notes", "target-binding"];
 
 /// Resolve the head of `args` to a legacy command. Grouped spelling first
 /// (`<group> <action>`, only when the second token IS one of that group's
@@ -139,6 +139,9 @@ pub fn run(args: &[String]) -> i32 {
         // The folded corpus/history reader: fully native, engine owns the
         // whole surface (inventory, migrate, history, stale, findings).
         "notes" => super::note_migrate::run_notes(resolved.tail),
+        // Internal: target init/start and the init hook ask which node a run
+        // may bind. Not a catalog command, so it adds nothing to the menu.
+        "target-binding" => super::target_binding::run(resolved.tail),
         // The folded note action. A leading `--graph` is the engine door's
         // shape (bridge, passthrough, status fanout); the plain public
         // shape still carries Python-owned legs (evidence, identity,
@@ -185,6 +188,13 @@ pub fn run(args: &[String]) -> i32 {
         // same change (d-e11b2b3e), so the door owns every shape, help
         // included.
         "decisions" => super::decisions_cli::run(resolved.tail),
+        // The decide record verb is native end to end: the same door
+        // `fno inbox decide` uses, every lane, the Python twin deleted in
+        // the same change.
+        "decide" => crate::decide_door::run_decide_door(resolved.tail),
+        // The recovery backfill is native: compact + journal fold, the port
+        // of the deleted Python `reindex`.
+        "decide-reindex" => crate::decide_door::run_decide_reindex(resolved.tail),
         // The blueprint session lifecycle is native end to end: identity,
         // claims substrate, session rows, receipts. The Python twin is gone.
         "session" => super::session_cli::run(resolved.tail),

@@ -293,7 +293,7 @@ def test_seam_refuses_on_the_verbs_refuse_answer(monkeypatch):
     _stub_row(monkeypatch, _row())
     _stub_verb(monkeypatch, {"action": "refuse", "message": "--node x-1 derives /blueprint; the payload names /target. Drop the verb from the payload: --node supplies it."})
     monkeypatch.setattr(
-        "fno.agents.spawn_defaults.inject_spawn_defaults",
+        "fno.agents.spawn_defaults.compose_spawn_argv",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("inject must not run")),
     )
     from fno.agents.rust_runtime import _node_seed_at_seam

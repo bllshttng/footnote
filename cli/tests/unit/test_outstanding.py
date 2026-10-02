@@ -78,7 +78,25 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: OwnedHarnessIdentity(None, None, (), "empty"),
     )
-    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
+
+    # The provenance resolver is a native door now; its hermetic default here
+    # is the state the fixture's identity patch used to produce: a bare
+    # operator shell at a terminal, claiming no authority by silence. The
+    # listing read answers an empty law set, so the ask gate stays inert
+    # unless a test stubs its own rows.
+    def _door(payload):
+        if payload.get("mode") == "resolve-provenance":
+            return {
+                "decided_by": "operator",
+                "authority_source": None,
+                "attested_by": "operator",
+                "relayed_by": None,
+                "origin": None,
+            }
+        assert payload.get("mode") == "decisions", payload
+        return {"decisions": [], "damaged": 0}
+
+    monkeypatch.setattr("fno.rust_binary.call_front_json", _door)
     # resolve_repo_root is @cache'd and is warmed with the REAL worktree root
     # before this fixture runs. Without the clear, session resolution reads the
     # live target-state.md instead of this sandbox, and the ownership tests
@@ -440,9 +458,9 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
 
 
 def _fake_law_rows(*a, **k):
-    return (
-        "(all)",
-        [
+    """The decisions door's answer for one live law row."""
+    return {
+        "decisions": [
             {
                 "decision_id": "d-0fa92eb9",
                 "subject": "review-coverage",
@@ -450,8 +468,8 @@ def _fake_law_rows(*a, **k):
                 "lifecycle": "live",
             }
         ],
-        0,
-    )
+        "damaged": 0,
+    }
 
 
 _PR1717_QUESTION = (
@@ -548,7 +566,7 @@ class TestAskRefusedWhenLiveLawRules:
     def test_the_pr1717_question_exits_2_and_records_nothing(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        monkeypatch.setattr("fno.rust_binary.call_front_json", _fake_law_rows)
         # Positive control: a plain ask on a different subject records a row,
         # so the absence below is the gate's doing and not a broken journal.
         plain = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?", "--ask", "finish the lane"])
@@ -565,7 +583,7 @@ class TestAskRefusedWhenLiveLawRules:
     def test_a_named_subject_hits_even_on_unrelated_text(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        monkeypatch.setattr("fno.rust_binary.call_front_json", _fake_law_rows)
         refused = runner.invoke(
             outstanding_app,
             ["ask", "what colour should the button be?", "--subject", "review-coverage", "--ask", "finish the lane"],
@@ -585,7 +603,7 @@ class TestAskRefusedWhenLiveLawRules:
     def test_a_named_other_subject_asks_and_records_the_subject(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        monkeypatch.setattr("fno.rust_binary.call_front_json", _fake_law_rows)
         allowed = runner.invoke(
             outstanding_app,
             ["ask", _PR1717_QUESTION, "--subject", "pr-heal", "--ask", "finish the lane"],
@@ -599,7 +617,7 @@ class TestAskRefusedWhenLiveLawRules:
     def test_a_question_with_no_matching_words_asks(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        monkeypatch.setattr("fno.rust_binary.call_front_json", _fake_law_rows)
         allowed = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?", "--ask", "finish the lane"])
         assert allowed.exit_code == 0, allowed.output
 
@@ -610,7 +628,7 @@ class TestAskRefusedWhenLiveLawRules:
         def broken(*a, **k):
             raise RuntimeError("index unreadable")
 
-        monkeypatch.setattr("fno.decide.list_decisions", broken)
+        monkeypatch.setattr("fno.rust_binary.call_front_json", broken)
         allowed = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION, "--ask", "finish the lane"])
         assert allowed.exit_code == 0, allowed.output
         assert "live-law lookup failed" in allowed.output
@@ -1178,14 +1196,6 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
         ),
     )
     qid = runner.invoke(outstanding_app, ["ask", "which lane?", "--ask", "finish the lane"]).stdout.strip().splitlines()[-1]
-    recorded: dict[str, object] = {}
-
-    def record_decision(**kwargs):
-        recorded.update(kwargs)
-        return {"decision_id": "d-recorded"}
-
-    monkeypatch.setattr("fno.decide.record_decision", record_decision)
-
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coord"])
 
     assert cleared.exit_code == 0, cleared.output
@@ -1253,9 +1263,17 @@ def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
     """The superuser lane stays reachable on this path; only the silent default
     closed. An agent clearing a question on the operator's behalf must not be
     indistinguishable from the operator answering it."""
-    from fno import decide as decide_mod
+    def operator_at_a_terminal(payload):
+        assert payload["mode"] == "resolve-provenance"
+        return {
+            "decided_by": "operator",
+            "authority_source": "operator",
+            "attested_by": "operator",
+            "relayed_by": None,
+            "origin": None,
+        }
 
-    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
+    monkeypatch.setattr("fno.rust_binary.call_front_json", operator_at_a_terminal)
 
     asked = runner.invoke(
         outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94", "--ask", "finish the lane"]
@@ -1282,9 +1300,14 @@ def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
 def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
     """Closing on a refused answer would retire the question with nothing on
     record, which is worse than refusing the close. The refusal covers both."""
-    from fno import decide as decide_mod
+    def unattributed(payload):
+        assert payload["mode"] == "resolve-provenance"
+        return {
+            "refusal_kind": "unattributed",
+            "refusal": "no session identity and no terminal, so nothing here marks a decider",
+        }
 
-    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: False)
+    monkeypatch.setattr("fno.rust_binary.call_front_json", unattributed)
 
     asked = runner.invoke(
         outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94", "--ask", "finish the lane"]
@@ -1320,12 +1343,12 @@ def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
 
 
 @requires_rust
-def test_clear_with_answer_projects_the_decision_onto_the_node(
+def test_clear_with_answer_records_the_subject_the_question_names(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The clear-path decision has both halves a `fno backlog decide` record has:
-    findable by subject through the graph projection, not merely greppable
-    in the journal."""
+    """The clear-path decision carries the node subject, so the store's
+    native attach (the Rust door's node_decisions write) can find it, and
+    every subject read reaches it through the decisions door."""
     graph = root / "graph.json"
     seed_graph(graph, json.dumps({"entries": [{"id": "x-7d94", "title": "t", "status": "ready"}]}) + "\n")
 
@@ -1335,48 +1358,12 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
     assert cleared.exit_code == 0, cleared.output
 
-    from fno.decide import list_decisions
-
-    _, decisions, _damaged = list_decisions("x-7d94")
-    assert [d["question_id"] for d in decisions] == [qid]
-    assert decisions[0]["decision"] == "fold"
-    assert decisions[0]["question"] == "fold or migrate?"
-    assert decisions[0]["asked_at"]
-
-
-@requires_rust
-def test_a_projection_failure_no_longer_holds_the_question_open(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """The answer is durable and recoverable without the projection.
-
-    This inverts the old contract on purpose. Holding the question open was the
-    only recall path when the graph projection was the sole read source: a
-    projection failure then meant the answer existed and could not be found.
-    The machine-wide index now carries recall, so the projection is the node
-    VIEW alone - and keeping the question open would invite a retry that
-    records one answer a second time under a new id.
-    """
-    qid = runner.invoke(
-        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94", "--ask", "finish the lane"]
-    ).stdout.strip().splitlines()[-1]
-
-    def fail_projection(_event):
-        raise OSError("graph unavailable")
-
-    monkeypatch.setattr("fno.decide._project", fail_projection)
-    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
-
-    assert cleared.exit_code == 0, cleared.output
-    assert "graph projection failed" in cleared.output
-    from fno.outstanding.core import read_open_questions
-
-    assert [q.id for q in read_open_questions(root)] == []
-
-    from fno.decide import list_decisions
-
-    _, decisions, _damaged = list_decisions()
-    assert "fold" in [d["decision"] for d in decisions]
+    lines = _journal_events(project_log("events.jsonl", project_root=root))
+    data = [e for e in lines if e["type"] == "operator_decision"][0]["data"]
+    assert data["subject"] == "x-7d94"
+    assert data["question_id"] == qid
+    assert data["decision"] == "fold"
+    assert data["asked_at"]
 
 
 @requires_rust
@@ -2556,14 +2543,14 @@ def test_operator_authority_refusal_names_the_drop_flag_remedy(
         .stdout.strip()
         .splitlines()[-1]
     )
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: SimpleNamespace(
-            session_id="7420e8f7-aaaa-bbbb-cccc-dddddddddddd",
-            harness="claude",
-            disposition="proven",
-        ),
-    )
+    def agent_refused(payload):
+        assert payload["mode"] == "resolve-provenance"
+        return {
+            "refusal_kind": "authority",
+            "refusal": "agent cl7420e8f7 cannot record under superuser authority",
+        }
+
+    monkeypatch.setattr("fno.rust_binary.call_front_json", agent_refused)
 
     refused = runner.invoke(
         outstanding_app,
@@ -2602,12 +2589,16 @@ def test_origin_floor_refusal_names_the_flag_that_actually_fixes_it(
         .stdout.strip()
         .splitlines()[-1]
     )
-    # No session identity, and a terminal: the operator's own state.
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
-    )
-    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
+    # The resolver door refuses an agent channel carrying operator authority.
+    def origin_capped(payload):
+        assert payload["mode"] == "resolve-provenance"
+        return {
+            "refusal_kind": "origin-authority",
+            "refusal": "agent unattributed-caller cannot record under superuser authority from peer origin",
+            "origin": "peer",
+        }
+
+    monkeypatch.setattr("fno.rust_binary.call_front_json", origin_capped)
 
     refused = runner.invoke(
         outstanding_app,
@@ -2636,11 +2627,14 @@ def test_unattributed_caller_is_not_sent_to_chat(
         .stdout.strip()
         .splitlines()[-1]
     )
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
-    )
-    monkeypatch.setattr("fno.decide._attended_terminal", lambda: False)
+    def unattributed(payload):
+        assert payload["mode"] == "resolve-provenance"
+        return {
+            "refusal_kind": "unattributed",
+            "refusal": "no session identity and no terminal, so nothing here marks a decider",
+        }
+
+    monkeypatch.setattr("fno.rust_binary.call_front_json", unattributed)
 
     refused = runner.invoke(
         outstanding_app,
@@ -2654,7 +2648,9 @@ def test_unattributed_caller_is_not_sent_to_chat(
 
 
 @requires_rust
-def test_bad_origin_is_not_told_to_go_write_law(root: Path):
+def test_bad_origin_is_not_told_to_go_write_law(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
     """A typo'd --origin gets its own remedy, not the authority two-step.
 
     The law text would tell this caller to drop `--authority operator`, which
@@ -2665,6 +2661,15 @@ def test_bad_origin_is_not_told_to_go_write_law(root: Path):
         .stdout.strip()
         .splitlines()[-1]
     )
+
+    def unknown_origin(payload):
+        assert payload["mode"] == "resolve-provenance"
+        return {
+            "refusal_kind": "unknown-origin",
+            "refusal": "mail origin 'bogus' is unknown; use one of operator, peer, scheduler, recovery",
+        }
+
+    monkeypatch.setattr("fno.rust_binary.call_front_json", unknown_origin)
 
     refused = runner.invoke(
         outstanding_app,
