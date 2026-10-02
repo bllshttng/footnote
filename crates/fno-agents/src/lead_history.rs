@@ -1017,7 +1017,7 @@ pub fn run_lead_verdict(args: &[String]) -> i32 {
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
-    readings.checkins_expected = manifest.shape == "org" && team_age_secs > checkin_interval_secs;
+    readings.checkins_expected = matches!(manifest.shape.as_str(), "org" | "court") && team_age_secs > checkin_interval_secs;
     readings.checkins_stale = checkins_stale(
         &readings,
         now.timestamp(),

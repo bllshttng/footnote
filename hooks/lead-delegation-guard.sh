@@ -10,11 +10,15 @@ trap 'rm -f "$errfile"' EXIT
 for bin in "$(command -v fno-agents 2>/dev/null)" "${FNO_AGENTS_BIN:-}" \
     "$PWD"/crates/fno-agents/target/{release,debug}/fno-agents; do
     [[ -n "$bin" && -x "$bin" ]] || continue
-    if out="$(printf '%s' "$stdin" | "$bin" hook lead-guard 2>"$errfile")"; then
-        cat "$errfile" >&2
-        printf '%s\n' "$out"
-        exit 0
-    fi
+    # Both verb spellings for one release: the installed binary and the
+    # repo hook update at different times.
+    for verb in lead-guard king-guard; do
+        if out="$(printf '%s' "$stdin" | "$bin" "hook" "$verb" 2>"$errfile")"; then
+            cat "$errfile" >&2
+            printf '%s\n' "$out"
+            exit 0
+        fi
+    done
 done
 echo "lead-delegation-guard: no fno-agents could answer the hook verb; allowing" >&2
 printf '%s\n' '{}'

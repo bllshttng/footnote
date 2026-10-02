@@ -632,7 +632,7 @@ pub fn set_manifest_shape(
     shape: &str,
     expect_session: Option<&str>,
 ) -> Result<String, String> {
-    if shape != "pass" && shape != "org" {
+    if shape != "pass" && shape != "org" && shape != "court" {
         return Err(format!("shape must be pass or org, got {shape:?}"));
     }
     set_manifest_fields(root, scope, &[("shape", shape)], expect_session)?;

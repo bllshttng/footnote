@@ -85,8 +85,8 @@ REG_RC=$?
 MY_ROW="$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SID" \
     '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)"
 [[ -n "$MY_ROW" ]] || exit 0
-TEAM_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.team_level // empty' 2>/dev/null)"
-TEAM_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.team_scope // empty' 2>/dev/null)"
+TEAM_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)"
+TEAM_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)"
 [[ -n "$TEAM_LEVEL" || -n "$TEAM_SCOPE" ]] || exit 0
 
 # Never truncate: a brief that outgrew its budget fails the byte-budget test

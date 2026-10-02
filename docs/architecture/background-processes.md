@@ -60,7 +60,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 
 | arm | scheduler | hosted by | what it does | default interval |
 |---|---|---|---|---|
-| `king_wake` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | wakes crowned kings on the 900 s beat | 900 s |
+| `lead_wake` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | wakes the crowned lead on the 900 s beat | 900 s |
 | `watchdog` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the fleet watchdog classifier over lanes | 600 s |
 | `pr_watch_sweep` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | scans open-PR backlog nodes and fires `/fno:ship pr check` | 600 s |
 | `pr_watch_merge` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the merge phase: fires the merge queue for ready PRs | 600 s |
@@ -73,13 +73,13 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `retire` | `daemon` | `fno-agents-daemon` | retires finished work | 300 s |
 | `machine_watch` | `daemon` | `fno-agents-daemon` | watches sustained machine footprint | 300 s |
 | `arm_watch` | `daemon` | `fno-agents-daemon` | pages the operator when arms stay broken past the threshold | 300 s |
-| `king_settle` | `daemon` | `fno-agents-daemon` | mails the owning king when a covered PR settles green or its node closes | 300 s |
+| `lead_settle` | `daemon` | `fno-agents-daemon` | mails the owning lead when a covered PR settles green or its node closes | 300 s |
 | `provider_cap` | `daemon` | `fno-agents-daemon` | provider cap accounting | 120 s |
 | `slot_cutover` | `daemon` | `fno-agents-daemon` | switches to a globally declared managed Claude account when the proven account is low or exhausted | 120 s |
 | `slot_login_health` | `daemon` | `fno-agents-daemon` | health-checks every shared-slot managed Claude login and raises one operator notice when one dies | 120 s |
 | `merge_close` | `daemon` | `fno-agents-daemon` | merge-close sweeps | 900 s |
-| `crown_ledger` | `daemon` | `fno-agents-daemon` | renders reign.html | 300 s |
-| `reign_eval` | `daemon` | `fno-agents-daemon` | writes missing eval parts for ended Claude reigns | 600 s |
+| `team_ledger` | `daemon` | `fno-agents-daemon` | renders rundown.html | 300 s |
+| `lead_eval` | `daemon` | `fno-agents-daemon` | writes missing eval parts for ended Claude leads | 600 s |
 | `fleet_page` | `daemon` | `fno-agents-daemon` | renders fleet.html | 1800 s |
 | `attention` | `daemon` | `fno-agents-daemon` | selects attention rows into the status payload | 30 s |
 | `heal` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the PR auto-heal drive, gated on `auto_heal.enabled` | 600 s |
