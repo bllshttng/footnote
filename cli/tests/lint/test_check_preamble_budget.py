@@ -67,7 +67,7 @@ def _reported_total(result: subprocess.CompletedProcess[str]) -> int:
 
 
 def _stub_doctor_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno import doctor, update
+    from fno import doctor
 
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: ROOT)
     monkeypatch.setattr(doctor, "_source_rev", lambda source: "abc123")
@@ -84,7 +84,7 @@ def _stub_doctor_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor, "_source_config_keys", lambda source: frozenset())
     monkeypatch.setattr(doctor, "_python_content_drift", lambda source: 0)
     monkeypatch.setattr(doctor, "_mux_front_door_report", lambda: {})
-    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    monkeypatch.setattr(doctor, "_PROBES", {"mux_server_stale": []})
     monkeypatch.setattr(doctor, "_orphan_report", lambda: [])
     monkeypatch.setattr(doctor, "_pr_watch_liveness", lambda: {})
     monkeypatch.setattr(doctor, "_dead_letter_report", lambda: {})

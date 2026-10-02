@@ -1,6 +1,38 @@
 //! One subprocess read under a wall-clock budget (moved out of daemon.rs,
 //! : the file-budget ratchet made daemon.rs shrink-only).
 
+/// The most a child's pipe may contribute to memory. Past it the reader
+/// drains to EOF without keeping, so a runaway child can never grow this
+/// process; the overflow is named on stderr once and the truncated output
+/// fails the caller's parse loudly.
+const PIPE_KEEP_BYTES: usize = 64 * 1024 * 1024;
+
+fn keep_capped<R: std::io::Read>(pipe: Option<R>, name: &str) -> Vec<u8> {
+    let mut kept: Vec<u8> = Vec::new();
+    let Some(mut pipe) = pipe else {
+        return kept;
+    };
+    let mut chunk = [0u8; 65536];
+    let mut named = false;
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) | Err(_) => return kept,
+            Ok(n) => {
+                if kept.len() < PIPE_KEEP_BYTES {
+                    let room = PIPE_KEEP_BYTES - kept.len();
+                    kept.extend_from_slice(&chunk[..n.min(room)]);
+                } else if !named {
+                    named = true;
+                    eprintln!(
+                        "bounded_cmd: {name} passed the {} byte keep cap; output truncated",
+                        PIPE_KEEP_BYTES
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// One subprocess read under a wall-clock budget: `std` has no
 /// `Command::output` timeout, and a git stalled on a wedged filesystem must
 /// not park the daemon's rm handler forever. Past the deadline the child's
@@ -14,7 +46,6 @@ pub(crate) fn output_with_timeout_result(
     mut cmd: std::process::Command,
     secs: u64,
 ) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
     use std::os::unix::process::CommandExt;
     let mut child = cmd
         .process_group(0)
@@ -25,14 +56,8 @@ pub(crate) fn output_with_timeout_result(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        if let Some(mut s) = stdout {
-            let _ = s.read_to_end(&mut out);
-        }
-        if let Some(mut s) = stderr {
-            let _ = s.read_to_end(&mut err);
-        }
+        let out = keep_capped(stdout, "stdout");
+        let err = keep_capped(stderr, "stderr");
         (out, err)
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);

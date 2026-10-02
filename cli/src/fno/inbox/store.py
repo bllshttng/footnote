@@ -345,8 +345,7 @@ def _slug_for(body: str, fallback_msg_id: str, max_len: int = 40) -> str:
 # ---------------------------------------------------------------------------
 
 def generate_msg_id() -> str:
-    """Generate a 'fmail-' + 12-hex id, the message-id form the mux-messages
-    design locks; old 'msg-' ids on the bus still resolve."""
+    """Generate a 'fmail-XXXXXXXXXXXX' id with 12 hex characters."""
     return "fmail-" + secrets.token_hex(6)
 
 

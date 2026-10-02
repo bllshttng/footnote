@@ -142,17 +142,26 @@ pub(super) fn detect_intent(
 pub(super) const INTENT_LOOKBACK_ENTRIES: usize = 5;
 
 pub(super) fn detect_intent_full(transcript_path: &Path) -> Intent {
-    let Ok(content) = std::fs::read_to_string(transcript_path) else {
-        return Intent::None;
+    // The lookback needs at most INTENT_LOOKBACK_ENTRIES assistant entries
+    // from the tail, so read tail windows, not the file: a session
+    // transcript here reaches 135MB, and a whole-file read plus a Vec of
+    // every line cost a hook fire 1.4GB of churn. Grow the window only
+    // while the entries it holds have not filled the lookback.
+    let mut window_bytes: u64 = 1 << 20;
+    let window = loop {
+        let candidate = read_tail_lines(transcript_path, window_bytes);
+        if (candidate.len() >= 2 && enough_entries(&candidate)) || window_bytes >= (64u64 << 20) {
+            break candidate;
+        }
+        window_bytes *= 4;
     };
 
-    let lines: Vec<&str> = content.lines().collect();
     let mut scanned: usize = 0;
     // `watching` is honored ONLY from the single newest assistant entry
     //: a stale watch-request from earlier work must not idle a session
     // that has since moved on. `promise`/`aborted` keep their bounded lookback.
     let mut newest_entry = true;
-    for line in lines.iter().rev() {
+    for line in window.iter().rev() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -192,4 +201,62 @@ pub(super) fn detect_intent_full(transcript_path: &Path) -> Intent {
         newest_entry = false;
     }
     Intent::None
+}
+
+/// Assistant entries carrying text, the same predicate the reverse scan
+/// applies, so the window is grown only while the scan could run past it.
+fn enough_entries(lines: &[String]) -> bool {
+    let mut count = 0usize;
+    for line in lines {
+        let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let role = val
+            .pointer("/message/role")
+            .or_else(|| val.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if role == "assistant" && !extract_assistant_text(&val).is_empty() {
+            count += 1;
+            if count >= INTENT_LOOKBACK_ENTRIES {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The last `cap` bytes of the file as complete lines, oldest first. A window
+/// that starts mid-line drops that torn line; a window covering the whole
+/// file keeps its first line.
+fn read_tail_lines(path: &Path, cap: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(len) = file.seek(SeekFrom::End(0)) else {
+        return Vec::new();
+    };
+    if len == 0 {
+        return Vec::new();
+    }
+    let start = len.saturating_sub(cap);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    if file.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 {
+        // Torn line at the window edge: the byte before it in the file is
+        // not a newline, so this partial line is not the file's first.
+        if let Some(pos) = text.find('\n') {
+            text.drain(..=pos);
+        } else {
+            return Vec::new();
+        }
+    }
+    text.lines().map(str::to_string).collect()
 }

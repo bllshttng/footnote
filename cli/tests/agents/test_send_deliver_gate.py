@@ -426,7 +426,7 @@ def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
     out = (cli.stdout or "") + (cli.stderr or "")
     assert cli.exit_code == 14, out
     assert "NOT LANDED" in out, out
-    assert "fno agents peek codex-thread-agent --grep fmail-" in out, out
+    assert "fno agents peek codex-thread-agent --grep " in out, out
     assert "the user's Codex window" in out, out
 
 

@@ -123,6 +123,12 @@ impl Drop for IsolatedConfig {
 
 #[test]
 fn settings_rows() {
+    // The Keys rows and the assertion both read FNO_CONFIG from the process
+    // env; hold the environment lock so a parallel IsolatedConfig cannot
+    // flip it between the two reads.
+    let _env = crate::digest_overlay::ENVIRONMENT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let v = two_pane_view();
     let (rows, actions) = v.settings_rows_for(SettingsTab::Theme);
     // One ApplyTheme action per shipped theme, in display order.

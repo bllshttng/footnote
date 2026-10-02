@@ -147,6 +147,7 @@ class PathsBlock(BaseModel):
     handoffs_dir: Optional[str] = None
     retro_pending_dir: Optional[str] = None
     bus_dir: Optional[str] = None
+    chats: Optional[str] = None
     observer_reports_dir: Optional[str] = None
     operator_lane: Optional[str] = None
     spaces_dir: Optional[str] = None
@@ -167,6 +168,7 @@ class PathsBlock(BaseModel):
         "handoffs_dir",
         "retro_pending_dir",
         "bus_dir",
+        "chats",
         "observer_reports_dir",
         "operator_lane",
         "spaces_dir",

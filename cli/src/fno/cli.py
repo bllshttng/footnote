@@ -273,8 +273,8 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "update": (
-        "fno.update:update_command",
-        "Reinstall fno from its source directory.",
+        "fno.doctor_cli:_update_signpost",
+        "The updater is native: the Rust front door answers `update` and `doctor update`.",
         {"hidden": True},
     ),
     "restart": (
