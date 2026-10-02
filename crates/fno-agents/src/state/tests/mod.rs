@@ -2581,6 +2581,24 @@ fn update_registry_mints_a_row_its_own_fno_id() {
         load_registry(&path).unwrap().entries[1].fno_id.as_deref(),
         Some("thread-a")
     );
+    // A fresh mint never lands on a head another row already answers to:
+    // seed born with a known handle, then birth a row and compare heads.
+    let seeded = "a1a1a1a1-1111-4111-8111-111111111111";
+    update_registry(&path, |r| {
+        r.find_mut("born-renamed").unwrap().fno_id = Some(seeded.into());
+    })
+    .unwrap();
+    update_registry(&path, |r| {
+        let mut row = sample_entry("second");
+        row.harness_session_id = Some("7c5dcf5d-2222-4222-8222-222222222299".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+    let second = load_registry(&path).unwrap().entries[2]
+        .fno_id
+        .clone()
+        .expect("second row minted at the write");
+    assert_ne!(second.get(..8), seeded.get(..8), "heads stay unique");
     std::fs::remove_dir_all(&dir).ok();
 }
 

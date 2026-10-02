@@ -66,6 +66,10 @@ __pycache__/
 # Cache
 .cache/
 
+# Written by Claude Code when it loads the buddy mod from `claude --plugin-dir .`
+/.claude-plugin/types/
+/tsconfig.json
+
 # Other provider configs (local, not distributed).
 # NB: .codex-plugin/ is intentionally NOT here - it's the public Codex plugin
 # manifest (parity with .claude-plugin/), so it must ship.

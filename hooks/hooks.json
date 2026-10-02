@@ -1,5 +1,8 @@
 {
   "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection",
+  "modules": [
+    "./buddy/register.ts"
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -126,6 +129,11 @@
       {
         "matcher": "",
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-prompt-submit.sh",
+            "timeout": 5
+          },
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"

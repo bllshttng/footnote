@@ -200,7 +200,14 @@ set -euo pipefail
 # loaded surface. A first draft weighed 68; the style gate split it into four
 # short sentences, and 109 is the measured residue of the version that passes.
 # The raise spends exactly its delta and leaves the bank above intact.
-CEILING_BYTES=40300
+# +510 (40300 -> 40808), measured 2026-10-02: the "If `fno` is missing" block
+# in skills/using-fno/SKILL.md. A fresh /plugin install leaves every fno verb
+# failing until the background installer finishes, and using-fno is the one
+# preamble a CLI-less session still receives (it is injected by the plugin's
+# own hook, not the CLI), so the installing-vs-failed states, the log path and
+# the locked fix have to live there. The ceiling follows the measurement up,
+# zero spare (the baseline sat 2 under the old ceiling, so 40298 + 510).
+CEILING_BYTES=40808
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

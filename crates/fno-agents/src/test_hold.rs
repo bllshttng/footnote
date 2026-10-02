@@ -184,7 +184,7 @@ fn write_state(path: &Path, state: &PauseState) -> Result<(), String> {
 }
 
 fn announce(outcome: &mut Outcome, body: &str) {
-    match crate::announce::announce_all("fleet-incident", ANNOUNCE_SUBJECT, body) {
+    match crate::announce::announce_all("fno/fleet-incident", ANNOUNCE_SUBJECT, body) {
         Ok(id) => outcome.announced = Some(id),
         Err(error) => outcome.announce_error = Some(error),
     }

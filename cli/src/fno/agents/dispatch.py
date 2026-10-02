@@ -5056,12 +5056,10 @@ def _load_a2a_settings() -> tuple[bool, int]:
 
 
 def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
-    """Wrap a relay hop body in the peer's ``<fno_mail>`` envelope, or return it
-    raw when no context is supplied (an unwrapped hop) (node). The stream-json
-    switchboard injects a whole turn, so this uses the paired multiline form, not
-    the relay single-line PTY variant."""
+    """Wrap a relay hop in the peer's envelope; the hop mints its header id."""
     if ctx is None:
         return cur
+    from fno.inbox.store import generate_msg_id
     from fno.mail.envelope import wrap_fno_mail
 
     return wrap_fno_mail(
@@ -5070,6 +5068,7 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
         harness=ctx.harness,
         node=ctx.node,
         to=ctx.to,
+        id=ctx.id or generate_msg_id(),
         from_session=ctx.from_session,
         origin=ctx.origin,
         to_session=ctx.to_session,

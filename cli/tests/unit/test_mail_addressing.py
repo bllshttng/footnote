@@ -34,33 +34,29 @@ def test_two_v7_siblings_collide_on_the_display_handle():
 
 
 def test_the_envelope_carries_the_full_session_when_given_one():
-    # D2: `from` IS the full session id; one attribute, one address.
-    tag = fno_mail_open(from_=V7_A)
-    assert f'from="{V7_A}"' in tag
-    assert "from_session" not in tag
+    # The delivered text names the sender; the full session id rides the bus
+    # row's from_session, never the delivered text.
+    tag = fno_mail_open(from_=V7_A, id="fmail-abc123def456")
+    assert tag == f"`@{V7_A} · fmail-abc123def456 · (empty)`"
 
 
 def test_an_envelope_without_it_is_byte_unchanged():
     """A sender with no resolvable session still renders the compact handle."""
-    assert fno_mail_open(from_="a") == ('<fno_mail from="a">')
+    assert fno_mail_open(from_="a", id="fmail-abc123def456") == (
+        "`@a · fmail-abc123def456 · (empty)`"
+    )
 
 
 def test_the_reply_resolver_prefers_the_full_session_over_the_handle():
-    """The full reply address survives transcript parsing."""
-    text = wrap_fno_mail(
-        "hi",
-        from_="01a025f8",
-        id="msg-882e18",
-        from_session=V7_A,
-        harness="codex",
-    )
+    """The full reply address survives transcript parsing of the legacy tag."""
+    text = f'<fno_mail from="01a025f8" from_session="{V7_A}" id="msg-882e18">hi</fno_mail>'
     assert sender_from_transcript_text(text, "msg-882e18") == V7_A
 
 
 def test_a_legacy_envelope_still_resolves_through_its_handle():
     """An envelope written before the attribute existed is still sitting in live
     transcripts. Preferring the full id must not break reading the old shape."""
-    text = wrap_fno_mail("hi", from_="01a025f8", id="msg-1")
+    text = '<fno_mail from="01a025f8" id="msg-1">hi</fno_mail>'
     assert sender_from_transcript_text(text, "msg-1") == "01a025f8"
 
 

@@ -493,7 +493,7 @@ def build_lane_fill_report(
 
     The daemon's only walk is ``active_backlog`` shelling ``advance --epic``,
     whose fan-out runs ``_ready_leaf_children`` through the converge gates.
-    This preview used to call ``select_lane_fill(mission=epic)`` instead, which
+    This preview used to call the wheel's lane-fill selector instead, which
     reaches ``fno backlog ready --mission <epic>`` - a ``mission_id`` field 0 of
     2320 graph nodes carry - so it reported an empty mission for every epic
 . It now classifies the SAME children through the SAME pre-spawn
