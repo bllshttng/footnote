@@ -505,11 +505,11 @@ mod tests {
             )
         };
         let mut text = String::new();
-        text.push_str(&row("msg_1", "claude-opus-5-5[1m]", 100, 10));
+        text.push_str(&row("msg_1", "claude-opus-5-5[1m]", 100_000, 10_000));
         text.push('\n');
-        text.push_str(&row("msg_1", "claude-opus-5-5[1m]", 100, 10));
+        text.push_str(&row("msg_1", "claude-opus-5-5[1m]", 100_000, 10_000));
         text.push('\n');
-        text.push_str(&row("msg_2", "claude-opus-5-5[1m]", 40, 4));
+        text.push_str(&row("msg_2", "claude-opus-5-5[1m]", 40_000, 4_000));
         text.push('\n');
         text
     }
@@ -523,11 +523,11 @@ mod tests {
         fold.absorb(&path);
         let book_bookmark = fold.offset;
         let first = fold.session(&PriceBook::default(), None, None);
-        assert_eq!(first.tokens, 154);
+        assert_eq!(first.tokens, 154_000);
 
         let mut appended = claude_transcript();
         appended.push_str(&format!(
-            r#"{{"type":"assistant","message":{{"id":"msg_3","model":"claude-opus-5-5[1m]","usage":{{"input_tokens":7,"output_tokens":3}}}}}}"#
+            r#"{{"type":"assistant","message":{{"id":"msg_3","model":"claude-opus-5-5[1m]","usage":{{"input_tokens":7000,"output_tokens":3000}}}}}}"#
         ));
         appended.push('\n');
         std::fs::write(&path, appended).unwrap();
@@ -535,10 +535,10 @@ mod tests {
         let second = fold.session(&PriceBook::default(), None, None);
         // The re-written prefix re-read from the new offset only saw msg_3;
         // msg_1 counted once, msg_2 once.
-        assert_eq!(second.tokens, 164);
+        assert_eq!(second.tokens, 164_000);
         assert!(fold.offset > book_bookmark);
 
-        // Pricing through the fixture book: 147k opus tokens.
+        // Pricing through the fixture book: 147k input + 17k output tokens.
         let dir = tmpdir("fold-priced");
         fixture_book(&dir);
         let book = price_book(&dir).unwrap();
@@ -563,7 +563,9 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let mut fold = RunningCost::new();
         fold.absorb(&path);
-        assert_eq!(fold.session(&PriceBook::default(), None, None).tokens, 980);
+        // tokens is the RAW sum of the last cumulative total (900 + 700 + 80);
+        // the cached-token subtraction only applies to the dollars.
+        assert_eq!(fold.session(&PriceBook::default(), None, None).tokens, 1680);
 
         let dir = tmpdir("codex-priced");
         fixture_book(&dir);
@@ -624,12 +626,12 @@ mod tests {
         let keys = served_context_cost_keys(&e);
         assert_eq!(keys.len(), 7);
         assert_eq!(keys["context_used_pct"], serde_json::json!(48));
-        assert_eq!(keys["session_tokens"], serde_json::json!(154));
+        assert_eq!(keys["session_tokens"], serde_json::json!(154_000));
         assert_eq!(
             keys["session_cost_measured_at"],
             serde_json::json!("2026-10-02T00:00:00Z")
         );
-        // 140 input + 14 output opus tokens.
+        // 140k input + 14k output opus tokens.
         let expected: f64 = (140_000.0 * 4.0 + 14_000.0 * 20.0) / 1_000_000.0 * 100.0;
         assert_eq!(
             keys["session_cost_cents"],
