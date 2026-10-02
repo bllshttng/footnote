@@ -1294,13 +1294,14 @@ pub(super) async fn show_composer(
     Ok(true)
 }
 
-/// The agent-view pattern: entering full-screen opens the composer (a list
-/// with an input at the bottom). Leaving leaves the composer as it is;
-/// content_dims never changed, so no Resize travels in either direction.
+/// Full-screen is a display toggle: it flips `sideline_full` and reveals a
+/// hidden sideline on the way in. The composer stays owned by prefix+i
+/// (`toggle-composer`); F no longer opens it. Leaving leaves the composer
+/// as it is; content_dims never changed, so no Resize travels in either
+/// direction.
 pub(super) fn toggle_full(view: &mut View) {
     view.sideline_full = !view.sideline_full;
-    if view.sideline_full && view.launcher.is_none() {
-        agent_launcher::open(view);
+    if view.sideline_full {
         view.panel_on = true;
     }
 }

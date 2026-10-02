@@ -131,9 +131,15 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     was never addressed to cannot produce one, so a wrong candidate is excluded
     by evidence and not by precedence.
 
-    ``None`` on any miss (no marker, unreadable store, id absent) so the caller
-    falls through to its existing not-on-bus error path.
+    ``None`` on any miss so the caller falls through to its not-on-bus error path.
     """
+    try:
+        from fno.rust_binary import VerbUnavailable, chats_verb
+        sender = (chats_verb(["resolve", "--prefix", msg_id], {}) or {}).get("from_key")
+        if sender:
+            return sender
+    except (ImportError, VerbUnavailable):
+        pass
     for harness, session_id in _candidate_stores():
         path = _transcript_path(harness, session_id)
         if path is None:

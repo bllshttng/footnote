@@ -63,6 +63,8 @@ prefix = "fno"
 # retro_pending_dir = <unset>   # optional; no default
 # Override path to the cross-project mail bus dir.
 # bus_dir = <unset>   # optional; no default
+# Override root dir for the per-chat message store (default ~/.fno/chats).
+# chats = <unset>   # optional; no default
 # Override path to the observer harness digest dir.
 # observer_reports_dir = <unset>   # optional; no default
 # Override path to the operator's priorities lane.
