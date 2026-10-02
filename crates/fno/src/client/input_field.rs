@@ -57,6 +57,14 @@ impl InputField {
                     let at = self.byte_at(self.cursor);
                     self.text.remove(at);
                 }
+                LKey::KillLeft => {
+                    let at = self.byte_at(self.cursor);
+                    let start = self.text[..at].rfind('\n').map_or(0, |b| b + 1);
+                    if start < at {
+                        self.text.replace_range(start..at, "");
+                        self.cursor = self.text[..start].chars().count();
+                    }
+                }
                 LKey::Left => self.cursor = self.cursor.saturating_sub(1),
                 LKey::Right => self.cursor = (self.cursor + 1).min(self.text.chars().count()),
                 LKey::Enter | LKey::CtrlJ => {
@@ -147,5 +155,13 @@ mod tests {
             "cursor cell before the placeholder"
         );
         assert_eq!(line.roles[ph], Role::PanelMeta, "placeholder is dimmed");
+    }
+}
+
+/// Clear an optional single-buffer input on Ctrl+U (Cmd+Backspace): the
+/// one-line arm every buffer-style overlay in `client.rs` shares.
+pub(crate) fn clear_opt(slot: Option<&mut String>) {
+    if let Some(buf) = slot {
+        buf.clear();
     }
 }

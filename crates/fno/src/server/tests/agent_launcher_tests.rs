@@ -24,6 +24,7 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         extra_flags: Vec::new(),
         worktree: false,
         branch: None,
+        force: false,
     }
 }
 

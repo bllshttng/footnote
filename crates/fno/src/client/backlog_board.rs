@@ -1571,6 +1571,11 @@ fn input_keys(view: &mut View, bytes: &[u8]) {
                     buf.pop();
                 }
             }
+            SearchKey::Byte(0x15) => {
+                if let Some((_, buf)) = b.input.as_mut() {
+                    buf.clear();
+                }
+            }
             SearchKey::Byte(c @ 0x20..=0x7e) => {
                 if let Some((_, buf)) = b.input.as_mut() {
                     if buf.len() < 200 {

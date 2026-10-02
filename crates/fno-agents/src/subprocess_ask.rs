@@ -67,8 +67,9 @@ pub fn ask_interrupted() -> bool {
 /// the interrupt. Async-signal-safe (killpg + atomic store only).
 extern "C" fn forward_sigint_to_child(_sig: libc::c_int) {
     let pgid = ASK_CHILD_PGID.load(Ordering::SeqCst);
-    if pgid > 0 {
-        // SAFETY: killpg is async-signal-safe; pgid is the child's group id.
+    if pgid > 0 && pgid != unsafe { libc::getpgrp() } {
+        // SAFETY: killpg and getpgrp are async-signal-safe; pgid is the
+        // child's group id, never our own (the ask spawners setpgid(0, 0)).
         unsafe {
             libc::killpg(pgid, libc::SIGINT);
         }
@@ -163,14 +164,19 @@ impl Drop for SigintForwarder {
 // Process-group kill + grace reap
 // ===========================================================================
 
-/// Send `sig` to the process group of `pid`.
-pub fn kill_pgrp(pid: u32, sig: libc::c_int) {
+/// Send `sig` to the process group of `pid`. Returns whether a signal was
+/// sent. Refuses when the target group is our own: a child spawned without
+/// its own session shares the caller's group, and killpg would signal this
+/// whole tree (pytest workers, the step shell, the runner).
+pub fn kill_pgrp(pid: u32, sig: libc::c_int) -> bool {
     unsafe {
         let pgid = libc::getpgid(pid as libc::pid_t);
-        if pgid > 0 {
+        if pgid > 0 && pgid != libc::getpgrp() {
             libc::killpg(pgid, sig);
+            return true;
         }
     }
+    false
 }
 
 /// Reap `child`: wait up to `grace_sec`, then SIGTERM, then SIGKILL after 5s.
@@ -364,5 +370,17 @@ pub fn resolve_ask_cwd(cwd_param: Option<&str>) -> PathBuf {
             }
         },
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_pgrp_refuses_the_callers_own_group() {
+        // Our own pid has no private session, so getpgid resolves to our
+        // group; the refusal must leave us alive and report no signal sent.
+        assert!(!kill_pgrp(std::process::id(), libc::SIGCONT));
     }
 }

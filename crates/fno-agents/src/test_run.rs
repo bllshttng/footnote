@@ -1921,6 +1921,57 @@ fn cleanup_group(pgid: i32) -> bool {
     unsafe { libc::killpg(pgid, 0) != 0 }
 }
 
+/// The group members that outlived the leader, as `pid command` rows.
+/// Membership is answered twice, by pgid and by session id (the leader
+/// called setsid, so both equal its pid), and the two answers union: one
+/// pass on a loaded runner once missed a live `sleep 30` that a plain ps
+/// column filter should have caught. An empty vec is a clean group (or an
+/// unreadable table); the cleanup kill below still runs.
+fn leaked_members(pgid: i32) -> Vec<String> {
+    if unsafe { libc::killpg(pgid, 0) } != 0 {
+        return Vec::new(); // ESRCH: nothing left in the group
+    }
+    let mut found: Vec<String> = Vec::new();
+    for flag in ["-g", "-s"] {
+        let Ok(out) = std::process::Command::new("pgrep")
+            .args([flag, &pgid.to_string()])
+            .output()
+        else {
+            continue;
+        };
+        let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(String::from)
+            .collect();
+        if pids.is_empty() {
+            continue;
+        }
+        let Ok(ps) = std::process::Command::new("ps")
+            .args(["-o", "pid=,command=", "-p", &pids.join(",")])
+            .output()
+        else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&ps.stdout).lines() {
+            let mut parts = line.trim_start().splitn(2, char::is_whitespace);
+            let Some(pid) = parts.next() else {
+                continue;
+            };
+            let Some(command) = parts.next() else {
+                continue;
+            };
+            let command = command.trim();
+            if command.is_empty() || found.iter().any(|row| row.split(' ').next() == Some(pid)) {
+                continue;
+            }
+            found.push(format!("{pid} {command}"));
+        }
+    }
+    found
+}
+
 /// The durable fleet incident stop, read as a refusal for this run: `Some`
 /// exit code with a `suite_refused` receipt when the tests scope is held or
 /// the incident state is unreadable, `None` otherwise. `extra` fields ride
@@ -2064,6 +2115,34 @@ pub fn run_test_run(args: &[String]) -> i32 {
 
     let wait_result = wait_bounded(&mut child, run_deadline);
 
+    // A leader that exits by itself can leak group members behind it: the
+    // group survives the leader's reap. Name them BEFORE the kill, so a
+    // green suite that leaked reads as the failure it is, not as done.
+    let leaked = match &wait_result {
+        Ok(_) => leaked_members(child_pid),
+        Err(_) => Vec::new(),
+    };
+    if !leaked.is_empty() {
+        let named = leaked
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        emit(
+            &run_id,
+            "suite_leaked",
+            &[
+                ("count", leaked.len().to_string()),
+                ("commands", named.clone()),
+            ],
+        );
+        eprintln!(
+            "fno-agents test-run: suite leaked {} member(s) past the leader: {named}",
+            leaked.len()
+        );
+    }
+
     // ALWAYS attempted, success or failure or timeout or signal - this line
     // is the fix: ownership of cleanup does not depend on which of those
     // paths brought us here.
@@ -2117,12 +2196,59 @@ pub fn run_test_run(args: &[String]) -> i32 {
         // that leaked its group must not read as done.
         return if exit_code == 0 { 1 } else { exit_code };
     }
+    if exit_code == 0 && !leaked.is_empty() {
+        // Same rule as the cleanup branch: green plus a leak is not done.
+        return 1;
+    }
     exit_code
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC6-HP + AC7-EDGE: the leak verdict fires exactly when the suite
+    /// leaks - a green suite whose group outlives it fails the run, named,
+    /// and a clean suite stays green.
+    #[test]
+    fn a_green_suite_that_leaks_its_group_fails_the_run_and_a_clean_one_stays_green() {
+        let leak_code = run_isolated("sleep 30 & exit 0");
+        assert_eq!(
+            leak_code, 1,
+            "a green suite that leaked its group is not done"
+        );
+        let clean_code = run_isolated("exit 0");
+        assert_eq!(clean_code, 0, "a clean suite reads done");
+    }
+
+    /// One isolated end-to-end run: temp home, self owner pins, the argv
+    /// on `sh -c`. Returns the run's exit code.
+    fn run_isolated(argv: &str) -> i32 {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let td = tempfile::TempDir::new().unwrap();
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", td.path());
+        crate::paths::pin_test_claims_root(td.path());
+        for (key, value) in self_owner_env() {
+            std::env::set_var(key, value);
+        }
+        let code = run_test_run(&[
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            argv.to_string(),
+        ]);
+        for key in ["FNO_TEST_OWNER_PID", "FNO_TEST_OWNER_BIRTH"] {
+            std::env::remove_var(key);
+        }
+        match saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        code
+    }
 
     #[test]
     fn parse_args_splits_flags_from_the_argvs_after_the_separator() {
