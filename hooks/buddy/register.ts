@@ -19,6 +19,8 @@ const FRAME_REFRESH_MS = 10_000
 const PANE_ID = 'buddy'
 const PANE_COLUMNS = 24
 const WRAPPER = 'statusline.py'
+// bbb: bring back buddy.
+const COMMANDS = ['buddy', 'bbb']
 
 let buddy: Companion | null = null
 let muted = false
@@ -333,15 +335,17 @@ export function register(on: On) {
     })
     $.clock.every(FEED_MS, async () => readFeed($, await $.clock.now()))
     $.clock.every(FLEET_MS / 5, async () => readFleet($, await $.clock.now()))
-    try {
-      await $.command.register({ name: 'buddy', description: 'Your terminal companion: show it, pet it, roll a new one, or turn it off', argumentHint: '[pet|roll|off|on|statusline [off]]', immediate: true })
-    } catch {
-      // A newer Claude Code may ship its own /buddy again; the buddy still draws.
+    for (const name of COMMANDS) {
+      try {
+        await $.command.register({ name, description: name === 'bbb' ? 'Bring back buddy: your terminal companion' : 'Your terminal companion: show it, pet it, roll a new one, or turn it off', argumentHint: '[pet|roll|off|on|statusline [off]]', immediate: true })
+      } catch {
+        // A newer Claude Code may ship its own /buddy again; /bbb still works.
+      }
     }
     return next(e)
   })
 
-  on('command.run', { command: 'buddy' }, async ($, e) => {
+  for (const command of COMMANDS) on('command.run', { command }, async ($, e) => {
     const now = await $.clock.now()
     const arg = e.args.trim().toLowerCase()
     if (!buddy) await load($, now)

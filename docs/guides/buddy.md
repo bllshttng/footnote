@@ -27,7 +27,7 @@ Without the wrapper, the buddy opens a narrow pane docked on the right in the fu
 
 | Command | What it does |
 | :- | :- |
-| `/buddy` | Shows the card: species, rarity, personality and stats |
+| `/buddy` | Shows the card: species, rarity, personality and stats. `/bbb` (bring back buddy) is the same command. |
 | `/buddy pet` | Pets it |
 | `/buddy roll` | Hatches a new buddy in place of the old one |
 | `/buddy statusline` | Draws the buddy beside your status line |
