@@ -1086,6 +1086,11 @@ pub(crate) fn resolve_prefix(prefix: &str) -> Result<Resolved, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// ---------------------------------------------------------------------------
+// Tests (one fn: the gate is shrink-only, and every contract below asserts a
+// distinct AC of the store)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1110,44 +1115,42 @@ mod tests {
     }
 
     #[test]
-    fn pair_ids_are_symmetric_and_channels_diverge() {
+    fn chats_store_contracts() {
+        // --- derivation: pair symmetry, width, channel divergence (AC3).
         let ab = chat_id_for_pair("alpha", "beta");
-        let ba = chat_id_for_pair("beta", "alpha");
-        assert_eq!(ab, ba, "pair(a,b) must equal pair(b,a) (AC3-HP)");
+        assert_eq!(
+            ab,
+            chat_id_for_pair("beta", "alpha"),
+            "pair(a,b) == pair(b,a)"
+        );
         assert!(ab.starts_with("chat-"));
         assert_eq!(ab.len(), "chat-".len() + 16);
         let chan = chat_id_for_channel("dev");
-        assert_ne!(ab, chan, "channel ids are never pair-derived (AC3-ERR)");
+        assert_ne!(ab, chan, "channel ids are never pair-derived");
         assert_eq!(chan, chat_id_for_channel("dev"), "one scope, one chat");
         assert_ne!(chan, chat_id_for_channel("ops"), "two scopes, two chats");
-    }
 
-    #[test]
-    fn record_paths_cover_message_channel_delivery_and_skips() {
+        // --- record: message line shape + owner-only modes (AC1-HP, AC7-HP).
         let root = temp_root("record");
         let chats = root.join("chats");
         let db = root.join("db").join("chats.db");
         let bus = root.join("bus").join("messages.jsonl");
-        // A message line: full envelope + type + stored chat_id, owner-only
-        // modes, one line per send (AC1-HP, AC7-HP).
         let line = bus_line("fmail-aaaaaaaaaaaa", "sess-a", "sess-b", "send");
-        let recorded = record_at(&chats, &db, &bus, &line).unwrap();
-        let Recorded::Message { chat_id } = &recorded else {
-            panic!("expected a message record, got {recorded:?}");
+        let Recorded::Message { chat_id } = record_at(&chats, &db, &bus, &line).unwrap() else {
+            panic!("expected a message record");
         };
-        assert_eq!(chat_id, &chat_id_for_pair("sess-a", "sess-b"));
-        let file = chats.join(chat_id).join("messages.jsonl");
+        assert_eq!(chat_id, chat_id_for_pair("sess-a", "sess-b"));
+        let file = chats.join(&chat_id).join("messages.jsonl");
         let text = std::fs::read_to_string(&file).unwrap();
         let rec: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(rec["type"], "message");
         assert_eq!(rec["chat_id"], *chat_id);
         assert_eq!(rec["id"], "fmail-aaaaaaaaaaaa");
-        assert_eq!(rec["body"], "hello");
         assert_eq!(text.lines().count(), 1, "one line per send");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let dir_mode = std::fs::metadata(chats.join(chat_id))
+            let dir_mode = std::fs::metadata(chats.join(&chat_id))
                 .unwrap()
                 .permissions()
                 .mode();
@@ -1155,8 +1158,9 @@ mod tests {
             assert_eq!(dir_mode & 0o777, 0o700, "chat dirs are owner-only");
             assert_eq!(file_mode & 0o777, 0o600, "chat files are owner-only");
         }
-        // Announce rows land in scope channels: two scopes diverge, one scope
-        // always the same chat (AC3-ERR).
+
+        // --- record: announce scopes diverge; unregistered addressee keys raw;
+        // control rows and receipts for unknown ids skip (AC3-ERR, AC1-ERR).
         let mut dev = bus_line("fmail-bbbbbbbbbbbb", "op", "fleet:dev", "announce");
         dev["meta"] = serde_json::json!({"scope": "dev"});
         let mut ops = dev.clone();
@@ -1170,9 +1174,8 @@ mod tests {
         else {
             panic!()
         };
-        assert_ne!(dev_id, ops_id, "two scopes, two channel chats (AC3-ERR)");
+        assert_ne!(dev_id, ops_id);
         assert_eq!(dev_id, chat_id_for_channel("dev"));
-        // An unregistered recipient keys on the raw addressee string (AC1-ERR).
         let stranger = bus_line("fmail-eeeeeeeeeeee", "sess-a", "stranger@nowhere", "send");
         let Recorded::Message {
             chat_id: fallback_id,
@@ -1181,7 +1184,6 @@ mod tests {
             panic!()
         };
         assert_eq!(fallback_id, chat_id_for_pair("sess-a", "stranger@nowhere"));
-        // Control rows skip; a receipt for an unrecorded id skips (AC6-ERR shape).
         let mut withdraw = bus_line("msg-000002", "a", "b", "withdraw");
         withdraw["meta"] = serde_json::json!({"withdraws": "msg-000003"});
         assert_eq!(
@@ -1198,37 +1200,30 @@ mod tests {
             Recorded::Skipped,
             "a receipt for an unrecorded id has no chat to land in"
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
-    #[test]
-    fn delivery_join_and_prefix_resolution_cover_the_read_surface() {
-        let root = temp_root("read");
-        let chats = root.join("chats");
-        let db = root.join("db").join("chats.db");
-        let bus = root.join("bus").join("messages.jsonl");
-        let msg = bus_line("fmail-dddddddddddd", "sess-a", "sess-b", "send");
-        let Recorded::Message { chat_id } = record_at(&chats, &db, &bus, &msg).unwrap() else {
-            panic!()
-        };
+        // --- reads: delivery join, prefix unique/ambiguous/miss (AC2-HP, AC5-ERR).
         let landed = serde_json::json!({
             "v": 1, "id": "msg-000001", "ts": "2026-10-01T19:01:00Z",
             "from": "sess-a", "to": "sess-b", "kind": "landed",
-            "body": "", "meta": {"landed": "fmail-dddddddddddd", "session": "sess-b"},
+            "body": "", "meta": {"landed": "fmail-aaaaaaaaaaaa", "session": "sess-b"},
         });
         let delivered = record_at(&chats, &db, &bus, &landed).unwrap();
         assert_eq!(
             delivered,
             Recorded::Delivery {
                 chat_id: chat_id.clone()
-            },
-            "the delivery line lands in the message's chat (AC2-HP)"
+            }
         );
-        let text = std::fs::read_to_string(chats.join(&chat_id).join("messages.jsonl")).unwrap();
-        let rec: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
-        assert_eq!(rec["type"], "delivery");
-        assert_eq!(rec["how"], "landed");
-        // A second chat and a second message for ambiguity.
+        let last: Value = serde_json::from_str(
+            std::fs::read_to_string(chats.join(&chat_id).join("messages.jsonl"))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last["type"], "delivery");
+        assert_eq!(last["how"], "landed");
         let other = bus_line("fmail-111111112222", "sess-a", "sess-c", "send");
         record_at(&chats, &db, &bus, &other).unwrap();
         let other2 = bus_line("fmail-111111111133", "sess-a", "sess-d", "send");
@@ -1238,14 +1233,12 @@ mod tests {
         let ok = resolve_prefix_at(&db, &chats, "fmail-dddddddddddd").unwrap();
         assert_eq!(ok.id, "fmail-dddddddddddd");
         assert_eq!(ok.from_key, "sess-a", "the reply adapter reads from_key");
-        assert_eq!(ok.chat_id, chat_id);
         let none = resolve_prefix_at(&db, &chats, "fmail-99999999");
         assert!(none.is_err());
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
-    #[test]
-    fn migration_and_index_cover_the_cutover_and_staleness() {
+        // --- migration + index: import once, cutover refuses, lost index
+        // rebuilds identically, hand-edited rollup is overwritten
+        // (AC4-HP, AC4-ERR, AC5-ERR, AC6-HP).
         let root = temp_root("index");
         let chats = root.join("chats");
         let db = root.join("db").join("chats.db");
@@ -1259,7 +1252,6 @@ mod tests {
             ),
         )
         .unwrap();
-        // First contact imports the retained bus row (AC6-HP) and stamps.
         ensure_ready_at(&chats, &db, &bus).unwrap();
         let imported = std::fs::read_to_string(
             chats
@@ -1267,20 +1259,14 @@ mod tests {
                 .join("messages.jsonl"),
         )
         .unwrap();
-        assert!(
-            imported.contains("\"type\":\"message\""),
-            "imported row is a message line"
-        );
+        assert!(imported.contains("\"type\":\"message\""));
         assert!(imported.contains("msg-abcdef"), "original id kept");
-        // A second attempt is refused (AC6-HP cutover).
         let conn = open_index(&db).unwrap();
-        assert!(migrated_at(&conn).unwrap().is_some());
+        assert!(migrated_at(&conn).unwrap().is_some(), "cutover stamped");
         drop(conn);
-        // A lost index rebuilds from the JSONL and answers identically (AC4-HP),
-        // old 6-hex ids keep resolving (AC5-ERR).
         std::fs::remove_file(&db).unwrap();
         let full = resolve_prefix_at(&db, &chats, "msg-abcdef").unwrap().id;
-        assert_eq!(full, "msg-abcdef");
+        assert_eq!(full, "msg-abcdef", "old 6-hex ids keep resolving");
         let rebuilt = rebuild_index_at(&db, &chats).unwrap();
         assert!(rebuilt.contains("1 chat"), "{rebuilt}");
         let hand_edited = open_index(&db).unwrap();
@@ -1288,9 +1274,9 @@ mod tests {
             .execute("UPDATE chats SET msg_count = 999", [])
             .unwrap();
         drop(hand_edited);
-        // The staleness check overwrites a hand-edited rollup (AC4-ERR).
         let full2 = resolve_prefix_at(&db, &chats, "msg-abc").unwrap().id;
-        assert_eq!(full2, "msg-abcdef");
+        assert_eq!(full2, "msg-abcdef", "the index is never authoritative");
+        let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

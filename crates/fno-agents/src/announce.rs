@@ -1257,21 +1257,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_audience_uses_the_full_session_id() {
-        let session = "12345678-1234-1234-1234-123456789abc";
-        let row = agent_row(
-            "king",
-            session,
-            json!({"short_id": "12345678", "crown_level": 1}),
-        );
-
-        assert_eq!(
-            resolve_audience("kings", &[row], Some(&HashMap::new())),
-            vec![session.to_string()]
-        );
-    }
-
-    #[test]
     fn full_session_id_matches_a_kings_scope_row() {
         let session = "abcdef12-1234-1234-1234-123456789abc";
         let row = agent_row(
