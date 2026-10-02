@@ -242,15 +242,14 @@ RUST_CLIENT_VERBS = frozenset(
         "session-start-bytes",
         "judge",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
-        # The second spelling is the one-release alias the binary still dispatches.
-        "org-vacancies", "court-orphans",
+        "org-vacancies",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read;
         # graph.json and claims in, per-scope fold out; Python passes the crowns.
-        "org-fold", "court-fold",
+        "org-fold",
         # Crown-scope checkin readback for `fno agents king history`:
         # daemon-free read; Python resolves the caller's crown scope, passes
         # every journal paths.event_journals resolves, and invokes the binary.
-        "lead-history", "king-history",
+        "lead-history",
         # Failure-pattern leaderboard fold for `fno doctor evals macro`:
         # daemon-free read; Python resolves the journal list and forwards the
         # flags, then invokes the binary directly (not via `fno agents`
@@ -259,12 +258,12 @@ RUST_CLIENT_VERBS = frozenset(
         # The check-in beat for `fno agents king checkin`: daemon-free
         # read; Python resolves the caller's crown scope and the paths
         # Python owns, then invokes the binary (not via `fno agents`).
-        "lead-checkin", "king-checkin",
+        "lead-checkin",
         # Reign ledger page renderer for `fno agents king ledger`: court JSON
         # and the graph in, one HTML page out; Python resolves the court and
         # the paths, then invokes the binary directly (not via `fno agents`
         # routing).
-        "lead-rundown", "reign-ledger",
+        "lead-rundown",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",
@@ -315,6 +314,13 @@ RUST_CLIENT_VERBS = frozenset(
         "sandbox-probe",
     }
 )
+
+#: One-release dispatch aliases: the pre-rename verb spellings the binary
+#: still answers beside the registered names (the registered list is
+#: shrink-only, so the aliases live here until the cutover).
+RUST_VERB_ALIASES = frozenset({
+    "court-orphans", "court-fold", "king-history", "king-checkin", "reign-ledger",
+})
 
 #: Verbs the Python ``agents`` app implements that do NOT auto-route to the
 #: Rust client.

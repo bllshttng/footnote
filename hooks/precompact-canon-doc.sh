@@ -131,8 +131,8 @@ if isinstance(data, dict):
 rows = data if isinstance(data, list) else []
 mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
 r = mine[0] if mine else {}
-lvl = r.get("team_level")
-scp = r.get("team_scope")
+lvl = r.get("crown_level")
+scp = r.get("crown_scope")
 print("1" if (mine and (lvl is not None or scp is not None)) else "0")
 print(scp if isinstance(scp, str) else "")
 ' 2>/dev/null || true)"
@@ -240,8 +240,8 @@ rows = rows_from(os.environ.get("REG_ROWS", ""))
 mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
 r = mine[0] if mine else {}
 
-lvl = r.get("team_level")
-scp = r.get("team_scope")
+lvl = r.get("crown_level")
+scp = r.get("crown_scope")
 teamed = os.environ.get("IS_TEAMED") == "1"
 reg_rc = os.environ.get("REG_RC", "")
 if reg_rc not in ("", "0"):
