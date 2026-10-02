@@ -240,11 +240,11 @@ A task appears under `ready` when its effective blockers are all complete and no
 
 **If mode: parallel**
 - A lone target (`--band` absent) with at least two ready tasks first runs `fno config assert-subagent-budget --width <ready-count>`. On refusal, record the reason in STATE.md and run sequentially in place.
-- Resolve provider capabilities; a sequential-fallback provider records the downgrade and runs sequentially in place.
+- Resolve provider capabilities. A sequential-fallback provider records the downgrade and runs sequentially in place.
 - Run `fno-agents wave fork "$PLAN_PATH" --wave <n>`. It prints `B<TAB><base-sha>` and one `O<TAB><task-id><TAB><absolute-worktree><TAB><branch>` per task. A refusal records the reason in STATE.md and runs sequentially in place. For each worktree, best-effort run `CANONICAL=<repo-root> WORKTREE=<path> bash scripts/setup/setup-worktree.sh`.
-- Dispatch one executor per `O` line in one message. Each prompt names that task's absolute worktree and requires edits only there, absolute paths with `git -C <path>`, and a commit before return.
-- When all task results arrive, run `fno-agents wave join "$PLAN_PATH" --wave <n> --base <base-sha>`. A refusal pauses the wave and names the task/error. `OFF<TAB><task-id><TAB><file>` rows are written under `## Off-surface writes` in SUMMARY.md. Join reruns each task's `verify` once in the target worktree; failure names the task and enters the existing fix loop.
-- Joiner workers (`--band`), Gemini fallback, and sequential waves keep their current flow; they do not fork task worktrees.
+- Dispatch one executor per `O` line in one message. Name its task id and worktree path in the prompt. Require edits only there, absolute paths with `git -C <path>`, and a commit before return.
+- When all task results arrive, run `fno-agents wave join "$PLAN_PATH" --wave <n> --base <base-sha>`. A refusal pauses the wave and names the task/error. `OFF<TAB><task-id><TAB><file>` rows are written under `## Off-surface writes` in SUMMARY.md. Join reruns each task's `verify` once in the target worktree. A failure names the task and enters the existing fix loop.
+- Joiner workers (`--band`), Gemini fallback, and sequential waves keep their current flow. They do not fork task worktrees.
 - With `--node` bound: update STATE.md as each task completes, then rerun the `--ready` query; do not wait for the round - the peers' live task rows hold their in-flight claims back
 - Node-less: wait for the whole round to complete, update STATE.md, then re-query - with no node rows an in-flight sibling still reads `ready`, and re-dispatching it double-spawns the work
 - Tasks under `blocked_on` need no action; their derived edges hold them until a later round
