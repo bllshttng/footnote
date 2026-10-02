@@ -46,6 +46,7 @@ pub(crate) mod promise;
 pub mod pull_requests;
 pub mod rank_cli;
 pub mod receipt;
+pub(crate) mod reconcile_cli;
 pub mod relatedness;
 pub mod relations;
 pub mod render;

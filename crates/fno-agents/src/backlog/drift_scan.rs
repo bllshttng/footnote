@@ -1111,7 +1111,9 @@ pub(crate) fn collect_open_binding_heals(
                     }
                 }
                 "missing" => {
-                    let Some(heal_nid) = &verdict.node_id else { continue };
+                    let Some(heal_nid) = &verdict.node_id else {
+                        continue;
+                    };
                     let Some(node) = nodes.iter().find(|i| {
                         entries[*i].get("id").and_then(Value::as_str) == Some(heal_nid.as_str())
                     }) else {

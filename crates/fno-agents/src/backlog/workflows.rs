@@ -394,7 +394,7 @@ fn clear_completion_fields(node: &mut Value, reason: &str, status: &str) {
 
 /// Close ancestor epics whose children are now all complete (the
 /// _cascade_close_parents twin). Returns the closed ancestor ids.
-fn cascade_close_parents(entries: &mut [Value], node_id: &str) -> Vec<String> {
+pub(crate) fn cascade_close_parents(entries: &mut [Value], node_id: &str) -> Vec<String> {
     let id_of = |e: &Value| text_at(e, "id").map(String::from);
     let mut closed: Vec<String> = Vec::new();
     let mut cur: Option<String> = entries
@@ -555,7 +555,11 @@ fn release_claim_at_closure(node_id: &str) {
 
 /// Stamp a plan `shipped` against the evidencing PR then graduate (the
 /// _stamp_and_graduate_plan twin). Best-effort; the close never fails on it.
-fn stamp_and_graduate_plan(plan_path: &str, url: Option<&str>, session_id: Option<&str>) {
+pub(crate) fn stamp_and_graduate_plan(
+    plan_path: &str,
+    url: Option<&str>,
+    session_id: Option<&str>,
+) {
     let path = Path::new(plan_path);
     if let Some(url) = url {
         let sid = session_id.unwrap_or("backlog-close");
@@ -1390,16 +1394,16 @@ pub(crate) fn active_backend_name() -> String {
 }
 
 /// Aggregate session_id / cost_usd / cost_sessions / points from the ledger
-/// (the _rollup_from_ledger twin). A contained node is suppressed empty
-///-handed: the delivery unit carries the whole figure.
-struct Rollup {
-    session_id: Option<String>,
-    cost_usd: Option<f64>,
-    cost_sessions: Vec<Value>,
-    points: Option<Value>,
+/// (the _rollup_from rung). A contained node is suppressed empty-handed: the
+/// delivery unit carries the whole figure.
+pub(crate) struct Rollup {
+    pub session_id: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub cost_sessions: Vec<Value>,
+    pub points: Option<Value>,
 }
 
-fn rollup_from_ledger(node: &Value) -> Rollup {
+pub(crate) fn rollup_from_ledger(node: &Value) -> Rollup {
     let empty = Rollup {
         session_id: None,
         cost_usd: None,

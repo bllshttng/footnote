@@ -305,7 +305,6 @@ pub(crate) fn str_field(v: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
-
 /// One PR's closure context: body + state from a single `gh pr view`
 /// (the query-once contract: the trailer the gate reads and the state it
 /// is read against must come from one fetch).
@@ -365,7 +364,9 @@ pub(crate) fn fetch_pr_closure_context(
             rows.iter()
                 .filter_map(|item| match item {
                     Value::String(path) => Some(path.clone()),
-                    Value::Object(map) => map.get("path").and_then(Value::as_str).map(str::to_string),
+                    Value::Object(map) => {
+                        map.get("path").and_then(Value::as_str).map(str::to_string)
+                    }
                     _ => None,
                 })
                 .filter(|path| !path.is_empty())
@@ -373,8 +374,15 @@ pub(crate) fn fetch_pr_closure_context(
         })
         .unwrap_or_default();
     Ok(ClosureContext {
-        number: row.get("number").and_then(Value::as_i64).unwrap_or(pr_number),
-        body: row.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
+        number: row
+            .get("number")
+            .and_then(Value::as_i64)
+            .unwrap_or(pr_number),
+        body: row
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         url: str_field(row.get("url")),
         state: row
             .get("state")

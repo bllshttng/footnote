@@ -171,31 +171,6 @@ def advance_flight_scope(epic: Optional[str], *, json_out: bool) -> Iterator[boo
         yield ok
 
 
-def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_number: Optional[int],
-                   repo: Optional[str] = None, once: Callable[[], None]) -> None:
-    """cmd_reconcile's entry: the mutual-exclusion refusal (a bad invocation
-    is refused even while the scope is held), the dry-run bypass (--dry-run
-    mutates nothing and stays readable mid-sweep), then the gate."""
-    if node is not None and pr_number is not None:
-        raise typer.BadParameter(
-            "--node and --pr-number are mutually exclusive: --pr-number "
-            "already scopes the scan to every node its own trailer claims, "
-            "which --node cannot narrow without silently stranding the "
-            "other claimed nodes stamped-but-unclosed. Run them separately."
-        )
-    if dry_run:
-        once()
-        return
-    if pr_number is not None and repo is None:
-        from fno.graph._reconcile import resolve_current_repo_slug
-
-        repo = resolve_current_repo_slug(str(Path.cwd())) or "unresolved"
-    with _flight_scope(reconcile_flight_key(node=node, pr_number=pr_number, repo=repo), "reconcile",
-                       "backlog reconcile", json_out, None) as ok:
-        if ok:
-            once()
-
-
 def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     """Bound a live holder (: LIVE at 0.0 pct CPU, invisible to a pid
     probe): a SIGUSR1 stack file plus a thread that releases the flight and

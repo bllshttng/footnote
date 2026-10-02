@@ -1524,19 +1524,6 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
 
 
-def stamp_reopen_warning(parent: dict, child: object, node_id: str) -> None:
-    """Stamp which child reopened this done-on-its-own-evidence parent, and when.
-
-    The reopen stderr warning is gone the moment that
-    terminal closes; this survives on the graph node instead. ``child`` is
-    ``cur`` at the call site (falls back to ``node_id`` when not a dict, same
-    as before this was extracted). Cleared by
-    :func:`clear_reopen_warning_if_child_matches` or a direct reopen.
-    """
-    child_id = child.get("id") if isinstance(child, dict) else node_id
-    parent["reopen_warning"] = {"child": child_id, "at": datetime.now(timezone.utc).isoformat()}
-
-
 def clear_reopen_warning_if_child_matches(parent: dict, child: object) -> None:
     """Clear ``parent``'s ``reopen_warning`` when it names ``child``'s id.
 

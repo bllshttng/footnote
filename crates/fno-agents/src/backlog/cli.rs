@@ -219,6 +219,10 @@ pub fn run(args: &[String]) -> i32 {
         // The selection door: native on the graph backend; the external
         // joined candidates still ride the python wheel from inside the arm.
         "next" => super::next::run(resolved.tail),
+        // The drift closer is native end to end: scan, promise gate, one
+        // locked close, the self-heals, and the shelled legs (auto-continue
+        // rides the wheel until the advance port).
+        "reconcile" => super::reconcile_cli::run(resolved.tail),
         // The parallel fill: native selection over the lane world (peer
         // slots, domain annotation, the file-collision gate).
         "lane-fill" => super::advance_fill::run_lane_fill(resolved.tail),
