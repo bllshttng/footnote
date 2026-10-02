@@ -43,15 +43,13 @@ def _read_roster() -> dict[str, tuple[str, ...]]:
             " KNOWN_HARNESSES) and the read failed: {error}; run `fno doctor"
             " update --rust` or set FNO_AGENTS_BIN".format(error=error)
         )
-    out: dict[str, tuple[str, ...]] = {}
     for key in ("known", "providers"):
         names = payload.get(key) if isinstance(payload, dict) else None
         if not names or not all(isinstance(n, str) and n for n in names):
             raise VerbUnavailable(
                 f"fno-agents harness-roster answered no usable {key!r}: {payload!r}"[:200]
             )
-        out[key] = tuple(names)
-    return out
+    return {key: tuple(payload[key]) for key in ("known", "providers")}
 
 
 def _roster(key: str) -> tuple[str, ...]:
@@ -67,7 +65,6 @@ def known_harnesses() -> tuple[str, ...]:
 
 
 def known_providers() -> tuple[str, ...]:
-    """Rust ``KNOWN_PROVIDERS``: the harnesses ``for_name`` can dispatch."""
     return _roster("providers")
 
 
