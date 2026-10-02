@@ -426,7 +426,7 @@ fn finding_pointer_line(node_id: &str, finding_id: &str) -> String {
 /// live claim holder, injected detached through this binary's own
 /// mail-inject lane. A miss only degrades the receipt line; the durable
 /// record gates regardless.
-fn notice_holder(node_id: &str, pointer: &str) -> Option<String> {
+pub(crate) fn notice_holder(node_id: &str, pointer: &str) -> Option<String> {
     let (state, record) = crate::claims::status(&format!("node:{node_id}"), None);
     if !matches!(
         state,
@@ -458,6 +458,203 @@ fn notice_holder(node_id: &str, pointer: &str) -> Option<String> {
         .take()
         .and_then(|mut stdin| stdin.write_all(pointer.as_bytes()).ok());
     Some(format!("pointer sent to {}", record.holder))
+}
+
+/// `note comment` - the user-to-agent thread on a node. Forms:
+///   `<id> "<text>" [--author user|agent]` posts a comment (state open);
+///   `<id> --reply <cid> [--state accepted|done|declined] [--ref R] "<text>"`
+///   replies, moving the thread head; `<id> --list` renders the thread
+///   oldest first; `--open` lists every open ask board-wide. The write goes
+///   through `api::comment_create`; a live claim holder gets the reply
+///   pointer through `notice_holder`.
+pub fn run_comment(args: &[String]) -> i32 {
+    let mut graph: Option<PathBuf> = None;
+    let mut json_out = false;
+    let mut open_only = false;
+    let mut list = false;
+    let mut reply: Option<String> = None;
+    let mut state: Option<String> = None;
+    let mut state_ref: Option<String> = None;
+    let mut author: Option<String> = None;
+    let mut positionals: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--graph" => graph = it.next().map(PathBuf::from),
+            "--json" => json_out = true,
+            "--open" => open_only = true,
+            "--list" => list = true,
+            "--reply" => reply = it.next().cloned(),
+            "--state" => state = it.next().cloned(),
+            "--ref" => state_ref = it.next().cloned(),
+            "--author" => author = it.next().cloned(),
+            other => positionals.push(other.to_string()),
+        }
+    }
+    let graph = graph.unwrap_or_else(default_graph_path);
+    let store = super::api::Store::new(&graph);
+
+    // `--open`: every open ask across the board (node, comment id, age, text).
+    if open_only {
+        let rows = match graph_store::read_rows(&graph) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("fno-agents backlog-note comment: graph read failed: {e}");
+                return 5;
+            }
+        };
+        let mut found = 0;
+        for row in &rows {
+            let Some(node_id) = crate::graph_store::entry_id(row) else {
+                continue;
+            };
+            for note in row
+                .get("progress_notes")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                let kind = note.get("kind").and_then(Value::as_str);
+                // Extras flatten to the row's top level in storage.
+                let state = note.get("state").and_then(Value::as_str);
+                if kind != Some("comment") || state != Some("open") {
+                    continue;
+                }
+                let cid = note
+                    .get("comment_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let author = note.get("author").and_then(Value::as_str).unwrap_or("?");
+                let created = note.get("ts").and_then(Value::as_str).unwrap_or("");
+                let body = note.get("text").and_then(Value::as_str).unwrap_or("");
+                println!(
+                    "{node_id}  {cid}  {} {author}  {body}",
+                    comment_age(created)
+                );
+                found += 1;
+            }
+        }
+        if found == 0 {
+            println!("no open asks");
+        }
+        return 0;
+    }
+
+    let Some(node_id) = positionals.first().cloned() else {
+        eprintln!("fno-agents backlog-note comment: a node id (or --open) is required");
+        return 2;
+    };
+
+    // `<id> --list`: the thread, oldest first.
+    if list {
+        let thread = match super::api::comments(&store, &node_id, &super::api::Page::default()) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("fno-agents backlog-note comment: {}", e.0);
+                return 1;
+            }
+        };
+        for row in &thread.nodes {
+            let author = row
+                .extras
+                .get("author")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let state = row.extras.get("state").and_then(Value::as_str);
+            let age = comment_age(row.created_at.as_deref().unwrap_or(""));
+            let body = row.body.as_deref().unwrap_or("");
+            let indent = if row.kind.as_deref() == Some("reply") {
+                "  "
+            } else {
+                ""
+            };
+            let mark = match state {
+                Some("open") => "○",
+                Some("accepted") => "◐",
+                Some("done") => "✓",
+                Some("declined") => "✗",
+                _ => " ",
+            };
+            println!("{indent}{mark} {author} · {age}  {body}");
+        }
+        return 0;
+    }
+
+    let text = positionals[1..].join(" ");
+    if text.trim().is_empty() {
+        eprintln!("fno-agents backlog-note comment: nothing to post");
+        return 2;
+    }
+    let kind = if reply.is_some() { "reply" } else { "comment" };
+    let input = super::api::CommentCreateInput {
+        body: text.clone(),
+        kind: Some(kind.to_string()),
+        title: None,
+        author,
+        reply_to: reply.clone(),
+        state,
+        state_ref,
+    };
+    match super::api::comment_create(&store, &node_id, input) {
+        Ok(payload) => {
+            let minted = payload
+                .node
+                .as_ref()
+                .and_then(|n| n.comments.as_ref())
+                .and_then(|rows| rows.last())
+                .and_then(|c| c.extras.get("comment_id").and_then(Value::as_str))
+                .map(str::to_string);
+            let holder = match (&reply, &minted) {
+                (None, Some(cid)) => notice_holder(
+                    &node_id,
+                    &format!(
+                        "comment {cid} on {node_id}: {}\nReply: fno backlog note comment {node_id} --reply {cid} --state accepted|done|declined",
+                        first_line(&text)
+                    ),
+                ),
+                _ => notice_holder(&node_id, &format!("reply on {node_id}: {}", first_line(&text))),
+            };
+            if json_out {
+                let receipt = serde_json::json!({
+                    "success": true,
+                    "node": node_id,
+                    "comment_id": minted,
+                    "holder": holder,
+                });
+                println!("{receipt}");
+            } else {
+                println!("comment posted on {node_id}");
+                match holder {
+                    Some(line) => println!("{line}"),
+                    None => println!("no live reader: the comment waits on the node"),
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note comment: {}", e.0);
+            1
+        }
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
+}
+
+/// Relative age for a thread row, from the row's RFC 3339 stamp.
+fn comment_age(created_at: &str) -> String {
+    use chrono::{DateTime, Utc};
+    let Ok(then) = DateTime::parse_from_rfc3339(created_at) else {
+        return created_at.to_string();
+    };
+    let secs = (Utc::now() - then.with_timezone(&Utc)).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
 }
 
 /// The excerpt source: `-` reads stdin, a path reads the file, absent is None.
@@ -1045,5 +1242,135 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(parse_args(&args).is_err());
+    }
+
+    fn comment_graph() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let store = super::super::api::Store::new(&graph);
+        super::super::api::node_create(
+            &store,
+            super::super::api::NodeCreateInput {
+                id: "x-t1".into(),
+                title: "thread fixture".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (dir, graph)
+    }
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The comment tests read the claims state through `notice_holder`'s
+    /// holder probe; the hermetic guard demands a temp root, and the env is
+    /// process-global, so the three tests serialize on one mutex.
+    fn claims_root_pin() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let guard = LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
+        (guard, root)
+    }
+
+    #[test]
+    fn comment_post_names_the_holder_pointer() {
+        let (_lock, _root) = claims_root_pin();
+        let (_dir, graph) = comment_graph();
+        let graph = graph.to_string_lossy().into_owned();
+        let rc = run_comment(&argv(&[
+            "--graph",
+            &graph,
+            "x-t1",
+            "rename the flag",
+            "--author",
+            "user",
+        ]));
+        assert_eq!(rc, 0, "a user comment posts");
+        let store = super::super::api::Store::new(graph.as_ref());
+        let thread =
+            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
+                .unwrap();
+        assert_eq!(thread.nodes.len(), 1);
+        assert_eq!(
+            thread.nodes[0].extras.get("author").and_then(Value::as_str),
+            Some("user")
+        );
+        assert_eq!(
+            thread.nodes[0].extras.get("state").and_then(Value::as_str),
+            Some("open")
+        );
+    }
+
+    #[test]
+    fn comment_reply_done_without_ref_exits_one() {
+        let (_lock, _root) = claims_root_pin();
+        let (_dir, graph) = comment_graph();
+        let graph_path = graph.clone();
+        let graph = graph.to_string_lossy().into_owned();
+        run_comment(&argv(&[
+            "--graph", &graph, "x-t1", "ask", "--author", "user",
+        ]));
+        let store = super::super::api::Store::new(graph_path.as_ref());
+        let thread =
+            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
+                .unwrap();
+        let cid = thread.nodes[0]
+            .extras
+            .get("comment_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let rc = run_comment(&argv(&[
+            "--graph", &graph, "x-t1", "--reply", &cid, "--state", "done", "landed",
+        ]));
+        assert_eq!(rc, 1, "done without a ref refuses");
+    }
+
+    #[test]
+    fn comment_reply_moves_the_thread_head() {
+        let (_lock, _root) = claims_root_pin();
+        let (_dir, graph) = comment_graph();
+        let graph_path = graph.clone();
+        let graph = graph.to_string_lossy().into_owned();
+        run_comment(&argv(&[
+            "--graph", &graph, "x-t1", "ask", "--author", "user",
+        ]));
+        let store = super::super::api::Store::new(graph_path.as_ref());
+        let thread =
+            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
+                .unwrap();
+        let cid = thread.nodes[0]
+            .extras
+            .get("comment_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let rc = run_comment(&argv(&[
+            "--graph",
+            &graph,
+            "x-t1",
+            "--reply",
+            &cid,
+            "--state",
+            "accepted",
+            "--ref",
+            "node x-9 filed",
+            "on it",
+        ]));
+        assert_eq!(rc, 0);
+        let thread =
+            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
+                .unwrap();
+        assert_eq!(thread.nodes.len(), 2);
+        assert_eq!(
+            thread.nodes[0].extras.get("state").and_then(Value::as_str),
+            Some("accepted")
+        );
     }
 }
