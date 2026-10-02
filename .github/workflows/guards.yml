@@ -151,10 +151,22 @@ jobs:
         timeout-minutes: 5
         env:
           TEST_BASE: ${{ github.event_name == 'push' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
+          GH_TOKEN: ${{ github.token }}
         # 1: a brand-new native module's first contract test is an honest
         # floor the 0 cap cannot express; the suite still shrinks in net
-        # across any PR that only extends existing owners.
-        run: fno-agents test-delta --base "$TEST_BASE" --max-net 1
+        # across any PR that only extends existing owners. The operator
+        # file-budget-exception label stands the cap down: the table still
+        # prints, the gate reads it no more. The label is read live from the
+        # PR at the head sha, never the event snapshot; an unreadable label
+        # judges capped.
+        run: |
+          LABEL_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          if gh api "repos/$GITHUB_REPOSITORY/commits/$LABEL_SHA/pulls" \
+              --jq '[.[].labels[].name] | index("file-budget-exception") != null' 2>/dev/null | grep -q true; then
+            fno-agents test-delta --base "$TEST_BASE"
+          else
+            fno-agents test-delta --base "$TEST_BASE" --max-net 1
+          fi
 
       - name: Verb matrix fresh
         if: ${{ !cancelled() }}

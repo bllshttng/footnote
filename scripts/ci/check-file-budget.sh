@@ -34,7 +34,8 @@
 # belongs in the capability contract, long prose belongs in docs/, and
 # duplicate blocks belong behind one loop. An operator can grant a one-PR
 # exception with the file-budget-exception label; agents never apply it, and
-# it waives the tree tally alone, never a per-file grow. Two cases need no
+# it waives the tree tally and a grow of a file already over budget; never a
+# file born over budget. Two cases need no
 # label: a change whose Python tree net is negative (a port that deletes more
 # than it adds forward passes the tally), and a king-approved blocking-bug
 # repair to existing Python, no new verb, flag or feature, within the
@@ -54,7 +55,8 @@
 #                      `fno config get blueprint.python_repair_added_lines`,
 #                      then 30.
 #   FILE_BUDGET_EXCEPTION_LABEL  name of the operator-applied PR label that
-#                      waives the tree allowance. Waives the tree tally alone.
+#                      waives the tree allowance and an existing over-budget
+#                      file's grow. Never a file born over budget.
 #                      Default: empty.
 #   FILE_BUDGET_LABEL_SHA  commit whose pull request carries the waiver;
 #                      when set, the gate reads the label live from GitHub
@@ -128,6 +130,21 @@ label_live() {
         return 1
     fi
     [[ "$out" == "true" ]]
+}
+
+# One label read per run, however many files grew: the env override answers
+# without GitHub, the live read answers from the PR at FILE_BUDGET_LABEL_SHA.
+_CACHED_LABEL=""
+label_waived() {
+    if [[ -z "$_CACHED_LABEL" ]]; then
+        if [[ -n "$EXC_LABEL" ]] || label_live; then
+            EXC_LABEL="${EXC_LABEL:-file-budget-exception}"
+            _CACHED_LABEL=yes
+        else
+            _CACHED_LABEL=no
+        fi
+    fi
+    [[ "$_CACHED_LABEL" == "yes" ]]
 }
 
 # The source types this gate measures. The diffs and the uncommitted-work check
@@ -248,7 +265,9 @@ while IFS= read -r -d '' row; do
 
     if git cat-file -e "$BASE:$base_path" 2>/dev/null; then
         if [[ "$added" -gt "$deleted" ]]; then
-            if [[ "$PUSH_ALARM" -eq 1 ]]; then
+            if label_waived; then
+                [[ "$QUIET" -eq 0 ]] && echo "check-file-budget: ok $path $head_lines lines, change +$added/-$deleted; label $EXC_LABEL waives the existing-file grow"
+            elif [[ "$PUSH_ALARM" -eq 1 ]]; then
                 # A red push run is an alarm, not a refusal: the merge already
                 # happened. The shrink number is the measured net growth, so
                 # the next author gets the exact size of the owed payback.
@@ -258,10 +277,11 @@ while IFS= read -r -d '' row; do
                     echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head."
                     echo "  The next change touching this file must shrink it by at least $net lines."
                 } >> "$findings"
+                fails=1
             else
-                echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Then refactor the rest away here: duplicate code, dead code, comment bloat, and anything a data file or a doc should hold. Splitting the PR is not a remedy. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
+                echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Then refactor the rest away here: duplicate code, dead code, comment bloat, and anything a data file or a doc should hold. Splitting the PR is not a remedy. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it, and the label is read from the PR when the check runs, so re-run after labeling. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
+                fails=1
             fi
-            fails=1
         elif [[ "$QUIET" -eq 0 ]]; then
             net=$((deleted - added))
             if [[ "$net" -eq 0 ]]; then
@@ -309,8 +329,7 @@ py_net=$((py_added - py_deleted))
 
 exc_waived=0
 if [[ "$py_net" -ge 0 && "$py_added" -gt "$PY_ADDED_BUDGET" ]]; then
-    if [[ -n "$EXC_LABEL" ]] || label_live; then
-        EXC_LABEL="${EXC_LABEL:-file-budget-exception}"
+    if label_waived; then
         exc_waived=1
     else
         echo "check-file-budget: cli/src/fno added +$py_added lines (added-line budget $PY_ADDED_BUDGET, config blueprint.python_repair_added_lines). The tree did not shrink (net $(printf '%+d' "$py_net")), so the ceiling is on ADDED lines and deletions do not offset it: a rewrite cannot buy growth. A net-negative port passes without a label. Port the verb you touched to crates/ or cut the added growth away in THIS PR. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it. The label is read from the PR when the check runs, so re-run the check after labeling." >> "$findings"
@@ -335,6 +354,8 @@ fi
 if [[ "$QUIET" -eq 0 ]]; then
     waived=""
     [[ "$exc_waived" -eq 1 ]] && waived="; label $EXC_LABEL waives the tree allowance"
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno added $(printf '%+d' "$py_added"), net $(printf '%+d' "$py_net"), budget $PY_ADDED_BUDGET$waived)"
+    grew="no over-budget file grew"
+    [[ "$_CACHED_LABEL" == "yes" ]] && grew="over-budget grows carry the $EXC_LABEL label"
+    echo "check-file-budget: ok ($grew; cli/src/fno added $(printf '%+d' "$py_added"), net $(printf '%+d' "$py_net"), budget $PY_ADDED_BUDGET$waived)"
 fi
 exit 0

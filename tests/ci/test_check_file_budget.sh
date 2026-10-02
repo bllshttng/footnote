@@ -208,8 +208,23 @@ else
 fi
 
 fresh; lines 5 grow >> scripts/big.sh; commit
-check 'the label never waives the per-file budget' 1 \
-  'grows it by +5/-0' FILE_BUDGET_LINES=20 FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception
+check 'the label waives an existing over-budget file grow' 0 \
+  'label file-budget-exception waives the existing-file grow' FILE_BUDGET_LINES=20 FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception
+
+fresh; lines 5 grow >> scripts/big.sh; commit
+check 'the live label waives the per-file grow' 0 \
+  'waives the existing-file grow' \
+  PATH="$GHBIN:$PATH" GH_STUB_RESULT=true GH_STUB_MARKER="$GH_MARKER" \
+  GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
+  FILE_BUDGET_LABEL_SHA="$(git rev-parse HEAD)" FILE_BUDGET_LINES=20
+
+fresh; lines 5 grow >> scripts/big.sh; commit
+check 'a grow without the label still refuses' 1 \
+  'grows it by +5/-0' FILE_BUDGET_LINES=20
+
+fresh; lines 50 huge > scripts/monster.sh; commit
+check 'the label never waives a file born over budget' 1 \
+  'is a new file at 50 lines (budget 20)' FILE_BUDGET_LINES=20 FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception
 
 # --- the per-file budget ------------------------------------------------------
 fresh; git mv scripts/big.sh scripts/huge.sh; lines 5 grow >> scripts/huge.sh; commit
