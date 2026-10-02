@@ -191,7 +191,7 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
 fn fleet_incident_gate() -> Result<(), Refusal> {
     // A caller with no worker identity is the human's own typed verb: their
     // call is the recovery path, so the stop holds agent fan-out only.
-    if !gate_agent_origin() {
+    if !crate::spawn_gate_admission::gate_agent_origin() {
         return Ok(());
     }
     match crate::fleet_incident::verdict_for("spawns") {
@@ -220,39 +220,6 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
     }
 }
 
-/// True when this process carries a worker identity: the agent-spawn doors'
-/// one caller key. The user's own typed verb carries none, and no gate here
-/// may refuse or hold it.
-fn gate_agent_origin() -> bool {
-    std::env::var_os("FNO_AGENT_SELF")
-        .filter(|name| !name.is_empty())
-        .is_some()
-}
-
-/// The second admission boundary: the agent-spawn door's opt-in. The default
-/// is admit, and only a caller carrying `FNO_AGENT_SELF` is held; the same
-/// verb typed at a human's shell admits. An unexpired machine brake holds
-/// before the operator bypass, before `--force`, and before any capacity
-/// math. The census and the process ceiling live in the fno crate's own
-/// agent-spawn door (this crate never links fno; it shells the binary at
-/// runtime), so a `fno`-front invocation carries all three arms and a door
-/// this verb answers carries the brake. The arm attributes load before it
-/// arms the brake, so a hold here means fno's own fan-out; the user's pane
-/// taps admit through the default door.
-fn process_admission_gate() -> Result<(), Refusal> {
-    if !gate_agent_origin() {
-        return Ok(());
-    }
-    match crate::machine_watch::brake_holds() {
-        None => Ok(()),
-        Some(hold) => {
-            eprintln!("refused: {hold}; no new agent spawn is admitted while it holds");
-            Err(Refusal::code(EXIT_FLEET_STOP)
-                .ev("reason", serde_json::json!("machine-runaway"))
-                .ev("detail", serde_json::json!(hold)))
-        }
-    }
-}
 
 /// Queue mechanics (Claude's Discretion 2: targets, not contracts).
 const QUEUE_POLL: Duration = Duration::from_secs(2);
@@ -1410,7 +1377,7 @@ fn decide_gate(
     // the machine admission door is the same shape one door later: an
     // arm-measured world fact that holds agent spawns before any capacity
     // math.
-    process_admission_gate()?;
+    crate::spawn_gate_admission::process_admission_gate()?;
     if let Some(refusal) = review_session_gate(&input) {
         return Err(refusal);
     }
@@ -1489,7 +1456,7 @@ fn decide_gate(
     // A caller with no worker identity is the human's own typed verb: no
     // capacity gate below may refuse or hold it. The slot acquire stays
     // best-effort so the spawned worker still joins the roster accounting.
-    if !gate_agent_origin() {
+    if !crate::spawn_gate_admission::gate_agent_origin() {
         if substrate == "headless" {
             acquire_worker_slot(&mut guard, name, &holder, holder_pid, route_provider, false).ok();
         }
@@ -3322,7 +3289,7 @@ MemAvailable:    8000000 kB\n";
         )
         .unwrap();
         std::env::set_var("FNO_AGENT_SELF", "gate-admission-test");
-        let refusal = process_admission_gate().err().expect("armed brake refuses");
+        let refusal = crate::spawn_gate_admission::process_admission_gate().err().expect("armed brake refuses");
         assert_eq!(refusal.exit_code, EXIT_FLEET_STOP);
         assert!(
             verdict_line(&refusal).contains("machine-runaway"),
@@ -3331,7 +3298,7 @@ MemAvailable:    8000000 kB\n";
         // No worker identity, no hold: the default door admits.
         std::env::remove_var("FNO_AGENT_SELF");
         assert!(
-            process_admission_gate().is_ok(),
+            crate::spawn_gate_admission::process_admission_gate().is_ok(),
             "a caller with no identity passes the armed brake"
         );
         std::env::set_var("FNO_AGENT_SELF", "gate-admission-test");
@@ -3346,7 +3313,7 @@ MemAvailable:    8000000 kB\n";
         )
         .unwrap();
         assert!(
-            process_admission_gate().is_ok(),
+            crate::spawn_gate_admission::process_admission_gate().is_ok(),
             "an expired brake admits the spawn"
         );
         std::env::remove_var("FNO_AGENT_SELF");
