@@ -560,9 +560,7 @@ pub(crate) fn answered_lines(readings: &[crate::lead_checkin::Reading]) -> Vec<S
             crate::lead_checkin::dash(row.get("answer"))
         ));
     }
-    let hidden = rows
-        .len()
-        .saturating_sub(crate::lead_checkin::MAX_ORG_ROWS);
+    let hidden = rows.len().saturating_sub(crate::lead_checkin::MAX_ORG_ROWS);
     if hidden > 0 {
         lines.push(format!("  ... {hidden} more rows cut"));
     }
@@ -603,9 +601,7 @@ pub(crate) fn quiet_lines(readings: &[crate::lead_checkin::Reading]) -> Vec<Stri
             crate::lead_checkin::dash(row.get("line"))
         ));
     }
-    let hidden = rows
-        .len()
-        .saturating_sub(crate::lead_checkin::MAX_ORG_ROWS);
+    let hidden = rows.len().saturating_sub(crate::lead_checkin::MAX_ORG_ROWS);
     if hidden > 0 {
         lines.push(format!("  ... {hidden} more rows cut"));
     }

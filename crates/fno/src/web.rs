@@ -2683,8 +2683,7 @@ console.log("recent searches: 12 cases ok");
 
     #[tokio::test]
     async fn missing_team_names_the_render_action() {
-        let dir =
-            std::env::temp_dir().join(format!("fno-web-team-{}-missing", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fno-web-team-{}-missing", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let response = private_page_response(

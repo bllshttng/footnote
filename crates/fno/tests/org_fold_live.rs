@@ -19,11 +19,9 @@ async fn the_fold_reads_a_live_machine() {
     eprintln!("census          {:?}", org.census);
     // A live read must carry the machine arms, whatever their state.
     assert!(org.arm("spawn load").is_some(), "the load arm is present");
-    if let (Some(leads), Some(workers), Some(rows)) = (
-        org.census.leads,
-        org.census.workers,
-        org.census.roster_rows,
-    ) {
+    if let (Some(leads), Some(workers), Some(rows)) =
+        (org.census.leads, org.census.workers, org.census.roster_rows)
+    {
         assert_eq!(leads + workers, rows, "the census counts add up");
     }
 }

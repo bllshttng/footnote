@@ -416,9 +416,8 @@ pub fn run(args: &[String]) -> i32 {
     let mut goal_receipt = None;
     if ensure_goal && harness == "codex" && snapshot.ready() {
         if scope.trim().is_empty() || session.trim().is_empty() {
-            snapshot.provider_goal = ReadinessLeg::unreadable(
-                "Codex lead goal ensure requires exact session and scope",
-            );
+            snapshot.provider_goal =
+                ReadinessLeg::unreadable("Codex lead goal ensure requires exact session and scope");
         } else {
             match crate::lead_goal::ensure(&session, &scope, &cwd) {
                 Ok(receipt) => goal_receipt = Some(receipt),

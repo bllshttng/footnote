@@ -51,9 +51,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
     let session = match expect.get("harness_session_id") {
         None | Some(Value::Null) => None,
         Some(Value::String(session)) => Some(session.clone()),
-        Some(_) => {
-            return Err("team-identity: expect session must be a string or null".to_string())
-        }
+        Some(_) => return Err("team-identity: expect session must be a string or null".to_string()),
     };
     for (index, row) in rows.iter().enumerate() {
         if row.get("name").and_then(Value::as_str) != Some(name) {

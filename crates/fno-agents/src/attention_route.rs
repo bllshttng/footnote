@@ -449,10 +449,7 @@ mod tests {
             "AC2-ERR cycle falls back to the project team"
         );
         assert_eq!(routing.lead.as_deref(), Some("lead-fno"));
-        assert_eq!(
-            routing.epic, None,
-            "no epic in a cycle with no teamed epic"
-        );
+        assert_eq!(routing.epic, None, "no epic in a cycle with no teamed epic");
     }
 
     #[test]

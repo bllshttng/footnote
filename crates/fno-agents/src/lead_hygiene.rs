@@ -1210,10 +1210,7 @@ mod tests {
         )];
         let result = check2_spawn_abdicate_rule(&entries, Some("org"));
         assert!(!result.applicable);
-        assert_eq!(
-            result.detail,
-            "org lead: the pass exit rule does not apply"
-        );
+        assert_eq!(result.detail, "org lead: the pass exit rule does not apply");
     }
 
     #[test]

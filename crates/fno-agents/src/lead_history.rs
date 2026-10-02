@@ -1017,8 +1017,7 @@ pub fn run_lead_verdict(args: &[String]) -> i32 {
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
-    readings.checkins_expected =
-        manifest.shape == "org" && team_age_secs > checkin_interval_secs;
+    readings.checkins_expected = manifest.shape == "org" && team_age_secs > checkin_interval_secs;
     readings.checkins_stale = checkins_stale(
         &readings,
         now.timestamp(),
@@ -2051,10 +2050,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prior_config = std::env::var_os("FNO_CONFIG");
-        let (dir, path) = journal(&[
-            json!({"ts": "2026-09-15T10:00:00Z", "type": "lead_checkin",
-                 "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
-        ]);
+        let (dir, path) = journal(
+            &[json!({"ts": "2026-09-15T10:00:00Z", "type": "lead_checkin",
+                 "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}})],
+        );
         std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
         let history = crate::loop_lead::LeadFireHistory {
             total: 3,

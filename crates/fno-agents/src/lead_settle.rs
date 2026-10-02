@@ -401,8 +401,7 @@ mod tests {
     #[test]
     fn a_green_settle_mails_once_and_the_second_pass_is_quiet() {
         let store = temp_store("ac1");
-        let payload =
-            json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
+        let payload = json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
         let graph = |_pr: i64| -> Result<Vec<Value>, String> { Ok(vec![]) };
         let mut status = |_cwd: &Path, _pr: i64| -> Result<Value, String> {
             Ok(green_status("abcdef1234567890", true))
@@ -433,8 +432,7 @@ mod tests {
     #[test]
     fn a_new_head_or_cleared_blockers_mails_again() {
         let store = temp_store("ac2");
-        let payload =
-            json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
+        let payload = json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
         let graph = |_pr: i64| -> Result<Vec<Value>, String> { Ok(vec![]) };
         let head = Rc::new(RefCell::new("aaaaaaaaaaaaaaaa".to_string()));
         let ready = Rc::new(RefCell::new(false));
@@ -479,8 +477,7 @@ mod tests {
     #[test]
     fn a_merged_pr_mails_nothing() {
         let store = temp_store("ac3");
-        let payload =
-            json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
+        let payload = json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
         let graph = |_pr: i64| -> Result<Vec<Value>, String> { Ok(vec![]) };
         let mut status = |_cwd: &Path, _pr: i64| -> Result<Value, String> {
             let mut v = green_status("abcdef1234567890", true);
@@ -545,8 +542,7 @@ mod tests {
     #[test]
     fn a_failed_send_retries_the_next_pass() {
         let store = temp_store("ac6");
-        let payload =
-            json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
+        let payload = json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
         let graph = |_pr: i64| -> Result<Vec<Value>, String> { Ok(vec![]) };
         let mut status = |_cwd: &Path, _pr: i64| -> Result<Value, String> {
             Ok(green_status("abcdef1234567890", true))
@@ -580,8 +576,7 @@ mod tests {
     #[test]
     fn a_failed_status_read_is_named_and_mails_nothing() {
         let store = temp_store("ac-note");
-        let payload =
-            json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
+        let payload = json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
         let graph = |_pr: i64| -> Result<Vec<Value>, String> { Ok(vec![]) };
         let mut status =
             |_cwd: &Path, _pr: i64| -> Result<Value, String> { Err("timed out".to_string()) };
@@ -599,8 +594,7 @@ mod tests {
         crate::operator_notice::mark_once(&store, &seen_key("gone", "x-9"), "3");
         crate::operator_notice::mark_once(&store, &settle_key("gone", "x-9"), "green:3@aa:ready");
         crate::operator_notice::mark_once(&store, &seen_key("s1", "x-1"), "7");
-        let payload =
-            json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
+        let payload = json!({"teams": [team("s1", json!([covered_node("x-1", 7, json!(true))]))]});
         let graph = |_pr: i64| -> Result<Vec<Value>, String> { Ok(vec![]) };
         let mut status = |_cwd: &Path, _pr: i64| -> Result<Value, String> {
             Ok(green_status("abcdef1234567890", true))

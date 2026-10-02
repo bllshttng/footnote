@@ -399,13 +399,11 @@ pub fn lead_objective(scope: &str) -> String {
     format!("$fno:lead {}", scope.trim())
 }
 
-
 /// Whether `objective` is the lead objective for `scope` in the current
 /// or the pre-rename spelling: a live codex goal keeps the objective
 /// string it was created with, and the reader cannot rewrite it.
 pub fn is_lead_objective(objective: &str, scope: &str) -> bool {
-    objective == lead_objective(scope)
-        || objective == format!("$fno:reign {}", scope.trim())
+    objective == lead_objective(scope) || objective == format!("$fno:reign {}", scope.trim())
 }
 
 pub fn parse_goal_response(raw: &str) -> Result<Option<NativeGoal>, ThreadDriverError> {

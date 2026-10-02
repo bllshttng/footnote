@@ -21,8 +21,8 @@ use std::process::Command;
 use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
-use crate::org_board::prs::pr_binding_keys;
 use crate::main_ci::main_ci_red_run;
+use crate::org_board::prs::pr_binding_keys;
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick

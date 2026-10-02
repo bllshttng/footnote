@@ -126,9 +126,7 @@ pub(crate) enum Slot {
 /// True when a row renders in the teams band: a team kind, or a removal
 /// that names the team it held.
 fn in_teams_band(kind: &str, team: &Option<String>) -> bool {
-    kind == "team_granted"
-        || kind == "team_vacated"
-        || (kind == "session_reaped" && team.is_some())
+    kind == "team_granted" || kind == "team_vacated" || (kind == "session_reaped" && team.is_some())
 }
 
 /// The display order for one panel order. `Grouped` is the shipped shape;

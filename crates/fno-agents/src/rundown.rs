@@ -1799,8 +1799,7 @@ mod tests {
     fn home() -> crate::paths::AgentsHome {
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("team-ledger-test-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("team-ledger-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         crate::paths::AgentsHome::at(dir.join("home"))
     }

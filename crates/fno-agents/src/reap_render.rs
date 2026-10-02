@@ -823,10 +823,7 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(
-            text.contains("kept team x-live (roster blocked)"),
-            "{text}"
-        );
+        assert!(text.contains("kept team x-live (roster blocked)"), "{text}");
         assert!(
             text.contains(
                 "reverted succession on x-gone (heir gone-heir heir row removed: predecessor session restored)",

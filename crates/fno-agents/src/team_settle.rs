@@ -25,7 +25,7 @@
 //! Rows that both lack a session id still compare by name alone.
 
 use crate::announce::TERMINAL_STATUSES;
-use crate::loop_lead::{team_rivals_pub, same_territory, scopes_overlap};
+use crate::loop_lead::{same_territory, scopes_overlap, team_rivals_pub};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -369,9 +369,7 @@ fn parse_holder_ids(value: Option<&Value>) -> Result<Vec<(String, Option<String>
         let session = match id.get("harness_session_id") {
             None | Some(Value::Null) => None,
             Some(Value::String(session)) => Some(session.clone()),
-            _ => {
-                return Err("team-settle: holder_ids session must be a string or null".to_string())
-            }
+            _ => return Err("team-settle: holder_ids session must be a string or null".to_string()),
         };
         parsed.push((name.to_string(), session));
     }

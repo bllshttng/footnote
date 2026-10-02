@@ -557,10 +557,7 @@ mod tests {
             std::fs::read(home.registry_json()).unwrap(),
             before_registry
         );
-        assert_eq!(
-            std::fs::read(home.team_names_json()).unwrap(),
-            before_teams
-        );
+        assert_eq!(std::fs::read(home.team_names_json()).unwrap(), before_teams);
         crate::state::update_registry(&home.registry_json(), |registry| {
             registry.entries.retain(|entry| entry.name != "raven");
         })
@@ -651,10 +648,7 @@ mod tests {
             std::fs::read(home.registry_json()).unwrap(),
             before_registry
         );
-        assert_eq!(
-            std::fs::read(home.team_names_json()).unwrap(),
-            before_teams
-        );
+        assert_eq!(std::fs::read(home.team_names_json()).unwrap(), before_teams);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

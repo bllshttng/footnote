@@ -23,9 +23,9 @@
 //!
 //! rc 0 a completed beat, 3 when an asked-for row was not journalled or
 //! stdout could not be written, 2 usage failure.
-use crate::org_fold::org_fold;
-use crate::org_board::{read_board, BoardOpts};
 use crate::lead_history::LEAD_CHECKIN;
+use crate::org_board::{read_board, BoardOpts};
+use crate::org_fold::org_fold;
 use crate::scrape::fno_bin;
 use serde_json::{json, Map, Value};
 use std::io::Write;
@@ -2135,7 +2135,9 @@ pub(crate) fn emit_row(path: &Path, source: &str, data: &Map<String, Value>) -> 
         .iter()
         .any(|k| data.contains_key(*k));
     if forbidden {
-        eprintln!("lead-checkin: WARNING: lead_checkin row not emitted: a forbidden alias key is present");
+        eprintln!(
+            "lead-checkin: WARNING: lead_checkin row not emitted: a forbidden alias key is present"
+        );
         return false;
     }
     match crate::events::EventEmitter::new(path, source).emit_fields(LEAD_CHECKIN, data.clone()) {
@@ -2353,8 +2355,7 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     }
     // The beat stamps the lead clock first: the holder session it names is
     // what the previous-beat lookup and the refusal trend key on.
-    let holder =
-        crate::team_names::stamp_beat_lead(&home.team_names_json(), &ctx.cwd, &ctx.scope);
+    let holder = crate::team_names::stamp_beat_lead(&home.team_names_json(), &ctx.cwd, &ctx.scope);
     let (previous, previous_error) = previous_row(&ctx, holder.as_deref());
     let since = previous
         .as_ref()
@@ -4387,8 +4388,7 @@ mod tests {
         let mut scope = String::from("probe");
         let mut level: Option<i64> = None;
         let mut board_state: Option<PathBuf> = None;
-        let resolved =
-            resolve_missing_team_inputs(&mut scope, &mut level, &mut board_state, &base);
+        let resolved = resolve_missing_team_inputs(&mut scope, &mut level, &mut board_state, &base);
         match home_backup {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),

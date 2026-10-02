@@ -205,8 +205,7 @@ mod tests {
             "---\nname: review\ndescription: \"Retired spelling of review.\"\n---\n`review` is the retired spelling of `review`, kept for one release. Run the Skill tool with `fno:review` and the same arguments now.\n",
         )
         .unwrap();
-        let lead_body =
-            "Team mail delivers live between beats. Read the team doc before you act.";
+        let lead_body = "Team mail delivers live between beats. Read the team doc before you act.";
         std::fs::write(
             skills.join("lead").join("SKILL.md"),
             format!("---\nname: lead\ndescription: \"Beats.\"\n---\n{lead_body}\n"),

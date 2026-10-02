@@ -217,7 +217,11 @@ pub fn project(
                 continue;
             }
         };
-        let kind = match v.get("type").and_then(Value::as_str).map(crate::event_store::event_type_alias) {
+        let kind = match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
             Some("day_boundary") => {
                 let boundary_kind = s_field(data, "kind").unwrap_or_default();
                 FeedRow {
@@ -483,7 +487,11 @@ pub fn project(
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        let kind = match v.get("type").and_then(Value::as_str).map(crate::event_store::event_type_alias) {
+        let kind = match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
             Some(
                 k @ ("pane_closed"
                 | "server_stopped"
@@ -709,7 +717,11 @@ fn parse_team_events(team_raw: &str) -> Vec<TeamEvent> {
         let Some(ts) = s_field(&v, "ts") else {
             continue;
         };
-        match v.get("type").and_then(Value::as_str).map(crate::event_store::event_type_alias) {
+        match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
             Some("agent_teamed") => {
                 let Some(name) = s_field(&data, "name") else {
                     continue;
@@ -1585,16 +1597,8 @@ mod tests {
         .join("\n");
         let both = format!("{team}\n{team}");
         let p = project("", &[], &[], "", &both, "");
-        let granted: Vec<_> = p
-            .rows
-            .iter()
-            .filter(|r| r.kind == "team_granted")
-            .collect();
-        let vacated: Vec<_> = p
-            .rows
-            .iter()
-            .filter(|r| r.kind == "team_vacated")
-            .collect();
+        let granted: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_granted").collect();
+        let vacated: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_vacated").collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
         assert_eq!(granted[0].title, "jolly-finch teamed L2 x-eeee");
         assert_eq!(granted[0].team.as_deref(), Some("Lead of x-eeee"));

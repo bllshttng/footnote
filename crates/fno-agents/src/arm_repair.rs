@@ -1033,9 +1033,8 @@ mod tests {
         let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.failing = true;
         kw.skip_reason = Some("budget_spent".into());
-        kw.detail = Some(
-            "teams=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 teams".into(),
-        );
+        kw.detail =
+            Some("teams=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 teams".into());
         let mut rows = vec![kw];
         annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
         assert_eq!(rows[0].cause.as_deref(), Some("budget_spent"));

@@ -745,8 +745,7 @@ fn resolve_clear_caller(req: &ClearRequest) -> ClearCaller {
 /// Pure, so tests drive it without a registry.
 fn holds_team(teams: &[crate::territory::Team], handle: &str) -> bool {
     teams.iter().any(|team| {
-        team
-            .holder_session
+        team.holder_session
             .as_deref()
             .is_some_and(|session| crate::identity::canonical_handle(session) == handle)
     })

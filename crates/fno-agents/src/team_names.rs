@@ -1947,10 +1947,7 @@ mod tests {
         // Reverted records name the predecessor again, marker gone.
         assert_eq!(dump["teams"]["fno"]["holder_session"], json!("sess-old"));
         assert!(dump["teams"]["fno"].get("pending_succession").is_none());
-        assert_eq!(
-            dump["teams"]["x-tttt"]["holder_session"],
-            json!("sess-two")
-        );
+        assert_eq!(dump["teams"]["x-tttt"]["holder_session"], json!("sess-two"));
         // The live heir's record is untouched, and the young one keeps.
         assert_eq!(dump["teams"]["x-llll"]["holder_session"], json!(null));
         assert_eq!(

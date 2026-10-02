@@ -364,8 +364,7 @@ impl Panel {
             }
             _ => format!(
                 "  fleet     unknown - {}",
-                org
-                    .arm("cpu admission")
+                org.arm("cpu admission")
                     .map_or("arm absent", |a| a.reason.as_str())
             ),
         };

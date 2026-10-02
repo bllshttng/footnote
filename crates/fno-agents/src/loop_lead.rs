@@ -1653,7 +1653,11 @@ pub(crate) fn lead_fire_history(events_path: &Path, session_id: &str) -> LeadFir
         if sid != session_id {
             continue;
         }
-        match value.get("type").and_then(|v| v.as_str()).map(crate::event_store::event_type_alias) {
+        match value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(crate::event_store::event_type_alias)
+        {
             Some("lead_action") => {
                 let target = data
                     .and_then(|d| d.get("target_id"))

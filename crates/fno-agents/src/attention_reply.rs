@@ -509,8 +509,7 @@ pub(crate) fn team_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
         .filter(|n| !n.is_empty() && *n != "none")
         .or_else(|| item.blocks.first().map(String::as_str));
     let teams =
-        crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json())
-            .ok()?;
+        crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json()).ok()?;
     let entries = crate::territory::graph_entries(cwd).ok()?;
     let projects = Ok(crate::territory::workspace_paths(cwd));
     let (owners, _failures) = crate::territory::node_owners(&teams, &entries, &projects);

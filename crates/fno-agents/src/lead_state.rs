@@ -1492,11 +1492,7 @@ mod tests {
         let no_stamp = tmp("no-created-dead");
         write_org_manifest(&no_stamp, "x-nostamp", sess, "");
         let out = org_vacancies(&no_stamp, &[], &roster, &|_| None, 12 * 3600, now);
-        assert_eq!(
-            out.len(),
-            1,
-            "no created_at keeps the team listed: {out:?}"
-        );
+        assert_eq!(out.len(), 1, "no created_at keeps the team listed: {out:?}");
         fs::remove_dir_all(&no_stamp).ok();
 
         // No-hide: a young dead team and an older live manifest of the
@@ -1927,10 +1923,7 @@ mod tests {
         let state = lead_state(&root, Some("alpha"), None, None, &root.join("absent.json"));
         assert_eq!(state.teamed, Some(false));
         assert_eq!(state.live, Some(false));
-        assert!(state
-            .unknown_reason
-            .unwrap()
-            .contains("no live teamed row"));
+        assert!(state.unknown_reason.unwrap().contains("no live teamed row"));
     }
 
     #[test]

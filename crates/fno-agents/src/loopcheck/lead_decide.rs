@@ -521,8 +521,7 @@ fn stale_team_doc_gate(
         .as_deref()
         .and_then(|s| s.parse::<DateTime<Utc>>().ok())?;
     let boundaries =
-        crate::compaction::count_boundaries_since(transcript, Some(team_start.timestamp()))
-            .ok()?;
+        crate::compaction::count_boundaries_since(transcript, Some(team_start.timestamp())).ok()?;
     if boundaries <= ceiling {
         return None;
     }

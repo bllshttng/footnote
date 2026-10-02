@@ -146,11 +146,9 @@ pub(crate) fn resolve_scope(
     }
     let (session, harness) = crate::claims::resolve_identity();
     let (Some(session), Some(harness)) = (session, harness) else {
-        return Err(
-            "cannot resolve the caller's team: no teamed registry row. \
+        return Err("cannot resolve the caller's team: no teamed registry row. \
              Pass --scope explicitly."
-                .to_string(),
-        );
+            .to_string());
     };
     let registry = crate::state::load_registry(registry_path).map_err(|e| {
         format!("cannot resolve the caller's team: the agent registry could not be read: {e}")
@@ -871,10 +869,7 @@ mod tests {
         assert_eq!(inputs.generation_start, "2026-09-17T22:47:08Z");
         assert_eq!(inputs.generation_start_source, "registry");
         assert_eq!(inputs.team_inherited, Some(true));
-        assert_eq!(
-            inputs.team_from_session.as_deref(),
-            Some("grantor-session")
-        );
+        assert_eq!(inputs.team_from_session.as_deref(), Some("grantor-session"));
         assert_eq!(inputs.inherited_undelivered, 0);
         assert_eq!(inputs.filed_undelivered, 2);
     }

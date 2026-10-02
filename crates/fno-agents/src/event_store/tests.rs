@@ -132,13 +132,18 @@ fn rotation_overwrite_keeps_ingested_history() {
     // new-spelling query.
     append(
         &live,
-        &[json!({"ts": "2026-09-12T08:00:00Z", "type": "reign_checkin",
-                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}})],
+        &[
+            json!({"ts": "2026-09-12T08:00:00Z", "type": "reign_checkin",
+                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}}),
+        ],
     );
     sync(&live).unwrap();
     let hits = query_events(
         &live,
-        &EventQuery { types: vec!["lead_checkin".into()], ..Default::default() },
+        &EventQuery {
+            types: vec!["lead_checkin".into()],
+            ..Default::default()
+        },
     )
     .unwrap();
     let changes: Vec<String> = hits
@@ -152,7 +157,6 @@ fn rotation_overwrite_keeps_ingested_history() {
         "the alias table must surface the pre-rename row beside the new ones"
     );
 }
-
 
 #[test]
 fn gc_rewrite_dedupes_by_row_hash() {
@@ -964,4 +968,3 @@ fn journal_text_checked_fast_path_stays_bounded_on_a_huge_journal() {
 
 mod coverage;
 mod observation;
-
