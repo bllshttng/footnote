@@ -274,24 +274,33 @@ fn a_run_records_every_call_before_it_acts() {
 }
 
 /// An existing id refuses a create; a live writer refuses a second one.
-#[test]
 fn one_writer_per_session() {
     let fx = Fixture::new();
     let dir = fx.p("sessions/_none/abc");
     let w = transcript::Writer::create(&dir, "abc").unwrap();
     assert!(transcript::Writer::create(&dir, "abc")
-        .unwrap_err()
+        .err()
+        .unwrap()
         .contains("already exists"));
     let err = transcript::Writer::open(&dir, "abc").err().unwrap();
     assert!(err.contains("live writer"), "{err}");
     drop(w);
-    assert!(transcript::Writer::open(&dir, "abc").is_ok());
+    // A sibling test's fork can hold the inherited lock fd until its exec.
+    let reopened = (0..100).any(|_| {
+        let ok = transcript::Writer::open(&dir, "abc").is_ok();
+        if !ok {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        ok
+    });
+    assert!(reopened, "the lock outlived its writer");
 }
 
 /// Resume never re-runs a started effect-capable call; it re-runs a call
 /// that never started and a started read-only one.
 #[test]
 fn resume_settles_dead_calls_by_effect() {
+    one_writer_per_session();
     let fx = Fixture::new();
     std::fs::write(fx.p("cwd/r.txt"), "hello").unwrap();
     let (base, _) = stub(vec![]);
@@ -408,6 +417,7 @@ fn budget_stops_before_the_call_and_compaction_keeps_the_plan() {
 /// unknown non-ignorable record type refuses the read.
 #[test]
 fn readers_see_the_transcript_and_refuse_unknown_types() {
+    endpoint_refuses_a_subscription_login();
     let fx = Fixture::new();
     let dir = fx.p("sessions/_none/s1");
     let mut w = transcript::Writer::create(&dir, "s1").unwrap();
@@ -432,12 +442,24 @@ fn readers_see_the_transcript_and_refuse_unknown_types() {
     assert_eq!(src.turns(&raw).len(), 1);
     assert_eq!(src.tool_uses(&raw), 1);
     assert!(transcript::read_records(&w.transcript_path()).is_ok());
-    w.append("model_response", json!({"reported_model": "glm-x"}), false).unwrap();
-    w.append("usage", json!({"input_tokens": 7, "output_tokens": 3}), false).unwrap();
+    w.append("model_response", json!({"reported_model": "glm-x"}), false)
+        .unwrap();
+    w.append(
+        "usage",
+        json!({"input_tokens": 7, "output_tokens": 3}),
+        false,
+    )
+    .unwrap();
     let payload = json!({"lane": {"name": "f", "harness": "footnote", "model": "glm-x"},
         "workdir": fx.p("cwd"), "started_epoch": 0.0, "footnote_sessions_root": fx.p("sessions")});
     let seen = crate::eval_attempt::observe(&payload);
-    assert_eq!((seen["lane_status"].as_str(), seen["usage"]["input"].as_u64()), (Some("ok"), Some(7)));
+    assert_eq!(
+        (
+            seen["lane_status"].as_str(),
+            seen["usage"]["input"].as_u64()
+        ),
+        (Some("ok"), Some(7))
+    );
     w.append("future_thing", json!({}), false).unwrap();
     assert!(transcript::read_records(&w.transcript_path())
         .unwrap_err()
@@ -445,7 +467,6 @@ fn readers_see_the_transcript_and_refuse_unknown_types() {
 }
 
 /// A Claude.ai login never reaches api.anthropic.com; a route env does.
-#[test]
 fn endpoint_refuses_a_subscription_login() {
     let cwd = Path::new("/");
     let env = |pairs: &'static [(&'static str, &'static str)]| {

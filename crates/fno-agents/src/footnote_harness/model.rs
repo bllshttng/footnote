@@ -72,13 +72,31 @@ pub fn resolve_endpoint(
             route: "env",
         }
     } else if let Some(provider) = route_provider {
-        let table = crate::agents_config::config_table_merged(cwd, &["model_routing", "providers", &provider])
-            .ok_or_else(|| format!("provider {provider:?} is not configured: add config.model_routing.providers.{provider}"))?;
+        let table = crate::agents_config::config_table_merged(
+            cwd,
+            &["model_routing", "providers", &provider],
+        );
+        // The zero-config zai lane: the same built-in record Python's
+        // model_routing `_DEFAULT_PROVIDERS` carries; a config field wins.
+        let builtin = |n: &str| match (provider.as_str(), n) {
+            ("zai", "base_url") => Some("https://api.z.ai/api/anthropic"),
+            ("zai", "api_key_env") => Some("ZAI_API_KEY"),
+            ("zai", "api_key_file") => Some("~/.fno/.env"),
+            _ => None,
+        };
+        if table.is_none() && builtin("base_url").is_none() {
+            return Err(format!(
+                "provider {provider:?} is not configured: add config.model_routing.providers.{provider}"
+            ));
+        }
         let field = |n: &str| {
             table
-                .get(n)
+                .as_ref()
+                .and_then(|t| t.get(n))
                 .and_then(toml::Value::as_str)
+                .filter(|v| !v.is_empty())
                 .map(str::to_string)
+                .or_else(|| builtin(n).map(str::to_string))
         };
         let wire = match field("protocol")
             .unwrap_or_else(|| "anthropic".into())
@@ -100,7 +118,7 @@ pub fn resolve_endpoint(
         Endpoint {
             base_url,
             key,
-            bearer: wire == Wire::OpenAi,
+            bearer: key_env != "ANTHROPIC_API_KEY",
             wire,
             provider_id: Some(provider),
             route: "config",

@@ -1488,9 +1488,10 @@ mod tests {
         assert_eq!(run_intel(&["--nonsense".to_string()]), 2);
         assert_eq!(run_intel(&["--days".to_string()]), 2);
         assert_eq!(run_intel(&["--node".to_string()]), 2);
+        harness_and_project_refusals_exit_two();
+        sample_and_categories_refusals_exit_two();
     }
 
-    #[test]
     fn harness_and_project_refusals_exit_two() {
         assert_eq!(run_intel(&["-H".into(), "codex,bogus".into()]), 2);
         assert_eq!(run_intel(&["--harness".into(), "bogus".into()]), 2);
@@ -1655,7 +1656,6 @@ mod tests {
         assert_eq!(receipt.bound, 0);
     }
 
-    #[test]
     fn sample_and_categories_refusals_exit_two() {
         // AC12-ERR, AC18-ERR flag half
         assert_eq!(run_intel(&["--sample".into(), "0".into()]), 2);
