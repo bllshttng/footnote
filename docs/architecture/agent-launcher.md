@@ -26,7 +26,7 @@ Any flag beyond the chips is typed, never a form. Typing `--` at a word start in
 
 ## Shell lines, force, and how refusals read
 
-A `!` on an empty input turns the composer into a one-line shell prompt. The line is the user's own typed command. Its pane run rides the same human admission exemption the user's own attach carries (`PaneRun.human`, v99). The runaway brake warns instead of refusing, and the fleet census still gates. A `!` line never needs force.
+A `!` on an empty input turns the composer into a one-line shell prompt. The line is the user's own typed command. Its pane run rides the same human admission exemption the user's own attach carries (`PanePlacement.human`, v101). The runaway brake warns instead of refusing, and the fleet census still gates. A `!` line never needs force.
 
 A refusal shows as one sentence naming the limit and the way out, for example `process limit: machine runaway brake on`. The raw gate text is never painted mid-word. Ctrl-O swaps the raw text in, and the journal row (`composer_shell_refused`, `composer_launch_forced`) always carries it.
 

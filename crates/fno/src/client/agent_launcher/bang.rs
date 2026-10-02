@@ -150,11 +150,13 @@ pub(super) async fn run_with(
         cols: None,
         rows: None,
         claim: false,
-        placement: PanePlacement::default(),
+        placement: PanePlacement {
+            // The user typed this line: the human's own admission exemption
+            // (brake warns, census still gates), like their own mux start.
+            human: true,
+            ..PanePlacement::default()
+        },
         worker: None,
-        // The user typed this line: the human's own admission exemption
-        // (brake warns, census still gates), like their own mux start.
-        human: true,
     };
     let reply = tokio::task::spawn_blocking(move || roundtrip(verb))
         .await
@@ -303,7 +305,7 @@ mod tests {
                 cwd,
                 argv,
                 claim,
-                human,
+                placement,
                 ..
             } = seen.lock().unwrap().take().unwrap()
             else {
@@ -314,7 +316,7 @@ mod tests {
             assert_eq!(argv[0], "/bin/sh");
             assert_eq!(argv[4], "printf hi; pwd");
             assert!(!claim);
-            assert!(human, "the ! line rides the human exemption");
+            assert!(placement.human, "the ! line rides the human exemption");
         }
         let rows = read_rows(&events);
         assert_eq!(rows.len(), 1);

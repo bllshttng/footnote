@@ -362,7 +362,9 @@ fn default_true() -> bool {
 /// v100: `AgentLaunchRequest.force` (serde default), the per-request
 /// composer override the server journals and rides as the door's `--force`;
 /// floor stays 58.
-pub const PROTO_VERSION: u32 = 100;
+/// v101: `PanePlacement.human` (serde default) carries the v99 exemption;
+/// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
+pub const PROTO_VERSION: u32 = 101;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -666,14 +668,6 @@ pub enum ControlVerb {
         /// a plain `pane run` stays byte-identical.
         #[serde(default)]
         worker: Option<String>,
-        /// (v99) The run is a human's own typed command: the composer's `!`
-        /// shell line. The server has no TTY, so `human_at_tty` reads false
-        /// there even for the user's own keystrokes; this flag lets the
-        /// runaway brake warn instead of refusing, the same exemption the
-        /// user's own attach and resume already carry. Default `false` keeps
-        /// every other caller byte-identical.
-        #[serde(default)]
-        human: bool,
     },
     /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
     /// `guarded` (v21) makes the send atomic against the target going busy:
@@ -4262,6 +4256,7 @@ mod tests {
             max_panes: None,
             thread_pane: false,
             fit: false,
+            human: false,
         };
         for msg in [
             ClientMsg::Control {
@@ -4275,7 +4270,6 @@ mod tests {
                     claim: false,
                     placement: placement.clone(),
                     worker: None,
-                    human: false,
                 },
             },
             ClientMsg::Command(Command::AttachAgent {
@@ -4381,7 +4375,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 100);
+        assert_eq!(PROTO_VERSION, 101);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

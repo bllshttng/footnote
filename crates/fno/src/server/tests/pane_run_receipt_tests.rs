@@ -32,9 +32,9 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 max_panes: None,
                 thread_pane: false,
                 fit: false,
+                human: false,
             },
             None,
-            false,
         )
         .unwrap();
     let tab = core
@@ -72,9 +72,9 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 max_panes: None,
                 thread_pane: false,
                 fit: false,
+                human: false,
             },
             None,
-            false,
         )
         .unwrap_err();
     assert_eq!(err.0, err_code::BAD_REQUEST);
@@ -115,9 +115,9 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+            human: false,
         },
         worker: None,
-        human: false,
         reply: tx,
     });
     match rx.try_recv().unwrap() {
@@ -154,9 +154,9 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
             max_panes: None,
             thread_pane: false,
             fit: false,
+            human: false,
         },
         worker: None,
-        human: false,
         reply: tx,
     });
     match rx.try_recv().unwrap() {

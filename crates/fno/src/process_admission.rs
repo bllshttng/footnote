@@ -846,6 +846,18 @@ pub fn admit_pane(
     admit_pane_for(human_at_tty(), pane_count, requested_cap)
 }
 
+/// [`admit_pane_for`] with the spawn-refusal shape the mux server answers
+/// with: the placement carries the human ask, and the failure maps to the
+/// control error code the composer prints. `placement.max_panes` stays the
+/// requested tab cap.
+pub fn admit_pane_for_spawn(
+    placement: &crate::proto::PanePlacement,
+    pane_count: usize,
+) -> Result<AdmissionPermit, (u32, String)> {
+    admit_pane_for(placement.human, pane_count, placement.max_panes)
+        .map_err(|e| (crate::proto::err_code::SPAWN_FAILED, e.to_string()))
+}
+
 /// [`admit_pane`] for a pane the caller knows a human asked for. The mux
 /// server has no TTY, so `human_at_tty` reads false there even for a click
 /// from the user's own attached client. The server passes that fact here, and

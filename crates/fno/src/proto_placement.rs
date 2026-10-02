@@ -162,6 +162,14 @@ pub struct PanePlacement {
     /// `#[serde(default)]`, so the floor does not move.
     #[serde(default)]
     pub from: Option<String>,
+    /// (v101) The run is a human's own typed command: the composer's `!`
+    /// shell line takes the human admission exemption (the runaway brake
+    /// warns instead of refusing, the census still gates), the same
+    /// exemption the user's own attach and resume carry. Default `false`
+    /// keeps every other spawn byte-identical. Additive and
+    /// `#[serde(default)]`, so the floor does not move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human: bool,
 }
 
 impl PanePlacement {

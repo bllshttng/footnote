@@ -3965,7 +3965,6 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
                     claim,
                     placement,
                     worker,
-                    human: false,
                 },
                 CONTROL_TIMEOUT,
             )
