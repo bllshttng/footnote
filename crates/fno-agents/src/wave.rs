@@ -764,10 +764,23 @@ fn run_fork_at(
             continue;
         }
         if let Some(registered) = worktree_for_branch(&cwd, &branch)? {
-            return Err(format!(
-                "task {task_id} branch is already checked out at {}",
-                registered.display()
-            ));
+            let current_branch = git_text(&registered, &["branch", "--show-current"])?;
+            if current_branch != branch || !branch_descends_from(&cwd, &base, &branch) {
+                return Err(format!(
+                    "task {task_id} existing worktree is not reusable: {}",
+                    registered.display()
+                ));
+            }
+            if !git_text(
+                &registered,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )?
+            .is_empty()
+            {
+                return Err(format!("task {task_id} worktree has uncommitted changes"));
+            }
+            planned.push((task_id.clone(), branch, registered, true, false));
+            continue;
         }
         let ref_name = format!("refs/heads/{branch}");
         let branch_exists = git(

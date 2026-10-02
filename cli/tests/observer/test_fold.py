@@ -130,6 +130,7 @@ def test_collision_free_is_a_gap_not_a_fabricated_pass_without_waves():
     assert fold.score_blueprint_item({}, plan_text=plan_text)["collision_free"] is None
 
 
+@pytest.mark.dev_build
 def test_replay_path_scores_structural_only_and_none_without_plan():
     # A1: replay item omits shipped_outcome; plan_text=None -> gap.
     item = {"include_shipped_outcome": False}
