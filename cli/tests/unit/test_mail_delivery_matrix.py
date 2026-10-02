@@ -60,6 +60,9 @@ def mailbox(tmp_path, monkeypatch):
     """Co-isolate the md render, the bus log, and every discovery source."""
     monkeypatch.delenv("FNO_BUS_DIR", raising=False)
     monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path))
+    # the post-send landed verify reads immediately; these tests pin
+    # receipt wording, not the settle window.
+    monkeypatch.setenv("FNO_MAIL_LANDED_SETTLE_S", "0")
     use_tmpdir(monkeypatch, tmp_path)
     _blank_discovery(monkeypatch, tmp_path)
     return tmp_path
@@ -298,9 +301,12 @@ def test_cell4_failed_wake_demotes_durably_with_lane_receipt(
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    # Exit 0: the envelope is safe even though every live lane missed.
-    assert res.exit_code == 0, res.output
+    # the envelope is safe but nothing proves it landed, so the
+    # receipt says NOT LANDED and the exit says so too (14).
+    assert res.exit_code == 14, res.output
     assert "queued (durable)" in res.output
+    assert "NOT LANDED" in res.output
+    assert "fno agents peek" in res.output, res.output
     combined = res.output + (res.stderr or "")
     assert "spawn-exit-1" in combined, "the receipt does not name why the wake failed"
     # Addressed to the canonical handle the recipient's own drain reads.
@@ -462,7 +468,7 @@ def test_cell4_receipt_carries_the_inject_reason_token(runner, mailbox, monkeypa
     combined = res.output + (res.stderr or "")
     receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
 
-    assert res.exit_code == 0, combined
+    assert res.exit_code == 14, combined
     assert "durable leg holds" in receipt, (
         f"the success receipt must carry the positive leg story: {receipt}"
     )
@@ -502,7 +508,7 @@ def test_stalled_head_reads_the_transcript_not_the_lane(
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
     combined = res.output + (res.stderr or "")
 
-    assert res.exit_code == 0, combined
+    assert res.exit_code == 14, combined
     assert "queued (durable)" in combined
     assert "reads stalled on its transcript" in combined, (
         f"the warning must come from the transcript verdict, not the lane: {combined}"
@@ -535,7 +541,7 @@ def test_live_miss_receipt_names_the_transcript_age(
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
     combined = res.output + (res.stderr or "")
 
-    assert res.exit_code == 0, combined
+    assert res.exit_code == 14, combined
     assert "[live-miss, transcript quiet 2h]" in combined, (
         f"the live-miss receipt must name the transcript age the sender needs "
         f"to tell transient from stood-down: {combined}"
@@ -580,7 +586,7 @@ def test_durable_receipt_names_the_drain_window(
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 14, res.output
     receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
     assert "typically drains within" in receipt, receipt
     assert "an empty unread before then is not a failure" in receipt, receipt
@@ -626,7 +632,7 @@ def test_live_failure_receipt_positives_the_durable_leg_and_hides_the_token(
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 14, res.output
     receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
     assert "durable leg holds" in receipt, receipt
     assert "io-error" not in receipt, receipt
@@ -657,7 +663,7 @@ def test_live_miss_receipt_names_wait_and_transcript_age(
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 14, res.output
     receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
     assert "live leg unconfirmed after 32s" in receipt, receipt
     assert "transcript quiet" in receipt, receipt
@@ -823,7 +829,7 @@ def test_cell6b_retired_form_read_off_a_stored_record_is_migrated(
         ["mail", "reply", "--to", inbound.thread_id, "--body", "ack"],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 14, result.output
     replies = [m for m in iter_messages() if m.in_reply_to == inbound.thread_id]
     assert len(replies) == 1
     assert replies[0].to == LIVE_HANDLE
@@ -1098,7 +1104,7 @@ def test_unreadable_store_full_id_live_miss_queues_to_drainable_full_id(
         ["mail", "send", send_id, "hi", "--from-name", "web"],
     )
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 14, res.output
     assert attempted == [("claude", send_id), ("codex", send_id)]
     expected_handle = session_identity_key(drain_id)
     assert f"queued (durable) for {expected_handle}" in res.output
@@ -1137,7 +1143,7 @@ def test_a_non_claude_session_is_not_woken_as_claude(
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 14, res.output
     assert not woke, "a codex session was handed to a claude resume"
     assert "unsupported-harness" in (res.output + (res.stderr or ""))
     assert "queued (durable)" in res.output
@@ -1219,7 +1225,7 @@ def test_exactly_one_receipt_line_per_send(
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == (14 if expected == "queued (durable)" else 0), res.output
     receipts = [
         ln for ln in res.stdout.splitlines()
         if any(m in ln for m in ("delivered (hosted)", "delivered (woken)", "queued (durable)"))

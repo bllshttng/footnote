@@ -24,3 +24,9 @@ class DispatchSendResult:
     to_project: Optional[str] = None
     # Owner class the durable write was stamped with; None if none was.
     durable_owner: Optional[str] = None
+    # Recipient coordinates the post-send landed verify reads : the
+    # durable bus address the cursor claim is checked against, the harness,
+    # and the full harness session id the transcript read resolves with.
+    to: Optional[str] = None
+    to_harness: Optional[str] = None
+    to_session: Optional[str] = None

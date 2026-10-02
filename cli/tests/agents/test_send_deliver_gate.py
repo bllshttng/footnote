@@ -372,9 +372,10 @@ def test_deliver_live_codex_thread_routes_through_switchboard_not_deliver(
 
 
 def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_MAIL_LANDED_SETTLE_S", "0")
     _register_codex_thread_peer()
 
     def _mock_rpc(method: str, params: dict, **kwargs):
@@ -402,6 +403,30 @@ def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
     # codex-peer tests, which read "deadbeef" for deadbeef-0000-...).
     threads = read_all_threads("0198c0de")
     assert threads, "the body must land in the durable queue"
+
+    # the result carries the coordinates the post-send landed verify
+    # reads - the durable bus address, the harness, the full harness session id.
+    from fno.harness_identity import canonical_handle
+
+    assert result.to_harness == "codex"
+    assert result.to_session == "0198c0de-0000-7000-8000-00000000000a"
+    assert result.to == canonical_handle("0198c0de-0000-7000-8000-00000000000a")
+
+    # the same miss must never read as delivered. The receipt names
+    # NOT LANDED, the substrate-correct verify command for a codex thread with
+    # no pane (fno cannot inject; the session's own surface receives it), and
+    # the exit is non-zero so a last-line reader cannot record it as delivered.
+    from fno.mail.cli import mail_app
+
+    cli = runner.invoke(
+        mail_app,
+        ["send", "codex-thread-agent", "hello again", "--cwd", str(cwd)],
+    )
+    out = (cli.stdout or "") + (cli.stderr or "")
+    assert cli.exit_code == 14, out
+    assert "NOT LANDED" in out, out
+    assert "fno agents peek codex-thread-agent --grep msg-" in out, out
+    assert "the user's Codex window" in out, out
 
 
 # ---------------------------------------------------------------------------

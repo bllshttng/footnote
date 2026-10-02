@@ -32,7 +32,7 @@ SPAWN_HARNESSES: tuple[str, ...] = (
 )
 
 
-def _read_roster() -> tuple[str, ...]:
+def _read_roster() -> dict[str, tuple[str, ...]]:
     """One fail-closed subprocess read; the dev build outranks the stale installed copy."""
     error, payload = call_binary_json(
         "harness-roster", timeout=15, binary=find_dev_binary() or resolve_binary()
@@ -43,20 +43,32 @@ def _read_roster() -> tuple[str, ...]:
             " KNOWN_HARNESSES) and the read failed: {error}; run `fno doctor"
             " update --rust` or set FNO_AGENTS_BIN".format(error=error)
         )
-    names = payload.get("known") if isinstance(payload, dict) else None
-    if not names or not all(isinstance(n, str) and n for n in names):
-        raise VerbUnavailable(
-            f"fno-agents harness-roster answered no usable roster: {payload!r}"[:200]
-        )
-    return tuple(names)
+    out: dict[str, tuple[str, ...]] = {}
+    for key in ("known", "providers"):
+        # A binary older than the providers key answers known alone.
+        names = payload.get(key, out.get("known")) if isinstance(payload, dict) else None
+        if not names or not all(isinstance(n, str) and n for n in names):
+            raise VerbUnavailable(
+                f"fno-agents harness-roster answered no usable {key!r}: {payload!r}"[:200]
+            )
+        out[key] = tuple(names)
+    return out
+
+
+def _roster(key: str) -> tuple[str, ...]:
+    cached = globals().get("_ROSTER")
+    if cached is None:
+        globals()["_ROSTER"] = cached = _read_roster()
+    return cached[key]
 
 
 def known_harnesses() -> tuple[str, ...]:
     """The roster, resolved at most once per process; module-internal code calls this."""
-    cached = globals().get("KNOWN_HARNESSES")
-    if cached is None:
-        globals()["KNOWN_HARNESSES"] = cached = _read_roster()
-    return cached
+    return _roster("known")
+
+
+def known_providers() -> tuple[str, ...]:
+    return _roster("providers")
 
 
 def __getattr__(name: str) -> Any:

@@ -18,7 +18,7 @@
     "exit": 2,
     "journal": null,
     "stderr": [
-      "fno agents spawn: config.agents.defaults.provider = 'ghosth' is not a known harness; valid: claude, codex, gemini, agy, opencode, pi, cursor-agent, grok, zcode"
+      "fno agents spawn: config.agents.defaults.provider = 'ghosth' is not a known harness; valid: claude, codex, gemini, agy, opencode, pi, cursor-agent, grok, zcode, footnote"
     ],
     "stdout": null
   },

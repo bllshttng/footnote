@@ -17,9 +17,10 @@ from fno.bus.log import (
     record_landed,
     withdrawn_ids,
 )
-from fno.mail.reply_resolve import mail_ids_in_transcript
+from fno.mail.reply_resolve import _transcript_path, mail_ids_in_transcript
 # The nag renders inside hooks/inject-mail-notify.sh's 2s timeout; bound reads.
 _LANDED_READ_BUDGET_S = 0.5
+_VERIFY_TAIL_BYTES = 4 << 20  # the just-sent id sits in the tail; peek bounds the same read
 _REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 
 
@@ -97,6 +98,74 @@ def landed_states(
     out: dict[str, Optional[bool]] = dict.fromkeys((m.id for m in msgs), True)
     out.update(_landed_map(to_check, budget_s))
     return out
+
+
+def post_send_settle_seconds() -> float:
+    """The settle window a just-sent durable row gets before the sender-side
+    verify reads. The recipient needs a beat to poll the bus or flush its
+    transcript; the env override exists so tests read immediately."""
+    import os
+
+    try:
+        return max(0.0, float(os.environ.get("FNO_MAIL_LANDED_SETTLE_S", "2")))
+    except ValueError:
+        return 2.0
+
+
+def post_send_landed(
+    msg_id: str,
+    *,
+    to: Optional[str],
+    to_harness: Optional[str] = None,
+    to_session: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Sender-side verdict for a send that did not confirm live .
+
+    Landed means the recipient demonstrably has it, read from three proofs,
+    not only the transcript: the bus landed record, the recipient's read
+    cursor past this row (an ``unread`` poll claims the row without ever
+    rendering the id as its own record), and the recipient transcript, where
+    the raw id inside ANY record counts - the id inside a tool output is
+    exactly the pickup the record parsers drop. A transcript that cannot
+    resolve contributes nothing; the bus proofs still answer.
+    """
+    from fno.bus.cursor import read_cursor
+
+    msgs = list(iter_messages())
+    if msg_id in landed_ids(msgs):
+        return True, "bus landed record"
+    mine = next((m for m in msgs if m.id == msg_id), None)
+    if mine is not None and to:
+        try:
+            cursor = read_cursor(to)
+        except (ValueError, OSError):
+            cursor = None
+        if cursor is not None:
+            ids = [m.id for m in msgs]
+            try:
+                if ids.index(cursor) >= ids.index(mine.id):
+                    return True, "bus claim (recipient read past it)"
+            except ValueError:
+                pass  # cursor or row rotated out: no claim provable either way
+    if to_harness and to_session:
+        path = _transcript_path(to_harness, to_session)
+        if path is not None:
+            # A just-sent id sits at the tail, so a 4MiB tail answers like the
+            # full read without paying a multi-MB rollout on every unconfirmed
+            # send (the bound peek's reader uses).
+            try:
+                with path.open("rb") as fh:
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    fh.seek(max(0, size - _VERIFY_TAIL_BYTES))
+                    text = fh.read().decode("utf-8", "replace")
+            except OSError:
+                text = ""
+            # The raw substring is the whole test: msg ids carry no quotes, so
+            # it matches the envelope tag and the JSON-escaped tool output alike.
+            if msg_id in text:
+                return True, "recipient transcript"
+    return False, ""
 
 
 def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:

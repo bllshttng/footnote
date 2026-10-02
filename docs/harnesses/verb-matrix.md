@@ -12,36 +12,36 @@ A cell is a projection, never a fresh measurement. The rule, in order:
 2. `command_surface = "refused"`: `absent`. Dispatch refuses to render any verb there.
 3. Otherwise start at `native` and take the worst declared need, ordered absent < unmeasured < capable < native. The loop need reads the refusal: loop_participation `extension` with an empty loop_extension renders `absent` with the refusal quoted below, because dispatch refuses to loop there - measured absence, not capable.
 
-| verb | needs | claude | codex | gemini | agy | opencode | pi | hermes | openclaw | cursor-agent | grok | zcode |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| agent | spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| audit | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| autocorrect | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| blueprint | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| cache-keepalive | claude | native | absent | `absent` | absent | absent | absent | `unmeasured` | `unmeasured` | absent | absent | absent |
-| dnd | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| execute | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| fix | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| fno-me | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| groom | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| growth-launch | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| harness-verbs | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| intel | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| law | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| lead | loop, spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent | absent |
-| mail | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| reign | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| review | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| setup | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| ship | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| ship-docs | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| speculate | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| target | loop | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent | absent |
-| tdd | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| test-audit | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| think | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| triage | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
-| using-fno | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native |
+| verb | needs | claude | codex | gemini | agy | opencode | pi | hermes | openclaw | cursor-agent | grok | zcode | footnote |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| agent | spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| audit | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| autocorrect | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| blueprint | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| cache-keepalive | claude | native | absent | `absent` | absent | absent | absent | `unmeasured` | `unmeasured` | absent | absent | absent | absent |
+| dnd | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| execute | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| fix | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| fno-me | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| groom | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| growth-launch | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| harness-verbs | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| intel | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| law | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| lead | loop, spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent | absent | native |
+| mail | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| reign | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| review | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| setup | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| ship | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| ship-docs | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| speculate | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| target | loop | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent | absent | native |
+| tdd | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| test-audit | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| think | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| triage | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
+| using-fno | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
 
 The loop refusals the matrix quotes:
 
