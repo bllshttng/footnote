@@ -39,7 +39,7 @@ hook_run_optional your-command --with args
 exit 0
 ```
 
-`hook_run_optional` applies the tier table and turns a skip or a fired bound into silence. Then set a small `timeout` backstop for that hook in `settings.json`, just above the 3s idle budget:
+`hook_run_optional` applies the tier table and turns a skip or a fired bound into silence. Then set a small `timeout` backstop for that hook in `settings.json`, just above the 3s idle budget. The backstop exists for the day the wrapper does not finish in milliseconds.
 
 ```json
 {
@@ -55,5 +55,3 @@ exit 0
   }
 }
 ```
-
-The backstop is the seatbelt, not the budget: your wrapper should finish in milliseconds because the budget decided, and the backstop exists for the day it does not.
