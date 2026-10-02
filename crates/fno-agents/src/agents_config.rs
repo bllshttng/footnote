@@ -1313,7 +1313,7 @@ pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
 
 /// The normalized raw scalar for a direct child of `agents:`, so each caller
 /// applies its own coercion.
-fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
+pub(crate) fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
     resolve(cwd, |t| {
         table_agents_scalar(t, key)
             .as_ref()
@@ -1423,6 +1423,21 @@ pub fn active_backlog_enabled(cwd: &Path) -> bool {
             .and_then(|v| v.as_bool())
     })
     .unwrap_or(false)
+}
+
+/// `[telemetry] claude_otel` (default ON): whether the daemon binds the
+/// localhost OTLP receiver (`<agents home>/otel/port` + `otel.db`) and
+/// supervisor birth injects the OTEL_* env. Off, neither happens: no listener
+/// binds, no `OTEL_*` key is set on any birthed supervisor, and the burn arm
+/// falls back to the ledger estimate everywhere.
+pub fn telemetry_claude_otel(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("telemetry")?
+            .as_table()?
+            .get("claude_otel")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(true)
 }
 
 /// `[slot_cutover] enabled` (default false): whether the shared Claude slot may switch.

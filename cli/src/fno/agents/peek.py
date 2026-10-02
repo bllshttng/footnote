@@ -78,13 +78,10 @@ def _parse_claude_record(rec: dict) -> Optional[Record]:
     text = _extract_text(msg.get("content"))
     if not text:
         return None
-    from fno.mail.envelope import contains_fno_mail_tag
-
     raw_role = str(msg.get("role") or rec.get("type"))
-    role = "peer" if raw_role == "user" and contains_fno_mail_tag(text) else raw_role
     timestamp = rec.get("timestamp")
     return Record(
-        role=role,
+        role=raw_role,
         text=text,
         timestamp=timestamp if isinstance(timestamp, str) else None,
     )
@@ -100,13 +97,10 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
     text = _extract_text(payload.get("content"))
     if not text:
         return None
-    from fno.mail.envelope import contains_fno_mail_tag
-
     raw_role = str(payload.get("role") or "?")
-    role = "peer" if raw_role == "user" and contains_fno_mail_tag(text) else raw_role
     timestamp = rec.get("timestamp")
     return Record(
-        role=role,
+        role=raw_role,
         text=text,
         timestamp=timestamp if isinstance(timestamp, str) else None,
     )
@@ -269,12 +263,9 @@ def _parse_opencode_record(msg: dict, part_root: Path) -> Optional[Record]:
     text = _opencode_part_text(part_root / mid)
     if not text:
         return None
-    from fno.mail.envelope import contains_fno_mail_tag
-
     raw_role = msg.get("role")
     role_str = raw_role if isinstance(raw_role, str) and raw_role else "?"
-    role = "peer" if role_str == "user" and contains_fno_mail_tag(text) else role_str
-    return Record(role=role, text=text)
+    return Record(role=role_str, text=text)
 
 
 def _opencode_records_db(
@@ -290,7 +281,6 @@ def _opencode_records_db(
     import sqlite3
 
     from fno.agents.discover import default_opencode_db_path, opencode_connect
-    from fno.mail.envelope import contains_fno_mail_tag
 
     if n is not None and n <= 0:
         return []
@@ -335,9 +325,8 @@ def _opencode_records_db(
                 continue
             raw_role = msg.get("role")
             role_str = raw_role if isinstance(raw_role, str) and raw_role else "?"
-            role = "peer" if role_str == "user" and contains_fno_mail_tag(text) else role_str
             records.append(
-                Record(role=role, text=text)
+                Record(role=role_str, text=text)
             )
             if n is not None and len(records) >= n:
                 break
@@ -407,6 +396,20 @@ def _opencode_records(
     return records
 
 
+def _resolve_peer_roles(records: list[Record]) -> list[Record]:
+    """Flip ``user`` roles whose text IS a delivered mail turn to ``peer``."""
+    from fno.mail.envelope import mail_shape
+
+    user_records = [r for r in records if r.role == "user"]
+    if not user_records:
+        return records
+    shapes = mail_shape([r.text for r in user_records])
+    for rec, shape in zip(user_records, shapes):
+        if shape["framing"] != "bare":
+            rec.role = "peer"
+    return records
+
+
 def recent_records(
     agent: str,
     session_id: str,
@@ -418,34 +421,29 @@ def recent_records(
     opencode_storage_dir: Optional[Path] = None,
     transcript_path: Optional[Path] = None,
 ) -> list[Record]:
-    """The per-harness reader seam (Locked Decision 3).
-
-    Dispatches on ``agent`` and returns a uniform ``Record`` list so the command
-    body never special-cases a harness. An empty list means "resolved, nothing
-    to show yet". An unregistered harness raises ``ObserveUnsupported`` (the
-    command turns that into a legible exit-1, distinct from the exit-13 miss).
-    """
+    """The per-harness reader seam: a uniform ``Record`` list or empty; an
+    unregistered harness raises ``ObserveUnsupported``."""
+    records: list[Record] = []
     if agent == "claude":
         if transcript_path is not None:
-            return _records_from_jsonl(
+            records = _records_from_jsonl(
                 transcript_path, n, _parse_claude_record
             )
-        from fno.provenance.resolver import resolve_transcript
+        else:
+            from fno.provenance.resolver import resolve_transcript
 
-        rt = resolve_transcript(
-            "claude", session_id, cwd, projects_root=projects_root
-        )
-        if not rt.resolved or not rt.transcript_path:
-            return []
-        return _records_from_jsonl(
-            Path(rt.transcript_path), n, _parse_claude_record
-        )
-    if agent == "codex":
+            rt = resolve_transcript(
+                "claude", session_id, cwd, projects_root=projects_root
+            )
+            if rt.resolved and rt.transcript_path:
+                records = _records_from_jsonl(
+                    Path(rt.transcript_path), n, _parse_claude_record
+                )
+    elif agent == "codex":
         path = transcript_path or _codex_rollout_path(session_id, codex_sessions_dir)
-        if path is None:
-            return []
-        return _records_from_jsonl(path, n, _parse_codex_record)
-    if agent == "opencode":
+        if path is not None:
+            records = _records_from_jsonl(path, n, _parse_codex_record)
+    elif agent == "opencode":
         from fno.agents.discover import default_opencode_db_path
 
         # Branch on the database EXISTING, never on it yielding no records: an
@@ -453,9 +451,12 @@ def recent_records(
         # falling back on those would serve a stale legacy transcript as if it
         # were the session's current one.
         if default_opencode_db_path(opencode_storage_dir).exists():
-            return _opencode_records_db(session_id, opencode_storage_dir, n)
-        return _opencode_records(session_id, opencode_storage_dir, n)
-    raise ObserveUnsupported(agent)
+            records = _opencode_records_db(session_id, opencode_storage_dir, n)
+        else:
+            records = _opencode_records(session_id, opencode_storage_dir, n)
+    else:
+        raise ObserveUnsupported(agent)
+    return _resolve_peer_roles(records)
 
 
 def newest_assistant_text(path: Path) -> Optional[str]:

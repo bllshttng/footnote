@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from fno.rust_binary import chats_verb
 from fno.time_budget import validate_timeout_budget
 
 
@@ -171,8 +172,8 @@ class Envelope:
 
 
 def new_msg_id() -> str:
-    """Generate a 'msg-XXXXXX' id (6 hex chars), matching the inbox store."""
-    return "msg-" + secrets.token_hex(3)
+    """A 'fmail-XXXXXXXXXXXX' id (12 hex); Rust twin announce.rs::new_msg_id."""
+    return "fmail-" + secrets.token_hex(6)
 
 
 def _now_iso() -> str:
@@ -407,6 +408,8 @@ def append(env: Envelope) -> None:
     live = bus_log_path()
     line = to_json_line(env) + "\n"
     data = line.encode("utf-8")
+    if env.kind in ("send", "announce") and not env.delivery:  # chats record kinds
+        chats_verb(["append"], json.loads(to_json_line(env)))  # record seam, fail closed
     with _Flock(_lock_path()):
         try:
             if live.exists() and live.stat().st_size >= _max_bytes():
@@ -440,6 +443,11 @@ def append(env: Envelope) -> None:
                 written += n
         finally:
             os.close(fd)
+    if env.delivery in (HOSTED_DELIVERY, TYPED_DELIVERY) or env.kind == LANDED_KIND:
+        try:
+            chats_verb(["append"], json.loads(to_json_line(env)))
+        except Exception as why:  # a receipt must never break an ack flow
+            print(f"bus log: chats record failed: {why}", file=sys.stderr)
 
 
 #: The tombstone kind. A withdrawal cannot delete a line (the log is

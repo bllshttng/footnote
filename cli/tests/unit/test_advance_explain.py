@@ -18,7 +18,7 @@ from fno.graph.store import read_graph_strict
 # --explain --epic: the daemon's lane-fill cascade (task 5.1, LD5)
 #
 # The daemon's only walk is active_backlog shelling `advance --epic`, which
-# reaches select_lane_fill - a second selector beside next. An epic question
+# reaches the native lane-fill selection - a second selector beside next. An epic question
 # answered with the next cascade is the second-selector lie, so the epic
 # explain runs the fill itself and names ITS drops.
 # ---------------------------------------------------------------------------

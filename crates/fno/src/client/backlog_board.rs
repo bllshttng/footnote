@@ -670,7 +670,7 @@ fn push_stats_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usiz
     line.push_str(&format!(" · Done {done}"));
     line.push_str(" │ ");
     line.push_str(&flow_line(&board.stats.flow));
-    lines.push(BLine::meta(elide_words(&line, w)));
+    lines.push(BLine::meta(crate::chrome::clip(&line, w)));
 }
 
 /// The uncapped Done total, summed from the lanes' own cells.
@@ -797,39 +797,6 @@ pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BL
     }
     lines.push(line.trunc(w));
     lines
-}
-
-/// Truncate a summary to `w` chars, but cut after the last whole word that
-/// fits and mark the cut with an ellipsis: a summary truncated mid-word
-/// (`Nex`) reads as a broken word, not a cut.
-pub(crate) fn elide_words(s: &str, w: usize) -> String {
-    // Walk by display columns, not chars: a wide glyph is two cells and the
-    // ellipsis must stay inside `w` or the painter re-cuts the line and the
-    // marker is lost.
-    if s.chars().map(backlog_style::char_w).sum::<usize>() <= w {
-        return s.to_string();
-    }
-    let mut used = 0usize;
-    let mut cut_byte = s.len();
-    let mut last_space = 0usize;
-    for (i, ch) in s.char_indices() {
-        let cw = backlog_style::char_w(ch);
-        if used + cw > w.saturating_sub(1) {
-            cut_byte = i;
-            break;
-        }
-        used += cw;
-        cut_byte = i + ch.len_utf8();
-        if ch == ' ' {
-            last_space = cut_byte;
-        }
-    }
-    if last_space > 0 {
-        // Drop the space the word boundary sits on, ellipsis takes its slot.
-        format!("{}\u{2026}", &s[..last_space - 1])
-    } else {
-        format!("{}\u{2026}", &s[..cut_byte])
-    }
 }
 
 /// The lanes: an accordion - the cursor's lane expanded below its header,
@@ -1569,6 +1536,11 @@ fn input_keys(view: &mut View, bytes: &[u8]) {
             SearchKey::Byte(0x7f | 0x08) => {
                 if let Some((_, buf)) = b.input.as_mut() {
                     buf.pop();
+                }
+            }
+            SearchKey::Byte(0x15) => {
+                if let Some((_, buf)) = b.input.as_mut() {
+                    buf.clear();
                 }
             }
             SearchKey::Byte(c @ 0x20..=0x7e) => {

@@ -12,6 +12,14 @@ footnote is an orchestration loop that ships software. It plans, builds, reviews
 
 ## Install
 
+Start with the CLI:
+
+```
+curl -fsSL fno.sh | sh
+```
+
+When `uv` is missing the script installs it first. The install lands the `fno` CLI with its bundled binaries and adds the tool bin to your PATH. Then wire the plugin into your harness with `fno config setup wizard`, or add the plugin by hand below.
+
 Claude Code:
 
 ```
@@ -25,6 +33,8 @@ Codex CLI:
 codex plugin marketplace add bllshttng/footnote
 codex plugin add fno@footnote
 ```
+
+The plugin-only route gets its CLI on the next session: the first session you start after installing runs the installer. Until then `fno` is not on PATH and the `/fno:` skills cannot run.
 
 CLI only, for scripting, CI, or driving footnote yourself:
 

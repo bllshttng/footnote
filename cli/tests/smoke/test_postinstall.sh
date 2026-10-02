@@ -55,7 +55,7 @@ for needle in \
   "plugin_channel" \
   "plugin_version_matches" \
   "binary-complete" \
-  "fno doctor update --rust"; do
+  "cargo install --locked --path <repo>/crates/fno"; do
   grep -q "$needle" .claude-plugin/postinstall.sh \
     || { echo "FAIL: postinstall.sh missing US7 content: $needle"; exit 1; }
 done

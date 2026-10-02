@@ -224,7 +224,6 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
     reading, which is the defect the stamp exists to close - so the durable copy
     carries none while the live envelope carries one."""
     import fno.agents.dispatch as dispatch
-    import fno.mail.envelope as envelope
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import read_all_threads
 
@@ -234,7 +233,7 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
         dispatch, "_registered_family1_state", lambda _entry: "working"
     )
 
-    result = dispatch.dispatch_send(
+    result = dispatch.dispatch_send(from_name="lead", 
         name="king-fno", message="ping", provider=None, cwd=tmp_path
     )
     assert result.delivery == "durable"
@@ -243,11 +242,8 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
     body = threads[0].messages[0].body
     assert "to_rank" not in body
 
-    # Positive control on the same fleet and the same recipient: the live
-    # envelope DOES stamp it, so the absence above is the rule and not a
-    # crownless fleet or an unresolvable row.
-    assert 'to_rank="Head of fno"' in envelope.wrap_fno_mail(
-        "ping",
-        from_="peer",
-        to_session="session-king",
-    )
+    # The delivered shape retired the wire attrs to_rank rode on, so the old
+    # live-envelope positive control has no text left to assert on. The durable
+    # copy is the plain delivered header either way.
+    assert body.splitlines()[0].startswith("`@lead · fmail-"), body[:80]
+    assert "ping" in body

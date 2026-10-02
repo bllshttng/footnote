@@ -266,15 +266,18 @@ fn a_run_records_every_call_before_it_acts() {
 
     // The key is in no file; diag lines carry run and session ids.
     s.w.diag("info", &format!("probe {KEY}"));
-    for f in ["transcript.jsonl", "diag.log"] {
-        let text = std::fs::read_to_string(s.w.dir().join(f)).unwrap();
-        assert!(!text.contains(KEY), "{f} leaks the key");
+    for f in [
+        s.w.transcript_path(),
+        s.w.dir().join(format!("{id}.diag.log")),
+    ] {
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(!text.contains(KEY), "{} leaks the key", f.display());
     }
-    let diag = std::fs::read_to_string(s.w.dir().join("diag.log")).unwrap();
+    let diag = std::fs::read_to_string(s.w.dir().join(format!("{id}.diag.log"))).unwrap();
     assert!(diag.contains(&format!("session={id}")) && diag.contains("run="));
 
     // The index holds one content-free row per record.
-    let conn = rusqlite::Connection::open(s.w.dir().join("index.db")).unwrap();
+    let conn = rusqlite::Connection::open(s.w.dir().join(format!("{id}.index.db"))).unwrap();
     let rows: i64 = conn
         .query_row(
             "SELECT count(*) FROM events WHERE session_id = ?1",
@@ -283,6 +286,27 @@ fn a_run_records_every_call_before_it_acts() {
         )
         .unwrap();
     assert_eq!(rows as usize, on_disk.len());
+
+    // No generic file name anywhere: the record is <id>.jsonl beside the
+    // dir, and the dir holds only id-named files (spill keeps its unique
+    // tool_call_uid).
+    let record = s.w.transcript_path();
+    assert_eq!(record.parent().unwrap(), s.w.dir().parent().unwrap());
+    assert_eq!(
+        record.file_name().unwrap().to_string_lossy(),
+        format!("{id}.jsonl")
+    );
+    let names: Vec<String> = std::fs::read_dir(s.w.dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.is_empty()
+            && names
+                .iter()
+                .all(|n| n.starts_with(&format!("{id}.")) || n.ends_with(".out")),
+        "generic file name in the session dir: {names:?}"
+    );
 }
 
 /// An existing id refuses a create; a live writer refuses a second one.

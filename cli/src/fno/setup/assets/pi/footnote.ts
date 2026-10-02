@@ -63,15 +63,17 @@ function statePathTimeoutMs(): number {
 
 // One bounded child run. Resolves "" when the child failed for any reason
 // (spawn error, nonzero exit, timeout) - the caller records why it could not
-// read an answer rather than guessing one.
+// read an answer rather than guessing one. An optional stdin payload rides
+// to the child (the hook verbs read a claude-shaped payload on stdin).
 function runBounded(
   bin: string,
   args: string[],
   timeoutMs: number,
+  stdin?: string,
 ): Promise<string> {
   return new Promise((resolve) => {
     try {
-      execFile(
+      const child = execFile(
         bin,
         args,
         {
@@ -81,6 +83,13 @@ function runBounded(
         },
         (err, stdout) => resolve(err ? "" : String(stdout)),
       )
+      if (stdin !== undefined && child.stdin) {
+        // A fast-exiting child can close the pipe before the payload lands;
+        // the resulting EPIPE is an uncaught exception without this.
+        child.stdin.on("error", () => {})
+        child.stdin.write(stdin)
+        child.stdin.end()
+      }
     } catch {
       resolve("")
     }
@@ -98,30 +107,28 @@ async function resolveManifestPath(bin: string, dir: string): Promise<string | n
   return candidate
 }
 
-// The skills directory the plugin-root pointer names, or null with one
-// `[footnote]` line naming why. A stale or missing pointer degrades to "pi
-// shows no Footnote verbs", never to an error.
-function skillsRoot(): string | null {
+// The plugin root the install pointer names, or null with one `[footnote]`
+// line naming why. A stale or missing pointer degrades to silence, never to
+// an error. The pointer moved under install/ (the state-root tidiness wave);
+// an unmigrated install keeps the legacy root name until the daemon migrates.
+function pluginRoot(): string | null {
   const base = process.env.FNO_HOME || join(homedir(), ".fno")
-  // The pointer moved under install/ (the state-root tidiness wave); an
-  // unmigrated install keeps the legacy root name until the daemon migrates.
-  let root: string | null = null
   for (const name of ["install/plugin-root", "plugin-root"]) {
     try {
-      root = readFileSync(join(base, name), "utf8").trim()
-      if (root) break
+      const root = readFileSync(join(base, name), "utf8").trim()
+      if (root && existsSync(join(root, ".claude-plugin", "plugin.json"))) return root
     } catch {
       // try the next spelling
     }
   }
-  if (!root) {
-    console.error("[footnote] no plugin-root pointer; skills not offered")
-    return null
-  }
-  if (!root || !existsSync(join(root, ".claude-plugin", "plugin.json"))) {
-    console.error("[footnote] plugin-root pointer names no plugin root; skills not offered")
-    return null
-  }
+  console.error("[footnote] no plugin-root pointer; hook carriers not offered")
+  return null
+}
+
+// The skills directory under the plugin root, or null.
+function skillsRoot(): string | null {
+  const root = pluginRoot()
+  if (!root) return null
   if (!existsSync(join(root, "skills"))) {
     console.error("[footnote] plugin root carries no skills dir; skills not offered")
     return null
@@ -155,6 +162,22 @@ function synthesizeTranscript(entries: unknown[]): string {
     lines.push(JSON.stringify({ message: { role: "assistant", content: text } }))
   }
   return lines.length ? lines.join("\n") + "\n" : ""
+}
+
+// The context text a carrier hook printed: the claude JSON shape's
+// additionalContext, else the raw trimmed stdout. A carrier that answered
+// nothing injects nothing.
+function contextCarrierText(stdout: string): string {
+  const t = (stdout || "").trim()
+  if (!t) return ""
+  try {
+    const v = JSON.parse(t)
+    const ctx = v?.hookSpecificOutput?.additionalContext
+    if (typeof ctx === "string" && ctx) return ctx
+    return ""
+  } catch {
+    return t
+  }
 }
 
 export default function (pi: {
@@ -195,11 +218,51 @@ export default function (pi: {
   // is one bus line; the per-session cursor on the reader side makes this
   // print once and stay silent after. Fail-open: no binary, no output, or a
   // failed read injects nothing.
+  // Post-compact re-inject: pi exposes session_compact, so the compaction
+  // marks THIS session and the next `before_agent_start` boundary carries
+  // the lead's rules again (the same carrier claude runs at SessionStart
+  // source=compact). One message per compact; the mark clears on delivery
+  // or on a failed carrier - never re-armed mid-turn.
+  const crownPending = new Set<string>()
+  pi.on("session_compact", (_event: unknown, ctx: unknown) => {
+    const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.()
+    if (sid) crownPending.add(sid)
+  })
+
   pi.on("before_agent_start", async (_event: unknown, ctx: unknown) => {
     try {
       const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.() || ""
       const sessionKey = process.env.FNO_AGENT_SESSION_ID || sid || `pi:${process.cwd()}`
       const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+      // Crown re-inject first: fresh operating rules outrank an announce.
+      // Fail-open: no root, a failed run, or an empty payload injects
+      // nothing and drops the mark.
+      if (sid && crownPending.delete(sid)) {
+        const root = pluginRoot()
+        if (root) {
+          const out = await runBounded(
+            "bash",
+            [join(root, "hooks", "king-postcompact-reinject.sh")],
+            5000,
+            JSON.stringify({
+              hook_event_name: "SessionStart",
+              source: "compact",
+              cwd: process.cwd(),
+              session_id: sid,
+            }),
+          )
+          const text = contextCarrierText(out)
+          if (text) {
+            return {
+              message: {
+                customType: "fno-crown",
+                content: [{ type: "text", text }],
+                display: false,
+              },
+            }
+          }
+        }
+      }
       // Session-start report: the registry holds this session's id (mail and
       // liveness stop guessing). Fire-and-forget, best-effort; a spawned
       // worker passes FNO_AGENT_SELF so the daemon can match its row.
@@ -227,6 +290,55 @@ export default function (pi: {
           content: [{ type: "text", text }],
           display: true,
         },
+      }
+    } catch {
+      return
+    }
+  })
+
+  // LEAD GUARD: a crowned pi session does not write repo source. The tool
+  // call becomes a claude-shaped PreToolUse payload and the Rust guard
+  // answers; its deny vetoed with `block: true` and the guard's reason.
+  // Fail-open: no binary, an unreadable answer, or a failed run returns
+  // nothing and the tool proceeds - the never-block contract
+  // hooks/king-delegation-guard.sh ships under.
+  pi.on("tool_call", async (event: unknown, ctx: unknown) => {
+    try {
+      const ev = event as { toolName?: string; input?: Record<string, unknown> }
+      const input = ev?.input || {}
+      // pi names paths `path` and shells `command`; the guard reads the
+      // claude spellings. Everything else is not judged.
+      let toolName = ""
+      const shaped: Record<string, unknown> = { ...input }
+      if (ev?.toolName === "bash") {
+        toolName = "Bash"
+      } else if (ev?.toolName === "edit" || ev?.toolName === "write") {
+        toolName = ev.toolName === "edit" ? "Edit" : "Write"
+        shaped.file_path = typeof input.path === "string" ? input.path : ""
+      } else {
+        return
+      }
+      const payload = {
+        hook_event_name: "PreToolUse",
+        tool_name: toolName,
+        tool_input: shaped,
+        cwd: process.cwd(),
+        session_id: (ctx as Ctx)?.sessionManager?.getSessionId?.() || "",
+      }
+      const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+      const out = await runBounded(bin, ["hook", "king-guard"], 5000, JSON.stringify(payload))
+      if (!out.trim()) return
+      let decision: { permissionDecision?: string; reason?: string } | null = null
+      try {
+        decision = JSON.parse(out)
+      } catch {
+        return
+      }
+      if (decision?.permissionDecision === "deny") {
+        return {
+          block: true,
+          reason: decision.reason || "crowned sessions do not write repo source",
+        }
       }
     } catch {
       return
