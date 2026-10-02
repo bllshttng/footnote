@@ -263,7 +263,7 @@ class SpawnQueueRefused(SpawnError):
 _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
-    _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
+    _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_LEAD_SHARE: "capacity-refused",
     _spawn_gate.EXIT_TERRITORY_CAP: "capacity-refused", _spawn_gate.EXIT_BLUEPRINT_CAP: "capacity-refused",
     _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
     _spawn_gate.EXIT_FLEET_STOP: "gate-unavailable", _spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE: "gate-unavailable",
