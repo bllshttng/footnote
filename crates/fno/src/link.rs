@@ -153,6 +153,81 @@ pub fn for_notice(url: &str) -> String {
     format!("{head}…")
 }
 
+/// The pseudo scheme a tapped `@sender` header token resolves to. Never
+/// openable: the client intercepts it before [`open_url`], and [`is_openable`]
+/// rejects it, so it can never reach the platform opener.
+pub const SENDER_SCHEME: &str = "fno-sender:";
+
+/// True when `s` is exactly the sender pseudo URI for a `fmail-` id: scheme
+/// plus `fmail-` plus 12 hex, nothing else. A legacy `msg-` header has no
+/// sender session to find, so it resolves no span and no URI.
+pub fn is_sender_uri(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix(SENDER_SCHEME) else {
+        return false;
+    };
+    let Some(hex) = rest.strip_prefix("fmail-") else {
+        return false;
+    };
+    hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The `@name` span of a delivered-mail header line in pane text, as a
+/// half-open CHAR range plus the `fmail-<12 hex>` id.
+///
+/// The header the mail transport types into the pane reads
+/// `` `@name · fmail-<12hex> · summary` `` — a harness prompt prefix and the
+/// wrapping backticks may sit around it, so the scan anchors on the id token
+/// and tolerates whatever precedes the `@`. A spaced name, a non-hex or
+/// over-long id, or a missing summary resolves nothing, and a legacy `msg-`
+/// id resolves no span: there is no sender session to find.
+pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let hex12 = |cs: &[char]| cs.len() == 12 && cs.iter().all(|c| c.is_ascii_hexdigit());
+    for i in 0..chars.len() {
+        if !chars[i..].starts_with(&['f', 'm', 'a', 'i', 'l', '-']) {
+            continue;
+        }
+        let hex_start = i + "fmail-".len();
+        let id_end = hex_start + 12;
+        if !hex12(chars.get(hex_start..id_end)?) {
+            continue;
+        }
+        // A hex digit right after the id means a longer token, not this id.
+        if chars.get(id_end).is_some_and(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        // Left: exactly ` · ` between the id and the sender token.
+        if i < 3 || chars[i - 3..i] != [' ', '·', ' '] {
+            continue;
+        }
+        let name_end = i - 3;
+        // Right: exactly ` · ` then a non-empty summary.
+        if chars.get(id_end..id_end + 3) != Some(&[' ', '·', ' '][..]) {
+            continue;
+        }
+        if chars.get(id_end + 3).is_none_or(|c| c.is_whitespace()) {
+            continue;
+        }
+        // The sender token: the non-space run ending at the separator. The
+        // header's own `@` is the RIGHTMOST one in that run, so prompt text
+        // like `user@host` and the wrapping backtick stay outside the range.
+        let mut run_start = name_end;
+        while run_start > 0 && !chars[run_start - 1].is_whitespace() {
+            run_start -= 1;
+        }
+        let Some(at) = chars[run_start..name_end].iter().rposition(|c| *c == '@') else {
+            continue;
+        };
+        let name_start = run_start + at;
+        if name_start + 1 >= name_end {
+            continue;
+        }
+        let id: String = chars[hex_start..id_end].iter().collect();
+        return Some((name_start, name_end, format!("fmail-{id}")));
+    }
+    None
+}
+
 /// Hand `url` to the platform opener, blocking until it exits. `Err` carries
 /// one human line for the status notice.
 ///
@@ -703,5 +778,63 @@ mod tests {
             i += 1;
         }
         out
+    }
+
+    fn sender_span(text: &str) -> Option<(String, String)> {
+        find_mail_sender(text).map(|(a, b, id)| {
+            let chars: Vec<char> = text.chars().collect();
+            (chars[a..b].iter().collect(), id)
+        })
+    }
+
+    #[test]
+    fn sender_span_in_a_backticked_header() {
+        assert_eq!(
+            sender_span("`@t-x-9663-glm · fmail-840a07863897 · fix the gate`"),
+            Some((
+                "@t-x-9663-glm".to_string(),
+                "fmail-840a07863897".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn sender_span_tolerates_a_prompt_prefix() {
+        assert_eq!(
+            sender_span("❯ `@worker · fmail-0123456789ab · hi`"),
+            Some(("@worker".to_string(), "fmail-0123456789ab".to_string()))
+        );
+    }
+
+    #[test]
+    fn sender_span_rejects_the_summary_and_the_malformed_shapes() {
+        let line = "`@t-x-9663-glm · fmail-840a07863897 · fix the gate`";
+        // The id token itself is outside the span.
+        assert_eq!(find_mail_sender(line).unwrap().0, 1);
+        // Non-hex, short, and long ids resolve nothing.
+        assert_eq!(sender_span("`@a · fmail-zzzzzzzzzzzz · hi`"), None);
+        assert_eq!(sender_span("`@a · fmail-840a0786389 · hi`"), None);
+        assert_eq!(sender_span("`@a · fmail-840a078638971 · hi`"), None);
+        // A spaced name is not a sender token.
+        assert_eq!(sender_span("`@a b · fmail-840a07863897 · hi`"), None);
+        // An empty summary is not a header.
+        assert_eq!(sender_span("`@a · fmail-840a07863897 · "), None);
+        // A legacy msg- id resolves no span.
+        assert_eq!(sender_span("`@a · msg-whatever · hi`"), None);
+        // A nameless separator line is not a sender.
+        assert_eq!(sender_span("` · fmail-840a07863897 · hi`"), None);
+    }
+
+    #[test]
+    fn sender_uri_admits_only_the_exact_shape() {
+        assert!(is_sender_uri("fno-sender:fmail-840a07863897"));
+        assert!(!is_sender_uri("fno-sender:fmail-840a0786389"));
+        assert!(!is_sender_uri("fno-sender:fmail-zzzzzzzzzzzz"));
+        assert!(!is_sender_uri("fno-sender:msg-x"));
+        assert!(!is_sender_uri("fno-sender:"));
+        assert!(!is_sender_uri("https://example.com"));
+        // The sender URI must never read as openable: the platform opener
+        // can never receive it.
+        assert!(!is_openable("fno-sender:fmail-840a07863897"));
     }
 }

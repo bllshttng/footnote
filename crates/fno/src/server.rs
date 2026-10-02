@@ -9146,7 +9146,7 @@ impl Core {
     /// the client's opener with an unvetted URL - `link_at` already filters, and
     /// this is the second lock on the same door.
     fn send_open_link(&mut self, client_id: u64, url: String) {
-        if !crate::link::is_openable(&url) {
+        if !(crate::link::is_openable(&url) || crate::link::is_sender_uri(&url)) {
             return;
         }
         let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {

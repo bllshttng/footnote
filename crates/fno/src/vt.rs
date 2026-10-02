@@ -497,6 +497,14 @@ impl Pane {
         }
         let (text, points) = self.logical_line(point.line)?;
         let idx = points.iter().position(|p| *p == point)?;
+        if let Some((start, end, id)) = crate::link::find_mail_sender(&text) {
+            if idx >= start && idx < end {
+                return Some(LinkSpan {
+                    uri: format!("{}{id}", crate::link::SENDER_SCHEME),
+                    cells: self.visible_cells(&points[start..end]),
+                });
+            }
+        }
         let (start, end) = crate::link::find_urls(&text)
             .into_iter()
             .find(|&(a, b)| idx >= a && idx < b)?;
@@ -2035,6 +2043,30 @@ mod tests {
     }
 
     // -- hover affordance: the shared span behind click and hover ---------------
+
+    #[test]
+    fn sender_span_cells_in_a_pane_line() {
+        // The header the mail transport types into a worker pane. The span is
+        // exactly the `@name` cells - the id, the separators and the summary
+        // are not part of the affordance.
+        let line = "`@t-x-9663-glm · fmail-840a07863897 · fix the gate`";
+        let mut pane = Pane::new(4, 60);
+        pane.feed(line.as_bytes());
+        let span = pane.link_span(0, 2).expect("a cell inside @name resolves");
+        assert_eq!(span.uri, "fno-sender:fmail-840a07863897");
+        assert_eq!(
+            span.cells,
+            (1..14).map(|c| (0, c)).collect::<Vec<_>>(),
+            "cols 1..=13, the @name run and nothing else"
+        );
+        // The summary and the id token are not tappable.
+        assert!(pane.link_span(0, 16).is_none(), "the id token is not");
+        assert!(pane.link_span(0, 25).is_none(), "the summary is not");
+        // A malformed id resolves no span at all.
+        let mut pane = Pane::new(4, 60);
+        pane.feed("`@a · fmail-zzzzzzzzzzzz · hi`".as_bytes());
+        assert!(pane.link_span(0, 2).is_none(), "non-hex id");
+    }
 
     #[test]
     fn link_span_rows() {
