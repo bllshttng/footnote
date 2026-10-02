@@ -104,11 +104,10 @@ def incarnation_fence_blocks(
     if not session_uuid:
         return False, ""
     from .core import claim_status
-    from .io import claims_root_for
 
     key = f"session:{session_uuid}"
     try:
-        info = claim_status(key, root=claims_root or claims_root_for(key))
+        info = claim_status(key, root=claims_root)
     except Exception:  # noqa: BLE001 - unreadable single-writer state -> fail closed
         return True, f"incarnation-fence: claims directory unreadable for {key}"
     state = info.get("state")

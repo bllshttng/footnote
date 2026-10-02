@@ -930,8 +930,8 @@ def _spawn_worker(
     # sub-second window. A racing dispatcher in that window is refused by the
     # door's own atomic node-handover, so the release cannot double-dispatch.
     if dispatch_reservation is not None:
-        _res_key, _res_holder, _res_root = dispatch_reservation
-        _safe_release(_res_key, _res_holder, _res_root)
+        _res_key, _res_holder = dispatch_reservation
+        _safe_release(_res_key, _res_holder)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=args.env or None
     )
@@ -1512,7 +1512,6 @@ def dispatch_lanes(
             )
             dispatch_key = f"dispatch:{node_id}"
             dispatch_holder = f"advance:{os.getpid()}"
-            dispatch_root = _claims_root_for(dispatch_key)
         except LaneRootError as exc:
             _skip(f"lane-root: {exc}")
             continue
@@ -1530,7 +1529,6 @@ def dispatch_lanes(
                 dispatch_holder,
                 ttl_ms=_DISPATCH_TTL_MS,
                 reason=f"parallel lane dispatch for {node_id}",
-                root=dispatch_root,
             )
         except CLAIM_UNAVAILABLE:
             # Two advance() passes racing this key is ordinary contention,
@@ -1603,7 +1601,7 @@ def dispatch_lanes(
                     verb=node.get("dispatch_verb"),
                     brief=_brief,
                     node=node,
-                    dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
+                    dispatch_reservation=(dispatch_key, dispatch_holder),
                     caller="dispatch_lanes",
                     source=source,
                     events_path=ev_path,
@@ -1648,7 +1646,7 @@ def dispatch_lanes(
             dispatched = True
         finally:
             if not dispatched:
-                _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+                _safe_release(dispatch_key, dispatch_holder)
 
     if report is not None:
         report["dispatched"] = sum(
@@ -2181,7 +2179,7 @@ def _join_node(
     if not plan_raw:
         raise JoinRefuse(4, f"{node_id} has no bound plan")
     claim_key = f"node:{node_id}"
-    status = claim_status(claim_key, root=_claims_root_for(claim_key))
+    status = claim_status(claim_key)
     if status.get("state") != "live":
         raise JoinRefuse(
             2,
@@ -2531,22 +2529,8 @@ def _join_node(
 
 
 # ---------------------------------------------------------------------------
-# Claim helpers (route each key like the `fno agents claim` CLI's _node_aware_root)
+# Claim helpers
 # ---------------------------------------------------------------------------
-
-
-def _claims_root_for(key: str):
-    """Resolve the claims root for a key (delegates to the shared helper).
-
-    Global-id kinds (``node:``/``dispatch:``/``reconcile:``) live in the global
-    ($HOME) root; repo-local keys use the cwd/env default (canonical repo root,
-    honoring FNO_CLAIMS_ROOT). Delegating to fno.claims.io.claims_root_for keeps
-    advance, reconcile_dispatch, spawn-guard, and the `fno agents claim` CLI on ONE
-    routing rule so they cannot drift -- and roots the boot-window dispatch:<id>
-    token globally so cross-repo dispatchers dedup against each other."""
-    from fno.claims.io import claims_root_for
-
-    return claims_root_for(key)
 
 
 def _walker_key() -> str:
@@ -2720,13 +2704,13 @@ def _claim_is_live(
     from fno.claims.verdict import claim_verdicts
 
     try:
-        rows = verdicts or claim_verdicts([key], root=_claims_root_for(key))
+        rows = verdicts or claim_verdicts([key])
         return rows.get(key, {}).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not crash advance
         return False
 
 
-def _safe_release(key: str, holder: str, root) -> None:
+def _safe_release(key: str, holder: str) -> None:
     """Release a claim, swallowing any error.
 
     ``release_claim`` is best-effort by intent but NOT contractually no-raise
@@ -2739,7 +2723,7 @@ def _safe_release(key: str, holder: str, root) -> None:
     from fno.claims.core import release_claim
 
     try:
-        release_claim(key, holder, root=root)
+        release_claim(key, holder)
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("advance: dispatch-reservation release failed for %s: %s", key, exc)
 
@@ -2992,14 +2976,12 @@ def advance(
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"advance:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
             dispatch_key,
             holder,
             ttl_ms=_DISPATCH_TTL_MS,
             reason=f"auto-continue dispatch for {node_id}",
-            root=dispatch_root,
         )
     except CLAIM_UNAVAILABLE:
         return skip("already-claimed", node_id=node_id)
@@ -3033,25 +3015,25 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
-            dispatch_reservation=(dispatch_key, holder, dispatch_root),
+            dispatch_reservation=(dispatch_key, holder),
             caller="advance",
             source=source,
             events_path=ev_path,
             receipt=next_receipt,
         )
     except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         return skip("already-claimed", node_id=node_id)
     except SpawnError as exc:
         # Machine-scoped: skip (row ready, no strike, no defer); else fail.
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         refusal = gate_refusal(exc)
         if refusal is None:
             return failed(node_id, str(exc))
         return skip(refusal.reason, node_id=node_id, detail=refusal.detail,
                     retry_at=refusal.retry_at, exit_code=refusal.exit_code)
     except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         return failed(node_id, str(exc))
 
     # 7. Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
@@ -3362,7 +3344,6 @@ def _converge_one(
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"advance:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
             dispatch_key,
@@ -3371,7 +3352,6 @@ def _converge_one(
             reason=f"converge dispatch for {node_id}"
             + (f" (mission {mission})" if mission else "")
             + (f" (dep of {closed_node_id})" if closed_node_id else ""),
-            root=dispatch_root,
         )
     except CLAIM_UNAVAILABLE:
         return skip("already-claimed")
@@ -3399,7 +3379,7 @@ def _converge_one(
                 verb=node_meta.get("dispatch_verb"),
                 brief=_brief,
                 node=node_meta,
-                dispatch_reservation=(dispatch_key, holder, dispatch_root),
+                dispatch_reservation=(dispatch_key, holder),
                 caller="_converge_one",
                 source=source,
                 events_path=ev_path,
@@ -3457,7 +3437,7 @@ def _converge_one(
         )
     finally:
         if not dispatched:
-            _safe_release(dispatch_key, holder, dispatch_root)
+            _safe_release(dispatch_key, holder)
 
 
 def _dispatch_one_dependent(

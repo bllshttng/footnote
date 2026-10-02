@@ -32,10 +32,13 @@ use std::path::PathBuf;
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|flight-acquire|flight-release|long-holds|release-stopped"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|root|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
+    if op == "root" {
+        return run_claim_root(&args[1..]);
+    }
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
     }
@@ -285,6 +288,31 @@ pub fn run_claim(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// `claim root <key>` — the one claims-root resolver: `{"key","root","dir"}`
+/// for the store `key` resolves against (`root` null for a repo-local key).
+/// The Python callers that need the PATH read this op (`_native_claim("root",
+/// key, [])`); the lockfile operations themselves never needed it, they route
+/// inside `claims::acquire`/`claims_dir`.
+fn run_claim_root(args: &[String]) -> i32 {
+    let Some(key) = args.iter().find(|a| !a.starts_with("--")) else {
+        eprintln!("fno-agents: claim root requires a key argument");
+        return 2;
+    };
+    let root = crate::claims_root::claims_root_for(key);
+    let dir = match crate::claims_root::claims_dir(key, root.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("fno-agents: claim root: {e}");
+            return 2;
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({ "key": key, "root": root, "dir": dir })
+    );
+    0
 }
 
 /// `claim session-pid [--from-pid <pid>] [--json|-J]`: the one resolver of
