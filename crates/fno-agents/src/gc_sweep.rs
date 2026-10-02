@@ -4141,11 +4141,11 @@ mod tests {
         let listed = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
             crate::claude_roster::ClaudeAgentRow::new("9a1b2c3d", Some("done")),
         ]);
-        let (death, drift) = crate::daemon::row_death_and_drift(&held, &listed);
+        let (death, drift) = crate::daemon::roster_death::row_death_and_drift(&held, &listed);
         assert!(death.is_none());
         assert!(drift.is_some_and(|d| d.contains("done")));
         held.status = crate::AgentStatus::Exited;
-        let (death, drift) = crate::daemon::row_death_and_drift(&held, &listed);
+        let (death, drift) = crate::daemon::roster_death::row_death_and_drift(&held, &listed);
         assert!(death.is_some());
         assert!(drift.is_none());
         held.status = crate::AgentStatus::Idle;

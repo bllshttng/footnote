@@ -51,15 +51,6 @@ from .core import (
     refresh_claim,
     release_claim,
 )
-from .lanes import (
-    DEFAULT_LANE_TTL_MS,
-    LANE_HOLDER_PREFIX,
-    LANE_SLOT_PREFIX,
-    acquire_lane_slot,
-    active_lane_count,
-    find_lane_slot,
-    release_lane_slot,
-)
 from .types import Claim, ClaimState
 
 __all__ = [
@@ -74,20 +65,15 @@ __all__ = [
     "ClaimValidationError",
     "ClaimVerdictError",
     "ClaimVerdictUnavailable",
-    "DEFAULT_LANE_TTL_MS",
     "HolderMismatch",
     "LANE_HOLDER_PREFIX",
     "LANE_SLOT_PREFIX",
     "RebindRefused",
     "acquire_claim",
-    "acquire_lane_slot",
-    "active_lane_count",
     "claim_status",
     "compare_and_rebind",
-    "find_lane_slot",
     "force_release_claim",
     "list_claims",
     "refresh_claim",
     "release_claim",
-    "release_lane_slot",
 ]

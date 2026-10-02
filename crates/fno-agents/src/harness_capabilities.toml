@@ -1791,3 +1791,90 @@ proof = "goal-active"
 transport = "app-server"
 method = "thread/goal/set"
 proof = "goal-active"
+
+
+# Hook jobs: which fno hook jobs each harness runs, declared from the
+# measured wiring (the rename shim, the codex/opencode/pi registrations and
+# the agy PreToolUse adapter). The loop job is derived from
+# loop_participation/loop_extension, never declared here. A `missing` on a
+# wired row fails the load (validate_row), so a gap is a build break.
+
+[harness.claude.hooks.lead_guard]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.claude.hooks.lead_reinject]
+state = "supported"
+via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
+
+[harness.codex.hooks.lead_guard]
+state = "supported"
+via = ["hooks/codex-hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.codex.hooks.lead_reinject]
+state = "supported"
+via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
+
+[harness.agy.hooks.lead_guard]
+state = "supported"
+via = ["hooks/agy-king-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.agy.hooks.lead_reinject]
+state = "impossible"
+reason = "agy exposes no compaction event (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop); the crown line lands at invocationNum 0 in hooks/agy-crown-inject.sh"
+
+[harness.opencode.hooks.lead_guard]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-delegation-guard.sh"]
+
+[harness.opencode.hooks.lead_reinject]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-postcompact-reinject.sh", "hooks/target-postcompact-reinject.sh"]
+
+[harness.pi.hooks.lead_guard]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.pi.hooks.lead_reinject]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "hooks/king-postcompact-reinject.sh"]
+
+[harness.footnote.hooks.lead_guard]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/hooks.rs"]
+
+[harness.footnote.hooks.lead_reinject]
+state = "impossible"
+reason = "the footnote harness compacts in-process (footnote_harness maybe_compact) and fires no compaction hook event, so the postcompact carrier never runs; the lead brief rides SessionStart only"
+
+[harness.gemini.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane)"
+
+[harness.gemini.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane)"
+
+[harness.cursor-agent.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for cursor-agent (no plugin hook file and no capability install lane)"
+
+[harness.cursor-agent.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for cursor-agent (no plugin hook file and no capability install lane)"
+
+[harness.grok.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for grok (no plugin hook file and no capability install lane; the grok install lane would flip this)"
+
+[harness.grok.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for grok (no plugin hook file and no capability install lane; the grok install lane would flip this)"
+
+[harness.zcode.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane)"
+
+[harness.zcode.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane)"

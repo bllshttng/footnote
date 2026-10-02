@@ -11,6 +11,7 @@
 pub mod bin_install_guard;
 pub mod edit_integrity;
 pub mod king_guard;
+pub mod king_guard_wire;
 pub mod pipe_guard;
 pub mod pretooluse_bash;
 pub mod prompt;

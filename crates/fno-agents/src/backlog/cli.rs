@@ -219,6 +219,10 @@ pub fn run(args: &[String]) -> i32 {
         // The selection door: native on the graph backend; the external
         // joined candidates still ride the python wheel from inside the arm.
         "next" => super::next::run(resolved.tail),
+        // The parallel fill: native selection over the lane world (peer
+        // slots, domain annotation, the file-collision gate).
+        "lane-fill" => super::advance_fill::run_lane_fill(resolved.tail),
+        "schedule-shadow" => super::advance_fill::run_schedule_shadow(resolved.tail),
         "worked" => super::worked::run(resolved.tail),
         _ => forward_python(&resolved),
     }

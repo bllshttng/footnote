@@ -550,6 +550,40 @@ async function server({ directory, worktree, client, $ }) {
       eventLog("session.created:hooks", sid)
     }
   }
+  // Post-compact re-inject: after the bus fires session.compacted, run the
+  // two carriers the claude PostCompact lane runs, with the compact payload
+  // king-postcompact-reinject.sh reads, and queue their context so the next
+  // system transform carries it. Fail-open: a missing script or a failed
+  // run queues nothing, never a failed session.
+  const runPostCompactReinject = async (sid) => {
+    if (!root || !sid) return
+    const payload = {
+      hook_event_name: "SessionStart",
+      source: "compact",
+      cwd: dir,
+      session_id: sid,
+    }
+    for (const script of [
+      "hooks/king-postcompact-reinject.sh",
+      "hooks/target-postcompact-reinject.sh",
+    ]) {
+      try {
+        const out = await runProcSh(`bash ${root}/${script}`, JSON.stringify(payload), 10000)
+        const text = hookContextText(out)
+        if (text) {
+          const q = contextQueue.get(sid) || []
+          q.push(text)
+          contextQueue.set(sid, q)
+        }
+      } catch (e) {
+        reportOnce(
+          `postcompact:${script}`,
+          `[footnote] post-compact reinject failed (${script}): ${e}`,
+        )
+      }
+    }
+    eventLog("session.compacted:reinject", sid)
+  }
   const io = {
     readAssistantTexts: async (sid) => {
       const res = await client.session.messages({ path: { id: sid } })
@@ -574,6 +608,10 @@ async function server({ directory, worktree, client, $ }) {
         eventLog("session.created", event.properties?.sessionID)
         await runSessionStartHooks(event.properties?.sessionID)
         return handle("created", event.properties?.sessionID)
+      }
+      if (event?.type === "session.compacted") {
+        eventLog("session.compacted", event.properties?.sessionID)
+        return runPostCompactReinject(event.properties?.sessionID)
       }
       if (event?.type !== "session.idle") return
       return handle("idle", event.properties?.sessionID)
