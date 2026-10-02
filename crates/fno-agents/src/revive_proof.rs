@@ -14,6 +14,7 @@
 use crate::claude_ask::{read_state_json, resolve_session_uuid, ClaudeHome};
 use crate::subprocess_ask::wait_with_grace;
 use serde_json::json;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -143,10 +144,15 @@ pub fn run_revive_proof(args: &[String]) -> i32 {
         // then SIGKILL after 5s).
         let stopped = Command::new("claude")
             .args(["stop", &short_id])
+            // Own process group: wait_with_grace killpgs getpgid(child), and a
+            // child sharing our group would take this whole tree with it.
+            .process_group(0)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map(|mut child| wait_with_grace(child.id(), &mut child, 30.0).0 == 0)
+            .map(|mut child: std::process::Child| {
+                wait_with_grace(child.id(), &mut child, 30.0).0 == 0
+            })
             .unwrap_or(false);
         verdict["stopped"] = json!(stopped);
         if !stopped {

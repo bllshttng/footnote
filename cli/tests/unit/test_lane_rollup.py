@@ -7,15 +7,27 @@ node is unknown to the graph.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 from typer.testing import CliRunner
 
 import fno.graph.cli as gcli
-from fno.claims.lanes import acquire_lane_slot
+from fno.rust_binary import resolve_binary
 from tests.fixtures.graph_seed import seed_graph
 
 _runner = CliRunner()
+
+
+def _seed_lane(lane_id: str, max_lanes: int, domain: str) -> None:
+    """Hold a live slot through the native verb under the env-pinned root."""
+    binary = resolve_binary()
+    assert binary is not None, "dev binary required for lane seeding"
+    subprocess.run(
+        [str(binary), "claim", "lane-acquire", "--lane", lane_id,
+         "--max-lanes", str(max_lanes), "--domain", domain],
+        capture_output=True, text=True, check=True,
+    )
 
 
 @pytest.fixture
@@ -41,9 +53,10 @@ def graph(tmp_path, monkeypatch):
     return path
 
 
+@pytest.mark.dev_build
 def test_lanes_rollup_joins_slots_with_graph(claims_root, graph):
-    acquire_lane_slot(3, "x-aaaa", extra_metadata={"domain": "code"})
-    acquire_lane_slot(3, "x-bbbb", extra_metadata={"domain": "docs"})
+    _seed_lane("x-aaaa", 3, "code")
+    _seed_lane("x-bbbb", 3, "docs")
 
     res = _runner.invoke(gcli.cli, ["lanes", "--json"])
     assert res.exit_code == 0, res.output
@@ -65,8 +78,9 @@ def test_lanes_rollup_empty(claims_root, graph):
     assert out["lanes"] == []
 
 
+@pytest.mark.dev_build
 def test_lanes_rollup_human_line(claims_root, graph):
-    acquire_lane_slot(2, "x-aaaa", extra_metadata={"domain": "code"})
+    _seed_lane("x-aaaa", 2, "code")
     res = _runner.invoke(gcli.cli, ["lanes"])
     assert res.exit_code == 0, res.output
     assert "1/" in res.output.splitlines()[0]

@@ -66,6 +66,10 @@ Footnote injects a relay compression contract at SessionStart and after context 
 
 The mechanism adapts [Caveman](https://github.com/JuliusBrussee/caveman)'s MIT-licensed system-prompt pattern. Caveman's own measurements identify prompt programming as the output-shrinking mechanism. It does not compress model reasoning. Footnote keeps the portable core small because every user pays SessionStart context cost.
 
+## User-facing runtime text never narrates a gate
+
+A message fno prints to a human states the fact the reader can act on. It never reports the machinery that reached the fact. No brake report, no other app's process group, no ceiling numbers, and no "admitting anyway". When a gate holds agents and waives the human, the human reads at most one short line, and the measured detail lands in the log a TTY-less process writes. Measured on 2026-10-01: a human's own fno start under the runaway brake printed the arm's whole brake report with a ppid in it, and the user read it as almost snide.
+
 ## Why Caveman is not ported whole
 
 The 2026-09-11 operator ask was to bake Caveman into the mail gate. One part of it shipped, and three parts deliberately did not. This section is the record, so the next person does not re-propose the whole.

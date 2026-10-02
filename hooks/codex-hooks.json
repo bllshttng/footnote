@@ -61,6 +61,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/king-delegation-guard.sh",
+            "statusMessage": "checking crown delegation"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

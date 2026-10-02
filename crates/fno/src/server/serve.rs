@@ -269,6 +269,33 @@ pub(super) async fn serve(
                                 "fno mux: no agent daemon answering at {} ({error}); reading the registry file directly (degraded fallback, retried every tick)",
                                 agents_view::supervisor_sock_path().display()
                             );
+                            // Ruling d-e096c669: the mux starts fno's own
+                            // pieces; a vendor tab is never what unblocks it.
+                            // `fno-agents status` lazy-starts the daemon
+                            // (client::call runs ensure_daemon). Once per
+                            // fallback edge, off the loop, bounded, output
+                            // dropped.
+                            let bin = crate::digest_overlay::fno_agents_bin();
+                            tokio::spawn(async move {
+                                let mut command = crate::process_admission::tokio_command(&bin);
+                                command.args(["status"]).stdin(std::process::Stdio::null());
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    crate::process_admission::tokio_output(&mut command),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => {
+                                        eprintln!("fno mux: started the agent daemon")
+                                    }
+                                    Ok(Err(e)) => {
+                                        eprintln!("fno mux: agent daemon start failed: {e}")
+                                    }
+                                    Err(_) => eprintln!(
+                                        "fno mux: agent daemon start failed: timed out after 10s"
+                                    ),
+                                }
+                            });
                         }
                         scan(reg_path.clone(), state.reg_stamp()).await
                     }
@@ -500,11 +527,17 @@ pub(super) async fn serve(
     let core_wedge_e2e = std::env::var_os("FNO_E2E_CORE_WEDGE").is_some();
     let mut core_wedge_armed = false;
 
+    // The word this server died of, set by every Flow::Shutdown break before
+    // breaking. Unassigned on purpose: a future break without a cause fails
+    // to compile, so the log and the events feed can never disagree. The
+    // tail prints it once and record_exit carries it into the event.
+    let cause;
+
     let flow = loop {
         tokio::select! {
             chunk = out_rx.recv() => {
                 // out_tx lives in Core, so recv never yields None.
-                let Some((pid, item)) = chunk else { break Flow::Shutdown };
+                let Some((pid, item)) = chunk else { cause = "channel-closed"; break Flow::Shutdown };
                 drain_pty_output(
                     &mut core,
                     &mut out_rx,
@@ -520,7 +553,7 @@ pub(super) async fn serve(
                 }
             }
             exited = exit_rx.recv() => {
-                let Some(pid) = exited else { break Flow::Shutdown };
+                let Some(pid) = exited else { cause = "channel-closed"; break Flow::Shutdown };
                 e2e_log(format_args!("pane {pid} child exited"));
                 // The reader sends this only after enqueuing every output
                 // chunk. Drain that channel before removing the pane so final
@@ -536,7 +569,7 @@ pub(super) async fn serve(
                 let ctx = core.member_ctx(pid);
                 core.reconcile_member_close(ctx, true);
                 if core.close_viewer_died(pid, "viewer exited") == Flow::Shutdown {
-                    e2e_log(format_args!("last pane gone; shutting down"));
+                    cause = "last-pane-gone";
                     break Flow::Shutdown;
                 }
             }
@@ -558,7 +591,7 @@ pub(super) async fn serve(
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
                 if core.reap_dead_children(dead) == Flow::Shutdown {
-                    e2e_log(format_args!("last dead pane reaped; shutting down"));
+                    cause = "last-dead-pane-reaped";
                     break Flow::Shutdown;
                 }
                 // Drift retirement: a drifted verdict at a fully
@@ -577,12 +610,13 @@ pub(super) async fn serve(
                         running.path.display(),
                         on_disk.path.display()
                     );
+                    cause = "stale-build";
                     break Flow::Shutdown;
                 }
             }
             msg = core_rx.recv() => {
                 // core_tx lives in the accept loop, so recv never yields None.
-                let Some(msg) = msg else { break Flow::Shutdown };
+                let Some(msg) = msg else { cause = "channel-closed"; break Flow::Shutdown };
                 // Coalesce resize storms PER CLIENT: only each client's
                 // final geometry hits its viewed tab's clamp (AC1-FR). Other
                 // messages drained here run after, in arrival order.
@@ -611,7 +645,10 @@ pub(super) async fn serve(
                         if flow == Flow::Shutdown { break; }
                         flow = core.handle(m);
                     }
-                    if flow == Flow::Shutdown { break Flow::Shutdown; }
+                    if flow == Flow::Shutdown {
+                        cause = "kill";
+                        break Flow::Shutdown;
+                    }
                 } else if let CoreMsg::Mouse { id, pane, event } = msg {
                     // Wheel-scroll coalescing (mirrors the resize-storm coalescer
                     // above): fold a contiguous run of interpreted wheel ticks on
@@ -625,6 +662,7 @@ pub(super) async fn serve(
                     // the fold, so ordering and read-only gating stay unchanged.
                     if core.is_passive(id) {
                         if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
+                            cause = "kill";
                             break Flow::Shutdown;
                         }
                     } else if let Some(d0) = core.scroll_delta(pane, &event) {
@@ -660,13 +698,16 @@ pub(super) async fn serve(
                         }
                         if let Some(m) = trailer {
                             if core.handle(m) == Flow::Shutdown {
+                                cause = "kill";
                                 break Flow::Shutdown;
                             }
                         }
                     } else if core.handle(CoreMsg::Mouse { id, pane, event }) == Flow::Shutdown {
+                        cause = "kill";
                         break Flow::Shutdown;
                     }
                 } else if core.handle(msg) == Flow::Shutdown {
+                    cause = "kill";
                     break Flow::Shutdown;
                 }
                 if core_wedge_e2e && !core_wedge_armed && !core.panes.is_empty() {
@@ -676,8 +717,9 @@ pub(super) async fn serve(
                 }
             }
             signal = signal_rx.recv() => {
-                let Some(signal) = signal else { break Flow::Shutdown };
+                let Some(signal) = signal else { cause = "channel-closed"; break Flow::Shutdown };
                 if core.handle(signal) == Flow::Shutdown {
+                    cause = "signal";
                     break Flow::Shutdown;
                 }
             }
@@ -693,6 +735,7 @@ pub(super) async fn serve(
                 if owner.as_ref().is_some_and(|lease| !lease.alive()) {
                     let session = owner.as_ref().map(|lease| lease.session.as_str()).unwrap_or("unknown");
                     eprintln!("fno mux: sandbox owner {session} is gone; shutting down");
+                    cause = "owner-gone";
                     break Flow::Shutdown;
                 }
             }
@@ -706,6 +749,7 @@ pub(super) async fn serve(
                     && conns_alive.load(std::sync::atomic::Ordering::Acquire) == 0
                 {
                     eprintln!("fno mux: idle-exit: no client for grace window");
+                    cause = "idle-exit";
                     break Flow::Shutdown;
                 }
                 idle_deadline = tokio::time::Instant::now() + idle_grace;
@@ -720,8 +764,12 @@ pub(super) async fn serve(
         ever_attached |= !core.clients.is_empty();
     };
     if flow == Flow::Shutdown {
+        eprintln!(
+            "fno mux: shutting down ({cause}, {} panes)",
+            core.panes.len()
+        );
         // Capture only from a safe restore state and current store generation.
-        core.record_exit();
+        core.record_exit(cause);
         core.kill_all_panes();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as

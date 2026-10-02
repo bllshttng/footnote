@@ -100,7 +100,7 @@ def test_curriculum_end_to_end_reports_complement():
     proc = subprocess.run(
         [sys.executable, str(SCRIPT),
          "--curriculum", str(REPO_ROOT / "scripts" / "ci" / "curriculum.txt")],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180,
     )
     assert proc.returncode == 0, proc.stderr
 
@@ -195,7 +195,7 @@ def test_broken_argv_sweep_also_refuses_the_zero_list(tmp_path):
     """
     proc = subprocess.run(
         [sys.executable, str(_broken_argv_sweep(tmp_path)), "--zero"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180,
     )
     assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
     out = proc.stdout + proc.stderr
@@ -215,7 +215,7 @@ def test_rust_argv_controls_refuse_to_emit_a_list_when_the_sweep_breaks(tmp_path
     """
     proc = subprocess.run(
         [sys.executable, str(_broken_argv_sweep(tmp_path)), "--dead"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180,
     )
     assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
     out = proc.stdout + proc.stderr
@@ -278,6 +278,7 @@ def test_broken_crates_test_split_refuses_every_candidate_output(tmp_path, args)
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        timeout=180,
     )
     out = proc.stdout + proc.stderr
     assert proc.returncode == 2, out
@@ -296,7 +297,7 @@ def test_curriculum_with_self_check_runs_self_check():
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--curriculum",
          str(REPO_ROOT / "scripts" / "ci" / "curriculum.txt"), "--self-check"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180,
     )
     # self-check diagnostics present; the cull-list header is not.
     assert "controls:" in proc.stdout, proc.stdout

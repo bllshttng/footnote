@@ -3,7 +3,12 @@
 use std::time::Duration;
 
 use super::{LayoutView, View};
-use crate::proto::{read_msg, ServerMsg};
+use crate::proto::{read_msg, ProtoError, ServerMsg};
+
+/// The typed shape of one failure: the server accepted the attach and then
+/// closed the connection before the first Layout. `attach_once_more` keys
+/// its single retry on this prefix, and a double failure exits with it.
+pub(crate) const PREAMBLE_CLOSED: &str = "server closed before the first layout";
 
 /// How long the attach waits in silence before it tells the user the server
 /// is busy. It never gives up: a human attach always gets in.
@@ -137,7 +142,45 @@ pub(super) async fn read_preamble<R: tokio::io::AsyncRead + Unpin>(
             // A launch update cannot precede attach; ignore a misaddressed
             // one rather than failing the handshake.
             Ok(ServerMsg::AgentLaunch(_)) => {}
+            Err(ProtoError::Closed) => {
+                return Err(format!("{PREAMBLE_CLOSED}; {log_hint}"))
+            }
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
     }
+}
+
+/// Attach once, and when the server accepted and then closed before the
+/// first Layout, once more against a fresh server. The retry line carries
+/// the server's own last shutting-down cause from its log, so the user
+/// reads why the first attach bounced without opening the log. A second
+/// failure exits with the typed message; no third try.
+pub(super) async fn attach_once_more(path: &std::path::Path) -> Result<i32, String> {
+    let mut closed_once = false;
+    loop {
+        let stream = super::connect_or_spawn(path, true)?;
+        match super::attach_and_run(stream, path).await {
+            Ok(code) => return Ok(code),
+            Err(e) if !closed_once && e.starts_with(PREAMBLE_CLOSED) => {
+                closed_once = true;
+                let cause = last_shutdown_line(&super::log_path(path))
+                    .unwrap_or_else(|| "no cause in the server's log".to_string());
+                eprintln!("fno: the server closed before attach; retrying once ({cause})");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The last `fno mux: shutting down (...)` line in the server's log, read
+/// from the log tail so a long-lived log costs a bounded read.
+fn last_shutdown_line(log: &std::path::Path) -> Option<String> {
+    let data = std::fs::read(log).ok()?;
+    let tail = &data[data.len().saturating_sub(65_536)..];
+    std::str::from_utf8(tail)
+        .ok()?
+        .lines()
+        .rev()
+        .find(|l| l.contains("fno mux: shutting down"))
+        .map(str::to_string)
 }

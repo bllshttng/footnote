@@ -176,6 +176,10 @@ pub(crate) fn keys_modal_byte(view: &mut View, b: u8) -> bool {
                     }
                     edited = true;
                 }
+                0x15 => {
+                    m.filter.as_mut().expect("filtering").clear();
+                    edited = true;
+                }
                 _ if b.is_ascii_graphic() || b == b' ' => {
                     m.filter.as_mut().expect("filtering").push(b as char);
                     edited = true;

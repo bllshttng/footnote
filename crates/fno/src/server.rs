@@ -3141,8 +3141,7 @@ impl Core {
             }
         };
         let pane_count = self.placement_pane_count(dest, &placement);
-        let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
-            .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
+        let permit = crate::process_admission::admit_pane_for_spawn(&placement, pane_count)?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
         let theme = osc_reply::theme_at(&cwd);

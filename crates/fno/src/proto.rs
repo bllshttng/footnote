@@ -357,9 +357,16 @@ fn default_true() -> bool {
 /// can refuse commands an older server cannot parse instead of tripping
 /// the unknown-variant read failure. Floor stays 58.
 /// v98: optional worker context, start time, unread mail and node; floor stays 58.
-/// v99: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
+/// v99: `ControlVerb::PaneRun.human` (serde default), the composer's
+/// user-typed `!` line taking the human admission exemption; floor stays 58.
+/// v100: `AgentLaunchRequest.force` (serde default), the per-request
+/// composer override the server journals and rides as the door's `--force`;
+/// floor stays 58.
+/// v101: `PanePlacement.human` (serde default) carries the v99 exemption;
+/// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
+/// v102: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
 /// `session_tokens`), both optional; floor stays 58.
-pub const PROTO_VERSION: u32 = 99;
+pub const PROTO_VERSION: u32 = 102;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1183,7 +1190,7 @@ pub struct AgentRow {
     pub context_tokens: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measured_at: Option<u64>,
-    /// (v99) The daemon-served running session cost, in integer cents, and
+    /// (v102) The daemon-served running session cost, in integer cents, and
     /// the raw token sum behind it. Priced through the models.dev catalog by
     /// the reconcile sweep; `None` before the first measurement or when any
     /// token kind with a nonzero count has no catalog rate (unpriced, never a
@@ -4260,6 +4267,7 @@ mod tests {
             max_panes: None,
             thread_pane: false,
             fit: false,
+            human: false,
         };
         for msg in [
             ClientMsg::Control {
@@ -4382,7 +4390,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 99);
+        assert_eq!(PROTO_VERSION, 102);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
