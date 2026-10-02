@@ -155,4 +155,15 @@ out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/xdg-state" bash "$PWRAPPE
 [[ -z "$out" ]] || fail "fallback marker must silence later prompts, got: $out"
 pass "CLAUDE_PLUGIN_DATA unset -> XDG fallback carries stamp and marker"
 
+# --- Case 7: static-reminder state (no installer in the tree) -> SILENT -------
+# Without postinstall.sh the full hook prints its static reminder, and no
+# marker could ever be written (no version resolves). The wrapper must not
+# relay that into context on every prompt: the preamble owns the story.
+rm -rf "$DATA" "$MARK"
+mv "$PLUG/.claude-plugin/postinstall.sh" "$WORK/postinstall.sh.bak"
+out=$(run_wrapper)
+mv "$WORK/postinstall.sh.bak" "$PLUG/.claude-plugin/postinstall.sh"
+[[ -z "$out" ]] || fail "static reminder must not be relayed per prompt, got: $out"
+pass "static-reminder state -> silent"
+
 log "all cases passed"

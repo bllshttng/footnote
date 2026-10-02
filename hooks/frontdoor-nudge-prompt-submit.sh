@@ -37,9 +37,14 @@ command -v fno >/dev/null 2>&1 && exit 0
 
 # The full hook owns the lock and the detached spawn; its output is the note.
 # It never waits on the installer (every descriptor is redirected), so the
-# capture here cannot be held open by the background job.
+# capture here cannot be held open by the background job. Only its actionable
+# notes are relayed (both substrings are pinned by the hooks test): when the
+# hook falls to its static reminder - no version, or no installer in the
+# plugin tree - nothing here can mark the note as surfaced, so relaying it
+# would repeat the same lines on every prompt; the using-fno preamble owns
+# that story instead.
 out="$(bash "$HOOK_DIR/frontdoor-nudge-session-start.sh" 2>/dev/null)"
-if [[ -n "$out" ]]; then
+if [[ "$out" == *postinstall.log* || "$out" == *"install in progress"* ]]; then
   printf '%s\n' "$out"
   [[ -n "$VERSION" ]] && printf '%s' "$VERSION" >"$MARKER" 2>/dev/null
 fi
