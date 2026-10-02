@@ -1626,17 +1626,15 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     );
     // Sandbox homes skip fleet work that could target real state from a tempdir
     // and keep the daemon open forever.
-    let ab_handle = if sandbox {
-        tokio::spawn(std::future::ready(()))
-    } else {
-        let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
-        let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
-        let live = Arc::clone(&ab_live);
-        let shutdown = Arc::clone(&ab_shutdown);
-        tokio::spawn(crate::active_backlog::run_supervisor(
-            fno_bin, ab_emitter, live, shutdown,
-        ))
-    };
+    let ab_handle = crate::active_backlog::spawn_for_daemon(
+        &ctx.home,
+        sandbox,
+        Arc::clone(&ab_live),
+        Arc::clone(&ab_shutdown),
+    );
+    // Exact-cost telemetry: one localhost OTLP receiver, same sandbox skip,
+    // opt-out via `[telemetry] claude_otel = false`.
+    let otel_shutdown = crate::otel_ingest::spawn_for_daemon(&ctx.home, sandbox);
 
     // SIGTERM -> graceful shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1821,6 +1819,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // filter excludes the still-in-flight node (no double-dispatch).
     ab_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     ab_handle.abort();
+    if let Some(flag) = &otel_shutdown {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 
     // Only reap the socket if it's still ours -- never unlink a live
     // successor's socket, the same discipline stop_worker_confirmed
