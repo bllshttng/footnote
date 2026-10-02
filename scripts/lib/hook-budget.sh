@@ -124,7 +124,11 @@ hook_cache_serve() {
     local dir="${FNO_HOOK_CACHE_DIR:-$HOME/.fno/cache/hook-budget}"
     local file="$dir/$key" now mtime age raw stored_fp payload out rc=0
     now=$(date +%s)
-    mtime=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || printf 0)
+    # GNU stat first: BSD `stat -f %m` is the macOS form, and on GNU `stat -f`
+    # means FILESYSTEM status, which SUCCEEDS and prints a block whose first
+    # line starts with "File:" - under set -u the arithmetic then dies naming
+    # File. mtime=$(stat -c %Y ... || stat -f %m ... || printf 0)
+    mtime=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || printf 0)
     age=$((now - mtime))
     stored_fp=""
     payload=""

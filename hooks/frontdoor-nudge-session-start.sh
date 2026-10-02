@@ -24,6 +24,10 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
 if command -v fno >/dev/null 2>&1; then
+  # Floor 1s: the probe's EXIT CODE is the signal (2 = fno-py, 124 = hung
+  # socket that still proves the Rust door), and a budget of 0 would kill at
+  # t=0, racing a fast exit-2 into a 124 that silences a real reminder.
+  HOOK_BUDGET_FLOOR_SECS=1
   with_timeout "$(hook_budget_secs)" fno mux ls --json >/dev/null 2>&1
   probe_rc=$?
   # 124 means our own bound fired. A wedged socket still PROVES the Rust front

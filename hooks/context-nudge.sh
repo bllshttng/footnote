@@ -182,7 +182,7 @@ CONTEXT_RUNNER="${FNO_AGENTS_FRONT:-fno-agents}"
 # transcript always re-measures, because pressure truth is the one thing a
 # compaction gate may not serve stale by choice. Keyed by the transcript
 # basename the payload handed us.
-TSTATS="$(stat -f %z,%m "$TRANSCRIPT" 2>/dev/null || stat -c %s,%Y "$TRANSCRIPT" 2>/dev/null || true)"
+TSTATS="$(stat -c %s,%Y "$TRANSCRIPT" 2>/dev/null || stat -f %z,%m "$TRANSCRIPT" 2>/dev/null || true)"
 TSTATS="$(printf '%s' "$TSTATS" | tr -c '0-9' '-')"
 if command -v jq >/dev/null 2>&1 && command -v "$CONTEXT_RUNNER" >/dev/null 2>&1; then
     PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 "$TSTATS" -- \

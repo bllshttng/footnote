@@ -259,6 +259,10 @@ if [[ -n "$top" ]] \
   && [[ "$(git -C "$top" rev-parse --absolute-git-dir 2>/dev/null)" == "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] \
   && command -v fno-agents >/dev/null 2>&1 \
   && command -v jq >/dev/null 2>&1; then
+  # Floor 1s: the probe's exit code carries the answer (124 reads as
+  # behind-unknown), and a budget of 0 would kill at t=0, racing a real
+  # verdict into a 124. A hang still dies at the bound.
+  HOOK_BUDGET_FLOOR_SECS=1
   answer="$(jq -n --arg c "$top" '{canonical:$c}' | with_timeout "$(hook_budget_secs)" fno-agents canonical-check)"
   checkout_rc=$?
   if (( checkout_rc == 124 )); then
