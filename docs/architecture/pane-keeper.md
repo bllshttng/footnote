@@ -45,6 +45,8 @@ At startup, before serving, the server scans `<state-root>/mux/panes/*.sock`. Se
 
 Re-adoption is not respawn. The proof below pins the SAME child pid across the server's death.
 
+**After a restart.** The adoption handshake runs under one 3 s wall-clock deadline, on both roads: the fresh-launch road retries a not-yet-bound socket for that long, and the adopt road treats a refused connect on an existing socket file as final, unlinking it at once instead of waiting. A stale socket from a power loss costs nothing; a wedged keeper costs at most 3 s, and the failure names the socket. When a keeper dies mid-handshake anyway, the spawn road's failure message names the exit status (`keeper exited: signal 9`), so the log never shows a bare `Invalid argument` again.
+
 ## The reaper contract
 
 `kill_all_panes` (the server shutdown sweep) skips `PtyShell::Keeper` panes. Every pane is keeper-hosted now, so a server death keeps them all to re-adoption. A hangup must never become a close. The deliberate paths are unchanged. `reap_pane` (explicit pane close) still sends Kill. The keeper SIGKILLs its own child, unlinks its socket, and exits. And `fno mux kill-server` measures before it signals. A live pane with no live keeper at its id is unkept. The kill refuses while one is live, and `--end-unkept` is the deliberate override. Surviving a hangup never becomes surviving a close.
