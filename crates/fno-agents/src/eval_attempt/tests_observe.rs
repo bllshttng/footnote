@@ -138,6 +138,32 @@ fn observe_claude_model_mismatch_is_substituted() {
     assert_eq!(out["substituted"], true);
     assert_eq!(out["lane_status"], "substituted");
     assert_eq!(out["observed_model"], "claude-sonnet-5");
+
+    // The `[1m]` context suffix is how the lane asks, never what the
+    // transcript stores: same family reads ok, a different family does not.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let body = format!(
+        "{}\n{}\n",
+        json!({"type": "user", "cwd": WD, "message": {"role": "user"}}),
+        claude_line(WD, "glm-5.3-flash", 10, 2, 0, 0),
+    );
+    plant_claude(
+        tmp.path(),
+        "-repo-wt",
+        &format!("{uuid}.jsonl"),
+        &body,
+        1_700_000_050,
+    );
+    let root = json!({"projects_root": tmp.path().to_str().unwrap()});
+    let lane =
+        json!({"name": "glm", "harness": "claude", "model": "glm-5.3-flash[1m]", "effort": "high"});
+    let out = observe(&observe_payload(lane, root.clone()));
+    assert_eq!(out["lane_status"], "ok", "out: {out}");
+    assert_eq!(out["observed_model"], "glm-5.3-flash");
+    let lane =
+        json!({"name": "glm", "harness": "claude", "model": "glm-5.3[1m]", "effort": "high"});
+    let out = observe(&observe_payload(lane, root));
+    assert_eq!(out["lane_status"], "substituted", "out: {out}");
 }
 
 fn observe_statuses_before_any_worker() {
