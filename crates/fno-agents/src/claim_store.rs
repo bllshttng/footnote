@@ -656,7 +656,12 @@ pub fn list_repo_space(prefix: &str, include_stale: bool) -> Result<Vec<ClaimRec
     )
 }
 
-pub fn force_release(key: &str, reason: &str, root: Option<&Path>) -> Result<Value, String> {
+pub fn force_release(
+    key: &str,
+    reason: &str,
+    root: Option<&Path>,
+    holding_recovery_lock: bool,
+) -> Result<Value, String> {
     if key.is_empty() {
         return Err("key must be non-empty".to_string());
     }
@@ -664,7 +669,7 @@ pub fn force_release(key: &str, reason: &str, root: Option<&Path>) -> Result<Val
         return Err("reason must be non-empty for force-release".to_string());
     }
     let path = claims::claim_path(key, root)?;
-    claims::with_recovery_lock(&path, || {
+    let archive = || {
         if !path.exists() {
             return Ok(json!({
                 "key": key,
@@ -686,7 +691,16 @@ pub fn force_release(key: &str, reason: &str, root: Option<&Path>) -> Result<Val
             "force_released": true,
             "previous_holder": previous_holder,
         }))
-    })
+    };
+    // `--holding-recovery-lock` mirrors Python `force_release_claim`'s
+    // `holding_recovery_lock`: the CALLER holds the per-key recovery mutex
+    // (the dispatch-guard reclaim re-verified inside it) and this archive must
+    // run under that same hold, not dead-wait on a lock its own caller owns.
+    if holding_recovery_lock {
+        archive()
+    } else {
+        claims::with_recovery_lock(&path, archive)
+    }
 }
 
 #[cfg(test)]

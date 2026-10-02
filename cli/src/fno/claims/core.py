@@ -2248,14 +2248,16 @@ def force_release_claim(
             root=root,
             holding_recovery_lock=holding_recovery_lock,
         )
-    del holding_recovery_lock
     if not key:
         raise ClaimValidationError("key must be non-empty")
     if not reason:
         raise ClaimValidationError("reason must be non-empty for force-release")
+    flags = ["--reason", reason]
+    if holding_recovery_lock:
+        flags.append("--holding-recovery-lock")
     payload = _native_claim(
         "force-release", key,
-        ["--reason", reason, *_native_root_flags(root or _configured_claim_root())],
+        [*_native_root_flags(root or _configured_claim_root()), *flags],
     )
     return ForceReleaseOutcome(
         path=Path(str(payload.get("path") or "")),

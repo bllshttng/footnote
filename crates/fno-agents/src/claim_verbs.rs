@@ -92,6 +92,7 @@ pub fn run_claim(args: &[String]) -> i32 {
 
     let mut holder: Option<String> = None;
     let mut opts = crate::claims::AcquireOpts::default();
+    let mut holding_recovery_lock = false;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut take = |name: &str| -> Option<String> {
@@ -132,6 +133,7 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(r) => opts.root = Some(PathBuf::from(r)),
                 None => return 2,
             },
+            "--holding-recovery-lock" => holding_recovery_lock = true,
             "--json" | "-J" => {} // output is always JSON; accepted for symmetry
             other => {
                 eprintln!("fno-agents: claim: unknown flag {other}");
@@ -262,7 +264,12 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim force-release requires --reason");
                 return 2;
             };
-            match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
+            match crate::claim_store::force_release(
+                &key,
+                reason,
+                opts.root.as_deref(),
+                holding_recovery_lock,
+            ) {
                 Ok(payload) => {
                     println!("{payload}");
                     0

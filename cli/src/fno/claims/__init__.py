@@ -48,6 +48,7 @@ from .core import (
     compare_and_rebind,
     force_release_claim,
     list_claims,
+    native_claims_root,
     refresh_claim,
     release_claim,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "compare_and_rebind",
     "force_release_claim",
     "list_claims",
+    "native_claims_root",
     "refresh_claim",
     "release_claim",
 ]

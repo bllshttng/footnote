@@ -145,6 +145,7 @@ def _reclaim_if_provably_dead(
         force_release_claim,
         sweep_verdict,
     )
+    from fno.agents.lock import _pid_is_alive
     from fno.claims.core import native_claims_root
     from fno.claims.io import claim_path, read_claim_file
     from fno.claims.verdict import claim_verdicts
@@ -187,8 +188,20 @@ def _reclaim_if_provably_dead(
             # `foreign-reservation` there would print force-release advice
             # against a reservation somebody is actively launching under.
             if native.get("state") == "live":
-                return None, _HOLDER_ALIVE
-            if native.get("bucket") == "offhost":
+                if (
+                    native.get("session_basis") != "registry-served-live"
+                    or _pid_is_alive(claim.pid)
+                ):
+                    return None, _HOLDER_ALIVE
+                # A registry-served live verdict names the DISPATCHER's session
+                # (the subprocess stamps its caller's session id), which
+                # outlives the holder by design. Only the spawn-cli shape may
+                # clear on the holder pid: an advance:<pid> reservation stays
+                # the only barrier its booting worker has, and its pid is dead
+                # by design too.
+                if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
+                    return None, "foreign-reservation"
+            elif native.get("bucket") == "offhost":
                 return None, "offhost"
             if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
                 return None, "foreign-reservation"

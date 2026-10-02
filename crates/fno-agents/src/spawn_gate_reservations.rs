@@ -99,7 +99,8 @@ pub(crate) fn release_redeemed_reservation(name: &str, root: Option<&Path>) {
         .get("reserved_reason")
         .and_then(Value::as_str)
         .unwrap_or("no reason recorded");
-    match crate::claim_store::force_release(&key, &format!("redeemed by spawn {name}"), root) {
+    match crate::claim_store::force_release(&key, &format!("redeemed by spawn {name}"), root, false)
+    {
         Ok(_) => {
             eprintln!("spawn-gate: redeemed reservation {key} (reserved by {by}: {why})");
         }

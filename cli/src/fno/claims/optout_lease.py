@@ -105,8 +105,8 @@ def _lease_dict(claim: Any) -> dict[str, Any]:
 
 def _claim_state(key: str) -> str:
     """Read the opt-out instrument, distinguishing unreadable from absent."""
-    root = native_claims_root(f"config-optout:{key}")
     try:
+        root = native_claims_root(f"config-optout:{key}")
         directory = claims_dir(root)
         try:
             directory.stat()
