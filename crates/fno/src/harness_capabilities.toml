@@ -1655,6 +1655,7 @@ measured_by = { reader = "session-id resume journey", version = "3.14.3", date =
 # no pane, no thread, no TUI. The id is footnote's own fno_id, minted before
 # the first record, so the binding is preassigned.
 [harness.footnote]
+mail_header_at = true
 permission_bypass = []
 efforts = []
 permission_modes = []

@@ -234,7 +234,7 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
         dispatch, "_registered_family1_state", lambda _entry: "working"
     )
 
-    result = dispatch.dispatch_send(
+    result = dispatch.dispatch_send(from_name="lead", 
         name="king-fno", message="ping", provider=None, cwd=tmp_path
     )
     assert result.delivery == "durable"

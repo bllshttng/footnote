@@ -81,7 +81,8 @@ def test_force_receipt_says_typed_with_the_pane_and_never_delivered(
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 0, result.output
@@ -102,7 +103,8 @@ def test_force_thread_uses_the_logical_thread_identity(_tmp_state, monkeypatch):
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 0, result.output
@@ -120,7 +122,8 @@ def test_force_thread_without_a_reference_names_the_logical_ref(
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code != 0
@@ -139,7 +142,8 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
     assert result.exit_code == 0, result.output
 
@@ -167,7 +171,8 @@ def test_force_writes_an_outbox_row_naming_the_pane(_tmp_state, monkeypatch):
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
     assert result.exit_code == 0, result.output
 
@@ -229,7 +234,8 @@ def test_force_writes_the_full_sender_session_on_the_row(_tmp_state, monkeypatch
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
     assert result.exit_code == 0, result.output
 
@@ -274,7 +280,8 @@ def test_force_accepts_every_non_terminal_status(_tmp_state, monkeypatch, status
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 0, (status, result.output, result.stderr)
@@ -296,7 +303,8 @@ def test_force_refuses_a_row_that_is_not_live(_tmp_state, monkeypatch, status):
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 1
@@ -392,7 +400,8 @@ def test_force_refuses_a_bus_only_recipient_up_front(_tmp_state, monkeypatch):
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 1

@@ -62,13 +62,15 @@ render() {
 
 out=$(render '{"mode":"wrap","body":"Fix the gate. Then ship.","from":"candor-short","to":"quill-short","to_session":"codex-session-2","id":"fmail-0badc0de1234"}')
 case "$out" in
-  '`@quill · fmail-0badc0de1234 ·'*'`'*) echo "ok: a mail_header_at=true recipient renders the mention form" ;;
+  '`@candor · fmail-0badc0de1234 · Fix the gate.'*'
+Fix the gate. Then ship.') echo "ok: a mail_header_at=true recipient renders the mention form" ;;
   *) echo "FAIL: expected the mention form for a true recipient, got: $out"; exit 1 ;;
 esac
 
 out=$(render '{"mode":"wrap","body":"Fix the gate. Then ship.","from":"candor-short","to":"quill-short","to_session":"codex-session-2","id":"fmail-0badc0de1234","form":"plain"}')
 case "$out" in
-  '`quill · fmail-0badc0de1234 ·'*'`'*) echo "ok: an explicit plain form overrides the row" ;;
+  '`candor · fmail-0badc0de1234 · Fix the gate.'*'
+Fix the gate. Then ship.') echo "ok: an explicit plain form overrides the row" ;;
   *) echo "FAIL: expected the plain form under an explicit override, got: $out"; exit 1 ;;
 esac
 

@@ -194,7 +194,7 @@ def test_deliver_live_codex_daemon_delivered_true(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey codex via PTY",
         provider=None,
@@ -243,7 +243,7 @@ def test_deliver_live_codex_daemon_delivered_false(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey queued",
         provider=None,
@@ -284,7 +284,7 @@ def test_deliver_live_codex_daemon_unreachable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey unreachable",
         provider=None,
@@ -357,7 +357,7 @@ def test_deliver_live_codex_thread_routes_through_switchboard_not_deliver(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-thread-agent",
         message="hey hosted thread",
         provider=None,
@@ -391,7 +391,7 @@ def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-thread-agent",
         message="hello anyone",
         provider=None,
@@ -486,7 +486,7 @@ def test_deliver_live_codex_daemon_rpc_error_still_durable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="error path",
         provider=None,
@@ -559,7 +559,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-peer",
         message="hi claude",
         provider=None,
@@ -626,7 +626,7 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-stream",
         message="hi via switchboard",
         provider=None,
@@ -1042,7 +1042,7 @@ def deliver(entry, body, from_name, mail=None, sender_entry=None, reason_out=Non
     )
 
 dispatch._deliver_live = deliver
-result = dispatch.dispatch_send(
+result = dispatch.dispatch_send(from_name="lead", 
     name="red",
     message="hello",
     provider=None,
@@ -1366,7 +1366,7 @@ def test_deliver_live_gemini_daemon_delivered_true(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="gemini-agent",
         message="hey gemini",
         provider=None,
@@ -1686,7 +1686,7 @@ def test_dispatch_send_stamp_valueerror_non_fatal(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="codex-agent", message="hello", provider=None, cwd=cwd
     )
     assert result.delivery == "durable"
@@ -1750,7 +1750,7 @@ def test_deliver_live_mcp_row_delivers_via_control_sock(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-mcp", message="fyi built", provider=None, cwd=cwd
     )
 
@@ -1795,7 +1795,7 @@ def test_deliver_live_mcp_channel_id_is_the_recipient_fallback(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-mcp-only", message="fyi built", provider=None, cwd=cwd
     )
 
@@ -1843,7 +1843,7 @@ def test_deliver_live_claude_no_live_lane_queues_durable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="offline-claude", message="hello?", provider=None, cwd=cwd
     )
     assert result.delivery != "hosted", "no live lane -> durable fallback"

@@ -783,7 +783,7 @@ def test_dispatch_send_lock_timeout(tmp_path: Path, monkeypatch) -> None:
     # A queued message is a durable SUCCESS: cmd_send's stdout contract is one
     # receipt and exit 0 for every durable outcome, and a nonzero exit would
     # make a retry-on-failure caller enqueue the same message twice.
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="hello",
         provider=None,
@@ -826,7 +826,7 @@ def test_dispatch_send_locks_canonical_registry_name(
     monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _record_lock)
     monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *_args, **_k: True)
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name=address,
         message="hello",
         provider=None,
@@ -885,7 +885,7 @@ def test_dispatch_send_refuses_address_owner_change_under_lock(
     )
 
     with pytest.raises(dispatch_mod.DispatchAskError, match="changed from 'red' to 'blue'"):
-        dispatch_mod.dispatch_send(
+        dispatch_mod.dispatch_send(from_name="lead", 
             name="abcd1234",
             message="hello",
             provider=None,
@@ -949,7 +949,7 @@ def test_dispatch_send_refuses_same_name_identity_change_under_lock(
     )
 
     with pytest.raises(dispatch_mod.DispatchAskError, match="recipient identity changed"):
-        dispatch_mod.dispatch_send(
+        dispatch_mod.dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -1032,7 +1032,7 @@ def test_dispatch_send_refuses_same_name_route_change_under_lock(
     )
 
     with pytest.raises(dispatch_mod.DispatchAskError, match="recipient identity changed"):
-        dispatch_mod.dispatch_send(
+        dispatch_mod.dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -1120,7 +1120,7 @@ def test_dispatch_send_durable_queued_output(tmp_path: Path, monkeypatch) -> Non
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="FYI done",
         provider=None,
@@ -1153,7 +1153,7 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="FYI done",
         provider=None,
@@ -1182,7 +1182,7 @@ def test_dispatch_send_stale_orphaned_status_uses_live_family1(
     )
     monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *a, **k: True)
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="ping", provider=None, cwd=tmp_path
     )
 
@@ -1207,7 +1207,7 @@ def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
         dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a) or True
     )
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="ping", provider=None, cwd=tmp_path
     )
 
@@ -1234,7 +1234,7 @@ def test_dispatch_send_idle_claude_thread_tries_the_roster_lane(
         dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a) or True
     )
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="ping", provider=None, cwd=tmp_path
     )
 
@@ -1263,7 +1263,7 @@ def test_dispatch_send_idle_claude_thread_roster_miss_queues_durable(
 
     monkeypatch.setattr(dispatch_mod, "_deliver_live", _roster_miss)
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="ping", provider=None, cwd=tmp_path
     )
 
@@ -1322,7 +1322,7 @@ def test_dispatch_send_unknown_family1_attempts_confirmable_transport(
         dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a) or True
     )
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="ping", provider=None, cwd=tmp_path
     )
 
@@ -1393,7 +1393,7 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message=body,
         provider=None,
@@ -1426,7 +1426,7 @@ def test_dispatch_send_rejects_over_1mib_body(tmp_path: Path, monkeypatch) -> No
     cwd = tmp_path / "work"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(
+        dispatch_send(from_name="lead", 
             name="red",
             message=body,
             provider=None,
@@ -1468,7 +1468,7 @@ def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) 
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="important message",
         provider=None,
@@ -1507,7 +1507,7 @@ def test_dispatch_send_unknown_agent(tmp_path: Path, monkeypatch) -> None:
     cwd = tmp_path / "work"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(
+        dispatch_send(from_name="lead", 
             name="blue",
             message="hi",
             provider=None,
@@ -1558,7 +1558,7 @@ def test_dispatch_send_codex_peer_queued_durable(tmp_path: Path, monkeypatch) ->
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey codex",
         provider=None,
@@ -1600,7 +1600,7 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    dispatch_send(
+    dispatch_send(from_name="lead", 
         name="red",
         message="test event emission",
         provider=None,
@@ -1682,7 +1682,7 @@ def test_dispatch_send_done_event_carries_live_miss_reason(tmp_path: Path, monke
         dispatch_mod.events, "emit", lambda kind, **data: captured.append((kind, data))
     )
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="hello", provider=None, cwd=tmp_path
     )
     assert result.delivery == "durable"
@@ -1694,7 +1694,7 @@ def test_dispatch_send_done_event_carries_live_miss_reason(tmp_path: Path, monke
 
     captured.clear()
     monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_a, **_k: True)
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red", message="hello again", provider=None, cwd=tmp_path
     )
     assert result.delivery == "hosted"
@@ -1729,7 +1729,7 @@ def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
         lambda kind, **data: captured.append((kind, data)),
     )
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="red",
         message="hello",
         provider=None,
@@ -1787,7 +1787,7 @@ def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
     fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
     started = time.monotonic()
     try:
-        result = dispatch_mod.dispatch_send(
+        result = dispatch_mod.dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -1858,7 +1858,7 @@ def test_dispatch_send_does_not_stamp_recipient_restamped_during_delivery(
         lambda kind, **data: captured.append((kind, data)),
     )
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="victim",
         message="hello",
         provider=None,
@@ -1921,7 +1921,7 @@ def test_dispatch_send_queues_to_selected_session_when_live_miss_restamps(
 
     monkeypatch.setattr(dispatch_mod, "_deliver_live", restamp_then_miss)
 
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name=original_id,
         message="secret for A",
         provider=None,
@@ -1966,7 +1966,7 @@ def test_dispatch_send_refuses_durable_fallback_without_full_session_id(
     )
 
     with pytest.raises(dispatch_mod.DispatchAskError, match="no full harness session id") as exc:
-        dispatch_mod.dispatch_send(
+        dispatch_mod.dispatch_send(from_name="lead", 
             name="legacy",
             message="do not misaddress",
             provider=None,
@@ -2016,7 +2016,7 @@ def test_dispatch_send_envelope_write_oserror_exit12(tmp_path: Path, monkeypatch
     cwd = tmp_path / "work"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(name="red", message="hello", provider=None, cwd=cwd)
+        dispatch_send(from_name="lead", name="red", message="hello", provider=None, cwd=cwd)
 
     assert exc_info.value.exit_code == 12, f"Expected exit 12, got {exc_info.value.exit_code}"
     assert "envelope-write" in str(exc_info.value) or "envelope write" in str(exc_info.value).lower()
@@ -2050,7 +2050,7 @@ def test_dispatch_send_bus_lock_timeout_is_explicit_exit12(
     cwd = tmp_path / "work"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(name="red", message="hello", provider=None, cwd=cwd)
+        dispatch_send(from_name="lead", name="red", message="hello", provider=None, cwd=cwd)
 
     text = str(exc_info.value)
     assert exc_info.value.exit_code == 12
@@ -2122,7 +2122,7 @@ def test_dispatch_send_alias_lock_contention_falls_back_before_delivery(
     with open(lock_path, "w") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
         started = time.monotonic()
-        result = dispatch_mod.dispatch_send(
+        result = dispatch_mod.dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -2159,7 +2159,7 @@ def test_dispatch_send_rejects_nonterminating_registry_stamp_timeout(
     )
 
     with pytest.raises(ValueError, match="finite and non-negative"):
-        dispatch_mod.dispatch_send(
+        dispatch_mod.dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -2191,7 +2191,7 @@ def test_dispatch_send_rejects_nonterminating_agent_lock_timeout(
     )
 
     with pytest.raises(ValueError, match="finite and non-negative"):
-        dispatch_mod.dispatch_send(
+        dispatch_mod.dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -2229,7 +2229,7 @@ def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypa
     cwd = tmp_path / "work"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(name="red", message="hello", provider=None, cwd=cwd)
+        dispatch_send(from_name="lead", name="red", message="hello", provider=None, cwd=cwd)
 
     assert exc_info.value.exit_code == 12
 
@@ -2600,7 +2600,7 @@ def test_dispatch_send_durable_stamps_live_drain_owner(tmp_path: Path, monkeypat
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(name="red", message="FYI done", provider=None, cwd=cwd)
+    result = dispatch_send(from_name="lead", name="red", message="FYI done", provider=None, cwd=cwd)
 
     assert result.delivery == "durable"
     envs = [m for m in iter_messages(warn=False) if m.id == result.msg_id]
@@ -2641,7 +2641,7 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
     # is that the grace acquire succeeds and the recipient is verified under
     # the lock before anything is written.
     _fail_first_lock_acquire(monkeypatch)
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="hello",
         provider=None,
@@ -2821,7 +2821,7 @@ def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
 
     _fail_first_lock_acquire(monkeypatch)
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(
+        dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -2875,7 +2875,7 @@ def test_dispatch_send_lock_timeout_refuses_a_changed_recipient(
 
     _fail_first_lock_acquire(monkeypatch, on_first=_reclaim)
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(
+        dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider=None,
@@ -2961,7 +2961,7 @@ def test_dispatch_send_lock_timeout_refuses_provider_mismatch_before_queuing(
 
     _fail_first_lock_acquire(monkeypatch)
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(
+        dispatch_send(from_name="lead", 
             name="red",
             message="hello",
             provider="codex",
@@ -2998,7 +2998,7 @@ def test_dispatch_send_lock_timeout_names_the_holder(
     assert "pid" in stamped
 
     _fail_first_lock_acquire(monkeypatch)
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="hello",
         provider=None,
@@ -3091,7 +3091,7 @@ def test_dispatch_send_lock_timeout_refuses_when_lock_never_frees(
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
         try:
             with pytest.raises(DispatchAskError) as exc_info:
-                dispatch_send(
+                dispatch_send(from_name="lead", 
                     name="red",
                     message="hello",
                     provider=None,
@@ -3143,7 +3143,7 @@ def test_dispatch_send_lock_timeout_sees_a_reclaim_committed_under_the_lock(
         assert ready.exists(), "contender did not take the lock"
 
         with pytest.raises(DispatchAskError) as exc_info:
-            dispatch_send(
+            dispatch_send(from_name="lead", 
                 name="red",
                 message="hello",
                 provider=None,
@@ -3232,7 +3232,7 @@ def test_dispatch_send_lock_timeout_books_the_queue_as_a_success(
     assert before[0].last_message_at is None
 
     _fail_first_lock_acquire(monkeypatch)
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red",
         message="hello",
         provider=None,
@@ -3276,7 +3276,7 @@ def test_dispatch_send_lock_timeout_books_an_alias_addressed_send_too(
     from fno.agents.registry import load_registry
 
     _fail_first_lock_acquire(monkeypatch)
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="abcd1234",  # the short-id, a first-class address form
         message="hello",
         provider=None,
@@ -3357,7 +3357,7 @@ def test_lock_timeout_queue_keeps_a_bus_only_row_on_its_designed_lane(
     _fail_first_lock_acquire(monkeypatch)
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="red", message="hello", provider=None, cwd=cwd, lock_timeout=0.1
     )
 

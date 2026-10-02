@@ -87,7 +87,7 @@ def _graph_details(graph_path):
 def _hosted_dispatch(monkeypatch, before_transport=None):
     calls = []
 
-    def dispatch_send(**kwargs):
+    def dispatch_send(from_name="lead", **kwargs):
         if before_transport is not None:
             before_transport()
         calls.append(kwargs)
