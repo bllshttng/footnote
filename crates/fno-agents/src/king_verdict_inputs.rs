@@ -21,17 +21,6 @@ const WINDOW_INTERVALS: i64 = 3;
 /// The default compaction ceiling (`config.king.compaction_ceiling`).
 pub(crate) const DEFAULT_COMPACTION_CEILING: i64 = 3;
 
-/// The registry statuses Python reads as terminal (`registry.TERMINAL_STATUSES`).
-fn row_status_word(status: &AgentStatus) -> Option<&'static str> {
-    match status {
-        AgentStatus::Exited => Some("exited"),
-        AgentStatus::Orphaned => Some("orphaned"),
-        AgentStatus::Failed => Some("failed"),
-        AgentStatus::PermanentDead => Some("permanent_dead"),
-        _ => None,
-    }
-}
-
 /// A sortable instant: the `Z` and `+00:00` UTC spellings must compare equal,
 /// so a Z-suffixed manifest date and a +00:00 graph date cannot misorder at
 /// the same-second crowning boundary (Python `_ts_key`, scope.py).
@@ -128,8 +117,8 @@ pub(crate) struct VerdictInputs {
 
 /// The caller's canonical crown scope: explicit `--scope` wins (canonicalized,
 /// refused when it names nothing); else the live registry row for this
-/// session's own identity, requiring a stamped, non-terminal crown (the
-/// retired Python `resolve_scope`, whose wording is matched). Shared by the
+/// session's own identity, requiring a stamped crown on a row the
+/// `row_verdict` door has not finished. Shared by the
 /// verdict, checkin and history verbs: the Rust reader tolerates unknown
 /// keys, so a registry row carrying a field this binary predates no longer
 /// blinds the crown resolution the way the strict Python reader did.
@@ -161,9 +150,14 @@ pub(crate) fn resolve_scope(
             "cannot resolve the caller's crown: no registry row names session {session}"
         ));
     };
-    if let Some(word) = row_status_word(&row.status) {
+    if matches!(row.status, AgentStatus::Failed) {
         return Err(format!(
-            "the registry row for {session} is {word}, a terminal state"
+            "the registry row for {session} is failed, a terminal state"
+        ));
+    }
+    if let crate::row_verdict::RowVerdict::Finished(why) = crate::row_verdict::fno_verdict(row) {
+        return Err(format!(
+            "the registry row for {session} is finished ({why}), a terminal state"
         ));
     }
     let crown = row
@@ -1086,6 +1080,36 @@ mod tests {
         with_crowned_identity(|| {
             let scope = resolve_scope(None, &path).expect("unknown key must not blind the read");
             assert_eq!(scope, crate::territory::canonical_scope("probe fleet"));
+        });
+        // An orphaned row with a live pid is not finished: the row_verdict
+        // door decides, not a copied terminal-status list.
+        let live = write_registry(
+            &dir,
+            serde_json::json!([crowned_row(serde_json::json!({
+                "status": "orphaned",
+                "pid": std::process::id(),
+            }))]),
+        );
+        with_crowned_identity(|| {
+            let scope =
+                resolve_scope(None, &live).expect("an orphaned row with a live pid resolves");
+            assert_eq!(scope, crate::territory::canonical_scope("probe fleet"));
+        });
+        // The same orphaned shape with a reaped pid is finished.
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        let dead = write_registry(
+            &dir,
+            serde_json::json!([crowned_row(serde_json::json!({
+                "status": "orphaned",
+                "pid": gone_pid,
+            }))]),
+        );
+        with_crowned_identity(|| {
+            let err = resolve_scope(None, &dead)
+                .expect_err("an orphaned row with a gone pid is finished");
+            assert!(err.contains("terminal"), "{err}");
         });
         fs::remove_dir_all(&dir).ok();
     }
