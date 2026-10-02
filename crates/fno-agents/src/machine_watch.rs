@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(verdict, "unreadable", "no baseline, no process arm");
         let (verdict, reason) = decide(&s, 0.9, 10.0, Some(1200));
         assert_eq!(verdict, "runaway");
-        assert!(reason.contains("baseline"), "{reason}");
+        assert!(reason.contains("twice the usual 1200"), "{reason}");
         let now = Instant::now();
         let window: Vec<(Instant, u64)> = (0..3)
             .map(|i| (now - Duration::from_secs(300 * (i as u64 + 1)), 1000 + i))
