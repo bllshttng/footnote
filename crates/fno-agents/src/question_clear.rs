@@ -213,7 +213,7 @@ mod tests {
             .unwrap();
         for path in [&req.journal_path, &req.decisions_path] {
             let store = crate::event_store::store_path(path);
-            let mut conn = Connection::open(&store).unwrap();
+            let conn = Connection::open(&store).unwrap();
             conn.execute_batch(
                 "CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL);
                  INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events;",
