@@ -308,7 +308,7 @@ fn on_path(name: &str) -> Option<PathBuf> {
 
 /// One native `fno-agents source-pin` invocation; None = cannot answer.
 fn source_pin_call(sub: &str, extra: &[String], input: Option<&str>) -> Option<Value> {
-    let mut args = vec![sub.to_string()];
+    let mut args = vec!["source-pin".to_string(), sub.to_string()];
     args.extend(extra.iter().cloned());
     let Ok((code, out, err)) =
         run_bounded(&fno_agents_bin(), &args, Duration::from_secs(30), input)
@@ -377,7 +377,7 @@ fn discover_source(override_path: Option<&Path>) -> Result<PathBuf, String> {
 }
 
 /// Record both pins natively (companion + legacy path file). A failed record
-/// is a failed step (absorbs x-6f4c); the caller owns the verdict.
+/// is a failed step, never a warning; the caller owns the verdict.
 fn record_source_pin(pin: &Value) -> Result<(), String> {
     if pin.get("path").and_then(Value::as_str).is_none() {
         return Ok(());
@@ -1488,7 +1488,7 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
                 eprintln!("fno doctor update: WARNING: marker write failed: {e}");
             }
         }
-        // A failed pin record is a failed step (absorbs x-6f4c).
+        // A failed pin record is a failed step, never a warning.
         if let Err(e) = record_source_pin(&pin) {
             eprintln!("fno doctor update: ERROR: {e}");
             failed.push("source-pin record".into());
