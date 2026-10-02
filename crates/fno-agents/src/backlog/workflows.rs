@@ -146,7 +146,7 @@ fn parse_reopen_args(tail: &[String]) -> (Option<String>, Option<String>, bool, 
 
 /// LIVE = not terminal: no completion, no deferral, and a supersession that
 /// is either absent or unverified (the _is_live twin).
-fn is_live(entry: &Value) -> bool {
+pub(crate) fn is_live(entry: &Value) -> bool {
     if truthy_field(entry, "completed_at") || truthy_field(entry, "deferred_at") {
         return false;
     }
@@ -165,7 +165,7 @@ fn truthy_field(row: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn text_at<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn text_at<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
 }
 
@@ -193,7 +193,10 @@ fn live_child_ids(entries: &[Value], owner_id: &str) -> Vec<String> {
 
 /// Re-parent each live membership child of `dead_id` onto the nearest live
 /// ancestor (the _reparent_live_children twin). Returns the moved pairs.
-fn reparent_live_children(entries: &mut [Value], dead_id: &str) -> Vec<(String, Option<String>)> {
+pub(crate) fn reparent_live_children(
+    entries: &mut [Value],
+    dead_id: &str,
+) -> Vec<(String, Option<String>)> {
     let kids = live_child_ids(entries, dead_id);
     if kids.is_empty() {
         return Vec::new();
@@ -243,7 +246,7 @@ fn reparent_live_children(entries: &mut [Value], dead_id: &str) -> Vec<(String, 
     moved
 }
 
-fn reparent_receipt(pairs: &[(String, Option<String>)]) -> String {
+pub(crate) fn reparent_receipt(pairs: &[(String, Option<String>)]) -> String {
     let listed: Vec<String> = pairs
         .iter()
         .map(|(cid, p)| format!("{cid} -> {}", p.clone().unwrap_or_else(|| "(none)".into())))
@@ -266,7 +269,7 @@ fn parse_iso(value: Option<&Value>) -> Option<chrono::DateTime<chrono::FixedOffs
 /// Every child closed, and at least one really shipped (the
 /// children_all_closed twin). A child superseded BY this parent never counts
 /// closed against it.
-fn children_all_closed(parent: &Value, kids: &[&Value]) -> bool {
+pub(crate) fn children_all_closed(parent: &Value, kids: &[&Value]) -> bool {
     let pid = text_at(parent, "id").unwrap_or("");
     if kids.is_empty() {
         return false;
@@ -284,7 +287,7 @@ fn children_all_closed(parent: &Value, kids: &[&Value]) -> bool {
 
 /// True when a deliberate reopen postdates every child's close (the
 /// _reopen_outranks_child_closes twin). Ambiguity favours the human.
-fn reopen_outranks_child_closes(parent: &Value, kids: &[&Value]) -> bool {
+pub(crate) fn reopen_outranks_child_closes(parent: &Value, kids: &[&Value]) -> bool {
     let reopened = match parse_iso(parent.get("reopened_at")) {
         Some(t) => t,
         None => {
@@ -300,6 +303,23 @@ fn reopen_outranks_child_closes(parent: &Value, kids: &[&Value]) -> bool {
         }
     }
     true
+}
+
+/// True when a deliberate reopen postdates the merge being closed on (the
+/// _reopen_outranks_merge twin). Ambiguity favours the human, both ways: an
+/// unreadable reopen protects, and so does an unreadable merge stamp.
+pub(crate) fn reopen_outranks_merge(node: &Value, merged_at: &str) -> bool {
+    let reopened = match parse_iso(node.get("reopened_at")) {
+        Some(t) => t,
+        None => {
+            let raw = text_at(node, "reopened_at").unwrap_or("");
+            return !raw.trim().is_empty();
+        }
+    };
+    match parse_iso(Some(&Value::String(merged_at.to_string()))) {
+        Some(merged) => reopened > merged,
+        None => true,
+    }
 }
 
 fn clear_reopen_warning_if_child_matches(parent: &mut Value, child_id: Option<&str>) {
@@ -319,7 +339,7 @@ fn clear_reopen_warning_if_child_matches(parent: &mut Value, child_id: Option<&s
     }
 }
 
-fn auto_closed_note(entry: &Value) -> String {
+pub(crate) fn auto_closed_note(entry: &Value) -> String {
     let has_plan = truthy_field(entry, "plan_path")
         || entry
             .get("plan_path")
@@ -334,7 +354,7 @@ fn auto_closed_note(entry: &Value) -> String {
 
 /// Set the fields that mark a row done (the _apply_completion_fields twin).
 /// `merge_status` is stamped only when a caller resolved MERGED from gh.
-fn apply_completion_fields(node: &mut Value, merge_status: bool) {
+pub(crate) fn apply_completion_fields(node: &mut Value, merge_status: bool) {
     let obj = node.as_object_mut().expect("row is an object");
     for key in [
         "locked_by",
