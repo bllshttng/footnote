@@ -301,7 +301,11 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
 }
 
 /// One participant row, inserted once per key with its registry join.
-fn note(participants: &mut BTreeMap<String, Value>, key: &str, row: Option<&Value>) -> &mut Value {
+fn note<'a>(
+    participants: &'a mut BTreeMap<String, Value>,
+    key: &str,
+    row: Option<&Value>,
+) -> &'a mut Value {
     participants.entry(key.to_string()).or_insert_with(|| {
         let reg = row;
         json!({
