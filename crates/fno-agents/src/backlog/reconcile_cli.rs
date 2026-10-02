@@ -41,6 +41,41 @@ use crate::graph_store::{self, read_rows, settle_blocked_by_edges};
 
 const USAGE: &str = "usage: fno-agents backlog reconcile [--dry-run|-N] [--node ID] [--json|-J] [--pr-number N] [--repo owner/repo]";
 
+/// The door owns the help now: the Python parser that rendered the option
+/// surface is deleted with its verb. The epilog's reopen pointer survives
+/// verbatim.
+const HELP: &str = "\
+fno-agents backlog reconcile
+Close open backlog nodes whose PR has merged outside the ship gate.
+
+The completion ritual (stamp plan -> mark node done -> capture follow-ups)
+runs automatically only through /target's ship gate or
+scripts/lib/pr-merge.sh. A PR merged any other way (manual GitHub merge,
+bare gh pr merge) leaves the node open. This verb detects that drift and
+closes it mechanically: mark done, best-effort stamp the plan, and drop a
+retro sentinel so a later session captures follow-ups. It never
+auto-creates inbox lines or backlog nodes, never auto-resumes work, and
+never clobbers a node that is already done.
+
+Side effect: also runs claim GC (reap_dead_claims), archiving dead
+lockfiles under the claims store's .expired/. --dry-run propagates to it
+(no archiving). This fires on every throttled auto-reconcile, including
+the SessionStart hook - not just a manual invocation.
+
+Options:
+  --dry-run, -N    Report candidates only; mutate nothing (graph stays byte-identical).
+  --node ID        Restrict the scan to a single node id (ab-XXXXXXXX).
+  --json, -J       Emit structured JSON instead of a human summary.
+  --pr-number N    Bind every node named in this merged PR's exact closure line (Fixes, or the retired Backlog-Closure: spelling) to the PR (filling an absent primary or appending to additional_prs) BEFORE the drift scan below runs, so a PR naming several nodes closes all of them in this one invocation rather than only the one node stamped at creation. All-or-nothing: an unknown, malformed, or cross-repo claim binds nothing.
+  --repo OWNER/REPO  owner/repo scoping --pr-number's gh query and cross-repo claim check. Resolved from the checkout's origin remote when omitted.
+  -h, --help       Show this message and exit.
+
+Paired verb: `fno backlog reopen <id> --reason ...` reverses a close this
+made. It refuses on a merged PR, which is what closed the node here, so an
+intentional correction of an auto-close needs --force. Correction is
+reopen, a verb the native binary serves after the python leg retired.
+";
+
 struct Args {
     dry_run: bool,
     node: Option<String>,
@@ -86,6 +121,10 @@ fn parse_args(tail: &[String]) -> Option<Args> {
 /// The door entry: resolve the graph path, arm the single-flight gate, run
 /// one pass.
 pub(crate) fn run(tail: &[String]) -> i32 {
+    if tail.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{HELP}");
+        return 0;
+    }
     let Some(args) = parse_args(tail) else {
         eprintln!("{USAGE}");
         return 2;
@@ -368,6 +407,14 @@ pub(crate) fn once_at(args: &Args, graph_path: &Path) -> i32 {
     // from its graph node and mark the rest explicitly, before the report.
     let ledger_harvest = harvest_leg(&post_entries, args.dry_run, args.json_out);
 
+    // Persisted-vs-derived status drift, full sweep only (the `reclaimed`
+    // roll the goldens pin).
+    let reclaimed = if full_sweep {
+        status_drift(&entries)
+    } else {
+        Vec::new()
+    };
+
     let supersession_unverified = close
         .as_ref()
         .map(|c| c.supersession_unverified.clone())
@@ -392,6 +439,7 @@ pub(crate) fn once_at(args: &Args, graph_path: &Path) -> i32 {
             claim_reap,
             ledger_harvest,
             epics_waiting,
+            reclaimed,
         },
         full_sweep,
     );
@@ -1587,6 +1635,7 @@ struct LegOutcomes {
     claim_reap: Value,
     ledger_harvest: Value,
     epics_waiting: Vec<Value>,
+    reclaimed: Vec<(String, String, String)>,
 }
 
 /// W4 causal links: a merged "Revert ..." PR referencing a PR carried by a
@@ -2057,7 +2106,9 @@ fn report_leg(
             "reparented": reparented.iter().map(|(nid, p)| json!({
                 "node_id": nid, "parent": p,
             })).collect::<Vec<_>>(),
-            "reclaimed": [],
+            "reclaimed": outcomes.reclaimed.iter().map(|(nid, before, after)| json!({
+                "node_id": nid, "from": before, "to": after,
+            })).collect::<Vec<_>>(),
             "contained_closed": contained_closed,
             "carried_stamped": carried_stamped,
             "contained_errors": close.map(|c| c.contained_errors.clone()).unwrap_or_default(),
@@ -2103,6 +2154,7 @@ fn report_leg(
         && promise_warnings.is_empty()
         && sweep.owed_failures.is_empty()
         && closure_claims.is_empty()
+        && outcomes.reclaimed.is_empty()
         && blocked_by_settlement.is_empty();
     if in_sync {
         println!("No merged-PR drift found. Backlog is in sync.");
@@ -2232,6 +2284,9 @@ fn human_lines(
         if !reparented.is_empty() {
             out.push(reparent_receipt_line(reparented, "Would "));
         }
+        for (node_id, before, after) in &outcomes.reclaimed {
+            out.push(format!("Would reclaim {node_id}: {before} -> {after}"));
+        }
     } else {
         // Suppressed ONLY on a heal-only sweep (no drift candidates at
         // all), where a bare "Closed 0 node(s):" sits above a line saying
@@ -2300,6 +2355,9 @@ fn human_lines(
         if !reparented.is_empty() {
             // Bare-lead shape: groom's _reconcile_leg_outcome parses this line.
             out.push(reparent_receipt_line(reparented, ""));
+        }
+        for (node_id, before, after) in &outcomes.reclaimed {
+            out.push(format!("reclaimed {node_id}: {before} -> {after}"));
         }
     }
     if !blocked_by_settlement.is_empty() {
@@ -2388,4 +2446,183 @@ fn reparent_receipt_line(pairs: &[(String, Option<String>)], lead: &str) -> Stri
         pairs.len(),
         listed.join(", ")
     )
+}
+
+/// The persisted-vs-derived status drift (the _status_drift twin): the
+/// full sweep's `reclaimed` roll. A blocked row whose blockers are gone
+/// derives unblocked, and the persisted copy only says blocked - that
+/// gap is what this leg names. Read-only.
+fn status_drift(entries: &[Value]) -> Vec<(String, String, String)> {
+    let blocked_truthy = |e: &Value| {
+        e.get("blocked_by")
+            .map(|v| {
+                v.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+                    || v.as_str().map(|s| !s.is_empty()).unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+    let mut persisted: HashMap<String, String> = HashMap::new();
+    for e in entries {
+        let (Some(id), Some(status)) = (
+            e.get("id").and_then(Value::as_str),
+            e.get("status").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if status == "blocked" && blocked_truthy(e) {
+            continue;
+        }
+        persisted.insert(id.to_string(), status.to_string());
+    }
+    let mut derived_rows = entries.to_vec();
+    crate::graph_store::recompute_statuses(&mut derived_rows);
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for e in &derived_rows {
+        let (Some(id), Some(status)) = (
+            e.get("id").and_then(Value::as_str),
+            e.get("status").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if let Some(before) = persisted.get(id) {
+            if before != status {
+                out.push((id.to_string(), before.clone(), status.to_string()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tail(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_reads_the_documented_surface_and_refuses_strangers() {
+        let a = parse_args(&tail(&["--dry-run", "--node", "ab-1234abcd", "-J"])).expect("parses");
+        assert!(a.dry_run && a.json_out);
+        assert_eq!(a.node.as_deref(), Some("ab-1234abcd"));
+        let a = parse_args(&tail(&["--pr-number", "77", "--repo", "o/r"])).expect("parses");
+        assert_eq!(a.pr_number, Some(77));
+        assert_eq!(a.repo.as_deref(), Some("o/r"));
+        assert!(parse_args(&tail(&["--bogus"])).is_none());
+        assert!(parse_args(&tail(&["--pr-number", "notanint"])).is_none());
+        assert!(
+            parse_args(&["--help".to_string()]).is_none(),
+            "help is the door's arm"
+        );
+    }
+
+    #[test]
+    fn scan_scope_node_wins_and_a_bare_run_sweeps_the_graph() {
+        let entries = Vec::new();
+        let scope = scan_scope(
+            &entries,
+            Some("ab-1111aaaa"),
+            Some(7),
+            None,
+            &[],
+            None,
+            true,
+            &mut Vec::new(),
+        )
+        .expect("node scope");
+        assert_eq!(scope.len(), 1);
+        assert!(scope.contains("ab-1111aaaa"));
+        assert!(scan_scope(&entries, None, None, None, &[], None, true, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn scan_scope_pr_number_scopes_to_claims_and_same_repo_refs() {
+        let entries = vec![
+            json!({"id": "ab-claim01", "status": "in_review"}),
+            json!({"id": "ab-samerep", "status": "in_review", "pr_number": 7,
+                   "pr_url": "https://github.com/o/r/pull/7"}),
+            json!({"id": "ab-otherre", "status": "in_review", "pr_number": 7,
+                   "pr_url": "https://github.com/other/repo/pull/7"}),
+        ];
+        let scope = scan_scope(
+            &entries,
+            None,
+            Some(7),
+            Some("https://github.com/o/r/pull/7"),
+            &["ab-claim01".to_string()],
+            Some("o/r"),
+            true,
+            &mut Vec::new(),
+        )
+        .expect("pr scope");
+        assert!(scope.contains("ab-claim01"));
+        assert!(scope.contains("ab-samerep"));
+        assert!(
+            !scope.contains("ab-otherre"),
+            "a cross-repo same-number ref never joins the scope"
+        );
+    }
+
+    #[test]
+    fn status_drift_names_only_the_rows_where_persisted_and_derived_diverge() {
+        let entries = vec![
+            // A stale in_progress row whose PR makes the ladder say in_review.
+            json!({"id": "ab-drift01", "status": "in_progress", "pr_number": 9,
+                   "pr_url": "https://github.com/o/r/pull/9"}),
+            // Already consistent: no row.
+            json!({"id": "ab-fine01", "status": "idea"}),
+            // Blocked with live blockers reads blocked both ways: no row.
+            json!({"id": "ab-blk001", "status": "blocked", "blocked_by": ["ab-fine01"]}),
+        ];
+        let drift = status_drift(&entries);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0].0, "ab-drift01");
+        assert_eq!(drift[0].1, "in_progress");
+        assert_eq!(drift[0].2, "in_review");
+    }
+
+    #[test]
+    fn summarize_promise_held_splits_the_roll_by_outcome() {
+        let held = vec![
+            (
+                "ab-a".to_string(),
+                "short one ship".to_string(),
+                "promise_unmet".to_string(),
+            ),
+            (
+                "ab-b".to_string(),
+                "gh timed out".to_string(),
+                "promise_unknown".to_string(),
+            ),
+            (
+                "ab-c".to_string(),
+                "reopened after PR #1 merged: fix forward".to_string(),
+                "reopen_held".to_string(),
+            ),
+        ];
+        let text = summarize_promise_held(&held, false);
+        assert!(text.contains("Held 1 node(s) open (merged PR, unmet plan promise):"));
+        assert!(
+            text.contains("Held 1 node(s) open (ship count unconfirmed, retryable read failure):")
+        );
+        assert!(text.contains("Held 1 node(s) open (deliberate reopen postdates the merge):"));
+        assert!(text.contains("  ab-a: short one ship"));
+        let dry = summarize_promise_held(&held, true);
+        assert!(dry.starts_with("Holding 1 node(s) open"));
+    }
+
+    #[test]
+    fn reparent_receipt_line_leads_read_would_and_past() {
+        let pairs = vec![("x-kid".to_string(), None)];
+        assert_eq!(
+            reparent_receipt_line(&pairs, "Would "),
+            "Would re-parent 1 stranded child(ren) under terminal parents: x-kid -> (none)"
+        );
+        assert_eq!(
+            reparent_receipt_line(&pairs, ""),
+            "re-parented 1 stranded child(ren) under terminal parents: x-kid -> (none)"
+        );
+    }
 }
