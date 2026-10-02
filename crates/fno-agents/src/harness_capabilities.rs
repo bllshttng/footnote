@@ -36,6 +36,13 @@ const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 /// Python validator in cli/src/fno/agents/harness_map.py so the two runtimes
 /// cannot disagree about which contracts are legal.
 const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
+
+/// The fno hook jobs a harness row must declare beside its pane mechanics.
+/// The loop job is NOT one of them: `loop_participation` and
+/// `loop_extension` already declare it, and the wire-gate below derives the
+/// loop's state from that pair instead of a second field. Wave 2 adds
+/// `session_state` after the session-state push lands its remaining waves.
+pub const HOOK_JOBS: [&str; 2] = ["lead_guard", "lead_reinject"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
 
@@ -203,6 +210,20 @@ pub struct JourneyDecl {
     pub reader: String,
 }
 
+/// One fno hook job's declared state on a harness row. `supported` names the
+/// repo-relative files that implement it in `via`; `impossible` and
+/// `missing` carry the reason instead.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookJob {
+    /// "supported" | "impossible" | "missing"
+    pub state: String,
+    #[serde(default)]
+    pub via: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessCapabilities {
@@ -304,6 +325,13 @@ pub struct HarnessCapabilities {
     /// use the identity-pinned pane transaction.
     #[serde(default)]
     pub provider_actions: BTreeMap<String, ProviderAction>,
+    /// Which fno hook jobs this harness runs, keyed by [`HOOK_JOBS`]. The
+    /// loop job is derived from loop_participation/loop_extension, not
+    /// declared here. Every row declares every job; validate_row refuses a
+    /// `missing` on a wired row, so a gap is a load failure, never an
+    /// audit-only fact.
+    #[serde(default)]
+    pub hooks: BTreeMap<String, HookJob>,
     /// The pane-to-thread lifecycle move (`fno agents resume <name>
     /// --substrate thread`), one stanza per harness. ABSENT reads
     /// `unsupported` at the accessor with a named refusal - absence is the
@@ -1349,6 +1377,74 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
             "only an extension harness may name a loop artifact",
         ));
     }
+
+    // Hook jobs: a key outside HOOK_JOBS is a typo; every job is declared
+    // on every row; a supported job names its via; an impossible/missing
+    // job names its reason. The GATE is last: once fno wires one job into a
+    // harness (a supported hook job, or a row that loops), a `missing` on
+    // that row is refused, naming the harness, the job and the word
+    // missing - the gap the audit found by hand becomes a load failure.
+    for (job, decl) in &caps.hooks {
+        if !HOOK_JOBS.contains(&job.as_str()) {
+            return Err(field_error(
+                harness,
+                "hooks",
+                &format!(
+                    "unknown hook job {job:?}; declared jobs are lead_guard and lead_reinject"
+                ),
+            ));
+        }
+        match decl.state.as_str() {
+            "supported" => {
+                if decl.via.is_empty() {
+                    return Err(field_error(
+                        harness,
+                        &format!("hooks.{job}.via"),
+                        "a supported job names the files that implement it",
+                    ));
+                }
+            }
+            "impossible" | "missing" => {
+                if decl.reason.is_empty() {
+                    return Err(field_error(
+                        harness,
+                        &format!("hooks.{job}.reason"),
+                        &format!("a {:?} job names its reason", decl.state),
+                    ));
+                }
+            }
+            other => {
+                return Err(field_error(
+                    harness,
+                    &format!("hooks.{job}.state"),
+                    &format!("unknown state {other:?}; use supported, impossible or missing"),
+                ));
+            }
+        }
+    }
+    for job in HOOK_JOBS {
+        if !caps.hooks.contains_key(job) {
+            return Err(field_error(
+                harness,
+                &format!("hooks.{job}"),
+                "every row declares every hook job",
+            ));
+        }
+    }
+    let loop_supported = caps.loop_participation == "native"
+        || (caps.loop_participation == "extension" && !caps.loop_extension.is_empty());
+    if loop_supported || caps.hooks.values().any(|d| d.state == "supported") {
+        for job in HOOK_JOBS {
+            let state = caps.hooks.get(job).map(|d| d.state.as_str());
+            if state == Some("missing") {
+                return Err(field_error(
+                    harness,
+                    &format!("hooks.{job}"),
+                    "missing is refused on a wired row: declare supported with its via, or impossible with the measured reason",
+                ));
+            }
+        }
+    }
     if !STOP_STRATEGIES.contains(&caps.stop_strategy.as_str()) {
         return Err(field_error(harness, "stop_strategy", "unknown strategy"));
     }
@@ -1492,6 +1588,7 @@ pub fn render_session_argv_with_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// Every harness whose spawn claim reads `native`: fno's own launch arm is
     /// wired and journey-proven for each. agy joined when its keeper arm
@@ -1602,6 +1699,63 @@ mod tests {
         let codex = contract.harness.get_mut("codex").unwrap();
         codex.provider_actions.get_mut("compact").unwrap().transport = "pane".into();
         assert!(validate_row("codex", codex).is_err());
+
+        // Hook jobs: every bundled row declares every job; a supported job's
+        // via paths exist under the repo root; the gate refuses a `missing`
+        // on a wired row, naming the harness, the job and the word missing;
+        // an empty via on a supported job and an empty reason on a missing
+        // job refuse naming the field.
+        let contract = HarnessContract::packaged().unwrap();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        for (name, caps) in &contract.harness {
+            assert_eq!(caps.hooks.len(), HOOK_JOBS.len(), "{name}");
+            for (job, decl) in &caps.hooks {
+                match decl.state.as_str() {
+                    "supported" => {
+                        assert!(!decl.via.is_empty(), "{name}.{job}: empty via");
+                        for path in &decl.via {
+                            assert!(
+                                repo_root.join(path).exists(),
+                                "{name}.{job}: via path {path:?} does not exist under the repo root"
+                            );
+                        }
+                    }
+                    "impossible" | "missing" => {
+                        assert!(!decl.reason.is_empty(), "{name}.{job}: empty reason");
+                    }
+                    other => panic!("{name}.{job}: unknown state {other:?}"),
+                }
+            }
+        }
+        let wired = contract.capabilities("claude").unwrap().clone();
+        let mut probe = wired.clone();
+        probe.hooks.insert(
+            "lead_guard".into(),
+            HookJob {
+                state: "missing".into(),
+                via: vec![],
+                reason: "probe: a wired row cannot go back to missing".into(),
+            },
+        );
+        let err = validate_row("claude", &probe).expect_err("missing on a wired row refuses");
+        assert!(err.0.contains("claude"), "{err:?}");
+        assert!(err.0.contains("lead_guard"), "{err:?}");
+        assert!(err.0.contains("missing"), "{err:?}");
+        let mut probe = wired.clone();
+        probe.hooks.get_mut("lead_guard").unwrap().via.clear();
+        let err = validate_row("claude", &probe).expect_err("empty via on a supported job refuses");
+        assert!(err.0.contains("via"), "{err:?}");
+        let mut probe = wired.clone();
+        probe.hooks.remove("lead_reinject");
+        assert!(
+            validate_row("claude", &probe).is_err(),
+            "an undeclared job refuses"
+        );
+        let unwired = contract.capabilities("gemini").unwrap().clone();
+        assert!(
+            validate_row("gemini", &unwired).is_ok(),
+            "a row with no supported job and every job missing with a reason loads"
+        );
     }
 
     /// The lane assignment, pinned per harness: lane A where the attach form
