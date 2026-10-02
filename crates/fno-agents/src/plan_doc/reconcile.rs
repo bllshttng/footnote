@@ -358,7 +358,7 @@ pub fn handle_reconcile_status_op(
     // absent evidence, not archive-only truth.
     let read = crate::graph_keeper::cached_entries(state, false, true);
     let mut rows: Vec<serde_json::Value> = match &read {
-        Ok(e) => (*e).clone(),
+        Ok(e) => e.as_ref().clone(),
         Err(_) => Vec::new(),
     };
     if read.is_ok() {
