@@ -1401,16 +1401,19 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     # Removal accounting runs AFTER the write persisted: the shared
     # accounting stages the receipt first, and a removal that failed to
     # persist never happened. update_registry accounts through the same fn;
-    # direct write_registry callers were the silent door left.
+    # direct write_registry callers were the silent door left. A before-row
+    # too malformed to construct skips alone, never the whole accounting.
     if raw:
-        try:
-            current = [
-                AgentEntry(**{k: row[k] for k in row if k in _INIT_FIELD_NAMES})
-                for row in raw.get("agents", [])
-                if isinstance(row, dict)
-            ]
-        except TypeError:
-            current = []
+        current = []
+        for row in raw.get("agents", []):
+            if not isinstance(row, dict):
+                continue
+            try:
+                current.append(
+                    AgentEntry(**{k: row[k] for k in row if k in _INIT_FIELD_NAMES})
+                )
+            except TypeError:
+                continue
         _account_for_removed_rows(target, current, entries)
 
 
