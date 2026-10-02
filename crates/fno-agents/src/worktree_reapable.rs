@@ -407,20 +407,27 @@ pub(crate) fn production_readers() -> DoneNodeReaders<'static> {
             )
         },
         session_live: &|session: &str| {
-            let home = crate::paths::AgentsHome::from_env_opt()?;
-            let registry = crate::state::load_registry(&home.registry_json()).ok()?;
-            let sid = session.trim();
-            let entry = registry.entries.iter().find(|e| {
-                e.harness_session_id.as_deref() == Some(sid)
-                    || (!sid.is_empty()
-                        && e.harness_session_id
-                            .as_deref()
-                            .is_some_and(|s| s.starts_with(sid)))
-            })?;
-            matches!(
-                crate::row_verdict::fno_verdict(entry),
-                crate::row_verdict::RowVerdict::Live(_)
-            )
+            crate::paths::AgentsHome::from_env_opt()
+                .and_then(|home| crate::state::load_registry(&home.registry_json()).ok())
+                .is_some_and(|registry| {
+                    let sid = session.trim();
+                    registry
+                        .entries
+                        .iter()
+                        .find(|e| {
+                            e.harness_session_id.as_deref() == Some(sid)
+                                || (!sid.is_empty()
+                                    && e.harness_session_id
+                                        .as_deref()
+                                        .is_some_and(|s| s.starts_with(sid)))
+                        })
+                        .is_some_and(|entry| {
+                            matches!(
+                                crate::row_verdict::fno_verdict(entry),
+                                crate::row_verdict::RowVerdict::Live(_)
+                            )
+                        })
+                })
         },
     }
 }
