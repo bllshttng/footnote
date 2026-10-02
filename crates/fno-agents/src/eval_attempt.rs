@@ -675,10 +675,11 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
 fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Option<Observed> {
     let mut best: Option<(f64, PathBuf)> = None;
     let projects = std::fs::read_dir(root).ok()?.flatten();
-    for session in
-        projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten())
-    {
-        let path = session.path().join("transcript.jsonl");
+    for f in projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten()) {
+        let path = f.path();
+        if !crate::footnote_harness::transcript::is_record_file(&path) {
+            continue;
+        }
         let Some(mtime) = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
