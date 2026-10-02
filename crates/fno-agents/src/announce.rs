@@ -953,7 +953,7 @@ pub(crate) fn run_announce_read(args: &[String], paths: &AnnouncePaths) -> i32 {
 /// reply_resolve.py::_transcript_path, mirrored: claude
 /// `<projects>/*/<id>.jsonl`, codex a rollout embedding the id. A key neither
 /// store resolves is `unverified`, never `pending`.
-fn transcript_path(harness_home: &Path, session_key: &str, codex: bool) -> Option<PathBuf> {
+pub(crate) fn transcript_path(harness_home: &Path, session_key: &str, codex: bool) -> Option<PathBuf> {
     if codex {
         let root = std::env::var_os("FNO_CODEX_SESSIONS_DIR")
             .map(PathBuf::from)

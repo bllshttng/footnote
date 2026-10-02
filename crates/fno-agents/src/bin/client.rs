@@ -666,6 +666,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::chats::run_chats(&args[1..]);
     }
 
+    // `mail-threads`: the mux Messages tab's thread read model (see
+    // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
+    // read must work when the daemon is wedged. Hidden from help and from
+    // ALL_CLIENT_ACTIONS, like court-fold (d-aef0ed7b).
+    if verb == "mail-threads" {
+        return fno_agents::mail_threads::run_mail_threads(&args[1..]);
+    }
+
     // `capabilities` / `target-family` (change 2): read-only leaves
     // over the packaged capability table and the merge-posture family table,
     // `review-coverage`: standalone review_coverage producer (see its own doc

@@ -250,6 +250,7 @@ pub mod machine_watch;
 pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_header;
+pub mod mail_threads;
 pub mod mail_hold;
 pub mod mail_inject;
 pub mod main_ci;
