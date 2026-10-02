@@ -3,8 +3,7 @@ session's OWN transcript when ``fno agents mail reply --to <id>`` cannot find a 
 
 Current hosted delivery appends an audit-only bus record, but legacy deliveries
 and a nonretryable audit-append failure can still leave the transcript as the only
-place the ``id -> from`` binding exists. This module reads that fallback record;
-the shape reads live in the Rust classifier.
+place the ``id -> from`` binding exists; this module reads that fallback record.
 """
 from __future__ import annotations
 
