@@ -1839,6 +1839,14 @@ via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/hook/ki
 state = "supported"
 via = ["cli/src/fno/setup/assets/pi/footnote.ts", "hooks/king-postcompact-reinject.sh"]
 
+[harness.footnote.hooks.lead_guard]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/hooks.rs"]
+
+[harness.footnote.hooks.lead_reinject]
+state = "impossible"
+reason = "the footnote harness compacts in-process (footnote_harness maybe_compact) and fires no compaction hook event, so the postcompact carrier never runs; the lead brief rides SessionStart only"
+
 [harness.gemini.hooks.lead_guard]
 state = "missing"
 reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane)"
