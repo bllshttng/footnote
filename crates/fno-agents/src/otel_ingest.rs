@@ -461,6 +461,28 @@ mod tests {
         shutdown.store(true, Ordering::SeqCst);
     }
 
+    /// Declare a body larger than the cap without sending it: the 413 must
+    /// fire on the header, and not sending avoids the RST the server's early
+    /// close would deliver mid-body.
+    async fn post_oversized(port: u16) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let req = format!(
+            "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut resp)).await;
+        let head = String::from_utf8_lossy(&resp).into_owned();
+        head.split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0)
+    }
+
     #[tokio::test]
     async fn refuses_malformed_and_oversized_bodies_and_keeps_serving() {
         let (home, _td) = home();
@@ -469,9 +491,7 @@ mod tests {
         assert_eq!(post(port, "/v1/logs", "{not json").await, 400);
         assert_eq!(post(port, "/v1/traces", "{}").await, 404);
         assert!(!home.otel_dir().join("otel.db").exists());
-        let big = body(json!([api_request("req_big", "sess-3", 1)]));
-        let big = format!("{blank}{big}", blank = " ".repeat(MAX_BODY));
-        assert_eq!(post(port, "/v1/logs", &big).await, 413);
+        assert_eq!(post_oversized(port).await, 413);
         // Still serving after all three.
         assert_eq!(
             post(
