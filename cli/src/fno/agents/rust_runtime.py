@@ -257,10 +257,9 @@ RUST_CLIENT_VERBS = frozenset(
         # flags, then invokes the binary directly (not via `fno agents`
         # routing).
         "evals-macro",
-        # The reign check-in beat for `fno agents king checkin`: daemon-free
-        # read; Python resolves the caller's crown scope and the paths Python
-        # owns, then invokes the binary directly (not via `fno agents`
-        # routing).
+        # The check-in beat for `fno agents king checkin`: daemon-free
+        # read; Python resolves the caller's crown scope and the paths
+        # Python owns, then invokes the binary (not via `fno agents`).
         "lead-checkin",
         # Reign ledger page renderer for `fno agents king ledger`: court JSON
         # and the graph in, one HTML page out; Python resolves the court and
