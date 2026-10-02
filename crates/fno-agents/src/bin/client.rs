@@ -125,6 +125,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "territory-rows",
     "territory-verdict",
     "trace",
+    "update-journal",
     "verify-evidence",
     "version",
     "wait",
@@ -652,6 +653,14 @@ async fn run(args: Vec<String>) -> i32 {
     // scan + cursor write, and both must work when the daemon is wedged.
     if verb == "announce" {
         return fno_agents::announce::run_announce(&args[1..]);
+    }
+
+    // `update-journal`: the `fno doctor update` lifecycle's one Rust door
+    // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
+    // lifecycle rows land even when the daemon is wedged, which is the
+    // failure the node exists to name.
+    if verb == "update-journal" {
+        return fno_agents::update_journal::run_update_journal(&args[1..]);
     }
 
     // `capabilities` / `target-family` (change 2): read-only leaves

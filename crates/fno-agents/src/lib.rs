@@ -415,6 +415,7 @@ pub mod tick_ledger;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
+pub mod update_journal;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;

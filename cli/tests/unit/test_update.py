@@ -1393,11 +1393,15 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     call_order: list[str] = []
     recorded_cargo: list[list[str]] = []
     state = {"built": False}
-    journal: list[dict] = []
+    door_calls: list[list[str]] = []
 
     real_run = update.subprocess.run
 
     def _fake_run(cmd, **kwargs):
+        if cmd and "update-journal" in cmd:
+            # The lifecycle rows ride the fno-agents door; capture the argv.
+            door_calls.append(list(cmd))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         if cmd and cmd[0] == "cargo":
             call_order.append("cargo")
             recorded_cargo.append(list(cmd))
@@ -1408,13 +1412,6 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-
-    # Journal emission rides the update seam; capture it here rather than let
-    # the flow reach for a native binary the sandbox does not have.
-    def _fake_append(event, events_path=None, **kw):
-        journal.append(event)
-
-    monkeypatch.setattr("fno.events.append_event", _fake_append)
 
     exec_lines: list[str] = []
     env_at_exec: list[str] = []
@@ -1442,25 +1439,24 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     execvp_idx = call_order.index("execvp")
     assert cargo_idx < execvp_idx
 
-    # The journal recorded exactly the in-process lifecycle rows, shaped and
-    # python-sourced: started before built, with the revs and the source path.
-    kinds = [e["type"] for e in journal]
-    assert kinds == ["fno_update_started", "fno_update_built"], kinds
-    started = journal[0]
-    assert started["source"] == "python"
-    assert started["data"]["new_rev"] == crate_rev
-    assert started["data"]["source_path"].endswith("cli")
-    built = journal[1]
-    assert built["data"]["outcome"] == "refreshed"
-    assert built["data"]["rust_rev"] == crate_rev
+    # The journal rows ride the fno-agents door: started before built, each
+    # naming its revs, and the built row carrying the rust leg's verdict.
+    kinds = [c[c.index("--type") + 1] for c in door_calls]
+    assert kinds == ["started", "built"], kinds
+    started = door_calls[0]
+    assert started[started.index("--new-rev") + 1] == crate_rev
+    assert any(a.endswith("cli") for a in started[started.index("--source-path") + 1 :])
+    built = door_calls[1]
+    assert built[built.index("--outcome") + 1] == "refreshed"
+    assert built[built.index("--rust-rev") + 1] == crate_rev
 
-    # The exec'd line carries the installed and failed facts: the installed
-    # event, the crown mail, and the EXIT-trap fail handler that journals a
-    # bare exit and preserves the installer's own code.
-    assert "fno_update_installed" in exec_lines[0]
+    # The exec'd line carries the installed fact and the EXIT-trap fail
+    # handler: the installed row and the crown mail are the verb's job.
+    assert "--type installed" in exec_lines[0]
+    assert "update-journal" in exec_lines[0]
     assert "trap fno_fail_handler EXIT" in exec_lines[0]
-    assert "fno_update_failed" in exec_lines[0]
-    assert "kings" in exec_lines[0]
+    assert "--type failed" in exec_lines[0]
+    assert "--mail-from" in exec_lines[0]
     assert '[ "$rc" -eq 0 ] && return 0' in exec_lines[0]
     # The cargo legs are marked install builds before the exec (law d-829648bb).
     assert env_at_exec[0] == "1"
@@ -1583,13 +1579,14 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
         exec_lines.append(args)
 
     monkeypatch.setattr(update.os, "execvp", _fake_execvp)
-    # The store is down: every audit and lifecycle emit must be swallowed.
-    # The guard's claim audit and the update journal ride the same seam, and
-    # neither may block the install on a failed journal write.
-    def _boom(event, events_path=None, **kw):
-        raise RuntimeError("store down")
+    # The door is down: a failed journal write must not block the install.
+    # The timeout is the failure mode the old 60s wrapper guarded against.
+    def _boom(cmd, **kwargs):
+        if cmd and "update-journal" in cmd:
+            raise subprocess.TimeoutExpired(cmd, 60)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("fno.events.append_event", _boom)
+    monkeypatch.setattr(update.subprocess, "run", _boom)
     # The install-claim guard writes a machine-scoped claim; keep it in tmp.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     # Patch through the update module so _refresh_rust_bins sees it

@@ -1402,51 +1402,32 @@ def _front_fno_bin() -> Optional[str]:
         return None
 
 
-def _crown_mail_cmd(fno_bin: str, body: str) -> list[str]:
-    return [fno_bin, "agents", "mail", "team", "--scope", "kings", "--subject", "fno-update", body]
+def _journal_argv(
+    rust_bin: str,
+    journal: Path,
+    type_name: str,
+    mail_from: Optional[str] = None,
+    **fields,
+) -> list[str]:
+    """One argv per lifecycle step: the verb owns envelope, store and mail."""
+    argv = [str(rust_bin), "update-journal", "--events", str(journal), "--type", type_name]
+    for key in ("new_rev", "old_rev", "source_path", "outcome", "rust_rev", "rc"):
+        if fields.get(key) is not None:
+            argv += ["--" + key.replace("_", "-"), str(fields[key])]
+    if mail_from:
+        argv += ["--mail-from", str(mail_from)]
+    return argv
 
 
-def _update_emit_argv(fno_bin: str, type_name: str, data: dict) -> list[str]:
-    """One emit door for both journaling chains: the installed fact joins the
-    post-install line whole, and the fail trap takes the argv minus its data
-    element so `$FNO_UPDATE_FAIL_DATA` can carry the captured exit code."""
-    return [
-        fno_bin, "doctor", "event", "emit",
-        "--type", type_name, "--source", "python", "--global", "--data", json.dumps(data),
-    ]
-
-
-def _mail_crowns(fno_bin: Optional[str], body: str) -> None:
-    if not fno_bin:
+def _run_journal_door(argv: list[str]) -> None:
+    """Best-effort: the door never blocks the update it reports. A machine
+    with no cargo-installed triad skips the row; the next install journals."""
+    if not argv or not argv[0]:
         return
     try:
-        subprocess.run(
-            _crown_mail_cmd(fno_bin, body), capture_output=True, text=True, check=False, timeout=60
-        )
+        subprocess.run(argv, capture_output=True, check=False, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
-        typer.echo(f"fno doctor update: WARNING: crown mail not sent: {exc}", err=True)
-
-
-def _emit_update_event(type_name: str, **data) -> None:
-    """Best-effort journal row for the update lifecycle.
-
-    The journal is the visibility a lead reads (`fno doctor update --status`),
-    never a gate: a failed write warns on stderr and the update proceeds."""
-    try:
-        import datetime as _dt
-
-        from fno.events import append_event
-        from fno.paths import global_events_json
-
-        event = {
-            "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "type": type_name,
-            "source": "python",
-            "data": {k: v for k, v in data.items() if v is not None},
-        }
-        append_event(event, global_events_json())
-    except Exception as exc:  # noqa: BLE001
-        typer.echo(f"fno doctor update: WARNING: {type_name} event not journaled: {exc}", err=True)
+        typer.echo(f"fno doctor update: WARNING: update-journal door failed: {exc}", err=True)
 
 
 def _last_update_event() -> Optional[dict]:
@@ -1464,39 +1445,50 @@ def _last_update_event() -> Optional[dict]:
     return rows[-1] if rows else None
 
 
-def _installed_data(rev: Optional[str], old_rev: Optional[str]) -> dict:
-    data: dict = {"new_rev": rev or "unknown"}
-    if old_rev:
-        data["old_rev"] = old_rev
-    return data
+def _last_update_event() -> Optional[dict]:
+    """The newest journaled update event, or None; rides --check's readiness
+    payload (the flag ratchet bars a new Python flag). No cap: the filtered
+    type set is small and retention-managed, and a capped read can hide the
+    newest row behind its own horizon. An unreadable store degrades to None."""
+    try:
+        from fno.events.store_client import query_rows
+        from fno.paths import global_events_json
+
+        rows = query_rows(global_events_json(), types=list(_UPDATE_EVENT_TYPES))
+    except Exception:  # noqa: BLE001
+        return None
+    return rows[-1] if rows else None
 
 
-def _shell_fail_prologue(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
-    """An EXIT-trap prologue on the exec'd shell line: any nonzero exit
-    journals the failure and mails the crowns. A `||` suffix cannot do this:
-    `_uv_retry_sh` fails with a bare `exit` inside a loop, which skips every
-    trailing command. The handler performs no explicit exit, so the shell
-    keeps its own status; printf substitutes `$rc` into the JSON."""
-    template = json.dumps(
-        {
-            "reason": "install exited %s",
-            "stage": "install",
-            **({"old_rev": old_rev} if old_rev else {}),
-            **({"new_rev": rev} if rev else {}),
-        }
+def _shell_fail_prologue(
+    rust_bin: str,
+    journal: Path,
+    old_rev: Optional[str],
+    rev: Optional[str],
+    mail_from: str,
+) -> str:
+    """An EXIT-trap prologue on the exec'd shell line: any nonzero exit calls
+    the update-journal verb with `--rc` and lets the shell keep its own
+    status. A `||` suffix cannot do this: `_uv_retry_sh` fails with a bare
+    `exit` inside a loop, which skips every trailing command."""
+    handler = _journal_argv(
+        rust_bin,
+        journal,
+        "failed",
+        mail_from=mail_from,
+        rc='"$rc"',
+        old_rev=old_rev,
+        new_rev=rev,
     )
-    # The data arg stays OUTSIDE shlex.quote: shlex.quote would escape the
-    # `$`, and the whole point is shell expansion of the captured exit code.
-    emit = " ".join(shlex.quote(t) for t in _update_emit_argv(fno_bin, "fno_update_failed", {})[:-1])
-    emit += ' "$FNO_UPDATE_FAIL_DATA"'
-    mail_body = '"fno doctor update FAILED: install exited $rc."'
-    mail = f"{shlex.quote(fno_bin)} agents mail team --scope kings --subject fno-update {mail_body}"
+    body = " ".join(shlex.quote(t) for t in handler)
+    # The rc rides as literal "$rc": the one argv token that must stay
+    # unquoted so the shell substitutes the captured exit code. shlex.quote
+    # would escape it into a literal.
+    body = body.replace(shlex.quote('"$rc"'), '"$rc"')
     return (
         "fno_fail_handler() { "
         'rc=$?; [ "$rc" -eq 0 ] && return 0; '
-        f"FNO_UPDATE_FAIL_DATA=$(printf {shlex.quote(template)} \"$rc\"); "
-        f"{emit} >/dev/null 2>&1 || true; "
-        f"{mail} >/dev/null 2>&1 || true; "
+        f"{body} >/dev/null 2>&1 || true; "
         "}; "
         "trap fno_fail_handler EXIT; "
     )
@@ -1720,36 +1712,38 @@ def update_command(
         raise typer.Exit(1)
 
     # Machine-global mutations start here: the journal trail begins, and the
-    # cargo legs wear the install-build mark the admission doors read.
+    # cargo legs wear the install-build mark the admission doors read. The
+    # lifecycle rows land through the fno-agents update-journal verb, which
+    # owns envelope, store and crown mail; the fail trap calls the same verb
+    # with --rc, so the shell composes no JSON.
     os.environ["FNO_INSTALL_BUILD"] = "1"
+    from fno.paths import global_events_json
+
     try:
         from fno import doctor as _doctor
 
         old_rev = _doctor._read_marker()
     except Exception:  # noqa: BLE001
         old_rev = None
-    _emit_update_event(
-        "fno_update_started",
-        new_rev=rev or "unknown",
-        old_rev=old_rev,
-        source_path=str(resolved),
+    journal = global_events_json()
+    _run_journal_door(
+        _journal_argv(
+            _cargo_installed_bin(), journal, "started",
+            new_rev=rev or "unknown", old_rev=old_rev, source_path=str(resolved),
+        )
     )
 
     rust_outcome = None
     if not no_rust:
         # Warn-and-continue holds: the outcome never branches, it journals.
         rust_outcome = _refresh_rust_bins(resolved, force=rust, dry_run=False)
-        _emit_update_event(
-            "fno_update_built",
-            outcome=rust_outcome or "none",
-            rust_rev=_rust_subtree_rev(resolved),
+        _run_journal_door(
+            _journal_argv(
+                _cargo_installed_bin(), journal, "built",
+                outcome=rust_outcome or "none", rust_rev=_rust_subtree_rev(resolved),
+            )
         )
 
-    installed_body = (
-        f"fno doctor update installed {(rev or 'unknown')[:8]}"
-        + (f" (was {old_rev[:8]})" if old_rev else "")
-        + "."
-    )
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
         # installer as a child and terminates the parent with status 0,
@@ -1765,17 +1759,21 @@ def update_command(
             # List form (no shell) so subprocess handles Windows quoting.
             for _argv in refresh_cmds:
                 subprocess.run(_argv, check=False)
-            _emit_update_event("fno_update_installed", **_installed_data(rev, old_rev))
-            _mail_crowns(_front_fno_bin(), installed_body)
-        else:
-            _emit_update_event(
-                "fno_update_failed",
-                reason=f"installer exited {result.returncode}",
-                stage="install",
-                old_rev=old_rev,
-                new_rev=rev,
+            _run_journal_door(
+                _journal_argv(
+                    _cargo_installed_bin(), journal, "installed",
+                    new_rev=rev, old_rev=old_rev,
+                    mail_from=_front_fno_bin(),
+                )
             )
-            _mail_crowns(_front_fno_bin(), f"fno doctor update FAILED: installer exited {result.returncode}.")
+        else:
+            _run_journal_door(
+                _journal_argv(
+                    _cargo_installed_bin(), journal, "failed",
+                    rc=result.returncode, old_rev=old_rev, new_rev=rev,
+                    mail_from=_front_fno_bin(),
+                )
+            )
         raise typer.Exit(result.returncode)
 
     # On Unix, execvp replaces this Python process with the installer; uv
@@ -1787,17 +1785,26 @@ def update_command(
     # watcher must not skip the groom agent.
     # The installed fact and the crown mail chain BEFORE the refreshes: they
     # are the two facts the node exists for, so no refresh crash may eat them.
+    _cargo_bin = _cargo_installed_bin()
     _fno_bin = _front_fno_bin()
     post_steps: list[str] = []
-    if _fno_bin:
+    if _cargo_bin:
         post_steps.append(
-            shlex.join(_update_emit_argv(_fno_bin, "fno_update_installed", _installed_data(rev, old_rev)))
+            shlex.join(
+                _journal_argv(
+                    _cargo_bin, journal, "installed",
+                    new_rev=rev, old_rev=old_rev, mail_from=_fno_bin,
+                )
+            )
         )
-        post_steps.append(shlex.join(_crown_mail_cmd(_fno_bin, installed_body)))
     post_steps += [shlex.join(c) for c in refresh_cmds]
     post_install = "; ".join(post_steps) or None
 
-    fail_prologue = _shell_fail_prologue(_fno_bin, old_rev, rev) if _fno_bin else ""
+    fail_prologue = (
+        _shell_fail_prologue(_cargo_bin, journal, old_rev, rev, _fno_bin)
+        if _cargo_bin and _fno_bin
+        else ""
+    )
     if rev:
         os.execvp(
             "/bin/sh",
