@@ -78,9 +78,9 @@ registry_fixture() {
   printf '{"agents":[%s]}\n' "$1" > "$LEAD_REG_FIXTURE"
 }
 
-TEAMED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"lead","status":"live","team_level":1,"team_scope":"fno"}'
-TEAMED_HARNESS_ROW='{"session_id":"short-lead","harness_session_id":"'"$SID"'","name":"lead","status":"live","team_level":1,"team_scope":"fno"}'
-UNCROWNED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"worker","status":"live","team_level":null,"team_scope":null}'
+TEAMED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"lead","status":"live","crown_level":1,"crown_scope":"fno"}'
+TEAMED_HARNESS_ROW='{"session_id":"short-lead","harness_session_id":"'"$SID"'","name":"lead","status":"live","crown_level":1,"crown_scope":"fno"}'
+UNCROWNED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"worker","status":"live","crown_level":null,"crown_scope":null}'
 
 run_lead() { # $1 = event JSON ; FNO_PLATFORM env selects the lane
   printf '%s' "$1" | FNO_PLATFORM="$FNO_PLATFORM" bash "$LEAD" 2>/dev/null

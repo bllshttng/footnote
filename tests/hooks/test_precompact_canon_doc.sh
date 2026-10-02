@@ -380,7 +380,7 @@ cat > "$FAKE_BIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
   *"agents registry-json"*)
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-9e1e-fixture"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"},{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
@@ -427,7 +427,7 @@ cat > "$PORTFOLIO_BIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
   *"agents registry-json"*)
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-epic-a,x-epic-b","name":"lead-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-epic-a,x-epic-b","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-epic-a"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
@@ -468,7 +468,7 @@ cat > "$LIVENESS_BIN/fno" <<'FAKE'
 case "$*" in
   *"agents registry-json"*)
     echo '[
-      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-9e1e-fixture","name":"lead-fixture"},
+      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"lead-fixture"},
       {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"alive-child","status":"live","liveness":"alive"},
       {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"unmeasured-child","status":"live","liveness":"unmeasured"}
     ]'
@@ -707,7 +707,7 @@ case "\$*" in
     if [ -n "\${FNO_AGENTS_RUNTIME:-}" ]; then
       exit 127
     fi
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","team_level":2,"team_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-9e1e-fixture"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'

@@ -109,7 +109,7 @@ run_guard() { # $1 = payload JSON; stderr lands in $ERR via RUN_GUARD_ERR
   printf '%s' "$1" | bash "$KGD" 2>"$TMP/stderr.txt"
 }
 
-TEAMED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'","team_level":1,"team_scope":"fno"}'
+TEAMED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'","crown_level":1,"crown_scope":"fno"}'
 UNCROWNED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'"}'
 
 edit_payload() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$TMP/repo" "$1"; }
