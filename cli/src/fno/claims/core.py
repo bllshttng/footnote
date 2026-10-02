@@ -1384,16 +1384,9 @@ def _legacy_claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, 
     ``$FNO_CLAIMS_ROOT``); root ROUTING is the native leg's job, and the
     legacy leg survives only for explicit-root and python-runtime callers.
     """
-    from fno.graph._constants import is_wellformed_node_id
-
-    if ":" not in key and is_wellformed_node_id(key):
-        # A bare node id names no store; free here reads as safe-to-dispatch.
-        return {
-            "key": key,
-            "state": "unknown",
-            "basis": "key-unrouted",
-            "detail": f"{key!r} has no claim prefix; node claims are keyed node:{key}",
-        }
+    unrouted = _unrouted_key_verdict(key)
+    if unrouted is not None:
+        return unrouted
     path = claim_path(key, root=root)
     try:
         claim = read_claim_file(path)
@@ -2003,7 +1996,10 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
             "fno-agents claim unavailable: set FNO_AGENTS_BIN or reinstall fno"
         )
     command = [str(binary), "claim", operation]
-    if key:
+    # The root op's key IS the question, and an empty key is a legal input
+    # (a colon-less key routes repo-local); list/reap pass key="" to mean no
+    # key at all, so the falsy skip stays for them.
+    if key or operation == "root":
         command.append(key)
     command.extend(flags)
     command.append("--json")
@@ -2183,7 +2179,27 @@ def refresh_claim(
     return _native_claim_model(payload)
 
 
+def _unrouted_key_verdict(key: str) -> Optional[dict[str, Any]]:
+    """A bare well-formed node id names no store, and ``free`` there reads as
+    safe-to-dispatch. Both legs answer the same unknown."""
+    if not key or ":" in key:
+        return None
+    from fno.graph._constants import is_wellformed_node_id
+
+    if not is_wellformed_node_id(key):
+        return None
+    return {
+        "key": key,
+        "state": "unknown",
+        "basis": "key-unrouted",
+        "detail": f"{key!r} has no claim prefix; node claims are keyed node:{key}",
+    }
+
+
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+    unrouted = _unrouted_key_verdict(key)
+    if unrouted is not None:
+        return unrouted
     if _legacy_claim_call(key, root):
         return _LEGACY_CLAIM_STATUS(key, root=root)
     if not key:

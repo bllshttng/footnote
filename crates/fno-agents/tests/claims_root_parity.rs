@@ -44,6 +44,7 @@ fn run_root_op(key: &str, claims_root: &std::path::Path) -> (i32, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(["claim", "root", key, "--json"])
         .env("FNO_CLAIMS_ROOT", claims_root)
+        .envs(fno_agents::test_run::self_owner_env())
         .output()
         .expect("run fno-agents claim root");
     let payload: Value = serde_json::from_slice(&out.stdout)
