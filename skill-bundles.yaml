@@ -148,3 +148,12 @@ bundles:
         dest: code-index/providers/codegraph.toml
       - source: skills/blueprint/code-index/providers/graphify.toml
         dest: code-index/providers/graphify.toml
+
+  - skill: agent
+    files:
+      # with-timeout.sh: the one wall-clock bound, bundled so
+      # scripts/confirm-decision.sh bounds its config read with the skill-local
+      # copy (x-72bb): stock macOS ships no coreutils timeout, and the old
+      # timeout/gtimeout/bare chain ended in an UNBOUNDED call.
+      - source: scripts/lib/with-timeout.sh
+        dest: scripts/lib/with-timeout.sh

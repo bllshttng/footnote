@@ -67,16 +67,18 @@ done
 
 # ---- resolve posture (bounded read; degrade toward safety) -------------------
 default_reader() {
-  # The read is local-file-only today, but a bounded call costs nothing. macOS
-  # ships no `timeout`; fall back to gtimeout, then a bare call (never let a
-  # missing timeout binary force a degrade and disable the knob entirely).
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 5 fno config get config.agents.confirm
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 5 fno config get config.agents.confirm
-  else
-    fno config get config.agents.confirm
-  fi
+  # The read is local-file-only today, but a bounded call costs nothing. The
+  # bound is the skill-local with_timeout copy bundled from
+  # scripts/lib/with-timeout.sh via skill-bundles.yaml (x-72bb): stock macOS
+  # ships no coreutils timeout, and the old timeout/gtimeout/bare chain ended
+  # in an UNBOUNDED call. A missing helper degrades the read (rc 1), never
+  # drops the bound.
+  local lib
+  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/lib/with-timeout.sh"
+  [[ -f "$lib" ]] || return 1
+  # shellcheck source=scripts/lib/with-timeout.sh
+  source "$lib" 2>/dev/null || return 1
+  with_timeout 5 fno config get config.agents.confirm
 }
 
 DEGRADED=0
