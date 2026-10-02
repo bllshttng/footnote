@@ -52,7 +52,7 @@ if [[ "$files_after" != "1" ]]; then
 fi
 
 # 3) The thread file contains both message blocks.
-msg_count=$(grep -c '^## msg-' "$PARENT_PATH" || true)
+msg_count=$(grep -cE '^## (fmail|msg)-' "$PARENT_PATH" || true)
 if [[ "$msg_count" != "2" ]]; then
   echo "FAIL: expected 2 msg blocks in thread file, got $msg_count" >&2
   cat "$PARENT_PATH" >&2
