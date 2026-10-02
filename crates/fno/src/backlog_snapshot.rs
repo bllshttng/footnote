@@ -405,7 +405,7 @@ mod tests {
     fn crowned_registry_rows_become_the_snapshot_roster() {
         let raw = r#"{"agents": [
             {"name": "lead-live", "crown_level": 1, "crown_scope": "x-aaaa"},
-            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-bbbb", "exited": true},
+            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-bbbb", "status": "exited"},
             {"name": "plain", "crown_level": null, "crown_scope": null}
         ]}"#;
         let roster = agents_from_registry(raw, 1000);

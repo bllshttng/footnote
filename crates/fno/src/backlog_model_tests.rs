@@ -145,7 +145,7 @@ fn list_view_answers_uncapped_cells() {
 
 #[test]
 fn cards_carry_created_at_for_the_list_rows() {
-    let rows = vec![
+    let mut rows = vec![
         json!({
             "id": "x-a", "slug": "a", "status": "ready",
             "priority": "p2", "created_at": "2026-09-24T18:00:00Z",
@@ -652,7 +652,7 @@ fn search_matches_details_text_not_id_slug_title_only() {
         json!({"id": "x-miss", "slug": "miss", "title": "Another card",
                "status": "ready", "priority": "p2"}),
     ];
-    let inp = fixture(rows);
+    let inp = fixture(rows.clone());
     let kept = |q: &Query| -> Vec<String> {
         board(&inp, q)
             .lanes
