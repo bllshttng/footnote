@@ -804,6 +804,7 @@ fn bounce_not_ready(items: &[AttentionItem], dir: &Path, deadline: std::time::In
         let build_cmd = || {
             let mut cmd = crate::loop_dispatch::fno_cmd("fno");
             cmd.args(["agents", "mail", "send", asker, body]);
+            cmd.args(["--from-name", "fno/questions"]);
             cmd
         };
         // ETXTBSY keeps its spawn retry: a binary swap mid-beat must not

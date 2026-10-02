@@ -14,14 +14,17 @@ touching disk or the network, mirroring ``scoreboard/fold.py``'s style.
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
 from collections import Counter
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fno.cost._register import LEDGER_SESSION_UNRESOLVED
 from fno.plan._doc import FrontmatterError, ParseError, load_plan_text
 from fno.plan.brief import BriefParseError, parse_execution_strategy
-from fno.plan.execution_validation import validate_execution
+from fno.rust_binary import find_dev_binary, resolve_binary
 from fno.scoreboard.fold import (
     _WEDGE_REASONS,
     _ci_reds_from_fires,
@@ -179,20 +182,33 @@ def _surface_collisions(plan_text: str) -> Optional[list[str]]:
         doc = load_plan_text(plan_text)
         if not doc.frontmatter:
             return None
-        violations = validate_execution(doc).violations
-    except (FrontmatterError, ParseError):
+        strategy = parse_execution_strategy(doc.get_section("Execution Strategy") or "")
+    except (BriefParseError, FrontmatterError, ParseError, TypeError, ValueError):
         return None
-    if any(v.field == "waves" for v in violations):
-        # No waves: one task cannot collide with itself; more than one is a gap.
-        try:
-            tasks = parse_execution_strategy(doc.get_section("Execution Strategy") or "").get("tasks", [])
-        except (BriefParseError, TypeError, ValueError):
-            tasks = None
+    waves = strategy.get("waves", [])
+    if not waves:
+        tasks = strategy.get("tasks", [])
         return None if not isinstance(tasks, list) or len(tasks) > 1 else []
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        return None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", encoding="utf-8") as plan_file:
+            plan_file.write(plan_text)
+            plan_file.flush()
+            result = subprocess.run(
+                [str(binary), "wave", "check", plan_file.name],
+                capture_output=True, text=True, timeout=15,
+                cwd=Path(__file__).resolve().parents[3],
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode or any(line[:2] in ("U\t", "W\t") for line in result.stdout.splitlines()):
+        return None
     return [
-        v.message
-        for v in violations
-        if v.field.startswith("waves.") and v.field.endswith(".surface")
+        line.split("\t", 1)[1]
+        for line in result.stdout.splitlines()
+        if line.startswith(("E\tparallel tasks share surface", "X\tparallel tasks share surface"))
     ]
 
 

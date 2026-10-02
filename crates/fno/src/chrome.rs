@@ -60,6 +60,45 @@ pub(crate) fn fit_ellipsis(s: &str, w: usize) -> String {
     t
 }
 
+/// Cut `s` to at most `w` display columns with no marker: the ROW rule
+/// (ruling d-36438ea4). A wide glyph that does not fully fit is dropped
+/// whole rather than straddling the cut, the same rule [`fit_ellipsis`]
+/// applies, minus the `…`.
+pub(crate) fn clip(s: &str, w: usize) -> String {
+    let mut t = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = char_cols(ch);
+        if used + cw > w {
+            break;
+        }
+        t.push(ch);
+        used += cw;
+    }
+    t
+}
+
+/// Cut `s` to at most `w` display columns keeping the tail, no marker. The
+/// name cell's rule: worker names are suffix-distinguishing (the hex tail is
+/// the identity), so a cut head is absence before a cut tail is. A wide
+/// glyph that straddles the cut drops whole.
+pub(crate) fn clip_tail(s: &str, w: usize) -> String {
+    if str_cols(s) <= w {
+        return s.to_string();
+    }
+    let mut drop = str_cols(s) - w;
+    let mut t = String::new();
+    for ch in s.chars() {
+        let cw = char_cols(ch);
+        if drop > 0 {
+            drop = drop.saturating_sub(cw);
+            continue;
+        }
+        t.push(ch);
+    }
+    t
+}
+
 /// How much chrome a block wears. Derived from the anchor; never passed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -898,6 +937,20 @@ mod tests {
 
     fn bl(s: &str) -> BodyLine {
         BodyLine::plain(s)
+    }
+
+    // The former fit_name middle-cut tests, against the clip they became.
+    #[test]
+    fn clip_cuts_without_a_marker_and_drops_wide_glyphs_whole() {
+        assert_eq!(clip("dispatch-fno-8bef7b", 12), "dispatch-fno");
+        assert_eq!(clip("short", 5), "short");
+        assert_eq!(clip("long", 0), "");
+        // A double-wide glyph that straddles the cut drops whole, and the
+        // result never exceeds the width.
+        let wide = "\u{4e2d}\u{6587}abc";
+        let cut = clip(wide, 3);
+        assert_eq!(str_cols(&cut), 2);
+        assert_eq!(cut, "\u{4e2d}");
     }
 
     #[test]

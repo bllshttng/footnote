@@ -489,7 +489,7 @@ def _parse_thread_text(text: str, path: Path) -> Optional[ThreadHandle]:
 
 
 def _parse_messages(body_text: str) -> list[ThreadMessage]:
-    """Parse ``## msg-{id} · {ts} · from:{sender}`` blocks out of body text."""
+    """Parse ``## {id} · {ts} · from:{sender}`` blocks (fmail- or msg- ids)."""
     lines = body_text.splitlines()
     messages: list[ThreadMessage] = []
     i = 0

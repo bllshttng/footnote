@@ -1,6 +1,6 @@
 ---
 name: audit
-description: "Multi-perspective feature completeness analysis and planning loop. Use when: 'audit feature', 'what's missing', 'feature completeness', 'gap analysis', 'discover features to build', 'plan all features'."
+description: Audit a feature for completeness, gaps, and buildable follow-up work.
 argument-hint: "TOPIC [--max-iterations N] [--output-dir PATH] [--perspectives LIST]"
 metadata:
   internal: true

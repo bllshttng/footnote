@@ -1,6 +1,6 @@
 ---
 name: harness-verbs
-description: Run this before you run or mail a harness-native command. Renders your harness's native verb roster (verb, risk class, when to use) through fno-agents verbs, and teaches the two raw-mail rules. Works on every harness footnote drives.
+description: Show the safe native command roster before using harness-specific commands.
 ---
 
 # Know your own harness before you run or mail a native command

@@ -1,6 +1,6 @@
 ---
 name: law
-description: "Record a durable project law from chat in one step."
+description: Record a durable project rule from a conversation decision.
 argument-hint: "<plain-language ruling>"
 metadata:
   internal: false

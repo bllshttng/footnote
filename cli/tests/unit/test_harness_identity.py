@@ -1001,11 +1001,12 @@ def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch)
     for value in minted:
         assert not LEGACY_HANDLE_RE.match(value), f"{value!r} is a retired address"
 
-    # Resolve the registered address to its wire identity; for a claude sender
-    # that is the short 8-hex handle, and the bus columns retain the compact
-    # recipient handle for lookup.
-    body = wrap_fno_mail("hi", from_=stamp_from(None), to=canonical_handle(sid))
-    assert 'from="019f48e1"' in body and 'to="019f48e1"' in body
+    # Resolve the registered address to its wire identity; the delivered
+    # header names the sender's short 8-hex handle and mints its own id.
+    body = wrap_fno_mail(
+        "hi", from_=stamp_from(None), to=canonical_handle(sid), id="fmail-" + "0" * 12,
+    )
+    assert body.splitlines()[0].startswith("`@019f48e1 · fmail-"), body[:80]
 
 
 def test_ac4_err_legacy_suffix_is_read_only_compatibility_lookup():

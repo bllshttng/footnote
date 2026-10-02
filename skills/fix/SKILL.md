@@ -1,6 +1,6 @@
 ---
 name: fix
-description: "Repair a broken state. Routes to the fast one-fix-per-iteration loop with auto-revert (fix, default) or the scientific-method hypothesis loop (investigate). Use when: 'fix all errors', 'make tests pass', 'fix the build', 'debug this', 'investigate this failure'."
+description: Fix build failures and red tests, or investigate an error with an evidence-based loop.
 argument-hint: "[fix|investigate]  (fix: [from-debug] [--scope <glob>] [--guard <cmd>] [--category test|type|lint|build] [Iterations: N])"
 metadata:
   requires:

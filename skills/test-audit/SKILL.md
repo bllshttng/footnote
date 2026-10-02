@@ -1,6 +1,6 @@
 ---
 name: test-audit
-description: "Use when auditing or pruning an existing test surface, or when explicitly loaded by an execution workflow for its authoring gate."
+description: Audit or prune existing tests and verify coverage against distinct contracts.
 ---
 
 # Test Audit
