@@ -52,9 +52,18 @@ pub fn run(args: &[String]) -> i32 {
     // mints against an empty set, never an error. Answers a value, not a
     // path, so it rides the same pre-table dispatch as `migrate`.
     if name == "mint-id" {
+        // The mint runs while a Python updater can already hold the registry
+        // flock: register's load-modify-write mints inside its updater, so a
+        // blocking read here would deadlock the mint until the caller's own
+        // timeout. A registry locked by a writer reads as empty, same as an
+        // unreadable one - the draw is advisory, the write-time fill re-checks.
         let taken =
-            crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
-                .map(|registry| crate::state::taken_handles(&registry.entries))
+            crate::state::try_load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+                .map(|maybe| {
+                    maybe
+                        .map(|registry| crate::state::taken_handles(&registry.entries))
+                        .unwrap_or_default()
+                })
                 .unwrap_or_default();
         return match crate::identity::mint_unique_fno_id(&taken) {
             Ok(id) => {
