@@ -272,13 +272,23 @@ _plan_node_id() {
                 if (vals[pending] == "") { vals[pending] = "1:" item }
                 else { vals[pending] = "MANY" }
                 pending = ""
+            } else if (pending != "" && $0 ~ /^[ \t]/ && $0 !~ /^[ \t]*#/) {
+                # A nested mapping under the link key is the unusable shape
+                # the Rust plan_link_id reads as unlinked; do not fall
+                # through to a later key.
+                vals[pending] = "MANY"
+                pending = ""
             }
         }
         END {
+            # "-" marks a PRESENT-but-unusable link key (a mapping or a
+            # multi-item list): it stops the chain like the Rust
+            # plan_link_id does, while an absent key or an empty list
+            # falls through to the next one.
             for (k in vals) {
                 v = vals[k]
                 if (v == "[]") { v = "" }
-                else if (v == "MANY") { v = "" }
+                else if (v == "MANY") { v = "-" }
                 else if (v ~ /^1:/) {
                     v = substr(v, 3)
                     gsub(/^\[|\]$/, "", v)
@@ -289,9 +299,18 @@ _plan_node_id() {
                 }
                 vals[k] = v
             }
-            link = vals["node"]
-            if (link == "") { link = vals["claims"] }
-            if (link == "") { link = vals["graph_node_id"] }
+            link = ""
+            v = vals["node"]
+            if (v != "") { link = v }
+            if (link == "") {
+                v = vals["claims"]
+                if (v != "") { link = v }
+            }
+            if (link == "") {
+                v = vals["graph_node_id"]
+                if (v != "") { link = v }
+            }
+            if (link == "-") { link = "" }
             if (link ~ /,/) { link = "" }
             print link
         }

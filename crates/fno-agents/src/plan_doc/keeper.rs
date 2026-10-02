@@ -21,7 +21,7 @@ fn events_path<'a>(state: &'a StoreState, p: &'a Value) -> Option<&'a Path> {
 }
 
 /// The keeper runs in its own cwd, so a relative path means the caller's.
-fn caller_path(p: &Value, raw: &str) -> PathBuf {
+pub(crate) fn caller_path(p: &Value, raw: &str) -> PathBuf {
     match opt_str(p, "cwd") {
         Some(cwd) => Path::new(cwd).join(raw),
         None => PathBuf::from(raw),

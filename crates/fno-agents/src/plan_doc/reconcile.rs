@@ -35,7 +35,7 @@ const TIER1: &[(&str, &str)] = &[
 fn front_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\A(---\n)(?P<fm>.*?)(\n---)(?P<rest>.*)\z").expect("front regex")
+        Regex::new(r"(?s)\A(---\n)(?P<fm>.*?)(\n---)(?P<rest>.*)\z").expect("front regex")
     })
 }
 
@@ -377,7 +377,11 @@ pub fn handle_reconcile_status_op(
             Some((id, status))
         })
         .collect();
-    let res = sweep(&caller_path(params, plans_dir), apply, &status_map);
+    let res = sweep(
+        &super::keeper::caller_path(params, plans_dir),
+        apply,
+        &status_map,
+    );
     Ok(serde_json::json!({
         "normalized": res.normalized,
         "superseded": res.superseded,
@@ -387,14 +391,6 @@ pub fn handle_reconcile_status_op(
         "warnings": res.warnings,
         "summary": res.summary(),
     }))
-}
-
-/// The keeper runs in its own cwd, so a relative path means the caller's.
-fn caller_path(params: &serde_json::Value, raw: &str) -> PathBuf {
-    match params.get("cwd").and_then(serde_json::Value::as_str) {
-        Some(cwd) => Path::new(cwd).join(raw),
-        None => PathBuf::from(raw),
-    }
 }
 
 #[cfg(test)]
@@ -464,7 +460,7 @@ mod tests {
 
     #[test]
     fn canonical_status_left_alone() {
-        for s in super::status::known_statuses() {
+        for s in super::status::known_statuses().iter().copied() {
             assert_eq!(target_status(Some(&Value::Scalar(s.into())), true), None);
         }
     }

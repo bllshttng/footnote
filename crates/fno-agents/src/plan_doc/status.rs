@@ -13,16 +13,19 @@ const STATUS_ALIASES: &[(&str, &str)] = crate::graph_store::PLAN_STATUS_ALIASES;
 /// canonical axis + terminals (the store's STATUS_TO_RUNG words) plus every
 /// retired spelling. A retired spelling is valid input, not drift. Built from
 /// the tables that already exist; never a third retyped copy.
-pub(crate) fn known_statuses() -> Vec<&'static str> {
-    crate::graph_store::STATUS_TO_RUNG
-        .iter()
-        .map(|(s, _)| *s)
-        .chain(
-            crate::graph_store::PLAN_STATUS_ALIASES
-                .iter()
-                .map(|(s, _)| *s),
-        )
-        .collect()
+pub(crate) fn known_statuses() -> &'static [&'static str] {
+    static KNOWN: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KNOWN.get_or_init(|| {
+        crate::graph_store::STATUS_TO_RUNG
+            .iter()
+            .map(|(s, _)| *s)
+            .chain(
+                crate::graph_store::PLAN_STATUS_ALIASES
+                    .iter()
+                    .map(|(s, _)| *s),
+            )
+            .collect()
+    })
 }
 
 /// Graph derived `_status` -> plan `status`. None means "no plan write".
