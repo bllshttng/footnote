@@ -30,7 +30,6 @@ A cell is a projection, never a fresh measurement. The rule, in order:
 | law | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
 | lead | loop, spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent | absent | native |
 | mail | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
-| reign | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
 | review | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
 | setup | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
 | ship | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native | native | native |
