@@ -1644,6 +1644,7 @@ mod tests {
                 "claude",
                 "codex",
                 "cursor-agent",
+                "footnote",
                 "gemini",
                 "grok",
                 "opencode",

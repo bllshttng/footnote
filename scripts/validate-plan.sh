@@ -245,20 +245,76 @@ _plan_created_date() {
     printf '%s' "$created"
 }
 
-# The plan's node id, from the frontmatter's node: then claims: key - the
-# same order _plan_link_id resolves. Empty when neither names an id.
+# The plan's node id, resolved by the same rule the Rust sweep's
+# plan_link_id applies (crates/fno-agents/src/plan_doc/reconcile.rs): keys
+# node, claims, graph_node_id in that order, a truthy one-item list
+# (inline `[x-1]` or a single block item) unwraps, and any other list shape
+# reads as empty. The validator owns this one leg of the link rule; no
+# Python import.
 _plan_node_id() {
-    local file="$1" line=""
-    line=$(awk '
+    local file="$1" raw=""
+    raw=$(awk '
         /^---/ { c++; if (c==2) exit; next }
-        c==1 && /^(node|claims):/ {
-            sub(/^(node|claims):[[:space:]]*/, "")
-            gsub(/["'"'"']/, "")
-            print
-            exit
+        c==1 {
+            if ($0 ~ /^(node|claims|graph_node_id):/) {
+                key = $0; sub(/:.*/, "", key)
+                val = $0; sub(/^[^:]*:[[:space:]]*/, "", val)
+                gsub(/["'"'"']/, "", val)
+                if (!(key in seen)) {
+                    seen[key] = 1
+                    if (val == "") { pending = key }
+                    else { vals[key] = val }
+                }
+            } else if (pending != "" && $0 ~ /^[ \t]+-[ \t]/) {
+                item = $0
+                sub(/^[ \t]*-[ \t]*/, "", item)
+                gsub(/["'"'"']/, "", item)
+                if (vals[pending] == "") { vals[pending] = "1:" item }
+                else { vals[pending] = "MANY" }
+                pending = ""
+            } else if (pending != "" && $0 ~ /^[ \t]/ && $0 !~ /^[ \t]*#/) {
+                # A nested mapping under the link key is the unusable shape
+                # the Rust plan_link_id reads as unlinked; do not fall
+                # through to a later key.
+                vals[pending] = "MANY"
+                pending = ""
+            }
+        }
+        END {
+            # A usable link unwraps to the id. A PRESENT-but-unusable shape
+            # (a multi-item list, a nested mapping) returns its raw text so
+            # the well-formed-id check in the caller still reads malformed
+            # and keeps the malformed warning voice. Only an absent key or
+            # an empty list falls through to the next key.
+            for (k in vals) {
+                v = vals[k]
+                if (v == "[]") { v = "" }
+                else if (v == "MANY") { ; }
+                else if (v ~ /^1:/) {
+                    v = substr(v, 3)
+                    gsub(/^\[|\]$/, "", v)
+                    gsub(/^[ \t]+|[ \t]+$/, "", v)
+                } else {
+                    gsub(/^\[|\]$/, "", v)
+                    gsub(/^[ \t]+|[ \t]+$/, "", v)
+                }
+                vals[k] = v
+            }
+            link = ""
+            v = vals["node"]
+            if (v != "") { link = v }
+            if (link == "") {
+                v = vals["claims"]
+                if (v != "") { link = v }
+            }
+            if (link == "") {
+                v = vals["graph_node_id"]
+                if (v != "") { link = v }
+            }
+            print link
         }
     ' "$file")
-    printf '%s' "$line"
+    printf '%s' "$raw"
 }
 
 # The node id encoded by the plan's own filename, by the same trailing
@@ -1213,18 +1269,12 @@ sys.stdout.write("O\t%s\n" % validated.outcome)
 # one place that reads live data.
 #
 # node -> claims -> graph_node_id, same order and same one-element-list
-# unwrap as fno.plan.reconcile_status._plan_link_id (imported, not
-# re-spelled): `claims` alone missed every plan using the canonical `node:`
-# key - the field quick-template.md actually ships, `claims:` being commented
-# out there as the ab-id-input special case.
-node_id = None
-if isinstance(loaded, dict):
-    try:
-        from fno.plan.reconcile_status import _plan_link_id
-
-        node_id = _plan_link_id(loaded)
-    except Exception:  # noqa: BLE001 - a resolver import failure must not fail the shape check
-        node_id = None
+# unwrap as the Rust sweep's plan_link_id. The shell resolves the link (the
+# _plan_node_id helper) and passes it in, so this stays one leg of the rule
+# with no Python import: `claims` alone missed every plan using the canonical
+# `node:` key - the field quick-template.md actually ships, `claims:` being
+# commented out there as the ab-id-input special case.
+node_id = sys.argv[2] if len(sys.argv) > 2 else None
 if isinstance(node_id, str) and node_id.strip():
     try:
         from fno.rust_binary import call_front_json
@@ -1333,13 +1383,13 @@ PYEOF
     # can take.
     if [[ -n "$python_bin" ]]; then
         delegate_out=$(PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            "$python_bin" -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+            "$python_bin" -c "$consolidation_prog" "$file" "$(_plan_node_id "$file")" 2>&1) || delegate_rc=$?
     fi
     if [[ -z "$python_bin" || "$delegate_out" == U$'\t'* ]] \
             && command -v uv >/dev/null 2>&1; then
         delegate_rc=0
         delegate_out=$(uv run --project "$source_root/cli" \
-            python -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+            python -c "$consolidation_prog" "$file" "$(_plan_node_id "$file")" 2>&1) || delegate_rc=$?
     fi
     if [[ -z "$delegate_out" && "$delegate_rc" -eq 0 ]]; then
         warn "$label: consolidation block NOT CHECKED (no interpreter with the fno CLI importable at $source_root) - not a pass"
