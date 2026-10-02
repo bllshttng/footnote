@@ -639,7 +639,11 @@ fn archive_path(path: &Path) -> Result<PathBuf, String> {
         .file_name()
         .ok_or_else(|| "claim path has no filename".to_string())?
         .to_string_lossy();
-    Ok(archive.join(format!("{name}.{stamp}")))
+    // Python archive naming is `<encoded-key>.<ts_ms>.lock` (io.expired_archive_path):
+    // the .expired scanner decodes names ending in .lock, so the stamped file must
+    // keep that shape, not `<file>.<stamp>` with the .lock buried mid-name.
+    let encoded = name.strip_suffix(".lock").unwrap_or(&name);
+    Ok(archive.join(format!("{encoded}.{stamp}.lock")))
 }
 
 /// Read one repo-space claims directory using the same root resolution as a

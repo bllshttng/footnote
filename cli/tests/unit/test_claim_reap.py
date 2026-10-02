@@ -1368,7 +1368,7 @@ class TestSweepReadsWalkedDir:
         # The space root rides env: the native acquire below resolves it in
         # the binary's process, where a Python path-symbol patch is invisible.
         monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
-        space = claims_dir("reap:pr-1496", root=None).parent
+        space = claims_dir("reap:pr-1496").parent
         # Session-prover pid not running, no session id: the shape the
         # native classifier reads Stale on its own (dead pid proves death on
         # this machine regardless of the TTL arm).
