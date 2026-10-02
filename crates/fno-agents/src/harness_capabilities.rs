@@ -40,9 +40,8 @@ const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 /// The fno hook jobs a harness row must declare beside its pane mechanics.
 /// The loop job is NOT one of them: `loop_participation` and
 /// `loop_extension` already declare it, and the wire-gate below derives the
-/// loop's state from that pair instead of a second field. Wave 2 adds
-/// `session_state` after the session-state push lands its remaining waves.
-pub const HOOK_JOBS: [&str; 2] = ["lead_guard", "lead_reinject"];
+/// loop's state from that pair instead of a second field.
+pub const HOOK_JOBS: [&str; 3] = ["lead_guard", "lead_reinject", "session_state"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
 
@@ -228,6 +227,11 @@ pub struct HookJob {
 #[serde(deny_unknown_fields)]
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
+    /// Which delivered-mail header form this harness's composer tolerates:
+    /// `true` = the `@name` mention form, `false` = plain `name` (a bare
+    /// `@` can open a composer mention picker or read as an address). The
+    /// composer check's verdict, read as data - never a branch in code.
+    pub mail_header_at: bool,
     /// The mux composer's effort-picker list. `None` = no effort surface at
     /// all; `Some([])` = the axis exists but values are provider passthrough
     /// (free text); a filled list is the enumerable choices. Absent on a row
@@ -587,6 +591,13 @@ impl HarnessCapabilities {
 impl HarnessContract {
     pub fn packaged() -> Result<Self, ContractError> {
         Self::parse(CAPABILITY_TOML)
+    }
+
+    /// The delivered-mail header form a harness's composer takes, from its
+    /// contract row: `Some(true)` = the `@name` mention form, `Some(false)` =
+    /// plain `name`. `None` = unknown harness.
+    pub fn mail_header_at(&self, harness: &str) -> Option<bool> {
+        Some(self.harness.get(harness)?.mail_header_at)
     }
 
     /// Gate ONE merged candidate row (bundled + config override) through the
@@ -1390,7 +1401,7 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
                 harness,
                 "hooks",
                 &format!(
-                    "unknown hook job {job:?}; declared jobs are lead_guard and lead_reinject"
+                    "unknown hook job {job:?}; declared jobs are lead_guard, lead_reinject and session_state"
                 ),
             ));
         }
@@ -1540,6 +1551,17 @@ fn sh_join(tokens: &[String]) -> String {
         .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The packaged contract's header-form verdict for `harness`: `Some(true)` =
+/// the `@name` mention form, `Some(false)` = plain, `None` = unknown harness.
+pub fn packaged_mail_header_at(harness: &str) -> Option<bool> {
+    static CONTRACT: std::sync::OnceLock<HarnessContract> = std::sync::OnceLock::new();
+    CONTRACT
+        .get_or_init(|| {
+            HarnessContract::packaged().expect("the packaged capability contract parses")
+        })
+        .mail_header_at(harness)
 }
 
 pub fn render_session_argv(
@@ -1751,6 +1773,12 @@ mod tests {
             validate_row("claude", &probe).is_err(),
             "an undeclared job refuses"
         );
+        // The session_state job obeys the same gate: an undeclared entry on a
+        // wired row refuses naming the job (AC16's shape).
+        let mut probe = wired.clone();
+        probe.hooks.remove("session_state");
+        let err = validate_row("claude", &probe).expect_err("an undeclared session_state refuses");
+        assert!(err.0.contains("session_state"), "{err:?}");
         let unwired = contract.capabilities("gemini").unwrap().clone();
         assert!(
             validate_row("gemini", &unwired).is_ok(),

@@ -259,6 +259,10 @@ if [[ -n "$top" ]] \
   && [[ "$(git -C "$top" rev-parse --absolute-git-dir 2>/dev/null)" == "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] \
   && command -v fno-agents >/dev/null 2>&1 \
   && command -v jq >/dev/null 2>&1; then
+  # The probe's exit code carries the answer (124 reads as behind-unknown),
+  # so it keeps its FIXED bound from before the load-aware budget: a 1s
+  # budget measured a fork miss on a loaded runner that turned a real
+  # verdict into a 124.
   answer="$(jq -n --arg c "$top" '{canonical:$c}' | with_timeout 5 fno-agents canonical-check)"
   checkout_rc=$?
   if (( checkout_rc == 124 )); then

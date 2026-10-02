@@ -245,7 +245,7 @@ fn wide_glyph_name_keeps_the_pr_column_aligned() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = view.panel_w() as usize - 1;
-    let pr = sideline_column_rects(text_w as u16)[3];
+    let pr = view.worker_column_rects(text_w as u16)[3];
     // The two agent rows paint at outer rows 1 and 2 (row 0: squad header).
     let wide_pr = &frame.cells[1 * cols + pr.x as usize..1 * cols + (pr.x + pr.width) as usize];
     let ascii_pr = &frame.cells[2 * cols + pr.x as usize..2 * cols + (pr.x + pr.width) as usize];

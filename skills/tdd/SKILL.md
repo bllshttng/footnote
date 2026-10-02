@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: "Test-Driven Development: write the test first, watch it fail, implement minimal code. Use when implementing a feature or bugfix, during /execute, or when a plan carries acceptance criteria."
+description: Use test-first development to implement a feature or fix against acceptance criteria.
 ---
 
 # Test-Driven Development (TDD)

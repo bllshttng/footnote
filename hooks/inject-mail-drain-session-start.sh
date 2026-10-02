@@ -18,10 +18,10 @@ export PATH
 command -v fno >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/with-timeout.sh
-source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/hook-budget.sh
+source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
-OUTPUT=$(with_timeout 2 fno agents mail drain-self 2>/dev/null || true)
+OUTPUT=$(hook_run_optional fno agents mail drain-self 2>/dev/null || true)
 [[ -z "$OUTPUT" ]] && exit 0
 
 printf '%s\n' "$OUTPUT"

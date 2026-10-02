@@ -131,7 +131,9 @@ def test_three_79_word_sends_deliver_without_a_ledger(
     for _ in range(3):
         prepared = _pane_prepare(_clean_body(45))
         assert prepared.exit_code == 0, prepared.output
-        assert "</fno_mail>" in prepared.output
+        # The prepared payload opens with the delivered attribution line.
+        first = prepared.output.splitlines()[0]
+        assert first.startswith("`") and first.endswith("`") and " · " in first, first
 
     assert not (paths.bus_dir() / "word-budget").exists(), (
         "an ordinary send charges no rolling ledger"

@@ -27,11 +27,13 @@ PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 # fno shells can wedge on a stalled daemon / graph lock; bound every call with
-# the shared wall-clock helper rather than the harness's 30s hook timeout
-#. Fails closed like the other injection hooks: a missing helper exits 0.
+# the shared load-aware budget rather than the harness's 30s hook timeout.
+# Fails closed like the other injection hooks: a missing helper
+# exits 0.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/with-timeout.sh
-source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/hook-budget.sh
+source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
+OFFER_BUDGET="$(hook_budget_secs)"
 # shellcheck source=../scripts/lib/events-lock.sh
 source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 
@@ -272,7 +274,7 @@ if command -v fno >/dev/null 2>&1; then
     # deleted worktree (archive-worktree.sh / `fno agents workspace worktree cleanup` can remove one
     # under a live session) would read as "node absent" and destroy a live offer.
     # Map it to 99 so it lands in the degrade-to-surfacing branch below.
-    node_json=$( cd "$REPO_ROOT" 2>/dev/null || exit 99; with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
+    node_json=$( cd "$REPO_ROOT" 2>/dev/null || exit 99; with_timeout "$OFFER_BUDGET" fno backlog get "$node_id" 2>/dev/null )
     _get_rc=$?
     if [[ "$_get_rc" -eq 0 ]]; then
         # Resolved. Suppress only if the node is already underway; a parse
@@ -372,7 +374,7 @@ except Exception:
         cand_id=""
         cand_title=""
         if command -v fno >/dev/null 2>&1; then
-            cand_id=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog ready 2>/dev/null | python3 -c '
+            cand_id=$( cd "$REPO_ROOT" && with_timeout "$OFFER_BUDGET" fno backlog ready 2>/dev/null | python3 -c '
 import sys, json
 offered, domain = sys.argv[1], sys.argv[2]
 try:
@@ -390,7 +392,7 @@ except Exception:
 ' "$node_id" "$e_domain" 2>/dev/null ) || cand_id=""
 
             if [[ -z "$cand_id" ]]; then
-                cand_id=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog next 2>/dev/null | python3 -c '
+                cand_id=$( cd "$REPO_ROOT" && with_timeout "$OFFER_BUDGET" fno backlog next 2>/dev/null | python3 -c '
 import sys, json
 offered = sys.argv[1]
 try:
@@ -403,7 +405,7 @@ except Exception:
             fi
 
             if [[ -n "$cand_id" ]]; then
-                cand_title=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$cand_id" 2>/dev/null | python3 -c '
+                cand_title=$( cd "$REPO_ROOT" && with_timeout "$OFFER_BUDGET" fno backlog get "$cand_id" 2>/dev/null | python3 -c '
 import sys, json, re
 _TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 try:

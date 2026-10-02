@@ -10,7 +10,7 @@
 # quiet board forever.
 #
 # The check: extract every backticked token from the numbered arm lines of
-# skills/reign/SKILL.md and docs/architecture/reign.md - a bare word counts in
+# skills/lead/SKILL.md and docs/architecture/reign.md - a bare word counts in
 # full, so a one-word kind with no underscore is still checked - subtract the
 # allowlist of words that are reader fields, graph fields, code paths, harness
 # vocabulary or check-run vocabulary rather than journal events, and refuse

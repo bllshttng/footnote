@@ -1,6 +1,6 @@
 ---
 name: growth-social
-description: Social role subagent for growth-studio. Drafts social posts and a calendar grounded in verified product truth. Drafts and schedules into files only; holds no tool that can dispatch a publish.
+description: Adapt an approved campaign into platform-specific social content.
 pack: growth-studio
 role: social
 tools: ["Read", "Write", "Glob"]

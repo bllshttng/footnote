@@ -149,7 +149,11 @@ def test_heads_up_create_node_marks_read(inbox_root, repo_root, monkeypatch):
             self.stdout = stdout
             self.stderr = stderr
 
+    real_run = _subprocess.run  # the stub patches the shared module attr
+
     def fake_run(cmd, *args, **kwargs):
+        if len(cmd) >= 2 and cmd[1] == "mail-envelope":
+            return real_run(cmd, *args, **kwargs)
         if cmd[:4] == ["fno-py", "backlog", "new", "--help"]:
             return _FakeRun(stdout="--source-inbox-thread\n")
         if cmd[:3] == ["fno-py", "backlog", "new"]:

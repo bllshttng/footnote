@@ -104,6 +104,46 @@ fn board_render_rows() {
         lines.iter().any(|l| l.contains("no cards match")),
         "{lines:?}"
     );
+
+    // The keyed grammar reaches the board through the Find input; a bad
+    // keyed query names the parse error and keeps the previous filter.
+    let mut v = key_view(board_with(board_inputs()));
+    v.backlog_board.as_mut().expect("board open").input =
+        Some((BoardInputKind::Find, "s:ready".into()));
+    input_commit(&mut v);
+    let b = v.backlog_board.as_ref().expect("board open");
+    let total: usize = b
+        .body
+        .as_ref()
+        .unwrap()
+        .lanes
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
+        .sum();
+    assert_eq!(total, 2, "only the ready cards stay");
+    assert_eq!(b.query.q.as_deref(), Some("s:ready"));
+    let mut v = key_view(board_with(board_inputs()));
+    {
+        let b = v.backlog_board.as_mut().expect("board open");
+        b.query.q = Some("s:ready".into());
+        b.input = Some((BoardInputKind::Find, "stauts:ready".into()));
+    }
+    input_commit(&mut v);
+    let b = v.backlog_board.as_ref().expect("board open");
+    assert_eq!(
+        b.query.q.as_deref(),
+        Some("s:ready"),
+        "the previous filter stays"
+    );
+    let notice = v
+        .notice
+        .as_ref()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    assert!(
+        notice.contains("did you mean 'status:'?"),
+        "notice: {notice}"
+    );
 }
 
 // AC4-HP: the stats line counts every column and renders the flow line.
@@ -283,16 +323,17 @@ fn board_wide_rows() {
         "last column survives the cut: {header}"
     );
 
+    // The ROW rule clips with no marker (d-36438ea4): the stats line loses
+    // whole trailing text, never a word-boundary ellipsis.
     assert_eq!(
-        elide_words(
+        crate::chrome::clip(
             "In Progress 1 \u{b7} Now 1 \u{b7} Next 279 \u{b7} Later 30",
             26
         ),
-        "In Progress 1 \u{b7} Now 1 \u{b7}\u{2026}"
+        "In Progress 1 \u{b7} Now 1 \u{b7} Ne"
     );
-    assert_eq!(elide_words("short", 26), "short");
-    // One long word: no boundary exists, so the ellipsis follows a hard cut.
-    assert_eq!(elide_words("abcdefgh", 4), "abc\u{2026}");
+    assert_eq!(crate::chrome::clip("short", 26), "short");
+    assert_eq!(crate::chrome::clip("abcdefgh", 4), "abcd");
 }
 
 // `V` cycles the sideline view and the board rides with it: to backlog

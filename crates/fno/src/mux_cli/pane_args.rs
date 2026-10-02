@@ -41,7 +41,8 @@ the agent panel, and selecting it resumes the session through its own harness. E
 runs keeper-hosted, so any pane outlives its server and a fresh server re-adopts it in place \
 (`fno mux pane keeper list` reads them); a keeper that cannot start falls back to an inline pane \
 marked unkept, and `fno mux kill-server` refuses while one is live. A run without --worker \
-records no member.";
+records no member. pane run --size 144x40 sets the pane's columns and rows; a client that views \
+its tab later fits it to that screen.";
 
 /// What the `fno_id` column answers, stated where the listing is
 /// read: identity, never idleness or reusability. The dash is reserved for
@@ -164,6 +165,7 @@ pub fn parse_pane_args(
         let mut from: Option<String> = None;
         let mut at_current = false;
         let mut max_panes = None;
+        let mut size = None;
         // run keeps the common flags as loop arms, not a fence-less
         // MuxCommon::take: everything from the first bare token or `--` is
         // the spawned command's argv verbatim, and a payload token that
@@ -283,6 +285,13 @@ pub fn parse_pane_args(
                     max_panes = Some(parsed);
                     i += 1;
                 }
+                "--size" => {
+                    let Some(v) = sargs.get(i + 1) else {
+                        return Err("--size needs a value like 144x40".into());
+                    };
+                    size = Some(parse_size(v)?);
+                    i += 1;
+                }
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -339,6 +348,7 @@ pub fn parse_pane_args(
                 claim,
                 worker,
                 placement,
+                size,
             },
         });
     }
@@ -572,6 +582,14 @@ pub fn parse_pane_args(
         session = selector_session;
     }
     Ok(ParsedPane { session, json, cmd })
+}
+
+/// `--size 144x40`: columns, then rows, each 1..=1000.
+pub(crate) fn parse_size(v: &str) -> Result<(u16, u16), String> {
+    let dim = |s: &str| s.parse::<u16>().ok().filter(|n| (1..=1000).contains(n));
+    v.split_once('x')
+        .and_then(|(c, r)| Some((dim(c)?, dim(r)?)))
+        .ok_or_else(|| format!("--size needs <cols>x<rows> like 144x40, got {v:?}"))
 }
 
 #[cfg(test)]
