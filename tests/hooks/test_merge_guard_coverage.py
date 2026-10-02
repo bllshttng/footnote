@@ -18,7 +18,6 @@ no verdict at all.
 """
 import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -50,11 +49,6 @@ def _patch_run(monkeypatch, result):
         return result
 
     monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        git_protection,
-        "_inprocess_dispatch_hold_reason",
-        lambda _pr: (False, None),
-    )
     return seen
 
 
@@ -118,40 +112,18 @@ def test_dispatch_hold_veto_allows_proven_unheld(monkeypatch):
     assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
 
 
-def test_dispatch_hold_veto_prefers_inprocess_reader(monkeypatch):
-    monkeypatch.setattr(
-        git_protection,
-        "_inprocess_dispatch_hold_reason",
-        lambda _pr: (True, "dispatch-hold:x-5a5c: blocked"),
+def test_dispatch_hold_veto_probes_the_front_door_once(monkeypatch):
+    """The hold verdict comes from one `fno do pr hold-check` probe; the
+    retired in-process fast path and its `python -m fno.cli` source fallback
+    are gone, so the veto never imports the package or re-probes."""
+    seen = _patch_run(
+        monkeypatch,
+        _Proc(3, stderr="dispatch-hold:x-5a5c: blocked"),
     )
-    monkeypatch.setattr(
-        git_protection.subprocess,
-        "run",
-        lambda *a, **k: pytest.fail("subprocess fallback must not run"),
-    )
-    assert "dispatch-hold:x-5a5c" in git_protection._dispatch_hold_refusal(
-        "gh pr merge 900"
-    )
-
-
-def test_dispatch_hold_veto_falls_back_to_source_cli(monkeypatch):
-    calls = []
-
-    monkeypatch.setattr(
-        git_protection,
-        "_inprocess_dispatch_hold_reason",
-        lambda _pr: (False, None),
-    )
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[0] == "fno":
-            raise FileNotFoundError("fno")
-        return _Proc(0, stdout="PR 900: no plan dispatch hold\n")
-
-    monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
-    assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
-    assert calls[1][:5] == [sys.executable, "-m", "fno.cli", "do", "pr"]
+    msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
+    assert msg == "dispatch-hold:x-5a5c: blocked"
+    assert seen["cmd"] == ["fno", "do", "pr", "hold-check", "900"]
+    assert seen["timeout"] <= 5
 
 
 @pytest.mark.parametrize(
@@ -187,25 +159,6 @@ def test_dispatch_hold_veto_bare_merge_other_repo_names_the_repo_case(monkeypatc
     msg = git_protection._dispatch_hold_refusal("gh pr merge -R other/repo")
     assert msg and "another repository" in msg
     assert "cmd" not in calls
-
-
-def test_inprocess_hold_reader_degrades_on_broken_import(monkeypatch):
-    """Round-12 finding 8: the import chain reaches typer, so a broken/partial
-    install raises more than ImportError. A version-mismatch AttributeError
-    must degrade to the subprocess fallback, never crash the hook."""
-    import builtins
-
-    real_import = builtins.__import__
-
-    def broken(name, *args, **kwargs):
-        if name.startswith("fno.pr"):
-            raise AttributeError(
-                "module 'typer' has no attribute 'Bad' (broken install)"
-            )
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", broken)
-    assert git_protection._inprocess_dispatch_hold_reason(900) == (False, None)
 
 
 def test_other_repo_is_skipped(monkeypatch):

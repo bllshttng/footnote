@@ -68,6 +68,28 @@ enum MatchRequest {
     /// 1 unreadable index, 2 usage), like `record` and `retract`.
     #[serde(rename = "decisions")]
     Decisions(RecordDoorRequest),
+    /// The decide record verb, ported from `_record` + `record_decision`
+    /// (cli/src/fno/decide/cli.py + decide/__init__.py, deleted): `argv` is
+    /// the `fno inbox decide` / `fno backlog decide` command line. Same
+    /// ownership as `record`: the door owns stdout (the decision id) and the
+    /// exit code (0 recorded, 1 failed write, 2 bad flag value, 3 refused).
+    #[serde(rename = "decide")]
+    Decide(RecordDoorRequest),
+    /// The provenance resolver the Python callers share with the decide
+    /// door: one resolver, one law. Returns the resolved columns, or the
+    /// refusal kind plus its text.
+    #[serde(rename = "resolve-provenance")]
+    ResolveProvenance(ResolveProvenanceRequest),
+}
+
+/// The resolver request: the caller's authority claim and its carried
+/// origin, both optional exactly as the decide door takes them.
+#[derive(Deserialize)]
+pub(crate) struct ResolveProvenanceRequest {
+    #[serde(default)]
+    authority: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 /// The record door's request: the law-set argv plus the caller's stdin.
@@ -1362,7 +1384,7 @@ fn scope_split_answer_in(
 // law.
 // ---------------------------------------------------------------------------
 
-const WAIVER_SUBJECT_PREFIX: &str = "review-coverage-waiver";
+pub(crate) const WAIVER_SUBJECT_PREFIX: &str = "review-coverage-waiver";
 
 /// The law-set argv, parsed natively.
 pub(crate) struct RecordDoor {
@@ -1452,7 +1474,7 @@ fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
     Ok(door)
 }
 
-fn mint_decision_id() -> String {
+pub(crate) fn mint_decision_id() -> String {
     // 'd-<hex>', matching decide/__init__.py::mint_decision_id (8 hex chars).
     format!("d-{}", random_hex8())
 }
@@ -1478,7 +1500,7 @@ fn random_hex8() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn attended_terminal() -> bool {
+pub(crate) fn attended_terminal() -> bool {
     // A positive marker, not an absence (the Python doc states the limit
     // plainly: a tty is obtainable; this raises the cost of forging the
     // superuser lane and never stands alone).
@@ -1624,7 +1646,7 @@ fn find_decision_row(index: &decision_index::Index, decision_id: &str) -> Option
 
 /// The repo root the evidence gate resolves citations against: the
 /// FNO_REPO_ROOT test hook, then the git toplevel, then the cwd.
-fn evidence_repo_root() -> std::path::PathBuf {
+pub(crate) fn evidence_repo_root() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("FNO_REPO_ROOT") {
         return std::path::PathBuf::from(root);
     }
@@ -1648,7 +1670,7 @@ fn evidence_repo_root() -> std::path::PathBuf {
 /// worktree: `resolve_carveout_root` + `events_path`. The canonical root
 /// honors the FNO_REPO_ROOT test hook first, then the first `git worktree
 /// list` row.
-fn project_events_journal() -> std::path::PathBuf {
+pub(crate) fn project_events_journal() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("FNO_REPO_ROOT") {
         return std::path::PathBuf::from(root)
             .join(".fno")
@@ -1725,7 +1747,7 @@ fn read_open_questions() -> Vec<OpenQuestion> {
     asked
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -2046,7 +2068,7 @@ pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Cal
 
 /// Raw text cap: the first `cap` chars, Python `text[:cap]` semantics (no
 /// newline collapse; the law row keeps its line breaks).
-fn text_cap(text: &str, cap: usize) -> String {
+pub(crate) fn text_cap(text: &str, cap: usize) -> String {
     text.chars().take(cap).collect()
 }
 
@@ -2123,7 +2145,7 @@ fn row_id(row: &Value) -> &str {
 /// target, no `decision_id` of its own. Subject-addressed reads and writes
 /// skip it, or a fully retracted subject still answers to its own
 /// retraction.
-fn is_retraction_row(row: &Value) -> bool {
+pub(crate) fn is_retraction_row(row: &Value) -> bool {
     row.get("_event_type").and_then(Value::as_str) == Some("decision_retracted")
 }
 
@@ -2134,7 +2156,7 @@ fn row_subject(row: &Value) -> &str {
 /// Every flattened decision row, any lifecycle, from the machine's default
 /// store. The history read renders the retired rows; the retract door reads
 /// the same source so the two never disagree about what is live.
-fn all_decision_rows() -> Result<(Vec<Value>, usize), String> {
+pub(crate) fn all_decision_rows() -> Result<(Vec<Value>, usize), String> {
     decision_index::read_store_rows(
         &crate::graph_get::default_graph_path(),
         &decision_index::default_state_path("decisions.jsonl"),
@@ -2727,6 +2749,58 @@ pub fn run_law_match_str(input: &str) -> i32 {
             // The door owns stdout and the exit code; no envelope here.
             return run_record_door(&r.argv, &r.stdin);
         }
+        MatchRequest::Decide(r) => {
+            return crate::decide_door::run_decide_door(&r.argv);
+        }
+        MatchRequest::ResolveProvenance(r) => {
+            let origin = crate::decide_door::enforce_origin_floor(
+                r.origin.as_deref(),
+                crate::decide_door::DecideIdentity::Ambient,
+            );
+            match crate::decide_door::resolve_decider_lanes(
+                crate::decide_door::DecideIdentity::Ambient,
+                None,
+                r.authority.as_deref(),
+                origin.as_deref(),
+            ) {
+                Ok(p) => serde_json::to_string(&serde_json::json!({
+                    "decided_by": p.decided_by,
+                    "authority_source": p.authority_source,
+                    "attested_by": p.attested_by,
+                    "relayed_by": p.relayed_by,
+                    "origin": origin,
+                }))
+                .expect("serializes"),
+                Err(crate::decide_door::DecideRefusal::UnknownOrigin(o)) => {
+                    serde_json::to_string(&serde_json::json!({
+                        "refusal_kind": "unknown-origin",
+                        "refusal": format!(
+                            "mail origin '{o}' is unknown; use one of {}",
+                            crate::decide_door::MAIL_ORIGINS.join(", ")
+                        ),
+                    }))
+                    .expect("serializes")
+                }
+                Err(crate::decide_door::DecideRefusal::RefusedAuthority { agent, origin }) => {
+                    serde_json::to_string(&match origin {
+                        Some(o) => serde_json::json!({
+                            "refusal_kind": "origin-authority",
+                            "refusal": format!("agent {agent} cannot record under superuser authority from {o} origin"),
+                            "origin": o,
+                        }),
+                        None => serde_json::json!({
+                            "refusal_kind": "authority",
+                            "refusal": format!("agent {agent} cannot record under superuser authority"),
+                        }),
+                    })
+                    .expect("serializes")
+                }
+                Err(crate::decide_door::DecideRefusal::UnattributedAuthority) => serde_json::to_string(
+                    &serde_json::json!({"refusal_kind": "unattributed"}),
+                )
+                .expect("serializes"),
+            }
+        }
         MatchRequest::Retract(r) => {
             return run_retract_door(&r.argv);
         }
@@ -2759,7 +2833,7 @@ pub fn run_law_match_str(input: &str) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn law(id: &str, subject: &str, decision: &str, ts: &str) -> LawRow {
@@ -3805,7 +3879,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod scope_tests {
+pub(crate) mod scope_tests {
     use super::*;
 
     fn sources(tmp: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -3951,14 +4025,14 @@ mod scope_tests {
 
     // Field 2 is the env lock guard, held for its Drop and never read.
     #[allow(dead_code)]
-    struct DoorEnv(
-        tempfile::TempDir,
+    pub(crate) struct DoorEnv(
+        pub(crate) tempfile::TempDir,
         tempfile::TempDir,
         std::sync::MutexGuard<'static, ()>,
     );
 
     impl DoorEnv {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let guard = DOOR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             let home = tempfile::tempdir().expect("tempdir");
             let root = tempfile::tempdir().expect("tempdir");
@@ -4069,6 +4143,7 @@ mod scope_tests {
     #[test]
     fn the_door_records_journal_index_and_table_under_chat_authority() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let code = record_door_write(
             door("merge-authority", "Merges belong to the operator"),
             "Merges belong to the operator".to_string(),
@@ -4099,6 +4174,7 @@ mod scope_tests {
     #[test]
     fn the_door_records_the_paths_globs_it_validated() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let mut d = door("edit-governed", "A law that names a path.");
         d.raw_paths = vec!["crates/**".to_string()];
         let code = record_door_write(
@@ -4117,6 +4193,7 @@ mod scope_tests {
     #[test]
     fn chat_cannot_supersede_an_operator_row_but_can_its_own() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let index = env.0.path().join("decisions.jsonl");
         std::fs::write(
             &index,
@@ -4165,6 +4242,7 @@ mod scope_tests {
     #[test]
     fn a_same_subject_repeat_supersedes_automatically() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let index = env.0.path().join("decisions.jsonl");
         std::fs::write(
             &index,
@@ -4192,6 +4270,7 @@ mod scope_tests {
     #[test]
     fn a_foreign_scope_law_is_never_auto_superseded() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let index = env.0.path().join("decisions.jsonl");
         std::fs::write(
             &index,
@@ -4219,6 +4298,7 @@ mod scope_tests {
     #[test]
     fn several_live_laws_refuse_the_same_subject_edit() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let index = env.0.path().join("decisions.jsonl");
         let law_a = concat!(
             "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
@@ -4245,6 +4325,7 @@ mod scope_tests {
     #[test]
     fn the_retract_door_resolves_a_subject_and_writes_the_retraction() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let index = env.0.path().join("decisions.jsonl");
         std::fs::write(
             &index,
@@ -4649,6 +4730,7 @@ mod scope_tests {
     #[test]
     fn a_waiver_subject_refuses_chat_authority() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         let code = record_door_write(
             door(
                 "review-coverage-waiver:acme/widgets#42@cccc",
@@ -4664,6 +4746,7 @@ mod scope_tests {
     #[test]
     fn a_code_fact_without_a_read_refuses_and_with_one_records_the_row() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         std::fs::write(
             env.1.path().join("advance.py"),
             (1..=200).map(|i| format!("line {i}\n")).collect::<String>(),
@@ -4696,6 +4779,7 @@ mod scope_tests {
     #[test]
     fn an_index_write_failure_exits_1_with_the_journal_durable() {
         let env = DoorEnv::new();
+        crate::paths::pin_test_claims_root(env.0.path());
         // A DIRECTORY at the index store path: the recall append cannot land.
         let home = env.0.path();
         std::fs::remove_file(home.join("decisions.jsonl")).ok();

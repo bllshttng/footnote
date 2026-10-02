@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,10 +80,26 @@ def _resolve_worker(policy_dir: Path, session_id: str) -> str:
         except OSError:
             pass
     try:
-        from fno.claims.self_identity import resolve_task_holder
-
-        resolved, _refusal = resolve_task_holder()
-        name = resolved or ""
+        # The roster binding (spawn-minted name<->session row) is the fact
+        # `fno whoami` prints; its agent row carries the same registry read
+        # the retired fno.claims import made. A session whose only provable
+        # identity is a raw session id used to fall through with that id as
+        # the name, but advance.py mints policy files under roster names
+        # only, so a session-id name never matched a policy file: "" here is
+        # observationally identical, and identity trouble is never a jail.
+        proc = subprocess.run(
+            ["fno", "whoami"], capture_output=True, text=True, timeout=5
+        )
+        name = ""
+        for line in (proc.stdout or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("agent:") and "(registry)" in stripped:
+                name = (
+                    stripped[len("agent:"):]
+                    .replace("(registry)", "")
+                    .strip()
+                )
+                break
     except Exception:  # noqa: BLE001 - identity trouble is never a jail
         name = ""
     if cache is not None:

@@ -1,50 +1,25 @@
-"""Canonical harness-name list (L0 platform data).
+"""Canonical harness-name door (L0 platform data).
 
-The COMPLETE roster of harnesses footnote supports, held equal to the union of
-three shipped evidence surfaces (setup docs, the Rust provider dispatch, the
-Python adapter registry) by ``scripts/ci/check-harness-roster-parity.py``.
-Pure data with no ``fno`` imports, so any layer may read it without a
-cross-layer edge. The runtime capability table
-(``fno.agents.harness_map._HARNESS_CAPS``) asserts its keys are a SUBSET of
-this list at import time: a capability row naming a harness absent here fails
-loudly, while a roster entry with no capability row (hermes, openclaw today)
-is a supported identity without a native fno spawn - legal, and deliberately
-not a capability.
-
-This inverts the old derivation (names read FROM the capability table) so the
-platform layer (``fno.harness_identity``) no longer reaches into the runtime
-for the name set, which dragged ``fno.agents`` in at import time. The
-name set is the source of truth; the capability table validates against it.
+The COMPLETE harness roster lives in Rust, ``KNOWN_HARNESSES`` in
+``crates/fno-agents/src/provider.rs``, the one list; this module is
+its Python door: ``KNOWN_HARNESSES`` runs one ``fno-agents harness-roster``
+subprocess per process, cached in the module globals (never a subprocess per
+call) and fail-closed, while ``scripts/ci/check-harness-roster-parity.py``
+holds every evidence surface as a subset of that source. No ``fno.agents``
+import, so the platform layer drags no runtime. ``SPAWN_HARNESSES`` stays
+Python: it is the set of BUILT thread/headless seam arms, not roster.
 """
 from __future__ import annotations
 
-# Every harness supported by shipped evidence, not every harness with a
-# capability row. hermes and openclaw host real sessions per docs/SETUP-*.md
-# but have no native fno dispatch, so they carry no row in
-# fno.agents.harness_map._HARNESS_CAPS; the map asserts capability keys stay a
-# subset of this tuple at import time. Order is capability-table order, then
-# newly recognized hosts appended; readers that need sorted output call
-# sorted() (as known_harnesses() does).
-KNOWN_HARNESSES: tuple[str, ...] = (
-    "claude",
-    "codex",
-    "gemini",
-    "agy",
-    "opencode",
-    "pi",
-    "hermes",
-    "openclaw",
-    "cursor-agent",
-    "grok",
-    "zcode",
-)
+from typing import TYPE_CHECKING, Any
 
-# Every harness with a BUILT spawn-seam arm: opencode through its launch
-# joins on journey evidence, never on roster growth; the measurement behind
-# each row is in docs/architecture/thread-lanes.md. Membership answers "is
-# there a seam arm", the row answers "is the lane measured", which is why pi
-# and agy sit here while their HEADLESS lanes stay unmeasured. kimi is absent
-# because its ACP lane refuses every turn until a provider is configured.
+from fno.rust_binary import VerbUnavailable, call_binary_json, find_dev_binary, resolve_binary
+
+if TYPE_CHECKING:  # served by __getattr__ below; type checkers only
+    KNOWN_HARNESSES: tuple[str, ...]
+
+# Every harness with a BUILT spawn-seam arm, measured per
+# docs/architecture/thread-lanes.md; kimi is absent until its ACP lane admits a provider.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -53,27 +28,62 @@ SPAWN_HARNESSES: tuple[str, ...] = (
     "pi",
     "grok",
     "agy",
-    # zcode's arm is the headless one-shot seam (client.rs), not a thread
-    # keeper; its row carries state_root_grant.headless measured.
     "zcode",
 )
 
 
-def unknown_thread_harness_message(name: str) -> str:
-    """The one refusal every thread-substrate seam raises.
+def _read_roster() -> dict[str, tuple[str, ...]]:
+    """One fail-closed subprocess read; the dev build outranks the stale installed copy."""
+    error, payload = call_binary_json(
+        "harness-roster", timeout=15, binary=find_dev_binary() or resolve_binary()
+    )
+    if error is not None:
+        raise VerbUnavailable(
+            "the harness roster lives in the fno-agents binary (provider.rs"
+            " KNOWN_HARNESSES) and the read failed: {error}; run `fno doctor"
+            " update --rust` or set FNO_AGENTS_BIN".format(error=error)
+        )
+    for key in ("known", "providers"):
+        names = payload.get(key) if isinstance(payload, dict) else None
+        if not names or not all(isinstance(n, str) and n for n in names):
+            raise VerbUnavailable(
+                f"fno-agents harness-roster answered no usable {key!r}: {payload!r}"[:200]
+            )
+    return {key: tuple(payload[key]) for key in ("known", "providers")}
 
-    Both halves derive from this module's tuples, so no seam can name a
-    harness the accept list has since admitted. The ROSTER decides the second
-    sentence: the pane lane execs whatever is on PATH. A missing thread lane
-    says what fno has BUILT, never what the harness can do
-    (docs/architecture/thread-lanes.md).
-    """
+
+def _roster(key: str) -> tuple[str, ...]:
+    cached = globals().get("_ROSTER")
+    if cached is None:
+        globals()["_ROSTER"] = cached = _read_roster()
+    return cached[key]
+
+
+def known_harnesses() -> tuple[str, ...]:
+    """The roster, resolved at most once per process; module-internal code calls this."""
+    return _roster("known")
+
+
+def known_providers() -> tuple[str, ...]:
+    return _roster("providers")
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562: serve ``KNOWN_HARNESSES`` from the Rust roster on first read."""
+    if name == "KNOWN_HARNESSES":
+        return known_harnesses()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def unknown_thread_harness_message(name: str) -> str:
+    """The one refusal every thread-substrate seam raises: both halves derive
+    from this module, and the pane lane execs whatever is on PATH."""
     accepted = ", ".join(SPAWN_HARNESSES)
     lines = [
         f"unknown harness {name!r} on the thread substrate (--harness names "
         f"the CLI BINARY); accepted here: {accepted}.",
     ]
-    if name in KNOWN_HARNESSES:
+    if name in known_harnesses():
         lines.append(f"{name} has no measured thread lane yet; use --substrate pane.")
     lines.append("If you meant a model VENDOR, that is -P/--provider.")
     return "\n".join(lines)

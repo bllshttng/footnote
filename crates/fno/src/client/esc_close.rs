@@ -18,7 +18,8 @@ pub(super) fn chip_at(view: &View, row: u16, col: u16) -> bool {
 /// Press Esc for a tap on a chip: the overlay chain first, then the two
 /// quiet-window releases the run loop would give a held lone Esc. A docked
 /// column paints a chip without holding the keyboard, so when no overlay
-/// takes the Esc the column takes it.
+/// takes the Esc the column takes it; an open but unfocused feed panel is
+/// the same shape, and its chip closes the panel.
 pub(super) async fn tap(
     view: &mut View,
     scanner: &mut Scanner,
@@ -32,6 +33,13 @@ pub(super) async fn tap(
     match routed {
         Some(Ok(StdinFlow::Detach)) => return Ok(StdinFlow::Detach),
         Some(Err(e)) => return Err(e),
+        // An open but UNFOCUSED feed panel owns no keys, so the pressed Esc
+        // had no reader anywhere above. The tap is a gesture on the panel's
+        // own chip: it closes the panel.
+        None if view.feed.is_some() => {
+            feed_view::toggle(view, sock_w).await?;
+            return Ok(StdinFlow::Continue);
+        }
         _ => {}
     }
     if let StdinFlow::Detach = overlay_keys::flush_lone_esc(view, scanner, sock_w).await? {

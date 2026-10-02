@@ -577,7 +577,9 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         "the Python affirmative waiver value moved"
     );
     assert!(
-        python.contains("list_decisions(subject, lane=\"law\", state=\"live\")"),
+        python.contains("\"mode\": \"decisions\"")
+            && python.contains("\"--lane\", \"law\"")
+            && python.contains("\"--state\", \"live\""),
         "the Python gate grew a second law reader"
     );
     // Only operator authority counts as waiver evidence: a chat_attested row

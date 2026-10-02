@@ -76,9 +76,9 @@ def test_the_generation_stale_generation_is_gone():
 def test_the_unverifiable_ids_are_omitted_and_the_omission_recorded():
     """AC5-ERR: `gemini-3.7-flash` and opencode's 0x Alpha Free tier had no id
     any configured provider serves at verification time, so they are omitted -
-    never guessed - and the omission is recorded in the module that owns the
+    never guessed - and the omission is recorded in the file that owns the
     table. A marketing name shipped as a model id is the guess this refuses."""
-    src = (REPO_ROOT / "cli/src/fno/adapters/providers/benchmarks.py").read_text(
+    src = (REPO_ROOT / "crates/fno-agents/src/model_tiers.toml").read_text(
         encoding="utf-8"
     )
     assert "gemini-3.7-flash" not in bm.REACHABILITY

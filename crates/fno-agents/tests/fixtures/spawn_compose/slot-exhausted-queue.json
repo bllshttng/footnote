@@ -1,0 +1,60 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w10",
+    "/fno:target x-8"
+  ],
+  "stub_route_slot": true,
+  "config_toml": "[agents.profiles.target]\non_exhausted = \"queue\"\nlanes = [{provider = \"codex\", model = \"luna-q\"}]\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--name",
+      "w10",
+      "/fno:target x-8"
+    ],
+    "exit": 78,
+    "journal": null,
+    "stderr": [
+      "fno agents spawn: slot skip agents.profiles.target.lanes[0] capacity=exhausted window=7d age=3h source=usage"
+    ],
+    "stdout": "{\"status\": \"refused\", \"reason\": \"slot_exhausted\", \"verb\": \"target\", \"lanes\": [{\"name\": \"agents.profiles.target.lanes[0]\", \"reason\": \"capacity=exhausted window=7d age=3h source=usage\"}], \"retry_at\": 1893456000.0}\n"
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": null,
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": false,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w10",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:target x-8",
+    "seed_form": "positional",
+    "seed_index": 3,
+    "spawn_tokens": [
+      "--name",
+      "w10",
+      "/fno:target x-8"
+    ],
+    "tab_flag_present": false
+  }
+}

@@ -32,6 +32,20 @@ pub fn classify_inbox_law(args: &[OsString]) -> Option<Vec<OsString>> {
     }
 }
 
+/// Classify `fno inbox decide ...` for the front door: the decide record
+/// verb runs natively through the same worker lane as the law door,
+/// `None` forwards to the Python CLI for the rest of the `inbox` tree.
+pub fn classify_inbox_decide(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.len() < 2 {
+        return None;
+    }
+    if args[0].to_str() == Some("inbox") && args[1].to_str() == Some("decide") {
+        Some(args[2..].to_vec())
+    } else {
+        None
+    }
+}
+
 /// Classify `fno inbox decisions ...` for the front door: the listing read
 /// runs natively through the same worker lane, `None` forwards to the
 /// Python CLI for the rest of the `inbox` tree.
@@ -165,6 +179,19 @@ fn stdin_requested(argv: &[String]) -> bool {
 enum Attended {
     Yes,
     No,
+}
+
+/// The `fno inbox decide` entry: the record ride through the worker's
+/// one-shot law lane. Stdin is INHERITED, not piped: decide reads no
+/// stdin itself, and an attended recording needs the real terminal as
+/// the worker's fd 0 so the superuser lane can open.
+pub fn run_decide(args: &[OsString]) -> i32 {
+    let argv: Vec<String> = args
+        .iter()
+        .filter_map(|a| a.to_str().map(str::to_owned))
+        .collect();
+    let request = serde_json::json!({"mode": "decide", "argv": argv}).to_string();
+    law_exec(&request, Attended::Yes)
 }
 
 /// One request through the worker's one-shot law lane. The child owns stdout

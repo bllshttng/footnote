@@ -140,6 +140,7 @@ pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod day;
+pub mod decide_door;
 pub mod decision_index;
 pub mod delivery_completion;
 pub mod digest;
@@ -148,6 +149,7 @@ pub mod distress;
 pub mod drift;
 pub mod duration;
 pub mod effect_gate;
+pub mod effort_surface;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
@@ -168,6 +170,7 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod footnote_harness;
 pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
@@ -191,6 +194,7 @@ pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod harness_matrix;
 pub mod harness_reader;
+pub mod harness_roster;
 pub mod harness_verbs;
 pub mod heal;
 pub mod heal_pid;
@@ -331,6 +335,7 @@ pub mod registry_json;
 pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
+pub mod release_notes;
 pub mod removals;
 pub mod rename;
 pub mod repeated_asks;
@@ -351,10 +356,12 @@ pub mod rm_tombstone;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
+pub mod route_gather;
 pub mod route_inventory;
 pub mod route_recovery;
 pub mod route_slot;
 pub mod row_truth;
+pub mod row_verdict;
 pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
@@ -379,6 +386,7 @@ pub mod source_pin;
 pub mod spawn;
 pub mod spawn_axes;
 pub mod spawn_backends;
+pub mod spawn_compose;
 pub mod spawn_context;
 pub mod spawn_contract;
 pub mod spawn_cwd;
@@ -1414,6 +1422,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_renamed",
     "agent_model_changed",
     "agent_effort_changed",
+    "agent_posture_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_skipped",

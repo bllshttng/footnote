@@ -22,7 +22,6 @@ cli/tests/agents/test_grok_spawn_journey.py::test_grok_spawn_journey_public_surf
 cli/tests/agents/test_handle_collisions.py::test_codex_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_handle_collisions.py::test_legacy_opencode_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_harness_capability_parity.py::test_resolved_rows_match_between_readers::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_harness_roster_parity.py::test_rust_roster_matches_python_readable::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_king_drain_cache.py::graph::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_king_shape_cli.py::test_shape_court_lands_on_the_manifest_and_echoes::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_king_shape_cli.py::test_shape_is_idempotent_on_a_second_call::mark.skipif  # on main before this ratchet
@@ -176,8 +175,6 @@ cli/tests/unit/test_keyless_smoke.py::test_keyless_dispatch_to_terminal_reports_
 cli/tests/unit/test_lane_experiment_contract.py::_require_seed_bank::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_launch_pick.py::TestVerbParity.test_the_argv_the_loop_shells_resolves_to_a_real_command::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_launch_pick.py::TestVerbParity.test_the_argv_the_loop_shells_resolves_to_a_real_command::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_law_scope.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/unit/test_law.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_mail_cli.py::test_named_send_ruling_appends_dated_node_block_before_transport::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_mail_keeper_lane.py::test_the_journey_mail_send_delivers_to_a_live_keeper_hosted_thread::mark.xfail  # on main before this ratchet
 cli/tests/unit/test_mail_keeper_lane.py::test_the_journey_mail_send_delivers_to_a_live_keeper_hosted_thread::pytest.skip  # on main before this ratchet
@@ -242,3 +239,7 @@ cli/tests/integration/test_collision.py::_native_supersede::pytest.skip  # nativ
 cli/tests/unit/test_contain.py::_native_contain::pytest.skip  # native contain door: the guard ladder is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_decompose.py::_native_supersede::pytest.skip  # native supersede door: the release contract is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_pr_closure_producer.py::_native_supersede::pytest.skip  # native supersede door: the evidence-record contract is the Rust leg's; no dev build means no door to pin
+cli/tests/agents/test_rust_runtime.py::test_spawn_seam_injects_config_defaults::pytest.skip  # native door: the compose reads the config FILE through the fno-agents binary; without a dev build there is no door to pin
+cli/tests/agents/test_spawn_defaults.py::_pin_world::pytest.skip  # native door: the compose parity drives the fno-agents binary; without a dev build there is no door to pin
+cli/tests/agents/test_dispatch_harness_stage_table.py::test_spawn_door_answers_the_same_harness::pytest.skip  # native door: both doors drive the fno-agents binary; without a dev build there is no door to pin
+cli/tests/unit/test_evidence_refusal_remedy.py::test_unmeasured_refusal_names_only_remedies_the_verbs_support::pytest.skip  # front-binary probe: CI builds crates/fno, a bare checkout has none

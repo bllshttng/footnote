@@ -1302,6 +1302,11 @@ def test_update_completion_note_unknown_node_errors(tmp_graph):
 # --- note evidence: a note is a fact on the node ─────────────────────────────
 
 
+# The unpatched transport, captured at collection: the note-evidence stubs
+# below delegate every non-gate verb to it.
+from fno.rust_binary import verb_call as _real_verb_call
+
+
 def _note_node():
     node_id = json.loads(_native_verb("add", "NoteTarget").output)["id"]
     return node_id
@@ -1311,12 +1316,16 @@ def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph, monkey
     """AC18-ERR: exit 1, nothing appended, nothing mailed."""
     node_id = _note_node()
     monkeypatch.setattr(
-        "fno.decide._evidence_gate",
-        lambda payload: {
-            "ok": False,
-            "kind": "citation",
-            "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
-        },
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kwargs: (
+            {
+                "ok": False,
+                "kind": "citation",
+                "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
+            }
+            if verb == "evidence-gate"
+            else _real_verb_call(verb, payload, **kwargs)
+        ),
     )
 
     r = _invoke(
@@ -1333,8 +1342,12 @@ def test_note_with_an_unmeasured_claim_replaces_state_and_warns(tmp_graph, monke
     """AC19-HP: the note verb advises, never refuses a body."""
     node_id = _note_node()
     monkeypatch.setattr(
-        "fno.decide._evidence_gate",
-        lambda payload: {"ok": True, "rows": None, "claims": ["167 lines"]},
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kwargs: (
+            {"ok": True, "rows": None, "claims": ["167 lines"]}
+            if verb == "evidence-gate"
+            else _real_verb_call(verb, payload, **kwargs)
+        ),
     )
 
     r = _invoke("backlog", "note", node_id, "the drain loop is 167 lines", "-q")
@@ -1350,15 +1363,19 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypat
     """AC20-HP: executed reads land beside the state body."""
     node_id = _note_node()
     monkeypatch.setattr(
-        "fno.decide._evidence_gate",
-        lambda payload: {
-            "ok": True,
-            "rows": [
-                {"cmd": "echo measured", "exit": 0, "out_head": "measured",
-                 "ts": "2026-09-10T00:00:00Z", "head_sha": ""}
-            ],
-            "claims": None,
-        },
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kwargs: (
+            {
+                "ok": True,
+                "rows": [
+                    {"cmd": "echo measured", "exit": 0, "out_head": "measured",
+                     "ts": "2026-09-10T00:00:00Z", "head_sha": ""}
+                ],
+                "claims": None,
+            }
+            if verb == "evidence-gate"
+            else _real_verb_call(verb, payload, **kwargs)
+        ),
     )
 
     r = _invoke(
@@ -1380,12 +1397,16 @@ def test_note_whose_read_failed_refuses_cleanly(tmp_graph, monkeypatch):
     ladder as a contradicted citation, never a traceback."""
     node_id = _note_node()
     monkeypatch.setattr(
-        "fno.decide._evidence_gate",
-        lambda payload: {
-            "ok": False,
-            "kind": "unmeasured",
-            "message": "read 'nosuchcmd arg' did not run (exit 127) and stored no row.",
-        },
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kwargs: (
+            {
+                "ok": False,
+                "kind": "unmeasured",
+                "message": "read 'nosuchcmd arg' did not run (exit 127) and stored no row.",
+            }
+            if verb == "evidence-gate"
+            else _real_verb_call(verb, payload, **kwargs)
+        ),
     )
 
     r = _invoke(
@@ -1403,12 +1424,16 @@ def test_quiet_still_refuses_a_contradicted_citation(tmp_graph, monkeypatch):
     """AC21-EDGE: a silent annotation is still a fact on the node."""
     node_id = _note_node()
     monkeypatch.setattr(
-        "fno.decide._evidence_gate",
-        lambda payload: {
-            "ok": False,
-            "kind": "citation",
-            "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
-        },
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kwargs: (
+            {
+                "ok": False,
+                "kind": "citation",
+                "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
+            }
+            if verb == "evidence-gate"
+            else _real_verb_call(verb, payload, **kwargs)
+        ),
     )
 
     r = _invoke(
