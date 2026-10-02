@@ -3947,18 +3947,17 @@ fn row_menu_rows() {
         ]
     );
     v.row_menu = None;
-    // A truly menu-less row (the dim subline) refuses with no notice at all.
-    // A FOREIGN cwd is what makes display_rows emit the Sub line, so the
-    // fixture has to opt in - `.expect` rather than `if let`, so a fixture
-    // that stops producing one fails loudly instead of skipping the check.
-    v.layout.agents[0].cwd_base = Some("elsewhere".into());
-    let sub = v
+    // A truly menu-less row (a group spacer) refuses with no notice at all.
+    // unified_rows_view has three Blanks (two squads + the orphan section),
+    // so `.expect` rather than `if let` - a fixture that stops producing
+    // one fails loudly instead of skipping the check.
+    let blank = v
         .display_rows()
         .iter()
-        .position(|r| matches!(r, DisplayRow::Sub(_)))
-        .expect("a foreign-cwd agent renders a Sub row");
+        .position(|r| matches!(r, DisplayRow::Blank))
+        .expect("a spacer row exists between the groups");
     v.notice = None;
-    assert!(!v.open_row_menu(sub, Anchor::Center));
+    assert!(!v.open_row_menu(blank, Anchor::Center));
     assert!(v.notice.is_none(), "an inert row says nothing");
 
     // Operator report: "right-click does nothing on most rows; it works only
@@ -8563,9 +8562,9 @@ fn a_layout_with_backlog_cards_renders_no_backlog_rows() {
         "no backlog header renders"
     );
     assert!(
-        !rows
-            .iter()
-            .any(|r| matches!(r, DisplayRow::Sub(s) if s.starts_with("scope:"))),
+        !crate::vt::frame_text(&v.compose())
+            .lines()
+            .any(|l| l.contains("scope:")),
         "no scope subline renders"
     );
 }
@@ -11943,98 +11942,74 @@ pub(super) fn question_item(
     }
 }
 
-// (x-6851 US3) AC3-HP: a squad-matched agent whose cwd is FOREIGN to the
-// squad's project gets a dim, inert Sub row carrying the foreign cwd_base
-// alone (no branch); the selector skips it; and line 1 carries no
-// ` (basename)` suffix (that is orphan-only now).
+// (x-6851 US3, retold for d-36438ea4) AC3-HP: a squad-matched agent whose
+// cwd is FOREIGN to the squad's project shows the cwd inline in parens on
+// its own single row; there is no second row under it.
 #[test]
-fn foreign_cwd_agent_gets_dim_inert_subline() {
+fn foreign_cwd_agent_shows_inline_parens_on_one_row() {
     let mut agent = blocked_row("worker", 4, None);
     // squad 1 is "footnote" (/code/footnote); a "regready" cwd is foreign.
     agent.cwd_base = Some("regready".into());
     agent.subline = Some("main · regready".into()); // server subline is ignored now
-    let mut v = view_with_agents(vec![agent]);
+    let v = view_with_agents(vec![agent]);
     let rows = v.display_rows();
     let ai = rows
         .iter()
         .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "worker"))
         .unwrap();
+    // One row per agent: no second row carries the cwd.
     assert!(
-        matches!(rows[ai + 1], DisplayRow::Sub(_)),
-        "foreign-cwd agent gets a sub row"
+        !matches!(rows.get(ai + 1), Some(DisplayRow::CardDetail(..))),
+        "list mode adds no detail row"
     );
-    // AC1-UI: inert - no row action, and the selector steps over it.
-    assert!(v.row_action(ai + 1).is_none(), "sub row is not actionable");
-    assert!(v.selector_down(ai) > ai + 1, "selector skips the sub row");
-    assert_eq!(v.selector_anchor(ai + 1), v.selector_anchor(ai + 2));
-
+    // The agent row itself is actionable - nothing inert sits under it.
+    assert!(
+        v.row_action(ai).is_some(),
+        "the foreign agent's row is still the agent's"
+    );
     let frame = v.compose();
-    let cols = frame.cols as usize;
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines[ai].contains("worker"));
     assert!(
-        !lines[ai].contains("(regready)"),
-        "no line-1 basename suffix on a squad-matched row: {:?}",
+        lines[ai].contains("(regready)"),
+        "the foreign cwd rides inline after the name: {:?}",
         lines[ai]
     );
-    // The subline is the foreign cwd_base alone - no branch, no ` · `.
-    assert!(
-        lines[ai + 1].contains("regready"),
-        "foreign cwd on line 2: {:?}",
-        lines[ai + 1]
-    );
-    assert!(
-        !lines[ai + 1].contains('\u{b7}'),
-        "no branch on the subline: {:?}",
-        lines[ai + 1]
-    );
-    // The sub row paints DIM.
-    let sub_cell = frame.cells[(ai + 1) * cols + 4];
-    assert_eq!(sub_cell.flags & cell_flags::DIM, cell_flags::DIM);
-    // AC1-UI, restated for explicit bands: hovering the sub row paints the
-    // hover band, never an INVERSE bar.
-    v.hover_row = Some(ai + 1);
-    let frame = v.compose();
-    let hovered = frame.cells[(ai + 1) * cols + 4];
-    assert_eq!(
-        hovered.flags & cell_flags::INVERSE,
-        0,
-        "never an INVERSE bar"
-    );
-    assert_eq!(hovered.bg, Color::Indexed(0), "the hover band is explicit");
 }
 
-// (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and
-// a foreign agent B - A is one clean row, B gets exactly one Sub row.
+// (x-6851 US3) AC3-HP count, retold for d-36438ea4: squad "footnote" with a
+// same-project agent A and a foreign agent B - A reads bare, B reads with
+// the parens, and neither adds a row.
 #[test]
-fn exception_subline_only_for_foreign_agent() {
+fn inline_parens_only_for_foreign_agent() {
     let mut a = blocked_row("A", 4, None);
     a.cwd_base = Some("footnote".into()); // same project as squad 1
     let mut b = blocked_row("B", 5, None);
     b.cwd_base = Some("regready".into()); // foreign
     let v = view_with_agents(vec![a, b]);
     let rows = v.display_rows();
-    let subs = rows
+    let agents = rows
         .iter()
-        .filter(|r| matches!(r, DisplayRow::Sub(_)))
+        .filter(|r| matches!(r, DisplayRow::Agent(_)))
         .count();
-    assert_eq!(subs, 1, "exactly one subline (the foreign agent's)");
-    let bi = rows
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "B"))
-        .unwrap();
+    assert_eq!(agents, 2, "two agent rows, nothing between them");
+    let text = frame_text(&v.compose());
+    let line = |name: &str| -> String {
+        text.lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_default()
+            .to_string()
+    };
     assert!(
-        matches!(rows[bi + 1], DisplayRow::Sub(_)),
-        "the sub row follows the foreign agent B"
+        !line("A").contains("(footnote)"),
+        "same-project agent reads bare: {:?}",
+        line("A")
     );
-    let ai = rows
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "A"))
-        .unwrap();
     assert!(
-        !matches!(rows[ai + 1], DisplayRow::Sub(_)),
-        "same-project agent A has no sub row"
+        line("B").contains("(regready)"),
+        "the foreign agent carries the parens: {:?}",
+        line("B")
     );
 }
 
@@ -12043,7 +12018,7 @@ fn exception_subline_only_for_foreign_agent() {
 #[test]
 fn draw_sideline_narrow_panel_truncates_subline_without_panic() {
     let mut agent = blocked_row("worker", 4, None);
-    agent.cwd_base = Some("regready".into()); // foreign -> a Sub row exists to truncate
+    agent.cwd_base = Some("regready".into()); // a long label exercises the clip at text_w = 1
     let v = view_with_agents(vec![agent]);
     let (rows, cols, panel_w) = (10usize, 40usize, 2usize); // text_w = 1
     let mut cells = vec![Cell::default(); rows * cols];
@@ -12053,26 +12028,23 @@ fn draw_sideline_narrow_panel_truncates_subline_without_panic() {
     assert_eq!(cells[cols + (panel_w - 1)].c, '│');
 }
 
-// (x-6851 US3) AC3-HP negative + AC4-EDGE: a same-project agent (cwd matches
-// the squad basename) and a cwd-less agent both emit NO Sub row.
+// (x-6851 US3) AC3-HP negative, retold for d-36438ea4: a same-project agent
+// (cwd matches the squad basename) and a cwd-less agent read bare - no
+// inline parens.
 #[test]
-fn same_project_or_absent_cwd_emits_no_sub_row() {
+fn same_project_or_absent_cwd_reads_bare() {
     let bare = blocked_row("worker", 4, None); // cwd_base None (AC4-EDGE)
+    let text = frame_text(&view_with_agents(vec![bare]).compose());
     assert!(
-        !view_with_agents(vec![bare])
-            .display_rows()
-            .iter()
-            .any(|r| matches!(r, DisplayRow::Sub(_))),
-        "absent cwd -> no sub row"
+        !text.lines().any(|l| l.contains("worker (")),
+        "absent cwd -> no parens: {text}"
     );
     let mut same = blocked_row("worker", 4, None);
     same.cwd_base = Some("footnote".into()); // matches squad 1 "footnote"
+    let text = frame_text(&view_with_agents(vec![same]).compose());
     assert!(
-        !view_with_agents(vec![same])
-            .display_rows()
-            .iter()
-            .any(|r| matches!(r, DisplayRow::Sub(_))),
-        "same-project cwd -> no sub row"
+        !text.lines().any(|l| l.contains("worker (")),
+        "same-project cwd -> no parens: {text}"
     );
 }
 

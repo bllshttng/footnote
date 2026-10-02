@@ -1179,7 +1179,7 @@ pub struct AgentRow {
     pub liveness_measured_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used_pct: Option<u8>,
-    #[serde(default, skip_serializing_if = Option::is_none)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measured_at: Option<u64>,

@@ -428,15 +428,6 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
     );
 }
 
-fn detail_agent<'a>(rows: &'a [DisplayRow<'_>], name: &str) -> &'a AgentRow {
-    rows.iter()
-        .find_map(|r| match r {
-            DisplayRow::CardDetail(a) if a.name == name => Some(*a),
-            _ => None,
-        })
-        .expect("the card's detail row")
-}
-
 #[test]
 fn chosen_card_paints_accent_across_both_lines() {
     // x-b5b8: the focused card wears the same surface band as selection -

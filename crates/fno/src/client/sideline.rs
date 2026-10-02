@@ -4,7 +4,7 @@
 //! file-budget gate names this module the answer to "how does the sideline
 //! column paint".
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::backlog_style::BLine;
 use super::*;
@@ -28,16 +28,6 @@ const CARD_COLUMNS: [Constraint; 5] = [
     // under it (the regression `age_sort_arrow_survives_the_density_button`
     // pins). The two spare columns are the padding the old COL_TIME=6 gave.
     Constraint::Length(SIDELINE_RIGHT_SLOT_W),
-];
-
-pub(super) const SIDELINE_COLUMNS: [Constraint; 7] = [
-    CARD_COLUMNS[0],
-    CARD_COLUMNS[1],
-    CARD_COLUMNS[2],
-    CARD_COLUMNS[3],
-    CARD_COLUMNS[4],
-    Constraint::Length(7),
-    Constraint::Length(4),
 ];
 
 /// The sort column under each head cell. A card's third cell is the bar
@@ -1126,7 +1116,7 @@ impl View {
     /// (US3, inline) The foreign-cwd base an agent shows inline in parens:
     /// `Some` only when the agent's cwd basename differs from its squad's
     /// project basename. The dim `Sub` row's join, moved into the label.
-    pub(super) fn foreign_base(&self, a: &AgentRow) -> Option<&str> {
+    pub(super) fn foreign_base<'a>(&self, a: &'a AgentRow) -> Option<&'a str> {
         let squad_id = a.squad?;
         let squad = self.layout.squads.iter().find(|s| s.id == squad_id)?;
         let base = super::section_project_base(&squad.canonical_cwd);

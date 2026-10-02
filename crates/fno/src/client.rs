@@ -6030,7 +6030,7 @@ impl View {
         while let Some((row, depth)) = iter.next() {
             match row {
                 DisplayRow::Agent(agent) => {
-                    let mut item = vec![(DisplayRow::Agent(agent), depth)];
+                    let item = vec![(DisplayRow::Agent(agent), depth)];
                     group.push((item, agent));
                     if !matches!(iter.peek(), Some((DisplayRow::Agent(_), _))) {
                         append_sorted_agent_group(
@@ -6098,7 +6098,6 @@ impl View {
             let key = section_key(s);
             let view = self.section_view(&key);
             if view != SectionView::Collapsed {
-                let section_base = section_project_base(&s.canonical_cwd);
                 let mut squad_agents: Vec<&AgentRow> = self
                     .layout
                     .agents

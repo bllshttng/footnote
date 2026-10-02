@@ -29,7 +29,7 @@ pub(crate) struct Rates {
 }
 
 /// The parsed `cost` subset of one models.dev model row.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 struct RawCost {
     #[serde(default)]
     input: Option<f64>,
@@ -41,7 +41,7 @@ struct RawCost {
     cache_write: Option<f64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 struct CatalogModelCosts {
     #[serde(default)]
     id: Option<String>,
@@ -49,7 +49,7 @@ struct CatalogModelCosts {
     cost: Option<RawCost>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 struct CatalogProviderCosts {
     #[serde(default)]
     models: HashMap<String, CatalogModelCosts>,
@@ -104,7 +104,7 @@ impl PriceBook {
                     .as_deref()
                     .is_some_and(|id| normalize(id) == key);
                 if normalize(name) == key || id_matches {
-                    return model_costs.cost.map(|c| Rates {
+                    return model_costs.cost.as_ref().map(|c| Rates {
                         input: c.input,
                         output: c.output,
                         cache_read: c.cache_read,
@@ -543,7 +543,7 @@ mod tests {
         fixture_book(&dir);
         let book = price_book(&dir).unwrap();
         let priced = fold.session(&book, None, None);
-        let expected = (147_000.0 * 4.0 + 17_000.0 * 20.0) / 1_000_000.0 * 100.0;
+        let expected: f64 = (147_000.0 * 4.0 + 17_000.0 * 20.0) / 1_000_000.0 * 100.0;
         assert_eq!(priced.cents, Some(expected.round() as u64));
     }
 
@@ -630,7 +630,7 @@ mod tests {
             serde_json::json!("2026-10-02T00:00:00Z")
         );
         // 140 input + 14 output opus tokens.
-        let expected_cents =
+        let expected_cents: f64 =
             ((140_000.0 * 4.0 + 14_000.0 * 20.0) / 1_000_000.0 * 100.0).round() as u64;
         assert_eq!(
             keys["session_cost_cents"],
