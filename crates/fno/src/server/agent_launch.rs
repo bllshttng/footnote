@@ -524,7 +524,6 @@ impl super::Core {
                 req.message.as_bytes(),
                 timeout,
                 deadline,
-                req.force,
             )
             .await
             {

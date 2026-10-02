@@ -364,7 +364,12 @@ fn default_true() -> bool {
 /// floor stays 58.
 /// v101: `PanePlacement.human` (serde default) carries the v99 exemption;
 /// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
-pub const PROTO_VERSION: u32 = 101;
+/// v102: `PanePlacement.human` REMOVED. Admission inverts: the
+/// default is admit and only the agent-spawn door opts into the machine
+/// gate, so no per-call-site human ask exists to carry. Serde reads an old
+/// peer's field as an unknown-key ignore; a new field's `#[serde(default)]`
+/// keeps old peers reading new placements. Floor stays 58.
+pub const PROTO_VERSION: u32 = 102;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4256,7 +4261,6 @@ mod tests {
             max_panes: None,
             thread_pane: false,
             fit: false,
-            human: false,
         };
         for msg in [
             ClientMsg::Control {
