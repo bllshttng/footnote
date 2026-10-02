@@ -376,6 +376,12 @@ fn to_public_payload(payload: Value) -> Value {
     if let Some(nodes) = out.get_mut("nodes").and_then(Value::as_object_mut) {
         for view in nodes.values_mut() {
             let mut public_view = allowlist_copy(view, PUBLIC_NODE_FIELDS);
+            // The node's embedded card gets the same card allowlist the
+            // top-level cards got, so a private Card field (session ids)
+            // added later cannot leak through this copy.
+            if let Some(card) = public_view.get_mut("card") {
+                *card = allowlist_copy(card, PUBLIC_CARD_FIELDS);
+            }
             for key in LINK_KEYS {
                 if let Some(links) = public_view.get_mut(*key).and_then(Value::as_array_mut) {
                     links.retain(|l| {
