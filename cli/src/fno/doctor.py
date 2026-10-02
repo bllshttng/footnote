@@ -2371,9 +2371,9 @@ def _emit_human(
             out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
     else:
         for row in non_fresh:
-            line = row.get("line") if isinstance(row, dict) else None
-            if line:
-                out(f"fno doctor: {line}")
+            row_line = row.get("line") if isinstance(row, dict) else None
+            if row_line:
+                out(f"fno doctor: {row_line}")
 
     daemon_drift = result.get("daemon_drift")
     if daemon_drift:
