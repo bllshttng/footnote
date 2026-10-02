@@ -147,6 +147,7 @@ mod tests {
             reason: None,
             received_at: received_at.to_string(),
             ttl_ms,
+            posture: None,
         })
     }
 

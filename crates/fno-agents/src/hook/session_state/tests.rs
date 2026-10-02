@@ -6,10 +6,15 @@ use super::*;
 use crate::hook::adapter;
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
-/// The env-pinned tests share one process env; serialize them.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// The env-pinned tests share one process env with every other env-using
+/// test in the binary, so they serialize on the crate's shared lock, not a
+/// private one (a private lock let these mutations race hook::stop's).
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 fn job(name: &str) -> crate::harness_capabilities::HookJobDecl {
     crate::harness_capabilities::HarnessContract::packaged()
@@ -183,9 +188,10 @@ fn marker_bytes_open_close_and_reopen() {
 
 // --- the transition gate (the 120 s record) ---
 
-/// Seed `state-<sid>` with (state, epoch, message) in a temp runtime dir and
-/// answer (guard, path) for the assertions.
-fn seed_record(dir: &std::path::Path, sid: &str, body: &str) {
+/// Seed the gate record the way the gate itself resolves it (inside the
+/// rendezvous dir), so the seeded line is the one `should_report` reads.
+fn seed_record(sid: &str, body: &str) {
+    let dir = runtime_pin_dir().expect("rendezvous dir for the seeded record");
     let safe: String = sid
         .chars()
         .map(|c| if c == '/' || c == '.' { '_' } else { c })
@@ -205,7 +211,7 @@ fn runtime_dir(tag: &str) -> PathBuf {
 /// the ceiling.
 #[test]
 fn the_transition_gate_collapses_repeats_not_reason_changes() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let rt = runtime_dir("gate");
     std::env::set_var("XDG_RUNTIME_DIR", &rt);
     let d = Decision {
@@ -225,7 +231,7 @@ fn the_transition_gate_collapses_repeats_not_reason_changes() {
     };
     assert!(should_report("s", &blocked));
     // An aged-out record sends again.
-    seed_record(&rt, "s", "working 0 ");
+    seed_record("s", "working 0 ");
     assert!(should_report("s", &d));
     // A never-marked state keeps retrying: the failed-send contract.
     let d2 = Decision {
@@ -265,7 +271,7 @@ fn clear_pane_env() {
 /// legacy FNO_SESSION spelling compute the same pin.
 #[test]
 fn the_pane_host_wins_the_pin_and_a_nested_session_stays_silent() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let rt = runtime_dir("pin");
     std::env::set_var("FNO_SERVER", "main");
     std::env::set_var("FNO_SESSION", "main");
@@ -291,7 +297,7 @@ fn the_pane_host_wins_the_pin_and_a_nested_session_stays_silent() {
 /// escapes the dir.
 #[test]
 fn the_pin_degrades_to_emit_on_every_broken_key() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let rt = runtime_dir("degrade");
     std::env::set_var("FNO_PANE", "8");
     std::env::set_var("FNO_PANE_EPOCH", "8000");
@@ -332,7 +338,7 @@ fn the_pin_degrades_to_emit_on_every_broken_key() {
 /// record) never escapes the rendezvous dir.
 #[test]
 fn a_traversal_server_name_stays_in_the_pin_dir() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let rt = runtime_dir("traversal");
     set_pane_env("9", "9000", "", &rt);
     std::env::remove_var("FNO_SERVER");
@@ -357,8 +363,7 @@ fn a_traversal_server_name_stays_in_the_pin_dir() {
 /// only the report is skipped.
 #[test]
 fn a_malformed_payload_still_emits_markers() {
-    use std::io::Write as _;
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let rt = runtime_dir("malformed");
     let sink = rt.join("sink");
     set_pane_env("10", "10000", "main", &rt);
