@@ -312,9 +312,10 @@ usage: scripts/install/bootstrap.sh [--repair | --from-source DIR | --help]
   (no flag)        report every prerequisite as JSON on stdout; exit 0 = ready
   --repair         run the plugin's own installer (.claude-plugin/postinstall.sh),
                    then re-report. Never edits shell rc files.
-  --from-source DIR  build+install from a checkout: uv tool install from DIR/cli,
-                   then cargo install of DIR/crates/fno and DIR/crates/fno-agents.
-                   Prints the plugin-registration step; never runs it.
+  --from-source DIR  build+install from a checkout: the Python CLI via uv from
+                   DIR/cli, then cargo install of DIR/crates/fno and
+                   DIR/crates/fno-agents. Prints the plugin-registration step;
+                   never runs it.
 EOF
 }
 
@@ -364,9 +365,9 @@ mode_from_source() {
   local actions=""
   say "from-source: installing the Python CLI from $checkout/cli ..."
   if run_bounded 600 "$UV_CALL" tool install --force --compile-bytecode "$checkout/cli" >&2; then
-    actions="$actions\"uv tool install from cli\""
+    actions="$actions\"install the Python CLI from checkout cli via uv\""
   else
-    say "from-source: uv tool install failed (rc=$?)."
+    say "from-source: the uv install step failed (rc=$?)."
   fi
   if command -v cargo >/dev/null 2>&1; then
     say "from-source: cargo install crates/fno (the front door; bounded at 900s) ..."
