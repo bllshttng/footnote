@@ -561,19 +561,38 @@ def reconcile_status(
     ),
 ) -> None:
     """Sweep the plans dir, normalizing off-vocabulary/blank statuses."""
+    from fno import paths
+    from fno.graph import store
     from fno.paths import plans_content_dir
-    from fno.plan.reconcile_status import sweep
 
     target = Path(plans_dir) if plans_dir else plans_content_dir()
-    res = sweep(target, apply=apply)
+    params = {
+        "op": "reconcile_status",
+        "plans_dir": str(target),
+        "apply": apply,
+        "cwd": str(Path.cwd()),
+        "archive_path": str(paths.graph_archive_json()),
+    }
+    try:
+        result = store._client_for(store.GRAPH_JSON).request("plan_docs", params)
+    except store.StoreUnavailable as exc:
+        typer.echo(f"  ! plan-doc writer unreachable ({exc}); run `fno doctor`", err=True)
+        raise typer.Exit(code=1) from exc
+    except RuntimeError as exc:
+        # A stale keeper predates the op (x-d149's stamp-client pattern): a
+        # skipped sweep must not read as a clean run.
+        if "unknown store method" not in str(exc) and "unknown plan_docs op" not in str(exc):
+            raise
+        typer.echo(f"  ! {exc} - run `fno doctor update`", err=True)
+        raise typer.Exit(code=1) from exc
 
-    for path, old, new in res.changes:
+    for path, old, new in result.get("changes") or []:
         arrow = "->" if apply else "would ->"
         typer.echo(f"  {Path(path).name}: {old} {arrow} {new}")
-    for warn in res.warnings:
+    for warn in result.get("warnings") or []:
         typer.echo(f"  ! {warn}", err=True)
     prefix = "" if apply else "[dry-run] "
-    typer.echo(f"{prefix}{res.summary()}")
+    typer.echo(f"{prefix}{result['summary']}")
 
 
 @plan_app.command(
