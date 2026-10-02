@@ -47,6 +47,7 @@ import re
 import subprocess
 import sys
 import time
+from fno.mail.receipts import _escalate_to_human, _recipient_is_attended
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -116,7 +117,6 @@ mail_app = typer.Typer(
     help="Durable polled mailbox: send/unread/ack/reply/list/drain/status/view.",
     no_args_is_help=True,
 )
-
 
 
 _OLD_PATH_WARNED = False
@@ -479,8 +479,6 @@ def _emit_style_refusal(violations: list) -> None:
         pass
 
 
-
-
 def _validate_kind(kind: str) -> str:
     """Validate a CLI ``--kind`` value. Hint at replacement for deprecated kinds."""
     if kind in VALID_KINDS:
@@ -500,7 +498,6 @@ def _validate_kind(kind: str) -> str:
         err=True,
     )
     raise typer.Exit(code=1)
-
 
 
 # Status helpers
@@ -678,7 +675,6 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     )
 
 
-
 def _collect_refs(
     ref_pr: Optional[int],
     ref_node: Optional[str],
@@ -701,7 +697,6 @@ def _collect_refs(
     if cascade_of is not None:
         refs["cascade_of"] = cascade_of
     return refs
-
 
 
 def _is_job_name(name: Optional[str]) -> bool:
@@ -1671,8 +1666,6 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
 
 
-
-
 class AmbiguousTokenError(Exception):
     """A token matched two stored sessions. Never guess which one to wake."""
 
@@ -2629,125 +2622,8 @@ def _name_lane_send(
 # Send-time human escalation for a question, per (sender, recipient). A burst
 # re-nudges every window rather than once forever (marker refreshed only on an
 # actual escalation, so the window runs from the last nudge, not the first send).
-_ESCALATION_DEBOUNCE_S = 300
-
-
-def _recipient_is_attended(recipient: str) -> bool:
-    """True iff ``recipient``'s registry row was stamped ``origin=operator`` at
-    a hand-start (SessionStart register hook / ``fno agents register``).
-
-    Attendance is declared at registration, never inferred at send time, so a
-    row missing the field (a spawn/host worker, or a pre-change row) reads as
-    not-attended -- fail toward silence. Never raises: an unreadable registry or
-    an unresolved recipient escalates nothing, so the send still succeeds.
-    """
-    try:
-        from fno.agents.registry import load_registry, resolve_agent_in
-
-        entry = resolve_agent_in(load_registry(), recipient).entry
-    except Exception:  # noqa: BLE001 - a registry read failure never breaks the send
-        return False
-    return getattr(entry, "origin", None) == "operator"
-
-
-def _escalate_to_human(
-    sender: str,
-    recipient: str,
-    summary: str,
-    reason: str,
-    msg_id: str | None = None,
-) -> str:
-    """Notify the human at send time that mail needs them, and surface it in the
-    needs-me mux overlay.
-
-    ``reason`` is ``"question"`` (a --kind question send; Locked Decision 7: a
-    question NEVER autonomous-responds - only the human answers it) or
-    ``"attended-miss"`` (a send to an operator-attended session that fell to the
-    durable floor) or ``"reachable-miss"`` (the same miss to a worker the
-    resolver reports reachable). Every reason flows through this ONE helper so
-    the overlay event is emitted from a single place; a second emit site would
-    leave one reason un-surfaced (the silent-eat this exists to close). A reason
-    added here must also be added to :data:`fno.events.MAIL_ESCALATION_REASONS`
-    and the schema enum, or the overlay emit raises and is swallowed by the
-    best-effort guard below - the nudge then reaches the notifier only.
-
-    Debounced per (sender, recipient) so a chatty peer cannot spam the queue, and
-    the debounce gates BOTH the notifier and the event (one event per
-    non-debounced escalation, zero on debounced). The caller writes the durable
-    thread regardless, so the ambient unread count stays truthful even when this
-    nudge is debounced. Best-effort throughout: a notifier, events-write, or
-    filesystem failure never breaks the send. Returns ``"escalated"`` (the human
-    was notified), ``"debounced"`` (a recent nudge for this pair suppressed it),
-    or ``"notifier-unavailable"`` (no OS notifier on this host, so nothing
-    displayed - the caller must not claim escalation; the overlay event still
-    fired).
-    """
-    import hashlib
-
-    from fno.paths import state_dir
-
-    pair = hashlib.sha256(f"{sender}\x00{recipient}".encode()).hexdigest()[:16]
-    marker_dir = state_dir() / "mail-escalations"
-    marker = marker_dir / pair
-    try:
-        marker_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    # Atomically claim the debounce window via O_CREAT|O_EXCL: exactly one
-    # concurrent sender wins a fresh escalation, the rest see the marker and
-    # debounce. A check-then-touch here would let a concurrent burst from one
-    # pair all notify at once, defeating the debounce during the exact spike it
-    # exists to damp.
-    try:
-        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.close(fd)
-    except FileExistsError:
-        try:
-            last = marker.stat().st_mtime
-        except OSError:
-            last = 0.0
-        if time.time() - last < _ESCALATION_DEBOUNCE_S:
-            return "debounced"
-        try:
-            os.utime(marker, None)  # stale window: refresh so the next runs from now
-        except OSError:
-            pass
-    except OSError:
-        pass  # a missing marker just re-notifies; it never suppresses the durable write
-    # Debounce gate passed: this is a real escalation. Emit the overlay event
-    # BEFORE the notifier verdict - the overlay is an independent surface that
-    # must render even on a headless host where the notifier is unavailable (the
-    # whole point of surfacing in the mux). Best-effort: an events-write failure
-    # never breaks the notifier or the send.
-    try:
-        from fno.events import append_event, mail_escalation
-
-        append_event(
-            mail_escalation(
-                reason=reason,
-                sender=sender,
-                recipient=recipient,
-                summary=summary.split("\n", 1)[0][:120],
-                msg_id=msg_id,
-            )
-        )
-    except Exception:  # noqa: BLE001 - an overlay miss never breaks the send
-        pass
-    # Only report escalation when the notification actually displayed:
-    # send_notification returns (code, err) and a nonzero code means no OS
-    # notifier (a headless host), so the human was NOT notified.
-    try:
-        from fno.notify._impl import send_notification
-
-        one_line = summary.split("\n", 1)[0][:120]
-        label = "missed you" if reason in ("attended-miss", "reachable-miss") else "question"
-        code, _err = send_notification(
-            f"fno agents mail: {label} from {sender}",
-            f"{one_line} - run `fno agents mail drain-self`",
-        )
-    except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
-        code = 1
-    return "escalated" if code == 0 else "notifier-unavailable"
+# Send-time human escalation moved to fno.mail.receipts (file-budget: this
+# module is shrink-only); import it there.
 
 
 # Single-sourced from the capability table (the codex row's review_verbs, the

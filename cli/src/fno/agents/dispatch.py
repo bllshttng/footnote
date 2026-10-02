@@ -8002,33 +8002,25 @@ def dispatch_send(
             )
 
     except AgentLockTimeout as exc:
-        # INVARIANT, and it is load-bearing: this handler guards the whole
-        # `with` body, not only the acquire, and the body now ends in a
-        # durable queue that returns exit 0. That is safe ONLY because no
-        # callee inside the block takes a per-agent flock - not _deliver_live,
-        # _switchboard_exchange, _mux_pane_send, _registered_family1_state,
-        # _queue_durable_fallback or _stamp_after_delivery. Add a nested
-        # acquire and a timeout AFTER a confirmed hosted delivery lands here,
-        # queues the same message a second time, and prints a durable receipt
-        # for one that already arrived. Narrow this `try` to the acquire
-        # before adding one.
+        # INVARIANT: this handler guards the whole `with` body, not only the
+        # acquire, and the body ends in a durable queue returning exit 0. Safe
+        # ONLY because no callee inside takes a per-agent flock (deliver,
+        # switchboard, pane send, family-1 state, durable fallback, stamp).
+        # Add a nested acquire and a confirmed hosted delivery lands here
+        # DOUBLE-QUEUED with a receipt for one that already arrived. Narrow
+        # this `try` to the acquire before adding one.
         #
-        # A durable write needs a VERIFIED recipient, and ONLY the lock
-        # verifies one. An unlocked re-read cannot: the contender may be a
-        # same-name reclaim that holds the flock and has not committed its
-        # replacement row yet, so the read returns the OLD identity and the
-        # "identity unchanged" check passes vacuously. Unchanged has two
-        # explanations there - it really is, or the change is not visible yet -
-        # and queuing on that reading strands the message in the dead session's
-        # mailbox. So the queue takes the lock too, on a short grace window
-        # that asks "did the holder just finish?" rather than waiting again.
+        # A durable write needs a VERIFIED recipient and only the lock gives
+        # one: an unlocked re-read can hit a same-name reclaim that has not
+        # committed its row, where "identity unchanged" passes vacuously and
+        # the queue strands the message in the dead session's mailbox. So the
+        # queue takes the lock too, on a grace window that asks "did the
+        # holder just finish?" rather than waiting again.
         #
         # The locked path rebinds `name` to the registry primary key before it
         # emits or stamps anything; this path never entered that block, so it
-        # must do the same. Everything below keys on the name: a stamp keyed to
-        # the caller's alias matches no row, so it silently skips
-        # `last_message_at` AND reports the miss as "recipient identity
-        # changed" - a false failure on a send that succeeded.
+        # must do the same: a stamp keyed to the caller's alias matches no row
+        # and reports "recipient identity changed" over a send that succeeded.
         name = canonical_name
         grace_seconds = _queue_grace_seconds(exc.timeout)
         # Reassigned under the lock once the row is resolved: a bus-only row
