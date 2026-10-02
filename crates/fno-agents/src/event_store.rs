@@ -949,6 +949,10 @@ pub fn append_envelope(
     let obj = value
         .as_object()
         .ok_or_else(|| format!("{}: envelope is not a JSON object", store.display()))?;
+    // The judge owns the schema now: one line, the same diagnostic the
+    // Python judge printed. Storage-level checks (ts keying, scope
+    // canonicality) run after it and keep their own wording.
+    validate::validate_envelope(obj).map_err(|e| format!("{e}"))?;
     let ty = obj
         .get("type")
         .and_then(|t| t.as_str())
@@ -1735,6 +1739,8 @@ pub fn prune_ephemeral_now(journal: &Path, now_ms: i64) -> Result<u64, String> {
 }
 
 mod observation;
+
+pub mod validate;
 
 #[cfg(test)]
 mod tests;

@@ -69,6 +69,8 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
     let mut journal: Option<PathBuf> = None;
     let mut file: Option<PathBuf> = None;
     let mut requested_id: Option<String> = None;
+    let mut validate_only = false;
+    let mut expect_type: Option<String> = None;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         let tok = match tok.to_str() {
@@ -79,8 +81,48 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
             "--events" => journal = it.next().map(PathBuf::from),
             "--id" => requested_id = it.next().map(|v| v.to_string_lossy().into_owned()),
             "--file" => file = it.next().map(PathBuf::from),
+            "--validate-only" => validate_only = true,
+            "--expect-type" => expect_type = it.next().map(|v| v.to_string_lossy().into_owned()),
             _ => {}
         }
+    }
+    // Validate-only mode judges the envelope and writes nothing; --events is
+    // accepted but not needed (the judge is compiled in, not store-backed).
+    if validate_only {
+        let mut envelope = String::new();
+        let read_result = match &file {
+            Some(path) => {
+                std::fs::File::open(path).and_then(|mut f| f.read_to_string(&mut envelope))
+            }
+            None => std::io::stdin().read_to_string(&mut envelope),
+        };
+        if let Err(e) = read_result {
+            eprintln!("error: could not read the envelope: {e}");
+            return 2;
+        }
+        if let Some(expected) = expect_type.as_deref() {
+            let actual = serde_json::from_str::<serde_json::Value>(envelope.trim())
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from));
+            if actual.as_deref() != Some(expected) {
+                eprintln!(
+                    "type hint does not match payload type: {}",
+                    actual.unwrap_or_else(|| "None".to_string())
+                );
+                return 1;
+            }
+        }
+        return match crate::event_store::validate::judge_line(envelope.trim()) {
+            crate::event_store::validate::Verdict::Valid => 0,
+            crate::event_store::validate::Verdict::Invalid(msg) => {
+                eprintln!("{msg}");
+                1
+            }
+            crate::event_store::validate::Verdict::Substrate(msg) => {
+                eprintln!("{msg}");
+                2
+            }
+        };
     }
     let Some(journal) = journal else {
         eprintln!("error: --events <events.jsonl> is required (it names the sibling store)");
