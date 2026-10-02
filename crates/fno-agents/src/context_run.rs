@@ -79,6 +79,9 @@ pub fn run_context_run(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("--effective-window") {
         return run_effective_window(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("--model-price") {
+        return run_model_price(&args[1..]);
+    }
     let mut group_name: Option<&str> = None;
     let mut plugin_root: Option<&str> = None;
     let mut rest = args.iter();
@@ -124,6 +127,56 @@ pub fn run_context_run(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// `--model-price <model> <input> <output> [cache_read] [cache_write] [--route <provider>]`:
+/// the one price leg's CLI door. Prints the dollar cost with four decimals
+/// and exits 0, or prints `unpriced` and exits 3. The ledger shells this so
+/// the card and the ledger price through the same models.dev table.
+fn run_model_price(args: &[String]) -> i32 {
+    let mut route = None;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--route" => route = rest.next().map(String::as_str),
+            other => positional.push(other),
+        }
+    }
+    if positional.len() < 3 || positional.len() > 5 {
+        eprintln!(
+            "usage: fno-agents context-run --model-price <model> <input> <output> [cache_read] [cache_write] [--route <provider>]"
+        );
+        return 2;
+    }
+    let nums: Result<Vec<u64>, _> = positional[1..].iter().map(|s| s.parse::<u64>()).collect();
+    let Ok(nums) = nums else {
+        eprintln!("context-run --model-price: token counts are integers");
+        return 2;
+    };
+    let tokens = crate::session_activity::Tokens {
+        input: nums[0],
+        output: nums[1],
+        cache_read: nums.get(2).copied().unwrap_or(0),
+        cache_write: nums.get(3).copied().unwrap_or(0),
+    };
+    let unpriced = || {
+        println!("unpriced");
+        3
+    };
+    let Some(book) = crate::model_price::price_book(&crate::model_price::state_dir()) else {
+        return unpriced();
+    };
+    let Some(rates) = book.rates(positional[0], route) else {
+        return unpriced();
+    };
+    match crate::model_price::cost(tokens, &rates) {
+        Some(dollars) => {
+            println!("{dollars:.4}");
+            0
+        }
+        None => unpriced(),
+    }
 }
 
 fn run_effective_window(args: &[String]) -> i32 {
