@@ -666,6 +666,7 @@ fn concurrent_strict_spawn_only_one_commits() {
                 fit: false,
             },
             worker: None,
+            human: false,
         },
     };
     // Queue both before reading either: the server serializes them in arrival

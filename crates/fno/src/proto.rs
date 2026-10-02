@@ -357,7 +357,7 @@ fn default_true() -> bool {
 /// can refuse commands an older server cannot parse instead of tripping
 /// the unknown-variant read failure. Floor stays 58.
 /// v98: optional worker context, start time, unread mail and node; floor stays 58.
-pub const PROTO_VERSION: u32 = 98;
+pub const PROTO_VERSION: u32 = 100;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -661,6 +661,14 @@ pub enum ControlVerb {
         /// a plain `pane run` stays byte-identical.
         #[serde(default)]
         worker: Option<String>,
+        /// (v99) The run is a human's own typed command: the composer's `!`
+        /// shell line. The server has no TTY, so `human_at_tty` reads false
+        /// there even for the user's own keystrokes; this flag lets the
+        /// runaway brake warn instead of refusing, the same exemption the
+        /// user's own attach and resume already carry. Default `false` keeps
+        /// every other caller byte-identical.
+        #[serde(default)]
+        human: bool,
     },
     /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
     /// `guarded` (v21) makes the send atomic against the target going busy:
@@ -4262,6 +4270,7 @@ mod tests {
                     claim: false,
                     placement: placement.clone(),
                     worker: None,
+                    human: false,
                 },
             },
             ClientMsg::Command(Command::AttachAgent {

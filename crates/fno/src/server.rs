@@ -798,6 +798,7 @@ pub(crate) enum CoreMsg {
         claim: bool,
         placement: PanePlacement,
         worker: Option<String>,
+        human: bool,
         reply: ControlReply,
     },
     PaneSend {
@@ -3088,6 +3089,7 @@ impl Core {
         claim: bool,
         placement: PanePlacement,
         worker: Option<String>,
+        human: bool,
     ) -> Result<u64, (u32, String)> {
         let mut placement = placement;
         placement.max_panes = Some(crate::process_admission::configured_pane_group_max(
@@ -3141,8 +3143,13 @@ impl Core {
             }
         };
         let pane_count = self.placement_pane_count(dest, &placement);
-        let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
-            .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
+        // A human-typed run (the composer's `!` line) takes the human
+        // exemption the user's own attach takes: the brake warns and the
+        // fleet census still applies. Every other caller keeps the
+        // server-no-TTY read (human=false).
+        let permit =
+            crate::process_admission::admit_pane_for(human, pane_count, placement.max_panes)
+                .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
         let theme = osc_reply::theme_at(&cwd);
@@ -11971,6 +11978,7 @@ impl Core {
                 claim,
                 placement,
                 worker,
+                human,
                 reply,
             } => {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
@@ -11986,9 +11994,9 @@ impl Core {
                 let wants_receipt = placement.tab.is_some() || placement.at.is_some();
                 let (anchor, direction, fallback_policy) =
                     (placement.at, placement.split, placement.fallback);
-                let msg = match self
-                    .run_pane(squad_key, cwd, argv, rows, cols, claim, placement, worker)
-                {
+                let msg = match self.run_pane(
+                    squad_key, cwd, argv, rows, cols, claim, placement, worker, human,
+                ) {
                     Ok(pane_id) => {
                         let resolved = if wants_receipt {
                             // The new pane now sits in its committed squad+tab;
@@ -12952,6 +12960,7 @@ async fn handle_control(
             claim,
             placement,
             worker,
+            human,
         } => {
             // Resolve the squad key off the core loop, exactly like Attach.
             let squad_key = resolve_squad_key(&resolver, &cwd).await;
@@ -12965,6 +12974,7 @@ async fn handle_control(
                     claim,
                     placement,
                     worker,
+                    human,
                     reply: reply_tx,
                 })
                 .await

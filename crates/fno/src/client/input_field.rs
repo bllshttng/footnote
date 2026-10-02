@@ -57,6 +57,14 @@ impl InputField {
                     let at = self.byte_at(self.cursor);
                     self.text.remove(at);
                 }
+                LKey::KillLeft => {
+                    let at = self.byte_at(self.cursor);
+                    let start = self.text[..at].rfind('\n').map_or(0, |b| b + 1);
+                    if start < at {
+                        self.text.replace_range(start..at, "");
+                        self.cursor = self.text[..start].chars().count();
+                    }
+                }
                 LKey::Left => self.cursor = self.cursor.saturating_sub(1),
                 LKey::Right => self.cursor = (self.cursor + 1).min(self.text.chars().count()),
                 LKey::Enter | LKey::CtrlJ => {

@@ -2890,3 +2890,139 @@ fn keyed(
     m.key_file = key_file;
     m
 }
+
+// -- KillLeft (Ctrl+U / Cmd+Backspace) --------------------------------------
+
+#[test]
+fn fold_maps_both_cmd_backspace_spellings_and_shift_enter() {
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x15"),
+        vec![super::agent_launcher::LKey::KillLeft],
+        "Ctrl+U"
+    );
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x1b\x7f"),
+        vec![super::agent_launcher::LKey::KillLeft],
+        "ESC+DEL is one key, never Esc then Backspace"
+    );
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x1b[13;2u"),
+        vec![super::agent_launcher::LKey::ShiftEnter]
+    );
+    // A bare DEL still backspaces; a lone ESC still cancels.
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x7f"),
+        vec![super::agent_launcher::LKey::Backspace]
+    );
+    let mut esc = LauncherEsc::default();
+    assert_eq!(esc.fold(b"\x1b"), vec![super::agent_launcher::LKey::Esc]);
+}
+
+#[test]
+fn kill_left_deletes_the_row_left_of_the_cursor_only() {
+    let mut v = plain_view();
+    open(&mut v);
+    let l = v.launcher.as_mut().unwrap();
+    l.draft.message = "first\nsecond".to_string();
+    l.draft.cursor_chars = "first\nsecond".chars().count();
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x15", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, "first\n");
+    assert_eq!(l.draft.cursor_chars, "first\n".chars().count());
+}
+
+#[test]
+fn input_field_kill_left_clears_the_head() {
+    let mut f = super::input_field::InputField::new("name", 64).with_text("zai");
+    f.feed(b"\x15");
+    assert_eq!(f.text(), "");
+    let mut f = super::input_field::InputField::new("name", 64).with_text("zai");
+    f.feed(b"\x1b[D\x1b[D"); // cursor after "z"
+    f.feed(b"\x15");
+    assert_eq!(f.text(), "ai");
+}
+
+// -- refusal sentence + Ctrl+O detail ---------------------------------------
+
+#[test]
+fn first_sentence_maps_admission_refusals_to_canned_lines() {
+    use super::agent_launcher::first_sentence;
+    assert_eq!(
+        first_sentence("process admission refused: count=unknown, ceiling=29, reason=measurement-unavailable"),
+        "process limit: fno cannot read the machine's load (count=unknown); wait a beat or run it in a terminal",
+    );
+    assert_eq!(
+        first_sentence("process admission refused: machine runaway brake holds (900s left): hot; largest group cargo x40"),
+        "process limit: machine runaway brake on; run it in a terminal or wait for the all-clear",
+    );
+    assert_eq!(
+        first_sentence("plain first line\nsecond line"),
+        "plain first line",
+    );
+}
+
+#[test]
+fn refused_footer_shortens_then_toggles_raw() {
+    let mut v = plain_view();
+    open(&mut v);
+    let l = v.launcher.as_mut().unwrap();
+    l.phase = Phase::Refused {
+        request_id: 1,
+        reason: "process admission refused: count=unknown, ceiling=29".into(),
+    };
+    assert_eq!(
+        l.footer(),
+        "refused: process limit: fno cannot read the machine's load (count=unknown); wait a beat or run it in a terminal (^o raw)",
+    );
+    l.show_detail = true;
+    assert_eq!(
+        l.footer(),
+        "refused: process admission refused: count=unknown, ceiling=29",
+        "Ctrl+O shows the raw text"
+    );
+}
+
+#[test]
+fn question_mark_opens_help_on_empty_input_and_types_otherwise() {
+    let mut v = plain_view();
+    open(&mut v);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"?", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(
+        l.picker
+            .as_ref()
+            .is_some_and(|p| p.mode == super::agent_launcher::PickerMode::Help),
+        "? on an empty input opens the help sheet"
+    );
+    assert!(l.draft.message.is_empty());
+    // Esc closes the sheet outright; a second ? stays text on a non-empty
+    // input.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "esc closes the help sheet");
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"what?", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.draft.message, "what?",
+        "? is text once the input holds words"
+    );
+    assert!(l.picker.is_none());
+}

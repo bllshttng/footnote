@@ -152,6 +152,9 @@ pub(super) async fn run_with(
         claim: false,
         placement: PanePlacement::default(),
         worker: None,
+        // The user typed this line: the human's own admission exemption
+        // (brake warns, census still gates), like their own mux start.
+        human: true,
     };
     let reply = tokio::task::spawn_blocking(move || roundtrip(verb))
         .await
@@ -179,14 +182,24 @@ pub(super) async fn run_with(
             l.phase = Phase::Unknown { request_id, reason };
         }
         _ => {
+            // The composer shows one sentence naming the limit and the way
+            // out (the footer's shortener); the raw text stays in the
+            // journal row. The Debug wrapper never paints: an `Ok(other)`
+            // names the surprise instead of Debug-printing it.
             let reason = match &reply {
-                Ok(other) => format!("unexpected control reply: {other:?}"),
-                Err(e) => e.to_string(),
+                Ok(other) => {
+                    emit(
+                        events,
+                        &refused_row(&session, &cwd, &line, &format!("{other:?}"), "refused"),
+                    );
+                    "the pane never started: unexpected server reply".to_string()
+                }
+                Err(e) => {
+                    let raw = e.to_string();
+                    emit(events, &refused_row(&session, &cwd, &line, &raw, "refused"));
+                    raw
+                }
             };
-            emit(
-                events,
-                &refused_row(&session, &cwd, &line, &reason, "refused"),
-            );
             l.phase = Phase::Refused { request_id, reason };
         }
     }
@@ -287,7 +300,11 @@ mod tests {
         });
         {
             let ControlVerb::PaneRun {
-                cwd, argv, claim, ..
+                cwd,
+                argv,
+                claim,
+                human,
+                ..
             } = seen.lock().unwrap().take().unwrap()
             else {
                 panic!("expected PaneRun");
@@ -297,6 +314,7 @@ mod tests {
             assert_eq!(argv[0], "/bin/sh");
             assert_eq!(argv[4], "printf hi; pwd");
             assert!(!claim);
+            assert!(human, "the ! line rides the human exemption");
         }
         let rows = read_rows(&events);
         assert_eq!(rows.len(), 1);

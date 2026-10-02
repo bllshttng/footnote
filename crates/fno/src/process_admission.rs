@@ -1068,6 +1068,26 @@ pub fn tokio_spawn(command: &mut tokio::process::Command) -> io::Result<tokio::p
     Ok(child)
 }
 
+/// [`tokio_spawn`] for a human's own request: the runaway brake warns
+/// instead of refusing and the census still gates, the same exemption the
+/// user's own attach carries. The composer's force gesture rides this.
+pub fn tokio_spawn_for_human(
+    command: &mut tokio::process::Command,
+) -> io::Result<tokio::process::Child> {
+    let permit = admit_human();
+    let track_child = !is_root_program(command.as_std().get_program());
+    let mut child = command.spawn()?;
+    if track_child {
+        if let Some(pid) = child.id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        }
+    }
+    Ok(child)
+}
+
 pub async fn tokio_output(
     command: &mut tokio::process::Command,
 ) -> io::Result<std::process::Output> {

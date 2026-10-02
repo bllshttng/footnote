@@ -33,6 +33,7 @@ fn proto_v4_control_verbs_roundtrip() {
             claim: true,
             placement: PanePlacement::default(),
             worker: None,
+            human: false,
         },
         ControlVerb::PaneClaim {
             pane: 5,
