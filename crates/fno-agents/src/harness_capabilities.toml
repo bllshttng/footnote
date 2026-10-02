@@ -1648,6 +1648,7 @@ autonomous_pane = false
 route_on_pane = false
 # The loop runs hooks/hooks.json itself, Stop included.
 loop_participation = "native"
+loop_extension = ""
 command_surface = "slash"
 slash_prefix = "fno:"
 ready_marker = "unsupported"
