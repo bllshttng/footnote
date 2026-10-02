@@ -137,7 +137,6 @@ def test_cached_state_probe_finds_the_known_surface():
     assert {
         "fno.config._loader._load_settings_at",
         "fno.paths.resolve_repo_root_at",
-        "fno.plan.reconcile_status._node_status_map",
     } <= names
 
 

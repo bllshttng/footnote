@@ -34,7 +34,7 @@ from typing import Optional
 from fno.plan._stamp import _atomic_write
 
 # Leading ---\n ... \n--- . Non-greedy so the FIRST block wins even if the body
-# carries a --- rule. Mirrors reconcile_status._FRONT_RE.
+# carries a --- rule.
 _FRONT_RE = re.compile(r"\A(---\n)(?P<fm>.*?)(\n---)(?P<rest>.*)\Z", re.DOTALL)
 _KEY_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_]+)(?P<sep>[ \t]*:)(?P<val>.*)$"
