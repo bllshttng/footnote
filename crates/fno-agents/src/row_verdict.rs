@@ -151,19 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn ac1_working_inside_leg_inside_its_ttl_is_live_with_an_unread_vendor() {
+    fn ac1_ac2_the_door_walks_evidence_order_and_the_vendor_fold() {
+        // AC1: a working inside-leg report inside its TTL is Live, and an
+        // unread vendor listing resolves to nothing and flips nothing.
         let mut e = entry();
         e.inside_leg = working_leg(Some(90_000), &crate::daemon::now_rfc3339_like());
         assert_eq!(fno_verdict(&e), RowVerdict::Live("inside_leg"));
-        // The unread vendor listing resolves to nothing and flips nothing.
         assert_eq!(
             reconcile(&fno_verdict(&e), None),
             RowVerdict::Live("inside_leg")
         );
-    }
 
-    #[test]
-    fn ac2_an_empty_row_is_unknown_and_the_door_never_branches_on_the_harness_name() {
+        // AC2: no pid, no report and no outcome is Unknown, never Finished,
+        // and the door never branches on the harness name.
         let mut a = entry();
         a.harness = Some("claude".into());
         let mut b = entry();
@@ -176,10 +176,10 @@ mod tests {
                 )
             );
         }
-    }
 
-    #[test]
-    fn the_verdict_ladder_walks_status_then_ttl_then_pid() {
+        // The ladder below the TTL rung: terminal status finishes, an
+        // expired report decides nothing, a pid proven gone finishes, a
+        // live pid holds the row live.
         let mut e = entry();
         e.status = crate::AgentStatus::Exited;
         assert!(matches!(fno_verdict(&e), RowVerdict::Finished(_)));
@@ -195,21 +195,10 @@ mod tests {
         let mut live = entry();
         live.pid = Some(std::process::id());
         assert_eq!(fno_verdict(&live), RowVerdict::Live("pid"));
-    }
 
-    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
-    /// so only a reaped pid is provably ESRCH.
-    fn spawn_and_reap_pid() -> u32 {
-        let mut child = std::process::Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
-        let pid = child.id();
-        child.wait().expect("reap true");
-        pid
-    }
-
-    #[test]
-    fn a_vendor_word_resolves_only_an_unknown_and_drift_names_the_disagreement() {
+        // The vendor fold: a recognized word resolves only an Unknown, a
+        // decided fno verdict wins, and drift names the disagreement while
+        // staying silent on agreement, silence, and undecided rows.
         let unknown = fno_verdict(&entry());
         assert_eq!(
             reconcile(&unknown, Some("done")),
@@ -230,5 +219,16 @@ mod tests {
         assert!(drift(&decided, Some("working")).is_none());
         assert!(drift(&decided, None).is_none());
         assert!(drift(&unknown, Some("done")).is_none());
+    }
+
+    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
+    /// so only a reaped pid is provably ESRCH.
+    fn spawn_and_reap_pid() -> u32 {
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        pid
     }
 }
