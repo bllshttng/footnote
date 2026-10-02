@@ -34,6 +34,7 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 fit: false,
             },
             None,
+            false,
         )
         .unwrap();
     let tab = core
@@ -73,6 +74,7 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 fit: false,
             },
             None,
+            false,
         )
         .unwrap_err();
     assert_eq!(err.0, err_code::BAD_REQUEST);

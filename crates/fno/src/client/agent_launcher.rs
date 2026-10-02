@@ -3494,6 +3494,8 @@ pub(crate) fn apply_picker_action(
 ) {
     l.picker = None;
     match action {
+        // The force arm commits in commit_picker_action; nothing to place here.
+        PickerAction::Force => {}
         PickerAction::Set(name) => match field {
             Focus::Permission => {
                 l.draft.permission = name;

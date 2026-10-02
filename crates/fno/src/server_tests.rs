@@ -2303,6 +2303,7 @@ fn capacity_rows() {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap_err();
     assert_eq!(err.0, err_code::BAD_REQUEST);
@@ -2357,6 +2358,7 @@ fn capacity_rows() {
             false,
             placement,
             None,
+            false,
         )
         .unwrap_err();
 
@@ -2427,6 +2429,7 @@ fn capacity_rows() {
             false,
             placement,
             None,
+            false,
         )
         .unwrap_err();
 
@@ -2477,6 +2480,7 @@ fn capacity_rows() {
         false,
         placement,
         None,
+        false,
     )
     .unwrap();
 
@@ -3818,6 +3822,7 @@ fn resume_rows() {
                 ..Default::default()
             },
             Some("probe-x5f7f".into()),
+            false,
         )
         .unwrap();
     assert!(core.panes.contains_key(&pid));
@@ -3862,6 +3867,7 @@ fn resume_rows() {
             ..Default::default()
         },
         None,
+        false,
     )
     .unwrap();
     let stored = crate::squad_store::load();
@@ -3895,6 +3901,7 @@ fn resume_rows() {
                 ..Default::default()
             },
             Some("a;rm -rf".into()),
+            false,
         )
         .unwrap_err();
     assert_eq!(err.0, err_code::BAD_REQUEST);
@@ -8536,6 +8543,7 @@ fn pane_placement_target_does_not_replace_child_cwd() {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -8587,6 +8595,7 @@ fn run_pane_create_if_absent_mints_persisted_named_squad() {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap()
     };
@@ -8641,6 +8650,7 @@ fn run_pane_create_if_absent_rejects_blank_name_before_spawn() {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap_err();
     assert!(err.1.contains("blank"), "{err:?}");

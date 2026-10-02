@@ -252,6 +252,7 @@ fn run_pane_refuses_fit_with_explicit_geometry() {
                 false,
                 placement,
                 None,
+                false,
             )
             .unwrap_err();
         assert_eq!(err.0, err_code::BAD_REQUEST, "{label}");

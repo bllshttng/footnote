@@ -157,3 +157,11 @@ mod tests {
         assert_eq!(line.roles[ph], Role::PanelMeta, "placeholder is dimmed");
     }
 }
+
+/// Clear an optional single-buffer input on Ctrl+U (Cmd+Backspace): the
+/// one-line arm every buffer-style overlay in `client.rs` shares.
+pub(crate) fn clear_opt(slot: Option<&mut String>) {
+    if let Some(buf) = slot {
+        buf.clear();
+    }
+}

@@ -8034,7 +8034,7 @@ async fn attach_and_run(
     // The harness-catalog probe for the new-agent popup, same
     // last-outcome-wins shape as the update probe.
     let (flags_tx, mut flags_rx) =
-        tokio::sync::mpsc::channel::<(String, Vec<crate::client::harness_flags::FlagRow>)>(4);
+        tokio::sync::mpsc::channel::<(String, Option<Vec<crate::client::harness_flags::FlagRow>>)>(4);
     let (catalog_tx, mut catalog_rx) =
         tokio::sync::mpsc::unbounded_channel::<agent_launcher::CatalogOutcome>();
 
@@ -8223,28 +8223,7 @@ async fn attach_and_run(
         // Kick the harness-flags capture whenever the selected harness's
         // own --help rows are not the ones in hand: on open and on every
         // harness switch, one in flight, cached per binary version.
-        if view.launcher.is_some() && !view.flags_inflight && view
-            .launcher
-            .as_ref()
-            .is_some_and(|l| l.runtime_flags_harness != l.draft.harness())
-        {
-            view.flags_want = false;
-            view.flags_inflight = true;
-            let harness = view
-                .launcher
-                .as_ref()
-                .map(|l| l.draft.harness())
-                .unwrap_or_default();
-            let tx = flags_tx.clone();
-            tokio::spawn(async move {
-                let rows = if harness.is_empty() {
-                    None
-                } else {
-                    harness_flags::capture(&harness).await
-                };
-                let _ = tx.send((harness, rows.unwrap_or_default()));
-            });
-        }
+        harness_flags::kick(&mut view, flags_tx.clone());
         // Kick a wanted sweep verb off the UI loop, at most one in flight.
         if let Some(action) = view.sweep_action.take() {
             if !view.sweep_inflight {
@@ -8837,15 +8816,7 @@ async fn attach_and_run(
                 }
             }
             Some((harness, rows)) = flags_rx.recv() => {
-                // Last capture wins; a launcher that closed (or switched
-                // harness) mid-probe keeps only rows for ITS harness.
-                view.flags_inflight = false;
-                if let Some(l) = view.launcher.as_mut() {
-                    if l.draft.harness() == harness {
-                        l.runtime_flags = rows;
-                        l.runtime_flags_harness = harness;
-                    }
-                }
+                harness_flags::land(&mut view, &harness, rows);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11314,11 +11285,7 @@ async fn search_keys(
                         sv.query.pop();
                     }
                 }
-                0x15 => {
-                    if let Some(sv) = view.search.as_mut() {
-                        sv.query.clear();
-                    }
-                }
+                0x15 => input_field::clear_opt(view.search.as_mut().map(|sv| &mut sv.query)),
                 // ASCII printable appends (other control bytes ignored; query is
                 // ASCII in v1). Capped so a held key / paste can't grow it unbounded
                 // and drive an O(len * scrollback) server scan.
@@ -11415,10 +11382,7 @@ async fn nav_keys(
                     view.nav_ring_if_empty();
                 }
                 0x15 => {
-                    if let Some(n) = view.nav.as_mut() {
-                        n.query.clear();
-                        n.cursor = 0;
-                    }
+                    input_field::clear_opt(view.nav.as_mut().map(|n| &mut n.query));
                     view.nav_ring_if_empty();
                 }
                 // Printable ASCII edits the query; capped like search so a held
@@ -11557,11 +11521,7 @@ async fn create_keys(
                         buf.pop();
                     }
                 }
-                0x15 => {
-                    if let Some(buf) = view.create.as_mut() {
-                        buf.clear();
-                    }
-                }
+                0x15 => input_field::clear_opt(view.create.as_mut()),
                 0x20..=0x7e => {
                     if let Some(buf) = view.create.as_mut() {
                         if buf.len() < MAX_SEARCH_QUERY {
@@ -11627,11 +11587,7 @@ async fn recruit_keys(
                         buf.pop();
                     }
                 }
-                0x15 => {
-                    if let Some(buf) = view.recruit.as_mut() {
-                        buf.clear();
-                    }
-                }
+                0x15 => input_field::clear_opt(view.recruit.as_mut()),
                 0x20..=0x7e => {
                     if let Some(buf) = view.recruit.as_mut() {
                         if buf.len() < MAX_SQUAD_NAME {
@@ -11704,11 +11660,7 @@ async fn rename_keys(
                         buf.pop();
                     }
                 }
-                0x15 => {
-                    if let Some((_, buf)) = view.rename.as_mut() {
-                        buf.clear();
-                    }
-                }
+                0x15 => input_field::clear_opt(view.rename.as_mut().map(|(_, buf)| buf)),
                 0x20..=0x7e => {
                     if let Some((target, buf)) = view.rename.as_mut() {
                         // Cap to the target's stored ceiling so the operator sees
@@ -11809,11 +11761,7 @@ async fn move_to_keys(
                     buf.pop();
                 }
             }
-            0x15 => {
-                if let Some((_, buf)) = view.move_to.as_mut() {
-                    buf.clear();
-                }
-            }
+            0x15 => input_field::clear_opt(view.move_to.as_mut().map(|(_, buf)| buf)),
             b'0'..=b'9' => {
                 if let Some((_, buf)) = view.move_to.as_mut() {
                     // Four digits is far past any tab strip; the cap keeps the
@@ -11879,9 +11827,7 @@ async fn answer_keys(
                 0x7f | 0x08 => {
                     buf.pop();
                 }
-                0x15 => {
-                    buf.clear();
-                }
+                0x15 => buf.clear(),
                 0x20..=0x7e => buf.push(k as char),
                 _ => {}
             }
