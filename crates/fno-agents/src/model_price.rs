@@ -74,17 +74,15 @@ const FIRST_PARTY: &[&str] = &[
     "mistral",
 ];
 
-/// The catalog id a spawn model string keys on: cut the route prefix
-/// (`zai/glm-5.3-flash`) and the `[1m]`-style context suffix, trim,
-/// lowercase. Both sides of every match normalize through this, so the
-/// comparison stays exact: no fuzzy match, no family fallback.
+/// The catalog id a spawn model string keys on: cut the `[1m]`-style
+/// context suffix and any route prefix (`zai/glm-5.3-flash` keys the model
+/// after the slash), trim, lowercase. Both sides of every match normalize
+/// through this, so the comparison stays exact: no fuzzy match, no family
+/// fallback.
 fn normalize(model: &str) -> String {
-    model
-        .split(['[', '/'])
-        .next()
-        .unwrap_or(model)
-        .trim()
-        .to_ascii_lowercase()
+    let bare = model.split('[').next().unwrap_or(model).trim();
+    let bare = bare.rsplit('/').next().unwrap_or(bare);
+    bare.to_ascii_lowercase()
 }
 
 impl PriceBook {
