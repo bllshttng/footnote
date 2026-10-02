@@ -36,13 +36,25 @@ export PATH
 command -v fno >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WT_LIB="$HOOK_DIR/../scripts/lib/with-timeout.sh"
+WT_LIB="$HOOK_DIR/../scripts/lib/hook-budget.sh"
 [[ -f "$WT_LIB" ]] || exit 0
-# shellcheck source=../scripts/lib/with-timeout.sh
+# shellcheck source=../scripts/lib/hook-budget.sh
 source "$WT_LIB" 2>/dev/null || exit 0
 
+# The queue read derives from the session transcript, so it is keyed per
+# session and served from a stale-while-revalidate cache (x-72bb): a
+# fresh-enough copy costs milliseconds, a served copy past two thirds of its
+# life arms a DETACHED refresher for the next boundary, and a live read that
+# skipped or expired under load serves the stale copy rather than nothing.
+# Depth one boundary old is inside this hook's resolution: it reports a
+# count, never a verdict.
+session="$(cat 2>/dev/null | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 rc=0
-payload=$(with_timeout 10 fno inbox operator status --json 2>/dev/null) || rc=$?
+if [[ -n "$session" ]]; then
+    payload=$(hook_cache_serve "opcap-$session" 300 -- fno inbox operator status --json 2>/dev/null) || rc=$?
+else
+    payload=$(hook_run_optional fno inbox operator status --json 2>/dev/null) || rc=$?
+fi
 
 # A non-zero exit is not silence: collapsing a failed read into an empty
 # string is the absence-as-success trap. But exit 2 is Typer's "no such

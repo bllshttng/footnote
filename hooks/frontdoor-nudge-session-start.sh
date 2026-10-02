@@ -20,11 +20,11 @@ export PATH
 # server, and does not need the daemon, so it is fast. Bound it anyway so a
 # wedged socket can never stall session start.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/with-timeout.sh
-source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/hook-budget.sh
+source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
 if command -v fno >/dev/null 2>&1; then
-  with_timeout 3 fno mux ls --json >/dev/null 2>&1
+  with_timeout "$(hook_budget_secs)" fno mux ls --json >/dev/null 2>&1
   probe_rc=$?
   # 124 means our own bound fired. A wedged socket still PROVES the Rust front
   # door is present: `fno-py` has no `mux` verb and fails fast with a usage

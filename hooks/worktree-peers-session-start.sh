@@ -28,7 +28,7 @@ BODY_ONLY=0
 # Bound shelling out so a hung CLI or a slow fold over a huge journal can never
 # block SessionStart. The helper ships beside this hook; if absent (should not
 # happen in a real install), calls fall back to unbounded best-effort.
-WT_HELPER="$SCRIPT_DIR/../scripts/lib/with-timeout.sh"
+WT_HELPER="$SCRIPT_DIR/../scripts/lib/hook-budget.sh"
 if [[ -f "$WT_HELPER" ]]; then
   # shellcheck source=/dev/null
   source "$WT_HELPER"
@@ -259,7 +259,7 @@ if [[ -n "$top" ]] \
   && [[ "$(git -C "$top" rev-parse --absolute-git-dir 2>/dev/null)" == "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] \
   && command -v fno-agents >/dev/null 2>&1 \
   && command -v jq >/dev/null 2>&1; then
-  answer="$(jq -n --arg c "$top" '{canonical:$c}' | with_timeout 5 fno-agents canonical-check)"
+  answer="$(jq -n --arg c "$top" '{canonical:$c}' | with_timeout "$(hook_budget_secs)" fno-agents canonical-check)"
   checkout_rc=$?
   if (( checkout_rc == 124 )); then
     checkout_lines+=('- checkout staleness probe timed out. [fno-checkout-behind-unknown]')
