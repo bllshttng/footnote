@@ -165,6 +165,7 @@ RUST_CLIENT_VERBS = frozenset(
         # explicitly (not via `fno agents` routing); these entries exist so
         # the client.rs<->router parity test stays in sync.
         "kill-check",
+        "update-journal",
         "verify-evidence",
         # Plan-closure outcome probes: the close verbs shell out to
         # `fno-agents probe-run --key close_probes`, the same runner loop-check
