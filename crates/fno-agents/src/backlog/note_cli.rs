@@ -481,7 +481,7 @@ pub fn run_comment(args: &[String]) -> i32 {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--graph" => graph = it.next().map(PathBuf::from),
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             "--open" => open_only = true,
             "--list" => list = true,
             "--reply" => reply = it.next().cloned(),
