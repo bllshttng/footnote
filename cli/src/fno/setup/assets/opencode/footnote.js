@@ -850,8 +850,10 @@ async function setup(ctx) {
           }
           handle("created", event.data?.sessionID)
         } else if (event?.type === "session.idle") {
+          eventLog("idle via session.idle", event.data?.sessionID)
           runIdleOnce(event.data?.sessionID)
         } else if (event?.type === "session.status" && event.data?.status?.type === "idle") {
+          eventLog("idle via session.status", event.data?.sessionID)
           runIdleOnce(event.data?.sessionID)
         }
       }
