@@ -93,6 +93,12 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts(monkeypatch):
     assert hn.known_harnesses() == ("alpha", "beta")
     assert hn.known_harnesses() is hn.known_harnesses()
     assert calls == ["harness-roster"]
+    assert hn.known_providers() == ("alpha",)
+
+    # A binary older than the providers key: providers read the known list.
+    monkeypatch.setattr(hn, "call_binary_json", lambda *a, **k: (None, {"known": ("alpha",)}))
+    monkeypatch.setattr(hn, "_ROSTER", None, raising=False)
+    assert hn.known_providers() == ("alpha",)
 
     monkeypatch.setattr(
         hn, "call_binary_json", lambda *a, **k: ("fno-agents binary not found", None)
