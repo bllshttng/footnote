@@ -47,8 +47,13 @@ pub fn run(_args: &[String]) -> i32 {
         .unwrap_or("");
     let ti = payload.get("tool_input").cloned().unwrap_or(Value::Null);
 
-    // 2. Only the four implemented tools are judged.
-    if !matches!(tool, "Edit" | "Write" | "NotebookEdit" | "Bash") {
+    // 2. Only the five implemented tools are judged. `apply_patch` is what
+    //    codex reports as the raw tool name; the patch body rides in
+    //    `tool_input.command` (judged at step 10).
+    if !matches!(
+        tool,
+        "Edit" | "Write" | "NotebookEdit" | "Bash" | "apply_patch"
+    ) {
         return allow_at("tool-not-judged");
     }
 
@@ -182,17 +187,7 @@ pub fn run(_args: &[String]) -> i32 {
     // 10. Decide: deny SOURCE, allow everything else, one predicate for
     //     every tool.
     let allowed = |t: &str| !write_denied(t, &cwd, &repo_root, &roots);
-    let denied: Option<String> = match tool {
-        "Edit" | "Write" | "NotebookEdit" => {
-            let file = ti
-                .get("file_path")
-                .or_else(|| ti.get("notebook_path"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            (!file.is_empty() && !allowed(file)).then(|| file.to_string())
-        }
-        _ => targets.iter().find(|t| !allowed(t)).map(|t| t.to_string()),
-    };
+    let denied: Option<String> = read_denied(tool, &ti, &targets, &allowed);
 
     // 11. Telemetry: one row, one file, failure ignored.
     super::emit_guard_decision(&cwd, "king-delegation-guard", tool, denied.is_some());
@@ -217,6 +212,57 @@ fn deny_text(target: &str, repo_root: &Path) -> String {
          A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.king.write_roots.\n",
         repo = repo_root.display(),
     )
+}
+
+// ── File edit classification ────────────────────────────────────────────────
+
+/// The denied write, if any, for the file-editing tools: a `file_path` (or
+/// `notebook_path`) payload judges by its one path; a codex patch payload
+/// (body in `tool_input.command`) judges by its header paths. The marker
+/// gate keeps an arbitrary command from being read as a patch; the deny
+/// names the first denied path.
+fn read_denied(
+    tool: &str,
+    ti: &Value,
+    targets: &[String],
+    allowed: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    if tool == "Bash" {
+        return targets.iter().find(|t| !allowed(t)).map(|t| t.to_string());
+    }
+    let file = ti
+        .get("file_path")
+        .or_else(|| ti.get("notebook_path"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !file.is_empty() {
+        return (!allowed(file)).then(|| file.to_string());
+    }
+    let cmd = ti.get("command").and_then(Value::as_str).unwrap_or("");
+    let targets = if cmd.contains("*** Begin Patch") {
+        patch_targets(cmd)
+    } else {
+        Vec::new()
+    };
+    targets.iter().find(|t| !allowed(t)).map(|t| t.to_string())
+}
+
+/// Write targets a codex apply_patch body binds: the four header prefixes,
+/// the same four `hooks/lib/write-targets.sh` reads. A patch BODY is file
+/// content, never re-scanned as shell; only the headers name paths.
+fn patch_targets(command: &str) -> Vec<String> {
+    command
+        .lines()
+        .filter_map(|line| {
+            let path = line
+                .strip_prefix("*** Add File: ")
+                .or_else(|| line.strip_prefix("*** Update File: "))
+                .or_else(|| line.strip_prefix("*** Delete File: "))
+                .or_else(|| line.strip_prefix("*** Move to: "))?;
+            let path = path.trim_end_matches('\r');
+            (!path.is_empty()).then(|| path.to_string())
+        })
+        .collect()
 }
 
 // ── Shell write classification (the tokenizer port) ──────────────────────────
@@ -1001,6 +1047,31 @@ mod tests {
         assert_eq!(targets("command mv a /tmp/b"), vec!["/tmp/b"]);
         assert_eq!(targets("env FOO=bar cp /tmp/a /tmp/b"), vec!["/tmp/b"]);
         assert_eq!(targets("B=/path mv a b"), vec!["b"]);
+        // A codex apply_patch body binds exactly its header paths: the four
+        // prefixes hooks/lib/write-targets.sh reads, CR stripped, an empty
+        // path dropped.
+        assert_eq!(
+            patch_targets(concat!(
+                "*** Begin Patch\n",
+                "*** Update File: crates/fno-agents/src/lib.rs\n",
+                "+fn x() {}\n",
+                "*** Add File: docs/new.md\r\n",
+                "+hi\n",
+                "*** Delete File: docs/old.md\n",
+                "*** Move to: docs/renamed.md\n",
+                "*** End Patch\n",
+            )),
+            vec![
+                "crates/fno-agents/src/lib.rs",
+                "docs/new.md",
+                "docs/old.md",
+                "docs/renamed.md",
+            ]
+        );
+        assert!(
+            patch_targets("no headers here\n*** Begin Patch\n*** End Patch").is_empty(),
+            "a patch with no file headers binds nothing"
+        );
     }
 
     #[test]
@@ -1045,6 +1116,29 @@ mod tests {
             targets("N=$(cp a b").is_empty(),
             "unclosed substitution never executes"
         );
+        // A relative patch header resolves against the payload cwd exactly
+        // like a Bash target: judged through the same allowed() closure, so
+        // `docs/x.md` inside the repo denies and an outside cwd allows. The
+        // deny names the first denied path, in header order.
+        let repo = std::env::temp_dir().join(format!("kgd-patch-cwd-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let patch = "*** Begin Patch\n*** Update File: crates/fno-agents/src/lib.rs\n+fn y() {}\n*** Update File: docs/first.md\n+x\n*** End Patch\n";
+        let first_denied = |cwd: &Path| -> Option<String> {
+            patch_targets(patch)
+                .iter()
+                .find(|t| !write_denied(t, cwd, &repo, &[]))
+                .map(|t| t.to_string())
+        };
+        assert_eq!(
+            first_denied(&repo).as_deref(),
+            Some("crates/fno-agents/src/lib.rs"),
+            "the first in-repo header path denies"
+        );
+        assert!(
+            first_denied(&std::env::temp_dir()).is_none(),
+            "the same patch from an outside cwd allows"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
