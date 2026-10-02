@@ -657,6 +657,27 @@ fn select_wave(strategy: &Strategy, number: &str) -> Result<&Wave, String> {
         .ok_or_else(|| format!("wave '{number}' is not declared in the plan"))
 }
 
+fn selected_task_ids(wave: &Wave, requested: &[String]) -> Result<Vec<String>, String> {
+    let selected: &[String] = if requested.is_empty() {
+        &wave.tasks
+    } else {
+        requested
+    };
+    if selected.is_empty() {
+        return Err(format!("wave '{}' has no tasks", wave.number));
+    }
+    let mut seen = BTreeSet::new();
+    for task in selected {
+        if !wave.tasks.contains(task) {
+            return Err(format!("task {task} is not in wave '{}'", wave.number));
+        }
+        if !seen.insert(task) {
+            return Err(format!("task {task} was selected more than once"));
+        }
+    }
+    Ok(selected.to_vec())
+}
+
 fn cleanup_created_wave_worktrees(root: &Path, created: &[(PathBuf, String, bool)]) {
     for (path, branch, new_branch) in created.iter().rev() {
         let _ = git(
@@ -689,7 +710,12 @@ fn branch_descends_from(root: &Path, base: &str, branch: &str) -> bool {
     .is_ok_and(|output| output.status.success())
 }
 
-fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, String> {
+fn run_fork_at(
+    cwd: &Path,
+    plan: &Path,
+    number: &str,
+    requested_tasks: &[String],
+) -> Result<Vec<String>, String> {
     let cwd = PathBuf::from(git_text(cwd, &["rev-parse", "--show-toplevel"])?);
     let git_dir = git_text(&cwd, &["rev-parse", "--git-dir"])?;
     let common_dir = git_text(&cwd, &["rev-parse", "--git-common-dir"])?;
@@ -702,13 +728,14 @@ fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, Str
     }
     let strategy = parse_strategy(plan)?;
     let wave = select_wave(&strategy, number)?;
-    if wave.mode != "parallel" || wave.tasks.len() < 2 {
+    let task_ids = selected_task_ids(wave, requested_tasks)?;
+    if wave.mode != "parallel" || task_ids.len() < 2 {
         return Err("wave fork requires a parallel wave with at least two tasks".into());
     }
     let base = git_text(&cwd, &["rev-parse", "HEAD"])?;
     let mut lines = vec![format!("B\t{base}")];
     let mut planned = Vec::new();
-    for task_id in &wave.tasks {
+    for task_id in &task_ids {
         let branch = task_branch(&cwd, task_id)?;
         let worktree = task_worktree_path(&cwd, task_id)?;
         if worktree.exists() {
@@ -801,9 +828,9 @@ fn run_fork_at(cwd: &Path, plan: &Path, number: &str) -> Result<Vec<String>, Str
     Ok(lines)
 }
 
-fn run_fork(plan: &Path, number: &str) -> Result<Vec<String>, String> {
+fn run_fork(plan: &Path, number: &str, requested_tasks: &[String]) -> Result<Vec<String>, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    run_fork_at(&cwd, plan, number)
+    run_fork_at(&cwd, plan, number, requested_tasks)
 }
 
 fn append_off_surface(root: &Path, files: &[(String, String)]) -> Result<(), String> {
@@ -867,10 +894,17 @@ fn worktree_for_branch(root: &Path, branch: &str) -> Result<Option<PathBuf>, Str
     Ok(None)
 }
 
-fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<String>, String> {
+fn run_join_at(
+    cwd: &Path,
+    plan: &Path,
+    number: &str,
+    base: &str,
+    requested_tasks: &[String],
+) -> Result<Vec<String>, String> {
     let cwd = PathBuf::from(git_text(cwd, &["rev-parse", "--show-toplevel"])?);
     let strategy = parse_strategy(plan)?;
     let wave = select_wave(&strategy, number)?;
+    let task_ids = selected_task_ids(wave, requested_tasks)?;
     let dirty = git_text(&cwd, &["status", "--porcelain", "--untracked-files=all"])?;
     if !dirty.is_empty() {
         return Err("wave join requires a clean target worktree".into());
@@ -881,7 +915,7 @@ fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<
     }
     let mut off_surface = Vec::new();
     let mut branches = Vec::new();
-    for task_id in &wave.tasks {
+    for task_id in &task_ids {
         let task = strategy
             .tasks
             .get(task_id)
@@ -993,9 +1027,65 @@ fn run_join_at(cwd: &Path, plan: &Path, number: &str, base: &str) -> Result<Vec<
     Ok(lines)
 }
 
-fn run_join(plan: &Path, number: &str, base: &str) -> Result<Vec<String>, String> {
+fn run_join(
+    plan: &Path,
+    number: &str,
+    base: &str,
+    requested_tasks: &[String],
+) -> Result<Vec<String>, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    run_join_at(&cwd, plan, number, base)
+    run_join_at(&cwd, plan, number, base, requested_tasks)
+}
+
+fn parse_wave_operation_args(
+    args: &[String],
+    needs_base: bool,
+) -> Result<(PathBuf, String, String, Vec<String>), String> {
+    let mut plan = None;
+    let mut wave = None;
+    let mut base = None;
+    let mut tasks = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        let take = |name: &str| -> Option<String> {
+            argument
+                .strip_prefix(&format!("{name}="))
+                .map(str::to_string)
+        };
+        if argument == "--wave" {
+            index += 1;
+            wave = args.get(index).cloned();
+        } else if let Some(value) = take("--wave") {
+            wave = Some(value);
+        } else if argument == "--base" {
+            index += 1;
+            base = args.get(index).cloned();
+        } else if let Some(value) = take("--base") {
+            base = Some(value);
+        } else if argument == "--task" {
+            index += 1;
+            let Some(task) = args.get(index) else {
+                return Err("--task requires a task id".to_string());
+            };
+            tasks.push(task.clone());
+        } else if let Some(task) = take("--task") {
+            tasks.push(task);
+        } else if argument.starts_with('-') || plan.is_some() {
+            return Err(format!("unexpected wave argument: {argument}"));
+        } else {
+            plan = Some(PathBuf::from(argument));
+        }
+        index += 1;
+    }
+    let plan = plan.ok_or_else(|| "plan path is required".to_string())?;
+    let wave = wave.ok_or_else(|| "--wave is required".to_string())?;
+    let base = if needs_base {
+        base.ok_or_else(|| "--base is required".to_string())?
+    } else {
+        base.unwrap_or_default()
+    };
+    Ok((plan, wave, base, tasks))
 }
 
 /// Transport entrypoint: `fno-agents wave check|fork|join ...`.
@@ -1007,12 +1097,22 @@ pub fn run(args: &[String]) -> i32 {
     let rest = &args[1..];
     let result = match command {
         "check" => return run_check(rest),
-        "fork" if rest.len() == 3 && rest[1] == "--wave" => run_fork(Path::new(&rest[0]), &rest[2]),
-        "join" if rest.len() == 5 && rest[1] == "--wave" && rest[3] == "--base" => {
-            run_join(Path::new(&rest[0]), &rest[2], &rest[4])
-        }
+        "fork" => match parse_wave_operation_args(rest, false) {
+            Ok((plan, wave, _, tasks)) => run_fork(&plan, &wave, &tasks),
+            Err(error) => {
+                eprintln!("wave fork: {error}");
+                return 2;
+            }
+        },
+        "join" => match parse_wave_operation_args(rest, true) {
+            Ok((plan, wave, base, tasks)) => run_join(&plan, &wave, &base, &tasks),
+            Err(error) => {
+                eprintln!("wave join: {error}");
+                return 2;
+            }
+        },
         _ => {
-            eprintln!("usage: fno-agents wave check <plan> [--repo <dir>] | fork <plan> --wave <n> | join <plan> --wave <n> --base <sha>");
+            eprintln!("usage: fno-agents wave check <plan> [--repo <dir>] | fork <plan> --wave <n> [--task <id> ...] | join <plan> --wave <n> --base <sha> [--task <id> ...]");
             return 2;
         }
     };
@@ -1165,7 +1265,27 @@ mod tests {
         .success());
         let plan_path = dir.path().join("wave-plan.md");
         fs::write(&plan_path, plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\ntasks:\n  - id: '1.1'\n    surface: ['a.txt']\n    verify: 'printf x >> .fno/verify-one.log'\n  - id: '1.2'\n    surface: ['b.txt']\n    verify: 'printf x >> .fno/verify-two.log'" )).unwrap();
-        let fork = run_fork_at(&target, &plan_path, "1").unwrap();
+        let selected = run_fork_at(&target, &plan_path, "1", &["1.1".to_string()]).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|line| line.starts_with("O\t"))
+                .count(),
+            1
+        );
+        let selected_branch = task_branch(&target, "1.1").unwrap();
+        let selected_path = task_worktree_path(&target, "1.1").unwrap();
+        assert!(git(
+            &target,
+            &["worktree", "remove", selected_path.to_str().unwrap()]
+        )
+        .status
+        .success());
+        assert!(git(&target, &["branch", "-d", &selected_branch])
+            .status
+            .success());
+
+        let fork = run_fork_at(&target, &plan_path, "1", &[]).unwrap();
         assert_eq!(
             fork.iter().filter(|line| line.starts_with("O\t")).count(),
             2
@@ -1189,10 +1309,10 @@ mod tests {
         assert!(git(&wt2, &["commit", "-qm", "task two"]).status.success());
         let task_one_commit = git_text(wt1, &["rev-parse", "HEAD"]).unwrap();
         let task_two_commit = git_text(wt2, &["rev-parse", "HEAD"]).unwrap();
-        assert_eq!(run_fork_at(&target, &plan_path, "1").unwrap(), fork);
+        assert_eq!(run_fork_at(&target, &plan_path, "1", &[]).unwrap(), fork);
         fs::create_dir_all(target.join(".fno")).unwrap();
         let base = fork[0].strip_prefix("B\t").unwrap();
-        let lines = run_join_at(&target, &plan_path, "1", base).unwrap();
+        let lines = run_join_at(&target, &plan_path, "1", base, &[]).unwrap();
         assert_eq!(
             lines.iter().filter(|line| line.starts_with("M\t")).count(),
             2
@@ -1242,7 +1362,7 @@ mod tests {
             plan("execution_mode: parallel\nwaves:\n  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2']\n  - wave: 2\n    mode: parallel\n    tasks: ['2.1', '2.2']\ntasks:\n  - id: '1.1'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'\n  - id: '1.2'\n    surface: ['b.txt']\n    verify: 'git diff --quiet'\n  - id: '2.1'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'\n  - id: '2.2'\n    surface: ['a.txt']\n    verify: 'git diff --quiet'"),
         )
         .unwrap();
-        let conflict_fork = run_fork_at(&target, &plan_path, "2").unwrap();
+        let conflict_fork = run_fork_at(&target, &plan_path, "2", &[]).unwrap();
         let conflict_worktrees: Vec<PathBuf> = conflict_fork
             .iter()
             .filter_map(|line| {
@@ -1266,10 +1386,10 @@ mod tests {
             .success());
         let conflict_base = conflict_fork[0].strip_prefix("B\t").unwrap();
         fs::write(conflict_worktrees[1].join("dirty.txt"), "uncommitted\n").unwrap();
-        let dirty_error = run_join_at(&target, &plan_path, "2", conflict_base).unwrap_err();
+        let dirty_error = run_join_at(&target, &plan_path, "2", conflict_base, &[]).unwrap_err();
         assert!(dirty_error.contains("task 2.2 worktree is dirty:"));
         fs::remove_file(conflict_worktrees[1].join("dirty.txt")).unwrap();
-        let error = run_join_at(&target, &plan_path, "2", conflict_base).unwrap_err();
+        let error = run_join_at(&target, &plan_path, "2", conflict_base, &[]).unwrap_err();
         assert!(error.contains("merge conflict: task 2.2 (a.txt)"));
         assert_eq!(
             git_text(&target, &["rev-parse", "HEAD"]).unwrap(),
