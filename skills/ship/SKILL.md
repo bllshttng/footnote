@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Ship a pull request or research document through its required delivery gates.
+description: Open or create a pull request, check reviews, or ship a research brief through delivery gates.
 argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic> [--golden <discovery-*.md>])  - a type is required, there is no default"
 metadata:
   requires:
