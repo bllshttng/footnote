@@ -556,7 +556,7 @@ mod tests {
     ) -> PathBuf {
         let path = root
             .join("space-a")
-            .join("leads")
+            .join("kings")
             .join(format!("{scope}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = format!(

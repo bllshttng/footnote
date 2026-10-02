@@ -936,7 +936,7 @@ fn default_eval_dir_for(session: &str, checkins: &[Value], cwd: &Path) -> Result
     Ok(plans
         .join("..")
         .join("evals")
-        .join("leads")
+        .join("kings")
         .join(format!("lead-{tag}-{}", &session[..session.len().min(8)])))
 }
 
@@ -1337,7 +1337,7 @@ fn session_has_eval(session: &str) -> Result<bool, String> {
             cwd.display()
         ));
     };
-    let evals = plans.join("..").join("evals").join("leads");
+    let evals = plans.join("..").join("evals").join("kings");
     let sid8 = &session[..session.len().min(8)];
     let entries = match std::fs::read_dir(evals) {
         Ok(entries) => entries,

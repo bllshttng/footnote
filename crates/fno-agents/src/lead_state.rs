@@ -88,7 +88,7 @@ pub(crate) fn manifest_path(root: &Path, scope: &str) -> Result<PathBuf, String>
     }
     // `root` is the state root itself (the repo's space), matching Python's
     // lead_manifest_path: leads sit at <root>/leads, NOT <root>/.fno/leads.
-    Ok(root.join("leads").join(format!("{scope}.md")))
+    Ok(root.join("kings").join(format!("{scope}.md")))
 }
 
 /// The row's canonical session id, tolerating legacy rows without one
@@ -129,7 +129,7 @@ pub(crate) fn row_holds_manifest_live_team_cached(
     if cwd.as_os_str().is_empty() {
         return false;
     }
-    let leads = crate::paths::space_dir(&cwd).join("leads");
+    let leads = crate::paths::space_dir(&cwd).join("kings");
     cache
         .entry(leads.clone())
         .or_insert_with(|| manifest_team_sessions(&leads))
@@ -825,7 +825,7 @@ pub(crate) fn collect_lead_manifests(root: &Path) -> Vec<(PathBuf, String)> {
     };
     spaces.sort_by_key(|e| e.path());
     for space in spaces {
-        let leads = space.path().join("leads");
+        let leads = space.path().join("kings");
         let mut files: Vec<_> = match fs::read_dir(&leads) {
             Ok(rd) => rd.flatten().collect(),
             Err(_) => continue,
@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn org_vacancies_matches_territory_and_dedups() {
         let root = tmp("orphans");
-        let leads = root.join("space-a").join("leads");
+        let leads = root.join("space-a").join("kings");
         fs::create_dir_all(&leads).unwrap();
         let team = |scope: &str, level: &str, file: &str| {
             let body = format!(
@@ -1281,7 +1281,7 @@ mod tests {
     /// Write a leads manifest with full field control for the org tests:
     /// scope, session, and the recency stamp the superseded read compares.
     fn write_org_manifest(root: &Path, scope: &str, session: &str, created_at: &str) -> PathBuf {
-        let leads = root.join("space-a").join("leads");
+        let leads = root.join("space-a").join("kings");
         let path = leads.join(format!("{scope}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = format!(
@@ -1402,7 +1402,7 @@ mod tests {
         // harness_session_id line. No group, no supersession: both list, each
         // with its file stem as manifest_session.
         let root = tmp("sessionless");
-        let leads = root.join("space-a").join("leads");
+        let leads = root.join("space-a").join("kings");
         fs::create_dir_all(&leads).unwrap();
         for scope in ["zzz-scope", "aaa-scope"] {
             fs::write(
@@ -1507,7 +1507,7 @@ mod tests {
         };
         let both = tmp("young-and-live");
         write_org_manifest(&both, "x-key", sess, &stamp(1));
-        let leads_b = both.join("space-b").join("leads");
+        let leads_b = both.join("space-b").join("kings");
         fs::create_dir_all(&leads_b).unwrap();
         fs::write(
             leads_b.join("x-key.md"),
@@ -1613,7 +1613,7 @@ mod tests {
         // AC3-EDGE (second half): the verdict is claude-only. A codex
         // manifest whose short id the roster lists stopped still lists.
         let root = tmp("verdict-codex");
-        let path = root.join("space-a").join("leads").join("x-codex.md");
+        let path = root.join("space-a").join("kings").join("x-codex.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,

@@ -103,7 +103,7 @@ pub(crate) fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
         "events" => Some(crate::paths::events_path(cwd)),
         "plans" => Some(space.join("plans")),
         "inbox" => Some(space.join("inbox")),
-        "leads" => Some(space.join("leads")),
+        "kings" => Some(space.join("kings")),
         "scratchpad" => Some(wt.join("scratchpad")),
         "status-sinks" => Some(space.join("status-sinks")),
         "worktree-log" => Some(space.join("worktree-log.jsonl")),

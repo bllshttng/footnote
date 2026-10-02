@@ -1749,7 +1749,7 @@ mod tests {
             "positive control: the row cwd and the payload cwd must key different spaces"
         );
         let scope = "x-test-epic";
-        let leads = crate::hook::events_space(&repo).join("leads");
+        let leads = crate::hook::events_space(&repo).join("kings");
         std::fs::create_dir_all(&leads).unwrap();
         let manifest = leads.join(format!("{scope}.md"));
         std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: org\n---\n").unwrap();
@@ -1814,7 +1814,7 @@ mod tests {
         // A row whose cwd names a removed directory (a deleted linked
         // worktree keys its own dead slug) falls back to the payload cwd's
         // space before answering None.
-        let payload_leads = crate::hook::events_space(&elsewhere).join("leads");
+        let payload_leads = crate::hook::events_space(&elsewhere).join("kings");
         std::fs::create_dir_all(&payload_leads).unwrap();
         std::fs::write(payload_leads.join(format!("{scope}.md")), "fallback").unwrap();
         let dead_cwd = RegistryEntry {

@@ -5273,7 +5273,7 @@ fn cleanup_lead_manifest(entry: &state::RegistryEntry) {
     let Some(leads) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
         return;
     };
-    let path = leads.join("leads").join(format!("{scope}.md"));
+    let path = leads.join("kings").join(format!("{scope}.md"));
     // Owner guard, the Rust half of Python remove_lead_manifest's
     // expected_harness_session_id: a successor teamed over this scope after
     // the row went terminal can have re-armed the manifest with ITS session

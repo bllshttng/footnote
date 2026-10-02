@@ -162,7 +162,7 @@ impl LeadQueue {
             )));
         }
         let manifest_path = crate::paths::space_dir(repo_root)
-            .join("leads")
+            .join("kings")
             .join(format!("{scope}.md"));
         let content = fs::read_to_string(&manifest_path).map_err(|_| {
             LoopError::Queue(format!(
@@ -1059,7 +1059,7 @@ mod tests {
         // process-global and shared by every test thread. Take the env lock
         // and pin the spaces root here, so the resolution is race-free and
         // never touches the real $HOME.
-        let leads = crate::paths::space_dir(&dir).join("leads");
+        let leads = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&leads).unwrap();
         let path = leads.join("k.md");
         fs::write(
@@ -1100,7 +1100,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         // Same env-lock and pin as the ceiling test: space_dir reads global
         // state, and an unlocked read raced another test's env mutation.
-        let leads = crate::paths::space_dir(&dir).join("leads");
+        let leads = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&leads).unwrap();
         fs::write(
             leads.join("k.md"),
@@ -1211,7 +1211,7 @@ mod tests {
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         // Env lock + pin: space_dir reads process-global state.
-        let leads = crate::paths::space_dir(&dir).join("leads");
+        let leads = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&leads).unwrap();
         fs::write(leads.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
         let registry = write_registry(&dir, "busy", Some("epic-x"));
@@ -1512,7 +1512,7 @@ mod tests {
         let _root = crate::paths::DeclaredRoot::declare("leadsucc");
         let dir = _root.path().to_path_buf();
         // Env lock + pin: space_dir reads process-global state.
-        let leads = crate::paths::space_dir(&dir).join("leads");
+        let leads = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&leads).unwrap();
         fs::write(
             &leads.join("k.md"),
@@ -1542,7 +1542,7 @@ mod tests {
         let _root = crate::paths::DeclaredRoot::declare("leadrace");
         let dir = _root.path().to_path_buf();
         // Env lock + pin: space_dir reads process-global state.
-        let leads = crate::paths::space_dir(&dir).join("leads");
+        let leads = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&leads).unwrap();
         let path = leads.join("k.md");
         fs::write(

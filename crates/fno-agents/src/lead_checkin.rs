@@ -4347,7 +4347,7 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let scope = crate::territory::canonical_scope("probe fleet");
         let expected_board = crate::paths::space_dir(&repo)
-            .join("leads")
+            .join("kings")
             .join(format!("{scope}.md"));
         std::fs::create_dir_all(expected_board.parent().unwrap()).unwrap();
         std::fs::write(&expected_board, "# lead\n").unwrap();

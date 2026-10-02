@@ -58,7 +58,7 @@ async fn rm_cleans_a_teamed_rows_scope_manifest_best_effort() {
     std::env::set_var("FNO_SPACES_DIR", &spaces);
     let manifest = crate::paths::space_dir_opt(&project)
         .unwrap()
-        .join("leads")
+        .join("kings")
         .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(&manifest, "---\nscope: alpha\n---\n").unwrap();
@@ -111,7 +111,7 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
     std::env::set_var("FNO_SPACES_DIR", &spaces);
     let manifest = crate::paths::space_dir_opt(&project)
         .unwrap()
-        .join("leads")
+        .join("kings")
         .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(

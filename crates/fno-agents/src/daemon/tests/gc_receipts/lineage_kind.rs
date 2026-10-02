@@ -215,7 +215,7 @@ fn an_unstamped_row_with_a_live_manifest_is_kept_teamed() {
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     let space = crate::paths::space_dir(&repo);
-    let leads = space.join("leads");
+    let leads = space.join("kings");
     std::fs::create_dir_all(&leads).unwrap();
     std::fs::write(
         leads.join("x-demo.md"),
