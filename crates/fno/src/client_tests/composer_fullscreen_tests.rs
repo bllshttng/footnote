@@ -73,7 +73,7 @@ async fn toggle_panel_with_composer_open_closes_it() {
 }
 
 #[tokio::test]
-async fn full_screen_sideline_hides_panes_and_shows_the_composer() {
+async fn full_screen_sideline_hides_panes_without_the_composer() {
     let mut v = two_pane_view();
     v.term = (40, 120);
     v.frames.insert(10, text_frame(29, 35, 'Q'));
@@ -87,7 +87,7 @@ async fn full_screen_sideline_hides_panes_and_shows_the_composer() {
         .await
         .unwrap();
     assert!(v.sideline_full);
-    assert!(v.launcher.is_some(), "entering opens the composer");
+    assert!(v.launcher.is_none(), "F no longer opens the composer");
     let text = frame_text(&v.compose());
     assert!(!text.contains('Q'), "no pane cell paints");
     assert!(
@@ -95,8 +95,8 @@ async fn full_screen_sideline_hides_panes_and_shows_the_composer() {
         "the Extended table header paints"
     );
     assert!(
-        text.contains("new agent") && text.contains("Local"),
-        "the composer sheet paints centered, chip row first"
+        !text.contains("new agent"),
+        "the composer sheet stays closed; prefix+i owns it"
     );
 }
 
