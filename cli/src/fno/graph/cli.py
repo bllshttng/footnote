@@ -4255,13 +4255,13 @@ def cmd_roadmap(
     out: Optional[str] = typer.Option(
         None, "--out", help="Write markdown to this path instead of stdout."
     ),
-    html: Optional[str] = typer.Option(
-        None, "--html", help="Also write a standalone HTML file to this path."
-    ),
     backlog_html: Optional[str] = typer.Option(
         None,
         "--backlog-html",
-        help="Also write the grouped public open-work HTML projection.",
+        help=(
+            "Also write the public open-work HTML board (leak-gated, native "
+            "renderer) to this path."
+        ),
     ),
 ) -> None:
     """Render public roadmap and backlog projections through one leak gate.
@@ -4296,19 +4296,51 @@ def cmd_roadmap(
         raise typer.Exit(code=1) from exc
     entries, _ = omit_leaky_rows(entries, resolved_project)
 
-    md = render_public_roadmap_md(entries, resolved_project)
+    if backlog_html:
+        # The public page renders through the native front binary: selection
+        # and the title gate run there, beside the output allowlist, so the
+        # private graph never leaves the process unfiltered.
+        import json
+        import subprocess
 
-    if html or backlog_html:
-        # The public HTML pages were the second board this surface retired;
-        # refuse BY NAME so a script fails loudly instead of silently
-        # rendering nothing.
-        typer.echo(
-            "Error: --html/--backlog-html are retired; the web backlog page "
-            "is the one board (fno mux serve --web / fno backlog view). "
-            "The markdown roadmap still renders.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+        from fno.rust_binary import VerbUnavailable, resolve_front_binary
+
+        try:
+            binary = resolve_front_binary()
+            if binary is None:
+                raise VerbUnavailable("the native fno binary was not found")
+            request = json.dumps(
+                {
+                    "targets": [{"path": os.path.expanduser(backlog_html)}],
+                    "public": {"project": resolved_project},
+                }
+            )
+            done = subprocess.run(
+                [str(binary), "board-render"],
+                input=request,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except Exception as exc:
+            typer.echo(
+                f"Error: public backlog HTML render failed: {exc}", err=True
+            )
+            raise typer.Exit(code=1) from exc
+        if done.returncode != 0:
+            err = (done.stderr or "").strip()
+            if "unknown field" in err:
+                err += (
+                    " (the installed fno predates the public board render; "
+                    "run `fno doctor update --rust`)"
+                )
+            typer.echo(
+                f"Error: public backlog HTML render failed: {err[:300]}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+    md = render_public_roadmap_md(entries, resolved_project)
 
     documents: dict[Path, str] = {}
     out_path = Path(os.path.expanduser(out)) if out else None
