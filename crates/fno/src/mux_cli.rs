@@ -2210,13 +2210,8 @@ pub enum PaneCmd {
         pane: u64,
         name: Option<String>,
     },
-    /// `pane focus <pane>`: move the OPERATOR's view to a pane, rather
-    /// than acting on the pane for an agent. Every other `pane` verb is the
-    /// latter; this is the one that points a human at something.
-    /// The pane may be named by what a person remembers: an all-digit
-    /// argument is a pane id exactly as before; anything else is a selector
-    /// resolved against the agent registry, and `--fzf` (no argument) opens
-    /// the interactive picker.
+    /// `pane focus <pane>`: move the OPERATOR's view to a pane; every other `pane` verb acts for an
+    /// agent. A digit argument is a pane id, else a registry selector; `--fzf` opens the picker.
     Focus {
         target: FocusTarget,
     },
@@ -2225,10 +2220,10 @@ pub enum PaneCmd {
         argv: Vec<String>,
         claim: bool,
         placement: PanePlacement,
-        /// `--worker <registry-name>`: record this pane as a squad
-        /// member joined to that registry row, so it survives a mux restart
-        /// as an idle, resumable row.
+        /// `--worker <name>`: a squad member joined to that registry row, resumable after a restart.
         worker: Option<String>,
+        /// `--size <cols>x<rows>`: the pty size; a client viewing the tab later fits it to its screen.
+        size: Option<(u16, u16)>,
     },
     Send {
         pane: u64,
@@ -3954,14 +3949,15 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
             claim,
             worker,
             placement,
+            size,
         } => {
             let cwd = resolve_run_cwd(cwd, std::env::current_dir().ok());
             (
                 ControlVerb::PaneRun {
                     cwd,
                     argv,
-                    cols: None,
-                    rows: None,
+                    cols: size.map(|s| s.0),
+                    rows: size.map(|s| s.1),
                     claim,
                     placement,
                     worker,
@@ -6340,10 +6336,13 @@ mod tests {
                     claim: false,
                     placement: PanePlacement::default(),
                     worker: None,
+                    size: None,
                 },
             }
         );
         // The `--` is optional: the first bare token begins the argv.
+        assert_eq!(pane_args::parse_size("144x40"), Ok((144, 40)));
+        assert!(parse_pane_args(&op_of("run"), &os(&["--size", "144", "sh"])).is_err());
         let p = parse_pane_args(&op_of("run"), &os(&["echo", "marker"])).unwrap();
         assert!(
             matches!(p.cmd, PaneCmd::Run { argv, .. } if argv == vec!["echo".to_string(), "marker".into()])
