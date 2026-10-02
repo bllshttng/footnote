@@ -778,9 +778,17 @@ pub fn observe(payload: &Value) -> Value {
             fields["observed_harness"] = json!(o.harness);
             fields["observed_model"] = o.model.clone().map(Value::String).unwrap_or(Value::Null);
             fields["observed_session_id"] = json!(o.session_id);
-            let substituted = (!requested_harness.is_empty() && o.harness != requested_harness)
-                || (!requested_model.is_empty()
-                    && o.model.as_deref() != Some(requested_model.as_str()));
+            // A transcript stores the bare model, never the `[1m]` context
+            // suffix the lane asked with, so the model sides compare by family.
+            let model_differs = !requested_model.is_empty()
+                && o.model.as_deref().is_none_or(|observed| {
+                    crate::state::model_substitution(
+                        Some(requested_model.as_str()),
+                        Some(&json!(observed)),
+                    ) == "substituted"
+                });
+            let substituted =
+                (!requested_harness.is_empty() && o.harness != requested_harness) || model_differs;
             fields["substituted"] = json!(substituted);
             fields["lane_status"] = json!(if substituted { "substituted" } else { "ok" });
             if let Some(u) = o.usage {
