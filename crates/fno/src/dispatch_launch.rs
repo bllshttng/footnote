@@ -976,6 +976,23 @@ mod tests {
                 "-",
             ]
         );
+        // Force rides only when the user pressed it, and always as its own
+        // argv element (the door's own flag).
+        let mut forced = req.clone();
+        forced.force = true;
+        let argv = launch_spawn_argv("fno", &forced, "work");
+        assert!(
+            argv.contains(&"--force"),
+            "a forced request carries --force: {argv:?}"
+        );
+        assert_eq!(
+            launch_spawn_argv("fno", &req, "work"),
+            argv.iter()
+                .filter(|a| *a != "--force")
+                .copied()
+                .collect::<Vec<_>>(),
+            "force adds nothing else"
+        );
         let configured_route = AgentLaunchRequest {
             request_id: 6,
             revision: 1,
