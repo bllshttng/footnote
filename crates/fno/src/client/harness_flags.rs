@@ -61,7 +61,7 @@ pub(crate) async fn capture(harness: &str) -> Option<Vec<FlagRow>> {
 
 /// The harness whose `--help` rows are missing, when a probe may run: one
 /// in flight, and the selected harness differs from the captured one.
-pub(crate) fn probe_due(view: &super::View) -> Option<String> {
+pub(super) fn probe_due(view: &super::View) -> Option<String> {
     if view.flags_inflight {
         return None;
     }
@@ -72,7 +72,7 @@ pub(crate) fn probe_due(view: &super::View) -> Option<String> {
 }
 
 /// Kick the capture off the UI loop for the harness [`probe_due`] named.
-pub(crate) fn kick(
+pub(super) fn kick(
     view: &mut super::View,
     tx: tokio::sync::mpsc::Sender<(String, Option<Vec<FlagRow>>)>,
 ) {
@@ -89,7 +89,7 @@ pub(crate) fn kick(
 /// Land a finished capture: rows only ever join the launcher whose
 /// harness still matches; a failed read lands as an empty row set (the
 /// toml capture shows) so a missing binary never loops the probe.
-pub(crate) fn land(view: &mut super::View, harness: &str, rows: Option<Vec<FlagRow>>) {
+pub(super) fn land(view: &mut super::View, harness: &str, rows: Option<Vec<FlagRow>>) {
     view.flags_inflight = false;
     if let Some(l) = view.launcher.as_mut() {
         if l.draft.harness() == harness {
