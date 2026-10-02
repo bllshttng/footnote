@@ -407,10 +407,8 @@ fn run_inner(session: &str) -> Result<i32, String> {
     }
     let path = proto::socket_path(session)?;
 
-    let stream = connect_or_spawn(&path, true)?;
-
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
-    runtime.block_on(attach_and_run(stream, &path))
+    runtime.block_on(attach_handshake::attach_once_more(&path))
 }
 
 /// Append one line to a log file under the mux dir, best-effort. The shared
