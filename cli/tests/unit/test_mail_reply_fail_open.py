@@ -110,7 +110,9 @@ def test_reply_delivers_though_the_registry_is_torn(
     msg = _seed_inbound(from_=SENDER)
     # The reply runs as a named session would: a bare shell has no sender,
     # and the delivered-header guard refuses one before the fail-open branch.
-    monkeypatch.setattr("fno.mail.cli.stamp_from", lambda name=None: "reply-sender")
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.stamp_from", lambda name=None: "reply-sender"
+    )
 
     result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 

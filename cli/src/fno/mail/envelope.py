@@ -121,6 +121,11 @@ def fno_mail_open(
 def contains_fno_mail_tag(text: str) -> bool:
     """True if ``text`` holds an ``<fno_mail`` open or ``</fno_mail>`` close
     tag, through the Rust classifier."""
+    low = text.lower()
+    if "<fno_mail" not in low and "</fno_mail>" not in low:
+        # A real tag always carries the literal, so this pre-filter never
+        # hides one; it only saves the subprocess on the common no-tag text.
+        return False
     return bool(mail_shape([text])[0]["holds_tag"])
 
 
