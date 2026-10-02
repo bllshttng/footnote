@@ -87,8 +87,6 @@ use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
-#[cfg(test)]
-use sideline::sideline_column_rects;
 
 mod row_stamp;
 // The sideline's density width rules.
@@ -98,7 +96,7 @@ use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, Row
 use density_width::{
     canonical_width, density_glyph, min_admit_width, min_render_width, sideline_max_width,
 };
-pub(crate) use name_fit::{fit_name, pad_to};
+pub(crate) use name_fit::pad_to;
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -3749,22 +3747,6 @@ impl View {
             DisplayRow::Sel(s) => Some(format!("squad:{}:{:?}", s.squad, s.tab)),
             DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
             DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
-            // A `Sub` line's own text is not unique: it carries an agent's
-            // `cwd_base`, and two agents in one directory render the same
-            // string, as do repeated `+N more` remainders. Anchor it to the
-            // nearest identifiable row above plus its offset from that anchor,
-            // which survives a push the way a bare index does not.
-            DisplayRow::Sub(t) => {
-                let rows = self.display_rows();
-                let anchor = (0..i)
-                    .rev()
-                    .find(|&j| !matches!(rows.get(j), Some(DisplayRow::Sub(_))));
-                let (head, off) = match anchor {
-                    Some(j) => (self.row_identity(j).unwrap_or_default(), i - j),
-                    None => (String::new(), i),
-                };
-                Some(format!("sub:{head}+{off}:{t}"))
-            }
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank
             | DisplayRow::CardDetail(..)
@@ -4144,12 +4126,8 @@ impl View {
             // Agent row painted above it. Inert for the selector, clickable
             // here - the same split a Header has.
             DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
-            // Inert rows (subline, spacer, table column header) resolve to no
-            // action.
-            DisplayRow::Sub(_)
-            | DisplayRow::Blank
-            | DisplayRow::TableHead
-            | DisplayRow::TableEmpty => None,
+            // Inert rows (spacer, table column header) resolve to no action.
+            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay.
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -5979,11 +5957,15 @@ impl View {
             }
             Density::Slim => {
                 let (rows, depths) = self.tree_rows_with_depths();
+                // Small mode (q-334c5e9d option 1): one line per live agent,
+                // `glyph slug`, beside the workspace headers. Exited rows
+                // hide; the paint clips to the 16-column rail.
                 let mut kept_rows = Vec::with_capacity(rows.len());
                 let mut kept_depths = Vec::with_capacity(depths.len());
                 for (r, d) in rows.into_iter().zip(depths) {
                     let keep = matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
-                        || matches!(r, DisplayRow::Header { .. });
+                        || matches!(r, DisplayRow::Header { .. })
+                        || matches!(r, DisplayRow::Agent(a) if !a.exited);
                     if keep {
                         kept_rows.push(r);
                         kept_depths.push(d);
@@ -6014,10 +5996,7 @@ impl View {
         while let Some((row, depth)) = iter.next() {
             match row {
                 DisplayRow::Agent(agent) => {
-                    let mut item = vec![(DisplayRow::Agent(agent), depth)];
-                    while matches!(iter.peek(), Some((DisplayRow::Sub(_), _))) {
-                        item.push(iter.next().expect("peeked subline"));
-                    }
+                    let item = vec![(DisplayRow::Agent(agent), depth)];
                     group.push((item, agent));
                     if !matches!(iter.peek(), Some((DisplayRow::Agent(_), _))) {
                         append_sorted_agent_group(
@@ -6085,7 +6064,6 @@ impl View {
             let key = section_key(s);
             let view = self.section_view(&key);
             if view != SectionView::Collapsed {
-                let section_base = section_project_base(&s.canonical_cwd);
                 let mut squad_agents: Vec<&AgentRow> = self
                     .layout
                     .agents
@@ -6141,13 +6119,6 @@ impl View {
                 for (a, depth) in emitted.iter().zip(emitted_depths) {
                     agent_depth_at.insert(out.len(), depth);
                     out.push(DisplayRow::Agent(a));
-                    // (US3) Exception-based subline: a Sub row follows the
-                    // agent ONLY when its cwd_base differs from the squad's
-                    // project basename - the foreign-cwd join worth flagging. A
-                    // same-project agent stays one clean row.
-                    if agent_is_foreign(a, section_base) {
-                        out.push(DisplayRow::Sub(a.cwd_base.clone().unwrap_or_default()));
-                    }
                 }
                 // Emit the fold row whenever there is idle overflow: `+N more`
                 // when folded, `- fewer` when shown (so the expansion reverses
@@ -6304,24 +6275,18 @@ enum DisplayRow<'a> {
     /// The `+` create-workspace affordance, a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
-    /// (US2) The dim, 4-cell-indented line-2 under a row: an agent's
-    /// foreign `cwd_base`.
-    /// attribution and the section's `+N more` remainder. Owns its text so any
-    /// section can emit one without the painter learning a new row type. Inert:
-    /// every painted line stays one display row (the single-enumeration
-    /// invariant), so scroll, hover, and hit-test index math are untouched.
-    Sub(String),
     /// (US3) A one-line spacer between workspace groups and before the
-    /// trailing sections. Inert, like `Sub`.
+    /// trailing sections. Inert: every painted line stays one display row
+    /// (the single-enumeration invariant), so scroll, hover, and hit-test
+    /// index math are untouched.
     Blank,
     /// Line 2 of a card-mode card (the dims under `[sideline] layout =
-    /// "card"`): harness, king, message and age in a DIM legacy row. Inert
-    /// like `Sub` - every painted line stays one display row (the
-    /// single-enumeration invariant) - and a click on it acts on the `Agent`
-    /// row above it via [`View::row_action`]'s index shift. A foreign-cwd
-    /// card folds the subline's cwd in here, so the card stays two painted
-    /// rows.
-    CardDetail(&'a AgentRow, Option<String>),
+    /// "card"`): harness/model, parent-or-role, message, with the lifetime
+    /// and age right-aligned in a DIM legacy row. Inert - every painted
+    /// line stays one display row (the single-enumeration invariant) - and
+    /// a click on it acts on the `Agent` row above it via
+    /// [`View::row_action`]'s index shift.
+    CardDetail(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6445,7 +6410,6 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
     matches!(
         drow,
         DisplayRow::Header { .. }
-            | DisplayRow::Sub(_)
             | DisplayRow::Blank
             | DisplayRow::CardDetail(..)
             | DisplayRow::TableHead
@@ -7440,7 +7404,7 @@ fn header_band_flags(_active: bool) -> u8 {
 /// the panel width `w` (the caller paints it as one INVERSE band). Counts are
 /// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
 /// from the least-severe (`✗`) end - a glyph never renders without its count
-/// (AC11) - and the label truncates (via `fit_ellipsis`) only after every pair is
+/// (AC11) - and the label clips (via `chrome::clip`, no marker) only after every pair is
 /// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
 /// painter), so a double-width char in a squad name aligns the band instead of
 /// overflowing it.
@@ -7471,7 +7435,7 @@ fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> 
             let label_w: usize = label.chars().map(glyph_cols).sum();
             return match w.checked_sub(label_w) {
                 Some(gap) => format!("{label}{}", section_rule(gap)),
-                None => crate::chrome::fit_ellipsis(label, w),
+                None => crate::chrome::clip(label, w),
             };
         }
         let counts = pairs.join(" ");

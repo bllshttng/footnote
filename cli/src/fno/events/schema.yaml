@@ -2976,6 +2976,19 @@ event_types:
           type: array
           description: "One object per held row: id, reason, detail, age_s (nullable), escalated."
 
+  - name: row_liveness_drift
+    description: "The retirement sweep held a claude row whose fno verdict reads Live while the vendor roster reads it finished: the recorded disagreement between fno's rows and the vendor check, emitted at the keep decision. Never an override; the row stays."
+    sources: [daemon]
+    data:
+      required: [row, detail]
+      properties:
+        row:
+          type: string
+          description: "The row handle the verdict kept."
+        detail:
+          type: string
+          description: "The disagreement: fno's verdict against the vendor's word."
+
   - name: pr_nudge_sent
     description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed. red_head names the head whose settled red caused this wake. reason carries a failed resume's last stderr line; resume_exit and resume_reason carry the fallback resume's outcome on a mail pass. pr is null for a dead-worker row: a session the sweep keeps on an in_progress node whose roster process is gone, whose remedy is resume, not a PR."
     sources: [daemon]

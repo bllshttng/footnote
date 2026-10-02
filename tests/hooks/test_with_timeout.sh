@@ -343,9 +343,11 @@ for name in $ups_hooks; do
 
     # (a) If it touches a daemon at all - a bare fno/fno-agents token, or a
     #     resolved "$VAR" report RPC over a socket - it must source the bound.
+    #     scripts/lib/hook-budget.sh counts: it sources with-timeout.sh and
+    #     bounds through it, so the bound is present either way.
     if grep -qE '\b(fno|fno-agents)\b' "$f" \
        || grep -qE '"\$[A-Z_][A-Z_]*"[[:space:]]+report' "$f"; then
-        grep -qE '(^|[[:space:]])source[[:space:]].*with-timeout\.sh' "$f" \
+        grep -qE '(^|[[:space:]])source[[:space:]].*(with-timeout|hook-budget)\.sh' "$f" \
             || { fail "$name shells to a daemon but does not source scripts/lib/with-timeout.sh"; guard_fail=1; }
     fi
 

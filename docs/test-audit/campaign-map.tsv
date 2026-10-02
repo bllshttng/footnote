@@ -171,7 +171,6 @@ K1	tests/hooks/test_merge_guard_stacked_base.py	py	8
 K1	tests/hooks/test_merge_guard_worktree.py	py	68
 K1	tests/integration/test_failover_bdd_invariants.py	py	8
 K1	tests/integration/test_per_agent_routing_bdd_invariants.py	py	1
-K1	tests/lib/test_cost_tracker_pricing.py	py	22
 K1	tests/metrics/test_merge_stray_ledger_broken_link.py	py	3
 K1	tests/metrics/test_session_cost_dedup.py	py	17
 K1	tests/operator/test_dispatch_gate.py	py	15

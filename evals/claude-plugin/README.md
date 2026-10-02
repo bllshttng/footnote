@@ -1,6 +1,8 @@
 # Skill trigger and outcome eval (`claude plugin eval`)
 
-This suite asks two questions. A user types a natural request: does Claude pick the fno skill for it? And is the result better with the plugin than without it? Each case sends a prompt that never says the skill name. One case covers each advertised verb (`target`, `think`, `review`, `pr`, `fix`). A sixth case sends a plain language question. Its one grader demands zero skill calls.
+This suite tests two things. It asks whether Claude selects an fno skill for a natural request and whether the result improves with the plugin.
+
+Every prompt avoids the skill name. Cases cover `target`, `think`, `review`, `ship`'s PR mode, and `fix`. A sixth requires no skill call.
 
 The fno eval bank (`evals/bank`) and the trend reader in `crates/fno-agents` grade what a dispatched worker produced. This suite grades a person typing into a fresh session: skill choice on free phrasing, and the task result, with the plugin and without it. It is a different question, so it is not a second harness for the same answer.
 
@@ -9,7 +11,7 @@ The fno eval bank (`evals/bank`) and the trend reader in `crates/fno-agents` gra
 Each positive case has a `fixture.sh` that builds a small git repo before Claude starts, and two graders:
 
 - `skill-fired` (`tool_used: Skill`, pinned to the fno skill name) records whether the skill fired. In a two-arm run it is an indicator only and does not count toward the score.
-- `outcome` (`llm`) grades the result with concrete PASS and FAIL conditions. It reads the fixed `calc.py`, the rate limit in `app.py`, or the cited `findings.md`. For `review` and `pr` it reads the reply. It checks the off-by-one verdict, or an honest answer about the missing remote.
+- `outcome` (`llm`) grades the result with concrete PASS and FAIL conditions. It reads the fixed `calc.py`, the rate limit in `app.py`, or the cited `findings.md`. For `review` and the PR mode it reads the reply. It checks the off-by-one verdict, or an honest answer about the missing remote.
 
 The `fix`, `target`, and `think` fixtures end on a feature branch. On `main`, the fno write guard refuses every edit and asks for a worktree outside the workspace, and the eval sandbox cannot write there.
 

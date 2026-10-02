@@ -144,6 +144,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_NUDGE_DISABLED` | rs | unclear: crates/fno-agents/src/nudge.rs:32 |
 | `FNO_OBSERVER_GH_CAP` | py | unclear: cli/src/fno/observer/cli.py:184 |
 | `FNO_OBSERVER_PR_LIST_LIMIT` | py | unclear: cli/src/fno/observer/cli.py:456 |
+| `FNO_OPENCODE_BIN` | rs | Names the opencode binary an install classifies and asks for its config root; unset or empty falls back to `opencode` on PATH. |
 | `FNO_OPENCODE_LIVE_TOKEN` | rs | unclear: crates/fno-agents/src/opencode_archive_tests.rs:340 |
 | `FNO_OPENCODE_LIVE_URL` | rs | unclear: crates/fno-agents/src/opencode_archive_tests.rs:338 |
 | `FNO_OPERATOR_CAPTURE_DIR` | py+rs | unclear: cli/src/fno/inbox/operator_turns.py:87 |

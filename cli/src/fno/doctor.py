@@ -993,8 +993,8 @@ def _cost_check() -> int:
     typer.echo(
         f"fno doctor: cost-check WARN: session {session_id} "
         f"ours=${ours:.2f} reference=${theirs:.2f} divergence={pct} "
-        f"(> {_COST_DIVERGENCE_THRESHOLD * 100:.0f}% - pricing table or "
-        "dedup drift; see scripts/lib/cost_tracker.py)"
+        f"(> {_COST_DIVERGENCE_THRESHOLD * 100:.0f}% - catalog pricing or "
+        "dedup drift; see crates/fno-agents/src/model_price.rs)"
     )
     return 1
 

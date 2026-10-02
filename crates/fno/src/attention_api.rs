@@ -79,7 +79,7 @@ fn row_bool(v: &Value, key: &str) -> Option<bool> {
 }
 
 /// Every syntactically valid journal line, torn tails skipped.
-fn journal_rows(text: &str) -> impl Iterator<Item = Value> + '_ {
+pub(crate) fn journal_rows(text: &str) -> impl Iterator<Item = Value> + '_ {
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -390,7 +390,7 @@ fn fno_dir() -> PathBuf {
         .join(".fno")
 }
 
-fn journal_path() -> PathBuf {
+pub(crate) fn journal_path() -> PathBuf {
     fno_dir().join("questions.jsonl")
 }
 

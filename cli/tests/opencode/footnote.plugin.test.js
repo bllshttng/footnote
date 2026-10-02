@@ -169,19 +169,26 @@ function eventStream() {
 }
 
 /** The 2.x context stub: records prompt/synthetic calls, replays `rows` from
- * session.context in the 2.x row shape. */
+ * session.context in the 2.x row shape, and records every hook registration
+ * (`registered`, keyed `domain.name`) so tests can fire the callbacks via
+ * `fire(domain, name, event)`. `location` exercises ctx.location.directory;
+ * `noShell` drops the shell seam to exercise the missing-seam report. */
 function stubCtx(rows, opts = {}) {
   const prompts = []
   const synthetics = []
+  const registered = new Map()
+  const seam = (domain) => async (name, fn) => {
+    registered.set(`${domain}.${name}`, fn)
+    return { dispose() {} }
+  }
   const ctx = {
     directory: opts.directory,
+    location: opts.location,
     // The V2 hook seams: setup() registers nothing without them (a context
     // like opencode 1.18's plugin-authoring one is a no-op).
-    tool: {
-      hook() {},
-    },
+    tool: { hook: seam("tool") },
     session: {
-      hook() {},
+      hook: seam("session"),
       async context(o) {
         if (opts.contextError) throw new Error("context read failed")
         return rows
@@ -195,8 +202,14 @@ function stubCtx(rows, opts = {}) {
         return {}
       },
     },
+    shell: opts.noShell ? undefined : { hook: seam("shell") },
   }
-  return { ctx, prompts, synthetics }
+  async function fire(domain, name, event) {
+    const fn = registered.get(`${domain}.${name}`)
+    if (!fn) throw new Error(`no ${domain}.${name} registered`)
+    return fn(event)
+  }
+  return { ctx, prompts, synthetics, registered, fire }
 }
 
 const V2_IDLE = (sid) => ({
@@ -480,25 +493,170 @@ describe("opencode 2 setup arm", () => {
     },
   )
 
-  test("AC2-EDGE: a deprecated session.idle event and non-idle status never run the gate", async () => {
-    const dir = makeProject({ footnote: true })
-    const log = join(dir, "stub.log")
-    const bin = stubBin('echo "ARGS: $*" >> "$FNO_STUB_LOG"')
-    const stream = eventStream()
-    const { ctx, prompts } = stubCtx([v2AssistantRow("x")], { directory: dir })
-    ctx.event = { subscribe: stream.subscribe }
-    await withEnv({ FNO_AGENTS_BIN: bin, FNO_STUB_LOG: log }, async () => {
-      const cleanup = await setupV2(ctx)
-      stream.push({ type: "session.idle", data: { sessionID: "ses_v2" } })
-      stream.push({ type: "session.status", data: { sessionID: "ses_v2", status: { type: "busy" } } })
-      stream.push({ type: "message.part.updated", data: { sessionID: "ses_v2" } })
-      await new Promise((r) => setTimeout(r, 80))
-      cleanup()
-      expect(prompts.length).toBe(0)
-      expect(() => readFileSync(log)).toThrow() // no subprocess ran at all
-    })
-    rmSync(dir, { recursive: true, force: true })
-  })
+  test(
+    "AC3-EDGE: one idle turn reported as both session.status and session.idle runs the gate once; the next prompt re-arms it",
+    async () => {
+      const dir = makeProject()
+      const log = join(dir, "stub.log")
+      const bin = stubBin(GATE_STUB)
+      const stream = eventStream()
+      const { ctx, prompts, fire } = stubCtx([v2AssistantRow("x")], { directory: dir })
+      ctx.event = { subscribe: stream.subscribe }
+      await withEnv(
+        {
+          FNO_AGENTS_BIN: bin,
+          FNO_STUB_LOG: log,
+          FNO_PLUGIN_ROOT: undefined,
+          CLAUDE_PLUGIN_ROOT: undefined,
+          CODEX_PLUGIN_ROOT: undefined,
+          FNO_HOME: "/nonexistent-fno-home",
+        },
+        async () => {
+          const cleanup = await setupV2(ctx)
+          const gateRuns = () => {
+            try {
+              return (readFileSync(log, "utf8").match(/loop-check/g) || []).length
+            } catch {
+              return 0
+            }
+          }
+          // The same idle turn arrives as both forms: the gate runs once.
+          stream.push(V2_IDLE("ses_d"))
+          await until(() => gateRuns() === 1)
+          await new Promise((r) => setTimeout(r, 80)) // let the first gate settle
+          stream.push({ type: "session.idle", data: { sessionID: "ses_d" } })
+          await new Promise((r) => setTimeout(r, 80))
+          expect(gateRuns()).toBe(1)
+          // A non-idle status and a non-idle event never gate.
+          stream.push({ type: "session.status", data: { sessionID: "ses_d", status: { type: "busy" } } })
+          stream.push({ type: "message.part.updated", data: { sessionID: "ses_d" } })
+          await new Promise((r) => setTimeout(r, 80))
+          expect(gateRuns()).toBe(1)
+          // The session's next prompt re-arms the latch: the next turn end
+          // gates again - the live 2.0.19 form (execution.succeeded) takes
+          // the gate, and a same-turn .failed twin is latched out.
+          await fire("session", "prompt", { sessionID: "ses_d", prompt: { text: "next turn" } })
+          stream.push({ type: "session.execution.succeeded", data: { sessionID: "ses_d" } })
+          stream.push({ type: "session.execution.failed", data: { sessionID: "ses_d" } })
+          await until(() => gateRuns() === 2)
+          // A runtime retry after the failure fires execution.started without
+          // a prompt hook; it re-arms the latch, so the retry's own turn end
+          // gates instead of being dropped.
+          stream.push({ type: "session.execution.started", data: { sessionID: "ses_d" } })
+          stream.push({ type: "session.execution.succeeded", data: { sessionID: "ses_d" } })
+          await until(() => gateRuns() === 3)
+          cleanup()
+          expect(prompts.length).toBeGreaterThan(0) // block decision re-drove the session
+        },
+      )
+      rmSync(dir, { recursive: true, force: true })
+    },
+  )
+
+  test(
+    "AC1-HP/AC2-ERR: a v2 ctx registers the full hook set; the handler cwd is location.directory; a deny throws; an absent seam is reported",
+    async () => {
+      const loc = mkdtempSync(join(tmpdir(), "fno-loc-"))
+      const dir = makeProject()
+      const root = mkdtempSync(join(tmpdir(), "fno-hookroot-"))
+      mkdirSync(join(root, "hooks"), { recursive: true })
+      writeFileSync(
+        join(root, "hooks", "hooks.json"),
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: "Bash",
+                hooks: [
+                  // Captures the claude-shaped payload (hook cwd = the setup dir)...
+                  { type: "command", command: "cat > captured-payload.json" },
+                  // ...then denies, after the capture has run.
+                  {
+                    type: "command",
+                    command:
+                      "echo '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"v2 no bash\"}}'",
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [{ matcher: "", hooks: [{ type: "command", command: "echo 'v2 context line'" }] }],
+            PreCompact: [{ matcher: "", hooks: [{ type: "command", command: "echo 'v2 compaction line'" }] }],
+          },
+        }),
+      )
+      const closedStream = {
+        subscribe: () => {
+          const iterable = {
+            [Symbol.asyncIterator]() {
+              return { next: async () => ({ value: undefined, done: true }) }
+            },
+          }
+          return iterable
+        },
+      }
+      const { ctx, registered, fire } = stubCtx([], { location: { directory: loc } })
+      ctx.event = closedStream
+      await withEnv({ FNO_PLUGIN_ROOT: root }, async () => {
+        const cleanup = await setupV2(ctx)
+        expect([...registered.keys()].sort()).toEqual([
+          "session.compaction",
+          "session.context",
+          "session.prompt",
+          "shell.create.before",
+          "tool.execute.after",
+          "tool.execute.before",
+        ])
+        // Deny: the payload is captured first (cwd = location.directory), then
+        // the deny throws, like the 1.x arm.
+        await expect(
+          fire("tool", "execute.before", { tool: "bash", input: { command: "ls" }, sessionID: "ses_v2t" }),
+        ).rejects.toThrow("v2 no bash")
+        const payload = JSON.parse(readFileSync(join(loc, "captured-payload.json"), "utf8"))
+        expect(payload.cwd).toBe(loc)
+        expect(payload.tool_name).toBe("Bash")
+        expect(payload.session_id).toBe("ses_v2t")
+        // PostToolUse runs the hooks and never throws on an allow.
+        await fire("tool", "execute.after", { tool: "bash", input: { command: "ls" }, sessionID: "ses_v2t" })
+        // Shell env: foreign markers blanked, the proof pair stamped.
+        const shellEvent = { command: "sh", cwd: loc, env: { CLAUDE_CODE_SESSION_ID: "claude-parent" } }
+        await fire("shell", "create.before", shellEvent)
+        expect(shellEvent.env.CLAUDE_CODE_SESSION_ID).toBe("")
+        expect(Number(shellEvent.env.FNO_SESSION_PID)).toBeGreaterThan(0)
+        expect(shellEvent.env.FNO_SESSION_HARNESS).toBe("opencode")
+        // Prompt queues context; the context hook drains it as one text row.
+        await fire("session", "prompt", { sessionID: "ses_q", prompt: { text: "hello" } })
+        const systemOut = { system: [] }
+        await fire("session", "context", { sessionID: "ses_q", system: systemOut.system })
+        expect(systemOut.system).toEqual([{ type: "text", text: "v2 context line" }])
+        const systemOut2 = { system: [] }
+        await fire("session", "context", { sessionID: "ses_q", system: systemOut2.system })
+        expect(systemOut2.system).toEqual([])
+        // Compaction pushes PreCompact context rows into the compaction system.
+        const compOut = { system: [] }
+        await fire("session", "compaction", { sessionID: "ses_q", system: compOut.system })
+        expect(compOut.system).toEqual([{ type: "text", text: "v2 compaction line" }])
+        cleanup()
+      })
+      // A context without the shell seam registers the rest and reports the gap.
+      const errors = []
+      const orig = console.error
+      console.error = (...a) => errors.push(a.join(" "))
+      try {
+        const bare = stubCtx([], { location: { directory: loc }, noShell: true })
+        bare.ctx.event = closedStream
+        await withEnv({ FNO_PLUGIN_ROOT: root }, async () => {
+          const cleanup = await setupV2(bare.ctx)
+          cleanup()
+        })
+        expect(errors.some((e) => e.includes("shell.hook create.before"))).toBe(true)
+      } finally {
+        console.error = orig
+      }
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(loc, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    },
+  )
 
   test("AC2-CROWN: a crowned Footnote session gets its crown line via ctx.session.synthetic; an uncrowned one gets no call", async () => {
     // (a) crowned

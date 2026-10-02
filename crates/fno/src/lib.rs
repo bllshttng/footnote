@@ -67,6 +67,7 @@ pub mod reign_root;
 pub mod restore_gate;
 pub mod restore_liveness;
 mod review_invocation;
+pub mod search_query;
 pub mod served_liveness;
 pub mod server;
 pub mod server_stats;

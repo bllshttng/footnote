@@ -477,6 +477,15 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
         .last_gather
         .is_some_and(|t| t.elapsed() < backlog_model::REGATHER_AFTER);
     let agents = view.layout.agents.clone();
+    let wants_questions = b.query.q.as_deref().map_or(false, |text| {
+        crate::search_query::parse(
+            text,
+            crate::search_query::Surface::Node,
+            crate::search_query::now_secs(),
+        )
+        .map(|p| p.wants_questions())
+        .unwrap_or(false)
+    });
     tokio::spawn(async move {
         let version = tokio::task::spawn_blocking(|| store_client::version(&graph_path()))
             .await
@@ -489,7 +498,8 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &BoardTx) {
                 }
             }
         }
-        let inputs = backlog_model::gather(&graph_path(), agents).await;
+        let mut inputs = backlog_model::gather(&graph_path(), agents).await;
+        backlog_model::read_search_sources(&mut inputs, wants_questions);
         let _ = tx.send((gen, BoardMsg::Gathered { inputs }));
     });
 }
@@ -503,7 +513,21 @@ pub(crate) async fn fold_once(view: &mut View) {
         return;
     }
     backlog_board_open_fresh(view);
-    let inputs = backlog_model::gather(&graph_path(), view.layout.agents.clone()).await;
+    let mut inputs = backlog_model::gather(&graph_path(), view.layout.agents.clone()).await;
+    let wants_questions = view
+        .backlog_board
+        .as_ref()
+        .and_then(|b| b.query.q.as_deref())
+        .map_or(false, |text| {
+            crate::search_query::parse(
+                text,
+                crate::search_query::Surface::Node,
+                crate::search_query::now_secs(),
+            )
+            .map(|p| p.wants_questions())
+            .unwrap_or(false)
+        });
+    backlog_model::read_search_sources(&mut inputs, wants_questions);
     let gen = view.backlog_board.as_ref().map_or(0, |b| b.gen);
     apply_fold(view, gen, BoardMsg::Gathered { inputs });
 }
@@ -670,7 +694,7 @@ fn push_stats_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usiz
     line.push_str(&format!(" · Done {done}"));
     line.push_str(" │ ");
     line.push_str(&flow_line(&board.stats.flow));
-    lines.push(BLine::meta(elide_words(&line, w)));
+    lines.push(BLine::meta(crate::chrome::clip(&line, w)));
 }
 
 /// The uncapped Done total, summed from the lanes' own cells.
@@ -797,39 +821,6 @@ pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BL
     }
     lines.push(line.trunc(w));
     lines
-}
-
-/// Truncate a summary to `w` chars, but cut after the last whole word that
-/// fits and mark the cut with an ellipsis: a summary truncated mid-word
-/// (`Nex`) reads as a broken word, not a cut.
-pub(crate) fn elide_words(s: &str, w: usize) -> String {
-    // Walk by display columns, not chars: a wide glyph is two cells and the
-    // ellipsis must stay inside `w` or the painter re-cuts the line and the
-    // marker is lost.
-    if s.chars().map(backlog_style::char_w).sum::<usize>() <= w {
-        return s.to_string();
-    }
-    let mut used = 0usize;
-    let mut cut_byte = s.len();
-    let mut last_space = 0usize;
-    for (i, ch) in s.char_indices() {
-        let cw = backlog_style::char_w(ch);
-        if used + cw > w.saturating_sub(1) {
-            cut_byte = i;
-            break;
-        }
-        used += cw;
-        cut_byte = i + ch.len_utf8();
-        if ch == ' ' {
-            last_space = cut_byte;
-        }
-    }
-    if last_space > 0 {
-        // Drop the space the word boundary sits on, ellipsis takes its slot.
-        format!("{}\u{2026}", &s[..last_space - 1])
-    } else {
-        format!("{}\u{2026}", &s[..cut_byte])
-    }
 }
 
 /// The lanes: an accordion - the cursor's lane expanded below its header,
@@ -1600,10 +1591,22 @@ fn input_commit(view: &mut View) {
     let text = text.trim().to_string();
     match kind {
         BoardInputKind::Find => {
-            b.query.q = (!text.is_empty()).then_some(text);
-            let focus = cursor_card_id(b);
-            rederive(b);
-            focus_card(b, focus.as_deref());
+            // A bad keyed query never reaches the board state: the notice
+            // names the parse error and the previous filter stays applied,
+            // so rederive and the Gathered arm never drop one silently.
+            let candidate = QueryState {
+                q: (!text.is_empty()).then(|| text.clone()),
+                ..b.query.clone()
+            };
+            match candidate.to_query() {
+                Ok(_) => {
+                    b.query.q = (!text.is_empty()).then_some(text);
+                    let focus = cursor_card_id(b);
+                    rederive(b);
+                    focus_card(b, focus.as_deref());
+                }
+                Err(msg) => view.set_notice(msg),
+            }
         }
         BoardInputKind::Title => {
             if text.is_empty() {

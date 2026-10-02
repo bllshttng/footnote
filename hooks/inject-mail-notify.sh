@@ -18,15 +18,19 @@ export PATH
 command -v fno >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/with-timeout.sh
-source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/hook-budget.sh
+source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
 # Stdout of the atomic verb IS the hook payload: it streams through fd 3
 # (saved below) untouched, byte-for-byte. Stderr lands in the variable so a
 # miss can name its cause instead of looking like every other miss. A miss is
-# recorded, never raised: the turn always proceeds (contract above).
+# recorded, never raised: the turn always proceeds (contract above). The
+# budget is the one load-aware hook budget: under fleet load it SHORTENS to
+# 1s and past the load threshold the read is skipped entirely.
+budget="$(hook_budget_secs)"
+[[ "$budget" -gt 0 ]] || exit 0
 exec 3>&1
-notify_err="$(with_timeout 2 fno agents mail notify-self 2>&1 1>&3 3>&-)"
+notify_err="$(with_timeout "$budget" fno agents mail notify-self 2>&1 1>&3 3>&-)"
 notify_rc=$?
 exec 3>&-
 

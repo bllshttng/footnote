@@ -1,6 +1,6 @@
 ---
 name: intel
-description: Session-provenance report for the user - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold once, judges a sampled subset, clusters the summaries into categories with per-category metrics, and writes one vault report. Use when the user says session report, who typed, user insights, or intel report.
+description: Report session provenance, work completed, and where agent sessions needed correction.
 ---
 
 # intel
