@@ -1888,8 +1888,6 @@ mod report;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
 use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
-#[cfg(test)]
-use report::{buffer_pending_report, BufferOutcome};
 pub(crate) use report::{find_uuid_backfill_row, UuidBackfill};
 use report::{flush_buffered_inside_leg, handle_report};
 pub(crate) use thread_row_status::notify_transition;
@@ -7080,6 +7078,11 @@ pub(crate) mod sweeps;
 pub(crate) use sweeps::{park_sweep, stale_sweep};
 #[cfg(test)]
 pub(crate) use sweeps::{parse_stale_sweep, STALE_SWEEP_INTERVAL_SECS};
+// Test-only report imports live in this tail block beside the sweeps ones:
+// a `#[cfg(test)]` line above the emit region would split the emit-kind
+// scanner's production boundary mid-file.
+#[cfg(test)]
+use report::{buffer_pending_report, BufferOutcome};
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
