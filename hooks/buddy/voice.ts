@@ -56,7 +56,12 @@ Rules:
 - Bad: "implementation pending." Good: "penny-wise, parent-tracking-wise."`
 }
 
-export type TurnMessage = { role: string; text: string; toolUses?: { name?: string }[] }
+export type TurnMessage = {
+  role: string
+  text: string
+  toolUses?: readonly { tool: string }[]
+  toolResults?: readonly { text: string; isError: boolean }[]
+}
 
 // The newest exchange as the model reads it: the last user prompt and what came after.
 export function summarizeTurn(messages: readonly TurnMessage[]): string {
@@ -65,9 +70,11 @@ export function summarizeTurn(messages: readonly TurnMessage[]): string {
   return messages
     .slice(Math.max(0, start))
     .map(m => {
-      const tools = (m.toolUses ?? []).map(t => t.name).filter(Boolean)
-      const said = `[${m.role}]: ${m.text.slice(0, 300)}`
-      return tools.length ? `${said}\n[tools]: ${tools.join(', ')}` : said
+      const lines = [`[${m.role}]: ${m.text.slice(0, 300)}`]
+      const tools = (m.toolUses ?? []).map(t => t.tool)
+      if (tools.length) lines.push(`[tools]: ${tools.join(', ')}`)
+      for (const r of m.toolResults ?? []) if (r.isError) lines.push(`[error]: ${r.text.slice(0, 200)}`)
+      return lines.join('\n')
     })
     .join('\n')
     .slice(-800)

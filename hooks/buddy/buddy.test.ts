@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { embody, restore, rollBones } from './companion'
-import { narrate } from './voice'
+import { narrate, summarizeTurn } from './voice'
 
 const OLD_CONFIG = JSON.stringify({
   oauthAccount: { accountUuid: 'u-1' },
@@ -19,9 +19,10 @@ function band(maxRows: number) {
 }
 
 // The stubs every test needs before session.start runs the mod's hook.
-function boot(on: any, config = OLD_CONFIG) {
+function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>()) {
   const clock = mock.clock(on)
-  const saved = new Map<string, unknown>()
+  // Nothing after the buddy draws in the band.
+  on('ui.render', () => ({ type: 'Box', props: {}, children: [] }))
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
   on('store.get', ($: any, e: any) => ({ value: saved.get(e.key) }))
@@ -37,6 +38,15 @@ function boot(on: any, config = OLD_CONFIG) {
 test('a seed always rolls the same buddy', () => {
   expect(rollBones('seed-1')).toEqual(rollBones('seed-1'))
   expect(rollBones('seed-1')).not.toEqual(rollBones('seed-2'))
+})
+
+test('the turn summary names the tools that ran and the errors they hit', () => {
+  const summary = summarizeTurn([
+    { role: 'user', text: 'old prompt', toolUses: [] },
+    { role: 'user', text: 'fix the parser', toolUses: [] },
+    { role: 'assistant', text: 'trying', toolUses: [{ tool: 'Edit' }, { tool: 'Bash' }], toolResults: [{ text: 'exit 1: parse error', isError: true }] },
+  ])
+  expect(summary).toBe('[user]: fix the parser\n[assistant]: trying\n[tools]: Edit, Bash\n[error]: exit 1: parse error')
 })
 
 test('an old buddy comes back with its name and the species its personality names', () => {
@@ -62,7 +72,7 @@ test('the band draws the sprite when it has room and one face line when it does 
 
 test('a finished turn shows a quick line, then the model reaction', async ($, on) => {
   const { clock } = boot(on)
-  on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the parser', toolUses: [] }, { role: 'assistant', text: 'done', toolUses: [{ name: 'Edit' }] }] }))
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the parser', toolUses: [] }, { role: 'assistant', text: 'done', toolUses: [{ tool: 'Edit', input: {} }] }] }))
   on('model.complete', () => ({ value: { isAnswered: true, text: '"That null check does zero work."', usage: null } }))
   on('turn.complete', () => ({ text: '' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -96,4 +106,15 @@ test('a shipped node in the fleet feed becomes a line with no model call', async
   expect(await after.find({ type: 'Text', text: 'psst. parser-fix shipped pr 42.' })).toBeDefined()
   expect(modelCalls).toBe(0)
   expect(narrate({ ts: '', kind: 'session_spawned' })).toBe(null)
+})
+
+test('petting a short sprite puts the hearts above it, not over its head', async ($, on) => {
+  const saved = new Map<string, unknown>([['soul', { seed: 's2', name: 'Pip', personality: '', hatchedAt: 0, species: 'duck' }]])
+  boot(on, OLD_CONFIG, saved)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run({ command: 'buddy', args: 'pet' })
+
+  const ui = await $.ui.mount(band(8))
+  expect(await ui.find({ type: 'Text', text: /\u2665/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '    __      ' })).toBeDefined()
 })
