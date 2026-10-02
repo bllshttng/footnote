@@ -9,6 +9,25 @@
 /// three rows) instead of retyping it.
 const STATUS_ALIASES: &[(&str, &str)] = crate::graph_store::PLAN_STATUS_ALIASES;
 
+/// The full plan-status vocabulary the reconcile sweep leaves untouched: the
+/// canonical axis + terminals (the store's STATUS_TO_RUNG words) plus every
+/// retired spelling. A retired spelling is valid input, not drift. Built from
+/// the tables that already exist; never a third retyped copy.
+pub(crate) fn known_statuses() -> &'static [&'static str] {
+    static KNOWN: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KNOWN.get_or_init(|| {
+        crate::graph_store::STATUS_TO_RUNG
+            .iter()
+            .map(|(s, _)| *s)
+            .chain(
+                crate::graph_store::PLAN_STATUS_ALIASES
+                    .iter()
+                    .map(|(s, _)| *s),
+            )
+            .collect()
+    })
+}
+
 /// Graph derived `_status` -> plan `status`. None means "no plan write".
 const GRAPH_TO_PLAN_STATUS: &[(&str, Option<&str>)] = &[
     ("idea", Some("idea")),
@@ -139,5 +158,30 @@ mod tests {
         // rank(idea) = -1: never above any current rung, and unknown == idea rank.
         assert_eq!(project_plan_status(Some("design"), "idea"), None);
         assert_eq!(project_plan_status(None, "idea"), None);
+    }
+
+    #[test]
+    fn idea_advances_forward_to_every_later_rung() {
+        for rung in ["design", "ready", "in_review", "done"] {
+            assert_eq!(
+                project_plan_status(Some("idea"), rung),
+                Some(rung.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn backward_refused_from_a_retired_spelling() {
+        // `shipped` canonicalizes to in_review: a claimed node is a backward
+        // move, and the doc keeps its spelling (read-path translation only).
+        assert_eq!(project_plan_status(Some("shipped"), "claimed"), None);
+    }
+
+    #[test]
+    fn none_gates_in_progress_and_claimed() {
+        // The two rows that are not renames: a graph-side pause or claim is
+        // reversible, so plan state stands.
+        assert_eq!(project_plan_status(Some("design"), "in_progress"), None);
+        assert_eq!(project_plan_status(Some("design"), "claimed"), None);
     }
 }

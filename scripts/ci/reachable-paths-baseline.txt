@@ -1,4 +1,4 @@
-A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs	# CLASSIFY protocol|msg-twin|data
+A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs|crates/fno/src/backlog_snapshot.rs	# CLASSIFY protocol|msg-twin|data public render: the selection gate runs beside the allowlist in the front binary, beside the title_gate port; byte-for-byte port convention holds
 A	(`fno agents spawn --provider <vendor> --model <m>`).	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# CLASSIFY protocol|msg-twin|data
 A	(it landed via merged pr #{merged})	py=cli/src/fno/pr/_base_lineage.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
 A	(not yet implemented; planned for a future story)	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data

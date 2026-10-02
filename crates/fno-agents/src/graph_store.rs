@@ -153,7 +153,7 @@ const LEGACY_DEFER_PREFIX: &str = "deferred:";
 
 /// Plan-frontmatter status -> rung (ladder._STATUS_TO_RUNG), after
 /// canonical_status resolved the retired spellings.
-const STATUS_TO_RUNG: &[(&str, &str)] = &[
+pub(crate) const STATUS_TO_RUNG: &[(&str, &str)] = &[
     ("idea", "idea"),
     ("design", "design"),
     ("ready", "ready"),

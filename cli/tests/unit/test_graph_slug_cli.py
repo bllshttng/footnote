@@ -88,24 +88,62 @@ def test_roadmap_only_public_no_leaks(tmp_graph):
     assert "## Now" in out
 
 
-def test_roadmap_refuses_the_retired_html_flags(tmp_graph, tmp_path):
+def test_roadmap_backlog_html_hands_off_public_render(tmp_graph, tmp_path, monkeypatch):
+    """--backlog-html hands the project to board-render's public mode.
+
+    Selection and the title gate run in the Rust renderer; the request
+    carries only the target path and the project scope, and a failed render
+    exits 1 with the reason.
+    """
+    import subprocess
+
     _seed(tmp_graph, [
-        {"id": "ab-11111111", "title": "Roadmap now marker", "status": "ready",
-         "priority": "p1", "size": "M", "project": "fno"},
+        {"id": "ab-11111111", "title": "Public feature", "slug": "pub", "status": "ready",
+         "priority": "p1", "project": "fno"},
+        {"id": "ab-22222223", "title": "Explicitly private", "slug": "private",
+         "status": "ready", "priority": "p2", "project": "fno", "public": False},
+        {"id": "ab-33333333", "title": "Leaky at /Users/bb/tmp", "slug": "leak",
+         "status": "ready", "priority": "p2", "project": "fno"},
     ])
-    roadmap = tmp_path / "roadmap.html"
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["request"] = json.loads(kwargs["input"])
+        return subprocess.CompletedProcess(
+            argv, 0,
+            stdout='{"written": [{"path": "x", "cards": 1}], "failed": []}',
+            stderr="",
+        )
+
+    def refusing_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 1, stdout="",
+            stderr="board-render: bad request JSON: unknown field `public`",
+        )
+
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_front_binary", lambda: tmp_path / "stub-front"
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
     backlog = tmp_path / "backlog.html"
 
     result = runner.invoke(
         app,
-        ["backlog", "roadmap", "--project", "fno", "--html", str(roadmap),
-         "--backlog-html", str(backlog)],
+        ["backlog", "roadmap", "--project", "fno", "--backlog-html", str(backlog)],
     )
+    assert result.exit_code == 0, result.output
+    assert seen["argv"][-1] == "board-render"
+    assert seen["request"]["targets"] == [{"path": str(backlog)}]
+    assert seen["request"]["public"] == {"project": "fno"}
 
-    assert result.exit_code != 0
-    assert "retired" in (result.stdout + (result.stderr or ""))
-    assert not roadmap.exists()
-    assert not backlog.exists()
+    monkeypatch.setattr(subprocess, "run", refusing_run)
+    failed = runner.invoke(
+        app,
+        ["backlog", "roadmap", "--project", "fno", "--backlog-html", str(backlog)],
+    )
+    assert failed.exit_code == 1
+    assert "predates the public board render" in (failed.stdout + (failed.stderr or ""))
 
 
 def test_roadmap_includes_archive_only_shipped_row(tmp_graph, tmp_path):

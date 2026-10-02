@@ -6,6 +6,7 @@ pub mod keeper;
 pub mod lock;
 pub mod node_accessors;
 pub mod project;
+pub mod reconcile;
 pub mod rollup;
 pub mod stamp;
 pub mod status;
