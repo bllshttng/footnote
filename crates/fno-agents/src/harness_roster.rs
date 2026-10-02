@@ -9,7 +9,7 @@
 //! `resolve_binary`, like `sync-canonical`.
 
 use crate::client_verbs::to_python_json;
-use crate::provider::KNOWN_HARNESSES;
+use crate::provider::{KNOWN_HARNESSES, KNOWN_PROVIDERS};
 use serde_json::json;
 
 /// Takes no arguments and starts nothing; the roster is a compile-time const.
@@ -23,7 +23,7 @@ pub fn run_harness_roster(rest: &[String]) -> i32 {
 }
 
 fn roster_json() -> serde_json::Value {
-    json!({ "known": KNOWN_HARNESSES })
+    json!({ "known": KNOWN_HARNESSES, "providers": KNOWN_PROVIDERS })
 }
 
 // The read's substance is pinned on the consumer side: Python's roster

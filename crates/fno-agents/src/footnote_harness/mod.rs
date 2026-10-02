@@ -174,23 +174,20 @@ impl Session {
     }
 
     fn maybe_compact(&mut self) -> Result<(), String> {
-        let Some(last) = self.records.iter().rev().find(|r| r["type"] == "usage") else {
+        let Some(at) = self.records.iter().rposition(|r| r["type"] == "usage") else {
             return Ok(());
         };
-        let d = &last["data"];
+        // One compaction per usage reading: a failed call after a compaction
+        // leaves the same reading, and compacting again would drop its tail.
+        if self.records[at..].iter().any(|r| r["type"] == "compaction") {
+            return Ok(());
+        }
+        let d = &self.records[at]["data"];
         let used = d["input_tokens"].as_u64().unwrap_or(0)
             + d["cache_read_tokens"].as_u64().unwrap_or(0)
             + d["cache_write_tokens"].as_u64().unwrap_or(0);
         let window = crate::context_window::window_for_model(&self.model);
         if crate::context_window::used_percent(used, window).unwrap_or(0) < COMPACT_PERCENT {
-            return Ok(());
-        }
-        // Compacting twice on one reading would drop the tail it just kept.
-        if self
-            .records
-            .last()
-            .is_some_and(|r| r["type"] == "compaction")
-        {
             return Ok(());
         }
         let data = resume::compact(
@@ -271,9 +268,18 @@ impl Session {
                 .collect();
             if uses.is_empty() {
                 let last = last_text(&self.records);
+                // Claude's meaning: this turn already continues a Stop block.
+                let active = self
+                    .records
+                    .iter()
+                    .rev()
+                    .take_while(|r| {
+                        !(r["type"] == "user_input" && r["data"]["origin"] == "operator")
+                    })
+                    .any(|r| r["type"] == "hook_decision" && r["data"]["event"] == "Stop");
                 let out = self.run_hook(
                     "Stop",
-                    json!({"last_assistant_message": last, "stop_hook_active": turn > 1}),
+                    json!({"last_assistant_message": last, "stop_hook_active": active}),
                 );
                 if let Some((reason, rule)) = out.deny {
                     self.append("hook_decision", json!({"event": "Stop", "verdict": "block", "rule": rule, "reason": reason}))?;

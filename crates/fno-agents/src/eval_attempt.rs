@@ -687,16 +687,23 @@ fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Optio
         else {
             continue;
         };
-        if in_window(mtime, started, now) && best.as_ref().is_none_or(|(b, _)| mtime > *b) {
+        if !in_window(mtime, started, now) || best.as_ref().is_some_and(|(b, _)| mtime <= *b) {
+            continue;
+        }
+        // Match on the header's cwd before ranking, so a newer session in
+        // another workdir cannot hide this attempt's own.
+        let header_cwd = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| t.lines().next().map(str::to_string))
+            .and_then(|l| serde_json::from_str::<Value>(&l).ok())
+            .and_then(|r| r["data"]["cwd"].as_str().map(str::to_string));
+        if header_cwd.as_deref() == Some(workdir) {
             best = Some((mtime, path));
         }
     }
     let (_, path) = best?;
     let records = crate::footnote_harness::transcript::read_records(&path).ok()?;
     let header = &records.first()?["data"];
-    if header["cwd"].as_str() != Some(workdir) {
-        return None;
-    }
     let mut model = None;
     let mut usage: Option<UsageSum> = None;
     for r in &records {

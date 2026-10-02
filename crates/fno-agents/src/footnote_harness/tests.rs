@@ -132,6 +132,18 @@ impl Fixture {
     }
 }
 
+/// A sibling test's fork holds an inherited lock fd until its exec, so a
+/// reopen right after a drop can meet a lock that is about to free.
+fn retry<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    for _ in 0..100 {
+        match f() {
+            Err(e) if e.contains("live writer") => std::thread::sleep(Duration::from_millis(20)),
+            other => return other,
+        }
+    }
+    f()
+}
+
 fn of<'a>(s: &'a Session, ty: &str) -> Vec<&'a Value> {
     s.records.iter().filter(|r| r["type"] == ty).collect()
 }
@@ -285,15 +297,7 @@ fn one_writer_per_session() {
     let err = transcript::Writer::open(&dir, "abc").err().unwrap();
     assert!(err.contains("live writer"), "{err}");
     drop(w);
-    // A sibling test's fork can hold the inherited lock fd until its exec.
-    let reopened = (0..100).any(|_| {
-        let ok = transcript::Writer::open(&dir, "abc").is_ok();
-        if !ok {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        ok
-    });
-    assert!(reopened, "the lock outlived its writer");
+    assert!(retry(|| transcript::Writer::open(&dir, "abc")).is_ok());
 }
 
 /// Resume never re-runs a started effect-capable call; it re-runs a call
@@ -340,7 +344,7 @@ fn resume_settles_dead_calls_by_effect() {
     );
     let (dir, id) = (s.w.dir().to_path_buf(), s.fno_id());
     drop(s);
-    let s = reopen(&dir, &id, fx.launch(&base, None)).unwrap();
+    let s = retry(|| reopen(&dir, &id, fx.launch(&base, None))).unwrap();
     let by = |uid: &str| {
         of(&s, "tool_result")
             .into_iter()

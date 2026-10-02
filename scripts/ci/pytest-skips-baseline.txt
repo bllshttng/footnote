@@ -22,7 +22,6 @@ cli/tests/agents/test_grok_spawn_journey.py::test_grok_spawn_journey_public_surf
 cli/tests/agents/test_handle_collisions.py::test_codex_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_handle_collisions.py::test_legacy_opencode_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_harness_capability_parity.py::test_resolved_rows_match_between_readers::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_harness_roster_parity.py::test_rust_roster_matches_python_readable::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_king_drain_cache.py::graph::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_king_shape_cli.py::test_shape_court_lands_on_the_manifest_and_echoes::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_king_shape_cli.py::test_shape_is_idempotent_on_a_second_call::mark.skipif  # on main before this ratchet
