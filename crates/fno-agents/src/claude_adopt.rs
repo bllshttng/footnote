@@ -259,7 +259,7 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 // An agent adopt keeps the row's prior origin (the adopt
                 // observed nothing about the birth); a user-typed adopt
                 // upgrades it to `operator`, the origin the gc keeps
-                // (x-9663 rev 2, d-79e0186b).
+                // (rev-2 scope, ruling d-79e0186b).
                 reg.entries[i].origin = if crate::claims::adopter_is_operator() {
                     Some("operator".to_string())
                 } else {

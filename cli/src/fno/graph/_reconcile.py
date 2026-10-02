@@ -1014,7 +1014,7 @@ def resolve_promise_evidence(
     plan_display = node.get("plan_path", plan_path_clean)
 
     # A plan that declares waves promises one ship per wave even without an
-    # explicit expected_url_count (the x-72c2 stamp bug: wave 1's merge closed
+    # explicit expected_url_count (the multi-wave stamp bug: wave 1's merge closed
     # a 3-wave node). An explicit count wins; a parse failure skips with the
     # warning the other unread readers return.
     if expected is None:
@@ -1142,7 +1142,7 @@ def resolve_promise_evidence(
 def _declared_wave_count(body: str) -> tuple[Optional[int], Optional[str]]:
     """Waves the plan's Execution Strategy declares, or ``(None, warning)``.
 
-    The x-72c2 specimen: a 3-wave quick-plan declared neither close_probes nor
+    The specimen behind this gate: a 3-wave quick-plan declared neither close_probes nor
     expected_url_count, so the promise gate skipped and wave 1's merge closed
     the node while waves 2 and 3 were still in flight. The Execution Strategy
     ``waves:`` list is the structured declaration /execute itself runs from,

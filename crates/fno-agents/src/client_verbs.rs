@@ -1309,7 +1309,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // it, and both watchdog lanes treat it as the non-answer it is.
         // A user-typed adopt (no ambient agent identity, attended tty) stamps
         // `operator` instead: the origin the gc keeps, so a row the user
-        // adopted is never reaped as fleet work (x-9663 rev 2).
+        // adopted is never reaped as fleet work (rev-2 scope).
         origin: if crate::claims::adopter_is_operator() {
             Some("operator".into())
         } else {

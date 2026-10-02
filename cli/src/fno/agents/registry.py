@@ -1398,7 +1398,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
-    # Removal accounting runs AFTER the write persisted (x-9663): the shared
+    # Removal accounting runs AFTER the write persisted: the shared
     # accounting stages the receipt first, and a removal that failed to
     # persist never happened. update_registry accounts through the same fn;
     # direct write_registry callers were the silent door left.

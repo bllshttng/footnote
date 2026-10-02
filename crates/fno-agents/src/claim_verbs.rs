@@ -1054,7 +1054,7 @@ const ROW_VERDICT_LIVE: &str = "row-verdict-live";
 
 /// The row_verdict door's live answer for one session: the inside-leg rung
 /// and the terminal-status rung read evidence the served word misses - the
-/// x-9663 specimen is a pidless claude bg holder whose fresh working report
+/// specimen is a pidless claude bg holder whose fresh working report
 /// kept arriving while its lapsed claim was reaped for want of a pid.
 /// Absent and Unknown answer false: the door decides liveness, never death.
 fn row_verdict_live(registry: &SessionRegistryIndex, session: &str) -> bool {
@@ -1084,7 +1084,7 @@ fn session_liveness_answer_uncached(
     }
     // The row verdict door before the transcript walk: a fresh inside-leg
     // report or a live pid on the row holds the claim where the served word
-    // went stale (the x-9663 reap). Unknown and Finished fall through - the
+    // went stale (the reap this closes). Unknown and Finished fall through - the
     // door decides liveness, never death, and the transcript still answers.
     {
         let borrowed = index.borrow();
@@ -1772,7 +1772,7 @@ mod tests {
                     "harness_session_id": s_worker,
                 },
                 {
-                    // The x-9663 shape: a pidless thread row whose fresh
+                    // The incident shape: a pidless thread row whose fresh
                     // inside-leg report is the only live evidence. The
                     // row_verdict rung answers it without the transcript.
                     "name": "w-leg",
@@ -1814,7 +1814,7 @@ mod tests {
                 ));
                 // The row-verdict rung: a fresh inside-leg report on a
                 // pidless row answers Live without the transcript wire
-                // (the x-9663 reap held instead of starving).
+                // (the reap is held instead of starving).
                 assert!(matches!(
                     witness(&records[3]),
                     crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE)

@@ -3123,7 +3123,7 @@ def test_guard_refuses_probe_and_mass_drop_on_shared_root(
     write_registry([probe_row("fixture-probe")], path=shared)
     assert len(load_registry(path=shared)) == 1
 
-    # The removal accounting (x-9663): the deliberate drop journaled every
+    # The removal accounting: the deliberate drop journaled every
     # dropped row with the remover and the reason, in the daemon envelope
     # shape, beside the registry it dropped them from. The refused writes
     # above persisted nothing, so they emit nothing.

@@ -498,7 +498,7 @@ def test_condition_c_shortfall_refuses(tmp_path: Path):
     assert v.outcome == "promise_unmet"
     assert "promised 3 ships" in (v.reason or "")
     assert "only 1 merged" in (v.reason or "")
-    # The x-72c2 specimen: a 3-wave quick-plan declared no expected_url_count,
+    # The incident specimen: a 3-wave quick-plan declared no expected_url_count,
     # so wave 1's merge closed the node while waves 2 and 3 were still in
     # flight. The Execution Strategy's own waves list is the promise now.
     wave_plan = _write_plan(tmp_path / "w.md", exec_waves=3)

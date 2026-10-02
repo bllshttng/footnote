@@ -386,7 +386,7 @@ pub(crate) struct DoneNodeReaders<'a> {
     /// Does a live or suspect `node:<id>` claim exist?
     pub(crate) claim_live: &'a dyn Fn(&str) -> bool,
     /// Is the tree's own session live per its registry row
-    /// (`row_verdict::fno_verdict`)? The claim lapsed for the x-9663
+    /// (`row_verdict::fno_verdict`)? The claim lapsed for the
     /// specimen (a pidless claude bg holder cannot refresh it), so the
     /// claim read alone freed a tree whose worker was alive.
     pub(crate) session_live: &'a dyn Fn(&str) -> bool,
@@ -470,7 +470,7 @@ fn done_node_arm(
     let detached = branch.is_none();
 
     // d-79e0186b: the tree's own session holds it. The claim read above
-    // answers from the claims root, which the x-9663 specimen freed when the
+    // answers from the claims root, which the incident freed when the
     // pidless holder could not refresh its TTL; the registry row's verdict
     // (`row_verdict::fno_verdict`) still had the worker live. Both manifest
     // session ids are asked, so either identity resolves the row.
@@ -584,7 +584,7 @@ fn resolve_node_ids(target: &Path, branch: Option<&str>) -> Vec<String> {
 
 /// The tree's own session identity, from the target manifest: the target-minted
 /// session id plus the harness transcript uuid init captured. Either can
-/// resolve the registry row whose verdict holds the tree (x-9663: the claim
+/// resolve the registry row whose verdict holds the tree (the claim
 /// lapsed but the worker lived).
 fn resolve_manifest_sessions(target: &Path) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(target.join(".fno").join("target-state.md")) else {
@@ -1389,7 +1389,7 @@ mod tests {
             .contains("evidence=node:x-abc123 untracked=1 detached=no"));
 
         // d-79e0186b: the tree's own session holds it even when the node
-        // reads done and the claim is gone - the x-9663 reap freed exactly
+        // reads done and the claim is gone - the incident's reap freed exactly
         // this shape (lapsed claim, live worker, tree deleted).
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
@@ -1413,7 +1413,7 @@ mod tests {
 
         // A finished session holds nothing: the same tree with the door
         // answering not-live still reads done-node, so fleet rows keep
-        // reaping aggressively (x-9663 rev 2).
+        // reaping aggressively (rev-2 scope).
         let session_live = |_: &str| false;
         let readers = DoneNodeReaders {
             read_rows: &read_rows,
