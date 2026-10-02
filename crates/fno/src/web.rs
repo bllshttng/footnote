@@ -2327,7 +2327,7 @@ console.log("evictedRowCount: 18 cases ok");
             .expect("controls exist");
         assert!(bar < controls, "the search bar leads the page");
         assert!(
-            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
+            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label, session""#),
             "the placeholder names what search covers"
         );
         assert!(
