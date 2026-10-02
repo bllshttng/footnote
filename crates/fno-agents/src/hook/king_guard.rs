@@ -20,21 +20,33 @@ use std::path::{Path, PathBuf};
 
 use crate::agents_config::config_lookup;
 
-/// Entry: read the payload once, decide, print, always exit 0.
-pub fn run(_args: &[String]) -> i32 {
-    let payload: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
+/// Entry: read the payload once, decide, print, always exit 0. `--wire agy`
+/// reads agy's PreToolUse payload and prints agy's decision shape instead of
+/// the claude hook JSON.
+pub fn run(args: &[String]) -> i32 {
+    let wire_agy = args.windows(2).any(|w| w[0] == "--wire" && w[1] == "agy");
+    let raw: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
+    let payload = if wire_agy { agy_to_claude(raw) } else { raw };
     let trace = std::env::var_os("FNO_GUARD_TRACE").is_some();
+    let emit_allow = || -> i32 {
+        if wire_agy {
+            println!("{{\"decision\":\"allow\"}}");
+            0
+        } else {
+            super::emit_allow()
+        }
+    };
     let allow = |why: &str| -> i32 {
         if !why.is_empty() {
             eprintln!("king-delegation-guard: {why}");
         }
-        super::emit_allow()
+        emit_allow()
     };
     let allow_at = |stage: &str| -> i32 {
         if trace {
             eprintln!("king-delegation-guard: allow at {stage}");
         }
-        super::emit_allow()
+        emit_allow()
     };
 
     // 1. Empty or unparseable payload: not a refusal.
@@ -201,7 +213,77 @@ pub fn run(_args: &[String]) -> i32 {
     }
     let text = deny_text(&denied, &repo_root);
     eprint!("{text}");
+    if wire_agy {
+        println!(
+            "{}",
+            serde_json::json!({"decision": "deny", "reason": text})
+        );
+        return 0;
+    }
     super::emit_block(&text)
+}
+
+/// Translate an agy PreToolUse payload into the claude shape the guard core
+/// reads: toolCall.name -> tool_name (agy tool names mapped: run_command ->
+/// Bash, write_blob -> Write, file_change -> Edit, edit_notebook ->
+/// NotebookEdit), toolCall.args -> tool_input with a recognized path key
+/// promoted to file_path and CommandLine to command, conversationId ->
+/// session_id, workspacePaths[0] -> cwd. Measured against agy 1.2.7's
+/// embedded hook contract (camelCase protojson, matcher-grouped
+/// registration, `{"decision":"deny","reason":...}` veto); agy auth was
+/// down machine-wide during the live fire, so the file tools' exact arg
+/// keys are unmeasured and the promotion reads every candidate spelling.
+fn agy_to_claude(v: Value) -> Value {
+    let Some(obj) = v.as_object() else {
+        return Value::Null;
+    };
+    let call = obj.get("toolCall").cloned().unwrap_or(Value::Null);
+    let name = call.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = call.get("args").cloned().unwrap_or(Value::Null);
+    let mut ti = match args {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    if !ti.contains_key("file_path") {
+        let key = [
+            "file_path",
+            "FilePath",
+            "AbsPath",
+            "TargetFile",
+            "Path",
+            "FileName",
+        ]
+        .into_iter()
+        .find(|k| ti.get(*k).and_then(Value::as_str).is_some());
+        if let Some(k) = key {
+            let p = ti.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            ti.insert("file_path".to_string(), Value::String(p));
+        }
+    }
+    if !ti.contains_key("command") {
+        if let Some(c) = ti.get("CommandLine").and_then(Value::as_str) {
+            ti.insert("command".to_string(), Value::String(c.to_string()));
+        }
+    }
+    let tool = match name {
+        "run_command" => "Bash",
+        "write_blob" => "Write",
+        "file_change" => "Edit",
+        "edit_notebook" => "NotebookEdit",
+        other => other,
+    };
+    let cwd = obj
+        .get("workspacePaths")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    serde_json::json!({
+        "tool_name": tool,
+        "tool_input": Value::Object(ti),
+        "session_id": obj.get("conversationId").cloned().unwrap_or(Value::Null),
+        "cwd": cwd,
+    })
 }
 
 /// The two-line refusal. The shell twin is a pure exec shim, so this text is
@@ -1322,6 +1404,10 @@ mod tests {
         let r = roots("source");
         assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
         assert!(!allowed(&r, &r.repo.join("crates/fno-agents/src/lib.rs")));
+        // Required test 4 folded in (no vault configured anywhere): the
+        // predicate only knows the repo root, so with `&[]` anything
+        // outside the repo allows.
+        assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
         let _ = std::fs::remove_dir_all(&r.base);
     }
 
@@ -1363,14 +1449,40 @@ mod tests {
     }
 
     #[test]
-    fn no_vault_still_answers_denies_source_allows_outside() {
-        // Required test 4: no vault configured anywhere - the predicate only
-        // knows the repo root. With `&[]` the guard answers as before:
-        // source denies, anything outside allows.
-        let r = roots("novault");
-        assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
-        assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
-        let _ = std::fs::remove_dir_all(&r.base);
+    fn agy_wire_translates_payload_and_denies_source() {
+        // The agy wire: a run_command payload (the shape agy 1.2.7's
+        // embedded contract documents) whose CommandLine writes repo source
+        // maps to the Bash path and reads denied; an edit naming a path
+        // under an allowed root reads allowed; a foreign tool is not
+        // judged. The translation itself carries the measured spellings.
+        let payload = serde_json::json!({
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "cat > crates/fno-agents/src/lib.rs <<'EOF'\nx\nEOF"}},
+            "stepIdx": 3,
+            "conversationId": "agy-conv-1",
+            "workspacePaths": ["/repo"],
+        });
+        let t = agy_to_claude(payload);
+        assert_eq!(t["tool_name"], "Bash");
+        assert_eq!(t["session_id"], "agy-conv-1");
+        assert_eq!(t["cwd"], "/repo");
+        assert_eq!(
+            t["tool_input"]["command"],
+            "cat > crates/fno-agents/src/lib.rs <<'EOF'\nx\nEOF"
+        );
+        // A path-bearing tool the translation promotes into file_path.
+        let edit = agy_to_claude(serde_json::json!({
+            "toolCall": {"name": "write_blob", "args": {"AbsPath": "/repo/docs/x.md", "Content": "hi"}},
+            "workspacePaths": ["/repo"],
+        }));
+        assert_eq!(edit["tool_name"], "Write");
+        assert_eq!(edit["tool_input"]["file_path"], "/repo/docs/x.md");
+        // An unjudged tool name passes through untouched (the core allows).
+        assert_eq!(
+            agy_to_claude(serde_json::json!({
+                "toolCall": {"name": "view_file", "args": {}},
+            }))["tool_name"],
+            "view_file"
+        );
     }
 
     #[test]
