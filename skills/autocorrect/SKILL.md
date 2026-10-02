@@ -1,6 +1,6 @@
 ---
 name: autocorrect
-description: Self-improvement loop for the toolkit. Passive capture (git post-commit, verifiers, /fno:intel corrections) into ~/.fno/logs/corrections.log; a monthly review surfaces patches; the user triages in about 20 minutes. Use when asked to review corrections, triage proposed patches, install or check the schedule, ingest the intel report, or audit recurring mistake classes.
+description: Review recurring agent corrections and maintain the project's self-improvement loop.
 ---
 
 # Autocorrect

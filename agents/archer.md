@@ -1,6 +1,6 @@
 ---
 name: archer
-description: TDD-disciplined task executor. The worker agent that implements individual tasks with test-first methodology. Returns structured SUCCESS/FAILED/BLOCKED results.
+description: Implement one task with test-first discipline and return a structured result.
 model: sonnet
 color: cyan
 tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]

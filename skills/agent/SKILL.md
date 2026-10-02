@@ -1,6 +1,6 @@
 ---
 name: agent
-description: "Natural-language remote control for the `fno agents` worker mesh. Describe the outcome you want - spawn or hand off work, message or inspect workers, drive a session, or stop it - and this skill resolves and runs the provider- and substrate-specific CLI command. It normalizes arguments, applies confirmation policy, and reports genuine receipts. Use when: 'spawn a worker for ab-XXXX', 'seed a session with this prompt', 'hand off this doc to codex', 'show my running agents', 'drive the reviewer', 'stop the billing worker'."
+description: Control Footnote agents: spawn, inspect, message, resume, retask, or stop workers.
 argument-hint: "<verb> [args]  |  [handoff] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
 metadata:
   internal: false

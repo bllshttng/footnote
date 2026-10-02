@@ -1,6 +1,6 @@
 ---
 name: groom
-description: "Daily levers-only backlog grooming pass. Reads the graph, merged PRs, and the triage pile, applies a fixed allowlist of reversible levers, and mails a one-screen report. Use when: 'groom the backlog', 'daily grooming pass', 'clean up the backlog', dispatched by `fno backlog groom`."
+description: Apply the daily allowlisted grooming levers to the backlog and report changes.
 ---
 
 # Groom

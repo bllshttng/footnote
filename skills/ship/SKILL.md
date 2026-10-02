@@ -1,6 +1,6 @@
 ---
 name: ship
-description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (create, check, merged), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target."
+description: Ship a pull request or research document through its required delivery gates.
 argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic> [--golden <discovery-*.md>])  - a type is required, there is no default"
 metadata:
   requires:

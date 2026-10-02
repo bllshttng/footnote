@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default: levels low/medium/high/xhigh/max, --comment, --fix, optional PR/branch/path target), runtime evidence (prove-it), the apply-or-skip cleanup pass (cleanup), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'prove it works', 'clean this up', 'get a second opinion', 'review this research brief', 'declare this reviewed'."
+description: Review code or research, prove behavior, clean up findings, or record an attestation.
 argument-hint: "[level] [--comment] [--fix] [<pr#>|<branch>|<path>] | prove-it [<target>] | cleanup [<target>] | peer [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] | research [brief.md] | declare   e.g. (bare = the fno lane, level sized from the diff), `high --comment`, `657`, `prove-it`, `cleanup`, `peer 657 codex --attest`, `research out/topic.md`, `declare`"
 metadata:
   requires:

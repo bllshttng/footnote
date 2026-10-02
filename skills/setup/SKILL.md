@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "Schema-driven setup wizard for footnote settings. Derives its question set from the Pydantic config model (the single source of truth) instead of a hardcoded list; asks only the real per-project decisions and defaults the rest."
+description: Configure Footnote settings through the schema-driven setup wizard.
 ---
 
 # Setup Wizard
