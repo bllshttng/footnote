@@ -1292,6 +1292,44 @@ fn api_comment_thread_write_and_reply_state_rules() {
         let thread = comments(store, "ab-one", &Page::default()).unwrap();
         assert_eq!(thread.nodes.len(), 2, "no row added");
 
+        // A ref without a state has nothing to land on: refused.
+        let lone_ref = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "pointing".into(),
+                kind: Some("reply".into()),
+                reply_to: Some(cid.clone()),
+                state_ref: Some("PR 1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            lone_ref.0.contains("names a landing"),
+            "the refusal names the missing state: {}",
+            lone_ref.0
+        );
+
+        // State and ref flags belong to replies; a bare comment carrying
+        // them would drop them silently, so it refuses.
+        let stateful_comment = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "an ask".into(),
+                kind: Some("comment".into()),
+                state: Some("accepted".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            stateful_comment.0.contains("state moves a thread head"),
+            "the refusal names the reply path: {}",
+            stateful_comment.0
+        );
+
         // State rules: done without a ref, an unknown state, and a kind
         // outside the thread vocabulary all refuse.
         let no_ref = comment_create(

@@ -957,6 +957,16 @@ pub fn comment_create(
         }
     }
     let state = input.state.clone();
+    if input.state_ref.is_some() && state.is_none() {
+        return Err(ApiError(
+            "state_ref names a landing: carry it with --state done or accepted".into(),
+        ));
+    }
+    if kind == "comment" && (state.is_some() || state_ref.is_some()) {
+        return Err(ApiError(
+            "state moves a thread head: answer with reply_to (the CLI --reply <cid>)".into(),
+        ));
+    }
     if let Some(state) = &state {
         if !matches!(state.as_str(), "accepted" | "done" | "declined") {
             return Err(ApiError(format!(
@@ -1007,9 +1017,10 @@ pub fn comment_create(
                     "reply_to".into(),
                     Value::String(reply_to.clone().unwrap_or_default()),
                 );
-                if let Some(author) = &input.author {
-                    extras.insert("author".into(), Value::String(author.clone()));
-                }
+                extras.insert(
+                    "author".into(),
+                    Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
+                );
             }
             comments.push(Comment {
                 created_at: Some(crate::graph_store::now_isoformat()),
