@@ -5056,8 +5056,7 @@ def _load_a2a_settings() -> tuple[bool, int]:
 
 
 def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
-    """Wrap a relay hop body in the peer's envelope; a hop mints the msg id
-    its header needs (the paired multiline form, not the PTY single line)."""
+    """Wrap a relay hop in the peer's envelope; the hop mints its header id."""
     if ctx is None:
         return cur
     from fno.inbox.store import generate_msg_id

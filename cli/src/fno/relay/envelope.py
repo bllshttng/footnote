@@ -69,8 +69,7 @@ def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
                 f"relay {name} cannot hold a quote, angle bracket or backtick"
             )
     one_line = " ".join(body.split())
-    # The wire line is FROZEN (the Rust door's cross-session framing); it is
-    # built here, not through the delivered renderer, which speaks the header.
+    # The wire line is FROZEN (the Rust door's cross-session framing).
     harness_attr = "" if harness is None else f' harness="{harness_for_provider(harness)}"'
     return f'<fno_mail from="{from_session}"{harness_attr}> {one_line}'
 

@@ -35,7 +35,7 @@ class MailShapeError(RuntimeError):
 
 def mail_shape(texts: list) -> list[dict]:
     """Per text: framing, msg_id, ids, holds_tag, envelope_block,
-    legacy_tags, header_turns, relay_parse. One batched Rust subprocess."""
+    legacy_tags, header_turns, relay_parse."""
     from fno.rust_binary import find_dev_binary, resolve_binary
 
     binary = find_dev_binary() or resolve_binary() or "fno-agents"
@@ -116,16 +116,13 @@ def fno_mail_open(
     return _render_in_rust(payload)
 
 
-# The boundary rule lives in the Rust classifier; case-insensitive so a
-# peer-controlled ``<FNO_MAIL ...>`` variant cannot bypass any door (codex P1).
+# The boundary rule lives in the Rust classifier; case-insensitive (codex P1).
 def contains_fno_mail_tag(text: str) -> bool:
     """True if ``text`` holds an ``<fno_mail`` open or ``</fno_mail>`` close
     tag, through the Rust classifier."""
     low = text.lower()
     if "<fno_mail" not in low and "</fno_mail>" not in low:
-        # A real tag always carries the literal, so this pre-filter never
-        # hides one; it only saves the subprocess on the common no-tag text.
-        return False
+        return False  # a real tag carries the literal; no subprocess needed
     return bool(mail_shape([text])[0]["holds_tag"])
 
 

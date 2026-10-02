@@ -29,8 +29,8 @@ _CAP = 2000
 
 def dedup_key(body: str) -> Optional[str]:
     """Sha256 of the delivered message id - a header's middle token or an old
-    tag's ``id``; ``None`` names no id (the caller processes the message
-    normally). The id read lives in the Rust classifier."""
+    tag's ``id``; ``None`` names no id. The read lives in the Rust
+    classifier."""
     from fno.mail.envelope import mail_shape
 
     ids = mail_shape([body])[0]["ids"]
