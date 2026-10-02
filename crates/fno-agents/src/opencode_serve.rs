@@ -1613,14 +1613,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let stub = |name: &str, version: &str| {
-            let path = base.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            path
+            crate::write_exec_stub(&base, name, &format!("#!/bin/sh\necho '{version}'\n"))
         };
         let v1 = stub("oc-v1", "1.18.33");
         let v2 = stub("oc-v2", "2.0.19");
