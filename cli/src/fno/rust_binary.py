@@ -328,7 +328,6 @@ def verb_call(
 
 
 def chats_verb(args: "list[str]", payload: dict) -> dict:
-    """One round trip with the chats record door (the conversation store)."""
     return verb_call(["chats", *args], payload, timeout=30)
 
 
