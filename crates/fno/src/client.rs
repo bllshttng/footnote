@@ -1938,10 +1938,7 @@ mod mail_input;
 mod overlay_keys;
 // The overlay key state machines live in the module; the re-import keeps
 // every existing bare-name caller (the tests' `use super::*` chain) resolving.
-use overlay_keys::{
-    answer_keys, create_keys, move_to_keys, nav_goto, nav_keys, recruit_keys, rename_keys,
-    search_keys,
-};
+use overlay_keys::{answer_keys, move_to_keys, nav_goto, nav_keys, recruit_keys, rename_keys};
 
 mod bottom_row;
 
