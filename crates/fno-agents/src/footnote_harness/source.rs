@@ -41,11 +41,8 @@ impl TranscriptSource for FootnoteSource {
         for entry in
             projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten())
         {
-            // The record is the top-level `<fno_id>.jsonl` file; the
-            // sidecar dir carries no extension and child transcripts live
-            // inside it, one level down.
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            if !crate::footnote_harness::transcript::is_record_file(&path) {
                 continue;
             }
             let Ok(meta) = std::fs::metadata(&path) else {

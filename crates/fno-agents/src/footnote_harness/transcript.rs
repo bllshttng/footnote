@@ -60,6 +60,13 @@ pub fn transcript_file(dir: &Path, fno_id: &str) -> PathBuf {
     dir.parent().unwrap_or(dir).join(format!("{fno_id}.jsonl"))
 }
 
+/// A top-level record file: `<fno_id>.jsonl` directly under a project
+/// slug. Sidecar dirs carry no extension, and child transcripts live one
+/// level down, inside them.
+pub fn is_record_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+}
+
 /// Find a session's directory under any project slug: the sidecar dir
 /// whose record `<fno_id>.jsonl` exists beside it.
 pub fn find_session_dir(root: &Path, fno_id: &str) -> Option<PathBuf> {
