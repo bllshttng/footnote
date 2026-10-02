@@ -1425,6 +1425,21 @@ pub fn active_backlog_enabled(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// `[telemetry] claude_otel` (default ON): whether the daemon binds the
+/// localhost OTLP receiver (`<agents home>/otel/port` + `otel.db`) and
+/// supervisor birth injects the OTEL_* env. Off, neither happens: no listener
+/// binds, no `OTEL_*` key is set on any birthed supervisor, and the burn arm
+/// falls back to the ledger estimate everywhere.
+pub fn telemetry_claude_otel(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("telemetry")?
+            .as_table()?
+            .get("claude_otel")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(true)
+}
+
 /// `[slot_cutover] enabled` (default false): whether the shared Claude slot may switch.
 pub fn slot_cutover_enabled(cwd: &Path) -> bool {
     resolve(cwd, |t| {
