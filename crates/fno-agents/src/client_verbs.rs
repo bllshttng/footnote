@@ -3050,6 +3050,7 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
     let mut ttl_ms: Option<u64> = None;
     let mut model: Option<String> = None;
     let mut effort: Option<String> = None;
+    let mut posture: Option<String> = None;
 
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -3060,6 +3061,18 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
             // The served model/effort axes, passed through verbatim.
             "--model" => model = it.next(),
             "--effort" => effort = it.next(),
+            // The served sandbox posture, `<sandbox>:<approval>`; the daemon
+            // is the parse authority, the CLI only checks the shape.
+            "--posture" => {
+                let v = it.next().ok_or("--posture needs <sandbox>:<approval>")?;
+                let (s, a) = v
+                    .split_once(':')
+                    .ok_or("--posture needs <sandbox>:<approval>")?;
+                if s.is_empty() || a.is_empty() {
+                    return Err("--posture needs <sandbox>:<approval>".into());
+                }
+                posture = Some(v);
+            }
             "--seq" => {
                 seq = Some(
                     it.next()
@@ -3107,6 +3120,9 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
     }
     if let Some(e) = effort {
         params.insert("effort".into(), Value::String(e));
+    }
+    if let Some(p) = posture {
+        params.insert("posture".into(), Value::String(p));
     }
     Ok(Value::Object(params))
 }
@@ -3557,6 +3573,30 @@ mod tests {
             "working".into()
         ])
         .is_err()); // non-int seq
+
+        let p = build_report_params(&[
+            "--session-id".into(),
+            "uuid-x".into(),
+            "--seq".into(),
+            "1".into(),
+            "--state".into(),
+            "working".into(),
+            "--posture".into(),
+            "workspace-write:on-request".into(),
+        ])
+        .unwrap();
+        assert_eq!(p["posture"], "workspace-write:on-request");
+        assert!(build_report_params(&[
+            "--session-id".into(),
+            "x".into(),
+            "--seq".into(),
+            "1".into(),
+            "--state".into(),
+            "working".into(),
+            "--posture".into(),
+            "workspace-write".into()
+        ])
+        .is_err()); // posture without the approval half
 
         #[derive(Serialize)]
         struct S {

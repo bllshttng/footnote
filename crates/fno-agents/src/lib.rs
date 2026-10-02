@@ -1419,6 +1419,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_renamed",
     "agent_model_changed",
     "agent_effort_changed",
+    "agent_posture_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_skipped",
