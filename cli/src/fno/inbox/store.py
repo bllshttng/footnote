@@ -355,7 +355,7 @@ def generate_msg_id() -> str:
 # ---------------------------------------------------------------------------
 
 _MSG_HEADER_RE = re.compile(
-    r"^## (msg-[0-9a-zA-Z]+) · (\S+) · from:(\S+)\s*$"
+    r"^## ((?:fmail-|msg-)[0-9a-zA-Z]+) · (\S+) · from:(\S+)\s*$"
 )
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -490,7 +490,8 @@ def _parse_thread_text(text: str, path: Path) -> Optional[ThreadHandle]:
 
 
 def _parse_messages(body_text: str) -> list[ThreadMessage]:
-    """Parse ``## msg-{id} · {ts} · from:{sender}`` blocks out of body text."""
+    """Parse ``## {id} · {ts} · from:{sender}`` blocks (``fmail-`` or legacy
+    ``msg-`` ids) out of body text."""
     lines = body_text.splitlines()
     messages: list[ThreadMessage] = []
     i = 0

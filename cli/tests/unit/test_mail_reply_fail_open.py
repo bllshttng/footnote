@@ -145,7 +145,9 @@ def test_the_reported_incident_end_to_end(runner, mailbox, monkeypatch, tmp_path
     _seed_source_ahead_registry(tmp_path)
     msg = _seed_inbound(from_=SENDER)
 
-    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(
+        app, ["agents", "mail", "reply", "--to", msg, "--body", "ack", "--from", "lead"]
+    )
 
     assert result.exit_code == 14, result.output
     assert [m.to for m in _bus_msgs() if m.in_reply_to == msg] == [SENDER]

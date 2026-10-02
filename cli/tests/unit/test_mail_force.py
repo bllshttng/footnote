@@ -148,11 +148,10 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
     assert result.exit_code == 0, result.output
 
     _e, text, kwargs = sent[0]
-    assert text.startswith("<fno_mail from=")
+    assert text.splitlines()[0].startswith("`@lead · fmail-"), text[:80]
     assert "status?" in text
-    # The wrappedness marker is the paired envelope itself; the
+    # The wrappedness marker is the delivered header line; the
     # retired peer-mail footer no longer renders.
-    assert text.rstrip().endswith("</fno_mail>")
     assert "peer mail" not in text
     assert kwargs.get("raw") is not True, (
         "the forced send must cross the read-back gate, so it cannot be raw"
@@ -235,7 +234,7 @@ def test_force_writes_the_full_sender_session_on_the_row(_tmp_state, monkeypatch
     result = runner.invoke(
         mail_app,
         ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force",
-         "--from-name", "lead"],
+         "--from-name", "0199bbbb-2222-7000-8000-bbbbbbbbbbbb"],
     )
     assert result.exit_code == 0, result.output
 
@@ -327,7 +326,8 @@ def test_force_refuses_a_send_to_this_session(_tmp_state, monkeypatch):
 
     result = runner.invoke(
         mail_app,
-        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "note to self", "--force"],
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "note to self", "--force",
+         "--from-name", "lead"],
     )
 
     assert result.exit_code == 2
@@ -376,7 +376,9 @@ def test_force_reaches_a_registered_agent_by_name(_tmp_state, monkeypatch):
     entry, sent = _install(monkeypatch)
     entry.name = "blueprint-x-ce6e"
 
-    result = runner.invoke(mail_app, ["send", "blueprint-x-ce6e", "status?", "--force"])
+    result = runner.invoke(
+        mail_app, ["send", "blueprint-x-ce6e", "status?", "--force", "--from-name", "lead"]
+    )
 
     assert result.exit_code == 0, (result.output, result.stderr)
     assert "typed (pane 45)" in result.output
