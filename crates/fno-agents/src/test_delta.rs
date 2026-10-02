@@ -19,19 +19,32 @@ struct TestDelta {
 impl TestDelta {
     fn from_diff(diff: &str) -> Self {
         let mut result = Self::default();
+        // The `+++ b/` header of the hunk in flight, so a matcher only sees
+        // its own language: a `# T1` comment in a Python file is prose, a
+        // `test_`-prefixed function in Rust is not a shell declaration.
+        let mut ext = "";
         for line in diff.lines() {
+            if let Some(path) = line.strip_prefix("+++ b/") {
+                ext = path.rsplit('.').next().unwrap_or("");
+                continue;
+            }
             let (added, source) = match line.as_bytes().first() {
                 Some(b'+') if !line.starts_with("+++") => (true, &line[1..]),
                 Some(b'-') if !line.starts_with("---") => (false, &line[1..]),
                 _ => continue,
             };
             let code = source.trim_start();
-            let delta = if code.starts_with("def test_") || code.starts_with("async def test_") {
+            let delta = if ext == "py"
+                && (code.starts_with("def test_") || code.starts_with("async def test_"))
+            {
                 Some(&mut result.python)
-            } else if code.trim() == "#[test]" || code.starts_with("#[tokio::test") {
+            } else if ext == "rs" && (code.trim() == "#[test]" || code.starts_with("#[tokio::test"))
+            {
                 Some(&mut result.rust)
-            } else if code.starts_with("@test ")
-                || code.starts_with("test_") && code.contains("() {")
+            } else if ext == "sh"
+                && (code.starts_with("@test ")
+                    || code.starts_with("test_") && code.contains("() {")
+                    || is_shell_case_declaration(code))
             {
                 Some(&mut result.shell)
             } else {
@@ -73,11 +86,23 @@ fn net(delta: &LanguageDelta) -> i64 {
     delta.added as i64 - delta.removed as i64
 }
 
-/// Net test declarations over the two census languages (Python and Rust).
-/// Shell stays outside the cap: a shell deletion never pays for a Python or
-/// Rust test.
+/// The second shell declaration dialect: a `# T<digits>` case header. The
+/// repo's shell suites declare cases as numbered headers instead of (or
+/// beside) `test_...() {` functions, so a suite ported off shell was
+/// invisible to this counter and every shell-to-Rust port read as net
+/// growth. Matches `# T1: ...`, `# T13 (x-f209): ...` and a bare `# T1`.
+fn is_shell_case_declaration(code: &str) -> bool {
+    let b = code.as_bytes();
+    b.len() > 3 && b.starts_with(b"# T") && b[3].is_ascii_digit()
+}
+
+/// Net test declarations across all three census languages. Shell counts on
+/// both sides since the case-header matcher: a shell suite ported to Rust
+/// nets to its true delta instead of reading as growth (a port is not
+/// growth), so a port's deletions pay for its additions like any other
+/// language's.
 fn over_cap(delta: &TestDelta, cap: i64) -> Option<i64> {
-    let net = net(&delta.python) + net(&delta.rust);
+    let net = net(&delta.python) + net(&delta.rust) + net(&delta.shell);
     (net > cap).then_some(net)
 }
 
@@ -228,18 +253,29 @@ mod tests {
     #[test]
     fn reports_added_removed_and_net_test_declarations_by_language() {
         let diff = concat!(
+            "+++ b/tests/test_added.py\n",
+            "--- a/tests/test_added.py\n",
             "+def test_new_case():\n",
+            "-def test_old_case():\n",
+            // A `# T<digit>` comment in a Python file is prose, never a shell
+            // case: the matcher scopes every language to its own extension.
+            "+# T3 in a python file is prose, not a shell case\n",
+            "+++ b/tests/lib.rs\n",
+            "--- a/tests/lib.rs\n",
             "+#[test]\n",
             "+#[tokio::test]\n",
             "+#[tokio::test(flavor = \"multi_thread\")]\n",
-            "+@test \"shell case\" {\n",
-            "-def test_old_case():\n",
             "-#[test]\n",
+            "+++ b/tests/suite.sh\n",
+            "--- a/tests/suite.sh\n",
+            "+@test \"shell case\" {\n",
+            "+# T2: a new numbered case in a shell suite\n",
             "-test_old_shell() {\n",
             "-test_old_shell_two() {\n",
+            "-# T1: a Notification payload with a message yields one recorded call\n",
+            "-# T13 (x-f209): FNO_SERVER carries the server axis now\n",
             "+not_a_test() {\n",
-            "+++ b/tests/test_added.py\n",
-            "--- a/tests/test_removed.py\n",
+            "+prose mentions T3 without a header, never counts\n",
         );
         let delta = TestDelta::from_diff(diff);
         assert_eq!(
@@ -256,20 +292,41 @@ mod tests {
                 removed: 1
             }
         );
+        // The shell side counts declarations AND numbered case headers on
+        // both sides: 1 bats + 1 case header added, 2 fns + 2 case headers
+        // removed. The prose line without a `# ` prefix never counts.
         assert_eq!(
             delta.shell,
             LanguageDelta {
-                added: 1,
-                removed: 2
+                added: 2,
+                removed: 4
             }
         );
         assert!(delta
             .markdown()
-            .contains("| **Total** | **5** | **4** | **+1** |"));
-        // The cap covers the census languages only: shell's -1 never offsets
-        // Python or Rust growth.
-        assert_eq!(over_cap(&delta, 0), Some(2));
-        assert_eq!(over_cap(&delta, 1), Some(2));
-        assert_eq!(over_cap(&delta, 2), None);
+            .contains("| **Total** | **6** | **6** | **+0** |"));
+        // The cap spans all three languages: the ported shell deletions pay
+        // for the Rust additions, so a port nets to its true delta.
+        assert_eq!(over_cap(&delta, 0), None);
+        let growth_only_rust = TestDelta {
+            rust: LanguageDelta {
+                added: 2,
+                removed: 0,
+            },
+            shell: LanguageDelta {
+                added: 0,
+                removed: 2,
+            },
+            ..Default::default()
+        };
+        assert_eq!(over_cap(&growth_only_rust, 0), None);
+        let plain_growth = TestDelta {
+            rust: LanguageDelta {
+                added: 2,
+                removed: 0,
+            },
+            ..Default::default()
+        };
+        assert_eq!(over_cap(&plain_growth, 1), Some(2));
     }
 }
