@@ -693,7 +693,7 @@ attach_digest_threshold_min = 10
 hover_focus = true
 # Show the mux status row at the bottom of the terminal (default on).
 status_row = true
-# How the mux shows machine load: simple (default) says it in plain words, e.g. 'agents use 58% of the CPU (limit 50%)'; detailed shows the raw numbers (cores, load averages, GB). Both draw a CPU graph. Latched at mux client start.
+# How the mux shows machine load: simple (default) says it in plain words, e.g. 'CPU 80% busy: agents 58%, everything else 22%'; detailed shows the raw numbers (cores, load averages, GB). Both draw a CPU graph. Latched at mux client start.
 load_readout = "simple"
 # Mux chrome theme: footnote-superscript (default, the brand dark palette) | footnote-paper (auto-picked on a light terminal background) | terminal (no-op, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - "theme.brand", "theme.needs_you" and "theme.border" take #rrggbb values that hold under any theme, and every role also takes `default` to pin that role to the terminal's own text color (white on a dark ground, black on paper); theme.border recolors every border at once (the pane frame, the modal outlines). The tab-bar mark's stamp takes no override.
 # theme = <unset>   # optional; no default
