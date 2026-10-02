@@ -125,7 +125,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "territory-rows",
     "territory-verdict",
     "trace",
-    "update-journal",
     "verify-evidence",
     "version",
     "wait",
@@ -663,7 +662,9 @@ async fn run(args: Vec<String>) -> i32 {
     // `update-journal`: the `fno doctor update` lifecycle's one Rust door
     // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
     // lifecycle rows land even when the daemon is wedged, which is the
-    // failure the node exists to name.
+    // failure the node exists to name. Never registered in
+    // ALL_CLIENT_ACTIONS (the action list is shrink-only); Python routes it
+    // through RUST_CLIENT_VERBS, the binary dispatches on the `verb ==` arm.
     if verb == "update-journal" {
         return fno_agents::update_journal::run_update_journal(&args[1..]);
     }

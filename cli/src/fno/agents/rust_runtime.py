@@ -545,6 +545,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "target-family": "Merge-posture family test: --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
     "permission-tokens": "The permission-posture owner: payload {provider, mode, substrate} in, the {mappable, tokens} answer out; invoked by the spawn seam via fno.rust_binary.verb_call, not `fno agents` routing.",
     "sandbox-probe": "The codex sandbox verdict owner: payload {cwd, mode} in, the {verdict, blocked, note} envelope out; invoked by fno.agents.sandbox_probe, not `fno agents` routing.",
+    "update-journal": "The `fno doctor update` lifecycle's one Rust door: --events <journal.jsonl> --type started|built|installed|failed plus flat field flags appends one envelope per call through the event store, and mails the crowns on installed and failed (--mail-from names the front binary, 60s bounded); the failed row derives its reason from --rc. Invoked by fno.update's door calls and the installer's EXIT trap, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises. Every other
