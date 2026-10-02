@@ -2588,7 +2588,12 @@ fn update_registry_mints_a_row_its_own_fno_id() {
         r.find_mut("born-renamed").unwrap().fno_id = Some(seeded.into());
     })
     .unwrap();
-    update_registry(&path, |r| r.entries.push(sample_entry("second"))).unwrap();
+    update_registry(&path, |r| {
+        let mut row = sample_entry("second");
+        row.harness_session_id = Some("7c5dcf5d-2222-4222-8222-222222222299".into());
+        r.entries.push(row);
+    })
+    .unwrap();
     let second = load_registry(&path).unwrap().entries[2]
         .fno_id
         .clone()
