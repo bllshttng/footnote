@@ -1239,11 +1239,12 @@ mod tests {
             }
         }
 
-        // The allowed files: production binary repair (install_verify), two
-        // production dir modes (paths, fleet_incident), two dir-mode restores
-        // in tests (claims, operator_turns); the bin test target cannot see a
-        // cfg(test) lib fn (client_tests); and the plan writer's production
-        // mode-preserve on its atomic plan-file replace (plan_doc/codec).
+        // The allowed files: production binary repair (install_verify), three
+        // production dir modes (paths, fleet_incident, chats), two dir-mode
+        // restores in tests (claims, operator_turns); the bin test target
+        // cannot see a cfg(test) lib fn (client_tests); and the plan writer's
+        // production mode-preserve on its atomic plan-file replace
+        // (plan_doc/codec).
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
@@ -1252,6 +1253,7 @@ mod tests {
             ("client_tests.rs", 2),
             ("plan_doc/codec.rs", 1),
             ("fleet_incident.rs", 1),
+            ("chats.rs", 1),
         ];
         let allowed_counts: std::collections::HashMap<&str, usize> =
             ALLOWED.iter().copied().collect();
