@@ -121,13 +121,13 @@ Ground truth at ship time: the fixed parser reproduced the reference tool's $31.
 
 ## Exact cost: the local OTel ingest
 
-When `[telemetry] claude_otel` is on (the default), the fno-agents daemon binds an OTLP/http-json receiver on 127.0.0.1 and publishes its port at `~/.fno/agents/otel/port`. Supervisor birth injects `CLAUDE_CODE_ENABLE_TELEMETRY=1`, points the OTLP logs exporter at the receiver, and sets `OTEL_LOG_TOOL_DETAILS=1` so real skill and plugin names survive. Claude Code then reports one `api_request` record per API call with `cost_usd_micros`, `session.id` and skill/plugin/agent attribution; the receiver keeps the named columns in `~/.fno/agents/otel/otel.db` and drops everything else (tool details carry command text). Nothing leaves the machine.
+When `[telemetry] claude_otel` is on (the default), the fno-agents daemon binds an OTLP/http-json receiver on 127.0.0.1 and publishes its port at `~/.fno/agents/otel/port`. Supervisor birth injects `CLAUDE_CODE_ENABLE_TELEMETRY=1`, points the OTLP logs exporter at the receiver, and sets `OTEL_LOG_TOOL_DETAILS=1` so real skill and plugin names survive. Claude Code then reports one `api_request` record per API call with `cost_usd_micros`, `session.id` and skill or plugin attribution. The receiver keeps the named columns in `~/.fno/agents/otel/otel.db` and drops the rest. Tool details carry command text. Nothing leaves the machine.
 
 The off switch: `[telemetry] claude_otel = false` in config.toml means no listener binds and no `OTEL_*` env reaches any supervisor birth. A supervisor that is already running keeps its env until restart, and an operator-set `OTEL_EXPORTER_OTLP_ENDPOINT` always wins over fno's injection.
 
 ### Cost source order
 
-The burn arm (`crates/fno-agents/src/burn_watch.rs` `session_cost_exact`) reads the OTel sum for a session when rows exist, and falls back to the transcript-parsed `ledger.json` estimate (`loopcheck::session_cost_from_ledger`) otherwise. The `finalize` handoff cost line stays on the ledger until OTel coverage is proven on the fleet.
+When OTel rows exist for a session, the burn arm (`crates/fno-agents/src/burn_watch.rs` `session_cost_exact`) reads their exact sum. It falls back to the transcript-parsed `ledger.json` estimate (`loopcheck::session_cost_from_ledger`) otherwise. The `finalize` handoff cost line stays on the ledger until OTel coverage is proven on the fleet.
 
 ### Readouts
 
@@ -145,4 +145,4 @@ sqlite3 ~/.fno/agents/otel/otel.db \
   "SELECT session_id, SUM(cost_usd_micros)/1e6 FROM api_requests GROUP BY 1"
 ```
 
-A record is deduped on `request_id` (`rid:` key), or on session + sequence + timestamp when the record carries no `request_id`. A record with `cost_usd` but no micros converts at 1e6; a record with neither is still stored for its token counts and simply contributes zero to the cost sum.
+A record is deduped on its `request_id` (`rid:` key). A record without a `request_id` dedupes on session, sequence and timestamp. A record with `cost_usd` but no micros converts at 1e6. A record with neither is still stored for its token counts. It contributes zero to the cost sum.
