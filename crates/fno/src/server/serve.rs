@@ -142,6 +142,13 @@ pub(super) async fn serve(
             // (v48) Launch order for AgentTruth probes, so an out-of-order
             // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
             let mut truth_probe_seq: u64 = 0;
+            // The models.dev catalog refresh: once at start, then hourly (a
+            // stat per hour when fresh). Pricing never depends on a user who
+            // never opens the composer; a failed fetch keeps the old cache
+            // and the next hour retries. The refresh itself re-stats and
+            // spawns only on a stale cache, so the steady state is one stat.
+            let mut catalog_every = tokio::time::interval(Duration::from_secs(3600));
+            catalog_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Stat + conditional read of one file behind an mtime+len gate,
@@ -175,6 +182,9 @@ pub(super) async fn serve(
                 // parked reader at once so the first overlay is fresh (AC3-FR).
                 tokio::select! {
                     _ = tick.tick() => {}
+                    _ = catalog_every.tick() => {
+                        crate::model_catalog::refresh_if_stale(&crate::model_catalog::state_dir());
+                    }
                     res = count_rx.changed() => {
                         if res.is_err() {
                             return; // Core dropped; server shutting down

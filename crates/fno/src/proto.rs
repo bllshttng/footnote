@@ -357,7 +357,9 @@ fn default_true() -> bool {
 /// can refuse commands an older server cannot parse instead of tripping
 /// the unknown-variant read failure. Floor stays 58.
 /// v98: optional worker context, start time, unread mail and node; floor stays 58.
-pub const PROTO_VERSION: u32 = 98;
+/// v99: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
+/// `session_tokens`), both optional; floor stays 58.
+pub const PROTO_VERSION: u32 = 99;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1177,10 +1179,19 @@ pub struct AgentRow {
     pub liveness_measured_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used_pct: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = Option::is_none)]
     pub context_tokens: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measured_at: Option<u64>,
+    /// (v99) The daemon-served running session cost, in integer cents, and
+    /// the raw token sum behind it. Priced through the models.dev catalog by
+    /// the reconcile sweep; `None` before the first measurement or when any
+    /// token kind with a nonzero count has no catalog rate (unpriced, never a
+    /// guess). `#[serde(default)]` keeps a v98 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_cost_cents: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4319,6 +4330,8 @@ mod tests {
         assert_eq!(row.context_used_pct, None);
         assert_eq!(row.context_tokens, None);
         assert_eq!(row.context_measured_at, None);
+        assert_eq!(row.session_cost_cents, None);
+        assert_eq!(row.session_tokens, None);
         assert_eq!(row.started_at, None);
         assert_eq!(row.mail_unread, None);
         assert_eq!(row.node, None);
@@ -4331,6 +4344,8 @@ mod tests {
             "context_used_pct",
             "context_tokens",
             "context_measured_at",
+            "session_cost_cents",
+            "session_tokens",
             "started_at",
             "mail_unread",
             "node",
