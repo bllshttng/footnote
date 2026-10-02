@@ -38,10 +38,13 @@ impl TranscriptSource for FootnoteSource {
             .into_iter()
             .flatten()
             .flatten();
-        for session in
+        for entry in
             projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten())
         {
-            let path = session.path().join("transcript.jsonl");
+            let path = entry.path();
+            if !crate::footnote_harness::transcript::is_record_file(&path) {
+                continue;
+            }
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
@@ -57,7 +60,11 @@ impl TranscriptSource for FootnoteSource {
                 continue;
             }
             out.push(SessionFile {
-                session_id: session.file_name().to_string_lossy().into_owned(),
+                session_id: path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
                 path,
                 mtime,
                 size: meta.len(),

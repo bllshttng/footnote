@@ -992,6 +992,18 @@ pub fn admit_pane(
     admit_pane_for(human_at_tty(), pane_count, requested_cap)
 }
 
+/// [`admit_pane_for`] with the spawn-refusal shape the mux server answers
+/// with: the placement carries the human ask, and the failure maps to the
+/// control error code the composer prints. `placement.max_panes` stays the
+/// requested tab cap.
+pub fn admit_pane_for_spawn(
+    placement: &crate::proto::PanePlacement,
+    pane_count: usize,
+) -> Result<AdmissionPermit, (u32, String)> {
+    admit_pane_for(placement.human, pane_count, placement.max_panes)
+        .map_err(|e| (crate::proto::err_code::SPAWN_FAILED, e.to_string()))
+}
+
 /// [`admit_pane`] for a pane the caller knows a human asked for. The mux
 /// server has no TTY, so `human_at_tty` reads false there even for a click
 /// from the user's own attached client. The server passes that fact here, and
@@ -1271,6 +1283,26 @@ pub fn tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Co
 
 pub fn tokio_spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
     let permit = admit_fleet().map_err(admission_io_error)?;
+    let track_child = !is_root_program(command.as_std().get_program());
+    let mut child = command.spawn()?;
+    if track_child {
+        if let Some(pid) = child.id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        }
+    }
+    Ok(child)
+}
+
+/// [`tokio_spawn`] for a human's own request: the runaway brake warns
+/// instead of refusing and the census still gates, the same exemption the
+/// user's own attach carries. The composer's force gesture rides this.
+pub fn tokio_spawn_for_human(
+    command: &mut tokio::process::Command,
+) -> io::Result<tokio::process::Child> {
+    let permit = admit_human();
     let track_child = !is_root_program(command.as_std().get_program());
     let mut child = command.spawn()?;
     if track_child {
@@ -2051,32 +2083,38 @@ mod tests {
     /// Our own pid stands in for it (alive, not a zombie, not confirmed
     /// dead) paired with a reader that never resolves a start time. The
     /// malformed-line case prunes the torn line and keeps the readable one.
+    /// Each case scopes its own isolate: two live guards would deadlock on
+    /// the same env lock.
     #[test]
     fn unreadable_marker_pid_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-unreadable");
         let pid = std::process::id();
-        std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
+        {
+            let (_guard, path) = isolate("marker-unreadable");
+            std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
 
-        let count = marker_count_with(&[], &HashSet::new(), |_| None)
-            .expect("an unreadable marker pid must not collapse the census");
+            let count = marker_count_with(&[], &HashSet::new(), |_| None)
+                .expect("an unreadable marker pid must not collapse the census");
 
-        assert_eq!(count, 0);
-        assert!(
-            !path.exists(),
-            "the unreadable entry must be pruned from the ledger"
-        );
-        let (_guard, path) = isolate("marker-malformed");
-        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
+            assert_eq!(count, 0);
+            assert!(
+                !path.exists(),
+                "the unreadable entry must be pruned from the ledger"
+            );
+        }
+        {
+            let (_guard, path) = isolate("marker-malformed");
+            std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
 
-        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
-            .expect("a torn ledger line must not collapse the census");
+            let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
+                .expect("a torn ledger line must not collapse the census");
 
-        assert_eq!(count, 1);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            format!("{pid}:777\n")
-        );
-        let _ = std::fs::remove_file(&path);
+            assert_eq!(count, 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{pid}:777\n")
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// A readable marker still counts, so the skip above is a targeted drop
