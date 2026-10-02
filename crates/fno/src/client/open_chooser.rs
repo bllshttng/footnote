@@ -321,10 +321,7 @@ mod tests {
         ] {
             assert_eq!(OpenTarget::parse(pick.as_str()), Some(pick));
         }
-    }
 
-    #[test]
-    fn the_session_id_beats_a_shared_name() {
         // AC5-HP. Two rows share a name; only one owns the tapped session.
         // The finder returns the session owner, never the first name match.
         let mut twin_a = focus_agent(1);

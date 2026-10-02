@@ -2070,7 +2070,7 @@ mod tests {
         );
 
         // Click and hover cannot disagree: the projection answers the same URI.
-        assert_eq!(pane.link_at(0, 0).as_deref(), Some(url));
+        assert_eq!(pane.link_at(0, 0).as_deref(), Some(url.as_str()));
 
         // OSC 8: the span is the run of cells carrying the SAME anchor. A
         // second, separate anchor that happens to reuse the URI sits mid-row
