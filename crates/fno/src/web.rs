@@ -1066,8 +1066,34 @@ async fn backlog_model(
         Ok(q) => q,
         Err(msg) => return plain_status(StatusCode::BAD_REQUEST, &msg),
     };
+    // The question journal is 38 MB: read it only when the parsed query
+    // actually asks `has:question`, over a clone of the cached inputs.
+    let wants_questions =
+        q.q.as_deref()
+            .and_then(|text| {
+                crate::search_query::parse(
+                    text,
+                    crate::search_query::Surface::Node,
+                    crate::search_query::now_secs(),
+                )
+                .ok()
+            })
+            .is_some_and(|p| p.wants_questions());
+    if wants_questions {
+        let mut fresh = (*model_inputs(&st).await).clone();
+        backlog_model::read_search_sources(&mut fresh, true);
+        let mut board = backlog_model::board(&fresh, &q);
+        if raw.iter().any(|(k, v)| k == "keys" && v == "1") {
+            board.search_keys = Some(crate::search_query::keys_json());
+        }
+        return json_response(&board);
+    }
     let inputs = model_inputs(&st).await;
-    json_response(&backlog_model::board(&inputs, &q))
+    let mut board = backlog_model::board(&inputs, &q);
+    if raw.iter().any(|(k, v)| k == "keys" && v == "1") {
+        board.search_keys = Some(crate::search_query::keys_json());
+    }
+    json_response(&board)
 }
 
 /// `GET /backlog/node.json?id=<id>`: one node's answer behind the token.
@@ -1389,6 +1415,7 @@ async fn model_inputs(st: &AppState) -> Arc<backlog_model::Inputs> {
     if let Some(e) = roster_error {
         inputs.errors.push(e);
     }
+    backlog_model::read_search_sources(&mut inputs, false);
     let version = inputs.version;
     let inputs = Arc::new(inputs);
     *cached = Some(CachedModel {
@@ -2327,7 +2354,7 @@ console.log("evictedRowCount: 18 cases ok");
             .expect("controls exist");
         assert!(bar < controls, "the search bar leads the page");
         assert!(
-            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label, session""#),
+            BACKLOG_PAGE.contains(r#"placeholder="search: s:ready h:codex -t:epic, ? for keys""#),
             "the placeholder names what search covers"
         );
         assert!(
@@ -2473,49 +2500,46 @@ eq(cardKeeps(any, nodes, Object.assign({}, off, { status: ["idea"] })), false, "
 eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["bug"] })), true, "kind filter keeps");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["epic"] })), false, "kind filter drops");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { epic: ["e1"] })), true, "own id keeps an epic filter");
-eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "NEEDLE" })), true, "q is case-insensitive over details");
-eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "absent" })), false, "q drops");
-eq(cardKeeps(Object.assign({}, any, { created_at: "2026-09-24T10:00:00Z" }), nodes,
-  Object.assign({}, off, { date: ["created_at>=2026-09-20", "created_at<=2026-09-30"] })), true, "a date pair keeps the in-range card");
-eq(cardKeeps(Object.assign({}, any, { created_at: "2026-10-05T10:00:00Z" }), nodes,
-  Object.assign({}, off, { date: ["created_at<=2026-09-30"] })), false, "a late card drops under <=)");
-eq(cardKeeps(Object.assign({}, any, { created_at: null }), nodes,
-  Object.assign({}, off, { date: ["created_at>=2026-09-20"] })), false, "a stampless card drops under a date filter");
-// the date grammar: the five ops accept, ~ and a bad date refuse.
-for (const op of [">=", ">", "=", "<", "<="]) {
-  eq(parseDateFilter("created_at" + op + "2026-09-20"),
-    { field: "created_at", op: op, date: "2026-09-20" }, "the grammar takes " + op);
+// The grammar: every case-file row through the page's parser, the same
+// table the Rust case test runs.
+const searchKeys = KEYS.keys;
+const sortTable = KEYS.sort;
+const grammarNow = stampEpoch(CASES.now);
+let searchFails = 0;
+for (const id of Object.keys(CASES.rows)) {
+  const r = CASES.rows[id];
+  for (const k of Object.keys(r.fields)) {
+    r.fields[k] = (r.fields[k] || []).map(String);
+  }
 }
-eq(parseDateFilter("created_at~2026-09-20"), null, "a tilde op refuses");
-eq(parseDateFilter("created_at>=26-9-2"), null, "a short date refuses");
-eq(parseDateFilter("title>=2026-09-20"), null, "a bad field refuses");
-eq(dateKeeps({ updated_at: "2026-09-21T00:00:00Z" }, ["updated_at>2026-09-20"]), true, "updated_at filters");
-// sortCards: asc, desc, missing-last both ways, the size rank.
-const unsorted = [
-  { id: "b", title: "B" },
-  { id: "a", title: "A", size: "M" },
-  { id: "c", title: "C", size: "S" },
-];
-eq(sortCards(unsorted, "title").map((c) => c.id), ["a", "b", "c"], "title asc");
-eq(sortCards(unsorted, "-title").map((c) => c.id), ["c", "b", "a"], "title desc");
-eq(sortCards(unsorted, "size").map((c) => c.id), ["c", "a", "b"], "size ranks S before M, missing last");
-eq(sortCards(unsorted, "-size").map((c) => c.id), ["a", "c", "b"], "size desc keeps missing last");
-eq(sortCards(unsorted, "").map((c) => c.id), ["b", "a", "c"], "no sort keeps input order");
-eq(statusLabel("in_progress"), "in progress", "underscores read as spaces");
-eq(clampPanelWidth(500, 1000), 500, "the pane width rides through");
-eq(clampPanelWidth(50, 1000), 320, "a too-narrow pane clamps up");
-eq(clampPanelWidth(5000, 1000), 900, "a too-wide pane clamps to 90%");
-eq(clampPanelWidth("junk", 1000), 480, "a non-number reads as the default");
-// fuzzy matching: in-order subsequence, exact mode stays substring.
+for (const c of CASES.cases) {
+  try {
+    const p = parseSearch(c.q, searchKeys, c.surface, grammarNow, sortTable);
+    if (c.error) { console.error("FAIL(wanted error) " + c.q); searchFails++; continue; }
+    const kept = Object.keys(CASES.rows)
+      .filter((id) => CASES.rows[id].surface === c.surface && searchKeeps(p, CASES.rows[id].fields))
+      .sort();
+    const want = (c.keep || []).slice().sort();
+    if (JSON.stringify(kept) !== JSON.stringify(want)) {
+      console.error("FAIL " + c.q + " kept " + JSON.stringify(kept) + " want " + JSON.stringify(want));
+      searchFails++;
+    }
+  } catch (e) {
+    if (c.error && e.message === c.error) continue;
+    console.error("FAIL(err) " + c.q + " got " + e.message + " want " + c.error);
+    searchFails++;
+  }
+}
+eq(searchFails, 0, "the case file clears on the page leg");
+eq(setSortTerm("s:ready sort:created h:codex", "updated-desc"),
+  "s:ready h:codex sort:updated-desc", "setSortTerm replaces the term");
+eq(setSortTerm("s:ready", ""), "s:ready", "an empty sort drops the term only");
+eq(setSortTerm("", "created"), "sort:created", "setSortTerm on empty text appends");
+console.log("search cases: " + CASES.cases.length + " ok");
+// in-order subsequence matching still holds on its own.
 eq(fuzzyHit("wbsrt", "web board list: sorts"), true, "the title subsequence matches");
 eq(fuzzyHit("wbsrt", "word sort"), false, "letters out of order drop");
 eq(fuzzyHit("af8", "af8e03f2-1234"), true, "a session id head matches");
-const fuzzyOn = Object.assign({}, off, { q: "wbsrt", fuzzy: true });
-eq(cardKeeps(Object.assign({}, any, { title: "Web board list: every column sorts" }), nodes, fuzzyOn), true, "fuzzy keeps the subsequence title");
-eq(cardKeeps(any, nodes, fuzzyOn), false, "fuzzy drops a non-match");
-const sidOn = Object.assign({}, off, { q: "af8e03f2" });
-eq(cardKeeps(Object.assign({}, any, { session_ids: ["af8e03f2-e896-4d17-8600-213fca3dfb55"] }), nodes, sidOn), true, "a session id head matches in exact mode");
-eq(cardKeeps(any, nodes, sidOn), false, "a card with no session ids drops");
 const parents = new Set(["e1"]);
 const byId = new Map([["e1", { id: "e1", title: "Epic", completed_at: null }], ["x-1", any]]);
 eq(laneKeyOf(byId.get("e1"), "epic", parents, byId), { key: "e1", title: "Epic" }, "an epic sits in its own lane");
@@ -2550,7 +2574,7 @@ const reversed = nestChildren([
 ]);
 eq(reversed.map((r) => r.card.id), ["par", "kid"], "a child listed first still follows its parent");
 eq(reversed.map((r) => r.depth), [0, 1], "and sits one step in");
-console.log("snapshot page helpers: 49 cases ok");
+console.log("snapshot page helpers: 35 cases ok");
 // The board shortcuts: every key the ? sheet advertises, the typing guard,
 // the Escape unwind order, and the copied-id toast line.
 const M = { meta: false, ctrl: false };
@@ -2618,21 +2642,53 @@ eq(loadRecent('[\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s9\",\
 console.log("recent searches: 12 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
-            lift_js_fn(BACKLOG_PAGE, "nestChildren"),
-            lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
-            lift_js_fn(BACKLOG_PAGE, "parseDateFilter"),
-            lift_js_fn(BACKLOG_PAGE, "dateKeeps"),
-            lift_js_fn(BACKLOG_PAGE, "sortCards"),
-            lift_js_fn(BACKLOG_PAGE, "statusLabel"),
-            lift_js_fn(BACKLOG_PAGE, "clampPanelWidth"),
-            lift_js_fn(BACKLOG_PAGE, "fuzzyHit"),
-            lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
-            lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
-            lift_js_fn(BACKLOG_PAGE, "copiedToast"),
-            lift_js_fn(BACKLOG_PAGE, "pushRecent"),
-            lift_js_fn(BACKLOG_PAGE, "loadRecent"),
+            "{}\n{}\n{}\n{}",
+            [
+                "cardKeeps",
+                "nestChildren",
+                "laneKeyOf",
+                "lev",
+                "nearestKey",
+                "normVal",
+                "cmpParse",
+                "tokenizeSearch",
+                "splitColon",
+                "unquote",
+                "splitAlts",
+                "stampEpoch",
+                "absDate",
+                "dateBound",
+                "datePred",
+                "numPred",
+                "agePred",
+                "cmpHolds",
+                "sortTerm",
+                "looksNodeId",
+                "isUuid",
+                "bareAlts",
+                "termFrom",
+                "parseSearch",
+                "bareHit",
+                "predHolds",
+                "termHolds",
+                "searchKeeps",
+                "setSortTerm",
+                "sortCards",
+                "statusLabel",
+                "clampPanelWidth",
+                "fuzzyHit",
+                "shortcutAction",
+                "isTypingTarget",
+                "copiedToast",
+                "pushRecent",
+                "loadRecent",
+            ]
+            .iter()
+            .map(|name| lift_js_fn(BACKLOG_PAGE, name))
+            .collect::<Vec<String>>()
+            .join("\n"),
+            format!("const CASES = {};", include_str!("search_query_cases.json")),
+            format!("const KEYS = {};", crate::search_query::keys_json()),
             asserts
         );
         let path =
@@ -2655,8 +2711,12 @@ console.log("recent searches: 12 cases ok");
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 assert!(
-                    stdout.contains("snapshot page helpers: 49 cases ok"),
+                    stdout.contains("snapshot page helpers: 35 cases ok"),
                     "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
+                );
+                assert!(
+                    stdout.contains("search cases: 56 ok"),
+                    "the shipped page parser did not clear every case-file row:\n{stdout}{stderr}"
                 );
                 assert!(
                     stdout.contains("backlog shortcuts: 39 cases ok"),

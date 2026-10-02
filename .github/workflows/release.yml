@@ -307,12 +307,18 @@ jobs:
 
           # exit 3 (stable already shipped) reads as an idempotent no-op;
           # exit 1 (v<src> released on another channel) is a real failure
-          # naming the sync-version bump.
+          # naming the sync-version bump. stderr is captured so a failure
+          # re-emits as ::error annotations naming the cause, not a bare
+          # exit 1 under set -e.
           rc=0
-          bash scripts/release/release-version.sh "$channel" "$src" "$day" >> "$GITHUB_OUTPUT" || rc=$?
+          err="$(bash scripts/release/release-version.sh "$channel" "$src" "$day" 2>&1 >> "$GITHUB_OUTPUT")" || rc=$?
           if [ "$rc" -eq 3 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ "$rc" -ne 0 ]; then
+            printf '%s\n' "$err" >&2
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::${line}"
+            done <<< "$err"
             exit "$rc"
           fi
 

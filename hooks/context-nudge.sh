@@ -327,10 +327,6 @@ mkdir -p "$LATCH_DIR" 2>/dev/null || true
 # session ends nothing will ever read it again. Two days, not one: a long
 # session must not have its own latch swept mid-flight.
 find "$LATCH_DIR" -maxdepth 1 -type f -mtime +2 -delete 2>/dev/null || true
-# Legacy sweep: latches written to the state-dir TOP LEVEL before they moved
-# into latches/. Nothing writes that pattern there any more, so a match is by
-# definition pre-migration and needs no age bound. Delete this line after 0.4.0.
-find "${STATE_DIR:-$HOME/.fno}" -maxdepth 1 -type f -name '.context-nudge-*' -delete 2>/dev/null || true
 
 CTX_LATCH="${LATCH_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
 ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
