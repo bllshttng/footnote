@@ -3774,13 +3774,10 @@ mod tests {
             unreachable!("an unscopeable backref key is Inconclusive")
         };
         assert!(reason.contains("could not be scoped"));
-    }
 
-    #[test]
-    fn a_retarget_line_refuses_until_the_graph_binding_has_moved() {
-        // AC4-ERR: the body hands the branch's node to another node, but the
-        // graph still points the old node at this PR; the refusal names both
-        // fno backlog update commands.
+        // AC4-ERR, retarget: the body hands the branch's node to another
+        // node, but the graph still points the old node at this PR; the
+        // refusal names both fno backlog update commands.
         let url = "https://github.com/o/r/pull/7";
         let body = "Fixes x-bbbb\nRetarget x-aaaa x-bbbb msg-447f8f".to_string();
         let unmoved = vec![
