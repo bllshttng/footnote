@@ -37,7 +37,7 @@ naming the probe that died.
 The one deliberate bypass used to be the ``coverage-override`` label alone: it
 answers COVERED with a note carrying ``OVERRIDE_NOTE_PREFIX``, so a caller can
 always tell a merge that was reviewed from a merge that was waived. Operator
-law joins it through ``fno.decide.current_law`` - one standing subject, one
+law joins it through the native decisions door's standing-law read - one
 head-scoped subject minted by the attended ``coverage-waive`` command - with
 the same prefix on its receipts and the same fail-closed reading of anything
 the decision store could not answer.
@@ -167,14 +167,21 @@ def law_authority(subject: str) -> Tuple[str, str]:
     ``chat_attested`` rows cannot carry that fact: any harness-identified
     agent session records the same value through the law door (a check that
     also sits on the write path as
-    ``fno.decide.WaiverAuthorityRefusedError``). Filtering before the count
+    native decide door's waiver guard). Filtering before the count
     means such a row is a clean no, never a waiver, and never a conflict that
     muddies a real operator ruling into unknown.
     """
     try:
-        from fno.decide import list_decisions
+        from fno.rust_binary import call_front_json
 
-        _label, rows, damaged = list_decisions(subject, lane="law", state="live")
+        answer = call_front_json(
+            {
+                "mode": "decisions",
+                "argv": [subject, "--lane", "law", "--state", "live", "--json"],
+            }
+        )
+        rows = answer.get("decisions") or []
+        damaged = int(answer.get("damaged") or 0)
     except Exception as exc:  # noqa: BLE001 - a dead probe is unknown, never none
         return (
             "unknown",
@@ -312,39 +319,45 @@ def run_coverage_waive(pr_number: int, reason: str, cwd: Optional[str] = None) -
         )
         return 4
     subject = scoped_waiver_subject(slug, pr_number, head)
-    from fno.decide import (
-        IndexWriteError,
-        RefusedAuthorityError,
-        UnattributedAuthorityError,
-        record_decision,
-    )
+    # The write rides the native decide door at operator authority: the
+    # attended terminal is the credential, and the door refuses everything
+    # else (exit 3) exactly as the deleted Python engine did.
+    import subprocess
 
-    try:
-        record_decision(
-            decision=WAIVER_DECISION,
-            subject=subject,
-            rationale=text,
-            authority_source="operator",
-        )
-    except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+    from fno.rust_binary import resolve_front_binary
+
+    binary = resolve_front_binary()
+    if binary is None:
+        sys.stderr.write("coverage-waive failed: the native fno binary was not found\n")
+        return 1
+    proc = subprocess.run(
+        [
+            str(binary),
+            "inbox",
+            "decide",
+            subject,
+            WAIVER_DECISION,
+            "--rationale",
+            text,
+            "--authority",
+            "operator",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 3:
         sys.stderr.write(
-            f"coverage-waive refused: {exc}. An operator waiver needs an "
-            "attended operator terminal; a session a harness identifies "
-            "records nothing.\n"
+            "coverage-waive refused: "
+            + proc.stderr.strip()
+            + " An operator waiver needs an attended operator terminal; a "
+            "session a harness identifies records nothing.\n"
         )
         return 3
-    except IndexWriteError as exc:
+    if proc.returncode != 0:
         sys.stderr.write(
-            f"coverage-waive failed: the decision is durable but not yet "
-            f"recoverable ({exc}); run `fno backlog decide-reindex`. Do not "
-            "re-run this command - that records the waiver twice. No gate can "
-            "read it yet.\n"
-        )
-        return 1
-    except Exception as exc:  # noqa: BLE001 - no receipt without a durable record
-        sys.stderr.write(
-            f"coverage-waive failed: decision write failed: "
-            f"{type(exc).__name__}: {exc}\n"
+            f"coverage-waive failed: the decide door refused the write "
+            f"(exit {proc.returncode}): {proc.stderr.strip()}; do not re-run "
+            "this command - a recorded waiver would double.\n"
         )
         return 1
     # Publish the waiver green NOW, so GitHub's ruleset sees the context the

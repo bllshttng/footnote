@@ -57,7 +57,6 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENT_SESSION` | py | unclear: cli/src/fno/agents/context.py:237 |
 | `FNO_ATTEST_BRANCH` | py | Overrides the attested row's branch field with the caller-resolved PR branch (the shell producer's upstream rewrite); hold join/release keep the cwd-resolved local name. Set by skills/review/scripts/emit-attestation.sh, read in cli/src/fno/review/cli.py `_attest_from_record`. |
 | `FNO_AUTO_MEMORY_DIR` | py | unclear: cli/src/fno/inbox/drain.py:407 |
-| `FNO_BACKLOG_FORWARD` | py | Sentinel the decide-retract compatibility leaf mints before it execs the fno-agents dispatcher; a second pass reading the same value refuses with the update remedy instead of exec-spinning through an older binary. |
 | `FNO_BG` | py | unclear: cli/src/fno/target/orient.py:254 |
 | `FNO_BIN` | py+rs | Overrides the Python fno porcelain path at the Rust/Python seam. |
 | `FNO_BOARD_SCOPE` | rs | unclear: crates/fno/src/backlog_view.rs:333 |
@@ -263,7 +262,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `TARGET_MISSION_ID` | py | Presence marks the post-merge ritual as an autonomous run. |
 | `TARGET_NO_MERGE` | py+rs | unclear: cli/src/fno/agents/harness_map.py:215 |
 | `TARGET_PLAN_PATH` | py | unclear: cli/src/fno/target_cli.py:1369 |
-| `TARGET_SESSION_ID` | py | unclear: cli/src/fno/carveout/core.py:178 |
+| `TARGET_SESSION_ID` | py+rs | Run id a driver pre-assigns its workers; init adopts it verbatim as session id and claim owner, and the decide door matches it against a live claim's `target-session:<id>` holder to say whether this caller holds the node. |
 | `TARGET_SIZE` | py | unclear: cli/src/fno/target_cli.py:1734 |
 | `TARGET_SUMMARY_PATH` | py | unclear: cli/src/fno/cost/_register.py:446 |
 | `TARGET_UNATTENDED` | py | unclear: cli/src/fno/target/orient.py:255 |

@@ -139,11 +139,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Isolated per-project fno environments (now `fno config project`).",
         {"hidden": True},
     ),
-    "decide": (
-        "fno.decide.cli:shim_app",
-        "Deprecated decision shim; use fno inbox decide / fno inbox decisions.",
-        {"hidden": True},
-    ),
     "resume": (
         "fno.resume.cli:cli",
         "Durable typed resume receipts (evidence, never write authority)",
@@ -302,7 +297,6 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "carveout": set(),
     "claim": {"release"},
     "config": {"accounts", "get", "set"},
-    "decide": {"reindex"},
     "do": set(),
     "doctor": set(),
     "evals": set(),

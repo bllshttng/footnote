@@ -13,6 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const OBSERVER_COMMAND: &str = "fno backlog undispatched --json";
 
+/// One carrier for the claim-key guard so the board fold and this observer
+/// name the same defect with the same words.
+pub(crate) const CLAIMS_UNREADABLE_KEY_NOT_A_STRING: &str =
+    "claims unreadable: claim key is not a string";
+
 const USAGE: &str =
     "usage: fno-agents backlog undispatched [--project P] [--roadmap-id R] [--parent ID] [--mission M]";
 
@@ -99,7 +104,7 @@ pub(crate) fn classify_planned_unclaimed(
     let mut claimed: BTreeMap<String, String> = BTreeMap::new();
     for claim in claims {
         let Some(key) = claim.get("key").and_then(Value::as_str) else {
-            return Err("claims unreadable: claim key is not a string".to_string());
+            return Err(CLAIMS_UNREADABLE_KEY_NOT_A_STRING.to_string());
         };
         if let Some(node) = key.strip_prefix("node:") {
             claimed.insert(

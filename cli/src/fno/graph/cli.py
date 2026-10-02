@@ -100,19 +100,9 @@ from fno.backlog.advance import refuse_unknown_source as _refuse_unknown_source 
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
-# Decision records are node/PR metadata, so their three leaves live directly
-# under backlog. The old top-level spelling remains a lazy shim.
-from fno.decide.cli import (  # noqa: E402
-    backlog_decide,
-    backlog_decide_retract,
-    backlog_decide_reindex,
-    backlog_decisions,
-)
-
-cli.command("decide", hidden=True)(backlog_decide)
-cli.command("decisions", hidden=True)(backlog_decisions)
-cli.command("decide-retract", hidden=True)(backlog_decide_retract)
-cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
+# Decision records are node/PR metadata; their backlog leaves (decide,
+# decisions, decide-retract, decide-reindex) are the grouped dispatcher's
+# native arms since the decide family ported. No Python mount remains.
 
 
 # Node-lifecycle sub-apps folded under backlog (unit 6 of the  reorg):
