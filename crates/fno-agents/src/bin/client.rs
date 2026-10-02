@@ -159,6 +159,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("wave") {
+        std::process::exit(fno_agents::wave::run(&args[1..]));
+    }
     // cli/src/fno/pr/_sync_canonical.py transports HERE through verb_call:
     // the post-merge canonical sync + its catch-up sweep and staleness
     // alarm, native. Registers no verb (the shrink law allows no new

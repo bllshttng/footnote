@@ -430,6 +430,7 @@ pub mod version;
 pub mod wait;
 pub mod wake_meter;
 pub mod watch_expiry;
+pub mod wave;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
