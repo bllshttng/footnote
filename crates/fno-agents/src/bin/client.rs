@@ -659,12 +659,20 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::announce::run_announce(&args[1..]);
     }
 
+    // `chats`: the conversation record plane (see chats.rs doc). Direct
+    // dispatch like announce; no daemon RPC - a record write must work when
+    // the daemon is wedged, and the read doors back the thread read model.
+    if verb == "chats" {
+        return fno_agents::chats::run_chats(&args[1..]);
+    }
+
     // `update-journal`: the `fno doctor update` lifecycle's one Rust door
     // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
     // lifecycle rows land even when the daemon is wedged, which is the
     // failure the node exists to name. Never registered in
-    // ALL_CLIENT_ACTIONS (the action list is shrink-only); Python routes it
-    // through RUST_CLIENT_VERBS, the binary dispatches on the `verb ==` arm.
+    // ALL_CLIENT_ACTIONS (the action list is shrink-only); the update
+    // lifecycle execs the binary directly, the dispatch rides the
+    // `verb ==` arm.
     if verb == "update-journal" {
         return fno_agents::update_journal::run_update_journal(&args[1..]);
     }

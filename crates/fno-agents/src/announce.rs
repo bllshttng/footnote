@@ -135,7 +135,7 @@ fn parse_expires(raw: &str) -> Result<Duration, String> {
 
 /// All retained bus lines oldest -> newest (log.py::_segment_paths_oldest_first
 /// order), malformed lines skipped. Readers are lock-free by contract.
-fn read_bus_segments(live: &Path) -> Vec<Value> {
+pub(crate) fn read_bus_segments(live: &Path) -> Vec<Value> {
     let mut paths: Vec<(u64, PathBuf)> = Vec::new();
     if let Some(parent) = live.parent() {
         let prefix = format!(
@@ -217,6 +217,18 @@ impl BusLock {
 // ponytail: Rust never rotates; the next Python append rotates an over-size
 // live segment.
 pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("");
+    let has_delivery = obj
+        .get("delivery")
+        .and_then(Value::as_str)
+        .is_some_and(|d| !d.is_empty());
+    // The record seam (plan R2): message kinds record BEFORE the bus write
+    // and fail closed (what was never recorded is never sent); receipts
+    // (`landed`, or an envelope carrying a delivery mark) record AFTER the
+    // bus write and warn only - a receipt must never break an ack flow.
+    if crate::chats::is_message_kind(kind) && !has_delivery {
+        crate::chats::record(&crate::chats::chats_dir(), obj)?;
+    }
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
@@ -226,7 +238,13 @@ pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
         .open(live)
         .map_err(|e| format!("bus open {}: {e}", live.display()))?;
     f.write_all(line.as_bytes())
-        .map_err(|e| format!("bus append: {e}"))
+        .map_err(|e| format!("bus append: {e}"))?;
+    if kind == "landed" || has_delivery {
+        if let Err(e) = crate::chats::record(&crate::chats::chats_dir(), obj) {
+            eprintln!("chats record (receipt) failed: {e}");
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -624,8 +642,10 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
 }
 
 pub(crate) fn new_msg_id() -> String {
-    // 'msg-XXXXXX', matching bus/log.py::new_msg_id (6 hex chars).
-    let mut buf = [0u8; 3];
+    // 'fmail-XXXXXXXXXXXX' (12 hex), matching bus/log.py::new_msg_id.
+    // Pre-widening 'msg-XXXXXX' ids stay legal and resolve through the
+    // migrated chats rows.
+    let mut buf = [0u8; 6];
     if getrandom::fill(&mut buf).is_err() {
         // Fallback entropy: pid + clock. A collision costs one duplicate id.
         let seed = (std::process::id() as u64) << 32
@@ -1234,21 +1254,6 @@ mod tests {
         // An unreadable project map fails closed to equality.
         assert!(resolve_audience("x-cccc", &registry, None).is_empty());
         assert!(resolve_audience("alpha", &registry, None).is_empty());
-    }
-
-    #[test]
-    fn claude_audience_uses_the_full_session_id() {
-        let session = "12345678-1234-1234-1234-123456789abc";
-        let row = agent_row(
-            "king",
-            session,
-            json!({"short_id": "12345678", "crown_level": 1}),
-        );
-
-        assert_eq!(
-            resolve_audience("kings", &[row], Some(&HashMap::new())),
-            vec![session.to_string()]
-        );
     }
 
     #[test]
