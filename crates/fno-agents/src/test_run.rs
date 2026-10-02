@@ -1921,30 +1921,55 @@ fn cleanup_group(pgid: i32) -> bool {
     unsafe { libc::killpg(pgid, 0) != 0 }
 }
 
-/// The group members that outlived the leader, as `pid command` rows, from
-/// one ps pass filtered to the suite's own pgid. An empty vec is a clean
-/// group (or an unreadable table); the cleanup kill below still runs.
+/// The group members that outlived the leader, as `pid command` rows.
+/// Membership is answered twice, by pgid and by session id (the leader
+/// called setsid, so both equal its pid), and the two answers union: one
+/// pass on a loaded runner once missed a live `sleep 30` that a plain ps
+/// column filter should have caught. An empty vec is a clean group (or an
+/// unreadable table); the cleanup kill below still runs.
 fn leaked_members(pgid: i32) -> Vec<String> {
     if unsafe { libc::killpg(pgid, 0) } != 0 {
         return Vec::new(); // ESRCH: nothing left in the group
     }
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,pgid=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.trim_start().splitn(3, char::is_whitespace);
-            let pid = parts.next()?;
-            let row_pgid = parts.next()?;
-            let command = parts.next()?.trim();
-            (row_pgid.parse::<i32>().ok()? == pgid && !command.is_empty())
-                .then(|| format!("{pid} {command}"))
-        })
-        .collect()
+    let mut found: Vec<String> = Vec::new();
+    for flag in ["-g", "-s"] {
+        let Ok(out) = std::process::Command::new("pgrep")
+            .args([flag, &pgid.to_string()])
+            .output()
+        else {
+            continue;
+        };
+        let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(String::from)
+            .collect();
+        if pids.is_empty() {
+            continue;
+        }
+        let Ok(ps) = std::process::Command::new("ps")
+            .args(["-o", "pid=,command=", "-p", &pids.join(",")])
+            .output()
+        else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&ps.stdout).lines() {
+            let mut parts = line.trim_start().splitn(2, char::is_whitespace);
+            let Some(pid) = parts.next() else {
+                continue;
+            };
+            let Some(command) = parts.next() else {
+                continue;
+            };
+            let command = command.trim();
+            if command.is_empty() || found.iter().any(|row| row.split(' ').next() == Some(pid)) {
+                continue;
+            }
+            found.push(format!("{pid} {command}"));
+        }
+    }
+    found
 }
 
 /// The durable fleet incident stop, read as a refusal for this run: `Some`

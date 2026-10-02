@@ -69,16 +69,21 @@ pub struct OutsideGroup {
     pub pids: Vec<u32>,
 }
 
-/// The group label for a process command: only the bundle's executable
-/// region (`.app/Contents/`) names the app `X` - a process that merely
-/// reads a file inside X.app is not X. Anything else groups under the
-/// argv0 basename.
+/// The app name a command belongs to, when the command is an app-bundle
+/// process itself: the bundle's executable region (`.app/Contents/`) names
+/// the app, and only when the bundle path is the command's own path (a
+/// " /" before the match is an argument path, so a reader of a file inside
+/// X.app stays itself).
+fn app_bundle(command: &str) -> Option<String> {
+    let idx = command.find(".app/Contents/")?;
+    let before = &command[..idx];
+    (!before.contains(" /")).then(|| before.rsplit('/').next().unwrap_or(before).to_string())
+}
+
+/// The group label for a process command: the app name for a bundle
+/// process, else the argv0 basename.
 fn app_group_name(command: &str) -> String {
-    if let Some(idx) = command.find(".app/Contents/") {
-        let before = &command[..idx];
-        return before.rsplit('/').next().unwrap_or(before).to_string();
-    }
-    argv0_basename(command).to_string()
+    app_bundle(command).unwrap_or_else(|| argv0_basename(command).to_string())
 }
 
 /// The group label parts: the argv0 basename of a command line.
@@ -117,7 +122,7 @@ pub fn outside_groups(procs: &[ProcRow], fleet_pids: &HashSet<u32>) -> Vec<Outsi
         if owned.contains(&row.pid) || row.pid == 0 {
             continue;
         }
-        let bundle = row.command.contains(".app/Contents/");
+        let bundle = app_bundle(&row.command).is_some();
         let name = app_group_name(&row.command);
         let entry = groups.entry(name.clone()).or_insert_with(|| OutsideGroup {
             name,
