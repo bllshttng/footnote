@@ -892,6 +892,11 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # `fno doctor update --check` resolver shells it through
             # verb_call with a stdin JSON payload, never an argv route.
             "release-notes",
+            # `update-journal` is the update lifecycle's transport-only door:
+            # update.py and the installer's EXIT trap exec the binary with
+            # the verb as the first token (like `backlog`), so it dispatches
+            # on the `verb ==` arm and is never routed or help-listed.
+            "update-journal",
         }
     )
 
