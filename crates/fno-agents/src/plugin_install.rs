@@ -1150,7 +1150,7 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             }
             // The pre-rename spelling rides one release: python still sends it.
             "--team" | "--crown" => {
-                parsed.team = args.get(i + 1).cloned();
+                parsed.crown = args.get(i + 1).cloned();
                 i += 2;
             }
             "--guard" => {
