@@ -8118,31 +8118,6 @@ async fn attach_and_run(
                     backlog_board::WriteAction::Args(args, stdin) => {
                         crate::backlog_write::run_verb(&args, stdin).await.1
                     }
-                    backlog_board::WriteAction::Append { id, text } => {
-                        let id_for_read = id.clone();
-                        let current = tokio::task::spawn_blocking(move || {
-                            crate::store_client::node(
-                                &crate::backlog_view::graph_path(),
-                                &id_for_read,
-                            )
-                        })
-                        .await
-                        .unwrap_or(Ok(None))
-                        .ok()
-                        .flatten()
-                        .and_then(|n| n.get("details").cloned())
-                        .map(|d| d.to_string())
-                        .unwrap_or_default();
-                        let stdin = format!("{current}\n\n{text}");
-                        let args: Vec<String> = vec![
-                            "backlog".into(),
-                            "update".into(),
-                            id,
-                            "--details-file".into(),
-                            "-".into(),
-                        ];
-                        crate::backlog_write::run_verb(&args, Some(stdin)).await.1
-                    }
                 };
                 let _ = tx.send((gen, backlog_board::BoardMsg::VerbDone { notice }));
             });
