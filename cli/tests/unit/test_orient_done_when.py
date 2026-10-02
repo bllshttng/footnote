@@ -124,12 +124,10 @@ def test_stock_install_announces_the_self_review_floor(repo, monkeypatch):
     assert "self-review required for code" in line
     # A LIVE claim backs the opt-out: the floor clause is genuinely absent.
     from fno.claims import acquire_claim
-    from fno.claims.io import claims_root_for
 
     acquire_claim(
         "config-optout:review.self_review_required",
         "session-a",
-        root=claims_root_for("config-optout:review.self_review_required"),
     )
     line = _done_when_line({}, root)
     assert "self-review required for code" not in line
