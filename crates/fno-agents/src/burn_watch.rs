@@ -855,18 +855,27 @@ fn sample_session(
     node: &str,
     cwd: &str,
     facts: &HashMap<String, NodeFacts>,
+    home: &AgentsHome,
     runner: Runner,
 ) -> Sample {
     let (head, commits) = git_progress(cwd, runner);
     Sample {
-        cost_usd: Some(crate::loopcheck::session_cost_from_ledger(
+        cost_usd: session_cost_exact(
+            &home.otel_dir().join("otel.db"),
             &crate::paths::ledger_path(Path::new(cwd)),
             sid,
-        )),
+        ),
         head,
         commits,
         touched_at: facts.get(node).and_then(|f| f.touched_at),
     }
+}
+
+/// OTel rows are exact cost; the transcript-parsed ledger estimate answers
+/// only when no row exists for the session.
+pub(crate) fn session_cost_exact(otel_db: &Path, ledger: &Path, sid: &str) -> Option<f64> {
+    crate::otel_ingest::session_cost_usd(otel_db, sid)
+        .or_else(|| Some(crate::loopcheck::session_cost_from_ledger(ledger, sid)))
 }
 
 /// The pass body, behind `maybe_tick`'s cadence gate. `runner` and
@@ -921,7 +930,7 @@ fn run_pass(
         }
         sampled.insert(sid.clone());
         let prev = load_state(home, sid);
-        let sample = sample_session(sid, node, cwd, &facts, runner);
+        let sample = sample_session(sid, node, cwd, &facts, home, runner);
         let (decision, mut next) = decide(prev.as_ref(), &sample, now_epoch, idle_s, spend_min);
         match decision {
             Decision::FirstSight => {}

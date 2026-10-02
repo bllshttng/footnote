@@ -33,5 +33,6 @@ If any of these are misconfigured, the run will fail with a clear error in the r
 - No footnote-internal credentials. There is no footnote cloud service.
 - No credentials sent to third-party services other than the agent runtime you have configured.
 - No telemetry beyond what Anthropic and GitHub already collect for their products.
+- Local cost telemetry stays local. fno can ingest Claude Code's OpenTelemetry records into a receiver on 127.0.0.1 and store exact per-request cost in `~/.fno/agents/otel/otel.db`. Nothing leaves this machine. Turn it off with `[telemetry] claude_otel = false` in config.toml. See `docs/architecture/cost-accuracy.md`.
 
 See `docs/security-posture.md` for the broader trust model.

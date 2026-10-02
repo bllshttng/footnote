@@ -285,6 +285,7 @@ pub mod operator_turns;
 pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
+pub mod otel_ingest;
 pub mod pane_keeper;
 pub mod pane_rebind;
 pub mod pane_relaunch;

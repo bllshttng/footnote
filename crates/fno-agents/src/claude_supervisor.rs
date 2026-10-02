@@ -170,7 +170,60 @@ fn supervisor_birth_command(config_dir: Option<&Path>) -> std::process::Command 
     for key in held_poison_keys() {
         cmd.env_remove(key);
     }
+    if crate::agents_config::telemetry_claude_otel(
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    ) {
+        for (key, value) in otel_env(
+            &crate::paths::AgentsHome::from_env().otel_dir().join("port"),
+            |key| std::env::var(key).ok(),
+        ) {
+            cmd.env(key, value);
+        }
+    }
     cmd
+}
+
+/// The OTEL_* env a supervisor birth carries when fno's localhost receiver is
+/// up (`<agents home>/otel/port` parses) and the ambient env has no telemetry
+/// of its own. Empty means "leave this supervisor's telemetry alone": an
+/// operator endpoint wins, and an already-running supervisor keeps its env
+/// until restart.
+pub(crate) fn otel_env(
+    port_file: &Path,
+    ambient: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    if ambient("CLAUDE_CODE_ENABLE_TELEMETRY").is_some() {
+        return Vec::new();
+    }
+    if [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    ]
+    .iter()
+    .any(|key| ambient(key).is_some())
+    {
+        return Vec::new();
+    }
+    let Some(port) = std::fs::read_to_string(port_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+    else {
+        return Vec::new();
+    };
+    vec![
+        ("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "1".into()),
+        ("OTEL_LOGS_EXPORTER".into(), "otlp".into()),
+        ("OTEL_METRICS_EXPORTER".into(), "none".into()),
+        (
+            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL".into(),
+            "http/json".into(),
+        ),
+        (
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT".into(),
+            format!("http://127.0.0.1:{port}/v1/logs"),
+        ),
+        ("OTEL_LOG_TOOL_DETAILS".into(), "1".into()),
+    ]
 }
 
 fn supervisor_running(config_dir: Option<&Path>) -> bool {
