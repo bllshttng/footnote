@@ -2687,10 +2687,7 @@ console.log("recent searches: 12 cases ok");
             .map(|name| lift_js_fn(BACKLOG_PAGE, name))
             .collect::<Vec<String>>()
             .join("\n"),
-            format!(
-                "const CASES = {};",
-                include_str!("search_query_cases.json")
-            ),
+            format!("const CASES = {};", include_str!("search_query_cases.json")),
             format!("const KEYS = {};", crate::search_query::keys_json()),
             asserts
         );
