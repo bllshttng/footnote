@@ -281,14 +281,15 @@ _plan_node_id() {
             }
         }
         END {
-            # "-" marks a PRESENT-but-unusable link key (a mapping or a
-            # multi-item list): it stops the chain like the Rust
-            # plan_link_id does, while an absent key or an empty list
-            # falls through to the next one.
+            # A usable link unwraps to the id. A PRESENT-but-unusable shape
+            # (a multi-item list, a nested mapping) returns its raw text so
+            # the well-formed-id check in the caller still reads malformed
+            # and keeps the malformed warning voice. Only an absent key or
+            # an empty list falls through to the next key.
             for (k in vals) {
                 v = vals[k]
                 if (v == "[]") { v = "" }
-                else if (v == "MANY") { v = "-" }
+                else if (v == "MANY") { ; }
                 else if (v ~ /^1:/) {
                     v = substr(v, 3)
                     gsub(/^\[|\]$/, "", v)
@@ -310,8 +311,6 @@ _plan_node_id() {
                 v = vals["graph_node_id"]
                 if (v != "") { link = v }
             }
-            if (link == "-") { link = "" }
-            if (link ~ /,/) { link = "" }
             print link
         }
     ' "$file")
