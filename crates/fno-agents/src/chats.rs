@@ -673,8 +673,8 @@ pub(crate) fn resolve_prefix_at(
             Ok(Resolved {
                 id: r.get(0)?,
                 chat_id: r.get(1)?,
-                from_key: r.get(2)?,
-                ts: r.get(3)?,
+                from_key: r.get(3)?,
+                ts: r.get(2)?,
             })
         })
         .map_err(|e| format!("resolve query: {e}"))?;
