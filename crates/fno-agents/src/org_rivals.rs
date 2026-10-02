@@ -1,7 +1,7 @@
-//! `org-rivals`: the org view's rivalry scan, answered from the SAME
+//! `org_rivals`: the org view's rivalry scan, answered from the SAME
 //! ladder-aware rule the grant path enforces (`loop_lead::team_rivals`), so
 //! the view and the grant-time refusal cannot disagree. Reached as payload
-//! kind `org-rivals` on the spawn-overlay verb.
+//! kind `court-rivals` on the spawn-overlay verb.
 //!
 //! Input: `rows` of (name, crown_scope, crown_level); rows without a
 //! non-blank `crown_scope` claim nothing. Output: one rival PAIR per
@@ -48,7 +48,7 @@ fn scan(payload: &Value, projects: &HashMap<String, String>) -> Result<Value, St
     let rows = payload
         .get("rows")
         .and_then(Value::as_array)
-        .ok_or_else(|| "org-rivals: payload needs a rows array".to_string())?;
+        .ok_or_else(|| "court-rivals: payload needs a rows array".to_string())?;
     let mut claims: Vec<(String, Option<u32>, String)> = Vec::new();
     for row in rows {
         let scope = row

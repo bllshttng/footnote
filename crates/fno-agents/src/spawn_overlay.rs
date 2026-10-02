@@ -167,9 +167,9 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("crown-settle") => crate::team_settle::resolve(&payload),
         Some("crown-identity") => crate::team_identity::resolve(&payload),
         Some("crown-widen") => crate::team_widen::resolve(&payload),
-        Some("org-rivals") => crate::org_rivals::resolve(&payload),
+        Some("court-rivals") => crate::org_rivals::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|org-rivals"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|court-rivals"
         )),
     }
 }

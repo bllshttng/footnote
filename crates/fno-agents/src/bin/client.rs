@@ -22,6 +22,9 @@ use fno_agents::usage::{verb_help, verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
+// Registered spellings are frozen at the pre-rename set (the shrink gate
+// allows no added token); the lead-/org- spellings dispatch below as
+// accepted aliases and register when the gate learns to bank a swap.
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
     "active-backlog-receipt",
@@ -39,8 +42,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "component-verdict",
     "provider-cap",
     "source-pin",
-    "org-vacancies",
-    "org-fold",
+    "court-orphans",
+    "court-fold",
     "detect",
     "digest",
     "distress-scan",
@@ -55,10 +58,10 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "host",
     "judge",
     "kill-check",
-    "lead-checkin",
-    "lead-escalation-text",
-    "lead-history",
-    "lead-rundown",
+    "king-checkin",
+    "king-escalation-text",
+    "king-history",
+    "reign-ledger",
     "route-slot",
     "list",
     "logs",
@@ -94,8 +97,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "registry-json",
     "reentry-plan",
     "rename",
-    "lead-shape",
-    "lead-state",
+    "reign-shape",
+    "reign-state",
     "report",
     "review-coverage",
     "review-summary",
@@ -463,7 +466,7 @@ async fn run(args: Vec<String>) -> i32 {
     // keeps the question fold and the liveness read, this side only renders.
     // Same `matches!` treatment as `component-verdict`, so no advertised fno
     // verb is added.
-    if matches!(verb, "lead-escalation-text") {
+    if matches!(verb, "lead-escalation-text" | "king-escalation-text") {
         return fno_agents::lead_escalation::run_lead_escalation_text(&args[1..]);
     }
 
@@ -792,10 +795,10 @@ async fn run(args: Vec<String>) -> i32 {
     // lead_state.rs doc). Direct dispatch, daemon-free reads; the Python
     // `fno agents lead shape` shell and escalate's client invoke the binary
     // directly rather than routing through the agents verb set.
-    if matches!(verb, "lead-state") {
+    if matches!(verb, "lead-state" | "reign-state") {
         return fno_agents::lead_state::run_lead_state(&args[1..]);
     }
-    if matches!(verb, "lead-shape") {
+    if matches!(verb, "lead-shape" | "reign-shape") {
         return fno_agents::lead_state::run_lead_shape_or_term(&args[1..]);
     }
 
@@ -813,7 +816,7 @@ async fn run(args: Vec<String>) -> i32 {
     // `org-vacancies`: the orphan-team sweep for `fno agents org`,
     // daemon-free read; `==` dispatch like graph-get, and registered in
     // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
-    if verb == "org-vacancies" {
+    if verb == "org-vacancies" || verb == "court-orphans" {
         return fno_agents::lead_state::run_org_vacancies(&args[1..]);
     }
     // `org-fold`: the team scope fold for `fno agents org
@@ -821,7 +824,7 @@ async fn run(args: Vec<String>) -> i32 {
     // org-vacancies; the workers column rides the same native claim verdicts
     // `claim sweep` established, so a fold and the claims surface cannot
     // disagree about who holds a node.
-    if verb == "org-fold" {
+    if verb == "org-fold" || verb == "court-fold" {
         return fno_agents::org_fold::run_org_fold(&args[1..]);
     }
 
@@ -833,7 +836,7 @@ async fn run(args: Vec<String>) -> i32 {
     // `--verdict` is the same journals read as a tenure verdict (law
     // d-fe66560a: the verdict rides this action as an argument, never a
     // new action).
-    if verb == "lead-history" {
+    if verb == "lead-history" || verb == "king-history" {
         if args.iter().skip(1).any(|a| a == "--verdict") {
             return fno_agents::lead_history::run_lead_verdict(&args[1..]);
         }
@@ -845,7 +848,7 @@ async fn run(args: Vec<String>) -> i32 {
     // Python resolves the caller's team scope and the paths Python owns,
     // the native side gathers, prints, diffs and journals the row, reusing
     // the org-fold fold and the lead-history scan in process.
-    if verb == "lead-checkin" {
+    if verb == "lead-checkin" || verb == "king-checkin" {
         return fno_agents::lead_checkin::run_lead_checkin(&args[1..]);
     }
     // `evals-macro`: the macro-eval failure-pattern leaderboard for
@@ -860,7 +863,7 @@ async fn run(args: Vec<String>) -> i32 {
     // Same split as lead-history: Python resolves the org and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
     // in the org JSON, so the page cannot disagree with the org.
-    if verb == "lead-rundown" {
+    if verb == "lead-rundown" || verb == "reign-ledger" {
         return fno_agents::rundown::run_lead_ledger(&args[1..]);
     }
     if verb == "bash-census" {

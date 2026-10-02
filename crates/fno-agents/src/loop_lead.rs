@@ -510,7 +510,7 @@ fn canonical_members(scope: &str, projects: &HashMap<String, String>) -> HashSet
         .collect()
 }
 
-/// `canonical_members` for sibling modules: `org-rivals` names the shared
+/// `canonical_members` for sibling modules: `court-rivals` names the shared
 /// territory of a rival pair, sorted so the answer is deterministic.
 pub(crate) fn territory_members(scope: &str, projects: &HashMap<String, String>) -> Vec<String> {
     let mut members: Vec<String> = canonical_members(scope, projects).into_iter().collect();
