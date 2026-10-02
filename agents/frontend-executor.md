@@ -1,6 +1,6 @@
 ---
 name: frontend-executor
-description: Implement and polish frontend work against its design and acceptance criteria.
+description: Run frontend readiness passes, classify findings, and report deferred risks.
 model: sonnet
 color: magenta
 tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]

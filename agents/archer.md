@@ -1,6 +1,6 @@
 ---
 name: archer
-description: Implement one task with test-first discipline and return a structured result.
+description: Implement one task test-first and return a structured SUCCESS, FAILED, or BLOCKED result.
 model: sonnet
 color: cyan
 tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]

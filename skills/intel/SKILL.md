@@ -1,6 +1,6 @@
 ---
 name: intel
-description: Summarize who acted, what was completed, and where agent sessions needed correction.
+description: Report session provenance, work completed, and where agent sessions needed correction.
 ---
 
 # intel

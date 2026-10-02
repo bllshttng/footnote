@@ -1,6 +1,6 @@
 ---
 name: autocorrect
-description: Review recurring agent corrections and maintain the project's self-improvement loop.
+description: Review corrections, triage proposed patches, and audit the agent self-improvement loop.
 ---
 
 # Autocorrect
