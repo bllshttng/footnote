@@ -193,6 +193,7 @@ pub struct MachineSample {
     pub compressed_gb: Option<f64>,
     pub swap_used_gb: Option<f64>,
     pub swap_total_gb: Option<f64>,
+    pub total_mem_gb: Option<f64>,
     pub live_rows: Option<u64>,
     pub kings: Option<u64>,
     pub workers: Option<u64>,
@@ -271,6 +272,7 @@ pub fn read(
         compressed_gb: None,
         swap_used_gb: None,
         swap_total_gb: None,
+        total_mem_gb: None,
         live_rows: None,
         kings: None,
         workers: None,
@@ -327,6 +329,14 @@ pub fn read(
                 sample.swap_used_gb = Some(used / 1024.0);
             }
         }
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+        {
+            if let Ok(bytes) = String::from_utf8_lossy(&out.stdout).trim().parse::<f64>() {
+                sample.total_mem_gb = Some(bytes / 1024.0 / 1024.0 / 1024.0);
+            }
+        }
     }
     #[cfg(target_os = "linux")]
     if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
@@ -334,6 +344,14 @@ pub fn read(
             sample.swap_used_gb = Some(used);
             sample.swap_total_gb = Some(total);
             sample.compressed_gb = compressed;
+        }
+        if let Some(kb) = text
+            .lines()
+            .find_map(|line| line.strip_prefix("MemTotal:"))
+            .and_then(|rest| rest.trim_start_matches(':').split_whitespace().next())
+            .and_then(|value| value.parse::<f64>().ok())
+        {
+            sample.total_mem_gb = Some(kb / 1024.0 / 1024.0);
         }
     }
     sample.took_ms = Some(started.elapsed().as_millis() as u64);
@@ -463,7 +481,7 @@ pub fn footer_line(row: &(String, Value), now: DateTime<Utc>) -> String {
         .or_else(|| data.get("age_s").and_then(Value::as_i64))
         .unwrap_or(0);
     let _ = id;
-    format!(
+    let mut line = format!(
         "{}% busy ({}% sys) of {} cores against band {}% -> {} · load_15m {} ({} per core, band {}) · {} runnable of {} processes · {} zombies · compressor {} GB · swap {} of {} GB · sampled {}s ago",
         percent(data.get("busy_fraction")),
         percent(data.get("sys_fraction")),
@@ -480,7 +498,17 @@ pub fn footer_line(row: &(String, Value), now: DateTime<Utc>) -> String {
         display(data.get("swap_used_gb"), 1),
         display(data.get("swap_total_gb"), 1),
         age
-    )
+    );
+    let budget = crate::machine_load::budget(
+        data.get("cores").and_then(Value::as_f64),
+        data.get("total_mem_gb").and_then(Value::as_f64),
+        data.get("sessions"),
+    );
+    line.push_str(&format!(
+        " · budget max_live {} ({} leads + {} workers; {})",
+        budget.max_live, budget.leads, budget.workers, budget.basis
+    ));
+    line
 }
 
 pub fn no_row_footer() -> String {
