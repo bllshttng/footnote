@@ -143,6 +143,7 @@ pub mod daemon;
 pub mod day;
 pub mod decide_door;
 pub mod decision_index;
+pub mod decision_trace;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
@@ -1398,6 +1399,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",
+    // One hop in a traced decision (decision_trace.rs): ask, route,
+    // correction, or guard block, written through emit_span into the
+    // project journal; the Python side documents the shape for the
+    // validator, the way operator_question does.
+    "decision_span",
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     // Spawn coordinator: the durable accepted record written BEFORE
