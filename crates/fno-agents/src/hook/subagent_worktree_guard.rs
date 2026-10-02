@@ -45,7 +45,7 @@ fn reason_for(payload: &Value) -> Option<String> {
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if agent_id.is_empty() && !super::lead_guard::is_subagent_transcript(transcript, sid) {
+    if agent_id.is_empty() && !super::lead_guard_wire::is_subagent_transcript(transcript, sid) {
         return None;
     }
     let target = payload

@@ -87,7 +87,7 @@ def _graph_details(graph_path):
 def _hosted_dispatch(monkeypatch, before_transport=None):
     calls = []
 
-    def dispatch_send(**kwargs):
+    def dispatch_send(from_name="lead", **kwargs):
         if before_transport is not None:
             before_transport()
         calls.append(kwargs)
@@ -1211,14 +1211,18 @@ def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    # Full sender identity travels with the message; model remains in bus record.
-    assert 'from="abcd1234"' in body
+    # Full sender identity rides the header line; the model stays on the bus
+    # record, never in the delivered text.
+    assert body.splitlines()[0].startswith("`@abcd1234 · fmail-")
     assert 'model=' not in body
-    assert 'harness="claude-code"' in body
     from fno.bus.log import iter_messages
 
-    row = next(m for m in iter_messages() if 'from="abcd1234"' in m.body)
+    row = next(
+        m for m in iter_messages()
+        if m.body.splitlines()[0].startswith("`@abcd1234 · fmail-")
+    )
     assert row.from_model == "claude-opus-4-8"
+    assert row.from_harness == "claude"
 
 
 # ---------------------------------------------------------------------------

@@ -1332,7 +1332,10 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert not recovery._redispatch(self._cand())
-        lr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"])
+        # The lane slot frees through the native door now: <binary> claim
+        # lane-release --lane <node> (the Python `claim release --lane` leg is
+        # deleted), so the pin names the door the code actually walks.
+        lr = self._index_of(calls, ["claim", "lane-release", "--lane"])
         assert lr is not None
         assert "x-370f" in calls[lr]
 
@@ -1342,7 +1345,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
-        assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"]) is None
+        assert self._index_of(calls, ["claim", "lane-release", "--lane"]) is None
 
     def test_unresolvable_node_returns_false(self, monkeypatch):
         # No node id in the worktree manifest → nothing to re-dispatch.
@@ -1374,7 +1377,7 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
-        assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"]) is not None
+        assert self._index_of(calls, ["claim", "lane-release", "--lane"]) is not None
         self._assert_no_graph_claim_writes(calls)
 
 

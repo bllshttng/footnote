@@ -381,7 +381,7 @@ pub(super) fn node_id_of(node: &Value) -> Option<&str> {
 }
 
 fn registry_matches_handle(row: &Value, handle: &str) -> bool {
-    ["harness_session_id", "short_id"]
+    ["harness_session_id", "short_id", "fno_id"]
         .iter()
         .any(|key| str_at(row, key).is_some_and(|value| session_handle_matches(value, handle)))
         || registry_name_matches(row, handle)

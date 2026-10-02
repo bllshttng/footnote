@@ -373,6 +373,39 @@ impl PrBinding {
     }
 }
 
+/// The refusal while a Retarget line's graph binding has not moved: the old
+/// node still points back at this PR, or the new one does not yet. `None`
+/// when the body carries no live Retarget line.
+pub(crate) fn retarget_binding_refusal(
+    keys: &PrBinding,
+    body: &str,
+    number: i64,
+    url: &str,
+) -> Option<String> {
+    if super::pr_closure::retargeted_from(body).is_empty() {
+        return None;
+    }
+    let Some(r) = super::pr_closure::retarget(body) else {
+        return None;
+    };
+    if keys.backrefs.contains(&r.from) || !keys.backrefs.contains(&r.to) {
+        Some(format!(
+            "the Retarget line hands {from} to {to} (approval {approval}), but the graph \
+             binding has not moved: {from} still carries this PR, or {to} does not yet. \
+             Move it first: fno backlog update {from} --pr-number null --pr-url null, \
+             then fno backlog update {to} --pr-number {number} --pr-url {url}. Stop and \
+             ask instead if {to} already carries another PR.",
+            from = r.from,
+            to = r.to,
+            approval = r.approval,
+            number = number,
+            url = url,
+        ))
+    } else {
+        None
+    }
+}
+
 /// Compute the three binding keys of one PR against graph `entries`. The one
 /// predicate behind both readers: the board's `pr_node_binding_untracked`
 /// warning and the merge owner's refusal.
@@ -384,9 +417,15 @@ pub(crate) fn pr_binding_keys(
     entries: &[Value],
 ) -> PrBinding {
     let real_ids: HashSet<&str> = entries.iter().filter_map(|e| s_str(e, "id")).collect();
+    // An approved Retarget line hands the branch's node away: one filter here
+    // covers the board, `fno do pr list`, the dispatch-hold probe, the
+    // main-repair probe and the merge owner.
+    let gone = body
+        .map(super::pr_closure::retargeted_from)
+        .unwrap_or_default();
     let branch: Vec<String> = branch_node_ids(head_ref)
         .into_iter()
-        .filter(|nid| real_ids.contains(nid.as_str()))
+        .filter(|nid| real_ids.contains(nid.as_str()) && !gone.contains(nid))
         .collect();
     let trailer: Vec<String> = body
         .map(trailer_node_ids)
@@ -1012,6 +1051,19 @@ mod tests {
         })];
         let keys = pr_binding_keys(5, "fix/descriptive", Some(url), None, &carrying);
         assert_eq!(keys.backrefs, vec!["x-dddd".to_string()]);
+        assert_eq!(keys.unbound_detail(), None);
+        // Retarget key: an approved body line hands the branch's node away,
+        // so the branch stops naming it even though the head still does.
+        let entries = vec![json!({"id": "x-aaaa"}), json!({"id": "x-bbbb"})];
+        let keys = pr_binding_keys(
+            5,
+            "feature/x-aaaa",
+            Some(url),
+            Some("Fixes x-bbbb\nRetarget x-aaaa x-bbbb msg-447f8f"),
+            &entries,
+        );
+        assert_eq!(keys.branch, Vec::<String>::new());
+        assert_eq!(keys.trailer, vec!["x-bbbb".to_string()]);
         assert_eq!(keys.unbound_detail(), None);
     }
 

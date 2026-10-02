@@ -156,4 +156,31 @@ else
   pass "stray internal colon between ids fails"
 fi
 
+# zero-claim refusal: the remedy must name the Retarget line and the recipe.
+if run_err $'Fixes x-bbbb' "feature/x-aaaa" "$ERR"; then
+  fail "wrong-node body should fail"
+fi
+for want in "Retarget" "create.md"; do
+  grep -q -e "$want" "$ERR" || fail "wrong-node refusal should name '$want'"
+done
+pass "wrong-node refusal names the Retarget line and the create.md recipe"
+
+# corpus gate rows: every fixture case carrying gate replays through the real
+# gate, so the shared corpus pins the bash leg the same way it pins the Rust
+# parser and the Python forwarder tests.
+CORPUS="${SCRIPT_DIR}/../../tests/fixtures/pr-closure-cases.json"
+if printf '' | base64 -d >/dev/null 2>&1; then B64D="base64 -d"; else B64D="base64 -D"; fi
+corpus_rows=0
+while IFS=$'\t' read -r head_ref gate body_b64; do
+  body="$(printf '%s' "$body_b64" | $B64D)"
+  corpus_rows=$((corpus_rows + 1))
+  if [[ "$gate" == "pass" ]]; then
+    run "$body" "$head_ref" || fail "corpus row should pass: $head_ref / $body"
+  elif run "$body" "$head_ref"; then
+    fail "corpus row should fail: $head_ref / $body"
+  fi
+done < <(jq -r '.cases[] | select(.gate) | [.head_ref, .gate, (.body|@base64)] | @tsv' "$CORPUS")
+[[ $corpus_rows -gt 0 ]] || fail "no corpus gate rows replayed (fixture missing or jq failed)"
+pass "corpus gate rows all match ($corpus_rows rows)"
+
 log "all scenarios passed"

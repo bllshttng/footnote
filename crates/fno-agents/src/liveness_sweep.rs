@@ -697,6 +697,21 @@ pub(crate) fn persist_reconcile_changes(
                 .harness_session_id
                 .as_deref()
                 .and_then(|sid| transcripts.find(sid, entry.harness_name()));
+            // The running session cost: absorb the transcript's appended
+            // bytes and remember the reading under the session id (law
+            // d-e952ed19), never in the registry.
+            if let (Some(sid), Some(path)) =
+                (entry.harness_session_id.as_deref(), transcript.as_deref())
+            {
+                crate::model_price::measure_session_cost(
+                    &crate::model_price::state_dir(),
+                    sid,
+                    path,
+                    entry.model.as_deref(),
+                    entry.provider.as_deref(),
+                    now,
+                );
+            }
             measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())
         })
         .collect();

@@ -450,6 +450,8 @@ fn mail_note(
         "send".into(),
         asker.clone(),
         resume_message(state),
+        "--from-name".into(),
+        "fno/questions".into(),
         "--style-exception".into(),
         "attention delivery: quoted answer text, not authored prose".into(),
     ];
@@ -479,6 +481,8 @@ fn mail_team(
         "send".into(),
         holder.to_string(),
         message,
+        "--from-name".into(),
+        "fno/questions".into(),
         "--style-exception".into(),
         "attention delivery: quoted answer text, not authored prose".into(),
     ];

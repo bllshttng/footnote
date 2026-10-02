@@ -1435,7 +1435,7 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
 
     rows = list(iter_messages(warn=False))
     assert len(rows) == 1
-    assert rows[0].id.startswith("msg-")
+    assert rows[0].id.startswith("fmail-")
     assert rows[0].delivery == "hosted"
     assert rows[0].body == "/code-review <level> --comment --fix"
     assert rows[0].word_count == style.word_count(rows[0].body)
@@ -1883,18 +1883,15 @@ def test_from_self_resolves_a_pane_codex_worker(runner, mailbox, monkeypatch):
     """Regression (pane identity): a codex pane worker's stamp is name_only by
     construction, its own registry row already holds its id, and the walk is
     silent in the sandbox - the exact shape that refused --from-self and drove
-    the worker to report without a stamp. It now resolves and the envelope
-    carries the codex session's canonical handle."""
+    the worker to report without a stamp. It now resolves and the header names
+    the worker's own registry row (which binds the codex session id)."""
     injected = _seed_codex_pane_self(mailbox, monkeypatch, SID_CODEX)
     res = runner.invoke(
         app, ["agents", "mail", "send", "claudepeer", "status: ok", "--from-self"]
     )
     assert res.exit_code == 0, res.output + (res.stderr or "")
     assert injected, "send never reached the claude transport"
-    # The wrapped envelope carries the sender inside its fno_mail header; the
-    # transport's sender kwarg is the raw lane's. `from` holds the
-    # full session id when one is proven.
-    assert f'from="{SID_CODEX}"' in injected[0][1]
+    assert injected[0][1].splitlines()[0].startswith("`@codexself · fmail-")
 
 
 def test_from_self_still_refuses_a_codex_disagreement(runner, mailbox, monkeypatch):

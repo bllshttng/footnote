@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 # Pre-install PYTHONPATH so `python scripts/metrics/pr-node-closure-audit.py`
-# works from a bare checkout, mirroring cost-tracker.sh's convention.
+# works from a bare checkout, the repo-wide scripts convention.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CLI_SRC = _REPO_ROOT / "cli" / "src"
 if _CLI_SRC.is_dir() and str(_CLI_SRC) not in sys.path:

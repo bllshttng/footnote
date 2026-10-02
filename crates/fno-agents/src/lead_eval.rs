@@ -367,6 +367,7 @@ fn fold_transcript(
                         "org term",
                         "org done",
                         "--team",
+                        "--crown",
                         "--promote",
                         "--succeed",
                     ]
@@ -715,7 +716,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     while i < args.len() {
         let flag = args[i].as_str();
         match flag {
-            "--session" | "--team" | "--since" | "--until" => {
+            // The pre-rename spelling rides one release: python still sends it.
+            "--session" | "--team" | "--crown" | "--since" | "--until" => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -723,7 +725,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .ok_or_else(|| format!("{flag} requires a value"))?;
                 match flag {
                     "--session" => parsed.session = Some(value),
-                    "--team" => parsed.team = Some(value),
+                    "--team" | "--crown" => parsed.team = Some(value),
                     "--since" => parsed.since = Some(parse_date(&value)?),
                     _ => parsed.until = Some(parse_date(&value)?),
                 }

@@ -1966,17 +1966,18 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
 }
 
 /// Best-effort registry read for metadata that must not hold up delivery.
-/// Returns `None` when a writer owns the registry lock.
+/// A writer owning the lock never blocks the read: publishes are atomic
+/// (tempfile + rename), so the unlocked read still sees one whole registry.
 pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
-    let Some(lock) = try_acquire_shared(&registry_lock_path(path))? else {
-        return Ok(None);
-    };
+    let lock = try_acquire_shared(&registry_lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
         Ok(file) => read_registry_tolerant(path, &file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
         Err(error) => Err(error.into()),
     };
-    let _ = lock.unlock();
+    if let Some(lock) = lock {
+        let _ = lock.unlock();
+    }
     result.map(|(registry, _)| Some(registry))
 }
 
@@ -2436,6 +2437,35 @@ fn snapshot_registry(path: &Path) {
     let _ = crate::graph_store::rotate_backups(&snapshots, "registry.json.");
 }
 
+/// Every short handle any row answers to today: its fno handle, the canonical
+/// and retired-suffix heads of its harness id, a non-empty short id and its
+/// name, all lowercased. The unique mint draws against this set so a new row
+/// never shares a handle with an existing one.
+pub(crate) fn taken_handles(entries: &[RegistryEntry]) -> std::collections::HashSet<String> {
+    let mut taken = std::collections::HashSet::new();
+    for e in entries {
+        let own: Vec<&str> = [
+            e.harness_session_id.as_deref(),
+            e.related_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if let Some(handle) = crate::identity::fno_handle(e.fno_id.as_deref(), &own) {
+            taken.insert(handle);
+        }
+        if let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) {
+            taken.insert(crate::identity::canonical_handle(sid));
+            taken.insert(crate::identity::legacy_suffix_handle(sid));
+        }
+        if !e.short_id.is_empty() {
+            taken.insert(e.short_id.to_ascii_lowercase());
+        }
+        taken.insert(e.name.to_ascii_lowercase());
+    }
+    taken
+}
+
 pub fn update_registry<F, T>(path: &Path, f: F) -> Result<T, StateError>
 where
     F: FnOnce(&mut Registry) -> T,
@@ -2504,7 +2534,11 @@ where
     // value its predecessor held - the harness session id is the primary key,
     // so it names the same row whatever its label is; a row with no harness id
     // matches by name instead. A non-empty fno_id is never touched, so legacy
-    // rows keep their harness copies, short ids and names.
+    // rows keep their harness copies, short ids and names. A fresh mint
+    // redraws until its head is unique among every handle the rows already
+    // answer to.
+    let mut taken = taken_handles(&before_entries);
+    taken.extend(taken_handles(&registry.entries));
     for entry in &mut registry.entries {
         if entry.fno_id.as_deref().is_some_and(|v| !v.is_empty()) {
             continue;
@@ -2521,8 +2555,11 @@ where
         };
         entry.fno_id = match inherited.filter(|v| !v.is_empty()) {
             Some(v) => Some(v),
-            None => match crate::identity::mint_fno_id() {
-                Ok(id) => Some(id),
+            None => match crate::identity::mint_unique_fno_id(&taken) {
+                Ok(id) => {
+                    taken.insert(id[..8].to_ascii_lowercase());
+                    Some(id)
+                }
                 Err(msg) => return Err(StateError::InvariantViolation(msg)),
             },
         };

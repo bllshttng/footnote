@@ -1005,6 +1005,9 @@ pub(super) async fn detail_keys(
                 0x7f | 0x08 => {
                     buf.pop();
                 }
+                0x15 => {
+                    buf.clear();
+                }
                 0x20..=0x7e => buf.push(k as char),
                 _ => {}
             }

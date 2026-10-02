@@ -82,7 +82,9 @@ pub mod canonical_check;
 pub mod capability_leaves;
 pub mod cargo_build_dirs;
 pub mod census;
+pub mod chats;
 pub mod check_supersession;
+pub mod claim_lanes_cli;
 pub mod claim_queue;
 pub mod claim_store;
 pub mod claim_verbs;
@@ -200,6 +202,7 @@ pub mod json_output;
 pub(crate) mod keeper_revival;
 pub mod kill_criteria;
 pub mod lane_heal;
+pub mod lanes;
 pub mod launch_workdir;
 pub mod law_match;
 pub mod lead_answers;
@@ -232,11 +235,13 @@ pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
+pub mod machine_load;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
 pub mod mail_control_drain;
 pub mod mail_envelope;
+pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
 pub mod main_ci;
@@ -255,6 +260,7 @@ pub mod merge_reap;
 mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod model_family;
+pub mod model_price;
 pub mod naming;
 pub mod needs;
 pub mod node_branch;
@@ -277,6 +283,7 @@ pub mod org_fold;
 pub mod org_rivals;
 pub mod orphan_reap;
 pub mod osc;
+pub mod otel_ingest;
 pub mod pane_keeper;
 pub mod pane_rebind;
 pub mod pane_relaunch;
@@ -406,6 +413,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod surface_check;
 pub mod sync_canonical;
+pub mod system_sender;
 pub mod task_context;
 pub mod team_alarm;
 pub mod team_identity;
@@ -423,12 +431,14 @@ pub mod tick_ledger;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
+pub mod update_journal;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
 pub mod watch_expiry;
+pub mod wave;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1238,11 +1248,12 @@ mod tests {
             }
         }
 
-        // The allowed files: production binary repair (install_verify), two
-        // production dir modes (paths, fleet_incident), two dir-mode restores
-        // in tests (claims, operator_turns); the bin test target cannot see a
-        // cfg(test) lib fn (client_tests); and the plan writer's production
-        // mode-preserve on its atomic plan-file replace (plan_doc/codec).
+        // The allowed files: production binary repair (install_verify), three
+        // production dir modes (paths, fleet_incident, chats), two dir-mode
+        // restores in tests (claims, operator_turns); the bin test target
+        // cannot see a cfg(test) lib fn (client_tests); and the plan writer's
+        // production mode-preserve on its atomic plan-file replace
+        // (plan_doc/codec).
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
@@ -1251,6 +1262,7 @@ mod tests {
             ("client_tests.rs", 2),
             ("plan_doc/codec.rs", 1),
             ("fleet_incident.rs", 1),
+            ("chats.rs", 1),
         ];
         let allowed_counts: std::collections::HashMap<&str, usize> =
             ALLOWED.iter().copied().collect();

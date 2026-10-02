@@ -11,6 +11,7 @@
 pub mod bin_install_guard;
 pub mod edit_integrity;
 pub mod lead_guard;
+pub mod lead_guard_wire;
 pub mod pipe_guard;
 pub mod pretooluse_bash;
 pub mod prompt;
@@ -31,7 +32,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("effect-guard") => crate::effect_gate::run_hook(&args[1..]),
         // Both spellings for one release: a repo hook and an installed
         // binary update at different times.
-        Some("lead-guard") | Some("king-guard") => lead_guard::run(&args[1..]),
+        Some("lead-guard") | Some("lead-guard") => lead_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),

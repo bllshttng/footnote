@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "Schema-driven setup wizard for footnote settings. Derives its question set from the Pydantic config model (the single source of truth) instead of a hardcoded list; asks only the real per-project decisions and defaults the rest."
+description: Configure Footnote settings through the schema-driven setup wizard.
 ---
 
 # Setup Wizard
@@ -31,6 +31,10 @@ Each emitted field carries `{path, type, default, tier, question, default_source
 There is no separate "full" mode and no hand-maintained question table: `advanced`
 is just "ask the advanced tier too". Keys whose tier is `never` are always
 defaulted and never surfaced.
+
+## Step -1: the CLI itself
+
+Run `command -v fno`. A failure means the footnote CLI never finished installing, and every step below fails with it. Start the installer with `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"`. It takes the install lock, prints the log path and returns immediately. Poll that log until it ends with `installer exit 0`, and cap the wait at 5 minutes. A non-zero exit line or a missing log is a failed install: report the log tail to the user and stop. Never run `.claude-plugin/postinstall.sh` directly. The install lock lives in the hook, so a bare run can race a detached installer that is already running.
 
 ## Step 0: Check existing settings
 
@@ -135,6 +139,18 @@ Write the answer to the project config (the reader prefers `FNO_GUARD_PRESET`, t
 ```bash
 fno config set guards.preset <strict|standard|off> --local
 ```
+
+## Step 2d: Concurrency budget
+
+Run `fno agents status` and read the `budget max_live` clause on the machine line. The number is a guess: memory headroom and cores divided by the measured per-session cost, or the band defaults when no session rows exist yet.
+
+Ask the user whether to write it as the cap. On yes:
+
+```bash
+fno config set agents.max_live <n> --local
+```
+
+The leads/workers split in the clause is guidance; no config key caps leads. With no machine sample yet, say the daemon files the same question in the mux sideline questions block within five minutes, and skip the write.
 
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 

@@ -1095,7 +1095,7 @@ pub fn run_lead_ledger(args: &[String]) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--org-json" if i + 1 < args.len() => {
+            "--org-json" | "--court-json" if i + 1 < args.len() => {
                 org_json = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }

@@ -97,10 +97,15 @@ const STOPWORDS: [&str; 35] = [
 ];
 
 /// A field allowed to hold one value on every row, with the reason it is a
-/// measured result rather than an inherited default. Empty today, and adding
-/// to it is the moment to prove the uniformity rather than assume it.
+/// measured result rather than an inherited default. Adding to it is the
+/// moment to prove the uniformity rather than assume it.
 #[cfg(test)]
-const UNIFORM_BY_MEASUREMENT: &[(&str, &str)] = &[];
+const UNIFORM_BY_MEASUREMENT: &[(&str, &str)] = &[(
+    "mail_header_at",
+    "the composer check's verdict (tests/mail-header-composer-smoke.sh); \
+     every installed harness typed the `@name` header without opening a \
+     picker, so the rows are uniformly true until a harness fails it",
+)];
 
 /// One row of a population: an id plus flattened `field path -> canonical
 /// JSON text` (leaf values compact, object keys sorted).

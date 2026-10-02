@@ -588,7 +588,7 @@ pub fn run_repair(action: &str, cwd: &Path) -> bool {
             let Some(root) = crate::paths::canonical_repo_root(cwd) else {
                 return false;
             };
-            let child = std::process::Command::new(crate::scrape::fno_py())
+            let child = std::process::Command::new(crate::scrape::fno_bin())
                 .args(["doctor", "update"])
                 .current_dir(root)
                 .stdin(std::process::Stdio::null())

@@ -35,7 +35,7 @@ fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
         .expect("agent card exists");
     let detail = rows
         .iter()
-        .position(|row| matches!(row, DisplayRow::CardDetail(a, _) if a.name == name))
+        .position(|row| matches!(row, DisplayRow::CardDetail(a) if a.name == name))
         .expect("card detail exists");
     (agent, detail)
 }
@@ -158,11 +158,11 @@ fn card_age_sort_orders_workers_inside_a_lead_group() {
         let w_old = rows
             .iter()
             .find_map(|r| match r {
-                DisplayRow::CardDetail(a, _) if a.name == "w-old" => Some(a),
+                DisplayRow::CardDetail(a) if a.name == "w-old" => Some(a),
                 _ => None,
             })
             .expect("w-old card detail exists");
-        let detail = v.card_detail_text(w_old, None, now, 80);
+        let detail = v.card_detail_text(w_old, now, 80);
         assert!(
             detail.ends_with("12m"),
             "painted age must read the sorted-on field: {detail:?}"
@@ -187,7 +187,7 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_lead_message_age_on_l
     v.sideline_width = 80;
     let frame = v.compose();
     let text = frame_text(&frame);
-    assert!(text.contains("[26%|###     ]  x-4310"), "{text:?}");
+    assert!(text.contains("██▏      26%  x-4310"), "{text:?}");
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
     let head = text.lines().next().unwrap_or_default();
     assert!(
@@ -196,19 +196,27 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_lead_message_age_on_l
     );
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
-    let red = over_frame.cells.iter();
-    let red = red
-        .filter(|c| c.c == '#' && c.fg == Color::Indexed(1))
-        .count();
+    // One frame row carries the whole red bar: exactly the 8 fill cells.
+    let cols = over_frame.cols as usize;
+    let reds_in_row = |r: usize| {
+        over_frame.cells[r * cols..(r + 1) * cols]
+            .iter()
+            .filter(|c| c.c == '\u{2588}' && c.fg == v.theme.chip)
+            .count()
+    };
+    let red = (0..over_frame.rows as usize)
+        .map(reds_in_row)
+        .max()
+        .unwrap_or(0);
     assert_eq!(red, 8, "a near-compact bar paints its fill red");
     let over_window = frame_text(&over_frame);
     assert!(
-        over_window.contains("[129%|########] x-4310"),
+        over_window.contains("████████ 129% x-4310"),
         "{over_window:?}"
     );
     v.layout.agents[1].context_used_pct = None;
     let unmeasured = frame_text(&v.compose());
-    let dash = format!(" -{}x-4310", " ".repeat(15));
+    let dash = format!(" -{}x-4310", " ".repeat(13));
     assert!(unmeasured.contains(&dash), "{unmeasured:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
@@ -260,10 +268,14 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     a.harness = Some("claude".into());
     assert_eq!(card_line::slug(&a, &[]), "t-cards-org");
     assert_eq!(card_line::harness_model(&a), Some("claude/opus".into()));
-    // Narrow: the bar goes first, then the node; neither is ellipsized.
+    // Narrow: the bar goes first, then the cost, then the node; neither is
+    // ellipsized.
     a.context_used_pct = Some(28);
-    assert_eq!(card_line::meter_node(&a, 30).text, "[28%|###     ]  x-4fb5");
-    assert_eq!(card_line::meter_node(&a, 21).text, "x-4fb5");
+    assert_eq!(card_line::meter_node(&a, 30).text, "██▎      28%  x-4fb5");
+    // The bar's own width moved with the meter, so 21 now fits all three
+    // fields and 19 is where the bar drops.
+    assert_eq!(card_line::meter_node(&a, 21).text, "██▎      28%  x-4fb5");
+    assert_eq!(card_line::meter_node(&a, 19).text, "x-4fb5");
     assert_eq!(card_line::meter_node(&a, 5).text, "");
     // The node is a tap target where it is painted.
     let mut agents = lead_and_worker();
@@ -389,50 +401,33 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
 }
 
 #[test]
-fn a_foreign_cwd_folds_into_the_detail_line_and_never_adds_a_third_row() {
-    // x-b5b8 scope add: a foreign-cwd agent's card stays two painted rows -
-    // the subline's cwd folds into line 2 (`harness · … · cwd`), the Sub
-    // row is gone.
+fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
+    // d-36438ea4: a member with a different project or worktree path shows
+    // it inline in parens after the slug, only when it fits whole; the dim
+    // Sub line is gone. At a width that fits, the card's line 1 reads
+    // `slug (cwd)`; at a width that does not, the parens drop and the row
+    // is still one line.
     let mut agents = lead_and_worker();
     agents[1].cwd_base = Some("elsewhere".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
-    let rows = v.display_rows();
-    let kinds: Vec<&str> = rows
-        .iter()
-        .map(|r| match r {
-            DisplayRow::Blank => "blank",
-            DisplayRow::Agent(_) => "agent",
-            DisplayRow::CardDetail(..) => "detail",
-            DisplayRow::Sub(_) => "sub",
-            _ => "other",
-        })
-        .collect();
+    let frame_text = crate::vt::frame_text(&v.compose());
     assert!(
-        !kinds.contains(&"sub"),
-        "no sub row survives in card mode: {kinds:?}"
+        frame_text.contains("w1 (elsewhere)"),
+        "the cwd rides inline after the slug: {frame_text}"
     );
-    let detail = rows.iter().find_map(|r| match r {
-        DisplayRow::CardDetail(a, cwd) if a.name == "w1" => Some(cwd),
-        _ => None,
-    });
-    assert_eq!(
-        detail,
-        Some(&Some("elsewhere".to_string())),
-        "the cwd rides the detail line"
-    );
-    let text = v.card_detail_text(detail_agent(&rows, "w1"), Some("elsewhere"), 0, 80);
-    assert!(text.contains("elsewhere"), "line 2 names the cwd: {text:?}");
-}
-
-fn detail_agent<'a>(rows: &'a [DisplayRow<'_>], name: &str) -> &'a AgentRow {
-    rows.iter()
-        .find_map(|r| match r {
-            DisplayRow::CardDetail(a, _) if a.name == name => Some(*a),
-            _ => None,
-        })
-        .expect("the card's detail row")
+    // The card stays two painted rows: every Agent row is immediately
+    // followed by its CardDetail line.
+    let rows = v.display_rows();
+    for (i, r) in rows.iter().enumerate() {
+        if matches!(r, DisplayRow::Agent(_)) {
+            assert!(
+                matches!(rows.get(i + 1), Some(DisplayRow::CardDetail(_))),
+                "agent row {i} lost its detail line"
+            );
+        }
+    }
 }
 
 #[test]
@@ -643,12 +638,12 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     }
     let now = crate::digest_overlay::now_secs();
     assert_eq!(row_meter::ctx_cell(None), "-");
-    assert_eq!(row_meter::ctx_cell(Some(0)), "0%▫▫▫");
-    assert_eq!(row_meter::ctx_cell(Some(100)), "100%▪▪▪");
-    assert_eq!(row_meter::ctx_cell(Some(129)), "129%▪▪▪");
-    assert_eq!(row_meter::ctx_bar(None), format!("{:<15}", "-"));
-    assert_eq!(row_meter::ctx_bar(Some(0)), "[0%|        ]  ");
-    assert_eq!(row_meter::ctx_bar(Some(28)), "[28%|###     ] ");
+    assert_eq!(row_meter::ctx_cell(Some(0)), "    0%");
+    assert_eq!(row_meter::ctx_cell(Some(100)), "███ 100%");
+    assert_eq!(row_meter::ctx_cell(Some(129)), "███ 129%");
+    assert_eq!(row_meter::ctx_bar(None), format!("{:<13}", "-"));
+    assert_eq!(row_meter::ctx_bar(Some(0)), "         0%  ");
+    assert_eq!(row_meter::ctx_bar(Some(28)), "██▎      28% ");
     assert_eq!(row_meter::up_cell(None, now), "-");
     assert_eq!(row_meter::up_cell(Some(now + 1), now), "0s");
 }

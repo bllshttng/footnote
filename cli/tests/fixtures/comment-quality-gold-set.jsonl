@@ -19,8 +19,6 @@
 {"path": "cli/src/fno/plan/brief.py", "line": 660, "label": "CUT", "reason": "section label restating the variable and section name below"}
 {"path": "cli/src/fno/plan/brief.py", "line": 676, "label": "CUT", "reason": "section label restating the variable and function name below"}
 {"path": "scripts/save-session.py", "line": 198, "label": "CUT", "reason": "single-word label restating the line below"}
-{"path": "scripts/diagnostics/token-diagnose.py", "line": 338, "label": "CUT", "reason": "label restating the heading string built on the next line"}
-{"path": "scripts/diagnostics/token-diagnose.py", "line": 382, "label": "CUT", "reason": "label restating the attribute read on the next line"}
 {"path": "cli/src/fno/pr_watch/_install.py", "line": 594, "label": "CUT", "reason": "label restating the variable and function names below"}
 {"path": "cli/src/fno/target/blast.py", "line": 40, "label": "CUT", "reason": "label restating the glob string below"}
 {"path": "cli/src/fno/agents/rust_runtime.py", "line": 632, "label": "CUT", "reason": "duplicates the function docstring's cutover rule at the seam; adds nothing new"}

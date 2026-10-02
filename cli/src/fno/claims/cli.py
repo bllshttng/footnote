@@ -1868,35 +1868,48 @@ def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> 
     Exit 1 when the cap is full (no free slot) - the same "retry later" code as
     a held claim. The cap is enforced by atomic slot acquisition, never a count.
     """
-    from .lanes import acquire_lane_slot
+    import subprocess
 
-    try:
-        claim = acquire_lane_slot(max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h"))
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
+    from fno.rust_binary import resolve_binary
 
-    if claim is None:
-        typer.echo(f"lane cap full (max_lanes={max_lanes})", err=True)
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Error: no fno-agents binary", err=True)
         raise typer.Exit(code=1)
-
+    argv = [str(binary), "claim", "lane-acquire", "--lane", lane,
+            "--max-lanes", str(max_lanes), "--ttl", ttl or "1h"]
     if json_output:
-        out = claim.to_yaml_dict()
-        out["lane_id"] = lane
-        typer.echo(json.dumps(out))
-    else:
-        typer.echo(f"acquired lane slot {claim.key} for lane {lane}")
+        argv.append("--json")
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.stdout.strip():
+        typer.echo(result.stdout.strip())
+    if result.returncode == 2 and result.stderr.strip():
+        typer.echo(f"validation error: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=2)
+    if result.returncode != 0:
+        typer.echo((result.stderr or f"lane cap full (max_lanes={max_lanes})").strip(), err=True)
+        raise typer.Exit(code=result.returncode or 1)
 
 
 def _release_lane(*, lane: str, json_output: bool) -> None:
     """The former `claim lane-release`. Silent success if the lane holds none."""
-    from .lanes import release_lane_slot
+    import subprocess
 
-    release_lane_slot(lane_id=lane)
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Error: no fno-agents binary", err=True)
+        raise typer.Exit(code=1)
+    argv = [str(binary), "claim", "lane-release", "--lane", lane]
     if json_output:
-        typer.echo(json.dumps({"lane_id": lane, "released": True}))
-    else:
-        typer.echo(f"released lane {lane}")
+        argv.append("--json")
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo((result.stderr or "lane release failed").strip(), err=True)
+        raise typer.Exit(code=result.returncode or 1)
+    if result.stdout.strip():
+        typer.echo(result.stdout.strip())
 
 
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:

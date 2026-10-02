@@ -1041,12 +1041,17 @@ fn deliver_working_mail(
     name: &str,
     short_id: &str,
     message: &str,
+    from_name: Option<&str>,
     mut run_mail: impl FnMut(&[String]) -> (i32, String, String),
 ) -> i32 {
-    let argv: Vec<String> = ["fno", "agents", "mail", "send", name, "--body", message]
+    let mut argv: Vec<String> = ["fno", "agents", "mail", "send", name, "--body", message]
         .iter()
         .map(|part| part.to_string())
         .collect();
+    if let Some(arm) = from_name {
+        argv.push("--from-name".into());
+        argv.push(arm.to_string());
+    }
     let (code, stdout, stderr) = run_mail(&argv);
     if code != 0 {
         eprint!("{stderr}");
@@ -1089,6 +1094,7 @@ pub(crate) fn claude_live_route(
     cwd: &str,
     message: Option<&str>,
     message_already_queued: bool,
+    from_name: Option<&str>,
     reentry_plan: Option<&crate::reentry::ReentryPlan>,
     cross_project: bool,
     home: &AgentsHome,
@@ -1100,6 +1106,7 @@ pub(crate) fn claude_live_route(
         cwd,
         message,
         message_already_queued,
+        from_name,
         reentry_plan,
         cross_project,
         home,
@@ -1131,6 +1138,7 @@ fn claude_live_route_with<F, I, M>(
     cwd: &str,
     message: Option<&str>,
     message_already_queued: bool,
+    from_name: Option<&str>,
     reentry_plan: Option<&crate::reentry::ReentryPlan>,
     _cross_project: bool,
     home: &AgentsHome,
@@ -1181,7 +1189,7 @@ where
             return 16;
         }
         if let Some(message) = message {
-            return deliver_working_mail(name, short_id, message, &mut run_mail);
+            return deliver_working_mail(name, short_id, message, from_name, &mut run_mail);
         }
         let label = if state_lower == "working" {
             "Working"
@@ -2702,6 +2710,7 @@ mod tests {
             state,
             message,
             false,
+            None,
             plan,
             claims_root,
             read_roots,
@@ -2717,6 +2726,7 @@ mod tests {
         state: Option<&str>,
         message: Option<&str>,
         message_already_queued: bool,
+        from_name: Option<&str>,
         plan: Option<&crate::reentry::ReentryPlan>,
         claims_root: &Path,
         read_roots: &std::cell::RefCell<Vec<Option<std::path::PathBuf>>>,
@@ -2735,6 +2745,7 @@ mod tests {
             "/tmp/x",
             message,
             message_already_queued,
+            from_name,
             plan,
             false,
             home,
@@ -2820,6 +2831,7 @@ mod tests {
             Some("hello"),
             false,
             None,
+            None,
             claims.path(),
             &roots,
             &deliveries,
@@ -2843,12 +2855,35 @@ mod tests {
         );
         assert!(deliveries.borrow().is_empty());
 
+        // The caller's arm name rides the working mail as --from-name.
+        sends.borrow_mut().clear();
         let code = call_live_claude_route_with_mail(
             &home,
             &entry,
             Some("working"),
             Some("hello"),
             false,
+            Some("fno/pr-nudge"),
+            None,
+            claims.path(),
+            &roots,
+            &deliveries,
+            |argv| {
+                sends.borrow_mut().push(argv.to_vec());
+                (0, "msg-2 delivered (hosted)\n".to_string(), String::new())
+            },
+        );
+        assert_eq!(code, 0);
+        assert!(sends.borrow()[0].contains(&"--from-name".to_string()));
+        assert!(sends.borrow()[0].contains(&"fno/pr-nudge".to_string()));
+
+        let code = call_live_claude_route_with_mail(
+            &home,
+            &entry,
+            Some("working"),
+            Some("hello"),
+            false,
+            None,
             None,
             claims.path(),
             &roots,
@@ -2872,6 +2907,7 @@ mod tests {
             Some("working"),
             Some("hello"),
             true,
+            None,
             None,
             claims.path(),
             &roots,

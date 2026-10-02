@@ -126,7 +126,7 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     assert!(screen.contains("new agent"), "sheet title: {screen}");
     // The chip row paints before any catalog read lands.
     assert!(
-        screen.contains("Local") && screen.contains("What do you want to work on?"),
+        screen.contains("Local") && screen.contains("prompt \u{b7} -- flags"),
         "the Where chip and the placeholder paint: {screen}"
     );
     assert!(
@@ -237,9 +237,12 @@ fn wheel_over_the_sheet_never_reaches_the_pane() {
     let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
-    // Entering the full-screen sideline auto-opens the composer (toggle_full).
+    // prefix+F enters the full-screen sideline; the composer comes from
+    // prefix+i alone (F no longer opens it).
     type_and_settle(&mut h, PREFIX);
     type_and_settle(&mut h, FULL);
+    type_and_settle(&mut h, PREFIX);
+    type_and_settle(&mut h, OPEN);
     h.wait_screen(10, |s| s.contains("new agent"));
     std::thread::sleep(Duration::from_millis(500));
     type_and_settle(&mut h, b"\x1b[<64;35;12M"); // wheel up at row 12, col 35: over the sheet

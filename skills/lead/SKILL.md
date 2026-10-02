@@ -1,6 +1,6 @@
 ---
 name: lead
-description: "The tenured lead: stay active over a territory for days. Granted once, check in on a schedule, drive with levers, park rather than die. With --once, lead one wave: encode it into the graph, kick off, step down. Use when: 'lead <scope>', 'stay lead over <epic>', 'keep driving this territory', 'take over <epic>', 'plan the next wave'."
+description: Lead a backlog territory over time or run one governed planning wave.
 argument-hint: "<scope> [--once]"
 metadata:
   requires:

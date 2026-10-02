@@ -15,7 +15,7 @@ use std::path::Path;
 
 /// The sender stamp `fno agents mail send --from-name` used to carry on this
 /// lane; the settle arm's rows stay attributable after the shell-out goes.
-pub const SETTLE_SENDER: &str = "lead-settle";
+pub const SETTLE_SENDER: &str = "fno/lead-settle";
 
 /// Live team holders for `scope`, by row name, sorted and deduped - the
 /// port of `resolve_to_lead` over the JSON rows: `crown_level` present, the

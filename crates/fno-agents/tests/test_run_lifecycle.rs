@@ -198,7 +198,9 @@ fn tmp_claims_root(tag: &str) -> PathBuf {
 /// child alive in the SAME process group (no job control under `sh -c`, so
 /// the background job never gets its own pgid). The old `wait_or_kill_group`
 /// only killed on timeout/exception; this proves the native owner kills it on
-/// a plain, successful, on-time exit too.
+/// a plain, successful, on-time exit too. Since the suite_leaked verdict
+/// (x-bd69 change 3), that same green-plus-leak run also reads as FAILURE:
+/// the group was emptied, but a green suite that leaked is not done.
 #[test]
 fn normal_exit_still_reaps_a_backgrounded_group_mate() {
     let root = tmp_claims_root("normal-exit");
@@ -215,9 +217,10 @@ fn normal_exit_still_reaps_a_backgrounded_group_mate() {
         ))
         .status()
         .expect("run fno-agents test-run");
-    assert!(
-        status.success(),
-        "leader's own exit must still read as success"
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a green suite that leaked its group is not done (suite_leaked)"
     );
 
     let leftover_pid: u32 = std::fs::read_to_string(&pid_file)
@@ -778,6 +781,55 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
         !stderr.contains("suite_started"),
         "the argv must never spawn mid-incident: {stderr}"
     );
+
+    // Same stop, the install-build contract (law d-829648bb: nothing stops
+    // fno loading for the user): a plain build-admit parks at the hold while
+    // the marked install build walks straight through.
+    let wt = tmp_claims_root("fleet-recheck-wt");
+    let cargo_pid = std::process::id().to_string();
+    let mut plain = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the held plain build");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        plain.try_wait().unwrap().is_none(),
+        "a plain build must still wait at the tests hold"
+    );
+    plain.kill().expect("kill the waiting plain build");
+    let _ = plain.wait();
+
+    let start = Instant::now();
+    let out = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .env("FNO_INSTALL_BUILD", "1")
+        .output()
+        .expect("run the install build");
+    assert!(
+        out.status.success(),
+        "the install build walks past the tests hold: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the install build must not wait out the hold, took {:?}",
+        start.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("fleet stop holds tests"),
+        "the install build must not park at the hold: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&wt);
 
     let _ = holder.wait();
     let cleared = Command::new(bin())

@@ -67,7 +67,7 @@ def _reported_total(result: subprocess.CompletedProcess[str]) -> int:
 
 
 def _stub_doctor_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno import doctor, update
+    from fno import doctor
 
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: ROOT)
     monkeypatch.setattr(doctor, "_source_rev", lambda source: "abc123")
@@ -84,7 +84,7 @@ def _stub_doctor_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor, "_source_config_keys", lambda source: frozenset())
     monkeypatch.setattr(doctor, "_python_content_drift", lambda source: 0)
     monkeypatch.setattr(doctor, "_mux_front_door_report", lambda: {})
-    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    monkeypatch.setattr(doctor, "_PROBES", {"mux_server_stale": []})
     monkeypatch.setattr(doctor, "_orphan_report", lambda: [])
     monkeypatch.setattr(doctor, "_pr_watch_liveness", lambda: {})
     monkeypatch.setattr(doctor, "_dead_letter_report", lambda: {})
@@ -747,44 +747,29 @@ def test_every_frontmatter_parses_strictly() -> None:
     assert unparseable == [], f"frontmatter a strict parser rejects: {unparseable}"
 
 
-def test_repaired_descriptions_kept_their_whole_text() -> None:
-    """Parse success alone is not the bar: a truncation also parses.
-
-    The first repair attempt bounded the value with a bare `^word:` regex,
-    which matched a prose line reading "Examples:" and cut the description
-    there. That result is valid YAML and still loses most of the pointer, so
-    the assertion has to be on content, not on parseability.
-    """
-    expected_openings = {
-        "verifier.md": "Use this agent to verify task completion against requirements.",
-        "code-reviewer.md": "Use this agent when you need to review code for adherence",
-        "type-design-analyzer.md": "Use this agent when you need expert analysis of type design",
+def test_short_descriptions_are_preserved_and_examples_live_in_bodies() -> None:
+    """Keep concise invocation pointers in frontmatter and examples on demand."""
+    expected = {
+        "code-reviewer.md": "Review a code diff for concrete bugs and violations of project guidance.",
+        "verifier.md": "Verify completed work against its acceptance criteria and implementation evidence.",
+        "type-design-analyzer.md": "Assess type encapsulation, invariants, and enforcement for new or changed types.",
+        "integration-test-analyzer.md": "Find gaps in integration and journey coverage, including required data assertions.",
+        "multi-device-checker.md": "Check responsive layouts, touch targets, and usability across device sizes.",
+        "silent-failure-hunter.md": "Find swallowed errors, missing feedback, and unsafe failure handling in a diff.",
+        "ux-flow-tester.md": "Walk user journeys and check state transitions, edge cases, and error feedback.",
     }
 
-    for name, opening in expected_openings.items():
-        path = ROOT / "agents" / name
-        match = re.match(r"^---\n(.*?)\n---\n", path.read_text(encoding="utf-8"), re.S)
+    for name, description in expected.items():
+        text = (ROOT / "agents" / name).read_text(encoding="utf-8")
+        match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+        assert match is not None, f"{name}: missing frontmatter"
         front = yaml.safe_load(match.group(1))
-        description = front["description"]
 
-        assert description.startswith(opening), f"{name}: description was truncated at the front"
-        # The two that carry worked examples must still carry them: the
-        # truncation this guards against cuts exactly there.
-        if name in {"verifier.md", "code-reviewer.md"}:
-            assert "<example>" in description, f"{name}: examples lost"
-            assert description.rstrip().endswith("</example>"), f"{name}: tail lost"
-
-    # verifier.md is the one with an observed cost, so pin its size directly.
-    match = re.match(
-        r"^---\n(.*?)\n---\n",
-        (ROOT / "agents" / "verifier.md").read_text(encoding="utf-8"),
-        re.S,
-    )
-    verifier = yaml.safe_load(match.group(1))["description"]
-    assert len(verifier.encode("utf-8")) > 600, (
-        f"verifier description is {len(verifier.encode())} B; a line-based read of the "
-        "old form scored it at 114"
-    )
+        assert front["description"] == description, f"{name}: short description drifted"
+        assert len(description.encode("utf-8")) <= 128, f"{name}: description grew"
+        assert "<example>" not in description, f"{name}: example leaked into frontmatter"
+        assert "## Invocation examples" in match.group(2), f"{name}: examples missing from body"
+        assert "<example>" in match.group(2), f"{name}: example content missing from body"
 
 
 def test_user_invoked_skill_costs_nothing(tmp_path: Path) -> None:

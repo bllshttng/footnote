@@ -21,17 +21,6 @@ const WINDOW_INTERVALS: i64 = 3;
 /// The default compaction ceiling (`config.lead.compaction_ceiling`).
 pub(crate) const DEFAULT_COMPACTION_CEILING: i64 = 3;
 
-/// The registry statuses Python reads as terminal (`registry.TERMINAL_STATUSES`).
-fn row_status_word(status: &AgentStatus) -> Option<&'static str> {
-    match status {
-        AgentStatus::Exited => Some("exited"),
-        AgentStatus::Orphaned => Some("orphaned"),
-        AgentStatus::Failed => Some("failed"),
-        AgentStatus::PermanentDead => Some("permanent_dead"),
-        _ => None,
-    }
-}
-
 /// A sortable instant: the `Z` and `+00:00` UTC spellings must compare equal,
 /// so a Z-suffixed manifest date and a +00:00 graph date cannot misorder at
 /// the same-second teaming boundary (Python `_ts_key`, scope.py).
@@ -128,8 +117,8 @@ pub(crate) struct VerdictInputs {
 
 /// The caller's canonical team scope: explicit `--scope` wins (canonicalized,
 /// refused when it names nothing); else the live registry row for this
-/// session's own identity, requiring a stamped, non-terminal team (the
-/// retired Python `resolve_scope`, whose wording is matched). Shared by the
+/// session's own identity, requiring a stamped team on a row the
+/// `row_verdict` door has not finished. Shared by the
 /// verdict, checkin and history verbs: the Rust reader tolerates unknown
 /// keys, so a registry row carrying a field this binary predates no longer
 /// blinds the team resolution the way the strict Python reader did.
@@ -159,9 +148,14 @@ pub(crate) fn resolve_scope(
             "cannot resolve the caller's team: no registry row names session {session}"
         ));
     };
-    if let Some(word) = row_status_word(&row.status) {
+    if matches!(row.status, AgentStatus::Failed) {
         return Err(format!(
-            "the registry row for {session} is {word}, a terminal state"
+            "the registry row for {session} is failed, a terminal state"
+        ));
+    }
+    if let crate::row_verdict::RowVerdict::Finished(why) = crate::row_verdict::fno_verdict(row) {
+        return Err(format!(
+            "the registry row for {session} is finished ({why}), a terminal state"
         ));
     }
     let team = row
@@ -631,7 +625,7 @@ mod tests {
     }
 
     fn generation_setup(dir: &Path, registry_rows: &[Value]) -> (PathBuf, PathBuf) {
-        let manifest = dir.join("kings/x-root.md");
+        let manifest = dir.join("leads/x-root.md");
         fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         fs::write(
             &manifest,
@@ -754,7 +748,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("no-created-at");
-        let path = dir.join("kings/x-root.md");
+        let path = dir.join("leads/x-root.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -778,7 +772,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("bad-created-at");
-        let path = dir.join("kings/x-root.md");
+        let path = dir.join("leads/x-root.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -1081,6 +1075,36 @@ mod tests {
         with_teamed_identity(|| {
             let scope = resolve_scope(None, &path).expect("unknown key must not blind the read");
             assert_eq!(scope, crate::territory::canonical_scope("probe fleet"));
+        });
+        // An orphaned row with a live pid is not finished: the row_verdict
+        // door decides, not a copied terminal-status list.
+        let live = write_registry(
+            &dir,
+            serde_json::json!([teamed_row(serde_json::json!({
+                "status": "orphaned",
+                "pid": std::process::id(),
+            }))]),
+        );
+        with_teamed_identity(|| {
+            let scope =
+                resolve_scope(None, &live).expect("an orphaned row with a live pid resolves");
+            assert_eq!(scope, crate::territory::canonical_scope("probe fleet"));
+        });
+        // The same orphaned shape with a reaped pid is finished.
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        let dead = write_registry(
+            &dir,
+            serde_json::json!([teamed_row(serde_json::json!({
+                "status": "orphaned",
+                "pid": gone_pid,
+            }))]),
+        );
+        with_teamed_identity(|| {
+            let err = resolve_scope(None, &dead)
+                .expect_err("an orphaned row with a gone pid is finished");
+            assert!(err.contains("terminal"), "{err}");
         });
         fs::remove_dir_all(&dir).ok();
     }

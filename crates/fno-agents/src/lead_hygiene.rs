@@ -283,10 +283,12 @@ fn team_spawn_command(target: &str) -> bool {
             && args[1] == "agents"
             && args[2] == "spawn"
             && !has_help_flag(args)
-            && args
-                .iter()
-                .skip(3)
-                .any(|arg| arg == "--team" || arg.starts_with("--team="))
+            && args.iter().skip(3).any(|arg| {
+                arg == "--team"
+                    || arg.starts_with("--team=")
+                    || arg == "--crown"
+                    || arg.starts_with("--crown=")
+            })
     })
 }
 

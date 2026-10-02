@@ -1830,6 +1830,24 @@ async fn wait_for_wake(
 /// per-project loops; an in-flight `spawn_blocking` tick is not abortable, but
 /// that is safe by design - the dispatched worker owns its `node:<id>` claim
 /// independently and the live-claims filter excludes it on the next start.
+/// Daemon entry: spawn the drain supervisor exactly as the daemon's inline
+/// block used to, so daemon.rs (over the line budget) shrinks. A sandbox
+/// home gets a no-op handle: fleet work must not act on real state from a
+/// tempdir. The handle returns to the caller for shutdown abort.
+pub fn spawn_for_daemon(
+    home: &crate::paths::AgentsHome,
+    sandbox: bool,
+    live: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    if sandbox {
+        return tokio::spawn(std::future::ready(()));
+    }
+    let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
+    let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "active-backlog");
+    tokio::spawn(run_supervisor(fno_bin, emitter, live, shutdown))
+}
+
 pub async fn run_supervisor(
     fno_bin: String,
     emitter: EventEmitter,

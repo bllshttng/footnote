@@ -2131,7 +2131,7 @@ pub(crate) fn emit_row(path: &Path, source: &str, data: &Map<String, Value>) -> 
         );
         return false;
     }
-    let forbidden = ["crown", "crown_scope", "result"]
+    let forbidden = ["team", "crown_scope", "result"]
         .iter()
         .any(|k| data.contains_key(*k));
     if forbidden {

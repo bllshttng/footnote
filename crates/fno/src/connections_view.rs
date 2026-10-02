@@ -741,6 +741,10 @@ impl ConnectionsView {
                 field.pop();
                 ConnIntent::Redraw
             }
+            0x15 => {
+                field.clear();
+                ConnIntent::Redraw
+            }
             c if c.is_ascii_graphic() => {
                 field.push(c as char);
                 ConnIntent::Redraw
@@ -893,6 +897,10 @@ impl ConnectionsView {
                     w.id.pop();
                     ConnIntent::Redraw
                 }
+                0x15 => {
+                    w.id.clear();
+                    ConnIntent::Redraw
+                }
                 c if c.is_ascii_graphic() => {
                     w.id.push(c as char);
                     ConnIntent::Redraw
@@ -933,6 +941,10 @@ impl ConnectionsView {
                     w.dir.pop();
                     ConnIntent::Redraw
                 }
+                0x15 => {
+                    w.dir.clear();
+                    ConnIntent::Redraw
+                }
                 c if c.is_ascii_graphic() => {
                     w.dir.push(c as char);
                     ConnIntent::Redraw
@@ -949,6 +961,10 @@ impl ConnectionsView {
                 }
                 0x7f | 0x08 => {
                     w.api_key.pop();
+                    ConnIntent::Redraw
+                }
+                0x15 => {
+                    w.api_key.clear();
                     ConnIntent::Redraw
                 }
                 c if c.is_ascii_graphic() => {

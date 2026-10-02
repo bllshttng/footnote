@@ -33,6 +33,10 @@ pub struct ResumeArgs {
     /// the old one as the related id. Refused on a teamed row: moving a
     /// team to a new id is succession, a separate operation.
     pub allow_new_id: bool,
+    /// The daemon arm that sent this wake (`fno/<arm>`): rides the working
+    /// mail so the delivered header names an answerable sender, never the
+    /// bare `fno` floor.
+    pub from_name: Option<String>,
 }
 
 /// Parse the argv and validate what argv alone can settle. The replacement
@@ -71,6 +75,15 @@ pub fn parse_resume_args(rest: &[String]) -> Result<ResumeArgs, i32> {
             "--dry-run" => parsed.dry_run = true,
             "--allow-new-id" => parsed.allow_new_id = true,
             "--message-already-queued" => parsed.message_already_queued = true,
+            "--from-name" => {
+                parsed.from_name = Some(match iter.next() {
+                    Some(v) => v.clone(),
+                    None => {
+                        eprintln!("fno-agents: --from-name needs a value");
+                        return Err(2);
+                    }
+                });
+            }
             "--message" | "-m" => {
                 parsed.message = Some(match iter.next() {
                     Some(v) => v.clone(),

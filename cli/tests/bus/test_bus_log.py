@@ -44,7 +44,7 @@ def test_envelope_round_trips_with_version_and_from_key(bus):
     assert obj["to"] == "bob"
     assert obj["kind"] == "send"
     assert obj["body"] == "hi there"
-    assert obj["id"].startswith("msg-")
+    assert obj["id"].startswith("fmail-")
     # Round-trips back to an equal envelope.
     back = from_json_line(line)
     assert back.from_ == "alice"

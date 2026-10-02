@@ -1058,8 +1058,11 @@ jobs:
     # Its lib/bin step was 109-116s and serial integration 612-620s. Split the
     # 38 integration test binaries by observed runtime. The 15m cap died at
     # 15m12s inside the cold-runner compile once fno-agents grew the native
-    # decisions listing; 20m buys the build the headroom the sample predates.
-    timeout-minutes: 20
+    # decisions listing; 20m bought the build headroom the sample predates.
+    # 20m then died three PRs running on slow runners mid-compile, each
+    # rerun cold-cache and each cancelled with its tests still passing; 30m
+    # buys that congestion back without gating anything new.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout

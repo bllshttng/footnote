@@ -28,6 +28,8 @@ pub struct HookStatus {
     pub stop: String,
     /// "matches" | "missing" | "not_shipped"
     pub team: String,
+    /// "matches" | "missing" | "not_shipped"
+    pub guard: String,
     pub loaded: &'static str,
     pub runtime: &'static str,
     pub installed: bool,
@@ -71,6 +73,14 @@ fn has_handler(list: Option<&Value>, command: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The grouped shape (PreToolUse/PostToolUse) carries handlers under each
+/// group's `hooks` key; a guard command in ANY group's list counts.
+fn group_has_handler(list: Option<&Value>, command: &Path) -> bool {
+    list.and_then(Value::as_array)
+        .map(|groups| groups.iter().any(|g| has_handler(g.get("hooks"), command)))
+        .unwrap_or(false)
+}
+
 /// The footnote namespace as an object, or a word for why not.
 fn footnote_namespace(
     root: &Map<String, Value>,
@@ -96,12 +106,13 @@ impl HookStatus {
             ),
         };
         format!(
-            "file={} footnote={} {} stop={} team={} -> {}",
+            "file={} footnote={} {} stop={} team={} guard={} -> {}",
             file,
             self.footnote,
             enabled,
             self.stop,
             self.team,
+            self.guard,
             if self.installed {
                 "installed"
             } else {
@@ -115,7 +126,12 @@ impl HookStatus {
 /// ships. `adapter`/`team` are the shipped adapter scripts; `None` means
 /// this install carries none, which reads `unverifiable`/`not_shipped`
 /// rather than a guess.
-pub fn status(hooks_file: &Path, adapter: Option<&Path>, team: Option<&Path>) -> HookStatus {
+pub fn status(
+    hooks_file: &Path,
+    adapter: Option<&Path>,
+    team: Option<&Path>,
+    guard: Option<&Path>,
+) -> HookStatus {
     let mut s = HookStatus {
         file: "ok".to_string(),
         file_error: None,
@@ -125,6 +141,7 @@ pub fn status(hooks_file: &Path, adapter: Option<&Path>, team: Option<&Path>) ->
         enabled: true,
         stop: "unverifiable".to_string(),
         team: "not_shipped".to_string(),
+        guard: "not_shipped".to_string(),
         loaded: "unverified",
         runtime: "unverified",
         installed: false,
@@ -180,7 +197,22 @@ pub fn status(hooks_file: &Path, adapter: Option<&Path>, team: Option<&Path>) ->
         (Some(_), None) => "missing",
     }
     .to_string();
-    s.installed = s.footnote == "configured" && s.stop == "matches" && s.team != "missing";
+    s.guard = match (guard, fn_map) {
+        (None, _) => "not_shipped",
+        (Some(g), Some(map)) => {
+            if group_has_handler(map.get("PreToolUse"), g) {
+                "matches"
+            } else {
+                "missing"
+            }
+        }
+        (Some(_), None) => "missing",
+    }
+    .to_string();
+    s.installed = s.footnote == "configured"
+        && s.stop == "matches"
+        && s.team != "missing"
+        && s.guard != "missing";
     s
 }
 
@@ -193,6 +225,7 @@ pub fn install(
     hooks_file: &Path,
     adapter: &Path,
     team: Option<&Path>,
+    guard: Option<&Path>,
 ) -> Result<InstallReceipt, String> {
     let mut root = match read_root(hooks_file) {
         Root::Ok(map) => map,
@@ -259,6 +292,65 @@ pub fn install(
             }));
         }
     }
+    if let Some(guard) = guard {
+        match fn_map.get("PreToolUse") {
+            Some(Value::Array(_)) => {}
+            None => {
+                fn_map.insert("PreToolUse".to_string(), Value::Array(Vec::new()));
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{}: footnote.PreToolUse is present but not a list; fix \
+                     it or move the file aside, then rerun `fno config setup`",
+                    hooks_file.display()
+                ))
+            }
+        }
+        if !group_has_handler(fn_map.get("PreToolUse"), guard) {
+            let pre = fn_map
+                .get_mut("PreToolUse")
+                .and_then(Value::as_array_mut)
+                .expect("array checked above");
+            pre.push(json!({
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": guard.display().to_string(), "timeout": 30}]
+            }));
+        }
+    }
+    // The session-state reporter ships beside the stop adapter in the same
+    // plugin stage; when the sibling exists on disk, register it under
+    // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
+    // event's decision contract). Append-once like the team.
+    let report = adapter
+        .parent()
+        .map(|dir| dir.join("agy-session-report.sh"))
+        .filter(|path| path.is_file());
+    if let Some(report) = report {
+        match fn_map.get("PreInvocation") {
+            Some(Value::Array(_)) => {}
+            None => {
+                fn_map.insert("PreInvocation".to_string(), Value::Array(Vec::new()));
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{}: footnote.PreInvocation is present but not a list; fix \
+                     it or move the file aside, then rerun `fno config setup`",
+                    hooks_file.display()
+                ))
+            }
+        }
+        if !has_handler(fn_map.get("PreInvocation"), &report) {
+            let pre = fn_map
+                .get_mut("PreInvocation")
+                .and_then(Value::as_array_mut)
+                .expect("array checked above");
+            pre.push(json!({
+                "type": "command",
+                "command": report.display().to_string(),
+                "timeout": 10
+            }));
+        }
+    }
     let text = match serde_json::to_string_pretty(&Value::Object(root)) {
         Ok(t) => t,
         Err(e) => {
@@ -319,7 +411,7 @@ mod tests {
         let broken = "{\"other-plugin\":BROKEN USER CONFIG";
         std::fs::write(&path, broken).unwrap();
         let adapter = Path::new("/tmp/fake/adapter.sh");
-        let err = install(&path, adapter, None).expect_err("malformed must refuse");
+        let err = install(&path, adapter, None, None).expect_err("malformed must refuse");
         assert!(err.contains("line 1"), "refusal names position: {err}");
         assert_eq!(std::fs::read(&path).unwrap(), broken.as_bytes());
     }
@@ -342,7 +434,7 @@ mod tests {
         )
         .unwrap();
         let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
-        let receipt = install(&path, adapter, None).expect("install succeeds");
+        let receipt = install(&path, adapter, None, None).expect("install succeeds");
         assert!(!receipt.enabled, "receipt carries disabled state");
         let text = std::fs::read_to_string(&path).unwrap();
         let data: Value = serde_json::from_str(&text).unwrap();
@@ -357,7 +449,7 @@ mod tests {
             "Stop now names the adapter"
         );
         assert!(receipt.note.contains("configured but disabled"));
-        let s = status(&path, Some(adapter), None);
+        let s = status(&path, Some(adapter), None, None);
         assert!(s.installed, "disabled is still installed");
     }
 
@@ -371,7 +463,7 @@ mod tests {
             r#"{"footnote": {"Stop": [{"type": "command", "command": "/any.sh", "timeout": 60}]}}"#,
         )
         .unwrap();
-        let s = status(&path, None, None);
+        let s = status(&path, None, None, None);
         assert_eq!(s.stop, "unverifiable");
         assert!(!s.installed);
     }
@@ -381,26 +473,47 @@ mod tests {
     fn install_creates_absent_file_with_parents() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deep/nested/hooks.json");
-        let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
-        install(&path, adapter, None).expect("install into absent path");
+        // A real adapter dir with the session-state reporter as a sibling:
+        // install registers the reporter under PreInvocation beside the
+        // team, append-once.
+        let adapter_dir = dir.path().join("stage").join("hooks");
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        let adapter = adapter_dir.join("footnote-agy-target-stop-hook.sh");
+        std::fs::write(&adapter, "#!/usr/bin/env bash\n").unwrap();
+        let report = adapter_dir.join("agy-session-report.sh");
+        std::fs::write(&report, "#!/usr/bin/env bash\n").unwrap();
+        install(&path, &adapter, None, None).expect("install into absent path");
         let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = data["footnote"]["PreInvocation"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "the reporter registers once");
+        assert_eq!(pre[0]["command"], report.display().to_string());
         assert_eq!(
             data["footnote"]["Stop"][0]["command"],
-            "/plugin/hooks/footnote-agy-target-stop-hook.sh"
+            adapter.display().to_string()
         );
     }
 
     /// The team PreInvocation handler is appended when absent and not
-    /// duplicated when present; other footnote keys survive.
+    /// duplicated when present; the guard PreToolUse group is added once;
+    /// a foreign namespace's PreToolUse groups and other footnote keys
+    /// survive (AC13).
     #[test]
     fn team_appended_once_and_other_keys_survive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
         let team = Path::new("/plugin/hooks/agy-team-inject.sh");
-        std::fs::write(&path, r#"{"footnote": {"Stop": [], "note": "keep me"}}"#).unwrap();
+        let guard = Path::new("/plugin/hooks/agy-lead-guard.sh");
+        std::fs::write(
+            &path,
+            r#"{
+  "some-other-tool": {"PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": "/x/other.sh"}]}]},
+  "footnote": {"Stop": [], "note": "keep me"}
+}"#,
+        )
+        .unwrap();
         let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
-        install(&path, adapter, Some(team)).expect("install");
-        install(&path, adapter, Some(team)).expect("second install");
+        install(&path, adapter, Some(team), Some(guard)).expect("install");
+        install(&path, adapter, Some(team), Some(guard)).expect("second install");
         let data: Value = serde::de::Deserialize::deserialize(
             &mut serde_json::Deserializer::from_str(&std::fs::read_to_string(&path).unwrap()),
         )
@@ -408,6 +521,17 @@ mod tests {
         let pre = data["footnote"]["PreInvocation"].as_array().unwrap();
         assert_eq!(pre.len(), 1, "team appended once");
         assert_eq!(pre[0]["command"], team.display().to_string());
+        let groups = data["footnote"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "guard group appended once");
+        assert_eq!(groups[0]["matcher"], "*");
+        assert_eq!(
+            groups[0]["hooks"][0]["command"],
+            guard.display().to_string()
+        );
+        assert_eq!(
+            data["some-other-tool"]["PreToolUse"][0]["matcher"], "run_command",
+            "foreign PreToolUse unchanged"
+        );
         assert_eq!(data["footnote"]["note"], "keep me");
     }
 
@@ -417,7 +541,7 @@ mod tests {
         let (_dir, path) = tmp("ac4");
         std::fs::write(&path, r#"{"footnote": "legacy string"}"#).unwrap();
         let adapter = Path::new("/tmp/fake/adapter.sh");
-        let err = install(&path, adapter, None).expect_err("non-object footnote refuses");
+        let err = install(&path, adapter, None, None).expect_err("non-object footnote refuses");
         assert!(err.contains("not an object"), "got: {err}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),

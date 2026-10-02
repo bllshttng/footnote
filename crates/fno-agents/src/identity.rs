@@ -18,11 +18,57 @@ pub fn mint_fno_id() -> Result<String, String> {
     ))
 }
 
-/// The generated canonical handle: the harness's own short-id (the first eight
-/// of the session id). A mail address is this short-id OR the full session id;
-/// on a short-id collision, resolution fails closed and asks for the full id.
-/// (Codex ids are time-prefixed, so their first-8 collides across same-window
-/// sessions; codex addressing is often the full id in practice.)
+/// fno's own 8-hex handle for a registry row: the head of the row's
+/// fno-minted `fno_id`. None for a legacy row whose fno_id is a harness
+/// copy, a short id or a name - those keep the harness-head address.
+pub(crate) fn fno_handle(fno_id: Option<&str>, own_ids: &[&str]) -> Option<String> {
+    let id = fno_id?;
+    let groups: Vec<&str> = id.split('-').collect();
+    let v4 = groups.len() == 5
+        && [
+            groups[0].len(),
+            groups[1].len(),
+            groups[2].len(),
+            groups[3].len(),
+            groups[4].len(),
+        ] == [8, 4, 4, 4, 12]
+        && groups
+            .iter()
+            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_hexdigit()))
+        && groups[2].as_bytes()[0] == b'4';
+    if !v4 || own_ids.iter().any(|own| own.eq_ignore_ascii_case(id)) {
+        return None;
+    }
+    Some(id[..8].to_ascii_lowercase())
+}
+
+/// mint_fno_id, redrawn until its 8-hex head is not in `taken` (lowercase
+/// heads). Errors after 64 draws rather than looping.
+pub fn mint_unique_fno_id(taken: &std::collections::HashSet<String>) -> Result<String, String> {
+    mint_unique_fno_id_with(taken, mint_fno_id)
+}
+
+fn mint_unique_fno_id_with(
+    taken: &std::collections::HashSet<String>,
+    mut mint: impl FnMut() -> Result<String, String>,
+) -> Result<String, String> {
+    for _ in 0..64 {
+        let id = mint()?;
+        if !taken.contains(&id[..8]) {
+            return Ok(id);
+        }
+    }
+    Err("could not mint a unique fno_id head after 64 draws".to_string())
+}
+
+/// The harness head (the first eight of the session id), kept as a read-only
+/// tier so handles printed before fno minted row handles keep resolving, and
+/// kept as the mail bus key. For codex rows the list address is instead
+/// [`fno_handle`], the head of the id fno itself mints; every other harness
+/// keeps this head as its address until Python mail send and peek resolve
+/// the fno handle. Codex ids are time-prefixed, so their first-8 collides
+/// across same-window sessions; a shared head still resolves while it names
+/// one row and refuses naming every match when it names two.
 ///
 /// Parity with Python `fno.harness_identity.canonical_handle` is load-bearing:
 /// the Rust lifecycle client cannot import Python, and if the two rules differ a
@@ -146,7 +192,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{canonical_handle, legacy_suffix_handle, mint_fno_id};
+    use super::{canonical_handle, legacy_suffix_handle, mint_fno_id, mint_unique_fno_id_with};
 
     fn session_id_strategy() -> impl Strategy<Value = Vec<String>> {
         let uuid_lower_pattern = [
@@ -211,6 +257,14 @@ mod tests {
         let a = mint_fno_id().expect("mint succeeds when the OS has randomness");
         assert!(re.is_match(&a), "not a v4 UUID: {a}");
         assert_ne!(a, mint_fno_id().unwrap(), "two mints must differ");
+        // The unique mint: a fresh head passes, and a stub that keeps landing
+        // on a taken head errors after 64 draws instead of looping.
+        let taken: std::collections::HashSet<String> =
+            std::iter::once(a[..8].to_string()).collect();
+        assert!(mint_unique_fno_id_with(&taken, || Ok(a.clone())).is_err());
+        assert!(
+            mint_unique_fno_id_with(&std::collections::HashSet::new(), || Ok(a.clone())).is_ok()
+        );
     }
 
     #[test]

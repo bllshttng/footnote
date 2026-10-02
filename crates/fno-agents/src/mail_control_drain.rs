@@ -183,8 +183,10 @@ fn withdrawn_ids(msgs: &[Value]) -> std::collections::HashSet<String> {
     out
 }
 
-/// Every `<fno_mail id="...">` id in the session's own transcript, or None
-/// when the transcript cannot be resolved or read (print-everything posture).
+/// Every delivered-mail id in the session's own transcript - the middle
+/// token of a header line, or the `id` of an old `<fno_mail id="...">` tag -
+/// or None when the transcript cannot be resolved or read (print-everything
+/// posture).
 fn present_mail_ids(
     projects_base: &Path,
     session: &str,
@@ -196,6 +198,12 @@ fn present_mail_ids(
         .read_to_string(&mut text)
         .ok()?;
     let mut out = std::collections::HashSet::new();
+    let normalized = text.replace("\\\"", "\"");
+    for line in normalized.lines() {
+        if let Some(id) = crate::mail_header::delivered_msg_id(line) {
+            out.insert(id);
+        }
+    }
     let mut rest = text.as_str();
     while let Some(pos) = rest.find("<fno_mail") {
         rest = &rest[pos..];

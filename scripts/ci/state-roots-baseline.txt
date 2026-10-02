@@ -72,7 +72,6 @@ A	cli/src/fno/state/target_handoff.py	target-state.md	unowned	target-state.md ha
 A	cli/src/fno/state/v2_paths.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/target_cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/target_cli.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	cli/src/fno/update.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/verify_advise.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/wake/detect.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/worker/cli.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
@@ -95,9 +94,11 @@ A	crates/fno-agents/src/worktree_reapable.rs	target-state.md	unowned	the done-no
 A	crates/fno-agents/src/state_path.rs	target-state.md	unowned	this module IS the hook-facing resolver; the hand-built line is the one-release legacy checkout fallback and drains when it retires.
 A	crates/fno-agents/src/paths.rs	ledger.json	unowned	paths.rs IS the resolver module; the hand-built line is the ledger_path legacy checkout migration anchor and drains when it retires.
 A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FILES names for this file.
+A	crates/fno/src/doctor_update.rs	target-state.md	unowned	the native updater's IN_PROGRESS guard reads the repo it stands in; the Rust side cannot call the Python resolver (fno.paths.target_state_path), so the hand-built read stays a declared root until a Rust resolver exists.
 A	crates/fno/src/agents_view.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	registry.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/review_invocation.rs	events.jsonl	unowned	the mux client's ProjectJournalPath site, moved verbatim out of mux_cli.rs ; owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno/src/doctor_update_tests.rs	target-state.md	unowned	the guard test writes the manifest the verb reads; the Rust side cannot call the Python resolver (fno.paths.target_state_path), so the fixture path stays a declared root until a Rust resolver exists.
 A	crates/fno-agents/src/question_intake.rs	events.jsonl	ask-port	Fallback when the request carries no journal_path; the shim always passes paths.project_log("events.jsonl"). Drains with the ask-port PR: the fallback moves to state_path::resolve when a Rust caller appears.
 A	crates/fno-agents/src/spawn_gate_territory_tests.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/law_match.rs	events.jsonl	unowned	crate journal site of the law record door; mirrors resolve_carveout_root precedence, fix is a crate resolver mirroring fno.paths.project_events_json.

@@ -21,8 +21,8 @@ use std::process::Command;
 use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
+use crate::org_board::prs::{pr_binding_keys, retarget_binding_refusal};
 use crate::main_ci::main_ci_red_run;
-use crate::org_board::prs::pr_binding_keys;
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
@@ -2131,6 +2131,9 @@ fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) ->
             n = facts.number
         ));
     }
+    if let Some(detail) = retarget_binding_refusal(&keys, body, facts.number as i64, &facts.url) {
+        return ProbeOutcome::Refused(detail);
+    }
     ProbeOutcome::Clear
 }
 
@@ -3771,6 +3774,45 @@ mod tests {
             unreachable!("an unscopeable backref key is Inconclusive")
         };
         assert!(reason.contains("could not be scoped"));
+
+        // AC4-ERR, retarget: the body hands the branch's node to another
+        // node, but the graph still points the old node at this PR; the
+        // refusal names both fno backlog update commands.
+        let url = "https://github.com/o/r/pull/7";
+        let body = "Fixes x-bbbb\nRetarget x-aaaa x-bbbb msg-447f8f".to_string();
+        let unmoved = vec![
+            json!({"id": "x-aaaa", "cwd": "/this/repo", "project": "fno",
+                   "pr_number": 7, "pr_url": url}),
+            json!({"id": "x-bbbb", "cwd": "/this/repo", "project": "fno"}),
+        ];
+        let facts = PrFacts {
+            head_ref: "feature/x-aaaa".to_string(),
+            body: Some(body.clone()),
+            ..open_facts()
+        };
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &unmoved, &facts);
+        let ProbeOutcome::Refused(reason) = outcome else {
+            unreachable!("an unmoved retarget binding refuses")
+        };
+        assert!(reason.contains("msg-447f8f"), "{reason}");
+        assert!(
+            reason.contains("fno backlog update x-aaaa --pr-number null --pr-url null"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("fno backlog update x-bbbb --pr-number 7 --pr-url"),
+            "{reason}"
+        );
+
+        // AC4-HP: the graph moved (the old node holds no ref, the new one
+        // carries this PR), so the probe is Clear.
+        let moved = vec![
+            json!({"id": "x-aaaa", "cwd": "/this/repo", "project": "fno"}),
+            json!({"id": "x-bbbb", "cwd": "/this/repo", "project": "fno",
+                   "pr_number": 7, "pr_url": url}),
+        ];
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &moved, &facts);
+        assert_eq!(outcome, ProbeOutcome::Clear);
     }
 
     #[test]

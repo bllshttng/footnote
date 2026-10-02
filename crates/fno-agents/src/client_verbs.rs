@@ -1825,6 +1825,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         print_command,
         message,
         message_already_queued,
+        from_name,
         cross_project,
         cwd: cwd_override,
         account,
@@ -2198,6 +2199,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             cwd,
             message.as_deref(),
             message_already_queued,
+            from_name.as_deref(),
             reentry_plan.as_ref(),
             cross_project,
             home,
@@ -3311,6 +3313,43 @@ mod tests {
         assert_eq!(
             find_agent_entry(&rows, "billingf").unwrap()["name"],
             "reviewer"
+        );
+
+        // Two codex rows minted inside one UUIDv7 clock window share the same
+        // head; each row's fno handle still resolves to its own row, and the
+        // shared head refuses naming both. A lone row's head keeps resolving,
+        // so printed handles survive while they name one row.
+        let codex_a = json!({
+            "name": "codex-a", "provider": "codex", "cwd": "/w", "log_path": "/l",
+            "harness_session_id": "01a0fc7a-1111-7222-8333-444444444444",
+            "fno_id": "3f9a1c2d-0000-4000-8000-000000000001",
+        });
+        let codex_b = json!({
+            "name": "codex-b", "provider": "codex", "cwd": "/w", "log_path": "/l",
+            "harness_session_id": "01a0fc7a-2222-7333-9444-555555555555",
+            "fno_id": "7e2b4d5a-1111-4111-8111-111111111112",
+        });
+        let codex_rows = vec![codex_a, codex_b];
+        assert_eq!(
+            find_agent_entry(&codex_rows, "3f9a1c2d").unwrap()["name"],
+            "codex-a"
+        );
+        assert_eq!(
+            find_agent_entry(&codex_rows, "7e2b4d5a").unwrap()["name"],
+            "codex-b"
+        );
+        assert!(matches!(
+            find_agent_entry(&codex_rows, "01a0fc7a"),
+            Err(ResolveError::Ambiguous(_))
+        ));
+        let lone = vec![json!({
+            "name": "codex-c", "provider": "codex", "cwd": "/w", "log_path": "/l",
+            "harness_session_id": "01a0fc7a-3333-7444-a555-666666666666",
+            "fno_id": "9c1d2e3f-2222-4222-8222-222222222223",
+        })];
+        assert_eq!(
+            find_agent_entry(&lone, "01a0fc7a").unwrap()["name"],
+            "codex-c"
         );
         assert_eq!(
             find_agent_entry(&rows, "55556666").unwrap()["name"],

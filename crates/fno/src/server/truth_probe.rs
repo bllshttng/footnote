@@ -78,7 +78,17 @@ pub(crate) fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
             .get("last_activity_age_s")
             .and_then(|v| v.as_f64())
             .map(|f| f as u64);
-        map.insert(key, TruthReading { basis, age_s });
+        let cost_cents = row.get("session_cost_cents").and_then(|v| v.as_u64());
+        let tokens = row.get("session_tokens").and_then(|v| v.as_u64());
+        map.insert(
+            key,
+            TruthReading {
+                basis,
+                age_s,
+                cost_cents,
+                tokens,
+            },
+        );
     }
     Some(map)
 }
@@ -87,10 +97,39 @@ pub(crate) fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
 /// it: which basis answered and the transcript age it measured. The verdict
 /// word is deliberately absent - it is derivable from the basis and it is the
 /// half of the triple that reads healthy for a worker dead under two hours.
+/// Beside it ride the daemon's served running-cost pair, `None` before the
+/// first sweep measured the session.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TruthReading {
     pub(crate) basis: Option<String>,
     pub(crate) age_s: Option<u64>,
+    pub(crate) cost_cents: Option<u64>,
+    pub(crate) tokens: Option<u64>,
+}
+
+impl TruthReading {
+    /// The served running-cost pair for one agent row: what the daemon
+    /// measured, keyed by the same identity the probe joined on.
+    pub(crate) fn cost(&self) -> (Option<u64>, Option<u64>) {
+        (self.cost_cents, self.tokens)
+    }
+}
+
+/// The server-core side of the served cost: one accessor beside
+/// `truth_basis` / `truth_age` (which stay in server.rs, shrink-only), so
+/// the row builders never touch the reading map directly.
+use super::Core;
+use crate::agents_view::RegistryAgent;
+
+impl Core {
+    /// The daemon-served running-cost pair for one registry row: what the
+    /// reconcile sweep measured, keyed by the same identity the probe
+    /// joined on. `(None, None)` before the first measurement.
+    pub(crate) fn truth_cost(&self, a: &RegistryAgent) -> (Option<u64>, Option<u64>) {
+        self.truth_reading(a)
+            .map(|t| t.cost())
+            .unwrap_or((None, None))
+    }
 }
 
 #[cfg(test)]

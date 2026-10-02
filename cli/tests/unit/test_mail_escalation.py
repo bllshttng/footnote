@@ -129,7 +129,7 @@ def test_question_send_emits_one_valid_overlay_event(runner, mailbox, emitted_ev
     assert d["sender"] == "etl"
     assert d["recipient"] == "web"
     assert "which schema wins?" in d["summary"]
-    assert d["msg_id"].startswith("msg-"), "carries the mail id for correlation"
+    assert d["msg_id"].startswith("fmail-"), "carries the mail id for correlation"
 
 
 def test_debounce_gates_the_event_exactly_like_the_notifier(

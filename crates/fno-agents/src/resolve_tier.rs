@@ -17,6 +17,17 @@ pub(crate) fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
     if is_session_shaped(token) && entry.get("fno_id").and_then(Value::as_str) == Some(token) {
         return Some(0);
     }
+    // The row's fno handle (the head of its fno-minted fno_id) addresses it at
+    // the same short tier as the harness head, inside the union below.
+    let own: Vec<&str> = ["harness_session_id", "related_session_id"]
+        .iter()
+        .filter_map(|key| entry.get(*key).and_then(Value::as_str))
+        .collect();
+    if crate::identity::fno_handle(entry.get("fno_id").and_then(Value::as_str), &own)
+        .is_some_and(|handle| handle.eq_ignore_ascii_case(token.trim()))
+    {
+        return Some(1);
+    }
     let session_id = entry.get("harness_session_id").and_then(Value::as_str)?;
     if let Some(tier) = session_handle_tier(token, session_id) {
         return Some(tier);

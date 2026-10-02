@@ -613,6 +613,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     miss_reason: list = []
     if survivors:
         from fno.agents.dispatch import _deliver_live
+        from fno.inbox.store import generate_msg_id
         from fno.mail.envelope import wrap_fno_mail
 
         digest = render_digest(handle, survivors, held_for_s)
@@ -627,6 +628,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
                 framed = wrap_fno_mail(
                     digest,
                     from_="fno-mail-hold",
+                    id=generate_msg_id(),
                     to=getattr(entry, "name", None),
                     to_session=getattr(entry, "harness_session_id", None),
                 )

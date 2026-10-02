@@ -18,23 +18,40 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+use super::lead_guard_wire as wire;
 use crate::agents_config::config_lookup;
 
-/// Entry: read the payload once, decide, print, always exit 0.
-pub fn run(_args: &[String]) -> i32 {
-    let payload: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
+/// Entry: read the payload once, decide, print, always exit 0. `--wire agy`
+/// reads agy's PreToolUse payload and prints agy's decision shape instead of
+/// the claude hook JSON.
+pub fn run(args: &[String]) -> i32 {
+    let wire_agy = args.windows(2).any(|w| w[0] == "--wire" && w[1] == "agy");
+    let raw: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
+    let payload = if wire_agy {
+        wire::agy_to_claude(raw)
+    } else {
+        raw
+    };
     let trace = std::env::var_os("FNO_GUARD_TRACE").is_some();
+    let emit_allow = || -> i32 {
+        if wire_agy {
+            println!("{{\"decision\":\"allow\"}}");
+            0
+        } else {
+            super::emit_allow()
+        }
+    };
     let allow = |why: &str| -> i32 {
         if !why.is_empty() {
             eprintln!("lead-delegation-guard: {why}");
         }
-        super::emit_allow()
+        emit_allow()
     };
     let allow_at = |stage: &str| -> i32 {
         if trace {
             eprintln!("lead-delegation-guard: allow at {stage}");
         }
-        super::emit_allow()
+        emit_allow()
     };
 
     // 1. Empty or unparseable payload: not a refusal.
@@ -47,8 +64,13 @@ pub fn run(_args: &[String]) -> i32 {
         .unwrap_or("");
     let ti = payload.get("tool_input").cloned().unwrap_or(Value::Null);
 
-    // 2. Only the four implemented tools are judged.
-    if !matches!(tool, "Edit" | "Write" | "NotebookEdit" | "Bash") {
+    // 2. Only the five implemented tools are judged. `apply_patch` is what
+    //    codex reports as the raw tool name; the patch body rides in
+    //    `tool_input.command` (judged at step 10).
+    if !matches!(
+        tool,
+        "Edit" | "Write" | "NotebookEdit" | "Bash" | "apply_patch"
+    ) {
         return allow_at("tool-not-judged");
     }
 
@@ -170,10 +192,10 @@ pub fn run(_args: &[String]) -> i32 {
             "limb (agent_id {agent_id}) of teamed session {sid}; allowing"
         ));
     }
-    if is_subagent_transcript(transcript, &sid) {
+    if wire::is_subagent_transcript(transcript, &sid) {
         return allow(&format!("limb of teamed session {sid}; allowing"));
     }
-    if transcript_is_open_spawn(transcript) {
+    if wire::transcript_is_open_spawn(transcript) {
         return allow(&format!(
             "limb of teamed session {sid} (open Task/Agent tool_use in the parent transcript); allowing"
         ));
@@ -182,17 +204,7 @@ pub fn run(_args: &[String]) -> i32 {
     // 10. Decide: deny SOURCE, allow everything else, one predicate for
     //     every tool.
     let allowed = |t: &str| !write_denied(t, &cwd, &repo_root, &roots);
-    let denied: Option<String> = match tool {
-        "Edit" | "Write" | "NotebookEdit" => {
-            let file = ti
-                .get("file_path")
-                .or_else(|| ti.get("notebook_path"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            (!file.is_empty() && !allowed(file)).then(|| file.to_string())
-        }
-        _ => targets.iter().find(|t| !allowed(t)).map(|t| t.to_string()),
-    };
+    let denied: Option<String> = wire::read_denied(tool, &ti, &targets, &allowed);
 
     // 11. Telemetry: one row, one file, failure ignored.
     super::emit_guard_decision(&cwd, "lead-delegation-guard", tool, denied.is_some());
@@ -201,22 +213,19 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     };
     if mode == "warn" {
-        eprintln!("{}", deny_text(&denied, &repo_root));
+        eprintln!("{}", wire::deny_text(&denied, &repo_root));
         return allow("");
     }
-    let text = deny_text(&denied, &repo_root);
+    let text = wire::deny_text(&denied, &repo_root);
     eprint!("{text}");
+    if wire_agy {
+        println!(
+            "{}",
+            serde_json::json!({"decision": "deny", "reason": text})
+        );
+        return 0;
+    }
     super::emit_block(&text)
-}
-
-/// The two-line refusal. The shell twin is a pure exec shim, so this text is
-/// the only copy of the rule it enforces.
-fn deny_text(target: &str, repo_root: &Path) -> String {
-    format!(
-        "lead-delegation-guard: write target '{target}' is inside the repo ({repo}), and a teamed session does not write SOURCE.\n\
-         A lead operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.lead.write_roots.\n",
-        repo = repo_root.display(),
-    )
 }
 
 // ── Shell write classification (the tokenizer port) ──────────────────────────
@@ -771,39 +780,13 @@ fn is_build_output(t: &str, cwd: &Path) -> bool {
     false
 }
 
-// ── Limb signatures ──────────────────────────────────────────────────────────
-
-pub(crate) fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
-    let Some(parent) = Path::new(transcript).parent() else {
-        return false;
-    };
-    parent.file_name().is_some_and(|n| n == "subagents")
-        && parent
-            .parent()
-            .and_then(|g| g.file_name())
-            .is_some_and(|n| n == sid)
-}
-
-/// The sync-limb shape: the transcript's newest tool_use is Task/Agent with no
-/// tool_result yet. Tail-only (the open entry sits at the end of a live
-/// transcript); unreadable falls through fail-closed. The pairing is the one
-/// shared walk (`interrupt_classify::trailing_open_call`), not a private leg.
-fn transcript_is_open_spawn(transcript: &str) -> bool {
-    if transcript.is_empty() {
-        return false;
-    }
-    crate::tail_text_strict(Path::new(transcript), 262_144)
-        .and_then(|tail| {
-            crate::interrupt_classify::trailing_open_call(&tail)
-                .filter(|c| c.name == "Task" || c.name == "Agent")
-        })
-        .is_some()
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    use super::super::lead_guard_wire::{
+        agy_to_claude, deny_text, is_subagent_transcript, patch_targets, transcript_is_open_spawn,
+    };
     use super::*;
 
     fn targets(cmd: &str) -> Vec<String> {
@@ -1001,6 +984,31 @@ mod tests {
         assert_eq!(targets("command mv a /tmp/b"), vec!["/tmp/b"]);
         assert_eq!(targets("env FOO=bar cp /tmp/a /tmp/b"), vec!["/tmp/b"]);
         assert_eq!(targets("B=/path mv a b"), vec!["b"]);
+        // A codex apply_patch body binds exactly its header paths: the four
+        // prefixes hooks/lib/write-targets.sh reads, CR stripped, an empty
+        // path dropped.
+        assert_eq!(
+            patch_targets(concat!(
+                "*** Begin Patch\n",
+                "*** Update File: crates/fno-agents/src/lib.rs\n",
+                "+fn x() {}\n",
+                "*** Add File: docs/new.md\r\n",
+                "+hi\n",
+                "*** Delete File: docs/old.md\n",
+                "*** Move to: docs/renamed.md\n",
+                "*** End Patch\n",
+            )),
+            vec![
+                "crates/fno-agents/src/lib.rs",
+                "docs/new.md",
+                "docs/old.md",
+                "docs/renamed.md",
+            ]
+        );
+        assert!(
+            patch_targets("no headers here\n*** Begin Patch\n*** End Patch").is_empty(),
+            "a patch with no file headers binds nothing"
+        );
     }
 
     #[test]
@@ -1045,6 +1053,29 @@ mod tests {
             targets("N=$(cp a b").is_empty(),
             "unclosed substitution never executes"
         );
+        // A relative patch header resolves against the payload cwd exactly
+        // like a Bash target: judged through the same allowed() closure, so
+        // `docs/x.md` inside the repo denies and an outside cwd allows. The
+        // deny names the first denied path, in header order.
+        let repo = std::env::temp_dir().join(format!("kgd-patch-cwd-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let patch = "*** Begin Patch\n*** Update File: crates/fno-agents/src/lib.rs\n+fn y() {}\n*** Update File: docs/first.md\n+x\n*** End Patch\n";
+        let first_denied = |cwd: &Path| -> Option<String> {
+            patch_targets(patch)
+                .iter()
+                .find(|t| write_denied(t, cwd, &repo, &[]))
+                .map(|t| t.to_string())
+        };
+        assert_eq!(
+            first_denied(&repo).as_deref(),
+            Some("crates/fno-agents/src/lib.rs"),
+            "the first in-repo header path denies"
+        );
+        assert!(
+            first_denied(&std::env::temp_dir()).is_none(),
+            "the same patch from an outside cwd allows"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -1228,6 +1259,10 @@ mod tests {
         let r = roots("source");
         assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
         assert!(!allowed(&r, &r.repo.join("crates/fno-agents/src/lib.rs")));
+        // Required test 4 folded in (no vault configured anywhere): the
+        // predicate only knows the repo root, so with `&[]` anything
+        // outside the repo allows.
+        assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
         let _ = std::fs::remove_dir_all(&r.base);
     }
 
@@ -1269,14 +1304,40 @@ mod tests {
     }
 
     #[test]
-    fn no_vault_still_answers_denies_source_allows_outside() {
-        // Required test 4: no vault configured anywhere - the predicate only
-        // knows the repo root. With `&[]` the guard answers as before:
-        // source denies, anything outside allows.
-        let r = roots("novault");
-        assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
-        assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
-        let _ = std::fs::remove_dir_all(&r.base);
+    fn agy_wire_translates_payload_and_denies_source() {
+        // The agy wire: a run_command payload (the shape agy 1.2.7's
+        // embedded contract documents) whose CommandLine writes repo source
+        // maps to the Bash path and reads denied; an edit naming a path
+        // under an allowed root reads allowed; a foreign tool is not
+        // judged. The translation itself carries the measured spellings.
+        let payload = serde_json::json!({
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "cat > crates/fno-agents/src/lib.rs <<'EOF'\nx\nEOF"}},
+            "stepIdx": 3,
+            "conversationId": "agy-conv-1",
+            "workspacePaths": ["/repo"],
+        });
+        let t = agy_to_claude(payload);
+        assert_eq!(t["tool_name"], "Bash");
+        assert_eq!(t["session_id"], "agy-conv-1");
+        assert_eq!(t["cwd"], "/repo");
+        assert_eq!(
+            t["tool_input"]["command"],
+            "cat > crates/fno-agents/src/lib.rs <<'EOF'\nx\nEOF"
+        );
+        // A path-bearing tool the translation promotes into file_path.
+        let edit = agy_to_claude(serde_json::json!({
+            "toolCall": {"name": "write_blob", "args": {"AbsPath": "/repo/docs/x.md", "Content": "hi"}},
+            "workspacePaths": ["/repo"],
+        }));
+        assert_eq!(edit["tool_name"], "Write");
+        assert_eq!(edit["tool_input"]["file_path"], "/repo/docs/x.md");
+        // An unjudged tool name passes through untouched (the core allows).
+        assert_eq!(
+            agy_to_claude(serde_json::json!({
+                "toolCall": {"name": "view_file", "args": {}},
+            }))["tool_name"],
+            "view_file"
+        );
     }
 
     #[test]

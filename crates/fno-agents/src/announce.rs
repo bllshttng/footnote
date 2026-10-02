@@ -135,7 +135,7 @@ fn parse_expires(raw: &str) -> Result<Duration, String> {
 
 /// All retained bus lines oldest -> newest (log.py::_segment_paths_oldest_first
 /// order), malformed lines skipped. Readers are lock-free by contract.
-fn read_bus_segments(live: &Path) -> Vec<Value> {
+pub(crate) fn read_bus_segments(live: &Path) -> Vec<Value> {
     let mut paths: Vec<(u64, PathBuf)> = Vec::new();
     if let Some(parent) = live.parent() {
         let prefix = format!(
@@ -213,10 +213,26 @@ impl BusLock {
 }
 
 /// Append one line under the sidecar flock. Rotation stays with the Python
-/// appender.
+/// appender. A bare `fno` sender refuses before the write, so a refused send
+/// leaves no bus row.
 // ponytail: Rust never rotates; the next Python append rotates an over-size
 // live segment.
 pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
+    if let Some(from) = obj.get("from").and_then(Value::as_str) {
+        crate::system_sender::guard_sender(from)?;
+    }
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("");
+    let has_delivery = obj
+        .get("delivery")
+        .and_then(Value::as_str)
+        .is_some_and(|d| !d.is_empty());
+    // The record seam (plan R2): message kinds record BEFORE the bus write
+    // and fail closed (what was never recorded is never sent); receipts
+    // (`landed`, or an envelope carrying a delivery mark) record AFTER the
+    // bus write and warn only - a receipt must never break an ack flow.
+    if crate::chats::is_message_kind(kind) && !has_delivery {
+        crate::chats::record(&crate::chats::chats_dir(), obj)?;
+    }
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
@@ -226,7 +242,13 @@ pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
         .open(live)
         .map_err(|e| format!("bus open {}: {e}", live.display()))?;
     f.write_all(line.as_bytes())
-        .map_err(|e| format!("bus append: {e}"))
+        .map_err(|e| format!("bus append: {e}"))?;
+    if kind == "landed" || has_delivery {
+        if let Err(e) = crate::chats::record(&crate::chats::chats_dir(), obj) {
+            eprintln!("chats record (receipt) failed: {e}");
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -624,8 +646,10 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
 }
 
 pub(crate) fn new_msg_id() -> String {
-    // 'msg-XXXXXX', matching bus/log.py::new_msg_id (6 hex chars).
-    let mut buf = [0u8; 3];
+    // 'fmail-XXXXXXXXXXXX' (12 hex), matching bus/log.py::new_msg_id.
+    // Pre-widening 'msg-XXXXXX' ids stay legal and resolve through the
+    // migrated chats rows.
+    let mut buf = [0u8; 6];
     if getrandom::fill(&mut buf).is_err() {
         // Fallback entropy: pid + clock. A collision costs one duplicate id.
         let seed = (std::process::id() as u64) << 32
@@ -633,10 +657,10 @@ pub(crate) fn new_msg_id() -> String {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as u64)
                 .unwrap_or(0);
-        buf.copy_from_slice(&seed.to_le_bytes()[..3]);
+        buf.copy_from_slice(&seed.to_le_bytes()[..6]);
     }
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    format!("msg-{hex}")
+    format!("fmail-{hex}")
 }
 
 fn expired(m: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -751,16 +775,29 @@ fn standing_announcements(
     (standing, superseded)
 }
 
+/// One announcement block: the delivered-mail header line, then the body.
+/// The sender reads through the system-sender table (`fleet-incident` ->
+/// `fno/fleet-incident`), the summary is the subject when it is header-safe
+/// (no backtick or separator could forge a header field), else the body
+/// summary.
 fn render_block(m: &Value) -> String {
     let id = row_str(m, "id").unwrap_or("");
     let from = row_str(m, "from").unwrap_or("unknown");
     let meta = m.get("meta").cloned().unwrap_or(Value::Null);
     let subject = meta.get("subject").and_then(Value::as_str).unwrap_or("");
-    let expires = meta.get("expires_at").and_then(Value::as_str).unwrap_or("");
     let body = row_str(m, "body").unwrap_or("");
-    format!(
-        "<fno_mail id=\"{id}\" kind=\"announce\" from=\"{from}\" subject=\"{subject}\" expires=\"{expires}\">{body}</fno_mail>"
-    )
+    let sender = crate::system_sender::canonical(from);
+    let summary = match subject {
+        s if !s.is_empty() && !s.contains('`') && !s.contains(" · ") => s.to_string(),
+        _ => crate::mail_header::summary_of(body),
+    };
+    let header = crate::mail_header::render_header(
+        crate::mail_header::HeaderForm::Mention,
+        sender,
+        id,
+        &summary,
+    );
+    format!("{header}\n{body}")
 }
 
 fn render_compact_line(m: &Value) -> String {
@@ -961,13 +998,20 @@ fn walk_session_file(root: &Path, key: &str, depth: u8) -> Option<PathBuf> {
     None
 }
 
-/// Does the transcript carry the id? Mirrors mail_ids_in_transcript: JSONL
-/// quote-escapes are normalized before the id regex runs, and the id must sit
-/// inside an `<fno_mail` open tag (reply_resolve.py::_ID_RE), so an unrelated
-/// `id="..."` attribute cannot false-positive.
+/// Does the transcript carry the id? JSONL quote-escapes are normalized
+/// first, then the id must sit where a delivery puts it: a header line's
+/// middle token, or inside an `<fno_mail` open tag on an old transcript
+/// (reply_resolve.py::_ID_RE), so an unrelated `id="..."` attribute cannot
+/// false-positive.
 fn transcript_has_id(path: &Path, id: &str) -> Result<bool, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let normalized = text.replace("\\\"", "\"");
+    if normalized
+        .lines()
+        .any(|line| crate::mail_header::delivered_msg_id(line).as_deref() == Some(id))
+    {
+        return Ok(true);
+    }
     let needle = regex::Regex::new(&format!(r#"<fno_mail\b[^>]*\bid="{id}""#))
         .map_err(|e| format!("id regex: {e}"))?;
     Ok(needle.is_match(&normalized))
@@ -1237,21 +1281,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_audience_uses_the_full_session_id() {
-        let session = "12345678-1234-1234-1234-123456789abc";
-        let row = agent_row(
-            "lead",
-            session,
-            json!({"short_id": "12345678", "crown_level": 1}),
-        );
-
-        assert_eq!(
-            resolve_audience("kings", &[row], Some(&HashMap::new())),
-            vec![session.to_string()]
-        );
-    }
-
-    #[test]
     fn full_session_id_matches_a_leads_scope_row() {
         let session = "abcdef12-1234-1234-1234-123456789abc";
         let row = agent_row(
@@ -1511,6 +1540,16 @@ mod tests {
             !out.contains("maintenance at noon"),
             "stale news skipped: {out}"
         );
+        // The block opens with the delivered-mail header line, id in the middle.
+        let first_line = out.lines().next().unwrap_or("");
+        assert!(
+            crate::mail_header::is_header_line(first_line),
+            "block opens with a header line: {out}"
+        );
+        assert_eq!(
+            crate::mail_header::delivered_msg_id(first_line).as_deref(),
+            Some(second.as_str())
+        );
         std::fs::remove_dir_all(&f.root).ok();
     }
 
@@ -1613,7 +1652,7 @@ mod tests {
         let out = read_render(&f.paths, session, Boundary::Prompt)
             .unwrap()
             .unwrap();
-        assert!(out.contains(&format!("id=\"{id}\"")));
+        assert!(out.contains(&format!("\u{b7} {id} \u{b7}")));
         assert!(out.contains("hello fleet"));
         let second = read_render(&f.paths, session, Boundary::Prompt).unwrap();
         assert!(second.is_none(), "cursor silences the second read");
@@ -1832,6 +1871,30 @@ mod tests {
         assert_eq!(receipt["unverified"], json!(1));
         assert_eq!(receipt["landed"], json!(0));
         assert!(receipt.get("unreachable").is_none());
+        // A header-shaped transcript line carries the id too; a wrong id never
+        // matches. And a bare-fno bus append refuses, writing no row.
+        let header_file = home
+            .join("projects")
+            .join("-tmp-one")
+            .join("header-fixture.jsonl");
+        std::fs::create_dir_all(header_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &header_file,
+            "`@fleet-incident · msg-abc123 · test-hold`\nbody line\n",
+        )
+        .unwrap();
+        assert!(transcript_has_id(&header_file, "msg-abc123").unwrap());
+        assert!(!transcript_has_id(&header_file, "msg-ffffff").unwrap());
+        let bus_before = std::fs::read_to_string(&f.paths.bus_live)
+            .unwrap()
+            .lines()
+            .count();
+        assert!(append_line(&f.paths.bus_live, &json!({"id":"x","from":"fno"})).is_err());
+        let bus_after = std::fs::read_to_string(&f.paths.bus_live)
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(bus_before, bus_after, "a refused append writes no bus row");
         std::fs::remove_dir_all(&f.root).ok();
         std::fs::remove_dir_all(&home).ok();
     }

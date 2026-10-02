@@ -468,8 +468,9 @@ pub enum Event {
     /// open and unpainted.
     ToggleComposer,
     /// Toggle the full-screen sideline (prefix+F): the agent table takes the
-    /// terminal width with the composer at the bottom and the panes do not
-    /// paint. Client-local paint: no `Resize` travels in either direction.
+    /// terminal width and the panes do not paint. The composer is not
+    /// touched; prefix+i owns it. Client-local paint: no `Resize` travels in
+    /// either direction.
     ToggleFullSideline,
     /// Cycle the sideline density slim -> regular -> extended
     /// (prefix+B). Orthogonal to [`Event::TogglePanel`]: this changes how much

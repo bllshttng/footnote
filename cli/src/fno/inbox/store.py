@@ -345,8 +345,8 @@ def _slug_for(body: str, fallback_msg_id: str, max_len: int = 40) -> str:
 # ---------------------------------------------------------------------------
 
 def generate_msg_id() -> str:
-    """Generate a 'msg-XXXXXX' id with 6 hex characters."""
-    return "msg-" + secrets.token_hex(3)
+    """Generate a 'fmail-XXXXXXXXXXXX' id with 12 hex characters."""
+    return "fmail-" + secrets.token_hex(6)
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +354,7 @@ def generate_msg_id() -> str:
 # ---------------------------------------------------------------------------
 
 _MSG_HEADER_RE = re.compile(
-    r"^## (msg-[0-9a-zA-Z]+) · (\S+) · from:(\S+)\s*$"
+    r"^## ((?:fmail-|msg-)[0-9a-zA-Z]+) · (\S+) · from:(\S+)\s*$"
 )
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -489,7 +489,7 @@ def _parse_thread_text(text: str, path: Path) -> Optional[ThreadHandle]:
 
 
 def _parse_messages(body_text: str) -> list[ThreadMessage]:
-    """Parse ``## msg-{id} · {ts} · from:{sender}`` blocks out of body text."""
+    """Parse ``## {id} · {ts} · from:{sender}`` blocks (fmail- or msg- ids)."""
     lines = body_text.splitlines()
     messages: list[ThreadMessage] = []
     i = 0

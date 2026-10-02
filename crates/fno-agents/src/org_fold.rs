@@ -795,7 +795,7 @@ pub fn run_org_fold(args: &[String]) -> i32 {
                 claims_dir = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
-            "--teams-json" if i + 1 < args.len() => {
+            "--teams-json" | "--crowns-json" if i + 1 < args.len() => {
                 match serde_json::from_str::<Value>(&args[i + 1]) {
                     Ok(Value::Array(list)) => teams = list,
                     Ok(_) => {
