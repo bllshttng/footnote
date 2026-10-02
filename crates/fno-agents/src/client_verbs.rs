@@ -3345,7 +3345,10 @@ mod tests {
             "harness_session_id": "01a0fc7a-3333-7444-a555-666666666666",
             "fno_id": "9c1d2e3f-2222-4222-8222-222222222223",
         })];
-        assert_eq!(find_agent_entry(&lone, "01a0fc7a").unwrap()["name"], "codex-c");
+        assert_eq!(
+            find_agent_entry(&lone, "01a0fc7a").unwrap()["name"],
+            "codex-c"
+        );
         assert_eq!(
             find_agent_entry(&rows, "55556666").unwrap()["name"],
             "reviewer"

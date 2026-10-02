@@ -3648,9 +3648,7 @@ fn list_queries_pidless_row_by_bare_canonical_handle() {
     );
     // A v4 fno_id lists the row's fno handle as ADDRESS; a legacy row
     // (fno_id equal to its harness id) keeps the harness head.
-    let minted = state::load_registry(&home.registry_json())
-        .unwrap()
-        .entries[0]
+    let minted = state::load_registry(&home.registry_json()).unwrap().entries[0]
         .fno_id
         .clone()
         .expect("row-birth fill minted one");

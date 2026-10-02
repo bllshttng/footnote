@@ -2585,7 +2585,7 @@ fn update_registry_mints_a_row_its_own_fno_id() {
     // seed born with a known handle, then birth a row and compare heads.
     let seeded = "a1a1a1a1-1111-4111-8111-111111111111";
     update_registry(&path, |r| {
-        r.find_mut("born").unwrap().fno_id = Some(seeded.into());
+        r.find_mut("born-renamed").unwrap().fno_id = Some(seeded.into());
     })
     .unwrap();
     update_registry(&path, |r| r.entries.push(sample_entry("second"))).unwrap();

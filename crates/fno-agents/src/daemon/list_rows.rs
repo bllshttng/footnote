@@ -255,9 +255,13 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
 }
 
 /// The printed ADDRESS for a list row: the head of the row's fno-minted
-/// `fno_id` when the row has one, or the harness head for a legacy row whose
-/// fno_id is a harness copy, a short id or a name. The claude
-/// `transport_short` fallback stays at the caller.
+/// `fno_id`, but only for codex rows - their head collides across one
+/// UUIDv7 clock window and Python mail never resolved a codex head anyway.
+/// Every other harness keeps the harness head until Python mail send and
+/// peek resolve the fno handle, so a claude worker's listed mailbox stays
+/// one its sender can reach. A legacy row (fno_id a harness copy, short id
+/// or name) keeps the harness head too; the claude `transport_short`
+/// fallback stays at the caller.
 pub(super) fn row_address(e: &RegistryEntry) -> Option<String> {
     let own: Vec<&str> = [
         e.harness_session_id.as_deref(),
@@ -266,14 +270,16 @@ pub(super) fn row_address(e: &RegistryEntry) -> Option<String> {
     .into_iter()
     .flatten()
     .collect();
-    crate::identity::fno_handle(e.fno_id.as_deref(), &own).or_else(|| {
+    let minted = (e.harness_name() == "codex")
+        .then(|| crate::identity::fno_handle(e.fno_id.as_deref(), &own))
+        .flatten();
+    minted.or_else(|| {
         e.harness_session_id
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(crate::identity::canonical_handle)
     })
 }
-
 
 /// The `basis` leg beside `reachability`, worded by the batch
 /// outcome when the probe is absent: a handle the batch never measured reads

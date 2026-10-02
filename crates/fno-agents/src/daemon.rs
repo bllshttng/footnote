@@ -4274,9 +4274,11 @@ where
                     .as_deref()
                     .map(|s| Value::String(s.to_string()))
                     .unwrap_or(Value::Null);
-                // Only Claude's short transport key is a mailbox address;
-                // other harnesses need their full session identity.
-                let address: Value = list_rows::row_address(e).map(Value::String)
+                // ADDRESS is the row's fno handle (codex rows; others keep
+                // the harness head), and Claude's transport key is the
+                // last-resort fallback.
+                let address: Value = list_rows::row_address(e)
+                    .map(Value::String)
                     .or_else(|| {
                         if e.harness_name() == "claude" {
                             e.transport_short().map(|s| Value::String(s.to_string()))

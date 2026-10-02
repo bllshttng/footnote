@@ -63,11 +63,12 @@ fn mint_unique_fno_id_with(
 
 /// The harness head (the first eight of the session id), kept as a read-only
 /// tier so handles printed before fno minted row handles keep resolving, and
-/// kept as the mail bus key. It is no longer the row address: a row's address
-/// is [`fno_handle`], the head of the id fno itself mints. Codex ids are
-/// time-prefixed, so their first-8 collides across same-window sessions; a
-/// shared head still resolves while it names one row and refuses naming
-/// every match when it names two.
+/// kept as the mail bus key. For codex rows the list address is instead
+/// [`fno_handle`], the head of the id fno itself mints; every other harness
+/// keeps this head as its address until Python mail send and peek resolve
+/// the fno handle. Codex ids are time-prefixed, so their first-8 collides
+/// across same-window sessions; a shared head still resolves while it names
+/// one row and refuses naming every match when it names two.
 ///
 /// Parity with Python `fno.harness_identity.canonical_handle` is load-bearing:
 /// the Rust lifecycle client cannot import Python, and if the two rules differ a
