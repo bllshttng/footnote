@@ -124,6 +124,56 @@ pub(crate) fn parse_args(rest: &[std::ffi::OsString]) -> Result<Flags, String> {
     Ok(f)
 }
 
+/// One blocking subprocess with captured output, NO bound: the installer
+/// shape. The deleted exec waited forever, so the port does too; probes keep
+/// their timeouts, installs keep none.
+fn run_captured(
+    bin: &Path,
+    args: &[String],
+    input: Option<&str>,
+) -> Result<(i32, String, String), String> {
+    let tag = format!(
+        "fno-doctor-update-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    );
+    let tmp = |suffix: &str| std::env::temp_dir().join(format!("{tag}.{suffix}"));
+    let out_path = tmp("out");
+    let err_path = tmp("err");
+    let in_path = tmp("in");
+    let keep = |p: &Path| {
+        let _ = std::fs::remove_file(p);
+    };
+    let mut command = crate::process_admission::std_command(bin);
+    command.args(args).stdout(
+        std::fs::File::create(&out_path).map_err(|e| format!("{}: {e}", out_path.display()))?,
+    );
+    command.stderr(
+        std::fs::File::create(&err_path).map_err(|e| format!("{}: {e}", err_path.display()))?,
+    );
+    if input.is_some() {
+        std::fs::write(&in_path, input.unwrap_or_default())
+            .map_err(|e| format!("{}: {e}", in_path.display()))?;
+        let f = std::fs::File::open(&in_path).map_err(|e| format!("{}: {e}", in_path.display()))?;
+        command.stdin(Stdio::from(f));
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = crate::process_admission::std_spawn(&mut command)
+        .map_err(|e| format!("{}: {e}", bin.display()))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("{}: {e}", bin.display()))?;
+    let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+    keep(&out_path);
+    keep(&err_path);
+    if input.is_some() {
+        keep(&in_path);
+    }
+    Ok((status.code().unwrap_or(1), out, err))
+}
+
 /// One bounded blocking subprocess: stdout+stderr to private temp files (a
 /// pipe read blocks on EOF past the child; the files never do), stdin from a
 /// temp file when fed, a try_wait/kill bound. The server.rs `config_get`
@@ -1211,14 +1261,13 @@ fn uv_install(cmd: &[String]) -> bool {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
-        let (code, _out, err) =
-            match run_bounded(Path::new("uv"), &cmd[1..], Duration::from_secs(1800), None) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("fno doctor update: uv transport failed: {e}");
-                    return false;
-                }
-            };
+        let (code, _out, err) = match run_captured(Path::new("uv"), &cmd[1..], None) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("fno doctor update: uv transport failed: {e}");
+                return false;
+            }
+        };
         if code == 0 {
             if verify_uv_install() {
                 return true;
