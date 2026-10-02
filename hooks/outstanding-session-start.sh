@@ -57,7 +57,8 @@ fi
 # close. But exit 2 is Typer's "no such command", which a DEPLOYED fno older
 # than this feature returns on EVERY session until someone runs
 # `fno doctor update`. Nagging forever is noise, so the loud path is reserved
-# for a real failure: a fired bound (124) or an unreadable store (1).
+# for a real failure: an unreadable store (1). A fired bound or a skip past
+# the load threshold reads as silence (the budget contract below).
 WT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/lib/hook-budget.sh"
 [[ -f "$WT_LIB" ]] || exit 0
 # shellcheck source=../scripts/lib/hook-budget.sh

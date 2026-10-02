@@ -148,6 +148,16 @@ hook_cache_serve() {
     out=$(hook_run_optional "$@") || rc=$?
     if [[ -n "$out" ]]; then
         mkdir -p "$dir" 2>/dev/null
+        # Retention: one file per session or transcript, a few KB each. The
+        # sweep rides the sync path only (a live read already paid its forks)
+        # and trims the oldest half once the count passes the cap.
+        local entries
+        entries=$(ls "$dir" 2>/dev/null | wc -l)
+        if ((entries > 500)); then
+            ls -t "$dir" 2>/dev/null | tail -n +251 | while IFS= read -r old; do
+                rm -f "$dir/$old"
+            done
+        fi
         printf '%s\n%s' "$fp" "$out" > "$file.tmp.$$" 2>/dev/null \
             && mv -f "$file.tmp.$$" "$file" 2>/dev/null
         printf '%s' "$out"

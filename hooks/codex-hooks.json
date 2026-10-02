@@ -74,7 +74,7 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh",
-            "timeout": 4
+            "timeout": 8
           },
           {
             "type": "command",
