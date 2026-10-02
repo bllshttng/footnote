@@ -1430,6 +1430,7 @@ def _run_journal_door(argv: list[str]) -> None:
         typer.echo(f"fno doctor update: WARNING: update-journal door failed: {exc}", err=True)
 
 
+
 def _last_update_event() -> Optional[dict]:
     """The newest journaled update event, or None; rides --check's readiness
     payload (the flag ratchet bars a new Python flag). No cap: the filtered
@@ -1726,23 +1727,17 @@ def update_command(
     except Exception:  # noqa: BLE001
         old_rev = None
     journal = global_events_json()
+    _cargo_bin = _cargo_installed_bin()
+    door = [_cargo_bin, journal]
     _run_journal_door(
-        _journal_argv(
-            _cargo_installed_bin(), journal, "started",
-            new_rev=rev or "unknown", old_rev=old_rev, source_path=str(resolved),
-        )
+        _journal_argv(*door, "started", new_rev=rev or "unknown", old_rev=old_rev, source_path=str(resolved))
     )
 
     rust_outcome = None
     if not no_rust:
         # Warn-and-continue holds: the outcome never branches, it journals.
         rust_outcome = _refresh_rust_bins(resolved, force=rust, dry_run=False)
-        _run_journal_door(
-            _journal_argv(
-                _cargo_installed_bin(), journal, "built",
-                outcome=rust_outcome or "none", rust_rev=_rust_subtree_rev(resolved),
-            )
-        )
+        _run_journal_door(_journal_argv(*door, "built", outcome=rust_outcome or "none", rust_rev=_rust_subtree_rev(resolved)))
 
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
@@ -1759,21 +1754,9 @@ def update_command(
             # List form (no shell) so subprocess handles Windows quoting.
             for _argv in refresh_cmds:
                 subprocess.run(_argv, check=False)
-            _run_journal_door(
-                _journal_argv(
-                    _cargo_installed_bin(), journal, "installed",
-                    new_rev=rev, old_rev=old_rev,
-                    mail_from=_front_fno_bin(),
-                )
-            )
+            _run_journal_door(_journal_argv(*door, "installed", new_rev=rev, old_rev=old_rev, mail_from=_front_fno_bin()))
         else:
-            _run_journal_door(
-                _journal_argv(
-                    _cargo_installed_bin(), journal, "failed",
-                    rc=result.returncode, old_rev=old_rev, new_rev=rev,
-                    mail_from=_front_fno_bin(),
-                )
-            )
+            _run_journal_door(_journal_argv(*door, "failed", rc=result.returncode, old_rev=old_rev, new_rev=rev, mail_from=_front_fno_bin()))
         raise typer.Exit(result.returncode)
 
     # On Unix, execvp replaces this Python process with the installer; uv
@@ -1785,18 +1768,10 @@ def update_command(
     # watcher must not skip the groom agent.
     # The installed fact and the crown mail chain BEFORE the refreshes: they
     # are the two facts the node exists for, so no refresh crash may eat them.
-    _cargo_bin = _cargo_installed_bin()
     _fno_bin = _front_fno_bin()
     post_steps: list[str] = []
     if _cargo_bin:
-        post_steps.append(
-            shlex.join(
-                _journal_argv(
-                    _cargo_bin, journal, "installed",
-                    new_rev=rev, old_rev=old_rev, mail_from=_fno_bin,
-                )
-            )
-        )
+        post_steps.append(shlex.join(_journal_argv(*door, "installed", new_rev=rev, old_rev=old_rev, mail_from=_fno_bin)))
     post_steps += [shlex.join(c) for c in refresh_cmds]
     post_install = "; ".join(post_steps) or None
 
