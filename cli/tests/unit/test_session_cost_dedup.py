@@ -180,13 +180,17 @@ def test_json_surfaces_unpriced_model():
     assert payload["unpriced_model"] == "claude-opus-next"
 
 
-def test_json_omits_unpriced_field_when_priced():
+def test_json_omits_unpriced_field_when_priced(monkeypatch):
+    # The autouse fixture below makes every parse unpriced, so a priced
+    # session is stubbed: a dollar answer sets no unpriced key.
+    monkeypatch.setattr(session_cost, "calculate_cost", lambda m: 44.97)
     metrics = _parse([_assistant_line("msg_0", "req_0")])
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         session_cost.print_metrics(metrics, as_json=True)
     payload = json.loads(out.getvalue())
     assert "unpriced_model" not in payload
+    assert payload["cost_usd"] == 44.97
 
 
 # --- AC1-EDGE: multi-transcript dedup ------------------------------------------
