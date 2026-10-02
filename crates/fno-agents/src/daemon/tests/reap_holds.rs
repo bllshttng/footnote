@@ -43,18 +43,27 @@ fn ac2_hp_every_hold_line_carries_an_age_and_basis() {
         conf.node = Some("x-cccc".into());
         conf.harness_session_id = Some("sess-conf".into());
         conf.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        conf.status = crate::AgentStatus::Idle;
         r.entries.push(conf);
         // transcript unresolved: the age seam answers nothing for this row.
         let mut tu = ask_row("tu-row", None);
         tu.short_id = "turow".into();
         tu.harness_session_id = Some("sess-tu".into());
         tu.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        tu.status = crate::AgentStatus::Idle;
         r.entries.push(tu);
         // open do row on a done node.
         let mut odr = ask_row("odr-row", None);
         odr.short_id = "odrrow".into();
         odr.harness_session_id = Some("sess-odr".into());
         odr.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        odr.status = crate::AgentStatus::Idle;
         r.entries.push(odr);
         // needs live stop: a claude row a dry run cannot promise a stop for.
         let nls = claude_worker_row("nls-row", "nlsrow");
@@ -315,17 +324,26 @@ fn ac3_hp_the_release_retires_the_ruled_row_and_keeps_the_rest() {
         old.harness_session_id = Some("sess-old".into());
         old.origin = Some("spawn".into());
         old.created_at = stamp(7200);
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        old.status = crate::AgentStatus::Idle;
         r.entries.push(old);
         let mut mid = ask_row("mid-row", None);
         mid.short_id = "midrow".into();
         mid.harness_session_id = Some("sess-mid".into());
         mid.origin = Some("spawn".into());
         mid.created_at = stamp(60);
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        mid.status = crate::AgentStatus::Idle;
         r.entries.push(mid);
         let mut act = ask_row("act-row", None);
         act.short_id = "actrow".into();
         act.harness_session_id = Some("sess-act".into());
         act.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        act.status = crate::AgentStatus::Idle;
         r.entries.push(act);
     })
     .unwrap();

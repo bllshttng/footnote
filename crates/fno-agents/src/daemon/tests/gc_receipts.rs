@@ -614,6 +614,9 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
             let mut e = ask_row(name, None);
             e.harness_session_id = Some(format!("sess-{name}"));
             e.origin = Some("spawn".into());
+    // The verdict door reads the stored status first; these scenarios vary
+    // the vendor word, so the row itself must be fno-undecided.
+    e.status = crate::AgentStatus::Idle;
             r.entries.push(e);
         }
     })
@@ -3534,6 +3537,9 @@ fn spawn_row(reg: &mut state::Registry, name: &str, sid: &str) {
     e.harness = Some("claude".into());
     e.harness_session_id = Some(sid.into());
     e.origin = Some("spawn".into());
+    // The verdict door reads the stored status first; these scenarios vary
+    // the vendor word, so the row itself must be fno-undecided.
+    e.status = crate::AgentStatus::Idle;
     reg.entries.push(e);
 }
 
