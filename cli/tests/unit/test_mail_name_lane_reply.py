@@ -110,7 +110,7 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
         to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
     r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
     # I never typed the sender handle on the command line; the reply still names it.
     assert "9a063cd3" in r.output
     assert msg in r.output  # the correlated msg-id (re:<id>)
@@ -142,7 +142,7 @@ def test_session_lane_reply_uses_full_sender_provenance(
 
     result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 14, result.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
     # The FULL id, not its head-8. Truncating here threw away the one address
@@ -270,7 +270,7 @@ def test_us3_reply_to_live_injected_id_resolves_sender_from_transcript(
     )
 
     r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "pong"])
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
@@ -316,7 +316,7 @@ def test_ac2edge_two_replies_to_one_message_both_thread(
         r = runner.invoke(
             app, ["mail", "reply", "--to", msg, "--body", body]
         )
-        assert r.exit_code == 0, r.output
+        assert r.exit_code == 14, r.output
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 2
@@ -336,7 +336,7 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     r = runner.invoke(
         app, ["mail", "reply", "--to", msg, "--body", "ack"]
     )
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
     assert "queued (durable)" in r.output
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
@@ -393,7 +393,7 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-9a063cd3", body="ping")
     r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
     assert replies[0].to == "9a063cd3"  # migrated to the live session's canonical handle
@@ -458,7 +458,7 @@ def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(
     r = runner.invoke(
         app, ["mail", "reply", "--to", msg, "--body", "ack"]
     )
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
     rep = next(m for m in _bus_msgs() if m.in_reply_to == msg)
     assert rep.to == f"claude-{uuid}"  # durable floor to the full handle
     assert f'to="claude-{uuid}"' in rep.body  # wire `to` matches it exactly
@@ -496,7 +496,7 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
         to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
     r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
     assert "could not be established" in (r.stderr or "")
     assert "is not live" not in (r.stderr or "")
     assert "may never" in (r.stderr or "")
@@ -584,7 +584,7 @@ def _seeded_reply(runner, monkeypatch, tmp_path, argv_tail):
 def test_a_positional_body_is_accepted_like_send(runner, mailbox, monkeypatch, tmp_path):
     msg, r = _seeded_reply(runner, monkeypatch, tmp_path, ["ack"])
 
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 14, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
     assert "ack" in replies[0].body
@@ -609,7 +609,7 @@ def test_the_positional_and_body_flag_agree(runner, mailbox, monkeypatch, tmp_pa
     msg_b, r_b = _seeded_reply(runner, monkeypatch, tmp_path, ["--body", "ack"])
     via_flag = _payload([m for m in _bus_msgs() if m.in_reply_to == msg_b][0].body)
 
-    assert r_a.exit_code == r_b.exit_code == 0
+    assert r_a.exit_code == r_b.exit_code == 14
     assert via_positional == via_flag == "ack"
 
 

@@ -252,7 +252,7 @@ def test_writeahead_writes_durable_for_asleep_recipient(runner, tmp_path, monkey
     monkeypatch.setattr("fno.agents.dispatch._deliver_live", _no_live_lane)
 
     res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
-    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+    assert res.exit_code == 14, f"exit={res.exit_code} out={res.output!r}"
 
     unread = scan_unread(recipient)
     assert unread, "the write-ahead placeholder did not land on the bus"
@@ -372,7 +372,7 @@ def test_live_recipient_live_miss_writes_durable(runner, tmp_path, monkeypatch):
     monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: False)
 
     res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
-    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+    assert res.exit_code == 14, f"exit={res.exit_code} out={res.output!r}"
 
     unread = scan_unread(recipient)
     assert unread, "the live-first durable fallback did not write"
