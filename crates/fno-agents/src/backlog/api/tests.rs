@@ -1200,3 +1200,144 @@ fn primary_pr_stamp_never_overwrites_a_recorded_value() {
         );
     }
 }
+
+#[test]
+fn api_comment_thread_write_and_reply_state_rules() {
+    let (_pin, _d1, _d2, store, _second) = store_pair();
+    for store in [&store] {
+        // A user comment then an agent reply with state done and a link.
+        let ask = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "rename the flag".into(),
+                kind: Some("comment".into()),
+                author: Some("user".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(ask.success);
+        let thread = comments(store, "ab-one", &Page::default()).unwrap();
+        assert_eq!(thread.nodes.len(), 1);
+        let cid = thread.nodes[0]
+            .extras
+            .get("comment_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert!(cid.starts_with("c-") && cid.len() == 8, "c- plus 6 hex");
+        assert_eq!(
+            thread.nodes[0].extras.get("state").and_then(Value::as_str),
+            Some("open")
+        );
+        assert_eq!(
+            thread.nodes[0].extras.get("author").and_then(Value::as_str),
+            Some("user")
+        );
+
+        let reply = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "landed".into(),
+                kind: Some("reply".into()),
+                reply_to: Some(cid.clone()),
+                state: Some("done".into()),
+                state_ref: Some("PR 2951".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(reply.success);
+        let thread = comments(store, "ab-one", &Page::default()).unwrap();
+        assert_eq!(thread.nodes.len(), 2, "comment then reply, in order");
+        assert_eq!(
+            thread.nodes[1]
+                .extras
+                .get("reply_to")
+                .and_then(Value::as_str),
+            Some(cid.as_str())
+        );
+        // The PARENT row carries the moved state, in the same mutation.
+        assert_eq!(
+            thread.nodes[0].extras.get("state").and_then(Value::as_str),
+            Some("done")
+        );
+        assert_eq!(
+            thread.nodes[0]
+                .extras
+                .get("state_ref")
+                .and_then(Value::as_str),
+            Some("PR 2951")
+        );
+
+        // A reply to a comment id that does not exist is refused.
+        let ghost = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "orphan".into(),
+                kind: Some("reply".into()),
+                reply_to: Some("c-999999".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            ghost.0.contains("names no comment"),
+            "the refusal names the unknown thread: {}",
+            ghost.0
+        );
+        let thread = comments(store, "ab-one", &Page::default()).unwrap();
+        assert_eq!(thread.nodes.len(), 2, "no row added");
+
+        // State rules: done without a ref, an unknown state, and a kind
+        // outside the thread vocabulary all refuse.
+        let no_ref = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "landed".into(),
+                kind: Some("reply".into()),
+                reply_to: Some(cid.clone()),
+                state: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(no_ref.0.contains("names its landing"), "{}", no_ref.0);
+        let bad_state = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "hmm".into(),
+                kind: Some("reply".into()),
+                reply_to: Some(cid),
+                state: Some("closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            bad_state.0.contains("must be accepted, done or declined"),
+            "{}",
+            bad_state.0
+        );
+        let bad_kind = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "a note-shaped row".into(),
+                kind: Some("note".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            bad_kind.0.contains("must be comment or reply"),
+            "{}",
+            bad_kind.0
+        );
+    }
+}
