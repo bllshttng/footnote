@@ -675,7 +675,9 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
 fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Option<Observed> {
     let mut best: Option<(f64, PathBuf)> = None;
     let projects = std::fs::read_dir(root).ok()?.flatten();
-    for session in projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten()) {
+    for session in
+        projects.flat_map(|p| std::fs::read_dir(p.path()).into_iter().flatten().flatten())
+    {
         let path = session.path().join("transcript.jsonl");
         let Some(mtime) = std::fs::metadata(&path)
             .and_then(|m| m.modified())
@@ -700,10 +702,20 @@ fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Optio
     for r in &records {
         let d = &r["data"];
         match r["type"].as_str() {
-            Some("model_response") => model = d["reported_model"].as_str().map(str::to_string).or(model),
+            Some("model_response") => {
+                model = d["reported_model"].as_str().map(str::to_string).or(model)
+            }
             Some("usage") => {
                 let n = |k: &str| d[k].as_u64().unwrap_or(0);
-                usage = Some(add_usage(usage, (n("input_tokens"), n("output_tokens"), n("cache_read_tokens"), n("cache_write_tokens"))));
+                usage = Some(add_usage(
+                    usage,
+                    (
+                        n("input_tokens"),
+                        n("output_tokens"),
+                        n("cache_read_tokens"),
+                        n("cache_write_tokens"),
+                    ),
+                ));
             }
             _ => {}
         }
@@ -711,7 +723,10 @@ fn observe_footnote(root: &Path, workdir: &str, started: f64, now: f64) -> Optio
     Some(Observed {
         harness: "footnote",
         model,
-        session_id: header["session_id"].as_str().unwrap_or_default().to_string(),
+        session_id: header["session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         usage: usage.map(usage_json),
         source: "footnote-transcript",
     })

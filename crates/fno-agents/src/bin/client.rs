@@ -1323,7 +1323,8 @@ async fn run(args: Vec<String>) -> i32 {
         {
             return code;
         }
-        if let Some(code) = fno_agents::footnote_harness::maybe_run_ask(&home, &params, &agent_name) {
+        if let Some(code) = fno_agents::footnote_harness::maybe_run_ask(&home, &params, &agent_name)
+        {
             return code;
         }
         // Opencode `ask` is intercepted client-side: opencode is

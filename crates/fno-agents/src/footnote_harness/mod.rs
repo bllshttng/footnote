@@ -57,7 +57,10 @@ pub struct Terminal {
 }
 
 fn term(state: &'static str, reason: impl Into<String>) -> Terminal {
-    Terminal { state, reason: reason.into() }
+    Terminal {
+        state,
+        reason: reason.into(),
+    }
 }
 
 impl Session {
@@ -109,8 +112,11 @@ impl Session {
     pub fn submit(&mut self, text: &str, origin: &str) -> Result<bool, String> {
         let out = self.run_hook("UserPromptSubmit", json!({"prompt": text}));
         if let Some((reason, rule)) = &out.deny {
-            self.append("hook_decision", json!({"event": "UserPromptSubmit", "verdict": "block",
-                "rule": rule, "reason": reason}))?;
+            self.append(
+                "hook_decision",
+                json!({"event": "UserPromptSubmit", "verdict": "block",
+                "rule": rule, "reason": reason}),
+            )?;
             return Ok(false);
         }
         self.append("user_input", json!({"text": text, "origin": origin}))?;
@@ -133,9 +139,12 @@ impl Session {
                         "The outcome of this {} call is unknown: the previous run stopped after it started and before it reported. It was not re-run; check its effect before repeating it.",
                         call["name"].as_str().unwrap_or("tool")
                     );
-                    self.append("tool_result", json!({"tool_call_uid": call["tool_call_uid"],
+                    self.append(
+                        "tool_result",
+                        json!({"tool_call_uid": call["tool_call_uid"],
                         "disposition": "unknown", "is_error": true, "model_text": text,
-                        "size": 0, "sha256": null, "spill_path": null}))?;
+                        "size": 0, "sha256": null, "spill_path": null}),
+                    )?;
                 }
             }
         }
@@ -145,14 +154,20 @@ impl Session {
     fn check_budget(&self, estimated_input_tokens: u64) -> Option<Terminal> {
         if let Some(cap) = self.budget.wall_cap {
             if self.started.elapsed() >= cap {
-                return Some(term("budget", format!("wall cap {}s reached", cap.as_secs())));
+                return Some(term(
+                    "budget",
+                    format!("wall cap {}s reached", cap.as_secs()),
+                ));
             }
         }
         if let (Some(cap), Some((pin, _, _))) = (self.budget.cost_cap_usd, self.budget.price) {
             let spent = self.totals()["cost_usd"].as_f64().unwrap_or(0.0);
             let next = estimated_input_tokens as f64 * pin / 1e6;
             if spent + next > cap {
-                return Some(term("budget", format!("dollar cap ${cap:.4}: spent ${spent:.4}, next call ~${next:.4}")));
+                return Some(term(
+                    "budget",
+                    format!("dollar cap ${cap:.4}: spent ${spent:.4}, next call ~${next:.4}"),
+                ));
             }
         }
         None
@@ -171,10 +186,19 @@ impl Session {
             return Ok(());
         }
         // Compacting twice on one reading would drop the tail it just kept.
-        if self.records.last().is_some_and(|r| r["type"] == "compaction") {
+        if self
+            .records
+            .last()
+            .is_some_and(|r| r["type"] == "compaction")
+        {
             return Ok(());
         }
-        let data = resume::compact(&self.records, self.plan_path.as_deref(), self.node.as_deref(), used);
+        let data = resume::compact(
+            &self.records,
+            self.plan_path.as_deref(),
+            self.node.as_deref(),
+            used,
+        );
         self.append("compaction", data)
     }
 
@@ -197,11 +221,14 @@ impl Session {
             }
             let msg_count = resume::messages(&self.records).len();
             let ep = &self.client.endpoint;
-            self.append("model_request", json!({"turn": turn, "provider_id": ep.provider_id,
+            self.append(
+                "model_request",
+                json!({"turn": turn, "provider_id": ep.provider_id,
                 "endpoint_host": ep.host(), "wire": ep.wire.as_str(), "route": ep.route,
                 "requested_model": self.model, "message_count": msg_count,
                 "estimated_input_tokens": estimate,
-                "body_sha256": transcript::sha256_hex(body.as_bytes())}))?;
+                "body_sha256": transcript::sha256_hex(body.as_bytes())}),
+            )?;
             let mut attempts = Vec::new();
             let sent = self.client.send(&body, &mut |a| attempts.push(a));
             for a in attempts.drain(..) {
@@ -220,15 +247,17 @@ impl Session {
                 "reported_model": resp["model"], "content": resp["content"], "stop_reason": resp["stop_reason"],
                 "latency_ms": reply.latency_ms as u64, "attempts": reply.attempts}))?;
             let u = &resp["usage"];
-            let (i, o) = (u["input_tokens"].as_u64().unwrap_or(0), u["output_tokens"].as_u64().unwrap_or(0));
+            let (i, o) = (
+                u["input_tokens"].as_u64().unwrap_or(0),
+                u["output_tokens"].as_u64().unwrap_or(0),
+            );
             let (cr, cw) = (
                 u["cache_read_input_tokens"].as_u64().unwrap_or(0),
                 u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
             );
-            let cost = self
-                .budget
-                .price
-                .map(|(pi, po, pc)| (i as f64 * pi + cw as f64 * pi + o as f64 * po + cr as f64 * pc) / 1e6);
+            let cost = self.budget.price.map(|(pi, po, pc)| {
+                (i as f64 * pi + cw as f64 * pi + o as f64 * po + cr as f64 * pc) / 1e6
+            });
             self.append("usage", json!({"turn": turn, "provider_response_id": resp["id"],
                 "input_tokens": i, "output_tokens": o, "cache_read_tokens": cr, "cache_write_tokens": cw,
                 "cost_usd": cost}))?;
@@ -242,7 +271,10 @@ impl Session {
                 .collect();
             if uses.is_empty() {
                 let last = last_text(&self.records);
-                let out = self.run_hook("Stop", json!({"last_assistant_message": last, "stop_hook_active": turn > 1}));
+                let out = self.run_hook(
+                    "Stop",
+                    json!({"last_assistant_message": last, "stop_hook_active": turn > 1}),
+                );
                 if let Some((reason, rule)) = out.deny {
                     self.append("hook_decision", json!({"event": "Stop", "verdict": "block", "rule": rule, "reason": reason}))?;
                     self.append("user_input", json!({"text": reason, "origin": "hook"}))?;
@@ -257,7 +289,10 @@ impl Session {
                 if wire_id.is_empty() || !seen.insert(wire_id.clone()) {
                     wire_id = format!("footnote_{turn}_{n}");
                 }
-                let raw = b["raw_input"].as_str().map(str::to_string).unwrap_or_else(|| b["input"].to_string());
+                let raw = b["raw_input"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| b["input"].to_string());
                 let parse_error = (b["input"].is_null()).then_some("tool input is not valid JSON");
                 let call = json!({"turn": turn, "tool_call_uid": transcript::mint()?,
                     "provider_tool_call_id": wire_id, "name": b["name"], "raw_input": raw,
@@ -281,9 +316,17 @@ impl Session {
         if !call["parse_error"].is_null() {
             self.append("effect_decision", json!({"tool_call_uid": uid, "effect_class": class,
                 "effect_capable": effect, "verdict": "deny", "rule": "parse_error", "principal": "policy"}))?;
-            return self.result(&uid, "none", true, format!("{}: {}", call["parse_error"], call["raw_input"]).as_bytes());
+            return self.result(
+                &uid,
+                "none",
+                true,
+                format!("{}: {}", call["parse_error"], call["raw_input"]).as_bytes(),
+            );
         }
-        let out = self.run_hook("PreToolUse", json!({"tool_name": name, "tool_input": input, "tool_use_id": uid}));
+        let out = self.run_hook(
+            "PreToolUse",
+            json!({"tool_name": name, "tool_input": input, "tool_use_id": uid}),
+        );
         let (verdict, rule, reason) = match &out.deny {
             Some((reason, rule)) => ("deny", rule.clone(), Some(reason.clone())),
             None => ("allow", "default-allow".to_string(), None),
@@ -291,17 +334,33 @@ impl Session {
         self.append("effect_decision", json!({"tool_call_uid": uid, "effect_class": class,
             "effect_capable": effect, "verdict": verdict, "rule": rule, "reason": reason, "principal": "policy"}))?;
         if let Some(reason) = reason {
-            return self.result(&uid, "none", true, format!("Denied by a footnote hook: {reason}").as_bytes());
+            return self.result(
+                &uid,
+                "none",
+                true,
+                format!("Denied by a footnote hook: {reason}").as_bytes(),
+            );
         }
         self.append("tool_start", json!({"tool_call_uid": uid}))?;
         let fno_id = self.fno_id();
         let (text, is_error) = if name == "Skill" {
-            match load_skill(self.hooks.root(), input["skill"].as_str().unwrap_or(""), input["args"].as_str().unwrap_or("")) {
+            match load_skill(
+                self.hooks.root(),
+                input["skill"].as_str().unwrap_or(""),
+                input["args"].as_str().unwrap_or(""),
+            ) {
                 Some(body) => (body, false),
                 None => ("no such skill".to_string(), true),
             }
         } else {
-            tools::run(&name, &input, &tools::Ctx { cwd: &self.cwd, fno_id: &fno_id })
+            tools::run(
+                &name,
+                &input,
+                &tools::Ctx {
+                    cwd: &self.cwd,
+                    fno_id: &fno_id,
+                },
+            )
         };
         let killed = crate::subprocess_ask::ask_interrupted();
         let disposition = match (effect, killed) {
@@ -310,16 +369,28 @@ impl Session {
             (true, false) => "applied",
         };
         self.result(&uid, disposition, is_error, text.as_bytes())?;
-        let post = self.run_hook("PostToolUse", json!({"tool_name": name, "tool_input": input,
-            "tool_use_id": uid, "tool_response": cap(&text, 4096)}));
+        let post = self.run_hook(
+            "PostToolUse",
+            json!({"tool_name": name, "tool_input": input,
+            "tool_use_id": uid, "tool_response": cap(&text, 4096)}),
+        );
         for c in post.context {
-            self.append("hook_decision", json!({"event": "PostToolUse", "verdict": "allow", "context": c}))?;
+            self.append(
+                "hook_decision",
+                json!({"event": "PostToolUse", "verdict": "allow", "context": c}),
+            )?;
             self.append("user_input", json!({"text": c, "origin": "hook"}))?;
         }
         Ok(())
     }
 
-    fn result(&mut self, uid: &Value, disposition: &str, is_error: bool, out: &[u8]) -> Result<(), String> {
+    fn result(
+        &mut self,
+        uid: &Value,
+        disposition: &str,
+        is_error: bool,
+        out: &[u8],
+    ) -> Result<(), String> {
         let text = String::from_utf8_lossy(out);
         let (spill_path, sha) = if out.len() > SPILL_AT {
             let (p, _, sha) = self.w.spill(uid.as_str().unwrap_or("call"), out)?;
@@ -330,12 +401,18 @@ impl Session {
         let mut model_text = cap(&text, MODEL_TEXT_CAP);
         if let Some(p) = &spill_path {
             if out.len() > MODEL_TEXT_CAP {
-                model_text.push_str(&format!("\n[output truncated: {} bytes total; full output at {p}]", out.len()));
+                model_text.push_str(&format!(
+                    "\n[output truncated: {} bytes total; full output at {p}]",
+                    out.len()
+                ));
             }
         }
-        self.append("tool_result", json!({"tool_call_uid": uid, "disposition": disposition,
+        self.append(
+            "tool_result",
+            json!({"tool_call_uid": uid, "disposition": disposition,
             "is_error": is_error, "model_text": model_text, "size": out.len(), "sha256": sha,
-            "spill_path": spill_path}))
+            "spill_path": spill_path}),
+        )
     }
 
     pub fn finish(&mut self, t: &Terminal) -> Result<(), String> {
@@ -363,7 +440,12 @@ fn last_text(records: &[Value]) -> String {
         .rev()
         .find(|r| r["type"] == "model_response")
         .and_then(|r| r["data"]["content"].as_array())
-        .map(|b| b.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"))
+        .map(|b| {
+            b.iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
         .unwrap_or_default()
 }
 
@@ -374,13 +456,18 @@ fn load_skill(root: Option<&Path>, verb: &str, args: &str) -> Option<String> {
     }
     let dir = root?.join("skills").join(verb);
     let body = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
-    Some(format!("Base directory for this skill: {}\n\n{body}\n\nARGUMENTS: {args}", dir.display()))
+    Some(format!(
+        "Base directory for this skill: {}\n\n{body}\n\nARGUMENTS: {args}",
+        dir.display()
+    ))
 }
 
 /// A first token `/fno:<verb>` or `$fno:<verb>` expands to that SKILL.md.
 pub fn expand_skill(text: &str, root: Option<&Path>) -> Option<String> {
     let trimmed = text.trim_start();
-    let (tok, rest) = trimmed.split_once(char::is_whitespace).unwrap_or((trimmed, ""));
+    let (tok, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
     let (verb, namespaced) = crate::provider::parse_verb_token(tok)?;
     if !namespaced {
         return None;
@@ -391,14 +478,24 @@ pub fn expand_skill(text: &str, root: Option<&Path>) -> Option<String> {
 /// The system prompt: the base text plus the cwd's AGENTS.md.
 fn system_prompt(cwd: &Path) -> String {
     match std::fs::read_to_string(cwd.join("AGENTS.md")) {
-        Ok(a) => format!("{BASE_PROMPT}\n\ncwd: {}\n\n# AGENTS.md\n\n{a}", cwd.display()),
+        Ok(a) => format!(
+            "{BASE_PROMPT}\n\ncwd: {}\n\n# AGENTS.md\n\n{a}",
+            cwd.display()
+        ),
         Err(_) => format!("{BASE_PROMPT}\n\ncwd: {}", cwd.display()),
     }
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(cwd).args(args).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// USD per million tokens from the models.dev cache: the route provider's
@@ -408,7 +505,11 @@ pub fn price_for(cache: &Path, provider: Option<&str>, model: &str) -> Option<(f
     let from = |p: &Value| -> Option<(f64, f64, f64)> {
         let c = &p["models"][model]["cost"];
         let i = c["input"].as_f64()?;
-        Some((i, c["output"].as_f64().unwrap_or(i), c["cache_read"].as_f64().unwrap_or(i)))
+        Some((
+            i,
+            c["output"].as_f64().unwrap_or(i),
+            c["cache_read"].as_f64().unwrap_or(i),
+        ))
     };
     if let Some(hit) = provider.and_then(|p| from(&doc[p])) {
         return Some(hit);
@@ -424,14 +525,20 @@ fn price_cache() -> PathBuf {
 }
 
 /// Budget caps and the claimed plan from the target manifest, when one exists.
-fn manifest_fields(manifest: Option<&Path>) -> (Option<f64>, Option<u64>, Option<String>, Option<String>) {
+fn manifest_fields(
+    manifest: Option<&Path>,
+) -> (Option<f64>, Option<u64>, Option<String>, Option<String>) {
     let Some(content) = manifest.and_then(|p| std::fs::read_to_string(p).ok()) else {
         return (None, None, None, None);
     };
     let f = |k: &str| crate::loopcheck::scan_manifest_field(&content, k);
     (
-        f("budget_cost_cap_usd").and_then(|v| v.parse().ok()).filter(|v: &f64| *v > 0.0),
-        f("budget_wall_clock_cap_minutes").and_then(|v| v.parse().ok()).filter(|v: &u64| *v > 0),
+        f("budget_cost_cap_usd")
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f64| *v > 0.0),
+        f("budget_wall_clock_cap_minutes")
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &u64| *v > 0),
         f("plan_path"),
         f("graph_node_id"),
     )
@@ -453,7 +560,10 @@ pub struct Launch<'a> {
 
 fn budget_for(l: &Launch) -> Result<(Budget, Option<String>, Option<String>), String> {
     let (cost_cap, wall_min, plan_path, node) = manifest_fields(l.manifest.as_deref());
-    let wall = [l.timeout, wall_min.map(|m| Duration::from_secs(m * 60))].into_iter().flatten().min();
+    let wall = [l.timeout, wall_min.map(|m| Duration::from_secs(m * 60))]
+        .into_iter()
+        .flatten()
+        .min();
     let price = price_for(&l.price_cache, l.endpoint.provider_id.as_deref(), l.model);
     if cost_cap.is_some() && price.is_none() {
         return Err(format!(
@@ -462,7 +572,15 @@ fn budget_for(l: &Launch) -> Result<(Budget, Option<String>, Option<String>), St
             l.price_cache.display()
         ));
     }
-    Ok((Budget { wall_cap: wall, cost_cap_usd: cost_cap, price }, plan_path, node))
+    Ok((
+        Budget {
+            wall_cap: wall,
+            cost_cap_usd: cost_cap,
+            price,
+        },
+        plan_path,
+        node,
+    ))
 }
 
 /// Start a new session: mint, header, SessionStart. Returns the session.
@@ -473,22 +591,30 @@ pub fn start(l: Launch) -> Result<Session, String> {
     let mut w = Writer::create(&dir, &fno_id)?;
     w.add_secret(&l.endpoint.key);
     let node = l.node.map(str::to_string).or(manifest_node);
-    let header = w.append("header", json!({
-        "session_id": fno_id, "cwd": l.cwd, "harness": "footnote",
-        "commit": git(l.cwd, &["rev-parse", "HEAD"]),
-        "branch": git(l.cwd, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "fno_version": crate::version::version_json(),
-        "parent_session_id": l.parent_session_id, "forked_from": null,
-        "node": node, "plugin_root": l.plugin_root,
-        "model": l.model, "wire": l.endpoint.wire.as_str(),
-        "system_prompt": system_prompt(l.cwd),
-    }), false)?;
+    let header = w.append(
+        "header",
+        json!({
+            "session_id": fno_id, "cwd": l.cwd, "harness": "footnote",
+            "commit": git(l.cwd, &["rev-parse", "HEAD"]),
+            "branch": git(l.cwd, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "fno_version": crate::version::version_json(),
+            "parent_session_id": l.parent_session_id, "forked_from": null,
+            "node": node, "plugin_root": l.plugin_root,
+            "model": l.model, "wire": l.endpoint.wire.as_str(),
+            "system_prompt": system_prompt(l.cwd),
+        }),
+        false,
+    )?;
     let mut s = Session {
         w,
         records: vec![header],
         cwd: l.cwd.to_path_buf(),
         hooks: hooks::HookHost::load(l.plugin_root),
-        client: model::Client { endpoint: l.endpoint, max_time: Duration::from_secs(600), backoff: Duration::from_secs(1) },
+        client: model::Client {
+            endpoint: l.endpoint,
+            max_time: Duration::from_secs(600),
+            backoff: Duration::from_secs(1),
+        },
         budget,
         started: Instant::now(),
         node,
@@ -496,7 +622,10 @@ pub fn start(l: Launch) -> Result<Session, String> {
         model: l.model.to_string(),
     };
     let out = s.run_hook("SessionStart", json!({"source": "startup"}));
-    s.append("hook_decision", json!({"event": "SessionStart", "verdict": "allow", "context": out.context.join("\n\n")}))?;
+    s.append(
+        "hook_decision",
+        json!({"event": "SessionStart", "verdict": "allow", "context": out.context.join("\n\n")}),
+    )?;
     Ok(s)
 }
 
@@ -505,16 +634,27 @@ pub fn reopen(dir: &Path, fno_id: &str, l: Launch) -> Result<Session, String> {
     let (budget, plan_path, manifest_node) = budget_for(&l)?;
     let (mut w, records) = Writer::open(dir, fno_id)?;
     w.add_secret(&l.endpoint.key);
-    let header = records.iter().find(|r| r["type"] == "header").map(|r| r["data"].clone()).unwrap_or_default();
+    let header = records
+        .iter()
+        .find(|r| r["type"] == "header")
+        .map(|r| r["data"].clone())
+        .unwrap_or_default();
     let mut s = Session {
         w,
         records,
         cwd: l.cwd.to_path_buf(),
         hooks: hooks::HookHost::load(l.plugin_root),
-        client: model::Client { endpoint: l.endpoint, max_time: Duration::from_secs(600), backoff: Duration::from_secs(1) },
+        client: model::Client {
+            endpoint: l.endpoint,
+            max_time: Duration::from_secs(600),
+            backoff: Duration::from_secs(1),
+        },
         budget,
         started: Instant::now(),
-        node: header["node"].as_str().map(str::to_string).or(manifest_node),
+        node: header["node"]
+            .as_str()
+            .map(str::to_string)
+            .or(manifest_node),
         plan_path,
         model: header["model"].as_str().unwrap_or(l.model).to_string(),
     };
@@ -533,7 +673,12 @@ pub fn drive(s: &mut Session, input: &str, origin: &str) -> Result<Terminal, Str
     Ok(t)
 }
 
-fn launch_for<'a>(cwd: &'a Path, model: &'a str, timeout: Option<Duration>, node: Option<&'a str>) -> Result<Launch<'a>, String> {
+fn launch_for<'a>(
+    cwd: &'a Path,
+    model: &'a str,
+    timeout: Option<Duration>,
+    node: Option<&'a str>,
+) -> Result<Launch<'a>, String> {
     let endpoint = model::resolve_endpoint(cwd, &|k| std::env::var(k).ok())?;
     Ok(Launch {
         root: transcript::sessions_root(),
@@ -543,14 +688,20 @@ fn launch_for<'a>(cwd: &'a Path, model: &'a str, timeout: Option<Duration>, node
         plugin_root: crate::provider::plugin_root(),
         timeout,
         node,
-        parent_session_id: std::env::var("FNO_HARNESS_SESSION_ID").ok().filter(|v| !v.is_empty()),
+        parent_session_id: std::env::var("FNO_HARNESS_SESSION_ID")
+            .ok()
+            .filter(|v| !v.is_empty()),
         price_cache: price_cache(),
         manifest: crate::state_path::resolve("target-state", cwd),
     })
 }
 
 fn outcome(code: i32, stdout: String, stderr: String) -> AskOutcome {
-    AskOutcome { stdout, stderr, exit_code: code }
+    AskOutcome {
+        stdout,
+        stderr,
+        exit_code: code,
+    }
 }
 
 fn reply_for(s: &Session, t: &Terminal) -> AskOutcome {
@@ -562,7 +713,11 @@ fn reply_for(s: &Session, t: &Terminal) -> AskOutcome {
         s.w.transcript_path().display()
     );
     let code = if t.state == "done" { 0 } else { 1 };
-    let stderr = if code == 0 { String::new() } else { format!("{line} {}\n", t.reason) };
+    let stderr = if code == 0 {
+        String::new()
+    } else {
+        format!("{line} {}\n", t.reason)
+    };
     outcome(code, format!("{text}\n{line}\n"), stderr)
 }
 
@@ -574,7 +729,9 @@ fn mark_row(home: &AgentsHome, name: &str, s: &Session) {
         .and_then(|r| r["data"]["reported_model"].as_str())
         .map(str::to_string);
     let _ = update_registry(&home.registry_json(), |reg| {
-        let Some(e) = reg.find_mut(name) else { return false };
+        let Some(e) = reg.find_mut(name) else {
+            return false;
+        };
         e.status = crate::AgentStatus::Exited;
         e.pid = None;
         e.last_message_at = Some(crate::daemon::now_rfc3339_like());
@@ -606,7 +763,11 @@ pub fn dispatch_once(
     };
     match load_registry(&home.registry_json()) {
         Ok(reg) if reg.find(name).is_some() => {
-            return outcome(2, String::new(), format!("agent {name} already exists; use 'fno agents rm {name}' first\n"));
+            return outcome(
+                2,
+                String::new(),
+                format!("agent {name} already exists; use 'fno agents rm {name}' first\n"),
+            );
         }
         Err(e) => return outcome(12, String::new(), format!("registry read failed: {e}\n")),
         Ok(_) => {}
@@ -633,7 +794,10 @@ pub fn dispatch_once(
         pid: Some(std::process::id()),
         created_at: crate::daemon::now_rfc3339_like(),
         log_path: Some(s.w.transcript_path().to_string_lossy().to_string()),
-        ..RegistryEntry::new(Some(fno_id.clone()), crate::spawn_lineage::ambient_lineage())
+        ..RegistryEntry::new(
+            Some(fno_id.clone()),
+            crate::spawn_lineage::ambient_lineage(),
+        )
     };
     entry.account_record_id = Some("default".into());
     match update_registry(&home.registry_json(), |reg| {
@@ -664,7 +828,10 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
     if entry.harness_name() != "footnote" {
         return None;
     }
-    let fno_id = entry.fno_id.clone().or_else(|| entry.harness_session_id.clone())?;
+    let fno_id = entry
+        .fno_id
+        .clone()
+        .or_else(|| entry.harness_session_id.clone())?;
     let row_name = entry.name.clone();
     let cwd = PathBuf::from(&entry.cwd);
     let model = entry.requested_model.clone().unwrap_or_default();
@@ -674,7 +841,8 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
         eprintln!("fno-agents: footnote session {fno_id} has no transcript on disk");
         return Some(2);
     };
-    let mut s = match launch_for(&cwd, &model, timeout, None).and_then(|l| reopen(&dir, &fno_id, l)) {
+    let mut s = match launch_for(&cwd, &model, timeout, None).and_then(|l| reopen(&dir, &fno_id, l))
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!("fno-agents: {e}");
@@ -713,12 +881,18 @@ impl crate::provider::Provider for FootnoteProvider {
     }
 
     fn resume_argv(&self, ctx: &crate::provider::ResumeContext) -> Vec<String> {
-        crate::harness_capabilities::render_session_argv("footnote", "headless_resume", Some(&ctx.session_id))
-            .expect("embedded footnote headless-resume capability")
+        crate::harness_capabilities::render_session_argv(
+            "footnote",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded footnote headless-resume capability")
     }
 
     fn parse_stream_event(&self, chunk: &str) -> crate::ParsedEvent {
-        crate::ParsedEvent::Unknown { raw: chunk.to_string() }
+        crate::ParsedEvent::Unknown {
+            raw: chunk.to_string(),
+        }
     }
 
     fn reachability(
