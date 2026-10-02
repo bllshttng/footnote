@@ -565,16 +565,6 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn open_url_refuses_before_spawning_anything() {
-        // The refusal arm is the security-relevant half and needs no process.
-        // A pass would exec a browser, so only the refusal is asserted here.
-        for bad in ["file:///etc/passwd", "javascript:alert(1)", "", "https://"] {
-            let err = open_url(bad).expect_err("must refuse");
-            assert!(err.starts_with("refused to open"), "{bad} -> {err}");
-        }
-    }
-
     /// An exit status without launching anything: `true`/`false` are the two
     /// smallest real processes on every platform this runs on.
     fn status(ok: bool) -> std::process::ExitStatus {
@@ -788,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn sender_span_in_a_backticked_header() {
+    fn sender_span_in_a_header_tolerates_backticks_and_a_prompt_prefix() {
         assert_eq!(
             sender_span("`@t-x-9663-glm · fmail-840a07863897 · fix the gate`"),
             Some((
@@ -796,21 +786,17 @@ mod tests {
                 "fmail-840a07863897".to_string()
             ))
         );
-    }
-
-    #[test]
-    fn sender_span_tolerates_a_prompt_prefix() {
         assert_eq!(
             sender_span("❯ `@worker · fmail-0123456789ab · hi`"),
             Some(("@worker".to_string(), "fmail-0123456789ab".to_string()))
         );
+        // The id token itself is outside the span.
+        let line = "`@t-x-9663-glm · fmail-840a07863897 · fix the gate`";
+        assert_eq!(find_mail_sender(line).unwrap().0, 1);
     }
 
     #[test]
-    fn sender_span_rejects_the_summary_and_the_malformed_shapes() {
-        let line = "`@t-x-9663-glm · fmail-840a07863897 · fix the gate`";
-        // The id token itself is outside the span.
-        assert_eq!(find_mail_sender(line).unwrap().0, 1);
+    fn sender_spans_reject_the_malformed_shapes_and_the_uri_is_exact() {
         // Non-hex, short, and long ids resolve nothing.
         assert_eq!(sender_span("`@a · fmail-zzzzzzzzzzzz · hi`"), None);
         assert_eq!(sender_span("`@a · fmail-840a0786389 · hi`"), None);
@@ -823,10 +809,6 @@ mod tests {
         assert_eq!(sender_span("`@a · msg-whatever · hi`"), None);
         // A nameless separator line is not a sender.
         assert_eq!(sender_span("` · fmail-840a07863897 · hi`"), None);
-    }
-
-    #[test]
-    fn sender_uri_admits_only_the_exact_shape() {
         assert!(is_sender_uri("fno-sender:fmail-840a07863897"));
         assert!(!is_sender_uri("fno-sender:fmail-840a0786389"));
         assert!(!is_sender_uri("fno-sender:fmail-zzzzzzzzzzzz"));

@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_pick_preselects_its_row() {
+    fn the_chooser_maps_row_state_remembers_the_pick_and_finds_by_session() {
         // AC3-HP. The last pick pre-selects: down sits on index 3, whose
         // action is Split down for an attachable row; nothing saved sits on
         // Split right.
@@ -251,10 +251,19 @@ mod tests {
         let menu = build_open_chooser(&attachable(), None).unwrap();
         assert_eq!(menu.popup.sel, 0);
         assert_eq!(menu.actions[0], MenuAction::Split(Dir::Right));
-    }
 
-    #[test]
-    fn mod_pane_is_disabled_and_never_preselected() {
+        // AC4-ERR. A pane-hosted row MOVES its live pane; a paneless
+        // attachable row ATTACHES it; a paneless live thread with no attach
+        // id opens a fresh portal at the spot.
+        let pane = build_open_chooser(&focus_agent(7), None).unwrap();
+        assert_eq!(pane.actions[0], MenuAction::MoveDir(Dir::Right));
+        assert_eq!(pane.actions[3], MenuAction::MoveDir(Dir::Down));
+        assert_eq!(pane.actions[4], MenuAction::BreakOut);
+        let thread = build_open_chooser(&portal_thread(), None).unwrap();
+        assert_eq!(thread.actions[0], MenuAction::PortalAt(Some(Dir::Right)));
+        assert_eq!(thread.actions[3], MenuAction::PortalAt(Some(Dir::Down)));
+        assert_eq!(thread.actions[4], MenuAction::PortalAt(None));
+
         // AC4-ERR. The Mod pane entry draws greyed and carries no target:
         // arrows, Enter and clicks cannot reach it, so a pick landing there
         // degrades to Split right and no action exists to mis-fire.
@@ -274,35 +283,44 @@ mod tests {
             OpenTarget::parse("mod_pane").is_none(),
             "a disabled row never reads back as a saved pick"
         );
-    }
 
-    #[test]
-    fn each_row_state_maps_to_its_own_placement_verbs() {
-        // AC3/AC4. A pane-hosted row MOVES its live pane; a paneless
-        // attachable row ATTACHES it; a paneless live thread with no attach
-        // id opens a fresh portal at the spot.
-        let pane = build_open_chooser(&focus_agent(7), None).unwrap();
-        assert_eq!(pane.actions[0], MenuAction::MoveDir(Dir::Right));
-        assert_eq!(pane.actions[3], MenuAction::MoveDir(Dir::Down));
-        assert_eq!(pane.actions[4], MenuAction::BreakOut);
-        let thread = build_open_chooser(&portal_thread(), None).unwrap();
-        assert_eq!(thread.actions[0], MenuAction::PortalAt(Some(Dir::Right)));
-        assert_eq!(thread.actions[3], MenuAction::PortalAt(Some(Dir::Down)));
-        assert_eq!(thread.actions[4], MenuAction::PortalAt(None));
-    }
-
-    #[test]
-    fn an_exited_row_refuses_the_chooser() {
         // AC4-ERR. Nothing is left to open on an exited row: the builder
         // refuses, and the caller notices, naming the row.
-        let mut dead = focus_agent(3);
-        dead.exited = true;
-        let err = match build_open_chooser(&dead, None) {
+        let mut dead_row = focus_agent(3);
+        dead_row.exited = true;
+        let err = match build_open_chooser(&dead_row, None) {
             Err(e) => e,
             Ok(_) => panic!("an exited row refuses the chooser"),
         };
         assert!(err.contains("has exited"), "the refusal names the state");
-        assert!(err.contains(&dead.name), "the refusal names the row");
+        assert!(err.contains(&dead_row.name), "the refusal names the row");
+
+        // AC3-HP. Each chooser arm persists the pick it just executed; an
+        // action the chooser never builds answers None.
+        assert_eq!(pick_of_action(MenuAction::Split(Dir::Left)), Some("left"));
+        assert_eq!(pick_of_action(MenuAction::MoveDir(Dir::Down)), Some("down"));
+        assert_eq!(
+            pick_of_action(MenuAction::PortalAt(Some(Dir::Up))),
+            Some("up")
+        );
+        assert_eq!(pick_of_action(MenuAction::PortalAt(None)), Some("tab"));
+        assert_eq!(pick_of_action(MenuAction::BreakOut), Some("tab"));
+        assert_eq!(
+            pick_of_action(MenuAction::Focus),
+            None,
+            "a non-chooser action never rewrites the pick"
+        );
+        // The disk spelling is the lowercase name; parse is its exact
+        // inverse for every selectable pick.
+        for pick in [
+            OpenTarget::Right,
+            OpenTarget::Left,
+            OpenTarget::Up,
+            OpenTarget::Down,
+            OpenTarget::Tab,
+        ] {
+            assert_eq!(OpenTarget::parse(pick.as_str()), Some(pick));
+        }
     }
 
     #[test]
@@ -322,39 +340,5 @@ mod tests {
             row_for_session(&rows, "fmail-cccccccccccc").is_none(),
             "no session, no row"
         );
-    }
-
-    #[test]
-    fn a_picked_action_records_its_persisted_name() {
-        // AC3-HP. Each chooser arm persists the pick it just executed; an
-        // action the chooser never builds answers None.
-        assert_eq!(pick_of_action(MenuAction::Split(Dir::Left)), Some("left"));
-        assert_eq!(pick_of_action(MenuAction::MoveDir(Dir::Down)), Some("down"));
-        assert_eq!(
-            pick_of_action(MenuAction::PortalAt(Some(Dir::Up))),
-            Some("up")
-        );
-        assert_eq!(pick_of_action(MenuAction::PortalAt(None)), Some("tab"));
-        assert_eq!(pick_of_action(MenuAction::BreakOut), Some("tab"));
-        assert_eq!(
-            pick_of_action(MenuAction::Focus),
-            None,
-            "a non-chooser action never rewrites the pick"
-        );
-    }
-
-    #[test]
-    fn a_saved_pick_round_trips_through_its_disk_name() {
-        // The disk spelling is the lowercase name; parse is its exact
-        // inverse for every selectable pick.
-        for pick in [
-            OpenTarget::Right,
-            OpenTarget::Left,
-            OpenTarget::Up,
-            OpenTarget::Down,
-            OpenTarget::Tab,
-        ] {
-            assert_eq!(OpenTarget::parse(pick.as_str()), Some(pick));
-        }
     }
 }
