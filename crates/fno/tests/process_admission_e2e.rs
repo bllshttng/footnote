@@ -251,3 +251,75 @@ fn restore_max_processes(previous: Option<std::ffi::OsString>) {
         None => std::env::remove_var("FNO_PROCESS_ADMISSION_MAX"),
     }
 }
+
+/// The machine gate never refuses a caller that carries no worker identity:
+/// over the ceiling and under an armed brake, the server's own helper spawns
+/// admit. The same call with a worker identity refuses on the brake. This is
+/// the scope contract: only a new agent or harness launch that an agent
+/// asked for is held.
+#[test]
+fn ac_scope_non_agent_spawns_admit_through_ceiling_and_brake() {
+    let _env_lock = ADMISSION_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var("FNO_E2E", "1");
+    std::env::set_var(
+        "FNO_MUX_ADMISSION_NAMESPACE",
+        format!("scope-{}", std::process::id()),
+    );
+    std::env::remove_var("FNO_AGENT_SELF");
+    let previous_max = std::env::var_os("FNO_PROCESS_ADMISSION_MAX");
+    let previous_brake = std::env::var_os("FNO_MACHINE_BRAKE");
+    std::env::set_var("FNO_PROCESS_ADMISSION_MAX", "1");
+    let brake_dir = tempfile::tempdir().unwrap();
+    let brake_path = brake_dir.path().join("brake.json");
+    std::fs::write(
+        &brake_path,
+        serde_json::json!({
+            "until_epoch": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 600,
+            "reason": "machine runaway: test",
+            "group": {"name": "g i t", "count": 8000, "ppid": 1},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::env::set_var("FNO_MACHINE_BRAKE", &brake_path);
+
+    let output = fno::process_admission::std_output(
+        fno::process_admission::std_command("printf").arg("admitted"),
+    )
+    .expect("a non-agent spawn admits over the ceiling and under an armed brake");
+    assert_eq!(output.stdout, b"admitted");
+
+    // The same call carrying a worker identity refuses on the armed brake.
+    std::env::set_var("FNO_AGENT_SELF", "scope-worker");
+    let refusal =
+        fno::process_admission::std_spawn(fno::process_admission::std_command("sleep").arg("60"))
+            .err()
+            .expect("an agent-origin spawn is held");
+    restore_env("FNO_AGENT_SELF", None);
+    restore_max_processes(previous_max);
+    restore_env("FNO_MACHINE_BRAKE", previous_brake);
+    assert!(refusal.to_string().contains("machine-runaway"), "{refusal}");
+}
+
+/// The pane-group cap refusal reaches a user's screen, so it never tells
+/// anyone to set an env var; the fleet refusal is agent-facing recovery text
+/// and keeps the hint.
+#[test]
+fn ac_scope_user_visible_tab_refusal_carries_no_env_hint() {
+    let tab = decide_panes(PaneCount::new(4), MaxPanes::new(4));
+    let tab = tab.refusal().expect("over the tab cap refuses");
+    assert!(tab.contains("scope=tab"), "{tab}");
+    assert!(!tab.contains("FNO_PROCESS_ADMISSION"), "{tab}");
+
+    let fleet = decide_processes(&Census::complete(5), MaxProcesses::new(4));
+    let fleet = fleet.refusal().expect("over the fleet ceiling refuses");
+    assert!(fleet.contains("scope=fleet"), "{fleet}");
+    assert!(fleet.contains(BYPASS_HINT), "{fleet}");
+}
