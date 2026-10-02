@@ -1844,7 +1844,21 @@ def _claude_create_path(
                 king_loop_armed = False
                 king_unarmed_reason = str(exc)
         if revive:
-            return [entry if e.name == name else e for e in entries]
+            # One row per session id: the same-name revival replaces its own
+            # row; the short-id-named adopted row is replaced through the
+            # resumed uuid it carries.
+            return [
+                entry
+                if (
+                    e.name == name
+                    or (
+                        resume_session_id
+                        and getattr(e, "harness_session_id", None) == resume_session_id
+                    )
+                )
+                else e
+                for e in entries
+            ]
         return entries + [entry]
 
     try:
@@ -2079,7 +2093,8 @@ def validate_spawn_name(name: str) -> None:
 def _is_revival(
     existing: "AgentEntry", provider: str, resume_session_id: Optional[str]
 ) -> bool:
-    """True iff spawning an existing same-name row with ``--resume`` is a revival,
+    """True iff spawning an existing row (found by name, or by the resumed
+    uuid when the row answers to another name) with ``--resume`` is a revival,
     not a collision (Fix 3).
 
     Gated on: the spawn carries ``--resume``, both the spawn and the row are
@@ -2629,10 +2644,13 @@ def dispatch_spawn(
                 )
 
             # Revive-in-place (Fix 3): a --resume spawn whose target uuid
-            # matches an EXITED same-name claude row is a revival, not a
-            # collision - the row is updated in place below (new short_id, same
-            # uuid) instead of refused. Every other same-name case stays
-            # fail-closed (live row, uuid mismatch, no --resume).
+            # matches an EXITED claude row is a revival, not a collision - the
+            # row is updated in place below (new short_id, same uuid) instead
+            # of refused. The row is found by NAME first, then by the resumed
+            # uuid itself: an adopted row named by its short id must revive
+            # under the caller's explicit --name too, or the row and the
+            # harness disagree. Every other same-name case stays fail-closed
+            # (live row, uuid mismatch, no --resume).
             existing = next((e for e in entries if e.name == name), None)
             revive = existing is not None and _is_revival(existing, harness, resume_session_id)
             if existing is not None and not revive:
@@ -2641,6 +2659,20 @@ def dispatch_spawn(
                     f"use 'fno agents rm {name}' first or pick another name",
                     exit_code=2,
                 )
+            if resume_session_id and not revive:
+                session_row = next(
+                    (
+                        e
+                        for e in entries
+                        if getattr(e, "harness_session_id", None) == resume_session_id
+                    ),
+                    None,
+                )
+                if session_row is not None and _is_revival(
+                    session_row, harness, resume_session_id
+                ):
+                    existing = session_row
+                    revive = True
 
             if crown_level is not None:
                 # Refuses BEFORE launch - nothing exists as a result of an
