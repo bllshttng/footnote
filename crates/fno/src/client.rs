@@ -1485,7 +1485,7 @@ struct SearchView {
 /// stored here - they are recomputed from the live layout each keypress (the
 /// same per-key re-read discipline as the selector/search), so a layout push
 /// under an open navigator is reflected at once.
-struct NavView {
+pub(crate) struct NavView {
     /// Incremental text filter (substring, case-insensitive) over row match
     /// keys: label + pane id + node id + slug + workspace.
     query: String,
@@ -1501,7 +1501,7 @@ struct NavView {
 /// underneath); Esc drops back into it. The row is re-read from the live
 /// `display_rows()` per frame (navigator-style), so only the index, the request
 /// seq, and the fetched body live here - never a stale row snapshot.
-struct PeekView {
+pub(crate) struct PeekView {
     /// A `display_rows()` index, always kept on a `DisplayRow::Agent` row.
     cursor: usize,
     /// The seq of the last `PeekAgent` sent; a `PeekBody` with any other seq is
@@ -7059,7 +7059,7 @@ const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 /// One row of the navigator's flat catalog. Fully owned (no layout
 /// borrow) so goto can mutate the view after the catalog is built; recomputed
 /// per keypress, never cached.
-struct NavRow {
+pub(crate) struct NavRow {
     /// The displayed label (e.g. `nairobi › build` or `nairobi › claude#3`).
     /// Rendering only - the text filter matches [`NavRow::match_key`].
     label: String,

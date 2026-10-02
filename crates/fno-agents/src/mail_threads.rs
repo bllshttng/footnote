@@ -1,8 +1,8 @@
-//! The thread read model over the conversation record plane (epic x-07ac
-//! group 2). One JSON projection of the chats store for the mux Messages
-//! tab: participants joined to the registry, one thread per stored
-//! conversation, the per-session System rows, the broadcast channels and
-//! the standing announcements the bell reads.
+//! The thread read model over the conversation record plane. One JSON
+//! projection of the chats store for the mux Messages tab: participants
+//! joined to the registry, one thread per stored conversation, the
+//! per-session System rows, the broadcast channels and the standing
+//! announcements the bell reads.
 //!
 //! The store ([`crate::chats`]) is the record plane; this module only reads
 //! it, so pair chat ids and fmail resolution stay in one place (the
