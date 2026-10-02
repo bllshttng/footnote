@@ -1724,7 +1724,7 @@ def classify_open_pr_bindings(
     Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
     board all read the same verdicts.
     """
-    from fno.pr.closure import branch_node_ids, parse_closure_trailer
+    from fno.pr.closure import branch_node_ids, parse_closure_trailer, retargeted_from_ids
 
     real_ids = {
         e.get("id")
@@ -1755,6 +1755,9 @@ def classify_open_pr_bindings(
         if not isinstance(number, int) or not head:
             continue
         matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
+        if matched and "body" in row:
+            gone = retargeted_from_ids(row["body"])
+            matched = [nid for nid in matched if nid not in gone]
         body_supplied = "body" in row
         trailer: list[str] = (
             [nid for nid in parse_closure_trailer(row["body"]) if nid in real_ids]
@@ -2146,10 +2149,12 @@ def reverse_map_unstamped(
 
         for node in nodes:
             nid = node["id"]
+            from fno.pr.closure import retargeted_from_ids
             hits = [
                 row for row in merged
                 if isinstance(row, dict)
                 and _branch_matches_node(str(row.get("headRefName") or ""), nid)
+                and nid not in retargeted_from_ids(str(row.get("body") or ""))
             ]
             if not hits:
                 continue
