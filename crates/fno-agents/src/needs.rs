@@ -1059,112 +1059,130 @@ pub(crate) fn held_map(fno_dir: &Path, cwd: &Path) -> std::collections::BTreeMap
     std::panic::catch_unwind(|| held_nodes(&question_journals(fno_dir, cwd))).unwrap_or_default()
 }
 
-/// The held rows: one per blocked node, oldest question first.
+/// The held rows: one per blocked node, oldest question first. Journals fold
+/// in order without concatenation: a space journal plus the global pair
+/// reaches 53MB here, and the raw carrier was the whole cost.
 fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
-    let mut raw = String::new();
+    let mut rows = HeldFold::default();
     for path in journals {
         let content = crate::event_store::journal_text(path, crate::needs::QUESTION_TYPES);
-        raw.push_str(&content);
-        raw.push('\n');
+        rows.absorb(&content);
     }
-    held_rows_from_raw(&raw)
+    rows.finish()
 }
 
 /// The pure half of [`held_rows`], over newline-joined journal contents.
 fn held_rows_from_raw(raw: &str) -> Vec<HeldRow> {
-    // Latest ask of a qid wins (journal order, mirroring
-    // `scan_unrecorded_decisions`); the oldest OPEN ask per node then wins.
-    let mut asked: HashMap<String, (u64, String, Value)> = HashMap::new();
-    let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in raw.lines() {
-        if line.trim().is_empty() || !line.contains("operator_question") {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue; // torn/malformed tail line: skip, never abort
-        };
-        let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
-        let data = v
-            .get("data")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        match kind {
-            "operator_question" => {
-                let Some(qid) = data.get("question_id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let ts_env = v.get("ts").and_then(Value::as_str).unwrap_or("");
-                let epoch = to_epoch_lenient(ts_env).unwrap_or(0);
-                asked.insert(qid.to_string(), (epoch, ts_env.to_string(), data));
+    let mut fold = HeldFold::default();
+    fold.absorb(raw);
+    fold.finish()
+}
+
+/// The asked/closed fold over question journals, in journal order. Latest
+/// ask of a qid wins (journal order, mirroring
+/// `scan_unrecorded_decisions`); the oldest OPEN ask per node then wins.
+#[derive(Default)]
+struct HeldFold {
+    asked: HashMap<String, (u64, String, Value)>,
+    closed: std::collections::HashSet<String>,
+}
+
+impl HeldFold {
+    fn absorb(&mut self, raw: &str) {
+        for line in raw.lines() {
+            if line.trim().is_empty() || !line.contains("operator_question") {
+                continue;
             }
-            "operator_question_closed" => {
-                if let Some(qid) = data.get("question_id").and_then(Value::as_str) {
-                    closed.insert(qid.to_string());
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue; // torn/malformed tail line: skip, never abort
+            };
+            let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+            let data = v
+                .get("data")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            match kind {
+                "operator_question" => {
+                    let Some(qid) = data.get("question_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let ts_env = v.get("ts").and_then(Value::as_str).unwrap_or("");
+                    let epoch = to_epoch_lenient(ts_env).unwrap_or(0);
+                    self.asked
+                        .insert(qid.to_string(), (epoch, ts_env.to_string(), data));
                 }
+                "operator_question_closed" => {
+                    if let Some(qid) = data.get("question_id").and_then(Value::as_str) {
+                        self.closed.insert(qid.to_string());
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
-    struct Best {
-        epoch: u64,
-        qid: String,
-        question: String,
-        ts: String,
-    }
-    let mut best: std::collections::BTreeMap<String, Best> = std::collections::BTreeMap::new();
-    let mut qids: Vec<(&String, &(u64, String, Value))> = asked.iter().collect();
-    qids.sort_by(|a, b| a.0.cmp(b.0));
-    for (qid, (epoch, ts, data)) in qids {
-        if closed.contains(qid) {
-            continue;
+
+    fn finish(self) -> Vec<HeldRow> {
+        struct Best {
+            epoch: u64,
+            qid: String,
+            question: String,
+            ts: String,
         }
-        let Some(blocks) = data.get("blocks").and_then(Value::as_array) else {
-            continue;
-        };
-        let question: String = data
-            .get("question")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect();
-        let ts = ts.clone();
-        for node in blocks {
-            let Some(node) = node.as_str() else {
+        let mut best: std::collections::BTreeMap<String, Best> = std::collections::BTreeMap::new();
+        let mut qids: Vec<(&String, &(u64, String, Value))> = self.asked.iter().collect();
+        qids.sort_by(|a, b| a.0.cmp(b.0));
+        for (qid, (epoch, ts, data)) in qids {
+            if self.closed.contains(qid) {
+                continue;
+            }
+            let Some(blocks) = data.get("blocks").and_then(Value::as_array) else {
                 continue;
             };
-            let take = match best.get(node) {
-                None => true,
-                Some(b) => (*epoch, qid.as_str()) < (b.epoch, b.qid.as_str()),
-            };
-            if take {
-                best.insert(
-                    node.to_string(),
-                    Best {
-                        epoch: *epoch,
-                        qid: qid.to_string(),
-                        question: question.clone(),
-                        ts: ts.clone(),
-                    },
-                );
+            let question: String = data
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
+            let ts = ts.clone();
+            for node in blocks {
+                let Some(node) = node.as_str() else {
+                    continue;
+                };
+                let take = match best.get(node) {
+                    None => true,
+                    Some(b) => (*epoch, qid.as_str()) < (b.epoch, b.qid.as_str()),
+                };
+                if take {
+                    best.insert(
+                        node.to_string(),
+                        Best {
+                            epoch: *epoch,
+                            qid: qid.to_string(),
+                            question: question.clone(),
+                            ts: ts.clone(),
+                        },
+                    );
+                }
             }
         }
+        let mut rows: Vec<HeldRow> = best
+            .into_iter()
+            .map(|(node, b)| HeldRow {
+                node,
+                question_id: b.qid,
+                question: b.question,
+                ts: b.ts,
+                epoch: b.epoch,
+            })
+            .collect();
+        rows.sort_by_key(|r| (r.epoch, r.question_id.clone()));
+        rows
     }
-    let mut rows: Vec<HeldRow> = best
-        .into_iter()
-        .map(|(node, b)| HeldRow {
-            node,
-            question_id: b.qid,
-            question: b.question,
-            ts: b.ts,
-            epoch: b.epoch,
-        })
-        .collect();
-    rows.sort_by_key(|r| (r.epoch, r.question_id.clone()));
-    rows
 }
 
 /// The open question ids whose node reads a terminal rung: a
