@@ -1010,12 +1010,24 @@ mod tests {
         save_messages_read_mark("chat-a", "2026-10-01T09:05:00Z");
         save_messages_read_mark("chat-b", "2026-10-01T10:00:00Z");
         let marks = load_messages_read_marks();
-        assert_eq!(marks.get("chat-a").map(String::as_str), Some("2026-10-01T09:05:00Z"));
-        assert_eq!(marks.get("chat-b").map(String::as_str), Some("2026-10-01T10:00:00Z"));
+        assert_eq!(
+            marks.get("chat-a").map(String::as_str),
+            Some("2026-10-01T09:05:00Z")
+        );
+        assert_eq!(
+            marks.get("chat-b").map(String::as_str),
+            Some("2026-10-01T10:00:00Z")
+        );
         save_messages_read_mark("chat-a", "2026-10-01T11:00:00Z");
         let marks = load_messages_read_marks();
-        assert_eq!(marks.get("chat-a").map(String::as_str), Some("2026-10-01T11:00:00Z"));
-        assert_eq!(marks.get("chat-b").map(String::as_str), Some("2026-10-01T10:00:00Z"));
+        assert_eq!(
+            marks.get("chat-a").map(String::as_str),
+            Some("2026-10-01T11:00:00Z")
+        );
+        assert_eq!(
+            marks.get("chat-b").map(String::as_str),
+            Some("2026-10-01T10:00:00Z")
+        );
         assert_eq!(marks.len(), 2);
     }
 
@@ -1261,14 +1273,10 @@ mod tests {
 
     // ----: density + sort preferences ----
 
-    
-    
-    
-        #[test]
+    #[test]
     // One persistence surface, folded from three fns (test-delta cap 0):
     // every assert below ran in its own fn before the fold.
     fn prefs_width_and_preset_persist_together() {
-
         let _s = Scratch::new("prefs-roundtrip");
         // AC7-FR: a missing file is not an error, it is the defaults. The
         // default sort is attention (evidence of neglect first); only a stored
@@ -1317,7 +1325,7 @@ mod tests {
         );
     }
 
-#[test]
+    #[test]
     fn corrupt_width_degrades_to_none_then_writes_clean() {
         // AC5-ERR: a non-numeric width resolves to None (canonical), never a
         // panic, and is NOT retained - the first save_width writes a clean
