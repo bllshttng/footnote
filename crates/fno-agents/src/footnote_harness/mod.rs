@@ -782,14 +782,14 @@ pub fn dispatch_once(
         Ok(s) => s,
         Err(e) => return outcome(2, String::new(), format!("{e}\n")),
     };
-    let fno_id = s.fno_id();
+    let sid = s.fno_id();
     let mut entry = RegistryEntry {
         name: name.to_string(),
-        short_id: fno_id.clone(),
+        short_id: sid.clone(),
         provider: Some("footnote".into()),
         harness: Some("footnote".into()),
         substrate: Some("headless".into()),
-        session_id: Some(fno_id.clone()),
+        session_id: Some(sid.clone()),
         requested_model: Some(model.to_string()),
         route_provider_id: s.client.endpoint.provider_id.clone(),
         node: s.node.clone(),
@@ -800,13 +800,13 @@ pub fn dispatch_once(
         created_at: crate::daemon::now_rfc3339_like(),
         log_path: Some(s.w.transcript_path().to_string_lossy().to_string()),
         ..RegistryEntry::new(
-            Some(fno_id.clone()),
+            Some(sid.clone()),
             crate::spawn_lineage::ambient_lineage(),
         )
     };
     entry.account_record_id = Some("default".into());
     // The session's own id is the row's fno_id; a set value is never re-minted.
-    entry.fno_id = Some(fno_id.clone());
+    entry.fno_id = Some(sid.clone());
     match update_registry(&home.registry_json(), |reg| {
         if reg.find(name).is_some() {
             return false;
