@@ -39,7 +39,15 @@ def smoke_ok(arm: str) -> bool:
         return False
     stats = json.loads(res.read_text()).get("stats") or {}
     # Reaching the endpoint is the smoke's question, not solving the task: any tokens back is a pass.
-    return bool(stats.get("n_output_tokens") or stats.get("n_input_tokens"))
+    if stats.get("n_output_tokens") or stats.get("n_input_tokens"):
+        return True
+    # Harbor counts tokens per finished turn. A turn that streams until the task timeout
+    # reports zero, yet the model answered (Amendment 10): the agent log holds the stream.
+    for log in res.parent.glob("*/agent/claude-code.txt"):
+        stream = log.read_bytes()
+        if b'"thinking_tokens"' in stream or b'"type":"assistant"' in stream:
+            return True
+    return False
 
 
 def main(arms: list[str]) -> int:

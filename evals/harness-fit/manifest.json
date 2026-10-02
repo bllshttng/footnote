@@ -103,5 +103,19 @@
     "kill": "only 150 or more for 5 minutes kills both runs; killed work reruns on resume",
     "mechanism": "a drain file holds each new Run 0 trial before its first timer and each Run 1 attempt before it starts; zcode runs one attempt at a time through the top-up",
     "concurrency": "2 Run 0 trials; Run 1 one attempt at a time"
+  },
+  "amendment_10": {
+    "declared_at": "2026-10-02T18:05:00Z",
+    "scope": "the iMac run and the Claude Code 1M window; no grade or decision rule changes",
+    "machine": "both runs started clean on the Intel iMac at 2026-10-02T11:24Z; the iMac rows decide and the arm64 rows are reported apart",
+    "concurrency": "Run 0 runs 4 trials at once on the iMac (Amendment 6); the load sampler runs, no drain guard runs",
+    "claude_code_model": "glm-5.3-flash[1m] for the Run 0 claude-code arm and the Run 1 claude lane (user ruling: without [1m] the cap is low); effort high; opencode, pi and Terminus 2 strings unchanged",
+    "probe": "Claude Code 2.1.286 at 17:59Z: context window 1000000 with the suffix, 200000 without; z.ai answered both",
+    "not_comparable": "every Claude Code result before this amendment ran on the 200000 window (arm64 Run 0 claude-code arm and smokes, arm64 Run 1 claude lane, one iMac Run 1 claude attempt); reported apart; fires no decision rule",
+    "smoke_false_negative": "the 16:03Z iMac claude-code smoke hit the 900 s timeout with no finished turn, so Harbor read zero tokens and the driver logged unavailable; the agent log shows the model streamed about 40000 thinking tokens; the driver now reads the agent log when the token count is zero",
+    "arm_order": "seeded order pi, claude-code, opencode, terminus-2; claude-code runs last because opencode had started before the false negative was read",
+    "identity": "the observe door compares requested and observed model by family (one trailing bracket suffix dropped from each side), the agent registry's rule",
+    "run1_restarts": "four stops and restarts on the iMac; no worker started in any set-aside attempt; rows kept in logs/aborted-start-1 to aborted-start-4 in the run workspace; Run 1 runs the branch CLI from its own environment",
+    "pi_run1": "the pi lane reads unavailable on both machines: the headless substrate has no pi lane on this branch"
   }
 }
