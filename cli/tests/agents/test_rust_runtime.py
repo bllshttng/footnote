@@ -888,6 +888,10 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # `fno backlog session backfill` shells the binary through
             # resolve_binary, never `fno agents` routing.
             "session-backfill",
+            # `release-notes` is the update modal's notes builder: Python's
+            # `fno doctor update --check` resolver shells it through
+            # verb_call with a stdin JSON payload, never an argv route.
+            "release-notes",
         }
     )
 
