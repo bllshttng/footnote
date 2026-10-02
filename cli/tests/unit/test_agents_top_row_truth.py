@@ -63,6 +63,11 @@ def patched(monkeypatch):
     from fno.agents import retirement
 
     monkeypatch.setattr(retirement, "verdicts", lambda rows, entries=None: {})
+    # The claim join reads the operator's real claims dir and shells the CLI
+    # for the PR; blanked so every test here stays hermetic.
+    import fno.agents.top as top
+
+    monkeypatch.setattr(top, "_claim_sessions", lambda: {})
     return state
 
 
@@ -153,6 +158,53 @@ def test_foreign_row_progress_joins_registry_through_session_id(
         ],
     )
     assert row["progress"] == "advancing"
+
+
+def test_claim_join_renders_node_and_pr(patched, monkeypatch):
+    """x-54ba: the session's own claim answers before any name-keyed join.
+
+    A revived claude-store-only session (reaped row, adopt minted a fresh one)
+    holds a live ``node:<id>`` claim whose holder names its full session id.
+    The row renders that node and the node's PR, with the basis naming the
+    claim - never the null an unresolvable name produced."""
+    import fno.agents.top as top
+
+    monkeypatch.setattr(
+        top,
+        "_claim_sessions",
+        lambda: {"979e1acc-e240-4af5-9998-0a74ec6c0683": ("x-4dc0", 2965)},
+    )
+    (row,) = _rows(
+        patched,
+        [
+            _worker(
+                source="claude",
+                name="979e1acc",
+                session_id="979e1acc-e240-4af5-9998-0a74ec6c0683",
+            )
+        ],
+    )
+    assert row["node"] == "x-4dc0"
+    assert row["node_basis"] == "claim"
+    assert row["pr"] == 2965
+    assert row["pr_basis"] == "node"
+
+
+def test_claim_join_without_a_pr_still_names_the_node(patched, monkeypatch):
+    import fno.agents.top as top
+
+    monkeypatch.setattr(
+        top,
+        "_claim_sessions",
+        lambda: {"full-session-uuid": ("x-06f7", None)},
+    )
+    (row,) = _rows(
+        patched, [_worker(source="claude", name="0a4aad70", session_id="full-session-uuid")]
+    )
+    assert row["node"] == "x-06f7"
+    assert row["node_basis"] == "claim"
+    assert row["pr"] is None
+    assert row["pr_basis"] == "no-pr"
 
 
 def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):

@@ -150,6 +150,54 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
         return {}, {}
 
 
+def _claim_sessions() -> dict[str, tuple[str, Optional[int]]]:
+    """session id -> (node, pr_number) from the live ``node:<id>`` claims
+    whose holder names ``target-session:<id>``. The claim is the strongest
+    node join a row can have - it is the session's own work order, so a
+    revived or registry-less session still renders its node. The PR rides the
+    claimed node's graph row (one CLI read per distinct node, cached per
+    render); a failed read drops the PR, never the node."""
+    import json
+    import subprocess
+    import sys
+
+    from fno.claims.io import claim_path, claims_dir, list_claim_keys
+
+    out: dict[str, tuple[str, Optional[int]]] = {}
+    pr_cache: dict[str, Optional[int]] = {}
+    try:
+        keys = list_claim_keys(prefix="node:")
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return {}
+    for key in keys:
+        node = key[len("node:") :]
+        try:
+            payload = json.loads(claim_path(key).read_text("utf-8"))
+        except Exception:  # noqa: BLE001 — a corrupt lockfile skips, never fails
+            continue
+        holder = payload.get("holder") or ""
+        if not holder.startswith("target-session:"):
+            continue
+        sid = holder[len("target-session:") :].strip().lower()
+        if not sid or sid in out:
+            continue
+        if node not in pr_cache:
+            try:
+                proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                    [sys.executable, "-m", "fno.cli", "backlog", "get", node],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                row = json.loads(proc.stdout) if proc.returncode == 0 else {}
+                pr_cache[node] = row.get("pr_number")
+            except Exception:  # noqa: BLE001 — best-effort, PR is optional
+                pr_cache[node] = None
+        out[sid] = (node, pr_cache[node])
+    return out
+
+
 class RowTruth(NamedTuple):
     """What one transcript read says about a census row : ``reach``
     is the verdict the old ``_progress_map`` computed and threw away.
@@ -229,6 +277,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
+    claim_sessions = _claim_sessions()
     # One retirement read for the whole roster, keyed by the
     # REGISTRY identity: the first-8-hex census label resolves no node.
     from fno.agents.retirement import verdicts
@@ -255,6 +304,16 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         handle = handles.get(w.session_id or "")
         reg_name = handle or w.name
         v = verdict_map.get(reg_name)
+        claim_hit = claim_sessions.get((w.session_id or "").strip().lower())
+        if claim_hit:
+            node: Optional[str] = claim_hit[0]
+            node_basis: Optional[str] = "claim"
+            pr: Optional[int] = claim_hit[1]
+            pr_basis: Optional[str] = "node" if pr is not None else "no-pr"
+        else:
+            node = v.node if v else None
+            node_basis = v.node_basis if v else None
+            pr, pr_basis = None, None
         pid = w.session_pid or w.pid
         rows.append(
             {
@@ -285,10 +344,18 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # showed, with the basis that says which question it answered.
                 "reach": row_truth.reach if row_truth else None,
                 "reach_basis": row_truth.reach_basis if row_truth else None,
-                # has this worker's node already shipped. Null node is
-                # a real answer (unresolvable name), never a lookup miss.
-                "node": v.node if v else None,
-                "node_basis": v.node_basis if v else None,
+                # has this worker's node already shipped. The session's own
+                # claim answers FIRST (a revived or registry-less session
+                # still renders its work order); the retirement verdict's
+                # name-keyed join is the fallback. Null node is a real
+                # answer (no claim and an unresolvable name), never a miss.
+                "node": node,
+                "node_basis": node_basis,
+                # The node's primary PR when the node came from the claim
+                # (the graph row rode the same read); None elsewhere - the
+                # list view owns the node-keyed PR wording.
+                "pr": pr,
+                "pr_basis": pr_basis,
                 "retire": v.retire if v else False,
                 "retire_reason": v.reason if v else None,
                 "crown": crowns.get(reg_name),  # US9: null when uncrowned
