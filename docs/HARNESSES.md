@@ -28,7 +28,7 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 
 ### footnote
 
-`fno agents spawn -H footnote -P zai -m glm-5.3-flash --substrate headless "<task>"` runs footnote's own loop. footnote sends each turn to the model API, runs the tools (Read, Glob, Grep, Edit, Write, Bash, Skill) under `hooks/hooks.json`, and writes every call to `~/.fno/sessions/<project-slug>/<fno_id>.jsonl` before it acts. `fno agents ask <name>` resumes by name. A resume never re-runs a started Edit, Write or Bash; it tells the model the outcome is unknown.
+`fno agents spawn -H footnote -P zai -m glm-5.3-flash --substrate headless "<task>"` runs footnote's own loop. footnote sends each turn to the model API. It runs the tools (Read, Glob, Grep, Edit, Write, Bash, Skill) under `hooks/hooks.json`. It writes every call to `~/.fno/sessions/<project-slug>/<fno_id>.jsonl` before it acts. `fno agents ask <name>` resumes by name. A resume never re-runs a started Edit, Write or Bash. It tells the model the outcome is unknown.
 
 | Symptom | Cause | Fix |
 |---|---|---|

@@ -1,11 +1,11 @@
 # footnote session record, v1
 
-Every session file carries the session id. Under `~/.fno/sessions/<project-slug>/` (the slug is the canonical checkout's space slug, or `_none` outside a repo) a session is a record file beside a sidecar dir, Claude Code style:
+Every session file carries the session id. Under `~/.fno/sessions/<project-slug>/` a session is a record file beside a sidecar dir, Claude Code style. The slug is the canonical checkout's space slug, or `_none` outside a repo:
 
 - `<fno_id>.jsonl` is the record. It is append-only, mode 0600, and each line is fsynced. Child transcripts later land inside the sidecar dir as `<child_id>.jsonl`.
 - `<fno_id>/` is the sidecar dir. It refuses a second create: an id names one session, never a reused one.
 - `<fno_id>/<fno_id>.lock` holds an exclusive `flock` for the life of the one writer.
-- `<fno_id>/<fno_id>.index.db` holds one content-free row per line (`seq`, `record_id`, `offset`, `len`, `turn`, `tool_call_uid`). Its event_store journal is `<fno_id>/<fno_id>.index.jsonl`, so the store path maps to the db. The transcript stays the record when an index write fails.
+- `<fno_id>/<fno_id>.index.db` holds one content-free row per line (`seq`, `record_id`, `offset`, `len`, `turn`, `tool_call_uid`). Its event_store journal is `<fno_id>/<fno_id>.index.jsonl`, so the store path maps to the db. When an index write fails, the transcript stays the record.
 - `<fno_id>/<tool_call_uid>.out` holds a tool output over 8 KiB, whole. The uid is already unique, so spill files sit directly in the dir.
 - `<fno_id>/<fno_id>.diag.log` holds diagnostics, rotated to `<fno_id>.diag.log.1`. The API key is redacted. It is never part of the record.
 
