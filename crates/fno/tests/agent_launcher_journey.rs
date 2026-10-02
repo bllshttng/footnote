@@ -86,6 +86,7 @@ fn send_launch_full(
         extra_flags,
         worktree,
         branch,
+        force: false,
     }));
 }
 
@@ -146,6 +147,7 @@ fn launcher_journey_model_only_pin_omits_harness() {
         extra_flags: Vec::new(),
         worktree: false,
         branch: None,
+        force: false,
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -303,6 +305,7 @@ fn launcher_journey_empty_substrate_takes_the_door_default() {
         extra_flags: Vec::new(),
         worktree: false,
         branch: None,
+        force: false,
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -371,6 +374,7 @@ fn launcher_journey_node_prefill_rides_the_door() {
         extra_flags: Vec::new(),
         worktree: false,
         branch: None,
+        force: false,
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates

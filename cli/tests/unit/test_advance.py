@@ -1451,7 +1451,11 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
         "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
 
-    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(
+        adv,
+        "_lane_fill_selection",
+        lambda *a, **k: ([node], {"requested": 1, "filled": 1, "stop": "filled"}),
+    )
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
@@ -1518,7 +1522,11 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     _cfg, _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")
     _pin_grid_rows(_cfg)
 
-    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(
+        adv,
+        "_lane_fill_selection",
+        lambda *a, **k: ([node], {"requested": 1, "filled": 1, "stop": "filled"}),
+    )
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
@@ -4204,7 +4212,7 @@ def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
     def fake_call(verb, args, *, timeout):
         assert verb == "select-read"
         assert args == ["undispatched", "--project", "fno"]
-        assert timeout is None
+        assert timeout == 180
         return None, {
             "status": "unmeasured",
             "reason": "select-unmeasured",
@@ -4223,7 +4231,7 @@ def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     def fake_call(verb, args, *, timeout):
         assert verb == "select-read"
         assert args == ["undispatched", "--project", "fno"]
-        assert timeout is None
+        assert timeout == 180
         return None, {"status": "ok", "answer": receipt}
 
     monkeypatch.setattr("fno.rust_binary.call_binary_json", fake_call)

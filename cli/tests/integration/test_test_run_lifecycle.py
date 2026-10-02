@@ -62,7 +62,9 @@ def test_native_path_reaps_a_backgrounded_group_mate(tmp_path, monkeypatch):
 
     rc = test_runner.run_suite_bounded(cmd, dict(os.environ), timeout=30)
 
-    assert rc == 0, "the leader's own clean exit must still read as success"
+    assert rc == 1, (
+        "a green suite that leaked its group is not done (suite_leaked, x-bd69 change 3)"
+    )
     leftover_pid = int(pid_file.read_text().strip())
     assert not _pid_alive(leftover_pid), (
         f"backgrounded sleep {leftover_pid} must be dead: the native owner must reap every "

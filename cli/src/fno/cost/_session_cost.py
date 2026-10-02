@@ -188,8 +188,6 @@ def _accumulate_entry(
     msg_type = obj.get("type")
 
     if msg_type == "user":
-        from fno.mail.envelope import contains_fno_mail_tag
-
         msg = obj.get("message")
         msg_content = msg.get("content") if isinstance(msg, dict) else obj.get("content")
         text = ""
@@ -201,10 +199,8 @@ def _accumulate_entry(
                 for b in msg_content
                 if isinstance(b, dict) and isinstance(b.get("text"), str)
             )
-        if contains_fno_mail_tag(text):
-            metrics.mail_messages += 1
-        else:
-            metrics.user_messages += 1
+        # The caller batch-classifies user vs mail once per transcript read.
+        return text
 
     elif msg_type == "assistant":
         msg = obj.get("message", {})
@@ -256,6 +252,17 @@ def _accumulate_entry(
                     metrics.compaction_count += 1
             if context_size > 0:
                 prev_context_size[0] = context_size
+
+    return None
+
+
+def _count_user_vs_mail(metrics: SessionMetrics, texts: list[str]) -> None:
+    from fno.mail.envelope import mail_shape
+
+    for shape in mail_shape(texts):
+        is_mail = shape["framing"] != "bare"
+        metrics.mail_messages += is_mail
+        metrics.user_messages += not is_mail
 
 
 def parse_transcript(
@@ -314,6 +321,7 @@ def parse_transcript(
 
     skipped_lines = 0
     unparseable_ts_count = 0
+    user_texts: list[str] = []
     with open(path) as f:
         for line in f:
             try:
@@ -343,7 +351,11 @@ def parse_transcript(
                 if entry_ts < since:
                     continue
 
-            _accumulate_entry(obj, metrics, prev_context_size, seen=seen)
+            text = _accumulate_entry(obj, metrics, prev_context_size, seen=seen)
+            if text is not None:
+                user_texts.append(text)
+
+    _count_user_vs_mail(metrics, user_texts)
 
     if skipped_lines > 0:
         print(f"Warning: {skipped_lines} malformed lines in {path}", file=sys.stderr)
@@ -362,6 +374,7 @@ def get_branch_breakdown(path: str, session_id: str) -> dict[str, SessionMetrics
     """Parse a transcript and return metrics grouped by gitBranch."""
     branches: dict[str, SessionMetrics] = {}
     skipped_lines = 0
+    branch_texts: dict[str, list[str]] = {}
     # One dedup set across all branches: every content-block line of an API
     # message carries the same gitBranch, so the message lands on exactly
     # one branch and is counted once.
@@ -381,7 +394,12 @@ def get_branch_breakdown(path: str, session_id: str) -> dict[str, SessionMetrics
                     session_id=f"{session_id}:{git_branch}"
                 )
 
-            _accumulate_entry(obj, branches[git_branch], seen=seen)
+            text = _accumulate_entry(obj, branches[git_branch], seen=seen)
+            if text is not None:
+                branch_texts.setdefault(git_branch, []).append(text)
+
+    for branch_key, texts in branch_texts.items():
+        _count_user_vs_mail(branches[branch_key], texts)
 
     if skipped_lines > 0:
         print(f"Warning: {skipped_lines} malformed lines in {path}", file=sys.stderr)

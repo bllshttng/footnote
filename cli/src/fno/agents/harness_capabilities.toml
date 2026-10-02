@@ -6,6 +6,13 @@
 map_version = 23
 
 [harness.claude]
+# THE DELIVERED-MAIL HEADER FORM. Every delivered mail opens with one
+# backticked header line. `mail_header_at = true` renders the sender as the
+# `@name` mention form; `false` renders plain `name`, for a harness whose
+# composer opens a mention picker on a bare `@` or reads it as an address.
+# The value is the composer check's verdict (tests/mail-header-composer-smoke.sh),
+# read as data by the renderer - never a branch in code.
+mail_header_at = true
 permission_bypass = ["--dangerously-skip-permissions"]
 # LAUNCHER CHOICE LISTS. The mux composer's picker chips read these. Three
 # states: key ABSENT = no surface at all (the chip reads "not offered");
@@ -197,6 +204,7 @@ state = "native"
 state = "native"
 
 [harness.codex]
+mail_header_at = true
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 # efforts: the keys of model_switch_strategy.effort_labels below.
 # permission_modes: the two shortcuts plus every <sandbox>:<approval> pair
@@ -399,6 +407,7 @@ state = "native"
 state = "native"
 
 [harness.gemini]
+mail_header_at = true
 permission_bypass = ["--yolo"]
 # No efforts key: the spawn refuses a gemini effort. permission_modes: the
 # `--approval-mode` choices off `gemini --help` plus the `--yolo` spelling.
@@ -500,6 +509,7 @@ state = "absent"
 state = "capable"
 
 [harness.agy]
+mail_header_at = true
 permission_bypass = ["--dangerously-skip-permissions"]
 # efforts: agy's own `--effort (low|medium|high)`. permission_modes: exactly
 # the vocabulary permission_pane_tokens maps (codex_posture.rs).
@@ -662,6 +672,7 @@ takes_add_dir = true
 clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 
 [harness.opencode]
+mail_header_at = true
 permission_bypass = ["--dangerously-skip-permissions"]
 # efforts EMPTY: the door passes provider values through, so the picker
 # offers free text rather than a list.
@@ -833,6 +844,7 @@ measured_by = { reader = "daemon-kept attach journey", date = "2026-09-03" }
 # identity is the pair (cwd, session_id) and never the id alone. A resume issued
 # from the canonical checkout will not see a session started in a worktree.
 [harness.pi]
+mail_header_at = true
 # pi ships NO permission popups. Its own docs/usage.md says so in as many
 # words, and `pi --help` carries no bypass flag: `--approve`/`-a` trusts
 # project-local FILES for a run, which is a different axis. So there is no
@@ -1054,6 +1066,7 @@ ready_marker = "(sub)"
 resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."
 
 [harness.cursor-agent]
+mail_header_at = true
 permission_bypass = ["--force"]
 permission_modes = ["force", "yolo"]
 resume = "native-session"
@@ -1366,6 +1379,7 @@ takes_model = true
 takes_add_dir = true
 
 [harness.grok]
+mail_header_at = true
 permission_bypass = ["--always-approve"]
 # permission_modes: grok's own --help (1.0.13) names this set for
 # --permission-mode. efforts EMPTY: --reasoning-effort exists but the help
@@ -1533,6 +1547,7 @@ takes_effort = true
 # journey. No keeper arm = the thread substrate refuses with the TUI-dead
 # evidence.
 [harness.zcode]
+mail_header_at = true
 permission_bypass = ["--mode=yolo"]
 # permission_modes: zcode's own --mode values (zcode-cli arguments; the
 # trial doc measured `--mode yolo` live). efforts EMPTY: zcode has no
@@ -1647,6 +1662,7 @@ measured_by = { reader = "session-id resume journey", version = "3.14.3", date =
 # no pane, no thread, no TUI. The id is footnote's own fno_id, minted before
 # the first record, so the binding is preassigned.
 [harness.footnote]
+mail_header_at = true
 permission_bypass = []
 efforts = []
 permission_modes = []
@@ -1798,3 +1814,90 @@ proof = "goal-active"
 transport = "app-server"
 method = "thread/goal/set"
 proof = "goal-active"
+
+
+# Hook jobs: which fno hook jobs each harness runs, declared from the
+# measured wiring (the rename shim, the codex/opencode/pi registrations and
+# the agy PreToolUse adapter). The loop job is derived from
+# loop_participation/loop_extension, never declared here. A `missing` on a
+# wired row fails the load (validate_row), so a gap is a build break.
+
+[harness.claude.hooks.lead_guard]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.claude.hooks.lead_reinject]
+state = "supported"
+via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
+
+[harness.codex.hooks.lead_guard]
+state = "supported"
+via = ["hooks/codex-hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.codex.hooks.lead_reinject]
+state = "supported"
+via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
+
+[harness.agy.hooks.lead_guard]
+state = "supported"
+via = ["hooks/agy-king-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.agy.hooks.lead_reinject]
+state = "impossible"
+reason = "agy exposes no compaction event (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop); the crown line lands at invocationNum 0 in hooks/agy-crown-inject.sh"
+
+[harness.opencode.hooks.lead_guard]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-delegation-guard.sh"]
+
+[harness.opencode.hooks.lead_reinject]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-postcompact-reinject.sh", "hooks/target-postcompact-reinject.sh"]
+
+[harness.pi.hooks.lead_guard]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/hook/king_guard.rs"]
+
+[harness.pi.hooks.lead_reinject]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "hooks/king-postcompact-reinject.sh"]
+
+[harness.footnote.hooks.lead_guard]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/hooks.rs"]
+
+[harness.footnote.hooks.lead_reinject]
+state = "impossible"
+reason = "the footnote harness compacts in-process (footnote_harness maybe_compact) and fires no compaction hook event, so the postcompact carrier never runs; the lead brief rides SessionStart only"
+
+[harness.gemini.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane)"
+
+[harness.gemini.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane)"
+
+[harness.cursor-agent.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for cursor-agent (no plugin hook file and no capability install lane)"
+
+[harness.cursor-agent.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for cursor-agent (no plugin hook file and no capability install lane)"
+
+[harness.grok.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for grok (no plugin hook file and no capability install lane; the grok install lane would flip this)"
+
+[harness.grok.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for grok (no plugin hook file and no capability install lane; the grok install lane would flip this)"
+
+[harness.zcode.hooks.lead_guard]
+state = "missing"
+reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane)"
+
+[harness.zcode.hooks.lead_reinject]
+state = "missing"
+reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane)"

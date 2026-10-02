@@ -87,10 +87,11 @@ def _verbs(calls):
 
 
 def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
-    """The paste opens with `<fno_mail from=` and closes with the trailer.
+    """The paste opens with the delivered attribution and carries the body.
 
     This is the whole node in one assertion: a worker reading the paste can tell
-    it came from a peer, whichever transport typed it.
+    it came from a peer, whichever transport typed it. Mail never sends as bare
+    `fno`, so the lane names its sender.
 
     Crowned topology, because x-2dfa gates the trailer on the crown: the
     subject here is that the PANE transport carries whatever the single
@@ -102,13 +103,15 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
     _detector(monkeypatch, [])
 
-    assert dispatch._mux_pane_send(_entry(), "status?", guarded=False) is True
+    assert (
+        dispatch._mux_pane_send(_entry(), "status?", guarded=False, sender="lead")
+        is True
+    )
 
     paste = _pasted(calls)
-    assert paste.startswith("<fno_mail from=")
-    assert paste.rstrip().endswith("</fno_mail>")
+    assert paste.startswith("`@lead · ")
     assert "status?" in paste
-    # The wrapped pair itself is the point; the retired peer-mail
+    # The wrapped attribution itself is the point; the retired peer-mail
     # footer no longer renders.
     assert "peer mail" not in paste
 
@@ -173,7 +176,9 @@ def test_read_receipt_identity_gate_matches_on_uuid_not_the_name(monkeypatch, ca
     calls.clear()
     capsys.readouterr()
 
-    assert dispatch._mux_pane_send(entry, "status?", guarded=False) is True
+    assert (
+        dispatch._mux_pane_send(entry, "status?", guarded=False, sender="lead") is True
+    )
     assert any(call["argv"][1:4] == ["mux", "pane", "send"] for call in calls)
 
 
@@ -346,7 +351,7 @@ def test_an_undeclared_harness_sends_ungated_and_never_asks_the_detector(
         {"matched": False, "error": "unknown harness: no bundled readiness manifest"},
     )
 
-    assert dispatch._mux_pane_send(entry, "hello", guarded=False) is True
+    assert dispatch._mux_pane_send(entry, "hello", guarded=False, sender="lead") is True
     assert "send" in _verbs(calls), "the lane's one delivery path must run"
     assert detector_calls == [], "no manifest exists; the detector cannot be asked"
     err = capsys.readouterr().err
@@ -356,7 +361,7 @@ def test_an_undeclared_harness_sends_ungated_and_never_asks_the_detector(
     # The note prints ONCE per harness per process (round-1 review finding 3):
     # a driver loop mails the same pane repeatedly and a repeated advisory
     # line trains the reader to skip it.
-    assert dispatch._mux_pane_send(entry, "again", guarded=False) is True
+    assert dispatch._mux_pane_send(entry, "again", guarded=False, sender="lead") is True
     again = capsys.readouterr().err
     assert "not prompt-gated" not in again
 
@@ -415,7 +420,7 @@ def test_every_pane_verb_this_lane_issues_is_raw(monkeypatch):
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
     _detector(monkeypatch, [])
 
-    dispatch._mux_pane_send(_entry(), "status?", guarded=False)
+    dispatch._mux_pane_send(_entry(), "status?", guarded=False, sender="lead")
 
     sends = [c["argv"] for c in calls if c["argv"][1:4] == ["mux", "pane", "send"]]
     assert sends, "the lane must actually send"
@@ -442,26 +447,25 @@ def test_the_gate_asks_about_the_recipients_own_harness(monkeypatch, harness):
 
 
 def test_the_pane_drive_envelope_carries_an_id_to_reply_to(monkeypatch):
-    """A sender with no reply handle closes three of the four defects, not four.
+    """A pane drive's envelope carries a quotable msg id.
 
     A bare pane drive writes no bus row, and it does not need one:
     `resolve_live_sender` recovers a sender off the transcript for an id the bus
-    never saw, and it reads `from_session` first, so what comes back is the
-    collision-safe address rather than the head-8.
+    never saw, and the header names its id, so what comes back is quotable.
     """
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
     _detector(monkeypatch, [])
 
-    dispatch._mux_pane_send(_entry(), "status?", guarded=False)
+    dispatch._mux_pane_send(_entry(), "status?", guarded=False, sender="lead")
 
     pasted = _pasted(calls)
-    assert 'id="msg-' in pasted, pasted
+    assert "`@lead · fmail-" in pasted, pasted
     # The id has to be quotable, so it must survive into what is actually typed.
     import re
 
-    msg_id = re.search(r'id="(msg-[^"]+)"', pasted).group(1)
+    msg_id = re.search(r"fmail-([0-9a-f]{12})", pasted).group(0)
     assert msg_id in pasted
 
 
@@ -638,7 +642,9 @@ def test_wrapped_confirm_mail_rides_the_rust_pane_lane(monkeypatch):
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
     _detector(monkeypatch, [])
 
-    sent = dispatch._mux_pane_send(entry, "status?", guarded=False, confirm=True)
+    sent = dispatch._mux_pane_send(
+        entry, "status?", guarded=False, confirm=True, sender="lead"
+    )
     assert sent is True, f"pane lane did not deliver; calls: {calls}"
     inject_calls = [c for c in calls if c["argv"][1:2] == ["mail-inject"]]
     assert inject_calls, f"wrapped mail rides the pane lane; calls: {calls}"

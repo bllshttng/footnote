@@ -66,6 +66,11 @@ pub(super) async fn peek_input_keys(
                         buf.pop();
                     }
                 }
+                0x15 => {
+                    if let Some((_, buf)) = view.peek_input.as_mut() {
+                        buf.clear();
+                    }
+                }
                 0x20..=0x7e => {
                     if let Some((_, buf)) = view.peek_input.as_mut() {
                         // Cap to the server's ceiling so the operator sees exactly

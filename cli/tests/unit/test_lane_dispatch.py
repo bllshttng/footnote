@@ -6,23 +6,70 @@ DISTINCT project.id (x-071c narrowed the seed to this sole key), and
 slot-release-on-failure so one lane's spawn failure never aborts the fleet
 (Failure Modes: Errors).
 
-`select_lane_fill` runs for real against a monkeypatched `_ready_nodes` and an
-isolated `tmp_path` claims root, so the lane slots are genuinely held and the
-release path is exercised. `_ensure_lane_worktree` / `_spawn_worker` are
-monkeypatched (no real git / spawn).
+The fill selection is faked with the rows each test prepares, but the fake
+walks the door's own moves: slot acquisition rides the dev binary's
+`claim lane-acquire` over an isolated `tmp_path` claims root, so the slots are
+genuinely held and the release path is exercised. `_ensure_lane_worktree` /
+`_spawn_worker` are monkeypatched (no real git / spawn). Slot assertions go
+through the binary's own claim verbs over the same root; there is no python
+lanes library anymore.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tomllib
 import pytest
 from typer.testing import CliRunner
 
 from fno.backlog import advance
 from fno.graph import cli as graph_cli
-from fno.claims.lanes import active_lane_count, find_lane_slot
 from fno.config import WORKTREE_LOCAL_KEYS, _worktree_local_override
+from fno.rust_binary import resolve_binary
+
+pytestmark = pytest.mark.dev_build
+
+
+def _lane_count() -> int:
+    """Live lane slots under the ambient (env-pinned) claims root."""
+    binary = resolve_binary()
+    assert binary is not None, "dev binary required for the slot reads"
+    out = subprocess.run(
+        [str(binary), "claim", "lane-count", "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(out.stdout)["active_lanes"]
+
+
+def _acquire_at(root, lane_id: str, max_lanes: int) -> None:
+    """Hold a peer slot at an explicit claims root (not the env-pinned one)."""
+    binary = resolve_binary()
+    assert binary is not None, "dev binary required for the slot seed"
+    proc = subprocess.run(
+        [str(binary), "claim", "lane-acquire", "--lane", lane_id,
+         "--max-lanes", str(max_lanes), "--json"],
+        env={**os.environ, "FNO_CLAIMS_ROOT": str(root)},
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def _lane_slot(lane_id: str) -> str | None:
+    """The slot key a lane holds, read back through the lockfile listing."""
+    binary = resolve_binary()
+    assert binary is not None, "dev binary required for the slot reads"
+    out = subprocess.run(
+        [str(binary), "claim", "list", "--prefix", "lane-slot:", "--json"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return None
+    for row in json.loads(out.stdout or "[]"):
+        if row.get("holder") == f"parallel-lane:{lane_id}":
+            return row.get("key")
+    return None
 
 
 def _node_row(
@@ -60,11 +107,48 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
         # straight-to-target intake (d-834b6ff1), so lane placement derives.
         node.setdefault("difficulty", "low")
         node.setdefault("dispatch_verb", "")
-    monkeypatch.setattr(
-        advance, "_ready_nodes", lambda project=None, mission=None: list(ready_rows)
-    )
     monkeypatch.setattr(advance, "_canonical_root", lambda: canonical)
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
+
+    # The fill door is the dispatcher's input seam since the native port
+    # (main fed these rows through _ready_nodes, which dispatch_lanes no
+    # longer calls). These tests pin the dispatcher's per-lane behavior, not
+    # the fill's own selection - that contract lives in the rust
+    # advance_fill tests - so the fake walks the prepared rows through the
+    # door's own moves: one real slot acquired per pick over the same pinned
+    # claims root (peers' held slots consume the cap), and the door's stop
+    # vocabulary.
+    def fake_selection(max_lanes, project, *, mission=None, claims_root=None):
+        report = {
+            "requested": max_lanes,
+            "filled": 0,
+            "stop": "no-candidate",
+            "excluded": [],
+        }
+        if max_lanes < 1:
+            return [], report
+        binary = resolve_binary()
+        assert binary is not None, "dev binary required for slot acquisition"
+        env = {**os.environ}
+        if claims_root is not None:
+            env["FNO_CLAIMS_ROOT"] = str(claims_root)
+        selected: list[dict] = []
+        for node in ready_rows:
+            proc = subprocess.run(
+                [str(binary), "claim", "lane-acquire", "--lane", node["id"],
+                 "--max-lanes", str(max_lanes), "--json"],
+                env=env, capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                report["stop"] = "cap-full"
+                break
+            selected.append(dict(node))
+            report["filled"] = len(selected)
+        if len(selected) >= max_lanes:
+            report["stop"] = "filled"
+        return selected, report
+
+    monkeypatch.setattr(advance, "_lane_fill_selection", fake_selection)
 
     calls: dict = {
         "worktrees": [],
@@ -142,7 +226,7 @@ def test_dispatch_skips_lane_with_unusable_node_root(tmp_path, monkeypatch, cwd)
     else:
         assert "empty" in receipts[0]["error"]
     assert calls["worktrees"] == []
-    assert find_lane_slot("n-bad-root", root=tmp_path / "claims") is None
+    assert _lane_slot("n-bad-root") is None
 
 
 def test_lane_harness_resolution():
@@ -198,7 +282,7 @@ def test_dispatch_spawns_one_isolated_worker_per_lane(
     for node_id, cwd, _slug in calls["spawns"]:
         assert cwd == str(tmp_path / "wt" / node_id)
     # Slots stay held: the worker reconciles them at target init (LD#8).
-    assert active_lane_count(root=tmp_path / "claims") == 3
+    assert _lane_count() == 3
 
 
 def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):
@@ -257,9 +341,9 @@ def test_spawn_failure_releases_slot_and_spares_other_lanes(tmp_path, monkeypatc
     assert "boom" in by_id["n-a"]["error"]
     assert by_id["n-c"]["status"] == "dispatched"
     # The failed lane released its slot -> re-dispatchable; the good lane keeps its.
-    assert find_lane_slot("n-a", root=tmp_path / "claims") is None
-    assert find_lane_slot("n-c", root=tmp_path / "claims") is not None
-    assert active_lane_count(root=tmp_path / "claims") == 1
+    assert _lane_slot("n-a") is None
+    assert _lane_slot("n-c") is not None
+    assert _lane_count() == 1
 
 
 def test_max_lanes_one_dispatches_a_single_node(tmp_path, monkeypatch):
@@ -275,7 +359,7 @@ def test_max_lanes_one_dispatches_a_single_node(tmp_path, monkeypatch):
     )
     assert [r["node_id"] for r in receipts] == ["n-a"]
     assert receipts[0]["status"] == "dispatched"
-    assert active_lane_count(root=tmp_path / "claims") == 1
+    assert _lane_count() == 1
 
 
 def test_empty_ready_dispatches_nothing(tmp_path, monkeypatch):
@@ -330,13 +414,11 @@ def test_dispatch_lanes_exit_reflects_whether_any_lane_launched(
 
 
 def test_dispatch_report_explains_cap_full_after_one_selection(tmp_path, monkeypatch):
-    from fno.claims.lanes import acquire_lane_slot
-
     ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "code"))
     _wire(monkeypatch, tmp_path, ready)
     root = tmp_path / "claims"
-    assert acquire_lane_slot(3, "peer-a", root=root) is not None
-    assert acquire_lane_slot(3, "peer-b", root=root) is not None
+    _acquire_at(root, "peer-a", 3)
+    _acquire_at(root, "peer-b", 3)
     report = {}
 
     receipts = advance.dispatch_lanes(3, claims_root=root, report=report)
@@ -347,29 +429,6 @@ def test_dispatch_report_explains_cap_full_after_one_selection(tmp_path, monkeyp
     assert report["stop"] == "cap-full"
     assert report["dispatched"] == 1
     assert report["skipped"] == 0
-
-
-def test_lane_fill_report_preserves_classifier_exclusion(tmp_path, monkeypatch):
-    ready = _nodes(("n-a", "code"), ("n-b", "docs"))
-    _wire(monkeypatch, tmp_path, ready)
-    monkeypatch.setattr(
-        advance,
-        "_classify_lane_candidate",
-        lambda node, **_kwargs: "high-collision:plan" if node["id"] == "n-a" else None,
-    )
-    report = {}
-
-    selected = advance.select_lane_fill(
-        1, claim=False, claims_root=tmp_path / "claims", report=report
-    )
-
-    assert [node["id"] for node in selected] == ["n-b"]
-    assert report == {
-        "requested": 1,
-        "filled": 1,
-        "stop": "filled",
-        "excluded": [{"id": "n-a", "reason": "high-collision:plan"}],
-    }
 
 
 def test_dispatch_lanes_forwards_vendor_and_model_on_claude_harness(
@@ -498,8 +557,8 @@ def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monk
     assert "already-claimed" in by_id["n-a"]["error"]
     assert by_id["n-c"]["status"] == "dispatched"
     # n-a's lane slot returned to the pool; only the good lane keeps one.
-    assert find_lane_slot("n-a", root=tmp_path / "claims") is None
-    assert active_lane_count(root=tmp_path / "claims") == 1
+    assert _lane_slot("n-a") is None
+    assert _lane_count() == 1
 
 
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
@@ -544,8 +603,8 @@ def test_lane_preflight_error_returns_receipts_and_releases_slots(
         },
     ]
     assert calls["spawns"] == []
-    assert find_lane_slot("n-a", root=tmp_path / "claims") is None
-    assert find_lane_slot("n-b", root=tmp_path / "claims") is None
+    assert _lane_slot("n-a") is None
+    assert _lane_slot("n-b") is None
 
 
 def test_seed_heals_symlinked_fno_before_writing(tmp_path):

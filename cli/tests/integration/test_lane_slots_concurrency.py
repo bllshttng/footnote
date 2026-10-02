@@ -12,52 +12,55 @@ deterministic without keeping winners alive.
 """
 from __future__ import annotations
 
-import multiprocessing as mp
-import time
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from fno.claims.lanes import acquire_lane_slot, active_lane_count
+from fno.rust_binary import resolve_binary
 
-
-def _try_acquire_lane(root_str: str, max_lanes: int, lane_id: str, result_queue) -> None:
-    """Child worker: acquire a lane slot with a distinct lane_id."""
-    try:
-        claim = acquire_lane_slot(
-            max_lanes=max_lanes, lane_id=lane_id, root=Path(root_str)
-        )
-        if claim is None:
-            result_queue.put(("capped", lane_id, None))
-        else:
-            result_queue.put(("won", lane_id, claim.key))
-    except Exception as exc:  # pragma: no cover - surfaced as a failure
-        result_queue.put(("error", lane_id, repr(exc)))
+pytestmark = pytest.mark.dev_build
 
 
 def _run_lane_race(root: Path, max_lanes: int, n_workers: int) -> list[tuple]:
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
+    """Race n real `claim lane-acquire` processes on one claims root.
+
+    Exit 0 = won (stdout JSON carries the slot key), exit 1 = capped.
+    """
+    binary = resolve_binary()
+    assert binary is not None, "dev binary required for the race"
+    env = {**os.environ, "FNO_CLAIMS_ROOT": str(root)}
     procs = [
-        ctx.Process(
-            target=_try_acquire_lane,
-            args=(str(root), max_lanes, f"node-{i}", queue),
+        subprocess.Popen(
+            [str(binary), "claim", "lane-acquire", "--lane", f"node-{i}",
+             "--max-lanes", str(max_lanes), "--json"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         for i in range(n_workers)
     ]
-    for p in procs:
-        p.start()
-
     outcomes: list[tuple] = []
-    deadline = time.monotonic() + 10.0
-    while len(outcomes) < n_workers and time.monotonic() < deadline:
-        try:
-            outcomes.append(queue.get(timeout=0.5))
-        except Exception:
-            continue
-    for p in procs:
-        p.join(timeout=10)
+    for i, proc in enumerate(procs):
+        out, err = proc.communicate(timeout=30)
+        if proc.returncode == 0:
+            outcomes.append(("won", f"node-{i}", json.loads(out)["key"]))
+        elif proc.returncode == 1:
+            outcomes.append(("capped", f"node-{i}", None))
+        else:  # pragma: no cover - surfaced as a failure
+            outcomes.append(("error", f"node-{i}", err.strip()))
     return outcomes
+
+
+def _live_lane_count(root: Path) -> int:
+    binary = resolve_binary()
+    assert binary is not None, "dev binary required for the count"
+    out = subprocess.run(
+        [str(binary), "claim", "lane-count", "--json"],
+        env={**os.environ, "FNO_CLAIMS_ROOT": str(root)},
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(out.stdout)["active_lanes"]
 
 
 @pytest.mark.parametrize("trial", range(3))
@@ -78,7 +81,7 @@ def test_cap_holds_under_race_more_workers_than_slots(tmp_path, trial):
     assert len(won_slots) == max_lanes, f"trial {trial}: winners collided on slots {[o[2] for o in wins]}"
 
     # The derived count matches the cap exactly.
-    assert active_lane_count(root=tmp_path) == max_lanes, f"trial {trial}: count drift"
+    assert _live_lane_count(tmp_path) == max_lanes, f"trial {trial}: count drift"
 
 
 @pytest.mark.parametrize("trial", range(3))
@@ -91,4 +94,4 @@ def test_exactly_max_workers_all_win(tmp_path, trial):
     assert errors == [], f"trial {trial}: errors {errors}"
     assert len(wins) == max_lanes, f"trial {trial}: expected all {max_lanes} to win, got {outcomes}"
     assert len({o[2] for o in wins}) == max_lanes, f"trial {trial}: slot collision {outcomes}"
-    assert active_lane_count(root=tmp_path) == max_lanes
+    assert _live_lane_count(tmp_path) == max_lanes

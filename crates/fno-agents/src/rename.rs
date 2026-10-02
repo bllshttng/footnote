@@ -621,12 +621,15 @@ mod tests {
             &serde_json::json!({
                 "mode": "tag",
                 "from_session": session,
-                "to": "x"
+                "id": "fmail-0badc0de1234"
             }),
             &home.registry_json(),
         )
         .unwrap();
-        assert!(envelope.contains("from_name=\"bob\""));
+        assert!(
+            envelope.starts_with("`@bob · fmail-0badc0de1234 ·"),
+            "{envelope}"
+        );
         assert_eq!(
             crate::king_checkin::title_rename_command("codex", "bob", None),
             None

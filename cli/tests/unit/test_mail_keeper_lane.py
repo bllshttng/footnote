@@ -109,7 +109,9 @@ def test_a_keeper_recipient_routes_to_the_keeper_verb_and_reads_delivered(
     recipient, text, harness = recorded[0]
     assert recipient == KEEPER_SID
     assert harness == "pi", "the hosted harness names the settle-delay row"
-    assert "<fno_mail" in text, "the keeper lane carries the wrapped envelope"
+    assert text.splitlines()[0].startswith("`@web · fmail-"), (
+        "the keeper lane carries the delivered header"
+    )
     assert "delivered (hosted)" in out.out
     assert "queued (durable)" not in out.out
     assert "typed (pane" not in out.out

@@ -19,28 +19,24 @@ to the most-recent ``_CAP`` keys.
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 from typing import Optional
 
 from fno.paths import bus_dir
 
 _CAP = 2000
-# The whole paired envelope block (DOTALL: body spans newlines).
-_ENVELOPE_RE = re.compile(r"<fno_mail\b[^>]*>.*?</fno_mail>", re.DOTALL)
-# The open tag carries an id attribute (the "is this dedupable" gate).
-_HAS_ID_RE = re.compile(r'<fno_mail\b[^>]*\bid="[^"]+"')
 
 
 def dedup_key(body: str) -> Optional[str]:
-    """A collision-resistant dedup key for ``body``: the sha256 of its paired
-    ``<fno_mail>...</fno_mail>`` block, but only when that block carries an ``id``
-    attribute. ``None`` for a block with no id (pre-redesign; un-dedupable) or no
-    envelope at all - the caller then processes the message normally."""
-    m = _ENVELOPE_RE.search(body)
-    if not m or not _HAS_ID_RE.match(m.group(0)):
+    """Sha256 of the delivered message id - a header's middle token or an old
+    tag's ``id``; ``None`` names no id. The read lives in the Rust
+    classifier."""
+    from fno.mail.envelope import mail_shape
+
+    ids = mail_shape([body])[0]["ids"]
+    if not ids:
         return None
-    return hashlib.sha256(m.group(0).encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(ids[0].encode("utf-8")).hexdigest()[:32]
 
 
 def _seen_path(recipient: str) -> Path:

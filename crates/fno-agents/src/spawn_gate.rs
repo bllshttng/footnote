@@ -215,6 +215,23 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
     }
 }
 
+/// The second admission boundary: an unexpired machine brake holds agent
+/// spawns before the operator bypass, before `--force`, and before any
+/// capacity math. The arm attributes load before it arms the brake, so this
+/// door closing means fno's own fan-out; the user's taps pass through the
+/// admission brake instead (agent-origin only).
+fn machine_brake_gate() -> Result<(), Refusal> {
+    match crate::machine_watch::brake_holds() {
+        None => Ok(()),
+        Some(hold) => {
+            eprintln!("refused: {hold}; no new agent spawn is admitted while it holds");
+            Err(Refusal::code(EXIT_FLEET_STOP)
+                .ev("reason", serde_json::json!("machine-runaway"))
+                .ev("detail", serde_json::json!(hold)))
+        }
+    }
+}
+
 /// Queue mechanics (Claude's Discretion 2: targets, not contracts).
 const QUEUE_POLL: Duration = Duration::from_secs(2);
 const QUEUE_PROGRESS_EVERY: Duration = Duration::from_secs(30);
@@ -1368,6 +1385,9 @@ fn decide_gate(
     // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
+    // the machine brake is the same shape one door later: an arm-measured
+    // world fact that holds agent spawns before any capacity math.
+    machine_brake_gate()?;
     if let Some(refusal) = review_session_gate(&input) {
         return Err(refusal);
     }
@@ -2477,6 +2497,17 @@ pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
     (footer, keeper)
 }
 
+/// The footprint payload's admission split, `(fleet_cores, machine_cores)`,
+/// as the one fleet-share answer for the machine arm and the spawn CPU
+/// axis alike. `None` when the probe or the parse fails, which classifies
+/// as fleet load.
+pub(crate) fn fleet_split() -> Option<(f64, f64)> {
+    let raw = footprint_cause_raw().ok()?;
+    let payload: FootprintCausePayload = serde_json::from_str(&raw).ok()?;
+    let admission = payload.admission?;
+    Some((admission.fleet_cores, admission.machine_cores))
+}
+
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     // Test seam: a pinned payload keeps gate tests measuring their own axis,
     // never the live machine's load or whatever probe PATH resolves here.
@@ -3194,7 +3225,8 @@ MemAvailable:    8000000 kB\n";
 
     /// AC3-HP (Rust side): an active stop refuses at the FIRST boundary -
     /// this call runs before `run_gate`'s `FNO_SPAWN_GATE=0` return, so the
-    /// bypass env cannot wave a spawn through.
+    /// bypass env cannot wave a spawn through. AC2-HP: the machine brake
+    /// door one step later refuses the same way and admits an expired one.
     #[test]
     fn fleet_incident_gate_refuses_a_stopped_record() {
         let _guard = crate::claims::test_env_lock()
@@ -3229,6 +3261,49 @@ MemAvailable:    8000000 kB\n";
         match saved {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        // The machine brake door one boundary later: armed refuses with the
+        // same exit code and a machine-runaway reason; expired admits.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brake.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::env::set_var("FNO_MACHINE_BRAKE", &path);
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "until_epoch": now + 600,
+                "reason": "machine runaway: load hot for 700s",
+                "group": {"name": "claude", "count": 9, "ppid": 1},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let refusal = machine_brake_gate().err().expect("armed brake refuses");
+        assert_eq!(refusal.exit_code, EXIT_FLEET_STOP);
+        assert!(
+            verdict_line(&refusal).contains("machine-runaway"),
+            "{refusal:?}"
+        );
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "until_epoch": now - 10,
+                "reason": "machine runaway: expired",
+                "group": serde_json::Value::Null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            machine_brake_gate().is_ok(),
+            "an expired brake admits the spawn"
+        );
+        match std::env::var_os("FNO_MACHINE_BRAKE") {
+            Some(v) if v == path.as_os_str() => std::env::remove_var("FNO_MACHINE_BRAKE"),
+            _ => {}
         }
     }
 

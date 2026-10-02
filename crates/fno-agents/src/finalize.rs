@@ -1610,7 +1610,7 @@ fn env_dir_unless_null(key: &str) -> Option<PathBuf> {
 /// Read a `paths.<key>` value (e.g. `handoffs_dir`, `postmortems_dir`) from a
 /// flat config.toml. A literal `"null"` string is treated as absent (the "use
 /// default" sentinel), so the caller falls through to `~/.fno/<dir>`.
-fn read_path_setting(path: &Path, key: &str) -> Option<String> {
+pub(crate) fn read_path_setting(path: &Path, key: &str) -> Option<String> {
     let t = load_config_toml(path)?;
     toml_string_at(&t, &["paths", key]).filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("null"))
 }

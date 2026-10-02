@@ -198,7 +198,9 @@ fn tmp_claims_root(tag: &str) -> PathBuf {
 /// child alive in the SAME process group (no job control under `sh -c`, so
 /// the background job never gets its own pgid). The old `wait_or_kill_group`
 /// only killed on timeout/exception; this proves the native owner kills it on
-/// a plain, successful, on-time exit too.
+/// a plain, successful, on-time exit too. Since the suite_leaked verdict
+/// (x-bd69 change 3), that same green-plus-leak run also reads as FAILURE:
+/// the group was emptied, but a green suite that leaked is not done.
 #[test]
 fn normal_exit_still_reaps_a_backgrounded_group_mate() {
     let root = tmp_claims_root("normal-exit");
@@ -215,9 +217,10 @@ fn normal_exit_still_reaps_a_backgrounded_group_mate() {
         ))
         .status()
         .expect("run fno-agents test-run");
-    assert!(
-        status.success(),
-        "leader's own exit must still read as success"
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a green suite that leaked its group is not done (suite_leaked)"
     );
 
     let leftover_pid: u32 = std::fs::read_to_string(&pid_file)
