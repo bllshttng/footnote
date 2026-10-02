@@ -42,6 +42,7 @@ fn seed_kestrel_row(home: &AgentsHome, name: &str, rollout: &std::path::Path) {
             project_root: "/tmp".into(),
             log_path: Some(rollout.to_string_lossy().into_owned()),
             origin: Some("adopted".into()),
+            substrate: None,
             ..Default::default()
         });
     })

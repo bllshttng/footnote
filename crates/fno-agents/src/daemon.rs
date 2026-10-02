@@ -1888,9 +1888,9 @@ mod report;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
 use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
-pub(crate) use report::{
-    buffer_pending_report, find_uuid_backfill_row, BufferOutcome, UuidBackfill,
-};
+#[cfg(test)]
+use report::{buffer_pending_report, BufferOutcome};
+pub(crate) use report::{find_uuid_backfill_row, UuidBackfill};
 use report::{flush_buffered_inside_leg, handle_report};
 pub(crate) use thread_row_status::notify_transition;
 use thread_row_status::{

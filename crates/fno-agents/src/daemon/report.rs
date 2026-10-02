@@ -524,6 +524,8 @@ mod tests {
                 legacy_provider: "claude".into(),
                 claude_session_uuid: Some(uuid.into()),
                 status: AgentStatus::Live,
+                origin: None,
+                substrate: None,
                 created_at: "2026-10-01T00:00:00Z".into(),
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
