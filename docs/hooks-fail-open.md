@@ -1,6 +1,6 @@
 # Optional hooks fail open fast
 
-A hook that waits blocks a turn. Context that arrives late is worth less than a turn that starts on time. So every optional footnote hook runs under one load-aware budget: the machine pays LESS attention to context when it is busy, never more.
+A hook that waits blocks a turn. Context that arrives late is worth less than a turn that starts on time. So, when the machine is busy, every optional footnote hook runs under one load-aware budget that pays LESS attention to context, never more.
 
 ## The budget
 
@@ -19,7 +19,7 @@ A fired bound or a skip reads as silence: exit 0 with empty output. A turn never
 
 The optional families: context, nudge, inject, announce. That covers `prompt-outstanding`, `born-with-why-offer-inject`, `inject-mail-notify`, `inject-announce`, `law-stage-inject`, `inject-fno-agent-whoami`, `inject-mail-drain-session-start`, `outstanding-session-start`, `worktree-peers-session-start`, `frontdoor-nudge-session-start`, `agy-crown-inject`, `context-nudge` (reads), and `operator-capture-nudge`. `hooks/hooks.json` and `hooks/codex-hooks.json` set each one's `timeout` entry as a BACKSTOP just above the internal budget, so a wedged hook that ignores its own bound still dies at the harness layer.
 
-Two Stop-path context reads also serve from a stale-while-revalidate cache: the context nudge probe and the operator-capture queue depth. A fresh copy costs milliseconds. A served copy past two thirds of its life arms a detached refresher, so the refresh happens off the turn path. A live read that skipped or expired under load serves the stale copy rather than nothing. Keys are per session or per transcript; files live under `~/.fno/cache/hook-budget/`.
+Two Stop-path context reads also serve from a stale-while-revalidate cache: the context nudge probe and the operator-capture queue depth. A fresh copy costs milliseconds. A served copy past two thirds of its life arms a detached refresher, so the refresh happens off the turn path. A live read that skipped or expired under load serves the stale copy rather than nothing. Keys are per session or per transcript. Files live under `~/.fno/cache/hook-budget/`.
 
 ## Gates that decide keep their own budgets
 
