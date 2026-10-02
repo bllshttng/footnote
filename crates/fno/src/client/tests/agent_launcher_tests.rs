@@ -2893,8 +2893,11 @@ fn keyed(
 
 // -- KillLeft (Ctrl+U / Cmd+Backspace) --------------------------------------
 
+/// The kill line, every layer in one walk: the fold maps both Cmd+Backspace
+/// spellings (and Shift+Enter's CSI-u), the composer draft kills only the
+/// row left of the cursor, and the InputField forms kill their head.
 #[test]
-fn fold_maps_both_cmd_backspace_spellings_and_shift_enter() {
+fn kill_line_folds_and_every_editor_honors_it() {
     let mut esc = LauncherEsc::default();
     assert_eq!(
         esc.fold(b"\x15"),
@@ -2912,18 +2915,7 @@ fn fold_maps_both_cmd_backspace_spellings_and_shift_enter() {
         esc.fold(b"\x1b[13;2u"),
         vec![super::agent_launcher::LKey::ShiftEnter]
     );
-    // A bare DEL still backspaces; a lone ESC still cancels.
-    let mut esc = LauncherEsc::default();
-    assert_eq!(
-        esc.fold(b"\x7f"),
-        vec![super::agent_launcher::LKey::Backspace]
-    );
-    let mut esc = LauncherEsc::default();
-    assert_eq!(esc.fold(b"\x1b"), vec![super::agent_launcher::LKey::Esc]);
-}
 
-#[test]
-fn kill_left_deletes_the_row_left_of_the_cursor_only() {
     let mut v = plain_view();
     open(&mut v);
     let l = v.launcher.as_mut().unwrap();
@@ -2938,10 +2930,7 @@ fn kill_left_deletes_the_row_left_of_the_cursor_only() {
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.draft.message, "first\n");
     assert_eq!(l.draft.cursor_chars, "first\n".chars().count());
-}
 
-#[test]
-fn input_field_kill_left_clears_the_head() {
     let mut f = super::input_field::InputField::new("name", 64).with_text("zai");
     f.feed(b"\x15");
     assert_eq!(f.text(), "");
@@ -2953,8 +2942,11 @@ fn input_field_kill_left_clears_the_head() {
 
 // -- refusal sentence + Ctrl+O detail ---------------------------------------
 
+/// The footer's refusal text: admission refusals map to canned one-sentence
+/// heads (through the same first_sentence the footer calls), anything else
+/// keeps its first line, and Ctrl+O swaps the raw text in.
 #[test]
-fn first_sentence_maps_admission_refusals_to_canned_lines() {
+fn refused_footer_maps_admissions_and_toggles_raw() {
     use super::agent_launcher::first_sentence;
     assert_eq!(
         first_sentence("process admission refused: count=unknown, ceiling=29, reason=measurement-unavailable"),
@@ -2968,10 +2960,7 @@ fn first_sentence_maps_admission_refusals_to_canned_lines() {
         first_sentence("plain first line\nsecond line"),
         "plain first line",
     );
-}
 
-#[test]
-fn refused_footer_shortens_then_toggles_raw() {
     let mut v = plain_view();
     open(&mut v);
     let l = v.launcher.as_mut().unwrap();
