@@ -136,6 +136,18 @@ Write the answer to the project config (the reader prefers `FNO_GUARD_PRESET`, t
 fno config set guards.preset <strict|standard|off> --local
 ```
 
+## Step 2d: Concurrency budget
+
+Run `fno agents status` and read the `budget max_live` clause on the machine line. The number is a guess: memory headroom and cores divided by the measured per-session cost, or the band defaults when no session rows exist yet.
+
+Ask the user whether to write it as the cap. On yes:
+
+```bash
+fno config set agents.max_live <n> --local
+```
+
+The leads/workers split in the clause is guidance; no config key caps leads. With no machine sample yet, say the daemon files the same question in the mux sideline questions block within five minutes, and skip the write.
+
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 
 The `config.work` map (workspace -> projects[]) is topology, not a scalar leaf, so it is not asked via `fno config setup plan`. When setting up a workspace, auto-detect the current project and confirm it:

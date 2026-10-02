@@ -1418,7 +1418,7 @@ fn shell_mode_keys_glyph_and_placeholders() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
-    assert_painted(&v, '\u{276f}', "What do you want to work on?");
+    assert_painted(&v, '\u{276f}', "prompt \u{b7} -- flags");
 
     // AC1: the `!` is consumed as the mode switch.
     type_message(&mut v, "!");
@@ -1458,7 +1458,7 @@ fn shell_mode_keys_glyph_and_placeholders() {
         assert!(!l.shell, "the empty-line Backspace left shell mode");
         assert!(l.draft.message.is_empty());
     }
-    assert_painted(&v, '\u{276f}', "What do you want to work on?");
+    assert_painted(&v, '\u{276f}', "prompt \u{b7} -- flags");
 
     // Folded from the retired newline test: ^j inserts a newline in the
     // message and Enter never fires from inside it.
@@ -2889,4 +2889,146 @@ fn keyed(
     m.key_env = Some(env.to_string());
     m.key_file = key_file;
     m
+}
+
+// -- KillLeft (Ctrl+U / Cmd+Backspace) --------------------------------------
+
+/// The composer's contract, one walk: the fold maps both Cmd+Backspace
+/// spellings (and Shift+Enter's CSI-u), the kill line edits every editor
+/// layer, admission refusals map to canned one-sentence heads with the raw
+/// text behind Ctrl+O, `?` opens the help sheet on an empty input and stays
+/// text once words exist, and the runtime flags parser reads beside and
+/// next-line descriptions while never suggesting a flag the doors own.
+#[test]
+fn composer_keys_refusals_help_and_flag_parsing_contract() {
+    // -- the key fold ------------------------------------------------------
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x15"),
+        vec![super::agent_launcher::LKey::KillLeft],
+        "Ctrl+U"
+    );
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x1b\x7f"),
+        vec![super::agent_launcher::LKey::KillLeft],
+        "ESC+DEL is one key, never Esc then Backspace"
+    );
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x1b[13;2u"),
+        vec![super::agent_launcher::LKey::ShiftEnter]
+    );
+
+    // -- the draft and the InputField editors ------------------------------
+    let mut v = plain_view();
+    open(&mut v);
+    let l = v.launcher.as_mut().unwrap();
+    l.draft.message = "first\nsecond".to_string();
+    l.draft.cursor_chars = "first\nsecond".chars().count();
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x15", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, "first\n");
+    assert_eq!(l.draft.cursor_chars, "first\n".chars().count());
+
+    let mut f = super::input_field::InputField::new("name", 64).with_text("zai");
+    f.feed(b"\x15");
+    assert_eq!(f.text(), "");
+    let mut f = super::input_field::InputField::new("name", 64).with_text("zai");
+    f.feed(b"\x1b[D\x1b[D"); // cursor after "z"
+    f.feed(b"\x15");
+    assert_eq!(f.text(), "ai");
+
+    // -- refusal heads and the Ctrl+O raw toggle ---------------------------
+    use super::agent_launcher::first_sentence;
+    assert_eq!(
+        first_sentence("process admission refused: count=unknown, ceiling=29, reason=measurement-unavailable"),
+        "process limit: fno cannot read the machine's load (count=unknown); wait a beat or run it in a terminal",
+    );
+    assert_eq!(
+        first_sentence("process admission refused: machine runaway brake holds (900s left): hot; largest group cargo x40"),
+        "process limit: machine runaway brake on; run it in a terminal or wait for the all-clear",
+    );
+    assert_eq!(
+        first_sentence("plain first line\nsecond line"),
+        "plain first line",
+    );
+
+    let mut v = plain_view();
+    open(&mut v);
+    let l = v.launcher.as_mut().unwrap();
+    l.phase = Phase::Refused {
+        request_id: 1,
+        reason: "process admission refused: count=unknown, ceiling=29".into(),
+    };
+    assert_eq!(
+        l.footer(),
+        "refused: process limit: fno cannot read the machine's load (count=unknown); wait a beat or run it in a terminal (^o raw)",
+    );
+    l.show_detail = true;
+    assert_eq!(
+        l.footer(),
+        "refused: process admission refused: count=unknown, ceiling=29",
+        "Ctrl+O shows the raw text"
+    );
+
+    // -- ? opens help on empty input, types otherwise ----------------------
+    let mut v = plain_view();
+    open(&mut v);
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"?", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(
+        l.picker
+            .as_ref()
+            .is_some_and(|p| p.mode == super::agent_launcher::PickerMode::Help),
+        "? on an empty input opens the help sheet"
+    );
+    assert!(l.draft.message.is_empty());
+    // Esc closes the sheet outright; a second ? stays text on a non-empty
+    // input.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "esc closes the help sheet");
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"what?", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.draft.message, "what?",
+        "? is text once the input holds words"
+    );
+    assert!(l.picker.is_none());
+
+    // -- the runtime flags parser ------------------------------------------
+    let rows = super::harness_flags::parse_help(
+        "Usage: claude [options] [prompt]\n\
+         \n\
+         Options:\n\
+         \x20 --version          Show version number\n\
+         \x20 --add-dir <directories...>\n\
+         \x20                    Directories the session may read\n\
+         \x20 --dangerously-skip-permissions\n\
+         \x20 --model, -m <model>\n\
+         \x20                    Model override\n",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "--add-dir <directories...>".to_string(),
+                "Directories the session may read".to_string()
+            ),
+            ("--dangerously-skip-permissions".to_string(), String::new()),
+        ],
+        "owned flags never suggest; beside and next-line descriptions both land",
+    );
 }

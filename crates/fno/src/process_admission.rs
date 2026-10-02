@@ -415,13 +415,22 @@ fn describe_brake(until: u64, value: &serde_json::Value) -> String {
                 .get("ppid")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            let outside = u32::try_from(ppid)
-                .ok()
-                .filter(|pid| *pid != 0)
-                .and_then(group_outside_fleet)
-                .unwrap_or(false);
+            // The arm wrote the fleet/outside split it measured; an older
+            // brake without the fields names only the group.
+            let split = value
+                .get("fleet_cores")
+                .and_then(serde_json::Value::as_f64)
+                .zip(
+                    value
+                        .get("machine_cores")
+                        .and_then(serde_json::Value::as_f64),
+                )
+                .map(|(fleet, machine)| {
+                    format!(" (fleet {fleet:.1} of {machine:.1} machine cores)")
+                })
+                .unwrap_or_default();
             format!(
-                "{} x{} (ppid {ppid}){}",
+                "{} x{} (ppid {ppid}){split}",
                 group
                     .get("name")
                     .and_then(serde_json::Value::as_str)
@@ -430,23 +439,10 @@ fn describe_brake(until: u64, value: &serde_json::Value) -> String {
                     .get("count")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
-                if outside { ", outside the fleet" } else { "" },
             )
         }
     };
     format!("machine runaway brake holds ({left}s left): {reason}; largest group {group}")
-}
-
-/// Whether the brake's largest group descends from no fno root, so the load
-/// is not the fleet's. `None` when the parent cannot be read.
-fn group_outside_fleet(ppid: u32) -> Option<bool> {
-    let rows = snapshot_processes().ok()?;
-    let roots = process_root_names().ok()?;
-    let by_pid: HashMap<u32, &ProcessRow> = rows.iter().map(|row| (row.pid, row)).collect();
-    let parent = by_pid.get(&ppid)?;
-    reaches_root(parent, &by_pid, &roots, std::process::id())
-        .ok()
-        .map(|inside| !inside)
 }
 
 /// A human at a terminal is the recovery path, so the brake never holds
@@ -459,6 +455,31 @@ fn human_at_tty() -> bool {
         .is_none()
         && io::stdin().is_terminal()
         && io::stderr().is_terminal()
+}
+
+/// True when this process carries a worker identity. The brake holds only
+/// agent-origin callers: the arm now attributes load before it arms the
+/// brake, so a refusal here means fno's own fan-out, never the user's tap
+/// or their mux server.
+fn agent_origin() -> bool {
+    std::env::var_os("FNO_AGENT_SELF")
+        .filter(|name| !name.is_empty())
+        .is_some()
+}
+
+/// The server's start: a server an agent spawned inherits its worker
+/// identity and a background QoS policy, so the brake would hold the user's
+/// taps and the server would run demoted. Stripping the identity and
+/// clearing the inherited policy keeps fno's most important process out of
+/// both traps. A no-op on Linux.
+pub fn claim_server_priority() {
+    std::env::remove_var("FNO_AGENT_SELF");
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // PRIO_DARWIN_PROCESS 0,0 clears an inherited background policy on
+        // the calling process; permitted without root for self.
+        libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, 0);
+    }
 }
 
 /// Set while the client's TUI owns the terminal. A warning written then
@@ -476,19 +497,19 @@ fn warn(line: std::fmt::Arguments<'_>) {
     }
 }
 
-/// The brake check every admit shares. A `human` caller passes with one
-/// warning per armed brake instead of a refusal; a long-lived server still
-/// logs each new brake it waives. The brake is a world fact the arm
-/// measured, so it outranks the census read below.
+/// The brake check every admit shares. A caller that is not agent-origin
+/// passes with one warning per armed brake instead of a refusal; a
+/// long-lived server still logs each new brake it waives. The brake is a
+/// world fact the arm measured, so it outranks the census read below.
 fn brake_check(scope: Scope, ceiling: usize, human: bool) -> Result<(), AdmissionFailure> {
     let Some((until, value)) = runaway_brake() else {
         return Ok(());
     };
-    if human {
+    if human || !agent_origin() {
         static WARNED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if WARNED_UNTIL.swap(until, std::sync::atomic::Ordering::Relaxed) != until {
             warn(format_args!(
-                "fno: {}; admitting a human's own start anyway",
+                "fno: {}; admitting anyway: the brake holds only agent-origin callers",
                 describe_brake(until, &value)
             ));
         }
@@ -846,6 +867,18 @@ pub fn admit_pane(
     admit_pane_for(human_at_tty(), pane_count, requested_cap)
 }
 
+/// [`admit_pane_for`] with the spawn-refusal shape the mux server answers
+/// with: the placement carries the human ask, and the failure maps to the
+/// control error code the composer prints. `placement.max_panes` stays the
+/// requested tab cap.
+pub fn admit_pane_for_spawn(
+    placement: &crate::proto::PanePlacement,
+    pane_count: usize,
+) -> Result<AdmissionPermit, (u32, String)> {
+    admit_pane_for(placement.human, pane_count, placement.max_panes)
+        .map_err(|e| (crate::proto::err_code::SPAWN_FAILED, e.to_string()))
+}
+
 /// [`admit_pane`] for a pane the caller knows a human asked for. The mux
 /// server has no TTY, so `human_at_tty` reads false there even for a click
 /// from the user's own attached client. The server passes that fact here, and
@@ -1055,6 +1088,26 @@ pub fn tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Co
 
 pub fn tokio_spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
     let permit = admit_fleet().map_err(admission_io_error)?;
+    let track_child = !is_root_program(command.as_std().get_program());
+    let mut child = command.spawn()?;
+    if track_child {
+        if let Some(pid) = child.id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        }
+    }
+    Ok(child)
+}
+
+/// [`tokio_spawn`] for a human's own request: the runaway brake warns
+/// instead of refusing and the census still gates, the same exemption the
+/// user's own attach carries. The composer's force gesture rides this.
+pub fn tokio_spawn_for_human(
+    command: &mut tokio::process::Command,
+) -> io::Result<tokio::process::Child> {
+    let permit = admit_human();
     let track_child = !is_root_program(command.as_std().get_program());
     let mut child = command.spawn()?;
     if track_child {
@@ -1833,21 +1886,40 @@ mod tests {
     /// The measured 2026-09-02 wedge: one alive-but-unreadable marker pid
     /// took the whole census down and refused every spawn on the machine.
     /// Our own pid stands in for it (alive, not a zombie, not confirmed
-    /// dead) paired with a reader that never resolves a start time.
+    /// dead) paired with a reader that never resolves a start time. The
+    /// malformed-line case prunes the torn line and keeps the readable one.
+    /// Each case scopes its own isolate: two live guards would deadlock on
+    /// the same env lock.
     #[test]
     fn unreadable_marker_pid_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-unreadable");
         let pid = std::process::id();
-        std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
+        {
+            let (_guard, path) = isolate("marker-unreadable");
+            std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
 
-        let count = marker_count_with(&[], &HashSet::new(), |_| None)
-            .expect("an unreadable marker pid must not collapse the census");
+            let count = marker_count_with(&[], &HashSet::new(), |_| None)
+                .expect("an unreadable marker pid must not collapse the census");
 
-        assert_eq!(count, 0);
-        assert!(
-            !path.exists(),
-            "the unreadable entry must be pruned from the ledger"
-        );
+            assert_eq!(count, 0);
+            assert!(
+                !path.exists(),
+                "the unreadable entry must be pruned from the ledger"
+            );
+        }
+        {
+            let (_guard, path) = isolate("marker-malformed");
+            std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
+
+            let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
+                .expect("a torn ledger line must not collapse the census");
+
+            assert_eq!(count, 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{pid}:777\n")
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// A readable marker still counts, so the skip above is a targeted drop
@@ -1886,25 +1958,6 @@ mod tests {
             .expect("an unreadable start time must not fail the spawn");
 
         assert!(!path.exists(), "no marker line may be written");
-    }
-
-    /// The ledger is appended to by concurrent spawns, so a torn line is
-    /// possible. One must not refuse every spawn on the machine.
-    #[test]
-    fn malformed_ledger_line_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-malformed");
-        let pid = std::process::id();
-        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
-
-        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
-            .expect("a torn ledger line must not collapse the census");
-
-        assert_eq!(count, 1);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            format!("{pid}:777\n")
-        );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// A recovery switch that refuses on a plausible spelling strands the
@@ -2030,9 +2083,10 @@ mod tests {
     }
 
     /// The guard against retry-then-hold-forever: a NoSource answer stops
-    /// the loop on its first answer, with no wait spent.
+    /// Both stopping answers end the loop on their first answer, with no
+    /// wait spent.
     #[test]
-    fn census_stops_at_the_first_no_source_answer() {
+    fn census_stops_at_the_first_stopping_answer() {
         let mut calls = 0;
         let census = census_with(
             || {
@@ -2044,11 +2098,6 @@ mod tests {
         );
         assert_eq!(census, Census::no_source("no /proc on this host"));
         assert_eq!(calls, 1);
-    }
-
-    /// The famine answer stops the loop the same way.
-    #[test]
-    fn census_stops_at_the_first_descriptors_exhausted_answer() {
         let mut calls = 0;
         let census = census_with(
             || {
@@ -2168,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unexpired_brake_refuses_agents_admits_humans_and_names_outside_load() {
+    fn an_unexpired_brake_refuses_agents_admits_everyone_else_and_names_the_split() {
         let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
@@ -2183,6 +2232,8 @@ mod tests {
                         + 600,
                     "reason": "machine runaway: 10005 processes",
                     "group": {"name": "g i t", "count": 8000, "ppid": ppid},
+                    "fleet_cores": 6.0,
+                    "machine_cores": 8.0,
                 })
                 .to_string(),
             )
@@ -2203,39 +2254,36 @@ mod tests {
         }
         let text = failure.to_string();
         assert!(text.contains("largest group g i t x8000"), "{text}");
-        assert!(!text.contains("outside the fleet"), "{text}");
-        // pid 1 descends from no fno root: the refusal says whose load it
-        // is. A process snapshot that cannot resolve pid 1 gets the
-        // suffix-free line instead, so assert only what the snapshot supports.
-        let pid1_outside = group_outside_fleet(1);
+        // The arm's measured split rides the brake file; the refusal names it
+        // where a re-walk of the process table used to guess.
         arm(1);
         let text = admit_fleet().err().expect("brake refuses").to_string();
-        if pid1_outside == Some(true) {
-            assert!(text.contains("(ppid 1), outside the fleet"), "{text}");
-        } else {
-            assert!(text.contains("(ppid 1)"), "{text}");
-        }
-        // A human's shell pane is the recovery path and passes the brake.
-        let shell = admit_shell_pane();
-        // The mux server has no TTY: a row tap from the user's own client
-        // passes the brake by the flag the server hands in, an agent's does not.
-        let tap = admit_pane_for(true, 0, None);
-        let agent_pane = admit_pane_for(false, 0, None);
-        // The same flag at the fleet scope: the server hands a resume tap's
-        // human fact in, and a braked resume of an agent spawn stays refused.
-        let resume_tap = admit_fleet_for(true);
-        let agent_resume = admit_fleet_for(false);
+        assert!(text.contains("fleet 6.0 of 8.0 machine cores"), "{text}");
+        // No agent identity, no refusal: the user's mux server (no TTY, no
+        // FNO_AGENT_SELF) and their own taps pass with one warning.
         std::env::remove_var("FNO_AGENT_SELF");
+        assert!(
+            admit_fleet().is_ok(),
+            "a caller with no worker identity passes the brake"
+        );
+        let shell = admit_shell_pane();
+        let tap = admit_pane_for(true, 0, None);
+        let server_pane = admit_pane_for(false, 0, None);
+        let resume_tap = admit_fleet_for(true);
+        let server_resume = admit_fleet_for(false);
         assert!(shell.is_ok(), "a shell pane passes the brake");
         assert!(tap.is_ok(), "the user's own row tap passes the brake");
-        assert!(agent_pane.is_err(), "an agent's pane stays braked");
+        assert!(
+            server_pane.is_ok(),
+            "a TTY-less server pane passes the brake"
+        );
         assert!(
             resume_tap.is_ok(),
             "the user's own resume tap passes the brake"
         );
         assert!(
-            agent_resume.is_err(),
-            "an agent's fleet resume stays braked"
+            server_resume.is_ok(),
+            "a TTY-less server resume passes the brake"
         );
         // The absent-file branch: admission reads byte-for-byte as before.
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
