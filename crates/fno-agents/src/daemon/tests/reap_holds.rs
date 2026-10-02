@@ -1506,9 +1506,10 @@ fn an_adopted_row_retires_once_the_roster_sweep_removed_its_session() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// An unread roster snapshot no longer shields a terminal adopted row: the
-/// registry's own exited status is the death fact the carve-out needs, so
-/// the row takes the normal pipeline and its quiet transcript retires it.
+/// A terminal adopted row retires on fno's own verdict: the stored exited
+/// status is the death fact, so the unread roster proves nothing and no
+/// stop proof is owed. The stop-proof hold belongs to the undecided
+/// sibling, which the sweep-family hold tests pin.
 #[test]
 fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
     let home = tmp_home("gc-corpse-unknown");
@@ -1518,6 +1519,9 @@ fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
     state::update_registry(&home.registry_json(), |r| {
         let mut row = claude_worker_row("au-row", "aurow000");
         row.origin = Some("adopted".into());
+        // The scenario is the TERMINAL adopted row: the stored exited
+        // status is the death fact the door reads.
+        row.status = crate::AgentStatus::Exited;
         r.entries.push(row);
     })
     .unwrap();
@@ -1537,13 +1541,20 @@ fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
         &|_| true,
     );
 
-    assert_eq!(
-        summary.needs_live_stop.len(),
-        1,
-        "the phantom-forever keep is gone: the row reaches the pipeline and holds at the stop proof, which a dry run never promises: {summary:?}"
-    );
-    assert_eq!(summary.needs_live_stop[0].0, "aurow000");
+    // A dry run never retires: the proven row is NAMED at the unevaluated
+    // active-surface gate instead, and owes no stop proof.
     assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(
+        summary.dry_run_unverified,
+        vec![(
+            "aurow000".to_string(),
+            "active-surface removal was not evaluated".to_string()
+        )]
+    );
+    assert!(
+        summary.needs_live_stop.is_empty(),
+        "a row fno proves finished owes no stop proof: {summary:?}"
+    );
     assert!(
         summary.kept_not_spawn.is_empty(),
         "{:?}",
