@@ -250,7 +250,10 @@ fn render_one(
         "search": search,
         "search_keys": crate::search_query::keys_json(),
         "search_as_of": inputs.read_at,
-        "search_names": !inputs.sessions.is_empty(),
+        "search_names": !inputs
+            .errors
+            .iter()
+            .any(|e| e.contains("names unavailable")),
         "leads_at": leads_at,
     });
     if public {

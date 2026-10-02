@@ -484,6 +484,11 @@ struct Term {
 
 impl Term {
     fn holds(&self, f: &Fields, now: i64) -> bool {
+        // A term with no alternatives is a no-op (a lone `-` filters
+        // nothing), never an always-false predicate.
+        if self.alts.is_empty() {
+            return true;
+        }
         self.alts.iter().any(|p| p.holds(f, now)) != self.neg
     }
 }

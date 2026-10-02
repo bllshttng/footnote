@@ -741,6 +741,7 @@ function predHolds(p, fields, now) {
   return false;
 }
 function termHolds(term, fields, now) {
+  if (!term.alts.length) return true;
   return term.alts.some((p) => predHolds(p, fields, now)) !== term.neg;
 }
 function searchKeeps(parsed, fields) {
