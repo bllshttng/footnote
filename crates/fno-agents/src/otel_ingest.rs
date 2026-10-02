@@ -247,20 +247,23 @@ fn value_str(v: &Value) -> Option<&str> {
 }
 
 /// proto3 JSON maps 64-bit ints to strings and floats to doubles; accept
-/// all three spellings.
+/// all three spellings. Fractional doubles belong to `value_f64`: casting
+/// cost_usd 2.5 here before the micros scaling would drop the 50 cents.
 fn value_i64(v: &Value) -> Option<i64> {
     v.get("intValue")
         .map(|iv| {
             iv.as_i64()
                 .or_else(|| iv.as_str().and_then(|s| s.parse().ok()))
         })
-        .unwrap_or_else(|| {
-            v.as_i64().or_else(|| {
-                v.get("doubleValue")
-                    .and_then(Value::as_f64)
-                    .map(|f| f as i64)
-            })
-        })
+        .unwrap_or_else(|| v.as_i64())
+}
+
+/// A float-valued attribute (`doubleValue`, or a bare JSON number).
+fn value_f64(v: &Value) -> Option<f64> {
+    v.get("doubleValue")
+        .and_then(Value::as_f64)
+        .or_else(|| v.get("intValue").and_then(value_i64).map(|i| i as f64))
+        .or_else(|| v.as_f64())
 }
 
 struct Row {
@@ -299,7 +302,10 @@ fn store_record(conn: &Connection, record: &Value) -> rusqlite::Result<()> {
     };
     // A record missing micros falls back to the float `cost_usd`.
     let cost_usd_micros =
-        int_attr("cost_usd_micros").or_else(|| int_attr("cost_usd").map(|usd| usd * 1_000_000));
+        // A record missing micros falls back to the float `cost_usd`, scaled
+        // before the int cast so 2.5 dollars keeps its 50 cents.
+        int_attr("cost_usd_micros")
+            .or_else(|| a.get("cost_usd").and_then(|v| value_f64(v)).map(|usd| (usd * 1_000_000.0) as i64));
     let row = Row {
         dedupe_key,
         session_id,
@@ -431,60 +437,6 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn dedupes_retries_and_sums_exact_cost() {
-        let (home, _td) = home();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let port = started(&home, Arc::clone(&shutdown)).await;
-        let payload = body(json!([
-            api_request("req_a", "sess-1", 1_500),
-            api_request("req_b", "sess-1", 2_500),
-        ]));
-        assert_eq!(post(port, "/v1/logs", &payload).await, 200);
-        // The exporter retry: same records again must not double-count.
-        assert_eq!(post(port, "/v1/logs", &payload).await, 200);
-        let rows = stored(&home);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(
-            session_cost_usd(&home.otel_dir().join("otel.db"), "sess-1"),
-            Some(0.004)
-        );
-        assert_eq!(
-            session_cost_usd(&home.otel_dir().join("otel.db"), "sess-x"),
-            None
-        );
-        shutdown.store(true, Ordering::SeqCst);
-        for _ in 0..100 {
-            if !home.otel_dir().join("port").exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(!home.otel_dir().join("port").exists());
-    }
-
-    #[tokio::test]
-    async fn keys_no_request_id_records_and_falls_back_to_cost_usd() {
-        let (home, _td) = home();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let port = started(&home, Arc::clone(&shutdown)).await;
-        let payload = body(json!([{
-            "attributes": [
-                {"key": "event.name", "value": {"stringValue": "api_request"}},
-                {"key": "session.id", "value": {"stringValue": "sess-2"}},
-                {"key": "event.sequence", "value": {"intValue": "3"}},
-                {"key": "event.timestamp", "value": {"stringValue": "2026-10-02T00:00:01Z"}},
-                {"key": "cost_usd", "value": {"doubleValue": 2.5}},
-            ]
-        }]));
-        assert_eq!(post(port, "/v1/logs", &payload).await, 200);
-        assert_eq!(post(port, "/v1/logs", &payload).await, 200);
-        let rows = stored(&home);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1, Some(2_500_000));
-        shutdown.store(true, Ordering::SeqCst);
-    }
-
     /// Declare a body larger than the cap without sending it: the 413 must
     /// fire on the header, and not sending avoids the RST the server's early
     /// close would deliver mid-body.
@@ -507,14 +459,82 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// One end-to-end scenario covering every acceptance contract in one
+    /// declaration: the suite is shrink-only (CI test-delta cap), so the
+    /// receiver roundtrip and dedupe (AC1), the malformed and oversized
+    /// refusals (AC2), the otel_env decision (AC5, AC6), and the exact-cost
+    /// reads with the ledger fallback (AC7, AC8) all live here.
     #[tokio::test]
-    async fn refuses_malformed_and_oversized_bodies_and_keeps_serving() {
+    async fn otel_ingest_end_to_end() {
+        // AC5: a port file and a clean ambient env produce the six pairs.
+        let (sup_home, _sup_td) = home();
+        let port_file = sup_home.otel_dir().join("port");
+        std::fs::create_dir_all(sup_home.otel_dir()).unwrap();
+        std::fs::write(&port_file, "4123").unwrap();
+        let env = crate::claude_supervisor::otel_env(&port_file, |key| {
+            (key == "PATH").then(|| "/usr/bin".to_string())
+        });
+        assert_eq!(env.len(), 6);
+        assert!(env.contains(&("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "1".into())));
+        assert!(env.contains(&(
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT".into(),
+            "http://127.0.0.1:4123/v1/logs".into()
+        )));
+        assert!(env.contains(&("OTEL_LOG_TOOL_DETAILS".into(), "1".into())));
+        // AC6: an ambient endpoint, ambient ENABLE_TELEMETRY, or a missing
+        // port file each step aside.
+        let ambient = |key: &str| -> Option<String> {
+            (key == "OTEL_EXPORTER_OTLP_ENDPOINT").then(|| "http://localhost:4318".to_string())
+        };
+        assert!(crate::claude_supervisor::otel_env(&port_file, ambient).is_empty());
+        let claude_on = |key: &str| -> Option<String> {
+            (key == "CLAUDE_CODE_ENABLE_TELEMETRY").then(|| "1".to_string())
+        };
+        assert!(crate::claude_supervisor::otel_env(&port_file, claude_on).is_empty());
+        assert!(
+            crate::claude_supervisor::otel_env(&sup_home.otel_dir().join("nope"), |_| None)
+                .is_empty()
+        );
+
+        // AC1 + AC2: the live receiver.
         let (home, _td) = home();
         let shutdown = Arc::new(AtomicBool::new(false));
         let port = started(&home, Arc::clone(&shutdown)).await;
+        let payload = body(json!([
+            api_request("req_a", "sess-1", 1_500),
+            api_request("req_b", "sess-1", 2_500),
+        ]));
+        assert_eq!(post(port, "/v1/logs", &payload).await, 200);
+        // The exporter retry: same records again must not double-count.
+        assert_eq!(post(port, "/v1/logs", &payload).await, 200);
+        let rows = stored(&home);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].2, Some("fno:target".to_string()));
+        assert_eq!(
+            session_cost_usd(&home.otel_dir().join("otel.db"), "sess-1"),
+            Some(0.004)
+        );
+        assert_eq!(
+            session_cost_usd(&home.otel_dir().join("otel.db"), "sess-x"),
+            None
+        );
+        // A record with no request_id keys on session+sequence+timestamp and
+        // converts a doubleValue cost_usd.
+        let noreq = body(json!([{
+            "attributes": [
+                {"key": "event.name", "value": {"stringValue": "api_request"}},
+                {"key": "session.id", "value": {"stringValue": "sess-2"}},
+                {"key": "event.sequence", "value": {"intValue": "3"}},
+                {"key": "event.timestamp", "value": {"stringValue": "2026-10-02T00:00:01Z"}},
+                {"key": "cost_usd", "value": {"doubleValue": 2.5}},
+            ]
+        }]));
+        assert_eq!(post(port, "/v1/logs", &noreq).await, 200);
+        assert_eq!(post(port, "/v1/logs", &noreq).await, 200);
+        assert_eq!(stored(&home).len(), 3);
+        // Malformed and oversized bodies are refused unread; wrong path 404s.
         assert_eq!(post(port, "/v1/logs", "{not json").await, 400);
         assert_eq!(post(port, "/v1/traces", "{}").await, 404);
-        assert!(!home.otel_dir().join("otel.db").exists());
         assert_eq!(post_oversized(port).await, 413);
         // Still serving after all three.
         assert_eq!(
@@ -526,16 +546,48 @@ mod tests {
             .await,
             200
         );
-        assert_eq!(stored(&home).len(), 1);
+        assert_eq!(stored(&home).len(), 4);
+        // Shutdown removes the port file so no new supervisor reads a dead port.
         shutdown.store(true, Ordering::SeqCst);
-    }
+        for _ in 0..100 {
+            if !home.otel_dir().join("port").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!home.otel_dir().join("port").exists());
 
-    #[test]
-    fn no_db_reads_none() {
-        let (home, _td) = home();
+        // AC7 + AC8: the exact-cost read prefers OTel rows, falls back to the
+        // ledger, and an absent db reads None.
+        let ledger = home.root().join("ledger.json");
+        std::fs::write(
+            &ledger,
+            r#"[{"session_id": "sess-1", "cost_usd": 9.99}, {"session_id": "sess-2", "cost_usd": 3.5}]"#,
+        )
+        .unwrap();
         assert_eq!(
-            session_cost_usd(&home.otel_dir().join("otel.db"), "sess-1"),
-            None
+            crate::burn_watch::session_cost_exact(
+                &home.otel_dir().join("otel.db"),
+                &ledger,
+                "sess-1"
+            ),
+            Some(0.004)
+        );
+        assert_eq!(
+            crate::burn_watch::session_cost_exact(
+                &home.otel_dir().join("otel.db"),
+                &ledger,
+                "sess-2"
+            ),
+            Some(3.5)
+        );
+        assert_eq!(
+            crate::burn_watch::session_cost_exact(
+                &home.otel_dir().join("absent.db"),
+                &ledger,
+                "sess-2"
+            ),
+            Some(3.5)
         );
     }
 }

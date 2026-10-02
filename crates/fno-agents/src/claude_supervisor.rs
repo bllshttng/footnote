@@ -187,7 +187,10 @@ fn supervisor_birth_command(config_dir: Option<&Path>) -> std::process::Command 
 /// of its own. Empty means "leave this supervisor's telemetry alone": an
 /// operator endpoint wins, and an already-running supervisor keeps its env
 /// until restart.
-fn otel_env(port_file: &Path, ambient: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+pub(crate) fn otel_env(
+    port_file: &Path,
+    ambient: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
     if ambient("CLAUDE_CODE_ENABLE_TELEMETRY").is_some() {
         return Vec::new();
     }
@@ -698,50 +701,5 @@ mod tests {
         assert!(error.contains("FNO_ZZ_PROBE"));
         assert!(error.contains("SUPERVISOR_WIDE_FNO_KEYS"));
         assert!(error.contains("claude_supervisor_held_keys.txt"));
-    }
-
-    #[test]
-    fn otel_env_returns_the_six_pairs_when_port_file_up_and_env_clean() {
-        let td = tempfile::tempdir().unwrap();
-        let port_file = td.path().join("port");
-        std::fs::write(&port_file, "4123").unwrap();
-        let ambient = |key: &str| -> Option<String> {
-            match key {
-                "PATH" => Some("/usr/bin".into()),
-                _ => None,
-            }
-        };
-        let env = otel_env(&port_file, ambient);
-        assert_eq!(env.len(), 6);
-        assert!(env.contains(&("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "1".into())));
-        assert!(env.contains(&(
-            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT".into(),
-            "http://127.0.0.1:4123/v1/logs".into()
-        )));
-        assert!(env.contains(&("OTEL_LOG_TOOL_DETAILS".into(), "1".into())));
-    }
-
-    #[test]
-    fn otel_env_steps_aside_for_ambient_telemetry_or_a_missing_port_file() {
-        let td = tempfile::tempdir().unwrap();
-        let port_file = td.path().join("port");
-        std::fs::write(&port_file, "4123").unwrap();
-        let ambient = |key: &str| -> Option<String> {
-            match key {
-                "OTEL_EXPORTER_OTLP_ENDPOINT" => Some("http://localhost:4318".into()),
-                _ => None,
-            }
-        };
-        assert!(otel_env(&port_file, ambient).is_empty());
-        let clean = |_key: &str| -> Option<String> { None };
-        assert!(otel_env(&td.path().join("nope"), clean).is_empty());
-        // An ambient CLAUDE_CODE_ENABLE_TELEMETRY wins too.
-        let claude_on = |key: &str| -> Option<String> {
-            match key {
-                "CLAUDE_CODE_ENABLE_TELEMETRY" => Some("1".into()),
-                _ => None,
-            }
-        };
-        assert!(otel_env(&port_file, claude_on).is_empty());
     }
 }
