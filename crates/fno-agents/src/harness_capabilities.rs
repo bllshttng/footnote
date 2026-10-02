@@ -311,6 +311,23 @@ pub struct HarnessCapabilities {
     /// carry one.
     #[serde(default)]
     pub conversion: Option<ConversionRow>,
+    /// Per-fno-job hook wiring, keyed by job name (`session_state`, and the
+    /// sibling jobs a follow-on node adds beside it). ABSENT = the harness
+    /// wires no hooks for that job; the screen backstop keeps its row.
+    #[serde(default)]
+    pub hooks: BTreeMap<String, HookJobDecl>,
+}
+
+/// One fno hook job's wiring for a harness: which native event feeds it.
+/// `events` maps the harness's own event name to the state word it reports;
+/// `blocked` names the harness's permission-prompt event, or `"none"` when
+/// the harness exposes no such event (the row then has no Waiting producer
+/// and the screen backstop keeps the row).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HookJobDecl {
+    pub events: BTreeMap<String, String>,
+    pub blocked: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -635,6 +652,12 @@ impl HarnessContract {
                 "unknown harness {harness:?} in capability contract"
             ))
         })
+    }
+
+    /// One harness row's wiring for one fno hook job (`session_state`, ...).
+    /// `None` = the harness declares no producer for that job.
+    pub fn hook_job(&self, harness: &str, job: &str) -> Option<&HookJobDecl> {
+        self.harness.get(harness)?.hooks.get(job)
     }
 
     pub fn render_session_argv(

@@ -8,12 +8,14 @@
 //! before the tokio runtime builds, never in `run`, so the verb-surface
 //! ratchet never sees them (shrink law d-fe66560a).
 
+pub mod adapter;
 pub mod bin_install_guard;
 pub mod edit_integrity;
 pub mod king_guard;
 pub mod pipe_guard;
 pub mod pretooluse_bash;
 pub mod prompt;
+pub mod session_state;
 pub mod stop;
 pub mod subagent_worktree_guard;
 pub mod test_run_guard;
@@ -33,12 +35,13 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
+        Some("session-state") => session_state::run(&args[1..]),
         Some("test-run-guard") => test_run_guard::run(&args[1..]),
         Some("stop") => stop::run(&args[1..]),
         Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, king-guard, pipe-guard, pretooluse-bash, prompt, subagent-worktree-guard, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, king-guard, pipe-guard, pretooluse-bash, prompt, session-state, subagent-worktree-guard, test-run-guard or stop"
             );
             2
         }
