@@ -34,12 +34,14 @@ let feedSince = 0
 let feedOff = false
 let fleet = ''
 let home = ''
+// The buddy's files live in the fno state folder, never under the Claude config dir.
+let stateDir = ''
 let sessionId = ''
 let wrapped = false
 let lastFrame = ''
 let frameAt = -Infinity
 
-const buddyDir = () => `${home}/.claude/buddy`
+const buddyDir = () => `${stateDir}/state/buddy`
 const settingsPath = () => `${home}/.claude/settings.json`
 const wrapperCommand = () => `python3 ${buddyDir()}/${WRAPPER}`
 
@@ -106,7 +108,17 @@ async function readSettings($: EngineInterface): Promise<Record<string, unknown>
 }
 
 function isOurs(statusLine: any): boolean {
-  return typeof statusLine?.command === 'string' && statusLine.command.includes(`/.claude/buddy/${WRAPPER}`)
+  return typeof statusLine?.command === 'string' && statusLine.command.includes(`/state/buddy/${WRAPPER}`)
+}
+
+async function resolveStateDir($: EngineInterface): Promise<string> {
+  try {
+    const out = await $.process.run(['fno', 'config', 'get', 'state_dir'], { timeoutMs: 10_000 })
+    const dir = out.exitCode === 0 ? out.stdout.split('\n')[0]!.trim() : ''
+    return dir.replace(/^~(?=\/|$)/, home).replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
 }
 
 // Keeps a copy of the wrapper at a path that survives plugin updates, so statusLine never points into the plugin cache.
@@ -123,6 +135,7 @@ async function installWrapper($: EngineInterface): Promise<void> {
 }
 
 async function statuslineOn($: EngineInterface): Promise<string> {
+  if (!stateDir) return 'The status line needs the fno CLI on your PATH (fno config get state_dir).'
   const settings = await readSettings($)
   if (!settings) return `${settingsPath()} does not parse, so I left it alone.`
   const current = settings.statusLine as any
@@ -261,6 +274,7 @@ function sprite(c: Companion, now: number): string[] {
 
 // The wrapper stamps a heartbeat on each run, so a status line set in any settings file counts.
 async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
+  if (!stateDir) return false
   try {
     return now - Number(await $.fs.read(`${buddyDir()}/frames/${sessionId}.seen`)) < SEEN_MS
   } catch {
@@ -270,7 +284,7 @@ async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
 
 // The status line wrapper reads this file; frames change on screen at each status line refresh.
 async function writeFrame($: EngineInterface, now: number): Promise<void> {
-  if (!buddy || !sessionId) return
+  if (!buddy || !sessionId || !stateDir) return
   const frame = JSON.stringify({
     sprite: sprite(buddy, now),
     name: buddy.name,
@@ -291,11 +305,12 @@ export function register(on: On) {
     feedSince = Math.floor(now / 1000)
     home = (await $.env.get('HOME')) ?? ''
     sessionId = await $.session.id()
+    stateDir = await resolveStateDir($)
     await load($, now)
     const settings = await readSettings($)
     wrapped = isOurs(settings?.statusLine)
-    if (wrapped) await installWrapper($).catch(() => {})
-    else {
+    if (wrapped && stateDir) await installWrapper($).catch(() => {})
+    else if (stateDir) {
       const saved = await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined)
       // The user wrapped once, then ran /statusline again: ask, never re-wrap on their behalf.
       if (saved && buddy) say(`your status line changed. /buddy statusline puts me back beside it.`, now)

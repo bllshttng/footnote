@@ -15,7 +15,7 @@ It needs Claude Code 2.1.287 or later, the first version that loads mods.
 
 ## Where it stands
 
-Run `/buddy statusline` once. It saves your current `statusLine` setting to `~/.claude/buddy/inner.json` and points `statusLine` at a small wrapper, `~/.claude/buddy/statusline.py`, with `refreshInterval: 1`. The wrapper runs your own status line unchanged on the left and draws the buddy flush right. The status area grows to 4-6 rows while the buddy is there. With no status line of your own, the left side shows the model, the folder, context use and cost.
+Run `/buddy statusline` once. It saves your current `statusLine` setting to `state/buddy/inner.json` in the fno state folder (`~/.fno/` by default) and points `statusLine` at a small wrapper, `state/buddy/statusline.py` in that folder, with `refreshInterval: 1`. The wrapper runs your own status line unchanged on the left and draws the buddy flush right. The status area grows to 4-6 rows while the buddy is there. With no status line of your own, the left side shows the model, the folder, context use and cost.
 
 `/buddy statusline off` puts your saved setting back exactly. If you run `/statusline` again later, the buddy says so at the next session start and waits for you to run `/buddy statusline` again. It never wraps the new command on its own.
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Status line wrapper: the user's own status line on the left, the buddy flush right.
 
-The buddy mod copies this file to ~/.claude/buddy/statusline.py and points
-statusLine at it. It reads only files the mod wrote, so it stays fast.
+The buddy mod copies this file into its state folder and points statusLine at
+the copy. It reads only files the mod wrote beside it, so it stays fast.
 """
 import json
 import os
@@ -12,7 +12,7 @@ import sys
 import time
 import unicodedata
 
-HOME = os.path.expanduser("~/.claude/buddy")
+HOME = os.path.dirname(os.path.abspath(__file__))
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
 MIN_ROWS, MAX_ROWS = 4, 6
 # A frame older than this belongs to a session that stopped drawing.

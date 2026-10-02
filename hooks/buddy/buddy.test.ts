@@ -84,17 +84,20 @@ test('/buddy statusline wraps the user status line, writes frames, and off resto
   const mine = { type: 'command', command: '~/bin/my-status', padding: 2 }
   const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: mine })]])
   const { clock } = boot(on, OLD_CONFIG, new Map(), files)
-  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
+  on('process.run', ($: any, e: any) =>
+    e.argv.join(' ') === 'fno config get state_dir'
+      ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
   await $.command.run({ command: 'buddy', args: 'statusline' })
   const wrapped = JSON.parse(files.get('/home/u/.claude/settings.json')!)
-  expect(wrapped.statusLine).toEqual({ type: 'command', command: 'python3 /home/u/.claude/buddy/statusline.py', padding: 2, refreshInterval: 1 })
+  expect(wrapped.statusLine).toEqual({ type: 'command', command: 'python3 /home/u/.fno/state/buddy/statusline.py', padding: 2, refreshInterval: 1 })
   expect(wrapped.model).toBe('opus')
-  expect(JSON.parse(files.get('/home/u/.claude/buddy/inner.json')!).statusLine).toEqual(mine)
+  expect(JSON.parse(files.get('/home/u/.fno/state/buddy/inner.json')!).statusLine).toEqual(mine)
 
   await clock.advance(600)
-  const frame = JSON.parse(files.get('/home/u/.claude/buddy/frames/s1.json')!)
+  const frame = JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!)
   expect(frame).toMatchObject({ name: 'Quip', speech: 'Quip is back. did you miss me?' })
 
   await $.command.run({ command: 'buddy', args: 'statusline off' })
