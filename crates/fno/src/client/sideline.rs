@@ -196,11 +196,12 @@ impl View {
         // raw region `sideline_visible_rows` starts from, so a list that
         // exactly fits never reads as pinned here.
         let list_rows = (self.term.0 as usize)
+            .saturating_sub(1) // the strip row
             .saturating_sub(self.court_block_rows())
             .saturating_sub(self.questions_block_rows());
         let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
         let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
-        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(1) {
+        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(2) {
             return self
                 .painted_rows()
                 .iter()
@@ -354,14 +355,14 @@ impl View {
         // the terminal minus the bottom chrome row; the widget area must
         // answer to the same height, or the render-time scroll lands the
         // selected row under the chrome that paints over it.
-        let table_rows_n = list_rows.saturating_sub(chrome_rows);
-        // The sticky menu row (h): when the rows overflow the region, the
-        // menu/add-workspace footer pins directly above the questions block
-        // and the widget area gives up its last row, so the footer is never
-        // covered and the rows scroll to their true end above it. A region
-        // down to one row keeps that row as list, never as footer. The pinned
-        // copy yields while the in-list NewSquad row is inside the visible
-        // window - one instance of the label in every scroll state.
+        let table_rows_n = list_rows.saturating_sub(chrome_rows).saturating_sub(1); // strip row
+                                                                                    // The sticky menu row (h): when the rows overflow the region, the
+                                                                                    // menu/add-workspace footer pins directly above the questions block
+                                                                                    // and the widget area gives up its last row, so the footer is never
+                                                                                    // covered and the rows scroll to their true end above it. A region
+                                                                                    // down to one row keeps that row as list, never as footer. The pinned
+                                                                                    // copy yields while the in-list NewSquad row is inside the visible
+                                                                                    // window - one instance of the label in every scroll state.
         let sticky_footer = table_rows_n > 1 && display.len() > table_rows_n;
         let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
@@ -376,7 +377,7 @@ impl View {
         let mut buf = RtBuffer::empty(area);
         // The widget area is the top slice of the column; the dock paints
         // into the same Buffer below it, before the one blit.
-        let table_area = RtRect::new(0, 1, text_w as u16, table_h.saturating_sub(1) as u16);
+        let table_area = RtRect::new(0, 1, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
         let mut st = self
@@ -421,7 +422,6 @@ impl View {
         // bar. The list bar XORs INVERSE so a focused row's standing band
         // de-inverts under the cursor. Card mode clears the Table's selection
         // style; its Agent and CardDetail rows use one paired overlay here.
-        let table_h = table_h.saturating_sub(1); // the strip row
         for (i, drow) in display.iter().enumerate().skip(off) {
             let r = i - off + 1; // content paints under the strip row
             if r > table_h {

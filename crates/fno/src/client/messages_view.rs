@@ -976,7 +976,9 @@ pub(crate) async fn mouse(
                     .map(|b| b.cursors[0])
                     .unwrap_or(0),
             );
-            (rep.row as usize).checked_sub(2).map(|i| i + start)
+            // The tree column paints its two header lines at rows 1 to 2,
+            // so row r holds line r - 1 - 2 (strip at 0).
+            (rep.row as usize).checked_sub(3).map(|i| i + start)
         }
         Col::Partners => {
             let agent = view
@@ -999,7 +1001,8 @@ pub(crate) async fn mouse(
                     .map(|b| b.cursors[1])
                     .unwrap_or(0),
             );
-            (rep.row as usize).checked_sub(1).map(|i| i + start)
+            // One header line at row 1.
+            (rep.row as usize).checked_sub(2).map(|i| i + start)
         }
         Col::Thread => None,
     };
