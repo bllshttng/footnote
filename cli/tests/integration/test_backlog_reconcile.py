@@ -295,10 +295,36 @@ def test_reverse_map_prefix_collision_guard(live_cwd):
     assert records == []
 
 
-def test_reverse_map_no_match_leaves_open(live_cwd):
+def test_reverse_map_no_match_leaves_open(live_cwd, monkeypatch):
     """No merged branch carries the id -> no record, node stays open."""
     entries = [_node("ab-rev3", cwd=live_cwd)]
     records = scan_merge_drift(entries, list_merged=_merged({9: "feature/other-node"}))
+    assert records == []
+
+    # A merged row whose body retargets the node away also leaves it open.
+    def _retarget(verb, payload, unavailable=None, **kwargs):
+        return {"ids": [], "retargeted_from": ["ab-rev3"]}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _retarget)
+
+    def _retargeted_merged(**kw):
+        return [
+            {
+                "number": 12,
+                "url": "https://github.com/test-owner/test-repo/pull/12",
+                "headRefName": "feature/ab-rev3",
+                "mergedAt": "2026-07-08T00:00:00Z",
+                "body": "Fixes ab-other\nRetarget ab-rev3 ab-other msg-447f8f",
+            },
+            {
+                "number": 13,
+                "url": "https://github.com/test-owner/test-repo/pull/13",
+                "headRefName": "feature/other-node",
+                "mergedAt": "2026-07-08T00:00:00Z",
+            },
+        ]
+
+    records = scan_merge_drift(entries, list_merged=_retargeted_merged)
     assert records == []
 
 
