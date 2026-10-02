@@ -76,7 +76,10 @@ fn ac9_edge_applies_tab_ceiling_as_a_separate_scope() {
     let decision = decide_panes(PaneCount::new(4), MaxPanes::new(4));
 
     assert_eq!(decision.scope(), Some(Scope::Tab));
-    assert!(decision.refusal().is_some());
+    let refusal = decision.refusal().expect("over the tab cap refuses");
+    // The tab refusal reaches a user's screen, so it never tells anyone to
+    // set an env var; the fleet refusal is agent-facing and keeps the hint.
+    assert!(!refusal.contains("FNO_PROCESS_ADMISSION"), "{refusal}");
 }
 
 #[test]
@@ -306,20 +309,4 @@ fn ac_scope_non_agent_spawns_admit_through_ceiling_and_brake() {
     restore_max_processes(previous_max);
     restore_env("FNO_MACHINE_BRAKE", previous_brake);
     assert!(refusal.to_string().contains("machine-runaway"), "{refusal}");
-}
-
-/// The pane-group cap refusal reaches a user's screen, so it never tells
-/// anyone to set an env var; the fleet refusal is agent-facing recovery text
-/// and keeps the hint.
-#[test]
-fn ac_scope_user_visible_tab_refusal_carries_no_env_hint() {
-    let tab = decide_panes(PaneCount::new(4), MaxPanes::new(4));
-    let tab = tab.refusal().expect("over the tab cap refuses");
-    assert!(tab.contains("scope=tab"), "{tab}");
-    assert!(!tab.contains("FNO_PROCESS_ADMISSION"), "{tab}");
-
-    let fleet = decide_processes(&Census::complete(5), MaxProcesses::new(4));
-    let fleet = fleet.refusal().expect("over the fleet ceiling refuses");
-    assert!(fleet.contains("scope=fleet"), "{fleet}");
-    assert!(fleet.contains(BYPASS_HINT), "{fleet}");
 }

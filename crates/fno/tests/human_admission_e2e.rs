@@ -48,7 +48,7 @@ fn human_attach_passes_the_fleet_process_ceiling() {
     h.wait_prompt(30);
     let log = std::fs::read_to_string(scratch.0.join("server.log")).unwrap_or_default();
     assert!(
-        log.contains(SERVER_WAIVER) && log.contains("; waived"),
+        log.contains(SERVER_WAIVER) && log.contains("; waived") && !log.contains("admitting"),
         "the ceiling must have been met and waived:\n{log}"
     );
 }

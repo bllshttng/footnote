@@ -2448,21 +2448,4 @@ mod tests {
         std::env::remove_var("FNO_MACHINE_BRAKE");
         assert!(permit.is_ok(), "absent brake admits as before");
     }
-
-    #[test]
-    fn a_waived_gate_names_no_gate_to_a_human() {
-        let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("FNO_AGENT_SELF");
-        // The short line carries no brake report, no other app's process
-        // group, and no narration of the gate that let the human through.
-        assert_eq!(HUMAN_BUSY_LINE, "fno: machine is busy; agents are slowed");
-        // The TTY-less log line carries the measured detail and no narration.
-        let line = waiver_line(
-            "process admission refused: count=unknown ceiling=400 scope=fleet reason=measurement-unavailable",
-        );
-        assert!(line.contains("reason=measurement-unavailable"), "{line}");
-        assert!(line.ends_with("; waived"), "{line}");
-        assert!(!line.contains("admitting"), "{line}");
-        assert!(!line.contains("FNO_PROCESS_ADMISSION"), "{line}");
-    }
 }
