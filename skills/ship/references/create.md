@@ -290,10 +290,10 @@ Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of `.fno
 
 ### Retarget a PR to the right node
 
-Use this when review learned the PR delivers a different node than the branch names. Never rename the branch: a rename closes the PR for good and the replacement starts a fresh CI cycle. Never name the old node on the Fixes line either: that closes the wrong node at merge. Four steps:
+When review learns the PR delivers a different node than the branch names, use this recipe. Never rename the branch: a rename closes the PR for good and the replacement starts a fresh CI cycle. Never name the old node on the Fixes line either: that closes the wrong node at merge. Four steps:
 
 1. Get the approval first. Use a mail id (`msg-...`) from your lead. Or file the ruling with `fno inbox decide <to> "..."` and use its `d-...` id.
-2. Move the graph binding: `fno backlog update <from> --pr-number null --pr-url null`, then `fno backlog update <to> --pr-number <n> --pr-url <url>`. Stop and ask when `<to>` already carries another PR.
+2. Move the graph binding: `fno backlog update <from> --pr-number null --pr-url null`, then `fno backlog update <to> --pr-number <n> --pr-url <url>`. When `<to>` already carries another PR, stop and ask instead.
 3. Edit the body. `fno do pr closure-trailer <to>` prints the Fixes line. Put `Retarget <from> <to> <approval>` on the line after it. Apply with `gh pr edit <n> --body-file <file>`.
 4. `fno backlog note <from>` and `fno backlog note <to>` naming the PR, the approval, and the reason.
 
