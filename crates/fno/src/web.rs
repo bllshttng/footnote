@@ -2327,7 +2327,7 @@ console.log("evictedRowCount: 18 cases ok");
             .expect("controls exist");
         assert!(bar < controls, "the search bar leads the page");
         assert!(
-            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
+            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label, session""#),
             "the placeholder names what search covers"
         );
         assert!(
@@ -2352,7 +2352,7 @@ console.log("evictedRowCount: 18 cases ok");
         // snapshot copy tolerates the undefined, which is why only the
         // bridge showed it). Found live on the deployed binary 2026-10-01.
         for key in [
-            "project", "epic", "status", "priority", "size", "lead", "kind",
+            "project", "epic", "status", "priority", "size", "king", "kind",
         ] {
             let line = format!(r#"{}: initial.getAll("{}")"#, key, key);
             assert!(
@@ -2454,19 +2454,20 @@ console.log("backlog page helpers: 12 cases ok");
 
     /// The snapshot engine's pure half, the board's shortcut resolver and
     /// the recent-search store hold their contracts when run for real:
-    /// lift cardKeeps / laneKeyOf / voteText, shortcutAction /
-    /// isTypingTarget / copiedToast and pushRecent / loadRecent from the
-    /// shipped page and run every case under node, the same rule as the
-    /// board helpers.
+    /// lift cardKeeps / laneKeyOf, the date-filter and sort helpers,
+    /// statusLabel / clampPanelWidth / fuzzyHit, nestChildren,
+    /// shortcutAction / isTypingTarget / copiedToast and pushRecent /
+    /// loadRecent from the shipped page and run every case under node, the
+    /// same rule as the board helpers.
     #[test]
     fn snapshot_page_helpers_hold_under_node() {
         let asserts = r#"
 const eq = (got, want, what) => {
   if (JSON.stringify(got) !== JSON.stringify(want)) { console.error("FAIL " + what + ": got " + JSON.stringify(got) + ", want " + JSON.stringify(want)); process.exit(1); }
 };
-const any = { project: "p", status: "ready", priority: "p2", size: "M", kind: "bug", tags: ["t1"], lead: { name: "k" }, parent: "e1", id: "x-1", slug: "s", title: "T" };
+const any = { project: "p", status: "ready", priority: "p2", size: "M", kind: "bug", tags: ["t1"], king: { name: "k" }, parent: "e1", id: "x-1", slug: "s", title: "T" };
 const nodes = { "x-1": { details: "needle in details" } };
-const off = { project: [], status: [], priority: [], size: [], kind: [], tag: [], lead: [], epic: [], q: "" };
+const off = { project: [], status: [], priority: [], size: [], kind: [], tag: [], king: [], epic: [], q: "" };
 eq(cardKeeps(any, nodes, off), true, "no filters keep");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { status: ["idea"] })), false, "status filter drops");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["bug"] })), true, "kind filter keeps");
@@ -2474,6 +2475,47 @@ eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["epic"] })), false, "ki
 eq(cardKeeps(any, nodes, Object.assign({}, off, { epic: ["e1"] })), true, "own id keeps an epic filter");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "NEEDLE" })), true, "q is case-insensitive over details");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "absent" })), false, "q drops");
+eq(cardKeeps(Object.assign({}, any, { created_at: "2026-09-24T10:00:00Z" }), nodes,
+  Object.assign({}, off, { date: ["created_at>=2026-09-20", "created_at<=2026-09-30"] })), true, "a date pair keeps the in-range card");
+eq(cardKeeps(Object.assign({}, any, { created_at: "2026-10-05T10:00:00Z" }), nodes,
+  Object.assign({}, off, { date: ["created_at<=2026-09-30"] })), false, "a late card drops under <=)");
+eq(cardKeeps(Object.assign({}, any, { created_at: null }), nodes,
+  Object.assign({}, off, { date: ["created_at>=2026-09-20"] })), false, "a stampless card drops under a date filter");
+// the date grammar: the five ops accept, ~ and a bad date refuse.
+for (const op of [">=", ">", "=", "<", "<="]) {
+  eq(parseDateFilter("created_at" + op + "2026-09-20"),
+    { field: "created_at", op: op, date: "2026-09-20" }, "the grammar takes " + op);
+}
+eq(parseDateFilter("created_at~2026-09-20"), null, "a tilde op refuses");
+eq(parseDateFilter("created_at>=26-9-2"), null, "a short date refuses");
+eq(parseDateFilter("title>=2026-09-20"), null, "a bad field refuses");
+eq(dateKeeps({ updated_at: "2026-09-21T00:00:00Z" }, ["updated_at>2026-09-20"]), true, "updated_at filters");
+// sortCards: asc, desc, missing-last both ways, the size rank.
+const unsorted = [
+  { id: "b", title: "B" },
+  { id: "a", title: "A", size: "M" },
+  { id: "c", title: "C", size: "S" },
+];
+eq(sortCards(unsorted, "title").map((c) => c.id), ["a", "b", "c"], "title asc");
+eq(sortCards(unsorted, "-title").map((c) => c.id), ["c", "b", "a"], "title desc");
+eq(sortCards(unsorted, "size").map((c) => c.id), ["c", "a", "b"], "size ranks S before M, missing last");
+eq(sortCards(unsorted, "-size").map((c) => c.id), ["a", "c", "b"], "size desc keeps missing last");
+eq(sortCards(unsorted, "").map((c) => c.id), ["b", "a", "c"], "no sort keeps input order");
+eq(statusLabel("in_progress"), "in progress", "underscores read as spaces");
+eq(clampPanelWidth(500, 1000), 500, "the pane width rides through");
+eq(clampPanelWidth(50, 1000), 320, "a too-narrow pane clamps up");
+eq(clampPanelWidth(5000, 1000), 900, "a too-wide pane clamps to 90%");
+eq(clampPanelWidth("junk", 1000), 480, "a non-number reads as the default");
+// fuzzy matching: in-order subsequence, exact mode stays substring.
+eq(fuzzyHit("wbsrt", "web board list: sorts"), true, "the title subsequence matches");
+eq(fuzzyHit("wbsrt", "word sort"), false, "letters out of order drop");
+eq(fuzzyHit("af8", "af8e03f2-1234"), true, "a session id head matches");
+const fuzzyOn = Object.assign({}, off, { q: "wbsrt", fuzzy: true });
+eq(cardKeeps(Object.assign({}, any, { title: "Web board list: every column sorts" }), nodes, fuzzyOn), true, "fuzzy keeps the subsequence title");
+eq(cardKeeps(any, nodes, fuzzyOn), false, "fuzzy drops a non-match");
+const sidOn = Object.assign({}, off, { q: "af8e03f2" });
+eq(cardKeeps(Object.assign({}, any, { session_ids: ["af8e03f2-e896-4d17-8600-213fca3dfb55"] }), nodes, sidOn), true, "a session id head matches in exact mode");
+eq(cardKeeps(any, nodes, sidOn), false, "a card with no session ids drops");
 const parents = new Set(["e1"]);
 const byId = new Map([["e1", { id: "e1", title: "Epic", completed_at: null }], ["x-1", any]]);
 eq(laneKeyOf(byId.get("e1"), "epic", parents, byId), { key: "e1", title: "Epic" }, "an epic sits in its own lane");
@@ -2482,17 +2524,33 @@ byId.get("e1").completed_at = "2026-01-01";
 eq(laneKeyOf(any, "epic", parents, byId), { key: "", title: "no epic" }, "a done parent's child has no epic lane");
 eq(laneKeyOf(any, "none", parents, byId), { key: "all", title: "all" }, "none is one lane");
 eq(laneKeyOf(Object.assign({}, any, { project: "" }), "project", parents, byId), { key: "", title: "unscoped" }, "unscoped project lane");
-eq(voteText("x-9"), 'fno backlog encounter x-9 --operator --evidence "REPLACE: what it cost"', "vote command");
 const nestIn = [
-  { id: "p1", title: "Parent" },
+  { id: "p1", title: "Parent", child_count: 2 },
   { id: "c1", title: "Kid", parent: "p1" },
   { id: "l1", title: "Loose" },
 ];
 const nested = nestChildren(nestIn);
 eq(nested.map((r) => r.card.id), ["p1", "c1", "l1"], "a child follows its parent");
 eq(nested.map((r) => r.depth), [0, 1, 0], "the child sits one step in");
+eq(nested[0].hidden, 1, "one of two children is absent, so one hides");
+// lane-wide: a child nests under a parent from another cell, two steps deep.
+const wide = [
+  { id: "g1", title: "Grand" },
+  { id: "p2", title: "Parent", parent: "g1", child_count: 1 },
+  { id: "c3", title: "Kid", parent: "p2" },
+];
+const wideNested = nestChildren(wide);
+eq(wideNested.map((r) => r.card.id), ["g1", "p2", "c3"], "the whole lane nests");
+eq(wideNested.map((r) => r.depth), [0, 1, 2], "depth follows the tree");
 eq(nestChildren([{ id: "c2", title: "Orphan", parent: "absent" }]).map((r) => r.depth), [0], "a child whose parent is elsewhere keeps its own row");
-console.log("snapshot page helpers: 16 cases ok");
+// a sort can place a child before its parent; the tree still nests.
+const reversed = nestChildren([
+  { id: "kid", title: "Z kid", parent: "par", child_count: 0 },
+  { id: "par", title: "A parent", child_count: 1 },
+]);
+eq(reversed.map((r) => r.card.id), ["par", "kid"], "a child listed first still follows its parent");
+eq(reversed.map((r) => r.depth), [0, 1], "and sits one step in");
+console.log("snapshot page helpers: 49 cases ok");
 // The board shortcuts: every key the ? sheet advertises, the typing guard,
 // the Escape unwind order, and the copied-id toast line.
 const M = { meta: false, ctrl: false };
@@ -2505,6 +2563,10 @@ eq(shortcutAction("k", { meta: true, ctrl: false }, { typing: true }), null, "cm
 eq(shortcutAction("j", M, {}), "sel-next", "j moves down");
 eq(shortcutAction("k", M, {}), "sel-prev", "k moves up");
 eq(shortcutAction("j", M, { hasSelection: false }), "sel-next", "j starts the selection");
+eq(shortcutAction("ArrowDown", M, {}), "sel-next", "ArrowDown moves down");
+eq(shortcutAction("ArrowUp", M, {}), "sel-prev", "ArrowUp moves up");
+eq(shortcutAction("l", M, {}), "cycle-lanes", "l cycles the lanes");
+eq(shortcutAction("l", M, { typing: true }), null, "l never fires while typing");
 // enter and y answer only with a selection on the board.
 eq(shortcutAction("Enter", M, { hasSelection: true }), "open", "enter opens the selection");
 eq(shortcutAction("Enter", M, { hasSelection: false }), null, "enter without a selection is nothing");
@@ -2535,7 +2597,7 @@ eq(isTypingTarget({}), false, "no tag is no target");
 eq(isTypingTarget(null), false, "no target is no target");
 // the toast names what landed on the clipboard.
 eq(copiedToast("n-1234"), "copied n-1234", "the toast carries the id");
-console.log("backlog shortcuts: 35 cases ok");
+console.log("backlog shortcuts: 39 cases ok");
 // The recent-search store: a capped, newest-first, string-only list under
 // one localStorage key.
 eq(pushRecent([], "a"), ["a"], "empty list grows one");
@@ -2556,11 +2618,16 @@ eq(loadRecent('[\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s9\",\
 console.log("recent searches: 12 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
             lift_js_fn(BACKLOG_PAGE, "nestChildren"),
             lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
-            lift_js_fn(BACKLOG_PAGE, "voteText"),
+            lift_js_fn(BACKLOG_PAGE, "parseDateFilter"),
+            lift_js_fn(BACKLOG_PAGE, "dateKeeps"),
+            lift_js_fn(BACKLOG_PAGE, "sortCards"),
+            lift_js_fn(BACKLOG_PAGE, "statusLabel"),
+            lift_js_fn(BACKLOG_PAGE, "clampPanelWidth"),
+            lift_js_fn(BACKLOG_PAGE, "fuzzyHit"),
             lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
             lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
             lift_js_fn(BACKLOG_PAGE, "copiedToast"),
@@ -2588,11 +2655,11 @@ console.log("recent searches: 12 cases ok");
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 assert!(
-                    stdout.contains("snapshot page helpers: 16 cases ok"),
+                    stdout.contains("snapshot page helpers: 49 cases ok"),
                     "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
                 );
                 assert!(
-                    stdout.contains("backlog shortcuts: 35 cases ok"),
+                    stdout.contains("backlog shortcuts: 39 cases ok"),
                     "the shipped board shortcuts did not clear every case:\n{stdout}{stderr}"
                 );
                 assert!(

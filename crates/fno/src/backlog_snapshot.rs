@@ -97,17 +97,22 @@ struct Receipt {
 }
 
 fn render_request(request: &Request) -> Result<Receipt, String> {
-    let gathered = {
-        let graph = backlog_view::graph_path();
-        // No roster here: the snapshot records claims and columns, never
-        // live dots or teams, which are roster facts the served board
-        // answers live.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("cannot start the async runtime: {e}"))?;
-        runtime.block_on(backlog_model::gather(&graph, Vec::new()))
-    };
+    // Leads are read once at render time from the agent registry and
+    // stamped: the page header says when the leads were read, and a lead
+    // change alone does not re-render the page. A public render drops the
+    // roster here: inputs_from_rows rebuilds the inputs without one, and
+    // the payload allowlist strips `leads_at`.
+    let now = now_secs();
+    let agents = std::fs::read_to_string(crate::agents_view::registry_path())
+        .map(|raw| agents_from_registry(&raw, now))
+        .unwrap_or_default();
+    let graph = backlog_view::graph_path();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("cannot start the async runtime: {e}"))?;
+    let leads_at = (!agents.is_empty()).then_some(now);
+    let gathered = runtime.block_on(backlog_model::gather(&graph, agents));
     let public = request.public.is_some();
     let inputs = match &request.public {
         Some(spec) => inputs_from_rows(&select_public_rows(&gathered.rows, &spec.project)?),
@@ -122,7 +127,7 @@ fn render_request(request: &Request) -> Result<Receipt, String> {
             .scope
             .as_deref()
             .filter(|s| !s.is_empty() && *s != "all");
-        match render_one(&inputs, scope, request.vault.as_deref(), public) {
+        match render_one(&inputs, scope, request.vault.as_deref(), leads_at, public) {
             Ok((page, cards)) => match atomic_write(Path::new(&target.path), &page) {
                 Ok(()) => receipt
                     .written
@@ -162,6 +167,7 @@ fn render_one(
     inputs: &backlog_model::Inputs,
     scope: Option<&str>,
     vault: Option<&str>,
+    leads_at: Option<u64>,
     public: bool,
 ) -> Result<(String, usize), String> {
     if let Some(err) = &inputs.rows_error {
@@ -223,11 +229,29 @@ fn render_one(
         "columns": board.stats.totals.iter().map(|t| t.column).collect::<Vec<_>>(),
         "cards": &flat,
         "nodes": nodes,
+        "leads_at": leads_at,
     });
     if public {
         payload = to_public_payload(payload);
     }
     Ok((snapshot_page(crate::web::BACKLOG_PAGE, &payload)?, count))
+}
+
+/// The registry rows the snapshot's roster needs: live crowned agents only.
+/// Only the crown fields copy over, so `live` stays false on the static page
+/// (no `harness_session_id` is carried).
+fn agents_from_registry(raw: &str, now: u64) -> Vec<crate::proto::AgentRow> {
+    crate::agents_view::derive_rows(raw, now)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| !r.exited && r.crown_scope.is_some())
+        .map(|r| crate::proto::AgentRow {
+            name: r.name.clone(),
+            crown_level: r.crown_level,
+            crown_scope: r.crown_scope.clone(),
+            ..Default::default()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +376,12 @@ fn to_public_payload(payload: Value) -> Value {
     if let Some(nodes) = out.get_mut("nodes").and_then(Value::as_object_mut) {
         for view in nodes.values_mut() {
             let mut public_view = allowlist_copy(view, PUBLIC_NODE_FIELDS);
+            // The node's embedded card gets the same card allowlist the
+            // top-level cards got, so a private Card field (session ids)
+            // added later cannot leak through this copy.
+            if let Some(card) = public_view.get_mut("card") {
+                *card = allowlist_copy(card, PUBLIC_CARD_FIELDS);
+            }
             for key in LINK_KEYS {
                 if let Some(links) = public_view.get_mut(*key).and_then(Value::as_array_mut) {
                     links.retain(|l| {
@@ -653,6 +683,28 @@ mod tests {
         let end = out[start..].find("</script>").unwrap() + start;
         let back: Value = serde_json::from_str(&out[start..end]).unwrap();
         assert_eq!(back, payload);
+        // A lone `<` escapes by the same one rule.
+        let out = snapshot_page("<body>x", &json!({"q": "a<b"})).unwrap();
+        assert!(out.contains("a\\u003cb"), "{out}");
+    }
+
+    /// The registry reader keeps exactly the live crowned rows, with their
+    /// scope and level; exited and uncrowned rows drop. Only crown fields
+    /// copy, so the static page's roster stays paneless.
+    #[test]
+    fn crowned_registry_rows_become_the_snapshot_roster() {
+        let raw = r#"{"agents": [
+            {"name": "lead-live", "crown_level": 1, "crown_scope": "x-aaaa"},
+            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-bbbb", "status": "exited"},
+            {"name": "plain", "crown_level": null, "crown_scope": null}
+        ]}"#;
+        let roster = agents_from_registry(raw, 1000);
+        assert_eq!(roster.len(), 1, "one live crowned row survives");
+        assert_eq!(roster[0].name, "lead-live");
+        assert_eq!(roster[0].crown_scope.as_deref(), Some("x-aaaa"));
+        assert_eq!(roster[0].crown_level, Some(1));
+        assert!(roster[0].harness_session_id.is_none());
+        assert!(agents_from_registry("not json at all", 1000).is_empty());
     }
 
     /// The lexical classifier: the verb name claims itself, every other
@@ -746,7 +798,7 @@ mod tests {
         assert_eq!(ids, vec!["x-1"]);
 
         let inputs = inputs_from_rows(&selected);
-        let (page, count) = render_one(&inputs, None, None, true).unwrap();
+        let (page, count) = render_one(&inputs, None, None, None, true).unwrap();
         assert_eq!(count, 1);
         assert!(page.contains("Public thing"), "{page}");
         for secret in [
