@@ -675,7 +675,9 @@ def backfill_tasks_json(dry_run: bool = True):
         print(f"    Tokens: {format_tokens(combined.total_tokens)} | Compactions: {combined.compaction_count}")
 
         if not dry_run:
-            entry["cost_usd"] = round(combined.cost_usd, 2)
+            entry["cost_usd"] = (
+                None if combined.unpriced else round(combined.cost_usd, 2)
+            )
             entry["tokens_total"] = combined.total_tokens
             entry["cache_read_tokens"] = combined.cache_read_tokens
             entry["compactions"] = combined.compaction_count

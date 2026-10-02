@@ -8,7 +8,7 @@
 //! `cost_tracker.py`'s header.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -74,12 +74,13 @@ const FIRST_PARTY: &[&str] = &[
     "mistral",
 ];
 
-/// The catalog id a spawn model string keys on: cut the `[1m]`-style context
-/// suffix, trim, lowercase. Both sides of every match normalize through
-/// this, so the comparison stays exact: no fuzzy match, no family fallback.
+/// The catalog id a spawn model string keys on: cut the route prefix
+/// (`zai/glm-5.3-flash`) and the `[1m]`-style context suffix, trim,
+/// lowercase. Both sides of every match normalize through this, so the
+/// comparison stays exact: no fuzzy match, no family fallback.
 fn normalize(model: &str) -> String {
     model
-        .split('[')
+        .split(['[', '/'])
         .next()
         .unwrap_or(model)
         .trim()
@@ -200,9 +201,11 @@ impl RunningCost {
         Self::default()
     }
 
-    /// Absorb the bytes appended to `path` since the last call. A file
-    /// shorter than the remembered offset (rotated, replaced) resets the
-    /// fold. Only whole newline-terminated lines are consumed; a partial
+    /// Absorb the bytes appended to `path` since the last call, one line at
+    /// a time, so memory stays bounded by the longest line rather than the
+    /// appended region (a daemon restart re-reads the whole transcript). A
+    /// file shorter than the remembered offset (rotated, replaced) resets
+    /// the fold. Only whole newline-terminated lines are consumed; a partial
     /// tail stays for the next call.
     pub(crate) fn absorb(&mut self, path: &Path) {
         let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
@@ -211,25 +214,32 @@ impl RunningCost {
         if len < self.offset {
             *self = Self::new();
         }
-        let Ok(mut file) = std::fs::File::open(path) else {
+        let Ok(file) = std::fs::File::open(path) else {
             return;
         };
-        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+        let mut reader = std::io::BufReader::new(file);
+        if reader.seek(SeekFrom::Start(self.offset)).is_err() {
             return;
         }
-        let mut buf = Vec::new();
-        if file.read_to_end(&mut buf).is_err() {
-            return;
+        let mut line = Vec::new();
+        let mut consumed = 0u64;
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if line.last() != Some(&b'\n') {
+                        break; // partial tail stays for the next sweep
+                    }
+                    consumed += n as u64;
+                    if let Ok(text) = std::str::from_utf8(&line) {
+                        self.row_line(text.trim_end_matches('\n'));
+                    }
+                }
+                Err(_) => break,
+            }
         }
-        let text = String::from_utf8_lossy(&buf);
-        let complete = match text.rfind('\n') {
-            Some(end) => &text[..=end],
-            None => "",
-        };
-        self.offset += complete.len() as u64;
-        for line in complete.lines() {
-            self.row_line(line);
-        }
+        self.offset += consumed;
     }
 
     fn row_line(&mut self, line: &str) {
@@ -335,6 +345,10 @@ static FOLDS: OnceLock<Mutex<HashMap<String, (RunningCost, Option<SessionCost>)>
 /// Sweep-time measurement: absorb the transcript's new bytes, reprice, and
 /// remember the reading under the session id. `now` is the sweep's stamp, so
 /// the served triple always carries the measurement time beside the word.
+/// The fold is taken OUT of the map while it absorbs: the read and the price
+/// run lock-free, because the agents-list path serves from the same mutex
+/// and must not stall behind a large transcript read. Entries the sweeps
+/// stopped measuring (exited, reaped) prune after a day.
 pub(crate) fn measure_session_cost(
     state: &Path,
     sid: &str,
@@ -347,14 +361,28 @@ pub(crate) fn measure_session_cost(
         return;
     };
     let cell = FOLDS.get_or_init(|| Mutex::new(HashMap::new()));
-    let Ok(mut folds) = cell.lock() else {
-        return;
+    let (mut fold, _) = {
+        let Ok(mut folds) = cell.lock() else {
+            return;
+        };
+        folds
+            .remove(sid)
+            .unwrap_or_else(|| (RunningCost::new(), None))
     };
-    let entry = folds.entry(sid.to_string()).or_default();
-    entry.0.absorb(transcript);
-    let mut cost = entry.0.session(&book, codex_model, route);
+    fold.absorb(transcript);
+    let mut cost = fold.session(&book, codex_model, route);
     cost.measured_at = now.to_string();
-    entry.1 = Some(cost);
+    if let Ok(mut folds) = cell.lock() {
+        if let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(now) {
+            let cutoff = stamp - chrono::Duration::hours(24);
+            folds.retain(|_, (_, last)| {
+                last.as_ref()
+                    .and_then(|c| chrono::DateTime::parse_from_rfc3339(&c.measured_at).ok())
+                    .is_some_and(|m| m > cutoff)
+            });
+        }
+        folds.insert(sid.to_string(), (fold, Some(cost)));
+    }
 }
 
 /// The served triple for one row: cents, tokens, measurement time. All
@@ -447,6 +475,9 @@ mod tests {
         let rates = book.rates("claude-opus-5-5[1m]", None).unwrap();
         assert_eq!(rates.input, Some(4.0));
         assert_eq!(rates.cache_write, Some(5.0));
+        // A route-prefixed id still keys the catalog model.
+        let prefixed = book.rates("anthropic/claude-opus-5-5", None).unwrap();
+        assert_eq!(prefixed.output, Some(20.0));
         // Route provider first, then the fixed first-party order.
         let glm = book
             .rates("GLM-5.3-FLASH ", Some("unlisted-provider"))
