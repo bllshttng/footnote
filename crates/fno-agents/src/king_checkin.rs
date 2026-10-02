@@ -4,7 +4,7 @@
 //! diffs against the previous canonical `reign_checkin` row, and emits that
 //! row from the same values it printed. It reads, prints, diffs and
 //! journals; it never decides (no spawn, no reap, no lever, no graph write).
-//! Contract: docs/architecture/reign.md and skills/reign/SKILL.md.
+//! Contract: docs/architecture/reign.md and skills/lead/SKILL.md.
 //!
 //! Python resolves the paths Python owns (journals, graph, handoffs, FAQs)
 //! and relays here, the same split `king-history` applies; the caller's
