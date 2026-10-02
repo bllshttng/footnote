@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Order backlog work by priority, dependency, and duplication for operator approval.
+description: Order backlog work by priority, dependency, and duplication for user approval.
 argument-hint: "[deep] [all] [each] [dry-run] [--project NAME] [--roadmap-id ID]"
 metadata:
   requires:
