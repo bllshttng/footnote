@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn canonical_status_left_alone() {
-        for s in super::status::known_statuses().iter().copied() {
+        for s in crate::plan_doc::status::known_statuses().iter().copied() {
             assert_eq!(target_status(Some(&Value::Scalar(s.into())), true), None);
         }
     }
@@ -678,8 +678,14 @@ mod tests {
     #[test]
     fn plan_link_id_unwraps_single_element_list() {
         let f = |kv: &str| fields_of(kv);
-        assert_eq!(f("claims: [t-1d91]"), Some("t-1d91".to_string()));
-        assert_eq!(f("node: [t-aa95]"), Some("t-aa95".to_string()));
+        assert_eq!(
+            plan_link_id(&f("claims: [t-1d91]")),
+            Some("t-1d91".to_string())
+        );
+        assert_eq!(
+            plan_link_id(&f("node: [t-aa95]")),
+            Some("t-aa95".to_string())
+        );
     }
 
     #[test]
