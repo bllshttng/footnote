@@ -123,7 +123,20 @@ async fn handle_conn(mut stream: tokio::net::TcpStream, db: PathBuf) {
         return;
     }
     let mut body = buf[header_end..].to_vec();
-    while content_length.is_none_or(|len| body.len() < len) {
+    loop {
+        if let Some(len) = content_length {
+            if body.len() >= len {
+                break;
+            }
+        } else if body.len() > MAX_BODY {
+            // No Content-Length: bound the read instead of buffering forever.
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            return;
+        }
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => body.extend_from_slice(&chunk[..n]),
@@ -157,6 +170,9 @@ fn ingest(db: &Path, body: &[u8]) -> bool {
     let Ok(conn) = Connection::open(db) else {
         return true;
     };
+    // Concurrent POSTs each open their own connection; without a busy
+    // timeout the second writer eats SQLITE_BUSY and its rows drop silently.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     if conn
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS api_requests (
@@ -230,14 +246,21 @@ fn value_str(v: &Value) -> Option<&str> {
         .or_else(|| v.as_str())
 }
 
-/// proto3 JSON maps 64-bit ints to strings; accept both spellings.
+/// proto3 JSON maps 64-bit ints to strings and floats to doubles; accept
+/// all three spellings.
 fn value_i64(v: &Value) -> Option<i64> {
     v.get("intValue")
         .map(|iv| {
             iv.as_i64()
                 .or_else(|| iv.as_str().and_then(|s| s.parse().ok()))
         })
-        .unwrap_or_else(|| v.as_i64())
+        .unwrap_or_else(|| {
+            v.as_i64().or_else(|| {
+                v.get("doubleValue")
+                    .and_then(Value::as_f64)
+                    .map(|f| f as i64)
+            })
+        })
 }
 
 struct Row {
@@ -319,6 +342,7 @@ pub fn session_cost_usd(db: &Path, session_id: &str) -> Option<f64> {
         return None;
     }
     let conn = Connection::open(db).ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     conn.query_row(
         "SELECT SUM(cost_usd_micros) FROM api_requests
          WHERE session_id = ?1 AND cost_usd_micros IS NOT NULL",
@@ -450,14 +474,14 @@ mod tests {
                 {"key": "session.id", "value": {"stringValue": "sess-2"}},
                 {"key": "event.sequence", "value": {"intValue": "3"}},
                 {"key": "event.timestamp", "value": {"stringValue": "2026-10-02T00:00:01Z"}},
-                {"key": "cost_usd", "value": {"intValue": "2"}},
+                {"key": "cost_usd", "value": {"doubleValue": 2.5}},
             ]
         }]));
         assert_eq!(post(port, "/v1/logs", &payload).await, 200);
         assert_eq!(post(port, "/v1/logs", &payload).await, 200);
         let rows = stored(&home);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1, Some(2_000_000));
+        assert_eq!(rows[0].1, Some(2_500_000));
         shutdown.store(true, Ordering::SeqCst);
     }
 
