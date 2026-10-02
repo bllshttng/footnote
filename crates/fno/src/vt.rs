@@ -2000,10 +2000,29 @@ mod tests {
         // The summary and the id token are not tappable.
         assert!(pane.link_span(0, 16).is_none(), "the id token is not");
         assert!(pane.link_span(0, 25).is_none(), "the summary is not");
-        // A malformed id resolves no span at all.
+
+        // The matcher tolerates a harness prompt prefix before the header.
         let mut pane = Pane::new(4, 60);
-        pane.feed("`@a · fmail-zzzzzzzzzzzz · hi`".as_bytes());
-        assert!(pane.link_span(0, 2).is_none(), "non-hex id");
+        pane.feed("❯ `@worker · fmail-0123456789ab · hi`".as_bytes());
+        assert!(pane.link_span(0, 4).is_some(), "prompt prefix still spans");
+        // A malformed id, a spaced name, an empty summary, a legacy msg- id,
+        // and a nameless separator resolve no span at all.
+        for bad in [
+            "`@a · fmail-zzzzzzzzzzzz · hi`",
+            "`@a · fmail-840a0786389 · hi`",
+            "`@a · fmail-840a078638971 · hi`",
+            "`@a b · fmail-840a07863897 · hi`",
+            "`@a · fmail-840a07863897 · ",
+            "`@a · msg-whatever · hi`",
+            "` · fmail-840a07863897 · hi`",
+        ] {
+            let mut pane = Pane::new(4, 60);
+            pane.feed(bad.as_bytes());
+            assert!(pane.link_span(0, 2).is_none(), "no sender span for {bad}");
+        }
+        // The sender URI must never read as openable: the platform opener
+        // can never receive it.
+        assert!(!crate::link::is_openable("fno-sender:fmail-840a07863897"));
     }
 
     #[test]
