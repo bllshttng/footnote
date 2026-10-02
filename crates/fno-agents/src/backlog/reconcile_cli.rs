@@ -415,6 +415,14 @@ pub(crate) fn once_at(args: &Args, graph_path: &Path) -> i32 {
         Vec::new()
     };
 
+    // The legs' warnings print on stderr in both modes: the SessionStart
+    // hook reads --json and discards stderr, so a warning that stayed
+    // buffered would be invisible exactly where it matters least and
+    // silent where it matters most.
+    for line in &stderr_log {
+        eprintln!("{line}");
+    }
+
     let supersession_unverified = close
         .as_ref()
         .map(|c| c.supersession_unverified.clone())
@@ -2310,13 +2318,10 @@ fn human_lines(
             ));
         }
         if !closed_rows.is_empty() {
-            out.push(format!(
-                "Retro sentinels written under {}",
-                retro_dir
-                    .map(Path::display)
-                    .unwrap_or_else(|| "(state root)".into())
-                    .to_string()
-            ));
+            let retro_note = retro_dir
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(state root)".to_string());
+            out.push(format!("Retro sentinels written under {retro_note}"));
         }
         if !contained_closed.is_empty() {
             // Same wording rule as the dry-run branch: with no drift this
