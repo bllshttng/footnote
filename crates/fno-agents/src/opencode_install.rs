@@ -1052,6 +1052,8 @@ pub fn status_json() -> serde_json::Value {
 
 /// The manifest-only verdict the setup adapter's is_installed needs: no
 /// catalog read, so an adapter sweep never pays for two opencode spawns.
+/// With `OPENCODE_CONFIG_DIR` unset it still pays one `<bin> debug paths`
+/// spawn to resolve the root; the env override skips it.
 pub fn installed_status() -> serde_json::Value {
     let conf = config_dir();
     let source = source_version();

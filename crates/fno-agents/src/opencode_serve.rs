@@ -1454,7 +1454,6 @@ pub(crate) fn version_at_least(reported: &str, min: (u32, u32, u32)) -> bool {
         None => "",
     };
     let nums: Vec<u32> = from_digit
-        .trim_start_matches('v')
         .split('.')
         .take(3)
         .map(|part| {
