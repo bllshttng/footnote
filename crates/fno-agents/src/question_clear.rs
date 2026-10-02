@@ -170,6 +170,82 @@ mod tests {
             rows(&req.journal_path, &["operator_question_closed"]).len(),
             1
         );
+
+        // The same rerun on stores carrying recovery history: journal_text
+        // re-renders committed rows with `_store_seq`/`_history_only`, and
+        // hashing that annotated text misses the stored row_hash, so the
+        // mirrors must still land the raw stored line. The stores diverge:
+        // the decisions store's decision row sits at a different seq, so the
+        // journal's _store_seq cannot resolve there and the mirror must
+        // still append metadata-free bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(&tmp, "q-recovery", Some("ship it"));
+        seed_question(&req, &ask("q-recovery", "which lane?", None, None));
+        let stored = decision("q-recovery", "d-recovery1", "ship it");
+        let raw_line = stored.to_string();
+        crate::backlog::api::decision_record(&crate::backlog::api::Store::new(&req.graph), stored)
+            .unwrap();
+        crate::event_store::append_envelope(&req.journal_path, &raw_line, None).unwrap();
+        crate::event_store::append_envelope(
+            &req.decisions_path,
+            &json!({
+                "ts": "2026-09-23T00:00:30Z",
+                "type": "status_control",
+                "source": "test",
+                "data": {}
+            })
+            .to_string(),
+            None,
+        )
+        .unwrap();
+        crate::event_store::append_envelope(&req.decisions_path, &raw_line, None).unwrap();
+        let old_close = json!({
+            "ts": "2026-09-23T00:02:00Z",
+            "type": "operator_question_closed",
+            "source": "target",
+            "data": {
+                "question_id": "q-recovery",
+                "answer": "ship it",
+                "closed_by": "test-agent",
+            },
+        });
+        crate::event_store::append_envelope(&req.journal_path, &old_close.to_string(), None)
+            .unwrap();
+        for path in [&req.journal_path, &req.decisions_path] {
+            let store = crate::event_store::store_path(path);
+            let conn = Connection::open(&store).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL);
+                 INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events;",
+            )
+            .unwrap();
+        }
+
+        let result = run_clear(&req);
+
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        assert!(result.lines[0].contains("(decision d-recovery1 resumed)"));
+        for path in [&req.journal_path, &req.decisions_path] {
+            let store = crate::event_store::store_path(path);
+            let conn = Connection::open(&store).unwrap();
+            let (count, line): (i64, String) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(MAX(line), '') FROM events
+                     WHERE type = 'operator_decision'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "one decision row in {}", store.display());
+            assert_eq!(
+                line, raw_line,
+                "the mirror stores the raw envelope, not the annotated render"
+            );
+        }
+        assert_eq!(
+            rows(&req.journal_path, &["operator_question_closed"]).len(),
+            1
+        );
     }
 
     #[test]
@@ -423,6 +499,83 @@ mod tests {
         assert!(
             decisions.iter().all(|r| r["subject"] != "x-0000"),
             "no row may land at the node from an agent clear"
+        );
+        let board_sha = "a29b38c37b18e737eaf850e8765920498287cabf";
+        let board_subject = format!("merge-grant:footnote#2911@{board_sha}");
+        let ask_board = |req: &ClearRequest, qid: &str| {
+            seed_question(
+                req,
+                &json!({
+                    "ts": "2026-10-01T20:00:00Z",
+                    "type": "operator_question",
+                    "source": "agent",
+                    "data": {
+                        "question_id": qid,
+                        "question": "May PR 2911 merge?",
+                        "asker": "test-agent",
+                        "node": "x-0000",
+                        "subject": board_subject,
+                        "options": [
+                            {"n": 1, "text": "Yes, merge PR 2911."},
+                            {"n": 2, "text": "No, keep it held."},
+                        ],
+                        "context": {"recommendation": {"option": 1, "why": "every gate is met"}},
+                    },
+                }),
+            );
+        };
+        // The board words lane delivers the echoed option line with the
+        // operator's notes attached: the exact answer shape that once read
+        // as a conflict at the gate (q-7845e717).
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(
+            &tmp,
+            "q-echo",
+            Some("1. Yes, merge PR 2911. - notes: worried"),
+        );
+        ask_board(&req, "q-echo");
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        assert!(
+            result
+                .lines
+                .iter()
+                .any(|l| l.contains("operator merge grant recorded")),
+            "{:?}",
+            result.lines
+        );
+        let rows: Vec<Value> = graph_decisions(&req)
+            .into_iter()
+            .filter(|r| r["subject"] == board_subject.as_str())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["decision"],
+            crate::merge_grant::MERGE_GRANT_DECISION
+        );
+        let payload = serde_json::to_vec(&json!({ "decisions": rows })).unwrap();
+        assert_eq!(
+            crate::merge_grant::head_grant_status(Some(&payload)),
+            crate::merge_grant::HeadGrant::Granted
+        );
+
+        // The non-recommended option echoes too, and grants nothing: the raw
+        // words land at the subject and the gate reads a conflict.
+        let tmp = tempfile::tempdir().unwrap();
+        let req = request(&tmp, "q-hold2", Some("2. No, keep it held."));
+        ask_board(&req, "q-hold2");
+        let result = run_clear(&req);
+        assert_eq!(result.exit_code, 0, "{:?}", result.lines);
+        let rows: Vec<Value> = graph_decisions(&req)
+            .into_iter()
+            .filter(|r| r["subject"] == board_subject.as_str())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["decision"], "2. No, keep it held.");
+        let payload = serde_json::to_vec(&json!({ "decisions": rows })).unwrap();
+        assert_eq!(
+            crate::merge_grant::head_grant_status(Some(&payload)),
+            crate::merge_grant::HeadGrant::Conflict
         );
     }
 
@@ -939,7 +1092,7 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
             ));
             if let Some(subject) = merge_grant_subject(question_event) {
                 if operator_can_grant(req) {
-                    answer.lines.push(if is_affirmative_merge_answer(&text) {
+                    answer.lines.push(if merge_answer_grants(question_event, &text) {
                         format!(
                             "outstanding: operator merge grant recorded at {subject} (binds this head only)"
                         )
@@ -1064,8 +1217,12 @@ fn find_decision(path: &Path, decision_id: &str) -> Option<(Value, String)> {
 }
 
 fn append_decision_mirror(path: &Path, line: &str, decision_id: &str) -> Result<(), String> {
-    let event_id = stored_event_id(path, line)?.unwrap_or_else(|| decision_id.to_string());
-    crate::event_store::append_envelope(path, line, Some(&event_id)).map(|_| ())
+    // A recovery-annotated read re-mirrors only its raw stored envelope: the
+    // mirror row must stay byte-identical to the first append, so identity
+    // hashes the stored bytes, never the annotated render.
+    let line = crate::event_store::raw_stored_line(path, line)?;
+    let event_id = stored_event_id(path, &line)?.unwrap_or_else(|| decision_id.to_string());
+    crate::event_store::append_envelope(path, &line, Some(&event_id)).map(|_| ())
 }
 
 fn stored_event_id(path: &Path, line: &str) -> Result<Option<String>, String> {
@@ -1117,7 +1274,7 @@ fn make_decision(
     // resolves an agent authority can no more mint the grant through the
     // clear door than through decide.
     let grant_subject = merge_grant_subject(question_event).filter(|_| operator_can_grant(req));
-    let affirmative = grant_subject.is_some() && is_affirmative_merge_answer(answer);
+    let affirmative = grant_subject.is_some() && merge_answer_grants(question_event, answer);
     let decision_text = if affirmative {
         crate::merge_grant::MERGE_GRANT_DECISION.to_string()
     } else {
@@ -1266,6 +1423,96 @@ fn merge_grant_subject(question_event: &Value) -> Option<String> {
     crate::merge_grant::parse_head_grant_subject(subject).map(|_| subject.to_string())
 }
 
+/// Does this answer on a merge-grant question record the grant? Two shapes:
+/// the closed terminal set above, or picking the question's recommended
+/// option when that option reads affirmative.
+fn merge_answer_grants(question_event: &Value, answer: &str) -> bool {
+    is_affirmative_merge_answer(answer) || picks_recommended_option(question_event, answer)
+}
+
+/// The affirmative LEADS a board option's text may open with. Exact match is
+/// unavailable here (the option text is its own sentence), so the lead set is
+/// closed and conservative: an option that opens any other way never reads as
+/// the grant, whatever the recommendation says.
+fn is_affirmative_option_text(text: &str) -> bool {
+    let normalized = text.trim().to_lowercase();
+    [
+        "yes", "y", "merge", "approve", "approved", "lgtm", "ship it", "go ahead", "do it",
+    ]
+    .iter()
+    .any(|lead| {
+        normalized == *lead
+            || normalized.starts_with(&format!("{lead} "))
+            || normalized.starts_with(&format!("{lead},"))
+    })
+}
+
+/// True when the answer picks the question's recommended option and that
+/// option reads affirmative. The board words lane delivers the echoed option
+/// line ("1. Yes, merge PR 2911 at 5bf16e0bed. - notes: ..."), which the
+/// closed exact-match set can never admit; the recommendation intake
+/// validated is the asker's own affirmative, so picking it IS the grant.
+/// A recommendation whose text is not affirmative (a hold) never grants.
+fn picks_recommended_option(question_event: &Value, answer: &str) -> bool {
+    let data = question_event.get("data").unwrap_or(question_event);
+    let Some(recommended) = data
+        .get("context")
+        .and_then(|context| context.get("recommendation"))
+        .and_then(|rec| rec.get("option"))
+        .and_then(Value::as_u64)
+        .filter(|n| *n >= 1)
+    else {
+        return false;
+    };
+    let Some(options) = data.get("options").and_then(Value::as_array) else {
+        return false;
+    };
+    // File options carry an explicit `n` (1-based); flag options are bare
+    // strings whose order is the option number.
+    let text = options
+        .iter()
+        .enumerate()
+        .find(|(i, o)| {
+            o.get("n")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n == recommended)
+                || o.get("n").is_none() && (*i as u64) + 1 == recommended
+        })
+        .and_then(|(_, o)| {
+            o.get("text")
+                .and_then(Value::as_str)
+                .or_else(|| o.as_str())
+                .map(str::to_string)
+        })
+        .filter(|text| !text.is_empty());
+    let Some(text) = text else {
+        return false;
+    };
+    if !is_affirmative_option_text(&text) {
+        return false;
+    }
+    let norm = |s: &str| {
+        s.trim()
+            .trim_end_matches(['.', '!', '?', ';', ',', ':'])
+            .to_lowercase()
+    };
+    let answer_norm = norm(answer);
+    if answer_norm.is_empty() {
+        return false;
+    }
+    let text_norm = norm(&text);
+    if answer_norm == text_norm || answer_norm.starts_with(&text_norm) {
+        return true;
+    }
+    // The echoed number: "1", "1. Yes, ...", "1) Yes", "1: yes". The
+    // boundary check keeps "10." from reading as option 1.
+    let num = recommended.to_string();
+    match answer_norm.strip_prefix(&num) {
+        Some(rest) => rest.is_empty() || rest.starts_with(['.', ')', ':', ' ']),
+        None => false,
+    }
+}
+
 fn close_event(req: &ClearRequest, qid: &str, answer: Option<&str>) -> (Value, String) {
     if let Some((event, line)) =
         crate::event_store::journal_text(&req.journal_path, &["operator_question_closed"])
@@ -1296,8 +1543,11 @@ fn close_event(req: &ClearRequest, qid: &str, answer: Option<&str>) -> (Value, S
 }
 
 fn append_close(journal: &Path, line: &str, qid: &str) -> Result<(), String> {
-    let event_id = stored_event_id(journal, line)?.unwrap_or_else(|| format!("close:{qid}"));
-    crate::event_store::append_envelope(journal, line, Some(&event_id)).map(|_| ())
+    // Same recovery rule as the decision mirror: a close read back through
+    // journal_text re-appends only as its raw stored envelope.
+    let line = crate::event_store::raw_stored_line(journal, line)?;
+    let event_id = stored_event_id(journal, &line)?.unwrap_or_else(|| format!("close:{qid}"));
+    crate::event_store::append_envelope(journal, &line, Some(&event_id)).map(|_| ())
 }
 
 fn question_text(question: &Value) -> String {

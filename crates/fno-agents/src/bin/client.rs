@@ -741,6 +741,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::sandbox_probe::run_sandbox_probe(&args[1..]);
     }
 
+    // `release-notes`: the update modal's PR-grouped release notes (see
+    // release_notes.rs). Python's `fno doctor update --check` resolver calls
+    // it through the verb seam; it answers `{"notes": null}` on any git
+    // failure rather than refusing - the payload never blocks on it.
+    if verb == "release-notes" {
+        return fno_agents::release_notes::run_release_notes(&args[1..]);
+    }
+
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
     // Python resolves config and paths and serializes the candidate links;
     // this verb reads the provider runtime-state file, derives headroom
@@ -1320,6 +1328,10 @@ async fn run(args: Vec<String>) -> i32 {
         // zcode `ask` resumes by name over the headless lane: one -p --resume
         // turn per ask, session id from the row's harness_session_id.
         if let Some(code) = fno_agents::zcode_ask::maybe_run_zcode_ask(&home, &params, &agent_name)
+        {
+            return code;
+        }
+        if let Some(code) = fno_agents::footnote_harness::maybe_run_ask(&home, &params, &agent_name)
         {
             return code;
         }
@@ -2746,6 +2758,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             permission_mode,
             timeout,
             &harness_args,
+            params.get("node").and_then(|v| v.as_str()),
+        )),
+
+        // footnote headless: footnote's own loop, run in this process.
+        ("footnote", "headless") => emit!(fno_agents::footnote_harness::dispatch_once(
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            timeout,
             params.get("node").and_then(|v| v.as_str()),
         )),
 

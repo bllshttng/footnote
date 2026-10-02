@@ -170,6 +170,7 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod footnote_harness;
 pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
@@ -335,6 +336,7 @@ pub mod registry_json;
 pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
+pub mod release_notes;
 pub mod removals;
 pub mod rename;
 pub mod repeated_asks;
@@ -360,6 +362,7 @@ pub mod route_inventory;
 pub mod route_recovery;
 pub mod route_slot;
 pub mod row_truth;
+pub mod row_verdict;
 pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
@@ -1420,6 +1423,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_renamed",
     "agent_model_changed",
     "agent_effort_changed",
+    "agent_posture_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_skipped",

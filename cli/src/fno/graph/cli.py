@@ -4228,13 +4228,13 @@ def cmd_roadmap(
     out: Optional[str] = typer.Option(
         None, "--out", help="Write markdown to this path instead of stdout."
     ),
-    html: Optional[str] = typer.Option(
-        None, "--html", help="Also write a standalone HTML file to this path."
-    ),
     backlog_html: Optional[str] = typer.Option(
         None,
         "--backlog-html",
-        help="Also write the grouped public open-work HTML projection.",
+        help=(
+            "Also write the public open-work HTML board (leak-gated, native "
+            "renderer) to this path."
+        ),
     ),
 ) -> None:
     """Render public roadmap and backlog projections through one leak gate.
@@ -4249,6 +4249,7 @@ def cmd_roadmap(
         atomic_write_documents,
         load_render_entries,
         omit_leaky_rows,
+        render_public_backlog_html,
         render_public_roadmap_md,
     )
 
@@ -4269,19 +4270,12 @@ def cmd_roadmap(
         raise typer.Exit(code=1) from exc
     entries, _ = omit_leaky_rows(entries, resolved_project)
 
-    md = render_public_roadmap_md(entries, resolved_project)
+    if backlog_html:
+        if not render_public_backlog_html(resolved_project, backlog_html):
+            typer.echo("Error: public backlog HTML render failed; see the warning above", err=True)
+            raise typer.Exit(code=1)
 
-    if html or backlog_html:
-        # The public HTML pages were the second board this surface retired;
-        # refuse BY NAME so a script fails loudly instead of silently
-        # rendering nothing.
-        typer.echo(
-            "Error: --html/--backlog-html are retired; the web backlog page "
-            "is the one board (fno mux serve --web / fno backlog view). "
-            "The markdown roadmap still renders.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    md = render_public_roadmap_md(entries, resolved_project)
 
     documents: dict[Path, str] = {}
     out_path = Path(os.path.expanduser(out)) if out else None
