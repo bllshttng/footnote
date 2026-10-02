@@ -799,10 +799,7 @@ pub fn dispatch_once(
         pid: Some(std::process::id()),
         created_at: crate::daemon::now_rfc3339_like(),
         log_path: Some(s.w.transcript_path().to_string_lossy().to_string()),
-        ..RegistryEntry::new(
-            Some(sid.clone()),
-            crate::spawn_lineage::ambient_lineage(),
-        )
+        ..RegistryEntry::new(Some(sid.clone()), crate::spawn_lineage::ambient_lineage())
     };
     entry.account_record_id = Some("default".into());
     // The session's own id is the row's fno_id; a set value is never re-minted.
