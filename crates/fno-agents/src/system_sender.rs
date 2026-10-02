@@ -47,11 +47,14 @@ pub fn canonical(sender: &str) -> &str {
     sender
 }
 
-/// True when the sender is a system voice: the `fno/` prefix, or a legacy
-/// stamp that maps to one. Old rows stamped `king-settle` read system; the
-/// read model marks them from this table, never by name matching.
+/// True when the sender is a system voice: the `fno/` prefix, a legacy stamp
+/// that maps to one, or the bare `fno` the old floor produced. Old rows
+/// stamped `king-settle` or bare `fno` read system; the read model marks
+/// them from this table, never by name matching.
 pub fn is_system_sender(sender: &str) -> bool {
-    sender.starts_with("fno/") || LEGACY_ALIASES.iter().any(|(legacy, _)| sender == *legacy)
+    sender == "fno"
+        || sender.starts_with("fno/")
+        || LEGACY_ALIASES.iter().any(|(legacy, _)| sender == *legacy)
 }
 
 /// The bare-`fno` guard (R13): a sender resolving to exactly `fno` is not a
@@ -77,7 +80,7 @@ mod tests {
         assert!(is_system_sender("fno/pr-nudge"));
         assert!(is_system_sender("burn-watch"));
         assert!(!is_system_sender("candor"));
-        assert!(!is_system_sender("fno"));
+        assert!(is_system_sender("fno"));
         assert!(guard_sender("fno").is_err());
         assert!(guard_sender("fno/fleet-incident").is_ok());
         assert!(guard_sender("candor").is_ok());

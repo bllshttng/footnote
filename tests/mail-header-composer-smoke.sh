@@ -21,9 +21,10 @@ TOML="$ROOT/crates/fno-agents/src/harness_capabilities.toml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# 1. Every top-level harness row carries the verdict.
+# 1. Every top-level harness row carries the verdict. The name class carries
+# dashes (cursor-agent), so the row header matches them too.
 missing=$(awk '
-  /^\[harness\.[a-z]+\]$/ { if (row != "" && !saw) print row; row = $0; sub(/^\[harness\./, "", row); sub(/\]$/, "", row); saw = 0; next }
+  /^\[harness\.[a-z-]+\]$/ { if (row != "" && !saw) print row; row = $0; sub(/^\[harness\./, "", row); sub(/\]$/, "", row); saw = 0; next }
   /^mail_header_at[[:space:]]*=/ { saw = 1 }
   END { if (row != "" && !saw) print row }
 ' "$TOML")
@@ -77,7 +78,7 @@ echo
 echo "Header per harness verdict (confirm by typing into a live composer;"
 echo "no picker may open and nothing may expand):"
 awk '
-  /^\[harness\.[a-z]+\]$/ { row = $0; sub(/^\[harness\./, "", row); sub(/\]$/, "", row); next }
+  /^\[harness\.[a-z-]+\]$/ { row = $0; sub(/^\[harness\./, "", row); sub(/\]$/, "", row); next }
   /^mail_header_at[[:space:]]*=/ && row != "" { form = ($0 ~ /true/) ? "@candor (mention form)" : "candor (plain form)"; printf "  %-10s %s\n", row, form; row = "" }
 ' "$TOML"
 echo

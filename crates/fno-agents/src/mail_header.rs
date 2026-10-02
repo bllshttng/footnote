@@ -51,7 +51,9 @@ pub fn summary_of(body: &str) -> String {
     if trimmed.is_empty() {
         return "(empty)".to_string();
     }
-    let first_sentence = first_sentence_of(trimmed);
+    // A backtick in the cut text renders as a single quote, so the summary
+    // can never close the header's inline code early (AC6-HP).
+    let first_sentence = first_sentence_of(trimmed).replace('`', "'");
     cut_words(&first_sentence, SUMMARY_MAX_WORDS)
 }
 
@@ -437,7 +439,7 @@ mod tests {
         );
         assert_eq!(summary_of("  "), "(empty)");
         assert_eq!(summary_of("no sentence end here"), "no sentence end here");
-        assert_eq!(summary_of("```rust\ncode first"), "```rust");
+        assert_eq!(summary_of("```rust\ncode first"), "'''rust");
         assert_eq!(
             summary_of("J.N. Choi ships it today"),
             "J.N. Choi ships it today"
