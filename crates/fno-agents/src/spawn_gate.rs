@@ -220,7 +220,6 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
     }
 }
 
-
 /// Queue mechanics (Claude's Discretion 2: targets, not contracts).
 const QUEUE_POLL: Duration = Duration::from_secs(2);
 const QUEUE_PROGRESS_EVERY: Duration = Duration::from_secs(30);
@@ -3289,7 +3288,9 @@ MemAvailable:    8000000 kB\n";
         )
         .unwrap();
         std::env::set_var("FNO_AGENT_SELF", "gate-admission-test");
-        let refusal = crate::spawn_gate_admission::process_admission_gate().err().expect("armed brake refuses");
+        let refusal = crate::spawn_gate_admission::process_admission_gate()
+            .err()
+            .expect("armed brake refuses");
         assert_eq!(refusal.exit_code, EXIT_FLEET_STOP);
         assert!(
             verdict_line(&refusal).contains("machine-runaway"),
