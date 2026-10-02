@@ -117,5 +117,19 @@
     "identity": "the observe door compares requested and observed model by family (one trailing bracket suffix dropped from each side), the agent registry's rule",
     "run1_restarts": "four stops and restarts on the iMac; no worker started in any set-aside attempt; rows kept in logs/aborted-start-1 to aborted-start-4 in the run workspace; Run 1 runs the branch CLI from its own environment",
     "pi_run1": "the pi lane reads unavailable on both machines: the headless substrate has no pi lane on this branch"
+  },
+  "amendment_11": {
+    "declared_at": "2026-10-02T18:50:00Z",
+    "scope": "one load rule for every arm and lane on the iMac (user ruling: the key is consistency); no grade or decision rule changes",
+    "rule": "a Run 0 trial or Run 1 attempt is an infrastructure exclusion and runs again when the 5-minute load average passed 16 at any sample between its start and its end",
+    "load_threshold_5min": 16,
+    "threshold_basis": "two per physical core on the iMac; chosen after reading the load series and before reading any outcome; before 18:00Z the 5-minute load never passed 12.0",
+    "window": "5-minute load above 16 from 18:21Z to 18:38Z on 2026-10-02, peak 43.4; cause: a study shim made a cleanup command call itself and about 9000 processes piled up",
+    "in_flight": "a trial already running in a bad window finishes and is then set aside; nothing is killed for the rule",
+    "rerun": "same arm, job and settings",
+    "concurrency": "Run 0 stays at 4 trials for every remaining arm",
+    "claude_code_version": "the Run 0 claude-code container installs Claude Code 2.1.286, the Run 1 pin; the 16:03Z smoke had installed 2.1.287",
+    "images": "unused task images were removed at 18:29Z to free disk; later arms pull them again in environment setup, before the agent timer",
+    "freeze": "no setting, image or environment changes mid-arm unless the machine is at risk"
   }
 }
