@@ -82,13 +82,19 @@ struct Receipt {
 
 fn render_request(request: &Request) -> Result<Receipt, String> {
     let graph = backlog_view::graph_path();
-    // No roster here: the snapshot records claims and columns, never live
-    // dots or crowns, which are roster facts the served board answers live.
+    // Leads are read once at render time from the agent registry and
+    // stamped: the page header says when the crowns were read, and a crown
+    // change alone does not re-render the page.
+    let now = now_secs();
+    let agents = std::fs::read_to_string(crate::agents_view::registry_path())
+        .map(|raw| agents_from_registry(&raw, now))
+        .unwrap_or_default();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("cannot start the async runtime: {e}"))?;
-    let inputs = runtime.block_on(backlog_model::gather(&graph, Vec::new()));
+    let leads_at = (!agents.is_empty()).then_some(now);
+    let inputs = runtime.block_on(backlog_model::gather(&graph, agents));
     let mut receipt = Receipt {
         written: Vec::new(),
         failed: Vec::new(),
@@ -98,7 +104,7 @@ fn render_request(request: &Request) -> Result<Receipt, String> {
             .scope
             .as_deref()
             .filter(|s| !s.is_empty() && *s != "all");
-        match render_one(&inputs, scope, request.vault.as_deref()) {
+        match render_one(&inputs, scope, request.vault.as_deref(), leads_at) {
             Ok((page, cards)) => match atomic_write(Path::new(&target.path), &page) {
                 Ok(()) => receipt
                     .written
@@ -122,6 +128,7 @@ fn render_one(
     inputs: &backlog_model::Inputs,
     scope: Option<&str>,
     vault: Option<&str>,
+    leads_at: Option<u64>,
 ) -> Result<(String, usize), String> {
     if let Some(err) = &inputs.rows_error {
         return Err(err.clone());
@@ -182,8 +189,26 @@ fn render_one(
         "columns": board.stats.totals.iter().map(|t| t.column).collect::<Vec<_>>(),
         "cards": &flat,
         "nodes": nodes,
+        "leads_at": leads_at,
     });
     Ok((snapshot_page(crate::web::BACKLOG_PAGE, &payload)?, count))
+}
+
+/// The registry rows the snapshot's roster needs: live crowned agents only.
+/// Only the crown fields copy over, so `live` stays false on the static page
+/// (no `harness_session_id` is carried).
+fn agents_from_registry(raw: &str, now: u64) -> Vec<crate::proto::AgentRow> {
+    crate::agents_view::derive_rows(raw, now)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| !r.exited && r.crown_scope.is_some())
+        .map(|r| crate::proto::AgentRow {
+            name: r.name.clone(),
+            crown_level: r.crown_level,
+            crown_scope: r.crown_scope.clone(),
+            ..Default::default()
+        })
+        .collect()
 }
 
 fn now_secs() -> u64 {
@@ -368,6 +393,28 @@ mod tests {
         let end = out[start..].find("</script>").unwrap() + start;
         let back: Value = serde_json::from_str(&out[start..end]).unwrap();
         assert_eq!(back, payload);
+        // A lone `<` escapes by the same one rule.
+        let out = snapshot_page("<body>x", &json!({"q": "a<b"})).unwrap();
+        assert!(out.contains("a\\u003cb"), "{out}");
+    }
+
+    /// The registry reader keeps exactly the live crowned rows, with their
+    /// scope and level; exited and uncrowned rows drop. Only crown fields
+    /// copy, so the static page's roster stays paneless.
+    #[test]
+    fn crowned_registry_rows_become_the_snapshot_roster() {
+        let raw = r#"{"agents": [
+            {"name": "lead-live", "crown_level": 1, "crown_scope": "x-3b09"},
+            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-0ce3", "exited": true},
+            {"name": "plain", "crown_level": null, "crown_scope": null}
+        ]}"#;
+        let roster = agents_from_registry(raw, 1000);
+        assert_eq!(roster.len(), 1, "one live crowned row survives");
+        assert_eq!(roster[0].name, "lead-live");
+        assert_eq!(roster[0].crown_scope.as_deref(), Some("x-3b09"));
+        assert_eq!(roster[0].crown_level, Some(1));
+        assert!(roster[0].harness_session_id.is_none());
+        assert!(agents_from_registry("not json at all", 1000).is_empty());
     }
 
     /// The lexical classifier: the verb name claims itself, every other
@@ -408,13 +455,5 @@ mod tests {
             Some("internal/fno/plans/x.md")
         );
         assert_eq!(canonical_plan_path("~/elsewhere/x.md", Some("c3po")), None);
-    }
-
-    /// A `<` alone in the data escapes too, so the invariant is one rule,
-    /// not a closing-sequence hunt.
-    #[test]
-    fn every_angle_bracket_escapes() {
-        let out = snapshot_page("<body>x", &json!({"q": "a<b"})).unwrap();
-        assert!(out.contains("a\\u003cb"), "{out}");
     }
 }
