@@ -659,6 +659,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::announce::run_announce(&args[1..]);
     }
 
+    // `chats`: the conversation record plane (see chats.rs doc). Direct
+    // dispatch like announce; no daemon RPC - a record write must work when
+    // the daemon is wedged, and the read doors back the thread read model.
+    if verb == "chats" {
+        return fno_agents::chats::run_chats(&args[1..]);
+    }
+
     // `capabilities` / `target-family` (change 2): read-only leaves
     // over the packaged capability table and the merge-posture family table,
     // `review-coverage`: standalone review_coverage producer (see its own doc

@@ -1435,7 +1435,7 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
 
     rows = list(iter_messages(warn=False))
     assert len(rows) == 1
-    assert rows[0].id.startswith("msg-")
+    assert rows[0].id.startswith("fmail-")
     assert rows[0].delivery == "hosted"
     assert rows[0].body == "/code-review <level> --comment --fix"
     assert rows[0].word_count == style.word_count(rows[0].body)

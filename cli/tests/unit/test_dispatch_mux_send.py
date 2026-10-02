@@ -457,11 +457,11 @@ def test_the_pane_drive_envelope_carries_an_id_to_reply_to(monkeypatch):
     dispatch._mux_pane_send(_entry(), "status?", guarded=False)
 
     pasted = _pasted(calls)
-    assert 'id="msg-' in pasted, pasted
+    assert 'id="fmail-' in pasted, pasted
     # The id has to be quotable, so it must survive into what is actually typed.
     import re
 
-    msg_id = re.search(r'id="(msg-[^"]+)"', pasted).group(1)
+    msg_id = re.search(r'id="(fmail-[^"]+)"', pasted).group(1)
     assert msg_id in pasted
 
 
