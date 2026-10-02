@@ -736,7 +736,41 @@ echo ""
 echo "--- Parallel Conflict Check ---"
 
 if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
-    ok "Parallel ownership validated by semantic execution contract"
+    wave_gate_date="2026-10-02"
+    bin=$(resolve_agents_bin)
+    if [[ -z "$bin" ]]; then
+        warn "plan: parallel wave checks NOT CHECKED (no fno-agents binary) - not a pass"
+    else
+        wave_output=""
+        wave_rc=0
+        wave_output=$("$bin" wave check "$PLAN_DIR") || wave_rc=$?
+        if [[ "$wave_rc" -ne 0 ]]; then
+            warn "plan: parallel wave checks NOT CHECKED (the check failed to run: ${wave_output##*$'\n'}) - not a pass"
+        else
+            wave_receipts=()
+            wave_created=$(_plan_created_date "$PLAN_DIR")
+            while IFS=$'\t' read -r wave_kind wave_payload; do
+                case "$wave_kind" in
+                    E) error "$wave_payload" ;;
+                    X)
+                        if [[ ! "$wave_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                            error "$wave_payload (and no readable created: date to tell this plan from a pre-gate one)"
+                        elif [[ "$wave_created" > "$wave_gate_date" ]]; then
+                            error "$wave_payload"
+                        else
+                            warn "$wave_payload (created $wave_created, not after the $wave_gate_date wave gate)"
+                        fi ;;
+                    O) wave_receipts+=("$wave_payload") ;;
+                    U) warn "plan: parallel wave checks NOT CHECKED ($wave_payload) - not a pass" ;;
+                esac
+            done <<< "$wave_output"
+            if [[ $ERRORS -eq 0 ]]; then
+                for wave_receipt in ${wave_receipts[@]+"${wave_receipts[@]}"}; do
+                    ok "plan: $wave_receipt"
+                done
+            fi
+        fi
+    fi
 elif [[ -f "$PLAN_DIR" ]]; then
     # Find parallel waves in the Execution Strategy YAML: lines like
     # "mode: parallel" followed by tasks. Strategy: extract task IDs listed

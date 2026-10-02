@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from fno.observer import fold, isolation
 from tests.fixtures.graph_seed import seed_graph
 
@@ -94,6 +96,7 @@ def _strategy_plan(wave_mode: str, shared: bool) -> str:
     )
 
 
+@pytest.mark.dev_build
 def test_collision_free_rides_the_validator():
     # AC2-HP: shared surface inside one parallel wave fails; the same pair
     # split across sequential waves passes, matching validate_execution.
