@@ -138,8 +138,10 @@ Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMer
 /// the shelled Python helpers from the same manifest path).
 #[derive(Debug, Default)]
 pub(crate) struct ManifestFields {
-    /// Target-minted session id: idempotency key, handoff filename, event data.
-    session_id: Option<String>,
+    /// Target-minted session id: idempotency key, handoff every manifest reader
+    /// consults, event data. Pub(crate): the worktree gate asks the session
+    /// verdict for it (x-9663).
+    pub(crate) session_id: Option<String>,
     /// Canonical target-minted id, retained separately so it wins regardless of
     /// manifest key order over the one-release `session_id` fallback.
     fno_id: Option<String>,
@@ -153,7 +155,8 @@ pub(crate) struct ManifestFields {
     pub(crate) graph_node_id: Option<String>,
     /// Harness (conversation) session id captured at init: the do-stamp's
     /// identity-continuity input, passed through to the Python primitive.
-    harness_session_id: Option<String>,
+    /// Pub(crate): the worktree gate asks the session verdict for it (x-9663).
+    pub(crate) harness_session_id: Option<String>,
     /// HEAD at init: baseline for the `initial_head..HEAD` work-evidence range.
     /// Absent on manifests minted before -> the do stamp skips.
     initial_head: Option<String>,
