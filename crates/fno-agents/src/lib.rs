@@ -1474,6 +1474,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // One row per daemon retire tick that held rows: every held id
     // with its reason, detail and age, so the fleet reads one event stream.
     "retire_holds",
+    // The retirement sweep held a row fno's verdict keeps live while the
+    // vendor roster reads it finished: the recorded disagreement, never
+    // an override.
+    "row_liveness_drift",
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
     "graph_write_gate",
