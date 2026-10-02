@@ -15,6 +15,8 @@ import unicodedata
 HOME = os.path.dirname(os.path.abspath(__file__))
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
 MIN_ROWS, MAX_ROWS = 3, 6
+# Under this many columns the original buddy showed a one-line face.
+NARROW = 100
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
@@ -82,26 +84,18 @@ def layout(left, frame, cols):
     """Returns the rows to print. Inner text stays on top; the buddy stands on the bottom row."""
     if not frame:
         return left
+    if cols + 4 < NARROW:
+        return face_row(left, frame, cols)
     color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
     art = [r.rstrip() for r in frame.get("sprite", [])]
     while art and not art[0].strip():
         art.pop(0)
     name = frame.get("name", "")
     fleet = frame.get("fleet") or ""
-    # The buddy fits the user's status line height (at least MIN_ROWS), so a short
-    # status line leaves no empty rows: first the name moves beside the feet, then the hat goes.
-    fit = max(len(left), MIN_ROWS)
-    name_row = len(art) + 1 <= fit
-    if len(art) > fit:
-        art.pop(0)  # the hat (or the top row) goes first
-    while len(art) > fit:
-        art.pop(-2)  # then the middle of the body, keeping the face and the feet
-    aw = max([width(a) for a in art] + [len(name) if name_row else 0])
-    if name_row:
-        art.append(name.center(aw).rstrip())
-    else:
-        fleet = f"{fleet}  {name}" if fleet else name
-    # Speech sits beside the body, the fleet line (and the name, when it has no row) beside the bottom row.
+    # Like the original: the full sprite with its name row below, at 100 columns or more.
+    aw = max([width(a) for a in art] + [len(name)])
+    art.append(name.center(aw).rstrip())
+    # Speech sits beside the body, the fleet line beside the name row.
     labels = [""] * len(art)
     labels[-1] = fleet
     if len(art) > 1:
@@ -120,7 +114,12 @@ def layout(left, frame, cols):
                 out.append(l + " " * (cols - width(l) - width(right)) + color + right + "\x1b[0m")
             return out
 
-    # Too wide to share any 6-row stack: the one-line face on the first row that fits.
+    return face_row(left, frame, cols)
+
+
+def face_row(left, frame, cols):
+    """The one-line face on the lowest row that has room."""
+    color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
     face = f"{frame.get('face', '')} {frame.get('name', '')}"
     if frame.get("speech"):
         face += f": {frame['speech']}"
