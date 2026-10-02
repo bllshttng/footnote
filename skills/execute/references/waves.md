@@ -239,8 +239,12 @@ A task appears under `ready` when its effective blockers are all complete and no
 - Update STATE.md after each task
 
 **If mode: parallel**
-- Resolve provider capabilities first (a sequential-fallback provider still downgrades the wave)
-- Spawn the whole `ready` set concurrently - Task tool, multiple concurrent calls
+- A lone target (`--band` absent) with at least two ready tasks first runs `fno config assert-subagent-budget --width <ready-count>`. On refusal, record the reason in STATE.md and run sequentially in place.
+- Resolve provider capabilities; a sequential-fallback provider records the downgrade and runs sequentially in place.
+- Run `fno-agents wave fork "$PLAN_PATH" --wave <n>`. It prints `B<TAB><base-sha>` and one `O<TAB><task-id><TAB><absolute-worktree><TAB><branch>` per task. A refusal records the reason in STATE.md and runs sequentially in place. For each worktree, best-effort run `CANONICAL=<repo-root> WORKTREE=<path> bash scripts/setup/setup-worktree.sh`.
+- Dispatch one executor per `O` line in one message. Each prompt names that task's absolute worktree and requires edits only there, absolute paths with `git -C <path>`, and a commit before return.
+- When all task results arrive, run `fno-agents wave join "$PLAN_PATH" --wave <n> --base <base-sha>`. A refusal pauses the wave and names the task/error. `OFF<TAB><task-id><TAB><file>` rows are written under `## Off-surface writes` in SUMMARY.md. Join reruns each task's `verify` once in the target worktree; failure names the task and enters the existing fix loop.
+- Joiner workers (`--band`), Gemini fallback, and sequential waves keep their current flow; they do not fork task worktrees.
 - With `--node` bound: update STATE.md as each task completes, then rerun the `--ready` query; do not wait for the round - the peers' live task rows hold their in-flight claims back
 - Node-less: wait for the whole round to complete, update STATE.md, then re-query - with no node rows an in-flight sibling still reads `ready`, and re-dispatching it double-spawns the work
 - Tasks under `blocked_on` need no action; their derived edges hold them until a later round
@@ -427,11 +431,13 @@ For each task in wave.tasks:
 **Parallel Wave:**
 ```
 1. Announce: "## Executing Wave {n} (parallel: {count} tasks)"
-2. Spawn ALL targets concurrently
-3. Wait for ALL to complete
-4. Collect results (success/failure for each)
-5. Update STATE.md with all results
-6. If any failed, report and pause
+2. For a lone target with 2+ ready tasks, check `fno config assert-subagent-budget --width {count}`; on refusal, record the reason and use the sequential flow.
+3. Run `fno-agents wave fork "$PLAN_PATH" --wave {n}`; capture `B` and every `O` row. On refusal, record the reason and use the sequential flow.
+4. Best-effort initialize every returned worktree with `CANONICAL=<repo-root> WORKTREE=<path> bash scripts/setup/setup-worktree.sh`.
+5. Dispatch one executor per `O` row concurrently. Pass the task id and absolute worktree path; require all edits and commits in that worktree.
+6. Wait for all results. A missing or failed result pauses the wave.
+7. Run `fno-agents wave join "$PLAN_PATH" --wave {n} --base {base-sha}`. A merge error pauses and names the task and conflict. Join reruns each task's verify once; a failure names the task and enters the fix loop.
+8. Record every `OFF` row in SUMMARY.md under `## Off-surface writes`, then update STATE.md with all task results.
 ```
 
 ### 3b. Atomic Commits Per Task (MANDATORY)
