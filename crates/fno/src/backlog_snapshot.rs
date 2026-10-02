@@ -404,14 +404,14 @@ mod tests {
     #[test]
     fn crowned_registry_rows_become_the_snapshot_roster() {
         let raw = r#"{"agents": [
-            {"name": "lead-live", "crown_level": 1, "crown_scope": "x-3b09"},
-            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-0ce3", "exited": true},
+            {"name": "lead-live", "crown_level": 1, "crown_scope": "x-aaaa"},
+            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-bbbb", "exited": true},
             {"name": "plain", "crown_level": null, "crown_scope": null}
         ]}"#;
         let roster = agents_from_registry(raw, 1000);
         assert_eq!(roster.len(), 1, "one live crowned row survives");
         assert_eq!(roster[0].name, "lead-live");
-        assert_eq!(roster[0].crown_scope.as_deref(), Some("x-3b09"));
+        assert_eq!(roster[0].crown_scope.as_deref(), Some("x-aaaa"));
         assert_eq!(roster[0].crown_level, Some(1));
         assert!(roster[0].harness_session_id.is_none());
         assert!(agents_from_registry("not json at all", 1000).is_empty());
