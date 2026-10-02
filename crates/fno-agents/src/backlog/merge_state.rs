@@ -305,6 +305,92 @@ pub(crate) fn str_field(v: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+
+/// One PR's closure context: body + state from a single `gh pr view`
+/// (the query-once contract: the trailer the gate reads and the state it
+/// is read against must come from one fetch).
+#[derive(Debug, Clone)]
+pub(crate) struct ClosureContext {
+    pub number: i64,
+    pub body: String,
+    pub url: Option<String>,
+    pub state: String,
+    pub merged_at: Option<String>,
+    pub changed_files: Vec<String>,
+}
+
+/// `gh pr view` once for body + merge state + files. A typed error on any
+/// gh failure; blank exit-0 output refuses (never read a bare exit 0 as
+/// permission).
+pub(crate) fn fetch_pr_closure_context(
+    pr_number: i64,
+    repo: Option<&str>,
+) -> Result<ClosureContext, PrReadError> {
+    use std::process::Command;
+    let Some(gh) = gh_executable_for_merge_state() else {
+        return Err(PrReadError::new("gh CLI not found on PATH", "availability"));
+    };
+    let mut cmd = Command::new(gh);
+    cmd.args(["pr", "view", &pr_number.to_string(), "--json"]);
+    cmd.arg("number,body,url,state,mergedAt,files");
+    if let Some(repo) = repo {
+        cmd.args(["--repo", repo]);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| PrReadError::new(format!("gh subprocess failed to launch: {e}"), ""))?;
+    if !out.status.success() {
+        return Err(PrReadError::new(
+            format!(
+                "gh pr view #{pr_number} failed (rc={}): {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            "",
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return Err(PrReadError::new(
+            format!("gh pr view #{pr_number} returned no output (exit 0)"),
+            "",
+        ));
+    }
+    let row: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| PrReadError::new(format!("gh stdout was not JSON: {e}"), "malformed"))?;
+    let changed_files: Vec<String> = row
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|item| match item {
+                    Value::String(path) => Some(path.clone()),
+                    Value::Object(map) => map.get("path").and_then(Value::as_str).map(str::to_string),
+                    _ => None,
+                })
+                .filter(|path| !path.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ClosureContext {
+        number: row.get("number").and_then(Value::as_i64).unwrap_or(pr_number),
+        body: row.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
+        url: str_field(row.get("url")),
+        state: row
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN")
+            .to_string(),
+        merged_at: str_field(row.get("mergedAt")),
+        changed_files,
+    })
+}
+
+/// gh on PATH for this module's shellouts.
+fn gh_executable_for_merge_state() -> Option<std::path::PathBuf> {
+    crate::loop_dispatch::which_binary("gh")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

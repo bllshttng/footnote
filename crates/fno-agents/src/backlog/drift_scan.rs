@@ -1022,3 +1022,144 @@ mod tests {
         assert_eq!(effective_reconcile_cwd(&here, None), here);
     }
 }
+
+/// One open-PR binding heal: a missing verdict whose node is open with no
+/// PR refs - the exact repair a human did by hand with `update --pr-number`.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenBindingHeal {
+    pub node_id: String,
+    pub pr_number: i64,
+    pub pr_url: Option<String>,
+    /// true when the node already carries refs and the primary PR closed:
+    /// the heal REBINDS instead of filling.
+    pub rebind: bool,
+}
+
+/// Discover open PRs that uniquely name an open, ref-less node. One gh
+/// listing per repo (same-repo worktrees share the call), under the same
+/// wall-clock budget as the merged reverse map. Returns (heals,
+/// advisories): advisories name ambiguity and gh read failures without
+/// mutating anything. Persisting the fills is the CALLER's job.
+pub(crate) fn collect_open_binding_heals(
+    entries: &[Value],
+    scope: Option<&BTreeSet<String>>,
+    listings: Option<&ListingCache>,
+    query: impl Fn(i64, Option<&str>, Option<&str>, bool) -> Result<PrMergeState, PrReadError>,
+) -> (Vec<OpenBindingHeal>, Vec<String>) {
+    let mut fallback = HashMap::new();
+    let cache_memo;
+    let memo: &mut HashMap<String, String> = match listings {
+        Some(cache) => {
+            cache_memo = cache.repo_keys.borrow_mut();
+            &mut cache_memo
+        }
+        None => &mut fallback,
+    };
+    let (groups, cwd_by_nid, _skipped) = group_refless_by_repo(entries, scope, memo, true);
+
+    let mut heals: Vec<OpenBindingHeal> = Vec::new();
+    let mut advisories: Vec<String> = Vec::new();
+    let deadline = Instant::now() + REVERSE_MAP_BUDGET;
+    for (_key, nodes) in &groups {
+        if Instant::now() >= deadline {
+            let deferred: Vec<String> = groups
+                .iter()
+                .flat_map(|(_, ns)| ns.iter())
+                .filter_map(|i| entries[*i].get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect();
+            advisories.push(format!(
+                "open-binding scan stopped at its {}s budget (gh is slow or degraded); deferred {} node(s) to a later sweep: {}",
+                REVERSE_MAP_BUDGET.as_secs(),
+                deferred.len(),
+                deferred.join(" ")
+            ));
+            break;
+        }
+        let Some(first) = nodes.first() else { continue };
+        let nid0 = entries[*first]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let gh_cwd = cwd_by_nid
+            .get(&nid0)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let rows = match listings {
+            Some(cache) => cache.rows_for("open", gh_cwd),
+            None => list_open_pr_branches(gh_cwd, 100),
+        };
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => {
+                advisories.push(format!(
+                    "open-binding gh query failed ({gh_cwd}): {}",
+                    e.message
+                ));
+                continue;
+            }
+        };
+        for verdict in crate::king_board::prs::pr_binding_verdicts(&rows, entries) {
+            match verdict.verdict {
+                "ambiguous" => {
+                    if let Some(detail) = &verdict.detail {
+                        advisories.push(format!(
+                            "open PR #{} binding ambiguous: {detail}",
+                            verdict.number
+                        ));
+                    }
+                }
+                "missing" => {
+                    let Some(heal_nid) = &verdict.node_id else { continue };
+                    let Some(node) = nodes.iter().find(|i| {
+                        entries[*i].get("id").and_then(Value::as_str) == Some(heal_nid.as_str())
+                    }) else {
+                        continue;
+                    };
+                    let node = &entries[*node];
+                    let refs = node_pr_refs_of(node);
+                    if !refs.is_empty() {
+                        let closed = primary_closed(node, gh_cwd, &query, &mut advisories);
+                        if !closed {
+                            continue;
+                        }
+                    }
+                    heals.push(OpenBindingHeal {
+                        node_id: heal_nid.clone(),
+                        pr_number: verdict.number,
+                        pr_url: verdict.pr_url().map(str::to_string),
+                        rebind: !refs.is_empty(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    (heals, advisories)
+}
+
+/// The rebind gate: the node's primary PR must have CLOSED on GitHub
+/// before an open PR may rebind it. A read failure is an advisory, never
+/// a bind.
+fn primary_closed(
+    node: &Value,
+    cwd: &str,
+    query: &impl Fn(i64, Option<&str>, Option<&str>, bool) -> Result<PrMergeState, PrReadError>,
+    advisories: &mut Vec<String>,
+) -> bool {
+    let Some(number) = node.get("pr_number").and_then(Value::as_i64) else {
+        return false;
+    };
+    match query(number, None, Some(cwd), false) {
+        Ok(state) => state.state == "CLOSED",
+        Err(e) => {
+            let nid = node.get("id").and_then(Value::as_str).unwrap_or("?");
+            advisories.push(format!(
+                "open-binding rebind: {nid} PR #{number} unreadable ({})",
+                e.message
+            ));
+            false
+        }
+    }
+}
