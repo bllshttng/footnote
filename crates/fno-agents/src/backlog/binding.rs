@@ -6,7 +6,6 @@
 
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use super::merge_evidence::node_pr_refs;
 use super::node_ref::find_node_index;

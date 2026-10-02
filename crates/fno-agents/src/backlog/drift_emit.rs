@@ -282,7 +282,7 @@ fn fetch_pr_review_logins(
 /// Newest ts wins; a ts tie takes the SAFER verdict (uncovered).
 fn latest_review_coverage(pr_number: i64, events_path: &Path) -> Option<Value> {
     let mut best: Option<(String, Value)> = None;
-    let mut push = |ts: &str, data: Value, best: &mut Option<(String, Value)>| {
+    let push = |ts: &str, data: Value, best: &mut Option<(String, Value)>| {
         let newer = best
             .as_ref()
             .map(|(best_ts, best_data)| {

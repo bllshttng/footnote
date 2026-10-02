@@ -4,7 +4,7 @@
 //! workflows.rs). Every function mutates a plain entries list in place,
 //! inside the store's mutator and under the lock.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::merge_evidence::node_pr_refs;
@@ -156,8 +156,11 @@ pub(crate) fn cascade_close_contained(
     let unit_index = entries
         .iter()
         .position(|e| text_at(e, "id") == Some(node_id));
-    let unit = unit_index.map(|i| &entries[i]);
+    // Cloned, not borrowed: the mutation loop below needs `entries` mutably,
+    // and the guard reads the unit row only through this clone.
+    let unit: Option<Value> = unit_index.map(|i| entries[i].clone());
     let pr = unit
+        .as_ref()
         .and_then(|u| u.get("pr_number"))
         .and_then(Value::as_i64);
     let where_word = pr
@@ -180,8 +183,8 @@ pub(crate) fn cascade_close_contained(
             if reopen_outranks_merge(e, merged_at) {
                 continue;
             }
-        } else if let Some(unit) = unit {
-            if reopen_outranks_child_closes(e, std::slice::from_ref(&unit)) {
+        } else if let Some(unit) = &unit {
+            if reopen_outranks_child_closes(e, std::slice::from_ref(unit)) {
                 continue;
             }
         }
