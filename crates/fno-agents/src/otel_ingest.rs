@@ -562,7 +562,7 @@ mod tests {
         let ledger = home.root().join("ledger.json");
         std::fs::write(
             &ledger,
-            r#"[{"session_id": "sess-1", "cost_usd": 9.99}, {"session_id": "sess-2", "cost_usd": 3.5}]"#,
+            r#"[{"session_id": "sess-1", "cost_usd": 9.99}, {"session_id": "sess-4", "cost_usd": 3.5}]"#,
         )
         .unwrap();
         assert_eq!(
@@ -573,11 +573,13 @@ mod tests {
             ),
             Some(0.004)
         );
+        // sess-2 holds an OTel row, so the ledger never answers for it; a
+        // session with no rows reads the ledger estimate.
         assert_eq!(
             crate::burn_watch::session_cost_exact(
                 &home.otel_dir().join("otel.db"),
                 &ledger,
-                "sess-2"
+                "sess-4"
             ),
             Some(3.5)
         );
@@ -585,7 +587,7 @@ mod tests {
             crate::burn_watch::session_cost_exact(
                 &home.otel_dir().join("absent.db"),
                 &ledger,
-                "sess-2"
+                "sess-4"
             ),
             Some(3.5)
         );
