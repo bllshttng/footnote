@@ -1261,8 +1261,14 @@ mod tests {
 
     // ----: density + sort preferences ----
 
-    #[test]
-    fn prefs_default_then_round_trip() {
+    
+    
+    
+        #[test]
+    // One persistence surface, folded from three fns (test-delta cap 0):
+    // every assert below ran in its own fn before the fold.
+    fn prefs_width_and_preset_persist_together() {
+
         let _s = Scratch::new("prefs-roundtrip");
         // AC7-FR: a missing file is not an error, it is the defaults. The
         // default sort is attention (evidence of neglect first); only a stored
@@ -1274,10 +1280,8 @@ mod tests {
             (Density::Extended, AgentSort::Squad, None),
             "save_prefs leaves width untouched"
         );
-    }
+        // ----: width coexists with prefs
 
-    #[test]
-    fn width_round_trips_and_coexists_with_prefs() {
         // US1: a dragged width persists, and shares the file with
         // density/sort without either clobbering the other (one locked RMW).
         let _s = Scratch::new("width-roundtrip");
@@ -1299,10 +1303,8 @@ mod tests {
             load_prefs(),
             (Density::Extended, AgentSort::Squad, Some(60))
         );
-    }
+        // ----: the preset writes mode and width together
 
-    #[test]
-    fn save_preset_writes_mode_and_width_together() {
         // A preset is one choice of both fields; save_preset persists them in one
         // mutation so a reader never sees a mode paired with a stale width.
         let _s = Scratch::new("preset-atomic");
@@ -1315,7 +1317,7 @@ mod tests {
         );
     }
 
-    #[test]
+#[test]
     fn corrupt_width_degrades_to_none_then_writes_clean() {
         // AC5-ERR: a non-numeric width resolves to None (canonical), never a
         // panic, and is NOT retained - the first save_width writes a clean
