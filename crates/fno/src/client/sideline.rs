@@ -14,9 +14,9 @@ use super::*;
 /// third. The status words are shortened (operator, 2026-09-21, longest is
 /// `Input`) so the cell fits in 5, right-aligned so a word's blank parks at
 /// the margin, and every freed column goes to the name's Min(22); the
-/// message keeps the Fill(3) surplus. Read by the Table and - through
-/// [`sideline_column_rects`] - by the callers that need the solver's answer
-/// beside the paint: one geometry authority, and it is the solver.
+/// message keeps the Fill(3) surplus. Read by the Table; callers that need
+/// the solver's answer beside the paint use `worker_column_rects`, the same
+/// constraints the paint feeds: one geometry authority, and it is the solver.
 const SIDELINE_RIGHT_SLOT_W: u16 = 6;
 const CARD_COLUMNS: [Constraint; 5] = [
     Constraint::Length(5),
@@ -58,22 +58,14 @@ fn head_label(column: AgentSortColumn) -> &'static str {
     }
 }
 
-/// The solver's column rects for a text width: the same call the Table makes
-/// internally (same constraints, same spacing, same flex), so a caller that
-/// must know a column's width reads the SAME answer the paint uses.
-#[cfg(test)]
-pub(super) fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
-    Layout::horizontal(CARD_COLUMNS)
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(RtRect::new(0, 0, text_w, 1))
-}
-
 impl View {
     fn worker_columns(&self, text_w: u16) -> Vec<Constraint> {
         // The name takes a quarter of the surplus over the fixed cells, the
         // description first (d-36438ea4); the message keeps the Fill(3)
-        // surplus. Both layouts use the same rule.
+        // surplus. Both layouts use the same rule. `Min`, not `Length`: the
+        // name keeps the old yield order under deficit (names starve last),
+        // and name_w floors at 22 so the narrow rail solves as it did before
+        // the formula existed.
         let list_wide = self.sideline_layout == sideline_color::SidelineLayout::List
             && (self.density == Density::Extended || self.sideline_full)
             // Fixed cells and six gaps leave at least eight message columns.
@@ -81,7 +73,7 @@ impl View {
         if list_wide {
             vec![
                 CARD_COLUMNS[0],
-                Constraint::Length(row_meter::name_w(text_w, 28, 6)),
+                Constraint::Min(row_meter::name_w(text_w, 28, 6)),
                 CARD_COLUMNS[2],
                 CARD_COLUMNS[3],
                 CARD_COLUMNS[4],
@@ -91,7 +83,7 @@ impl View {
         } else {
             vec![
                 CARD_COLUMNS[0],
-                Constraint::Length(row_meter::name_w(text_w, 17, 4)),
+                Constraint::Min(row_meter::name_w(text_w, 17, 4)),
                 CARD_COLUMNS[2],
                 CARD_COLUMNS[3],
                 CARD_COLUMNS[4],
@@ -770,10 +762,10 @@ impl View {
                     None => label,
                 };
                 let name = if suffix_width < base_width {
-                    let base = crate::chrome::clip(&label, base_width - suffix_width);
+                    let base = crate::chrome::clip_tail(&label, base_width - suffix_width);
                     format!("{prefix}{base}{suffix}")
                 } else {
-                    let base = crate::chrome::clip(&label, base_width);
+                    let base = crate::chrome::clip_tail(&label, base_width);
                     format!("{prefix}{base}")
                 };
                 // The message column reads the sentence, not the markup, and

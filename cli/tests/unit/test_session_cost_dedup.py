@@ -94,7 +94,7 @@ def test_duplicate_lines_count_once():
     assert metrics.assistant_messages == 2, metrics.assistant_messages
 
 
-def test_deduped_cost_prices_the_deduped_totals(monkeypatch):
+def test_deduped_cost_prices_the_deduped_totals():
     # The Rust tests own the rate math; this pins that the price leg sees
     # exactly the DEDUPED totals (three identical lines, one usage).
     seen_totals = []
@@ -103,11 +103,14 @@ def test_deduped_cost_prices_the_deduped_totals(monkeypatch):
         seen_totals.append((metrics.input_tokens, metrics.output_tokens))
         return 44.97
 
-    monkeypatch.setattr(session_cost, "calculate_cost", fake_cost)
-    lines = [_assistant_line("msg_0", "req_0") for _ in range(3)]
-    metrics = _parse(lines)
-    assert metrics.cost_usd == 44.97
-    assert seen_totals == [(USAGE["input_tokens"], USAGE["output_tokens"])]
+    # The script runner in _main() calls tests bare, so no pytest fixtures:
+    # patch inline and restore.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(session_cost, "calculate_cost", fake_cost)
+        lines = [_assistant_line("msg_0", "req_0") for _ in range(3)]
+        metrics = _parse(lines)
+        assert metrics.cost_usd == 44.97
+        assert seen_totals == [(USAGE["input_tokens"], USAGE["output_tokens"])]
 
 
 # --- AC1-ERR: missing dedup keys ----------------------------------------------
@@ -180,11 +183,12 @@ def test_json_surfaces_unpriced_model():
     assert payload["unpriced_model"] == "claude-opus-next"
 
 
-def test_json_omits_unpriced_field_when_priced(monkeypatch):
-    # The autouse fixture below makes every parse unpriced, so a priced
-    # session is stubbed: a dollar answer sets no unpriced key.
-    monkeypatch.setattr(session_cost, "calculate_cost", lambda m: 44.97)
-    metrics = _parse([_assistant_line("msg_0", "req_0")])
+def test_json_omits_unpriced_field_when_priced():
+    # A priced session is stubbed (the parse would otherwise come back
+    # unpriced with no binary): a dollar answer sets no unpriced key.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(session_cost, "calculate_cost", lambda m: 44.97)
+        metrics = _parse([_assistant_line("msg_0", "req_0")])
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         session_cost.print_metrics(metrics, as_json=True)

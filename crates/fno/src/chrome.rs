@@ -78,6 +78,27 @@ pub(crate) fn clip(s: &str, w: usize) -> String {
     t
 }
 
+/// Cut `s` to at most `w` display columns keeping the tail, no marker. The
+/// name cell's rule: worker names are suffix-distinguishing (the hex tail is
+/// the identity), so a cut head is absence before a cut tail is. A wide
+/// glyph that straddles the cut drops whole.
+pub(crate) fn clip_tail(s: &str, w: usize) -> String {
+    if str_cols(s) <= w {
+        return s.to_string();
+    }
+    let mut drop = str_cols(s) - w;
+    let mut t = String::new();
+    for ch in s.chars() {
+        let cw = char_cols(ch);
+        if drop > 0 {
+            drop = drop.saturating_sub(cw);
+            continue;
+        }
+        t.push(ch);
+    }
+    t
+}
+
 /// How much chrome a block wears. Derived from the anchor; never passed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {

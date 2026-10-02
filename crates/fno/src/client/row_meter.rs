@@ -154,7 +154,7 @@ mod tests {
                 "the narrower fixed sum keeps more: {card} {list}"
             );
         }
-        assert_eq!(name_w(50, 17, 4), 22);
+        assert_eq!(name_w(50, 17, 4), 23);
         assert_eq!(name_w(320, 17, 4), 40);
     }
 }

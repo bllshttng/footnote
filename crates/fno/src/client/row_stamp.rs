@@ -162,10 +162,8 @@ impl View {
 
     /// The transient notice, right-aligned, clipped to the strip.
     ///
-    /// The ROW rule clips with no marker (d-36438ea4): a cut tail is absence,
-    /// never a marker that misreads as part of the sentence. Write notices
-    /// meaning-first: whatever the strip cannot hold is what a narrow
-    /// terminal loses.
+    /// The notice is an overlay, not a row: a cut tail keeps the `…`
+    /// marker, because a silent cut reads as a whole (shorter) sentence.
     pub(super) fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
         let (full, _) = self.notice.as_ref()?;
         // The open feed panel is senior: the toast right-aligns to the
@@ -173,7 +171,7 @@ impl View {
         // through this one function, so the hit test and the paint agree.
         let right = cols.saturating_sub(self.feed_panel_w() as usize);
         let room = right.saturating_sub(1);
-        let text = crate::chrome::clip(full, room);
+        let text = crate::chrome::fit_ellipsis(full, room);
         let start = right.saturating_sub(crate::chrome::str_cols(&text) + 1);
         Some((start, text))
     }

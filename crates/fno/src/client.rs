@@ -85,8 +85,6 @@ use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
-#[cfg(test)]
-use sideline::sideline_column_rects;
 
 mod row_stamp;
 // The sideline's density width rules.

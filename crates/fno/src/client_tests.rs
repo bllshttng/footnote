@@ -598,7 +598,7 @@ fn sideline_lane_color_and_deviation_token_render_on_the_row() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let panel_w = view.panel_w() as usize;
-    let name_x = sideline_column_rects((panel_w - 1) as u16)[1].x as usize;
+    let name_x = view.worker_column_rects((panel_w - 1) as u16)[1].x as usize;
     let line = |row: usize| -> (String, Color) {
         let start = row * cols;
         let end = start + panel_w.min(cols);
@@ -11006,8 +11006,16 @@ fn density_rows() {
     assert!(
         rows.iter()
             .all(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
-                || matches!(r, DisplayRow::Header { .. })),
-        "slim emits header bands only"
+                || matches!(r, DisplayRow::Header { .. })
+                || matches!(r, DisplayRow::Agent(a) if !a.exited)),
+        "slim keeps header bands and live agent lines only"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|r| matches!(r, DisplayRow::Agent(_)))
+            .count(),
+        2,
+        "small mode paints one line per live agent"
     );
     assert!(
         !rows.is_empty(),
@@ -11951,7 +11959,12 @@ fn foreign_cwd_agent_shows_inline_parens_on_one_row() {
     // squad 1 is "footnote" (/code/footnote); a "regready" cwd is foreign.
     agent.cwd_base = Some("regready".into());
     agent.subline = Some("main · regready".into()); // server subline is ignored now
-    let v = view_with_agents(vec![agent]);
+    let mut v = view_with_agents(vec![agent]);
+    // The tag contract needs a panel that affords it: the default 28-col
+    // rail starves the name cell below the tagged label (the drop is the
+    // narrow-width rule, pinned by the drop ladder's own tests).
+    v.term = (30, 140);
+    v.sideline_width = 80;
     let rows = v.display_rows();
     let ai = rows
         .iter()
@@ -11987,7 +12000,10 @@ fn inline_parens_only_for_foreign_agent() {
     a.cwd_base = Some("footnote".into()); // same project as squad 1
     let mut b = blocked_row("B", 5, None);
     b.cwd_base = Some("regready".into()); // foreign
-    let v = view_with_agents(vec![a, b]);
+    let mut v = view_with_agents(vec![a, b]);
+    // Wide enough that the tagged label fits whole (see the one-row test).
+    v.term = (30, 140);
+    v.sideline_width = 80;
     let rows = v.display_rows();
     let agents = rows
         .iter()
