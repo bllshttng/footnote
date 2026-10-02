@@ -174,17 +174,21 @@ COMPACTION_BAND=""
 COMPACTION_PREPARATION=0
 PROBE_OUT=""
 CONTEXT_RUNNER="${FNO_AGENTS_FRONT:-fno-agents}"
-# The probe rides the stale-while-revalidate cache: a fresh-enough copy is
-# served in milliseconds, a served copy past two thirds of its life arms a
-# DETACHED refresher for the next boundary, and a live read that skipped or
-# expired under load serves the stale copy rather than nothing. Keyed by the
-# transcript basename the payload handed us. A pressure percentage a few
-# minutes old is inside this gate's resolution: the bands are 10% wide.
+# The probe rides the stale-while-revalidate cache: an unchanged transcript
+# inside the window is served in milliseconds, a served copy past two thirds
+# of its life arms a DETACHED refresher for the next boundary, and a live
+# read that skipped or expired under load serves the stale copy rather than
+# nothing. The fingerprint (size + mtime) rides in the key: a GROWN
+# transcript always re-measures, because pressure truth is the one thing a
+# compaction gate may not serve stale by choice. Keyed by the transcript
+# basename the payload handed us.
+TSTATS="$(stat -f %z,%m "$TRANSCRIPT" 2>/dev/null || stat -c %s,%Y "$TRANSCRIPT" 2>/dev/null || true)"
+TSTATS="$(printf '%s' "$TSTATS" | tr -c '0-9' '-')"
 if command -v jq >/dev/null 2>&1 && command -v "$CONTEXT_RUNNER" >/dev/null 2>&1; then
-    PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 -- \
+    PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 "$TSTATS" -- \
         "$CONTEXT_RUNNER" context-run --probe --transcript "$TRANSCRIPT" --session "$SESSION_ID" --json 2>/dev/null || true)
 elif command -v jq >/dev/null 2>&1 && command -v fno >/dev/null 2>&1; then
-    PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 -- \
+    PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 "$TSTATS" -- \
         fno whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
 fi
 if command -v jq >/dev/null 2>&1; then

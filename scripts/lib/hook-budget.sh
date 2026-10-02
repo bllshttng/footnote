@@ -89,41 +89,58 @@ hook_run_optional() {
     return "$rc"
 }
 
-# hook_cache_serve KEY MAX_AGE_SECS -- CMD [ARGS...]
-# Prints CMD's output, from a cached copy when one is young enough, so a
-# repeated context read costs milliseconds instead of a live query. The cache
-# is refreshed OFF the turn path: a copy served past a third of its life arms
-# a detached refresher for the NEXT boundary; the synchronous run also writes
-# the cache. A sync run that skipped or expired under load serves the stale
-# copy rather than nothing - the point of the cache is that context survives
-# the days a live query would not. Cache files live under
+# hook_cache_serve KEY MAX_AGE_SECS FINGERPRINT -- CMD [ARGS...]
+# Prints CMD's output, from a cached copy when one is young enough AND its
+# input is unchanged, so a repeated context read costs milliseconds instead
+# of a live query. FINGERPRINT names the input state (for a transcript read:
+# size and mtime); the cache file's first line carries the fingerprint a copy
+# was built from, and a fingerprint mismatch forces the live read, because a
+# changed input must re-measure. A live read that skipped or expired under
+# load serves the STALE copy rather than nothing - context survives the
+# moments a live query would not. The cache is refreshed OFF the turn path:
+# a copy served past two thirds of its life arms a detached refresher for
+# the NEXT boundary; the synchronous run also writes the cache. Atomic mv,
+# so two racing refreshers cannot tear a read. Cache files live under
 # ${FNO_HOOK_CACHE_DIR:-$HOME/.fno/cache/hook-budget}; KEY is per session or
-# per transcript, supplied by the caller.
+# per transcript, supplied by the caller. An empty FINGERPRINT means the
+# input has no observable state and age alone decides freshness.
 hook_cache_serve() {
-    local key="$1" max_age="$2"
-    shift 2
+    local key="$1" max_age="$2" fp="$3"
+    shift 3
     [[ "${1:-}" == "--" ]] && shift
     case "$key" in '' | *[!A-Za-z0-9._-]*) return 2 ;; esac
     case "$max_age" in
         '' | *[!0-9]*) return 2 ;;
     esac
     local dir="${FNO_HOOK_CACHE_DIR:-$HOME/.fno/cache/hook-budget}"
-    local file="$dir/$key" now mtime age out rc=0
+    local file="$dir/$key" now mtime age raw stored_fp payload out rc=0
     now=$(date +%s)
     mtime=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || printf 0)
     age=$((now - mtime))
-    if [[ "$mtime" -gt 0 && "$age" -lt "$max_age" ]]; then
-        cat "$file" 2>/dev/null
+    stored_fp=""
+    payload=""
+    if [[ -f "$file" ]]; then
+        raw=$(cat "$file" 2>/dev/null)
+        if [[ "$raw" == *$'\n'* ]]; then
+            stored_fp="${raw%%$'\n'*}"
+            payload="${raw#*$'\n'}"
+        fi
+    fi
+    if [[ -n "$payload" && "$age" -ge 0 && "$age" -lt "$max_age" \
+        && (-z "$fp" || "$fp" == "$stored_fp") ]]; then
+        printf '%s' "$payload"
         # Past two thirds of its life: arm the detached refresher for the
-        # next boundary. Atomic mv, so two racing refreshers cannot tear a
-        # read; last writer wins.
+        # next boundary. The refresher re-runs the read and stores it under
+        # the fingerprint captured HERE, so a copy can never outlive the
+        # input state it was built from.
         if ((age * 3 >= max_age * 2)); then
             (
                 rbudget=$(hook_budget_secs)
                 [[ "$rbudget" -gt 0 ]] || exit 0
                 fresh=$(with_timeout "$rbudget" "$@") || exit 0
                 [[ -n "$fresh" ]] || exit 0
-                printf '%s' "$fresh" > "$file.tmp.$$" && mv -f "$file.tmp.$$" "$file"
+                printf '%s\n%s' "$fp" "$fresh" > "$file.tmp.$$" \
+                    && mv -f "$file.tmp.$$" "$file"
             ) >/dev/null 2>&1 </dev/null &
         fi
         return 0
@@ -131,12 +148,12 @@ hook_cache_serve() {
     out=$(hook_run_optional "$@") || rc=$?
     if [[ -n "$out" ]]; then
         mkdir -p "$dir" 2>/dev/null
-        printf '%s' "$out" > "$file.tmp.$$" 2>/dev/null \
+        printf '%s\n%s' "$fp" "$out" > "$file.tmp.$$" 2>/dev/null \
             && mv -f "$file.tmp.$$" "$file" 2>/dev/null
         printf '%s' "$out"
         return "$rc"
     fi
     # The live query skipped or expired: serve the stale copy, never nothing.
-    [[ "$mtime" -gt 0 ]] && cat "$file" 2>/dev/null
+    [[ -n "$payload" ]] && printf '%s' "$payload"
     return 0
 }

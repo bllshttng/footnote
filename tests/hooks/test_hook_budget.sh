@@ -98,24 +98,31 @@ export FNO_HOOK_CACHE_DIR="$TMP/cache"
 rm -rf "$FNO_HOOK_CACHE_DIR"
 
 marker="$TMP/miss-marker"
-out="$(hook_cache_serve k1 300 -- bash -c "echo live; touch $marker")"
+out="$(hook_cache_serve k1 300 "" -- bash -c "echo live; touch $marker")"
 [[ -e "$marker" && "$out" == "live" ]] && pass "cache miss runs the child and prints its output" \
     || fail "miss: marker=$([ -e "$marker" ] && echo yes || echo no) out='$out'"
 
 rm -f "$marker"
-out="$(hook_cache_serve k1 300 -- bash -c "touch $marker; echo SHOULD-NOT-RUN")"
+out="$(hook_cache_serve k1 300 "" -- bash -c "touch $marker; echo SHOULD-NOT-RUN")"
 [[ ! -e "$marker" && "$out" == "live" ]] && pass "fresh cache serves in milliseconds, child skipped" \
     || fail "hit: marker=$([ -e "$marker" ] && echo yes || echo no) out='$out'"
 
+# A fingerprint mismatch means the input changed: the copy must NOT serve.
+out="$(hook_cache_serve k1 300 newinput -- bash -c "echo remeasured")"
+[[ "$out" == "remeasured" ]] && pass "changed fingerprint forces the live read" \
+    || fail "fingerprint: out='$out'"
+
 # A served copy past two thirds of its life arms the detached refresher; the
-# refresher replaces the file for the NEXT boundary.
+# refresher replaces the file for the NEXT boundary. Fresh key: seed it, age
+# it, serve it.
+out="$(hook_cache_serve k2 300 "" -- bash -c "echo live")"
 touch -t "$(date -v-250S +%Y%m%d%H%M.%S 2>/dev/null || date -d '250 seconds ago' +%Y%m%d%H%M.%S)" \
-    "$FNO_HOOK_CACHE_DIR/k1"
+    "$FNO_HOOK_CACHE_DIR/k2"
 rm -f "$marker"
-out="$(hook_cache_serve k1 300 -- bash -c "echo refreshed; touch $marker")"
+out="$(hook_cache_serve k2 300 "" -- bash -c "echo refreshed; touch $marker")"
 refreshed=no
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-    grep -q refreshed "$FNO_HOOK_CACHE_DIR/k1" 2>/dev/null && { refreshed=yes; break; }
+    grep -q refreshed "$FNO_HOOK_CACHE_DIR/k2" 2>/dev/null && { refreshed=yes; break; }
     sleep 0.5
 done
 [[ "$out" == "live" && -e "$marker" && "$refreshed" == "yes" ]] \
@@ -127,8 +134,8 @@ load_lib
 hook_load1() { printf '99.0'; }
 hook_cores() { printf '8'; }
 touch -t "$(date -v-400S +%Y%m%d%H%M.%S 2>/dev/null || date -d '400 seconds ago' +%Y%m%d%H%M.%S)" \
-    "$FNO_HOOK_CACHE_DIR/k1"
-out="$(hook_cache_serve k1 300 -- bash -c 'echo NEVER')"
+    "$FNO_HOOK_CACHE_DIR/k2"
+out="$(hook_cache_serve k2 300 "" -- bash -c 'echo NEVER')"
 [[ "$out" == "refreshed" ]] && pass "skip under load serves the stale copy, not nothing" \
     || fail "stale-serve: out='$out'"
 
