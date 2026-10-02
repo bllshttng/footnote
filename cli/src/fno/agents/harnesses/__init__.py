@@ -21,17 +21,10 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 # in mux_spawn.PANE_HOSTABLE_PROVIDERS and remains wider than this tuple.
 from fno.harness_names import SPAWN_HARNESSES as SPAWN_HARNESSES  # noqa: E402
 
-# The spawn/pane read-tolerance roster: harnesses a pane can HOST even without a
-# Python ask adapter. It is Rust's KNOWN_PROVIDERS (provider.rs), read once
-# per process through `fno-agents harness-roster`; there is no Python copy.
-# Not the registry LOAD gate: load_registry shape-checks identity.
-from typing import Any  # noqa: E402
-
-
-def __getattr__(name: str) -> Any:
-    """PEP 562: serve ``READABLE_PROVIDERS`` from the Rust roster on first read."""
+def __getattr__(name: str) -> tuple[str, ...]:
+    """PEP 562: READABLE_PROVIDERS (pane-hostable read set) is Rust's KNOWN_PROVIDERS."""
     if name == "READABLE_PROVIDERS":
         from fno.harness_names import known_providers
 
         return known_providers()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    raise AttributeError(name)

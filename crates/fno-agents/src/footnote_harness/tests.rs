@@ -181,7 +181,7 @@ fn a_run_records_every_call_before_it_acts() {
     std::fs::write(fx.p("cwd/a.txt"), "a a").unwrap();
     let mut s = start(fx.launch(&base, None)).unwrap();
     s.client.backoff = Duration::ZERO;
-    let t = drive(&mut s, "/fno:target x-1234", "operator").unwrap();
+    let t = drive(&mut s, "/fno:target x-aaaa", "operator").unwrap();
     assert_eq!(t.state, "done", "{t:?}");
 
     // Identity: one v4 id names the dir and every record; seq rises by one.
@@ -202,7 +202,7 @@ fn a_run_records_every_call_before_it_acts() {
     // The skill body rode the first request with its argument.
     assert!(
         seen.lock().unwrap()[0].contains("TARGET SKILL BODY")
-            && seen.lock().unwrap()[0].contains("ARGUMENTS: x-1234")
+            && seen.lock().unwrap()[0].contains("ARGUMENTS: x-aaaa")
     );
 
     // The empty completion was retried, the attempt recorded and ignorable.
