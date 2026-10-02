@@ -1987,19 +1987,19 @@ mod tests {
         // The header the mail transport types into a worker pane. The span is
         // exactly the `@name` cells - the id, the separators and the summary
         // are not part of the affordance.
-        let line = "`@t-x-9663-glm · fmail-840a07863897 · fix the gate`";
+        let line = "`@t-glm-9663 · fmail-840a07863897 · fix the gate`";
         let mut pane = Pane::new(4, 60);
         pane.feed(line.as_bytes());
         let span = pane.link_span(0, 2).expect("a cell inside @name resolves");
         assert_eq!(span.uri, "fno-sender:fmail-840a07863897");
         assert_eq!(
             span.cells,
-            (1..14).map(|c| (0, c)).collect::<Vec<_>>(),
-            "cols 1..=13, the @name run and nothing else"
+            (1..12).map(|c| (0, c)).collect::<Vec<_>>(),
+            "cols 1..=11, the @name run and nothing else"
         );
         // The summary and the id token are not tappable.
-        assert!(pane.link_span(0, 16).is_none(), "the id token is not");
-        assert!(pane.link_span(0, 25).is_none(), "the summary is not");
+        assert!(pane.link_span(0, 15).is_none(), "the id token is not");
+        assert!(pane.link_span(0, 36).is_none(), "the summary is not");
 
         // The matcher tolerates a harness prompt prefix before the header.
         let mut pane = Pane::new(4, 60);

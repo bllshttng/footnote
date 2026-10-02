@@ -1,6 +1,6 @@
 //! The shared open-session chooser: one builder every "open this session
-//! here" affordance renders through (today the mail-header @sender tap;
-//! sibling x-79e0 wires the Claude Code mod row). Every entry maps to a
+//! here" affordance renders through (today the mail-header @sender tap; the
+//! Claude Code mod pane lands separately). Every entry maps to a
 //! `MenuAction` the row menu already executes, so Enter, digits, mouse and
 //! Esc all come from the existing menu input paths with no new input code.
 
