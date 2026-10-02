@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: all events - session-state producer shim
 # hooks/session-state.sh <harness> <event> - the session-state producer shim.
 # One line of policy: exec the `fno-agents hook session-state` entry. All
 # logic (state map, markers, transition gate) lives in the binary entry; the

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: all events - one-release stub routing to session-state.sh
 # hooks/inside-leg-report.sh - REMOVED NEXT RELEASE.
 #
 # Replaced by hooks/session-state.sh plus the `fno-agents hook session-state`

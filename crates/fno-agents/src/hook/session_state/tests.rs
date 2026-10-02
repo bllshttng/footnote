@@ -288,10 +288,7 @@ fn the_pane_host_wins_the_pin_and_a_nested_session_stays_silent() {
     assert!(is_pane_host("host-1"));
     assert!(!is_pane_host("nested-2"));
     clear_pane_env();
-    let _ = std::process::Command::new("rm")
-        .arg("-rf")
-        .arg(&rt)
-        .status();
+    let _ = std::fs::remove_dir_all(&rt);
 }
 
 /// mT6/mT7/mT8/mT11: every broken key degrades to emit (the v1 presence
@@ -385,7 +382,7 @@ fn a_malformed_payload_still_emits_markers() {
 
 fn fixture(name: &str) -> serde_json::Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/hook_payloads")
+        .join("tests/fixtures/hook_payloads")
         .join(name);
     serde_json::from_str(
         &std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {name}: {e}")),

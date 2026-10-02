@@ -465,8 +465,12 @@ pub(crate) fn process(harness: &str, event: &str, payload: &serde_json::Value) {
     // payload still emits via the presence-gate degrade), so a pane's block
     // scanner segments every turn even when the report cannot fly.
     if std::env::var_os("FNO_PANE").is_some_and(|v| !v.is_empty()) && is_pane_host(&ev.session_id) {
-        let manifest = repo_root().join(".fno/target-state.md");
-        let markers = marker_bytes(decision.state, &ev.event, manifest.is_file());
+        let manifest = crate::state_path::resolve("target-state", &repo_root());
+        let markers = marker_bytes(
+            decision.state,
+            &ev.event,
+            manifest.is_some_and(|p| p.is_file()),
+        );
         emit_markers(&markers);
     }
     // The report needs a parsed session id; a malformed/empty payload already
