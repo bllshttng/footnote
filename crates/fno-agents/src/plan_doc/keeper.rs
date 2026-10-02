@@ -194,6 +194,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
             }
             Err(message) => Ok(op_result(2, message)),
         },
+        "reconcile_status" => super::reconcile::handle_reconcile_status_op(state, params),
         other => Err(StoreError::Invalid(format!(
             "unknown plan_docs op {other:?}"
         ))),
@@ -296,5 +297,143 @@ mod tests {
             json!(["error: x"])
         );
         assert_eq!(op_result(0, "note".into())["warnings"], json!([]));
+    }
+
+    fn reconcile_state(graph: std::path::PathBuf) -> StoreState {
+        crate::store_exec::fresh_store_state(
+            graph,
+            false,
+            std::time::Duration::from_secs(2),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn seed_entries(graph: &std::path::Path, doc: Value) {
+        crate::graph_store::seed_rows(graph, doc["entries"].as_array().unwrap()).unwrap();
+    }
+
+    fn reconcile_params(dir: &std::path::Path, apply: bool, archive: bool) -> Value {
+        let mut p = json!({
+            "op": "reconcile_status",
+            "plans_dir": dir.join("plans").to_string_lossy(),
+            "cwd": dir.to_string_lossy(),
+            "apply": apply,
+        });
+        if archive {
+            p["archive_path"] = json!(dir.join("graph-archive.json").to_string_lossy());
+        }
+        p
+    }
+
+    #[test]
+    fn reconcile_status_op_rewrites_and_replies() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        seed_entries(
+            &graph,
+            json!({"entries": [
+                {"id": "x-live", "slug": "x-live", "title": "t", "type": "feature", "status": "ready", "priority": "p2"},
+            ]}),
+        );
+        let state = reconcile_state(graph);
+        std::fs::create_dir_all(dir.path().join("plans")).unwrap();
+        let doc = "---\nnode: x-live\nstatus: PENDING\n---\n# T\n\nbody\n";
+        std::fs::write(dir.path().join("plans/a.md"), doc).unwrap();
+
+        // Dry run: the reply carries the change, the doc is untouched.
+        let reply =
+            super::handle_plan_docs(&state, &reconcile_params(dir.path(), false, false)).unwrap();
+        assert_eq!(reply["normalized"], 1);
+        assert_eq!(reply["skipped"], 0);
+        assert!(reply["summary"].as_str().unwrap().contains("1 normalized"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("plans/a.md")).unwrap(),
+            doc
+        );
+
+        // Apply rewrites the doc.
+        let reply =
+            super::handle_plan_docs(&state, &reconcile_params(dir.path(), true, false)).unwrap();
+        assert_eq!(reply["normalized"], 1);
+        assert_eq!(reply["changes"][0][2], json!("design"));
+        assert!(std::fs::read_to_string(dir.path().join("plans/a.md"))
+            .unwrap()
+            .contains("status: \"design\""));
+
+        // No plans_dir is an invalid-params error.
+        assert!(super::handle_plan_docs(&state, &json!({"op": "reconcile_status"})).is_err());
+    }
+
+    #[test]
+    fn reconcile_status_projects_from_an_archived_node() {
+        // x-4e31: the node shipped and was archived - still projectable.
+        // Archive residents are rows carrying archived_at, not a second file;
+        // here the archive file itself carries the row.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        seed_entries(
+            &graph,
+            json!({"entries": [
+                {"id": "x-other", "slug": "x-other", "title": "t", "type": "feature", "status": "ready", "priority": "p2"},
+            ]}),
+        );
+        std::fs::write(
+            dir.path().join("graph-archive.json"),
+            r#"{"entries": [{"id": "x-shipped", "status": "done"}]}"#,
+        )
+        .unwrap();
+        let state = reconcile_state(graph);
+        std::fs::create_dir_all(dir.path().join("plans")).unwrap();
+        std::fs::write(
+            dir.path().join("plans/tier2.md"),
+            "---\nnode: x-shipped\nstatus: implemented\n---\n# T\n\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("plans/tier3.md"),
+            "---\nnode: x-shipped\nstatus: design\n---\n# T\n\nbody\n",
+        )
+        .unwrap();
+
+        let reply =
+            super::handle_plan_docs(&state, &reconcile_params(dir.path(), true, true)).unwrap();
+        assert_eq!(reply["superseded"], 0);
+        assert_eq!(reply["normalized"], 2);
+        assert!(std::fs::read_to_string(dir.path().join("plans/tier2.md"))
+            .unwrap()
+            .contains("status: \"done\""));
+        assert!(std::fs::read_to_string(dir.path().join("plans/tier3.md"))
+            .unwrap()
+            .contains("status: \"done\""));
+    }
+
+    #[test]
+    fn a_corrupt_store_stands_down_not_archive_only_truth() {
+        // The stand-down keys on an empty map: a corrupt working store must
+        // not be topped up by the archive into a map that covers no live node.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("graph.db"), "not sqlite").unwrap();
+        std::fs::write(
+            dir.path().join("graph-archive.json"),
+            r#"{"entries": [{"id": "x-archived", "status": "done"}]}"#,
+        )
+        .unwrap();
+        let state = reconcile_state(dir.path().join("graph.json"));
+        std::fs::create_dir_all(dir.path().join("plans")).unwrap();
+        std::fs::write(
+            dir.path().join("plans/live.md"),
+            "---\nnode: x-live-and-active\nstatus: implemented\n---\n# T\n\nbody\n",
+        )
+        .unwrap();
+
+        let reply =
+            super::handle_plan_docs(&state, &reconcile_params(dir.path(), true, true)).unwrap();
+        assert_eq!(reply["stood_down"], 1);
+        assert_eq!(reply["superseded"], 0);
+        assert!(std::fs::read_to_string(dir.path().join("plans/live.md"))
+            .unwrap()
+            .contains("status: implemented"));
     }
 }
