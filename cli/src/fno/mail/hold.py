@@ -628,7 +628,6 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
                 framed = wrap_fno_mail(
                     digest,
                     from_="fno-mail-hold",
-                    # A delivery of already-id'd rows, never its own bus row.
                     id=generate_msg_id(),
                     to=getattr(entry, "name", None),
                     to_session=getattr(entry, "harness_session_id", None),
