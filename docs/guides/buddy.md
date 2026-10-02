@@ -50,7 +50,7 @@ If you run `/statusline` again later, the buddy tells you at the next session st
 
 You get rerolls in two ways:
 
-- **One reroll each day.** The new day starts at midnight, local time.
+- **One reroll each day.** The day follows the clock of the Claude Code process, which can be UTC.
 - **One reroll for every 2 PRs that your fleet ships.** The buddy counts shipped PRs from the fleet feed. Each PR counts one time, even when many sessions read the same feed.
 
 You can keep 3 rerolls at most. A reroll that you earn with a full bank is lost. The card shows your bank, for example `rerolls: 2/3`. When the bank is empty, `/buddy roll` tells you how to get the next reroll, and your buddy stays.
