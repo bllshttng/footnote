@@ -515,6 +515,16 @@ impl Parsed {
             .flatten()
             .any(|t| t.alts.iter().any(|p| p.key() == Some(key)))
     }
+
+    /// Whether the query asks `has:question`, so the served board reads the
+    /// 38 MB question journal only then.
+    pub fn wants_questions(&self) -> bool {
+        self.groups.iter().flatten().any(|t| {
+            t.alts
+                .iter()
+                .any(|p| matches!(p, Pred::Flag { key: "has", val } if val == "question"))
+        })
+    }
 }
 
 /// Parse one query. An empty query parses to a `Parsed` that keeps
@@ -881,6 +891,14 @@ pub(crate) fn stamp_epoch(s: &str) -> Option<i64> {
         );
     }
     None
+}
+
+/// The wall clock, epoch seconds, one `now` per read.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// One fzf-style hit: the needle's characters appear in order in the field,

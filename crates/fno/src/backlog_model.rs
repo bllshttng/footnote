@@ -67,12 +67,10 @@ pub struct Query {
     king: Vec<String>,
     kind: Vec<String>,
     tag: Vec<String>,
-    q: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub date: Vec<String>,
-    /// fzf-style in-order subsequence matching for `q` (`match=fuzzy`).
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    pub fuzzy: bool,
+    pub(crate) q: Option<String>,
+    /// The resolved page sort from the query's `sort:` term.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sort: Option<String>,
     pub all: bool,
 }
 
@@ -124,51 +122,22 @@ impl Query {
                 "king" => push_unique(&mut q.king, val),
                 "type" => push_unique(&mut q.kind, val),
                 "tag" => push_unique(&mut q.tag, val),
-                "q" => q.q = val.map(str::to_string),
-                "date" => match val {
-                    Some(v) => match split_date_filter(v) {
-                        Some(_) => push_unique(&mut q.date, val),
-                        None => {
-                            return Err(format!(
-                                "bad date filter '{v}'; use <created_at|updated_at|completed_at><op><YYYY-MM-DD> with op one of > >= < <= ="
-                            ))
-                        }
-                    },
-                    None => {}
-                },
-                "match" => match val.unwrap_or_default() {
-                    "" | "exact" => q.fuzzy = false,
-                    "fuzzy" => q.fuzzy = true,
-                    other => {
-                        return Err(format!("unknown match '{other}'; use exact or fuzzy"))
-                    }
-                },
+                "q" => {
+                    let text = val.unwrap_or_default();
+                    let parsed = crate::search_query::parse(
+                        text,
+                        crate::search_query::Surface::Node,
+                        crate::search_query::now_secs(),
+                    )?;
+                    q.sort = parsed.sort;
+                    q.q = val.map(str::to_string);
+                }
                 "all" => q.all = matches!(v.as_str(), "1" | "true" | ""),
                 _ => {}
             }
         }
         Ok(q)
     }
-}
-
-/// Split a `date` filter value into `(field, op, date)`. The field is one of
-/// `created_at`, `updated_at`, `completed_at`; the op is tried longest
-/// first (`>=`, `<=`, then `>`, `<`, `=`); the date is `YYYY-MM-DD`.
-fn split_date_filter(s: &str) -> Option<(&str, &str, &str)> {
-    const FIELDS: [&str; 3] = ["created_at", "updated_at", "completed_at"];
-    let field = FIELDS.iter().find(|f| s.starts_with(**f))?;
-    let rest = &s[field.len()..];
-    const OPS: [&str; 5] = [">=", "<=", ">", "<", "="];
-    let op = OPS.iter().find(|o| rest.starts_with(**o))?;
-    let date = &rest[op.len()..];
-    (date.len() == 10
-        && date.as_bytes()[4] == b'-'
-        && date.as_bytes()[7] == b'-'
-        && date
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit()))
-    .then_some((field, op, date))
 }
 
 /// The crowned row that rules a node's territory.
@@ -401,6 +370,9 @@ pub struct Board {
     pub facets: Facets,
     pub unavailable: Vec<Unavailable>,
     pub errors: Vec<String>,
+    /// The page's key table, served once when the request asks `keys=1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_keys: Option<serde_json::Value>,
 }
 
 /// One graph session row joined to the roster.
@@ -479,6 +451,14 @@ pub struct Inputs {
     pub effective_priority: HashMap<String, String>,
     /// The claim sweep's node id -> holder map.
     pub live_claims: HashMap<String, String>,
+    /// When the read happened: the `now` the grammar's relative dates and
+    /// the stale rule answer against.
+    pub read_at: i64,
+    /// The registry's session identities, read after the gather by
+    /// [`read_search_sources`].
+    pub sessions: crate::search_query::SessionDirectory,
+    /// The node ids with an open operator question, read on demand.
+    pub open_questions: Option<HashSet<String>>,
     pub agents: Vec<AgentRow>,
     pub flow: Value,
     pub scope: BoardScope,
@@ -502,9 +482,14 @@ pub(crate) fn fixture(rows: Vec<Value>) -> Inputs {
             .collect(),
         flow: json!({"available": false, "reason": "fixture"}),
         rows,
+        read_at: FIXTURE_NOW,
         ..Default::default()
     }
 }
+
+/// The fixture's `read_at`: 2026-10-01T12:00:00Z, the case file's `now`.
+#[cfg(test)]
+pub(crate) const FIXTURE_NOW: i64 = 1790856000;
 
 /// The card's index in the model's total order: the keeper's `ids` first,
 /// then ids the keeper did not name, by `created_at`. Computed once per
@@ -698,8 +683,16 @@ fn stamped(e: &Value, field: &str) -> bool {
 /// Whether the filtered card set keeps the row: any-of project, status,
 /// priority, size, king-name, type and tag filters, `epic` keeps the
 /// epic's own card plus cards whose parent names any selected epic, and
-/// `q` is a case-insensitive substring of id, slug, title or details.
-fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
+/// `q` is the shared search grammar over the row's field map.
+#[allow(clippy::too_many_arguments)]
+fn keeps_query(
+    inp: &Inputs,
+    by_ref: &HashMap<&str, &Value>,
+    card: &Card,
+    row: Option<&Value>,
+    q: &Query,
+    parsed: Option<&crate::search_query::Parsed>,
+) -> bool {
     let in_set = |values: &[String], have: Option<&str>| {
         values.is_empty() || values.iter().any(|v| Some(v.as_str()) == have)
     };
@@ -737,92 +730,10 @@ fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
     {
         return false;
     }
-    for spec in &q.date {
-        let Some((field, op, date)) = split_date_filter(spec) else {
-            continue;
-        };
-        let stamp = match field {
-            "created_at" => card.created_at.as_deref(),
-            "updated_at" => card.updated_at.as_deref(),
-            _ => card.completed_at.as_deref(),
-        };
-        let Some(stamp) = stamp else {
-            return false;
-        };
-        let head = &stamp[..stamp.len().min(10)];
-        let keep = match op {
-            ">=" => head >= date,
-            "<=" => head <= date,
-            ">" => head > date,
-            "<" => head < date,
-            _ => head == date,
-        };
-        if !keep {
-            return false;
-        }
-    }
-    if let Some(needle) = &q.q {
-        let needle = needle.to_lowercase();
-        let slug = card.slug.as_deref().unwrap_or("");
-        let details = row
-            .and_then(|r| r.get("details"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if q.fuzzy {
-            // fzf style: the needle's characters appear in order in any one
-            // of id, slug, title, the parent's title or a session id, or in
-            // any one whitespace-split word of the details.
-            let field_hit = [
-                Some(card.id.as_str()),
-                Some(slug),
-                Some(card.title.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            .chain(card.parent_title.as_deref())
-            .chain(card.session_ids.iter().map(String::as_str))
-            .any(|f| fuzzy_hit(&needle, f));
-            let word_hit = details
-                .split_whitespace()
-                .any(|w| fuzzy_hit(&needle, &w.to_lowercase()));
-            if !field_hit && !word_hit {
-                return false;
-            }
-        } else {
-            let hay = format!(
-                "{} {} {} {} {}",
-                card.id,
-                slug,
-                card.title,
-                card.session_ids.join(" "),
-                details
-            )
-            .to_lowercase();
-            if !hay.contains(&needle) {
-                return false;
-            }
-        }
+    if !parsed.is_none_or(|p| p.keeps(&search_fields(inp, by_ref, card, row))) {
+        return false;
     }
     true
-}
-
-/// One fzf-style hit: the needle's characters appear in order in the field,
-/// gaps allowed. Both sides lowercased by the caller.
-fn fuzzy_hit(needle: &str, field: &str) -> bool {
-    let mut chars = needle.chars();
-    let mut want = match chars.next() {
-        Some(c) => c,
-        None => return true,
-    };
-    for ch in field.chars() {
-        if ch == want {
-            match chars.next() {
-                Some(c) => want = c,
-                None => return true,
-            }
-        }
-    }
-    false
 }
 
 /// The pure board answer for a query over gathered inputs.
@@ -857,6 +768,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
                 e.push(err.clone());
                 e
             },
+            search_keys: None,
         };
     }
     let order = order_of(inp);
@@ -915,9 +827,26 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
             *status_totals.entry(s.clone()).or_insert(0) += 1;
         }
     }
+    let parsed =
+        q.q.as_deref()
+            .map(|text| {
+                crate::search_query::parse(text, crate::search_query::Surface::Node, inp.read_at)
+            })
+            .transpose()
+            .ok()
+            .flatten();
     let filtered: Vec<Card> = scoped
         .into_iter()
-        .filter(|c| keeps_query(c, by_ref.get(c.id.as_str()).copied(), q))
+        .filter(|c| {
+            keeps_query(
+                inp,
+                &by_ref,
+                c,
+                by_ref.get(c.id.as_str()).copied(),
+                q,
+                parsed.as_ref(),
+            )
+        })
         .collect();
     // Per-column totals over the filtered set; `open` excludes Done, the
     // header counts keep it.
@@ -959,6 +888,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
         facets,
         unavailable: unavailable(inp),
         errors: inp.errors.clone(),
+        search_keys: None,
     }
 }
 
@@ -1597,6 +1527,9 @@ fn gather_blocking(
         underway,
         effective_priority,
         live_claims,
+        read_at: crate::search_query::now_secs(),
+        sessions: Default::default(),
+        open_questions: None,
         agents,
         flow,
         scope,
@@ -1687,6 +1620,374 @@ pub(crate) fn king_of(
         }
     }
     best.map(|(_, a)| (a.name.clone(), a.crown_level.unwrap_or(0)))
+}
+
+// ---------------------------------------------------------------------------
+// The search grammar's node leg: one field map per card, and the registry
+// + question reads the grammar's session-derived keys answer through.
+// ---------------------------------------------------------------------------
+
+/// The node row's search field map, one per card, from the row and the
+/// joined sessions. All values lowercase; the matcher reads only this map.
+pub(crate) fn search_fields(
+    inp: &Inputs,
+    by_ref: &HashMap<&str, &Value>,
+    card: &Card,
+    row: Option<&Value>,
+) -> crate::search_query::Fields {
+    let mut f = crate::search_query::Fields::new();
+    push_val(&mut f, "id", Some(card.id.clone()));
+    push_val(&mut f, "id", card.slug.clone());
+    // Session-derived keys match any session on the node (spec rule 3): the
+    // row's ids, the live claim holder, and each id's registry identities.
+    for sid in &card.session_ids {
+        push_val(&mut f, "session", Some(sid.clone()));
+        if let Some(entry) = inp.sessions.get(sid) {
+            for id in &entry.ids {
+                push_val(&mut f, "session", Some(id.clone()));
+            }
+            push_val(&mut f, "agent", Some(entry.name.clone()));
+            push_val(&mut f, "spawner", entry.spawned_by_session.clone());
+            push_val(&mut f, "harness", entry.harness.clone());
+            push_val(&mut f, "model", entry.model.clone());
+            push_val(&mut f, "account", entry.account.clone());
+        }
+    }
+    let str_of = |k: &str| -> Option<String> {
+        row.and_then(|r| r.get(k))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let holder = inp
+        .live_claims
+        .get(card.id.as_str())
+        .map(|h| {
+            h.split_once("-session:")
+                .map_or(h.as_str(), |(_, rest)| rest)
+        })
+        .map(str::to_string);
+    push_val(&mut f, "session", holder.clone());
+    push_val(&mut f, "session", str_of("session_id"));
+    push_val(&mut f, "session", str_of("source_session_id"));
+    push_val(&mut f, "session", str_of("locked_by_harness_session"));
+    push_val(&mut f, "session", str_of("source_parent_session"));
+    push_val(&mut f, "spawner", str_of("spawned_by_session"));
+    push_val(&mut f, "spawner", str_of("source_parent_session"));
+    push_val(&mut f, "harness", str_of("source_harness"));
+    push_val(&mut f, "harness", str_of("spawned_by_harness"));
+    push_val(&mut f, "harness", str_of("locked_by_harness"));
+    push_val(&mut f, "model", str_of("source_model"));
+    push_val(&mut f, "effort", str_of("source_effort"));
+    if let Some(sessions) = row
+        .and_then(|r| r.get("sessions"))
+        .and_then(Value::as_array)
+    {
+        for s in sessions {
+            push_val(&mut f, "session", str_of_session(s, "session_id"));
+            push_val(&mut f, "harness", str_of_session(s, "harness"));
+            push_val(&mut f, "phase", str_of_session(s, "phase"));
+            push_val(
+                &mut f,
+                "model",
+                s.get("observed_model")
+                    .and_then(|m| m.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+    }
+    // The PR set: the node's own binding plus any additional PRs.
+    if let Some(n) = row.and_then(|r| r.get("pr_number")).and_then(Value::as_u64) {
+        push_val(&mut f, "pr", Some(n.to_string()));
+    }
+    if let Some(extra) = row
+        .and_then(|r| r.get("additional_prs"))
+        .and_then(Value::as_array)
+    {
+        for p in extra {
+            if let Some(n) = p.get("number").and_then(Value::as_u64) {
+                push_val(&mut f, "pr", Some(n.to_string()));
+            }
+        }
+    }
+    for (key, field) in [
+        ("status", "status"),
+        ("priority", "priority"),
+        ("size", "size"),
+        ("difficulty", "difficulty"),
+        ("type", "type"),
+        ("domain", "domain"),
+        ("project", "project"),
+    ] {
+        push_val(&mut f, key, str_of(field));
+    }
+    push_val(&mut f, "origin", str_of("source_kind"));
+    push_val(&mut f, "epic", card.parent.clone());
+    if let Some(row) = row {
+        if let Some(tags) = row.get("tags").and_then(Value::as_array) {
+            for t in tags.iter().filter_map(Value::as_str) {
+                push_val(&mut f, "tag", Some(t.to_string()));
+            }
+        }
+    }
+    // `in`: the node and every ancestor up the parent chain; a visited set
+    // stops cycles.
+    let mut chain = vec![card.id.clone()];
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cur = card.parent.clone();
+    while let Some(p) = cur {
+        if !seen.insert(p.clone()) {
+            break;
+        }
+        chain.push(p.clone());
+        cur = by_ref
+            .get(p.as_str())
+            .and_then(|r| r.get("parent"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    for id in chain {
+        push_val(&mut f, "in", Some(id));
+    }
+    if let Some(king) = &card.king {
+        push_val(&mut f, "lead", Some(king.name.clone()));
+    }
+    push_val(&mut f, "column", Some(card.column.replace(' ', "_")));
+    let details = row
+        .and_then(|r| r.get("details"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let area = crate::search_query::areas_for_node(&card.title, &details, card.project.as_deref());
+    for a in area {
+        push_val(&mut f, "area", Some(a.to_string()));
+    }
+    push_val(&mut f, "created", str_of("created_at"));
+    push_val(&mut f, "updated", card.updated_at.clone());
+    push_val(&mut f, "done", str_of("completed_at"));
+    for flag in node_flags(inp, card, row) {
+        push_val(&mut f, "is", Some(flag));
+    }
+    for flag in node_has(inp, card, row) {
+        push_val(&mut f, "has", Some(flag));
+    }
+    push_val(&mut f, "votes", Some(card.encounters.to_string()));
+    push_val(&mut f, "children", Some(card.child_count.to_string()));
+    if let Some(cost) = row.and_then(|r| r.get("cost_usd")).and_then(Value::as_f64) {
+        push_val(&mut f, "cost", Some(cost.to_string()));
+    }
+    push_val(&mut f, "title", Some(card.title.clone()));
+    push_val(&mut f, "details", Some(details.clone()));
+    if let Some(notes) = row
+        .and_then(|r| r.get("progress_notes"))
+        .and_then(Value::as_array)
+    {
+        for n in notes {
+            push_val(
+                &mut f,
+                "details",
+                n.get("text").and_then(Value::as_str).map(str::to_string),
+            );
+        }
+    }
+    push_val(&mut f, "text", Some(card.id.clone()));
+    push_val(&mut f, "text", card.slug.clone());
+    push_val(&mut f, "text", Some(card.title.clone()));
+    push_val(&mut f, "text", card.parent_title.clone());
+    f
+}
+
+/// One lowercase value into a field slot, deduplicated, blanks dropped.
+fn push_val(f: &mut crate::search_query::Fields, key: &str, val: Option<String>) {
+    if let Some(v) = val.filter(|v| !v.is_empty()) {
+        let v = v.to_lowercase();
+        let slot = f.entry(key.to_string()).or_default();
+        if !slot.contains(&v) {
+            slot.push(v);
+        }
+    }
+}
+
+/// A session row's string field.
+fn str_of_session(s: &Value, key: &str) -> Option<String> {
+    s.get(key)
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// The `is:` flags one node answers.
+fn node_flags(inp: &Inputs, card: &Card, row: Option<&Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if card.column != "Done" {
+        out.push("open".to_string());
+    } else {
+        out.push("done".to_string());
+    }
+    if card.blocked {
+        out.push("blocked".to_string());
+    }
+    if card.claimed {
+        out.push("claimed".to_string());
+    }
+    if card.live || any_session_live(inp, &card.session_ids) {
+        out.push("live".to_string());
+    }
+    let operator = row
+        .and_then(|r| {
+            r.get("source_kind")
+                .or_else(|| r.get("request_origin"))
+                .and_then(Value::as_str)
+        })
+        .is_some_and(|k| k == "operator_request");
+    if operator {
+        out.push("operator".to_string());
+    }
+    if row
+        .and_then(|r| r.get("contained_in"))
+        .is_some_and(|v| !v.is_null())
+    {
+        out.push("contained".to_string());
+    }
+    let stale = card.status.as_deref() == Some("ready")
+        && row
+            .and_then(|r| r.get("created_at"))
+            .and_then(Value::as_str)
+            .and_then(crate::search_query::stamp_epoch)
+            .is_some_and(|ts| inp.read_at - ts > 30 * 86400);
+    if stale {
+        out.push("stale".to_string());
+    }
+    out
+}
+
+/// The `has:` flags one node answers.
+fn node_has(inp: &Inputs, card: &Card, row: Option<&Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let carries = |key: &str| -> bool {
+        row.and_then(|r| r.get(key)).is_some_and(|v| match v {
+            Value::String(s) => !s.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            _ => false,
+        })
+    };
+    if carries("pr_number") || carries("additional_prs") {
+        out.push("pr".to_string());
+    }
+    if carries("plan_path") {
+        out.push("plan".to_string());
+    }
+    if card.child_count > 0 {
+        out.push("children".to_string());
+    }
+    if carries("blocked_by") {
+        out.push("blocker".to_string());
+    }
+    if card.live || any_session_live(inp, &card.session_ids) {
+        out.push("worker".to_string());
+    }
+    if inp
+        .open_questions
+        .as_ref()
+        .is_some_and(|set| set.contains(card.id.as_str()))
+    {
+        out.push("question".to_string());
+    }
+    if carries("progress_notes") {
+        out.push("notes".to_string());
+    }
+    out
+}
+
+/// A non-exited registry row answers to any of these ids (the snapshot's
+/// live rule, where the roster carries no harness session ids).
+fn any_session_live(inp: &Inputs, ids: &[String]) -> bool {
+    ids.iter()
+        .any(|sid| inp.sessions.get(sid).is_some_and(|entry| !entry.exited))
+}
+
+/// The registry and question-journal reads the grammar's session-derived
+/// keys and `has:question` answer through, after a gather. A failed read
+/// leaves the slot empty and names itself on `errors`, never an empty board.
+pub fn read_search_sources(inp: &mut Inputs, want_questions: bool) {
+    if inp.sessions.is_empty() {
+        let read = std::fs::read_to_string(crate::agents_view::registry_path())
+            .map_err(|e| e.to_string())
+            .and_then(|raw| {
+                crate::agents_view::derive_rows(&raw, inp.read_at.max(0) as u64)
+                    .ok_or_else(|| "the registry rows did not parse".to_string())
+            });
+        match read {
+            Ok(rows) => inp.sessions = crate::search_query::SessionDirectory::from_registry(&rows),
+            Err(e) => {
+                if !inp.errors.iter().any(|e| e.contains("names unavailable")) {
+                    inp.errors.push(format!("names unavailable: {e}"));
+                }
+            }
+        }
+    }
+    if want_questions && inp.open_questions.is_none() {
+        inp.open_questions = Some(read_open_questions(inp));
+    }
+}
+
+/// The node ids with an `operator_question` whose `question_id` has no
+/// later `operator_question_closed` (file order decides "later").
+fn read_open_questions(inp: &Inputs) -> HashSet<String> {
+    let text = match std::fs::read_to_string(crate::attention_api::journal_path()) {
+        Ok(text) => text,
+        Err(_) => return HashSet::new(),
+    };
+    let _ = inp;
+    let mut by_qid: HashMap<String, Vec<String>> = HashMap::new();
+    for v in crate::attention_api::journal_rows(&text) {
+        let data = v.get("data").cloned().unwrap_or(Value::Null);
+        match v.get("type").and_then(Value::as_str) {
+            Some("operator_question") => {
+                let Some(qid) = data
+                    .get("question_id")
+                    .or_else(|| data.get("n"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                let mut nodes: Vec<String> = data
+                    .get("node")
+                    .and_then(Value::as_str)
+                    .map(|n| vec![n.to_string()])
+                    .unwrap_or_default();
+                if let Some(blocks) = data.get("blocks").and_then(Value::as_array) {
+                    nodes.extend(blocks.iter().filter_map(Value::as_str).map(str::to_string));
+                }
+                by_qid.insert(qid.to_string(), nodes);
+            }
+            Some("operator_question_closed") => {
+                if let Some(qid) = data
+                    .get("question_id")
+                    .or_else(|| data.get("n"))
+                    .and_then(Value::as_str)
+                {
+                    by_qid.remove(qid);
+                }
+            }
+            _ => {}
+        }
+    }
+    by_qid
+        .into_values()
+        .flatten()
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// The row refs one search-field build reads: id to row, the same map
+/// `board()` builds.
+pub fn board_refs(inp: &Inputs) -> HashMap<&str, &Value> {
+    inp.rows
+        .iter()
+        .filter_map(|r| r.get("id").and_then(Value::as_str).map(|id| (id, r)))
+        .collect()
 }
 
 #[cfg(test)]

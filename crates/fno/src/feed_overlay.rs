@@ -361,12 +361,8 @@ mod tests {
         assert_eq!(items[0].parent.as_deref(), Some("s-lead"));
         assert_eq!(items[0].holder.as_deref(), Some("heir"));
         assert_eq!(items[1].cwd.as_deref(), Some("/workspace/node-project"));
-    }
-
-    // AC7-HP: the event row interface answers the grammar's keys, and `s:`
-    // refuses on the event surface.
-    #[test]
-    fn event_fields_answer_the_search_grammar() {
+        // AC7-HP: the event row interface answers the grammar's keys, and
+        // `s:` refuses on the event surface.
         let item = FeedItem {
             ts: "2026-10-01T08:00:00Z".into(),
             kind: "question_asked".into(),
