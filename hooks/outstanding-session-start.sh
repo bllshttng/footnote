@@ -64,7 +64,7 @@ WT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/lib/hook-budget
 source "$WT_LIB" 2>/dev/null || exit 0
 
 # A fired bound or a skip past the load threshold reads as silence: the
-# machine is too loaded to spend a turn boundary on this read (x-72bb).
+# machine is too loaded to spend a turn boundary on this read.
 body=$(hook_run_optional fno inbox outstanding 2>/dev/null) || rc=$?
 rc=${rc:-0}
 

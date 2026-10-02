@@ -116,7 +116,7 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$HOOK_INPUT" | sed -n \
 # never consume each other's latch (same fix target-stop-hook applied).
 TBASE="$(basename "$TRANSCRIPT" .jsonl 2>/dev/null || echo "$TRANSCRIPT")"
 
-# ── 1b. The load-aware read budget (x-72bb). Live fno reads ride it; past
+# ── 1b. The load-aware read budget. Live fno reads ride it; past
 # the load threshold they are skipped and defaults apply. The PROBE is served
 # from a cache refreshed off the turn path, so the pressure check costs
 # milliseconds even when the machine is too loaded for a live read. The

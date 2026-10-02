@@ -3,10 +3,10 @@
 # (the context, nudge, inject and announce families), plus the cache those
 # hooks read instead of running a live query.
 #
-# Why (x-72bb): a UserPromptSubmit hook timed out after 30s and blocked the
-# turn. A generous harness ceiling is not a budget, because a hook that waits
-# blocks turns and mail. Optional context must fail open FAST, and load must
-# SHORTEN the budget, never lengthen it.
+# Why: a UserPromptSubmit hook timed out after 30s and blocked the turn. A
+# generous harness ceiling is not a budget, because a hook that waits blocks
+# turns and mail. Optional context must fail open FAST, and load must SHORTEN
+# the budget, never lengthen it.
 #
 # Contract:
 #   idle machine (load1 <= cores)            -> HOOK_BUDGET_IDLE_SECS (3)

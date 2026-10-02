@@ -69,7 +69,7 @@ done
 default_reader() {
   # The read is local-file-only today, but a bounded call costs nothing. The
   # bound is the skill-local with_timeout copy bundled from
-  # scripts/lib/with-timeout.sh via skill-bundles.yaml (x-72bb): stock macOS
+  # scripts/lib/with-timeout.sh via skill-bundles.yaml: stock macOS
   # ships no coreutils timeout, and the old timeout/gtimeout/bare chain ended
   # in an UNBOUNDED call. A missing helper degrades the read (rc 1), never
   # drops the bound.

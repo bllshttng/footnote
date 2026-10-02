@@ -27,8 +27,8 @@ PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 # fno shells can wedge on a stalled daemon / graph lock; bound every call with
-# the shared load-aware budget rather than the harness's 30s hook timeout
-# (x-72bb). Fails closed like the other injection hooks: a missing helper
+# the shared load-aware budget rather than the harness's 30s hook timeout.
+# Fails closed like the other injection hooks: a missing helper
 # exits 0. Past the load threshold the offer is skipped BEFORE the cursor
 # advances, so it is deferred to the next prompt, never destroyed.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

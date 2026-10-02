@@ -42,7 +42,7 @@ WT_LIB="$HOOK_DIR/../scripts/lib/hook-budget.sh"
 source "$WT_LIB" 2>/dev/null || exit 0
 
 # The queue read derives from the session transcript, so it is keyed per
-# session and served from a stale-while-revalidate cache (x-72bb): a
+# session and served from a stale-while-revalidate cache: a
 # fresh-enough copy costs milliseconds, a served copy past two thirds of its
 # life arms a DETACHED refresher for the next boundary, and a live read that
 # skipped or expired under load serves the stale copy rather than nothing.
