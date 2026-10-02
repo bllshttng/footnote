@@ -1043,7 +1043,7 @@ pub fn help_text(surface: Surface) -> String {
     let worked: &[&str] = match surface {
         Surface::Node => &[
             "h:codex is:open -t:epic",
-            "in:x-3b09 s:ready,idea sort:priority",
+            "in:x-aaaa s:ready,idea sort:priority",
             "created:>=2026-09-20 sid:01a0f916",
         ],
         Surface::Event => &[

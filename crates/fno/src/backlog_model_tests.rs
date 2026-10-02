@@ -828,10 +828,10 @@ fn search_grammar_case_table_holds_and_drives_the_board() {
     );
     assert!(!node_help.contains("k:question"), "k: is event-only");
     assert!(
-        node_help.contains("in:x-3b09 s:ready,idea sort:priority"),
+        node_help.contains("in:x-aaaa s:ready,idea sort:priority"),
         "the worked examples ride"
     );
-    assert!(event_help.contains("k:question kind"));
+    assert!(event_help.contains("k:ready kind"));
     assert!(!event_help.contains("s:ready"), "s: is node-only");
     assert!(event_help.contains("m:glm k:node_shipped ts:>=2026-10-01"));
 }
