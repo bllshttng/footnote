@@ -580,7 +580,7 @@ fn ensure_index(conn: &Connection, chats_dir: &Path) -> Result<(), String> {
         let stored: Option<(i64, Option<String>)> = conn
             .query_row(
                 "SELECT msg_count, last_line_hash FROM chats WHERE chat_id = ?1",
-                [chat_id],
+                [&chat_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok();
