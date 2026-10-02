@@ -304,3 +304,8 @@ code-index-detect.sh
 # (tests/mux-portal-restore-server-kill.sh, tests/mux-workspace-standalone.sh)
 # from their EXIT cleanup; a pure library with no fno surface of its own.
 keeper-reap.sh
+
+# The load-aware hook budget. Sourced by the optional hooks in hooks/ (see
+# docs/hooks-fail-open.md) and by tests/hooks/test_hook_budget.sh; the bound
+# and the cache are pure library, no fno verb wraps them.
+hook-budget.sh

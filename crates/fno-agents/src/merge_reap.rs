@@ -277,7 +277,7 @@ fn stop_harness_confirmed(
     // consults it - every other row's process is ended by the shared stage
     // below (law d-81c6da7e).
     if crate::gc_native::stop_precedes_removal(entry)
-        && crate::gc_sweep::claude_death_reason(entry, agents).is_some()
+        && crate::daemon::row_death_reason(entry, agents).is_some()
     {
         return Ok(row_stop_short(entry).unwrap_or_default());
     }
@@ -848,7 +848,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                     let terminal = if entry.harness_name() == "claude" {
                         let mut memo = agents_memo.borrow_mut();
                         let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);
-                        crate::gc_sweep::claude_death_reason(entry, agents)
+                        crate::daemon::row_death_reason(entry, agents)
                     } else {
                         None
                     };

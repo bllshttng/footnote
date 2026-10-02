@@ -57,14 +57,17 @@ fi
 # close. But exit 2 is Typer's "no such command", which a DEPLOYED fno older
 # than this feature returns on EVERY session until someone runs
 # `fno doctor update`. Nagging forever is noise, so the loud path is reserved
-# for a real failure: a fired bound (124) or an unreadable store (1).
-WT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/lib/with-timeout.sh"
+# for a real failure: an unreadable store (1). A fired bound or a skip past
+# the load threshold reads as silence (the budget contract below).
+WT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/lib/hook-budget.sh"
 [[ -f "$WT_LIB" ]] || exit 0
-# shellcheck source=../scripts/lib/with-timeout.sh
+# shellcheck source=../scripts/lib/hook-budget.sh
 source "$WT_LIB" 2>/dev/null || exit 0
 
-rc=0
-body=$(with_timeout 3 fno inbox outstanding 2>/dev/null) || rc=$?
+# A fired bound or a skip past the load threshold reads as silence: the
+# machine is too loaded to spend a turn boundary on this read.
+body=$(hook_run_optional fno inbox outstanding 2>/dev/null) || rc=$?
+rc=${rc:-0}
 
 [[ $rc -eq 0 ]] && { [[ -n "$body" ]] && printf '%s' "$body"; exit 0; }
 [[ $rc -eq 2 ]] && exit 0

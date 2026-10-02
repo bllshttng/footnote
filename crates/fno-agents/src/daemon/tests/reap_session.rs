@@ -37,6 +37,9 @@ fn x2774_spawn(name: &str, short_id: &str, sid: &str) -> state::RegistryEntry {
     e.harness = Some("claude".into());
     e.harness_session_id = Some(sid.into());
     e.origin = Some("spawn".into());
+    // The verdict door reads the stored status first; the x2774 buckets
+    // vary the vendor word, so the row itself must be fno-undecided.
+    e.status = crate::AgentStatus::Idle;
     e
 }
 

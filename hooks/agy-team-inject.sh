@@ -23,8 +23,8 @@
 # indistinguishable from a superuser typing (the mail-probe entry).
 #
 # NEVER blocks. Always exits 0 and degrades to silence when anything it reads
-# is missing: no jq, no fno-agents, no registry row, no team. An uncrowned
-# session still gets announcements; a session with neither injects nothing.
+# is missing: no jq, no fno-agents, no registry row, no team. A session with
+# no team still gets announcements; a session with neither injects nothing.
 set -uo pipefail
 
 HOOK_INPUT=$(cat)
@@ -43,13 +43,13 @@ CONVERSATION_ID="$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 
 
 STEPS=()
 
-# Announcements on every model call, ahead of any team line. Same 2-second
+# Announcements on every model call, ahead of any team line. Same load-aware
 # bound and fail-open posture as inject-announce.sh.
 command -v fno-agents >/dev/null 2>&1 && {
     HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    # shellcheck source=scripts/lib/with-timeout.sh
-    if source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null; then
-        ANNOUNCE_OUT="$(with_timeout 2 fno-agents announce read \
+    # shellcheck source=scripts/lib/hook-budget.sh
+    if source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null; then
+        ANNOUNCE_OUT="$(hook_run_optional fno-agents announce read \
             --session-id "$CONVERSATION_ID" \
             --harness agy \
             --boundary prompt 2>/dev/null || true)"
