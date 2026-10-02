@@ -20,7 +20,7 @@
 # source build on any mismatch, so the reserved 0.0.0 placeholder or a
 # squatted `fno` never runs in place of ours. Last resort:
 # `uv tool install` / `pip install --user` from the bundled cli/ source
-# (Python-only; the Rust binaries then need `fno doctor update --rust`).
+# (Python-only; the Rust binaries then need `cargo install --locked --path <repo>/crates/fno-agents --path <repo>/crates/fno`).
 #
 # Every path logs which one it took (AC7-UI), so the user knows whether the
 # daemon-backed verbs will work without a second step.
@@ -223,7 +223,7 @@ install_source_via_uv() {
   log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
   if uv_tool_install_retry "$CLI_DIR"; then
     log "installed Python-only fno from source. INCOMPLETE install: no 'fno' front door and no Rust binaries -"
-    log "run 'fno doctor update --rust' for the daemon-backed verbs, or install a published PyPI wheel for the advertised 'fno' command."
+    log "run 'cargo install --locked --path <repo>/crates/fno-agents --path <repo>/crates/fno' for the daemon-backed verbs, or install a published PyPI wheel for the advertised 'fno' command."
     log "restart your shell (or source your env) to pick up PATH."
     next_steps
     return 0
@@ -356,7 +356,7 @@ if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then
   PIP="$(command -v pip || command -v pip3)"
   log "uv unavailable; falling back to $PIP install --user from $CLI_DIR (Python-only)..."
   if "$PIP" install --user "$CLI_DIR"; then
-    log "installed Python-only fno via pip --user. INCOMPLETE install: no 'fno' front door - run 'fno doctor update --rust' for the Rust binaries, or install a published PyPI wheel for the advertised command."
+    log "installed Python-only fno via pip --user. INCOMPLETE install: no 'fno' front door - run 'cargo install --locked --path <repo>/crates/fno-agents --path <repo>/crates/fno' for the Rust binaries, or install a published PyPI wheel for the advertised command."
     log "ensure ~/.local/bin (or your user site-scripts dir) is on PATH."
     finish_success
     next_steps
