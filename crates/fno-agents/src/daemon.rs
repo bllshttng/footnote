@@ -1632,8 +1632,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         Arc::clone(&ab_live),
         Arc::clone(&ab_shutdown),
     );
-    // Exact-cost telemetry: one localhost OTLP receiver, same sandbox skip,
-    // opt-out via `[telemetry] claude_otel = false`.
+    // Exact-cost telemetry receiver; same sandbox skip; opt-out: telemetry.claude_otel.
     let otel_shutdown = crate::otel_ingest::spawn_for_daemon(&ctx.home, sandbox);
 
     // SIGTERM -> graceful shutdown.

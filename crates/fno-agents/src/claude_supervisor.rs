@@ -733,7 +733,7 @@ mod tests {
             }
         };
         assert!(otel_env(&port_file, ambient).is_empty());
-        let clean = |key: &str| -> Option<String> { None };
+        let clean = |_key: &str| -> Option<String> { None };
         assert!(otel_env(&td.path().join("nope"), clean).is_empty());
         // An ambient CLAUDE_CODE_ENABLE_TELEMETRY wins too.
         let claude_on = |key: &str| -> Option<String> {
