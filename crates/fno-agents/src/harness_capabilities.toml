@@ -689,8 +689,9 @@ route_on_pane = false
 # opencode resolves (`FNO_OPENCODE_BIN` names the binary; the install asks that
 # binary's `debug paths` for the root; OPENCODE_CONFIG_DIR and the XDG chain
 # remain the override and fallback). On 1.x the bridge subscribes to
-# `session.idle`; on v2 it listens to BOTH idle forms (`session.status` with
-# status.type "idle" and the documented `session.idle`), deduped by a
+# `session.idle`; on v2 it listens to every turn-end name (`session.status`
+# with status.type "idle", the documented `session.idle`, and the live
+# 2.0.19 bus's `session.execution.succeeded`/`.failed`), deduped by a
 # per-session latch re-armed on the next prompt, and wires the full hook set
 # (tool before/after, shell env, prompt, system context, compaction). It
 # synthesizes a claude-shaped transcript, shells the same `fno-agents
