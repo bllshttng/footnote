@@ -132,3 +132,32 @@ pub(super) fn agy_to_claude(v: Value) -> Value {
         "cwd": cwd,
     })
 }
+
+// ── Limb signatures ──────────────────────────────────────────────────────────
+
+pub(super) fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
+    let Some(parent) = Path::new(transcript).parent() else {
+        return false;
+    };
+    parent.file_name().is_some_and(|n| n == "subagents")
+        && parent
+            .parent()
+            .and_then(|g| g.file_name())
+            .is_some_and(|n| n == sid)
+}
+
+/// The sync-limb shape: the transcript's newest tool_use is Task/Agent with no
+/// tool_result yet. Tail-only (the open entry sits at the end of a live
+/// transcript); unreadable falls through fail-closed. The pairing is the one
+/// shared walk (`interrupt_classify::trailing_open_call`), not a private leg.
+pub(super) fn transcript_is_open_spawn(transcript: &str) -> bool {
+    if transcript.is_empty() {
+        return false;
+    }
+    crate::tail_text_strict(Path::new(transcript), 262_144)
+        .and_then(|tail| {
+            crate::interrupt_classify::trailing_open_call(&tail)
+                .filter(|c| c.name == "Task" || c.name == "Agent")
+        })
+        .is_some()
+}

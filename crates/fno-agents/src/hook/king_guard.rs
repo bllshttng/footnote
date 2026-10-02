@@ -192,10 +192,10 @@ pub fn run(args: &[String]) -> i32 {
             "limb (agent_id {agent_id}) of crowned session {sid}; allowing"
         ));
     }
-    if is_subagent_transcript(transcript, &sid) {
+    if wire::is_subagent_transcript(transcript, &sid) {
         return allow(&format!("limb of crowned session {sid}; allowing"));
     }
-    if transcript_is_open_spawn(transcript) {
+    if wire::transcript_is_open_spawn(transcript) {
         return allow(&format!(
             "limb of crowned session {sid} (open Task/Agent tool_use in the parent transcript); allowing"
         ));
@@ -780,40 +780,13 @@ fn is_build_output(t: &str, cwd: &Path) -> bool {
     false
 }
 
-// ── Limb signatures ──────────────────────────────────────────────────────────
-
-pub(crate) fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
-    let Some(parent) = Path::new(transcript).parent() else {
-        return false;
-    };
-    parent.file_name().is_some_and(|n| n == "subagents")
-        && parent
-            .parent()
-            .and_then(|g| g.file_name())
-            .is_some_and(|n| n == sid)
-}
-
-/// The sync-limb shape: the transcript's newest tool_use is Task/Agent with no
-/// tool_result yet. Tail-only (the open entry sits at the end of a live
-/// transcript); unreadable falls through fail-closed. The pairing is the one
-/// shared walk (`interrupt_classify::trailing_open_call`), not a private leg.
-fn transcript_is_open_spawn(transcript: &str) -> bool {
-    if transcript.is_empty() {
-        return false;
-    }
-    crate::tail_text_strict(Path::new(transcript), 262_144)
-        .and_then(|tail| {
-            crate::interrupt_classify::trailing_open_call(&tail)
-                .filter(|c| c.name == "Task" || c.name == "Agent")
-        })
-        .is_some()
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::super::king_guard_wire::{agy_to_claude, deny_text, patch_targets};
+    use super::super::king_guard_wire::{
+        agy_to_claude, deny_text, is_subagent_transcript, patch_targets, transcript_is_open_spawn,
+    };
     use super::*;
 
     fn targets(cmd: &str) -> Vec<String> {
