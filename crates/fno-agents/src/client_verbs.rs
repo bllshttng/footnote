@@ -3661,9 +3661,13 @@ mod tests {
         assert_eq!(value["node"], "x-old");
         assert_eq!(value["origin"], "revived");
 
-        let journal = std::fs::read_to_string(home.events_jsonl()).unwrap();
-        assert!(journal.contains("\"agent_revived\""), "{journal}");
-        assert!(journal.contains("t-old-name"), "{journal}");
+        let rows = crate::event_store::query_events(
+            &home.events_jsonl(),
+            &crate::event_store::EventQuery::of_types(&["agent_revived"]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "the revive journals one event");
+        assert!(rows[0].line.contains("t-old-name"), "{}", rows[0].line);
 
         // A session never reaped mints under the synthesized name, keeps the
         // adopted origin, and journals nothing.
@@ -3674,12 +3678,12 @@ mod tests {
         };
         let fresh_value = persist_manifest_identity(&fresh, &home).unwrap();
         assert_eq!(fresh_value["origin"], "adopted");
-        let journal = std::fs::read_to_string(home.events_jsonl()).unwrap();
-        assert_eq!(
-            journal.matches("agent_revived").count(),
-            1,
-            "only the revived session journals a comeback"
-        );
+        let rows = crate::event_store::query_events(
+            &home.events_jsonl(),
+            &crate::event_store::EventQuery::of_types(&["agent_revived"]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "only the revived session journals");
     }
 
     #[test]

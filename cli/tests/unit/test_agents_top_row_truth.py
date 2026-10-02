@@ -160,7 +160,7 @@ def test_foreign_row_progress_joins_registry_through_session_id(
     assert row["progress"] == "advancing"
 
 
-def test_claim_join_renders_node_and_pr(patched, monkeypatch):
+def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
     """x-54ba: the session's own claim answers before any name-keyed join.
 
     A revived claude-store-only session (reaped row, adopt minted a fresh one)
@@ -200,6 +200,32 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch):
     assert alone["node"] == "x-06f7"
     assert alone["pr"] is None
     assert alone["pr_basis"] == "no-pr"
+
+
+def test_claim_sessions_reads_the_real_yaml_lockfile(tmp_path, monkeypatch):
+    """The join's reader, not a stub: a real ``node:`` claim lockfile (YAML,
+    global-rooted) parses through fno.claims' own reader, so the parse and
+    the root cannot silently rot."""
+    from fno.agents.top import _claim_sessions
+    from fno.claims.io import claim_path, global_claims_root, serialize_claim
+    from fno.claims.types import Claim
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    lock = claim_path("node:x-join", root=global_claims_root())
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(
+        serialize_claim(
+            Claim(
+                key="node:x-join",
+                holder="target-session:SID-X",
+                acquired_at=1_700_000_000_000,
+                pid=41468,
+                host="test",
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert _claim_sessions() == {"sid-x": ("x-join", None)}
 
 
 def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):

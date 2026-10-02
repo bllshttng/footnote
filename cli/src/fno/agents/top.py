@@ -161,21 +161,29 @@ def _claim_sessions() -> dict[str, tuple[str, Optional[int]]]:
     import subprocess
     import sys
 
-    from fno.claims.io import claim_path, claims_dir, list_claim_keys
+    from fno.claims.io import (
+        claim_path,
+        global_claims_root,
+        list_claim_keys,
+        read_claim_file,
+    )
 
     out: dict[str, tuple[str, Optional[int]]] = {}
     pr_cache: dict[str, Optional[int]] = {}
+    # node: claims are global-rooted (claims_root_for); reading the cwd/env
+    # default would miss every claim when no env override is set.
+    root = global_claims_root()
     try:
-        keys = list_claim_keys(prefix="node:")
+        keys = list_claim_keys(prefix="node:", root=root)
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
         return {}
     for key in keys:
         node = key[len("node:") :]
         try:
-            payload = json.loads(claim_path(key).read_text("utf-8"))
+            claim = read_claim_file(claim_path(key, root=root))
         except Exception:  # noqa: BLE001 — a corrupt lockfile skips, never fails
             continue
-        holder = payload.get("holder") or ""
+        holder = claim.holder or ""
         if not holder.startswith("target-session:"):
             continue
         sid = holder[len("target-session:") :].strip().lower()
