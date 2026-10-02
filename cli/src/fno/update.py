@@ -1393,15 +1393,6 @@ _UPDATE_EVENT_TYPES = (
 )
 
 
-def _read_current_installed_rev() -> Optional[str]:
-    try:
-        from fno import doctor
-
-        return doctor._read_marker()
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def _front_fno_bin() -> Optional[str]:
     try:
         from fno.pr_watch.cli import _resolve_fno_binary
@@ -1473,11 +1464,11 @@ def _last_update_event() -> Optional[dict]:
     return rows[-1] if rows else None
 
 
-def _installed_event_argv(fno_bin: str, rev: Optional[str], old_rev: Optional[str]) -> list[str]:
+def _installed_data(rev: Optional[str], old_rev: Optional[str]) -> dict:
     data: dict = {"new_rev": rev or "unknown"}
     if old_rev:
         data["old_rev"] = old_rev
-    return _update_emit_argv(fno_bin, "fno_update_installed", data)
+    return data
 
 
 def _shell_fail_prologue(fno_bin: str, old_rev: Optional[str], rev: Optional[str]) -> str:
@@ -1731,7 +1722,12 @@ def update_command(
     # Machine-global mutations start here: the journal trail begins, and the
     # cargo legs wear the install-build mark the admission doors read.
     os.environ["FNO_INSTALL_BUILD"] = "1"
-    old_rev = _read_current_installed_rev()
+    try:
+        from fno import doctor as _doctor
+
+        old_rev = _doctor._read_marker()
+    except Exception:  # noqa: BLE001
+        old_rev = None
     _emit_update_event(
         "fno_update_started",
         new_rev=rev or "unknown",
@@ -1749,6 +1745,11 @@ def update_command(
             rust_rev=_rust_subtree_rev(resolved),
         )
 
+    installed_body = (
+        f"fno doctor update installed {(rev or 'unknown')[:8]}"
+        + (f" (was {old_rev[:8]})" if old_rev else "")
+        + "."
+    )
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
         # installer as a child and terminates the parent with status 0,
@@ -1764,13 +1765,8 @@ def update_command(
             # List form (no shell) so subprocess handles Windows quoting.
             for _argv in refresh_cmds:
                 subprocess.run(_argv, check=False)
-            _emit_update_event("fno_update_installed", new_rev=rev or "unknown", old_rev=old_rev)
-            _mail_crowns(
-                _front_fno_bin(),
-                f"fno doctor update installed {(rev or 'unknown')[:8]}"
-                + (f" (was {old_rev[:8]})" if old_rev else "")
-                + ".",
-            )
+            _emit_update_event("fno_update_installed", **_installed_data(rev, old_rev))
+            _mail_crowns(_front_fno_bin(), installed_body)
         else:
             _emit_update_event(
                 "fno_update_failed",
@@ -1791,15 +1787,12 @@ def update_command(
     # watcher must not skip the groom agent.
     # The installed fact and the crown mail chain BEFORE the refreshes: they
     # are the two facts the node exists for, so no refresh crash may eat them.
-    installed_body = (
-        f"fno doctor update installed {(rev or 'unknown')[:8]}"
-        + (f" (was {old_rev[:8]})" if old_rev else "")
-        + "."
-    )
     _fno_bin = _front_fno_bin()
     post_steps: list[str] = []
     if _fno_bin:
-        post_steps.append(shlex.join(_installed_event_argv(_fno_bin, rev, old_rev)))
+        post_steps.append(
+            shlex.join(_update_emit_argv(_fno_bin, "fno_update_installed", _installed_data(rev, old_rev)))
+        )
         post_steps.append(shlex.join(_crown_mail_cmd(_fno_bin, installed_body)))
     post_steps += [shlex.join(c) for c in refresh_cmds]
     post_install = "; ".join(post_steps) or None
