@@ -1,6 +1,6 @@
 # Optional hooks fail open fast
 
-A hook that waits blocks a turn. Context that arrives late is worth less than a turn that starts on time. So, when the machine is busy, every optional footnote hook runs under one load-aware budget that pays LESS attention to context, never more.
+A hook that waits blocks a turn. Context that arrives late is worth less than a turn that starts on time. When the machine is busy, every optional footnote hook runs under one load-aware budget that pays LESS attention to context, never more.
 
 ## The budget
 
@@ -27,7 +27,7 @@ These hooks decide something (block, refuse, attest, deliver control), so they d
 
 ## Third-party hooks: give yours the same budget
 
-If you add your own hook (a codegraph prompt-hook, a project linter, anything that shells out), wrap it in the same fail-open budget instead of trusting the harness ceiling:
+If you add your own hook, wrap it in the same fail-open budget. Do not trust the harness ceiling. The hook can be a codegraph prompt-hook, a project linter, anything that shells out:
 
 ```bash
 #!/usr/bin/env bash
