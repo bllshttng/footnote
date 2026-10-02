@@ -1724,7 +1724,7 @@ def classify_open_pr_bindings(
     Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
     board all read the same verdicts.
     """
-    from fno.pr.closure import branch_node_ids, parse_closure_trailer, retargeted_from_ids
+    from fno.pr.closure import branch_node_ids, parse_closure_answer
 
     real_ids = {
         e.get("id")
@@ -1754,13 +1754,15 @@ def classify_open_pr_bindings(
         head = str(row.get("headRefName") or "")
         if not isinstance(number, int) or not head:
             continue
-        matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
-        if matched and "body" in row:
-            gone = retargeted_from_ids(row["body"])
-            matched = [nid for nid in matched if nid not in gone]
         body_supplied = "body" in row
+        # ONE pr-closure-parse spawn per body answers both fields.
+        answer = parse_closure_answer(row["body"]) if body_supplied else {}
+        matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
+        gone = answer.get("retargeted_from", [])
+        if matched and gone:
+            matched = [nid for nid in matched if nid not in gone]
         trailer: list[str] = (
-            [nid for nid in parse_closure_trailer(row["body"]) if nid in real_ids]
+            [nid for nid in answer.get("ids", []) if nid in real_ids]
             if body_supplied
             else []
         )
