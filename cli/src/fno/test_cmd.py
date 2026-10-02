@@ -650,9 +650,21 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         # always red teaches people to ignore it exactly as fast as one that is
         # always green. It is exercised deliberately, in BOTH lanes, by
         # tests/ci/test_hermetic_lanes.sh, which is where the assertion belongs.
+        # TEMPORARY, remove before merge: a runner stop mid-progress looks
+        # like memory or disk exhaustion, so log free/df before and after the
+        # suite and sample the top processes every 15s between them. The last
+        # MEM-SAMPLE before a stop names the process that grew.
+        "free -m\ndf -h\n"
+        "(while true; do echo MEM-SAMPLE; ps -eo pid,ppid,rss,comm --sort=-rss"
+        " | head -21; sleep 15; done) &\n"
+        "sampler=$!\n"
+        "status=0\n"
         "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup "
         "-m 'not slow_e2e' "
-        "--ignore=tests/unit/test_ambient_canary.py",
+        "--ignore=tests/unit/test_ambient_canary.py || status=$?\n"
+        'kill "$sampler" 2>/dev/null || true\n'
+        "free -m\ndf -h\n"
+        'exit "$status"',
     ),
     ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
