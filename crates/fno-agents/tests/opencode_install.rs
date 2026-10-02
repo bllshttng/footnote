@@ -187,7 +187,9 @@ fn install_targets_the_binary_writes_the_full_surface_and_reinstall_is_a_noop() 
     // root source, and the reported version.
     {
         let s = scratch("target-binary");
-        let conf_v2 = s.root.parent().unwrap().join("conf-v2");
+        // A space in the root name: the debug-paths parse must carry the
+        // whole rest of the row, not just the next whitespace token.
+        let conf_v2 = s.root.parent().unwrap().join("conf v2");
         std::fs::create_dir_all(&conf_v2).unwrap();
         write_file(
             &s.root.join("agents/allow.md"),

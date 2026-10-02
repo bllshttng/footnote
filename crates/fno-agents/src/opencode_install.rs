@@ -71,16 +71,21 @@ pub(crate) fn opencode_bin() -> String {
         .unwrap_or_else(|| "opencode".to_string())
 }
 
-/// The `config` row of `<bin> debug paths`, parsed by its first whitespace
-/// token - never by line index. `None` when the binary is missing, fails,
-/// or prints no config row.
+/// The `config` row of `<bin> debug paths`: the first line whose leading
+/// token is `config`, carrying the REST of the line as the path so a home
+/// directory containing a space survives. `None` when the binary is
+/// missing, fails, or prints no config row.
 fn debug_paths_config_row(bin: &str) -> Option<String> {
     let out = run_bounded(bin, &["debug", "paths"])?;
     let text = String::from_utf8(out).ok()?;
     for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        if parts.next() == Some("config") {
-            return parts.next().map(str::to_string);
+        if let Some((token, rest)) = line.split_once(char::is_whitespace) {
+            if token == "config" {
+                let path = rest.trim();
+                if !path.is_empty() {
+                    return Some(path.to_string());
+                }
+            }
         }
     }
     None

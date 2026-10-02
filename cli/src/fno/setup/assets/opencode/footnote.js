@@ -846,12 +846,22 @@ async function setup(ctx) {
     try {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (event?.type === "session.created") {
-          if (
-            await runSessionStart(root, dir, runProc, contextQueue, event.data?.sessionID)
-          ) {
-            eventLog("session.created:hooks", event.data?.sessionID)
-          }
-          handle("created", event.data?.sessionID)
+          const sid = event.data?.sessionID
+          // Off the event loop's critical path: a slow SessionStart script
+          // must not serialize every later event (idle gates included).
+          // The context queue drains at the session's first model request,
+          // seconds away, so the scripts land in time.
+          runSessionStart(root, dir, runProc, contextQueue, sid)
+            .then((queued) => {
+              if (queued) eventLog("session.created:hooks", sid)
+            })
+            .catch((e) => console.error(`[footnote] SessionStart hooks failed: ${e}`))
+          handle("created", sid)
+        } else if (event?.type === "session.execution.started") {
+          // A new execution is a new turn: re-arm the latch. A runtime retry
+          // after a failed execution fires this without a prompt hook, so the
+          // eventual succeeded twin gates instead of being latched out.
+          idleArmed.delete(event.data?.sessionID)
         } else if (event?.type === "session.idle") {
           eventLog("idle via session.idle", event.data?.sessionID)
           runIdleOnce(event.data?.sessionID)

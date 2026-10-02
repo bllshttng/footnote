@@ -539,6 +539,12 @@ describe("opencode 2 setup arm", () => {
           stream.push({ type: "session.execution.succeeded", data: { sessionID: "ses_d" } })
           stream.push({ type: "session.execution.failed", data: { sessionID: "ses_d" } })
           await until(() => gateRuns() === 2)
+          // A runtime retry after the failure fires execution.started without
+          // a prompt hook; it re-arms the latch, so the retry's own turn end
+          // gates instead of being dropped.
+          stream.push({ type: "session.execution.started", data: { sessionID: "ses_d" } })
+          stream.push({ type: "session.execution.succeeded", data: { sessionID: "ses_d" } })
+          await until(() => gateRuns() === 3)
           cleanup()
           expect(prompts.length).toBeGreaterThan(0) // block decision re-drove the session
         },
