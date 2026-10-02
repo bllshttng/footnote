@@ -35,6 +35,8 @@ The lifecycle kinds derive from the graph at query time, so the graph stays the 
 | `session_reaped` | a reap receipt, `detail` carrying its verbatim resume line |
 | `day_boundary` | a persisted morning or end-of-day readback (ref: boundary id) |
 
+Crown rows (`crown_granted`, `crown_vacated`) also carry `holder`: the crowned worker's name, which the feed search answers `l:` through.
+
 ## Day boundaries
 
 `fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and reign check-ins. The native fold returns JSON or a short text readback. The native verb's `--commit` writes one bounded `day_boundary` row to the project journal first. It then writes the same row to `~/.fno/questions.jsonl` for durable cross-rotation recall. The inbox relay only selects the destination, so the operator command lives under the inbox. The row carries ids and counts only. The writer sizes the row against the validated event limit before any write. If the row is over the limit, the writer refuses it and never substitutes.
