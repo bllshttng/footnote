@@ -577,6 +577,7 @@ fn the_planner_routes_retire_and_rm_the_harness_session() {
             reason: None,
             received_at: "2026-09-01T00:00:00Z".into(),
             ttl_ms: None,
+            posture: None,
         });
         r.entries.push(a);
         r.entries.push(b);
@@ -838,6 +839,7 @@ fn a_planner_fno_stopped_holds_as_unclosed() {
                 reason: None,
                 received_at: "2026-09-01T00:00:00Z".into(),
                 ttl_ms: None,
+                posture: None,
             });
         }
     })

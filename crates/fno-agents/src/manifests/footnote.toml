@@ -1,0 +1,7 @@
+# footnote readiness manifest - deliberately rule-free.
+#
+# The validator requires every capability-row harness to bundle a manifest.
+# footnote's loop runs inside the client process with no terminal grid, so
+# there is nothing to match rules against.
+#
+# State vocabulary + arbitration: see codex.toml.

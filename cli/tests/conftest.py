@@ -20,6 +20,17 @@ import fno.doctor_cli  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _no_send_settle_wait(monkeypatch):
+    """The post-send landed verify reads immediately under test.
+
+    Its settle window waits for a REAL recipient to poll or flush; no test
+    measures the wait itself, and without this every durable-demotion test
+    in the suite pays the window as sleep.
+    """
+    monkeypatch.setenv("FNO_MAIL_LANDED_SETTLE_S", "0")
+
+
+@pytest.fixture(autouse=True)
 def _reset_project_resolve_cache():
     """Clear the project-name resolver's cache before and after every test.
 

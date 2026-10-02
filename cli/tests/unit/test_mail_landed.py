@@ -93,6 +93,22 @@ def test_ac1_landed_true_when_id_is_in_recipient_transcript(tmp_path, monkeypatc
 
     assert states[mid] is True
 
+    # the post-send verify reads the same transcript RAW, so the id
+    # inside a rendered tool output (an `unread` poll result) counts as the
+    # pickup the record parsers drop. No <fno_mail> tag anywhere.
+    from fno.bus.log import Envelope, append
+    from fno.mail.landed import post_send_landed
+
+    send = Envelope.new(from_="alice", to="bob", kind="send", body="raw pickup")
+    append(send)
+    tool_output = json.dumps(
+        {"type": "tool_result", "content": f"{send.id} queued (durable) for bob"}
+    ) + "\n"
+    _write_transcript(tmp_path, monkeypatch, RECIPIENT_SESSION, tool_output)
+    assert post_send_landed(
+        send.id, to="bob", to_harness="claude", to_session=RECIPIENT_SESSION
+    ) == (True, "recipient transcript")
+
 
 def test_ac2_landed_false_then_flips_true_once_the_id_appears(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
@@ -218,6 +234,20 @@ def test_ac3_edge_durable_row_with_unread_cursor_still_nags(tmp_path, monkeypatc
     outstanding = _sent_unclaimed("alice", ttl_seconds=0)
 
     assert [m.id for m in outstanding] == [send.id]
+
+    # the sender-side verify reads the same cursor, and an advanced
+    # cursor IS the pickup proof - the bus claim the transcript grep is blind
+    # to. Before the claim the verdict is a proven False; the nag above still
+    # applies its own TTL rule, which this arm does not touch.
+    from fno.bus.cursor import write_cursor
+    from fno.mail.landed import post_send_landed
+
+    assert post_send_landed(send.id, to="king") == (False, "")
+    write_cursor("king", send.id)
+    assert post_send_landed(send.id, to="king") == (
+        True,
+        "bus claim (recipient read past it)",
+    )
 
 
 def test_ac9_self_send_refuses_the_resolution(tmp_path, monkeypatch):

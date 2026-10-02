@@ -2284,6 +2284,21 @@ event_types:
         to:
           type: string
 
+  - name: agent_posture_changed
+    description: "A worker's observed sandbox posture changed; the report carries the runtime sandbox and approval words, stored observed beside the spawn's request."
+    sources: [daemon]
+    data:
+      required: [name, harness_session_id, from, to]
+      properties:
+        name:
+          type: string
+        harness_session_id:
+          type: string
+        from:
+          type: [string, "null"]
+        to:
+          type: string
+
   - name: agent_renamed
     description: "A worker's harness-side title changed (rename never fires a hook, so the transcript tail is the detector); the registry label is never rewritten."
     sources: [daemon]

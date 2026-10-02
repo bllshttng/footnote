@@ -1331,6 +1331,10 @@ async fn run(args: Vec<String>) -> i32 {
         {
             return code;
         }
+        if let Some(code) = fno_agents::footnote_harness::maybe_run_ask(&home, &params, &agent_name)
+        {
+            return code;
+        }
         // Opencode `ask` is intercepted client-side: opencode is
         // pane-hosted only in v1, so a stateful resume is unsupported — this
         // surfaces a clear error directing the caller to drive the pane
@@ -2754,6 +2758,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             permission_mode,
             timeout,
             &harness_args,
+            params.get("node").and_then(|v| v.as_str()),
+        )),
+
+        // footnote headless: footnote's own loop, run in this process.
+        ("footnote", "headless") => emit!(fno_agents::footnote_harness::dispatch_once(
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            timeout,
             params.get("node").and_then(|v| v.as_str()),
         )),
 
