@@ -8033,8 +8033,10 @@ async fn attach_and_run(
 
     // The harness-catalog probe for the new-agent popup, same
     // last-outcome-wins shape as the update probe.
-    let (flags_tx, mut flags_rx) =
-        tokio::sync::mpsc::channel::<(String, Option<Vec<crate::client::harness_flags::FlagRow>>)>(4);
+    let (flags_tx, mut flags_rx) = tokio::sync::mpsc::channel::<(
+        String,
+        Option<Vec<crate::client::harness_flags::FlagRow>>,
+    )>(4);
     let (catalog_tx, mut catalog_rx) =
         tokio::sync::mpsc::unbounded_channel::<agent_launcher::CatalogOutcome>();
 
