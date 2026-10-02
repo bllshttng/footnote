@@ -305,6 +305,18 @@ const LINK_KEYS: &[&str] = &[
     "parent",
 ];
 
+/// The facet lists the public filter bar may carry. `kings` is a roster
+/// fact; `tags` is free text the title gate never sees, so both stay
+/// private even though the page could render them.
+const PUBLIC_FACET_FIELDS: &[&str] = &[
+    "projects",
+    "epics",
+    "priorities",
+    "sizes",
+    "statuses",
+    "kinds",
+];
+
 /// Reduce `value` (an object) to the allowlisted fields. A non-object passes
 /// through, so `null` slots ride along.
 fn allowlist_copy(value: &Value, fields: &[&str]) -> Value {
@@ -351,6 +363,9 @@ fn to_public_payload(payload: Value) -> Value {
             }
             *view = public_view;
         }
+    }
+    if let Some(facets) = out.get_mut("facets") {
+        *facets = allowlist_copy(facets, PUBLIC_FACET_FIELDS);
     }
     out
 }
@@ -771,6 +786,12 @@ mod tests {
                     "node field {key} is not allowlisted"
                 );
             }
+        }
+        for key in payload["facets"].as_object().unwrap().keys() {
+            assert!(
+                PUBLIC_FACET_FIELDS.contains(&key.as_str()),
+                "facet field {key} is not allowlisted"
+            );
         }
         // A link to a non-public id drops.
         let view = &payload["nodes"]["x-1"];

@@ -4276,6 +4276,7 @@ def cmd_roadmap(
         atomic_write_documents,
         load_render_entries,
         omit_leaky_rows,
+        render_public_backlog_html,
         render_public_roadmap_md,
     )
 
@@ -4297,47 +4298,8 @@ def cmd_roadmap(
     entries, _ = omit_leaky_rows(entries, resolved_project)
 
     if backlog_html:
-        # The public page renders through the native front binary: selection
-        # and the title gate run there, beside the output allowlist, so the
-        # private graph never leaves the process unfiltered.
-        import json
-        import subprocess
-
-        from fno.rust_binary import VerbUnavailable, resolve_front_binary
-
-        try:
-            binary = resolve_front_binary()
-            if binary is None:
-                raise VerbUnavailable("the native fno binary was not found")
-            request = json.dumps(
-                {
-                    "targets": [{"path": os.path.expanduser(backlog_html)}],
-                    "public": {"project": resolved_project},
-                }
-            )
-            done = subprocess.run(
-                [str(binary), "board-render"],
-                input=request,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-        except Exception as exc:
-            typer.echo(
-                f"Error: public backlog HTML render failed: {exc}", err=True
-            )
-            raise typer.Exit(code=1) from exc
-        if done.returncode != 0:
-            err = (done.stderr or "").strip()
-            if "unknown field" in err:
-                err += (
-                    " (the installed fno predates the public board render; "
-                    "run `fno doctor update --rust`)"
-                )
-            typer.echo(
-                f"Error: public backlog HTML render failed: {err[:300]}",
-                err=True,
-            )
+        if not render_public_backlog_html(resolved_project, backlog_html):
+            typer.echo("Error: public backlog HTML render failed; see the warning above", err=True)
             raise typer.Exit(code=1)
 
     md = render_public_roadmap_md(entries, resolved_project)
