@@ -2,7 +2,10 @@
 //! marker IO, guard parsing, and verdict-row folding. Anything that shells to
 //! cargo/uv belongs to the manual verify pass on a scratch CARGO_INSTALL_ROOT.
 
-use super::*;
+use serde_json::Value;
+use std::path::PathBuf;
+
+use crate::doctor_update::*;
 
 fn os(args: &[&str]) -> Vec<std::ffi::OsString> {
     args.iter().map(std::ffi::OsString::from).collect()
@@ -44,7 +47,7 @@ fn parse_args_reads_every_flag() {
 
 #[test]
 fn guard_reads_target_state_frontmatter() {
-    let _g = super::super::model_catalog::state_env_lock();
+    let _g = crate::model_catalog::state_env_lock();
     let tmp = std::env::temp_dir().join(format!("fno-du-guard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join(".fno")).unwrap();

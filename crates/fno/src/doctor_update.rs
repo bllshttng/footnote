@@ -734,7 +734,7 @@ fn stale_mux_servers() -> Vec<String> {
 /// The `stale` verdict fold: only LIVE rows on a wire below the floor. A
 /// pre-sidecar server has no .ver and reads as stale, so the check works
 /// across the upgrade that introduces it.
-fn stale_sessions_from_rows(rows: &[Value]) -> Vec<String> {
+pub(crate) fn stale_sessions_from_rows(rows: &[Value]) -> Vec<String> {
     rows.iter()
         .filter_map(|r| {
             let live = r.get("state").and_then(Value::as_str) == Some("live");
@@ -1090,8 +1090,12 @@ fn render_component_evidence(source: &Path, subtree: Option<&str>, install_root:
 /// find it at spawn time).
 fn resolve_fno_py() -> PathBuf {
     on_path(&format!("fno-py{}", exe_suffix())).unwrap_or_else(|| {
-        uv_tool_bin_dir()
-            .map(|d| d.join(format!("fno-py{}", exe_suffix())))
+        uv_tool_dir()
+            .map(|d| {
+                d.join("fno")
+                    .join("bin")
+                    .join(format!("fno-py{}", exe_suffix()))
+            })
             .unwrap_or_else(|| PathBuf::from("fno-py"))
     })
 }
