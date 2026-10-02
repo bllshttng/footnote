@@ -65,11 +65,27 @@ pub struct Target {
 
 /// The request the Python caller writes to stdin: the configured local
 /// targets plus the Obsidian vault name for the deep links.
+///
+/// `deny_unknown_fields` is the version-skew guard: an installed binary
+/// predating the `public` field must refuse the request, never silently fall
+/// back to rendering the private graph onto a public path.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub targets: Vec<Target>,
     #[serde(default)]
     vault: Option<String>,
+    /// The public open-work projection: selection (`public_backlog_entries`
+    /// semantics) and the title gate run here in Rust beside the output
+    /// allowlist, so the private graph never leaves the process unfiltered.
+    #[serde(default)]
+    public: Option<PublicRequest>,
+}
+
+/// The public projection's request row: one named project scope.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PublicRequest {
+    pub project: String,
 }
 
 /// The receipt: one row per target under `written` or `failed`, so the
@@ -81,14 +97,22 @@ struct Receipt {
 }
 
 fn render_request(request: &Request) -> Result<Receipt, String> {
-    let graph = backlog_view::graph_path();
-    // No roster here: the snapshot records claims and columns, never live
-    // dots or crowns, which are roster facts the served board answers live.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("cannot start the async runtime: {e}"))?;
-    let inputs = runtime.block_on(backlog_model::gather(&graph, Vec::new()));
+    let gathered = {
+        let graph = backlog_view::graph_path();
+        // No roster here: the snapshot records claims and columns, never
+        // live dots or crowns, which are roster facts the served board
+        // answers live.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("cannot start the async runtime: {e}"))?;
+        runtime.block_on(backlog_model::gather(&graph, Vec::new()))
+    };
+    let public = request.public.is_some();
+    let inputs = match &request.public {
+        Some(spec) => inputs_from_rows(&select_public_rows(&gathered.rows, &spec.project)?),
+        None => gathered,
+    };
     let mut receipt = Receipt {
         written: Vec::new(),
         failed: Vec::new(),
@@ -98,7 +122,7 @@ fn render_request(request: &Request) -> Result<Receipt, String> {
             .scope
             .as_deref()
             .filter(|s| !s.is_empty() && *s != "all");
-        match render_one(&inputs, scope, request.vault.as_deref()) {
+        match render_one(&inputs, scope, request.vault.as_deref(), public) {
             Ok((page, cards)) => match atomic_write(Path::new(&target.path), &page) {
                 Ok(()) => receipt
                     .written
@@ -115,6 +139,22 @@ fn render_request(request: &Request) -> Result<Receipt, String> {
     Ok(receipt)
 }
 
+/// The selected row set as read-model inputs: no claims, no roster, flow
+/// marked unavailable. `select_public_rows` produced the rows; the render
+/// allowlists what the page embeds.
+fn inputs_from_rows(rows: &[Value]) -> backlog_model::Inputs {
+    backlog_model::Inputs {
+        backend: "graph".into(),
+        rows: rows.to_vec(),
+        order: rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect(),
+        flow: json!({"available": false, "reason": "public projection"}),
+        ..Default::default()
+    }
+}
+
 /// Render one target's page from the gathered inputs. A failed source read
 /// refuses the target (the caller leaves the last good page byte-unchanged,
 /// the Python renderer's rule).
@@ -122,6 +162,7 @@ fn render_one(
     inputs: &backlog_model::Inputs,
     scope: Option<&str>,
     vault: Option<&str>,
+    public: bool,
 ) -> Result<(String, usize), String> {
     if let Some(err) = &inputs.rows_error {
         return Err(err.clone());
@@ -171,7 +212,7 @@ fn render_one(
         nodes.insert(id.clone(), view);
     }
     let count = ids.len();
-    let payload = json!({
+    let mut payload = json!({
         "schema": 1,
         "generated_at": now_secs(),
         "vault": vault,
@@ -183,7 +224,251 @@ fn render_one(
         "cards": &flat,
         "nodes": nodes,
     });
+    if public {
+        payload = to_public_payload(payload);
+    }
     Ok((snapshot_page(crate::web::BACKLOG_PAGE, &payload)?, count))
+}
+
+// ---------------------------------------------------------------------------
+// The public projection: selection, the title gate, and the output allowlist.
+// The private page embeds whole node views and free text; the public page is
+// the allowlisted subset, so a future private-payload field (session ids,
+// agent names, search maps) can never reach it by being added on the writer
+// side alone.
+// ---------------------------------------------------------------------------
+
+/// The payload's top-level fields the public page may carry. `vault` is
+/// private-mode only.
+const PUBLIC_PAYLOAD_FIELDS: &[&str] = &[
+    "schema",
+    "generated_at",
+    "backend",
+    "scope",
+    "flow",
+    "facets",
+    "columns",
+    "cards",
+    "nodes",
+];
+
+/// The card fields the public page may carry: the board facts only. `king`
+/// and `live` are roster facts and stay private.
+const PUBLIC_CARD_FIELDS: &[&str] = &[
+    "id",
+    "slug",
+    "title",
+    "column",
+    "order",
+    "rank",
+    "priority",
+    "size",
+    "status",
+    "project",
+    "parent",
+    "kind",
+    "tags",
+    "blocked",
+    "claimed",
+    "created_at",
+    "completed_at",
+    "encounters",
+    "encounters_operator",
+];
+
+/// The node view's fields the public page may carry. plan_path, cwd,
+/// details, current_state, origin evidence, notes, decisions, unavailable
+/// and sessions are private; prs and the node links are public, with links
+/// filtered to public ids.
+const PUBLIC_NODE_FIELDS: &[&str] = &[
+    "card",
+    "kind",
+    "difficulty",
+    "created_at",
+    "completed_at",
+    "prs",
+    "children",
+    "contained",
+    "blocked_by",
+    "blocks",
+    "related",
+    "parent",
+];
+
+/// The link lists the public panel renders, filtered to public ids.
+const LINK_KEYS: &[&str] = &[
+    "children",
+    "contained",
+    "blocked_by",
+    "blocks",
+    "related",
+    "parent",
+];
+
+/// The facet lists the public filter bar may carry. `kings` is a roster
+/// fact; `tags` is free text the title gate never sees, so both stay
+/// private even though the page could render them.
+const PUBLIC_FACET_FIELDS: &[&str] = &[
+    "projects",
+    "epics",
+    "priorities",
+    "sizes",
+    "statuses",
+    "kinds",
+];
+
+/// Reduce `value` (an object) to the allowlisted fields. A non-object passes
+/// through, so `null` slots ride along.
+fn allowlist_copy(value: &Value, fields: &[&str]) -> Value {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .filter(|(k, _)| fields.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<serde_json::Map<String, Value>>()
+            .into(),
+        other => other.clone(),
+    }
+}
+
+/// The public payload: the same shape run through the three allowlists, with
+/// every node link retargeted to a public id.
+fn to_public_payload(payload: Value) -> Value {
+    let ids: std::collections::HashSet<&str> = payload["cards"]
+        .as_array()
+        .map(|cards| {
+            cards
+                .iter()
+                .filter_map(|c| c.get("id").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = allowlist_copy(&payload, PUBLIC_PAYLOAD_FIELDS);
+    if let Some(cards) = out.get_mut("cards").and_then(Value::as_array_mut) {
+        for card in cards.iter_mut() {
+            *card = allowlist_copy(card, PUBLIC_CARD_FIELDS);
+        }
+    }
+    if let Some(nodes) = out.get_mut("nodes").and_then(Value::as_object_mut) {
+        for view in nodes.values_mut() {
+            let mut public_view = allowlist_copy(view, PUBLIC_NODE_FIELDS);
+            for key in LINK_KEYS {
+                if let Some(links) = public_view.get_mut(*key).and_then(Value::as_array_mut) {
+                    links.retain(|l| {
+                        l.get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| ids.contains(id))
+                    });
+                }
+            }
+            *view = public_view;
+        }
+    }
+    if let Some(facets) = out.get_mut("facets") {
+        *facets = allowlist_copy(facets, PUBLIC_FACET_FIELDS);
+    }
+    out
+}
+
+/// The swimlane project key, ported from `_project_key`: the row's project
+/// string, else the unscoped label (which never matches a named scope).
+fn project_key(row: &Value) -> &str {
+    match row.get("project").and_then(Value::as_str) {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => "(unscoped)",
+    }
+}
+
+/// The public backlog's status membership, ported from
+/// `derived_status` + `PUBLIC_BACKLOG_STATUSES`: an open status, unless the
+/// row is terminally closed (`superseded_by`, the one closure signal an
+/// open raw status can carry) with a `completed_at`.
+fn in_public_backlog_set(row: &Value) -> bool {
+    let status = row.get("status").and_then(Value::as_str).unwrap_or("");
+    if !matches!(status, "in_progress" | "ready" | "blocked" | "idea") {
+        return false;
+    }
+    let superseded = row
+        .get("superseded_by")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    let completed = row
+        .get("completed_at")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    !(superseded && completed)
+}
+
+/// The one leak vocabulary, a byte-for-byte port of
+/// `roadmap_public.LEAK_PATTERNS` (also ported at
+/// `fno-agents title_gate.rs`): node ids and PR numbers are public; home
+/// paths and session ids are not.
+static LEAK_PATTERNS: std::sync::LazyLock<Vec<(&'static str, regex::Regex)>> =
+    std::sync::LazyLock::new(|| {
+        vec![
+            (
+                "home-path",
+                regex::Regex::new(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")
+                    .expect("static regex"),
+            ),
+            (
+                "session-id",
+                regex::Regex::new(
+                    r"(?i)\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ses-[A-Za-z0-9_-]+)\b",
+                )
+                .expect("static regex"),
+            ),
+        ]
+    });
+
+/// The selection behind `--backlog-html`: `public_backlog_entries` plus the
+/// title gate, in the same order the markdown render runs them. A leaking
+/// title costs its own row only; the warning names the classes so the
+/// operator hears why a row went missing.
+fn select_public_rows(rows: &[Value], project: &str) -> Result<Vec<Value>, String> {
+    let selected: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r.get("public").and_then(Value::as_bool) != Some(false))
+        .filter(|r| project_key(r) == project)
+        .filter(|r| in_public_backlog_set(r))
+        .collect();
+    let mut out = Vec::new();
+    let mut omitted = 0usize;
+    let mut classes: Vec<&str> = Vec::new();
+    for row in selected {
+        let title = row
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .replace('\n', " ");
+        let hits: Vec<&str> = LEAK_PATTERNS
+            .iter()
+            .filter(|(_, p)| p.is_match(&title))
+            .map(|(class, _)| *class)
+            .collect();
+        if hits.is_empty() {
+            out.push(row.clone());
+        } else {
+            omitted += 1;
+            classes.extend(hits);
+        }
+    }
+    if omitted > 0 {
+        classes.sort_unstable();
+        classes.dedup();
+        eprintln!(
+            "Warning: omitted {omitted} public row(s) from the {project} backlog render: title matched {}; the rest published.",
+            classes.join(", ")
+        );
+    }
+    if out.is_empty() {
+        // The typo'd-project signature, same rule the scoped private render
+        // runs: refuse rather than publish an empty public board.
+        return Err(format!(
+            "no public rows carry project {project:?}; nothing rendered"
+        ));
+    }
+    Ok(out)
 }
 
 fn now_secs() -> u64 {
@@ -410,11 +695,109 @@ mod tests {
         assert_eq!(canonical_plan_path("~/elsewhere/x.md", Some("c3po")), None);
     }
 
-    /// A `<` alone in the data escapes too, so the invariant is one rule,
-    /// not a closing-sequence hunt.
+    /// The public projection end to end: the request surface is exact (an
+    /// unknown field refuses, so an installed binary predating `public`
+    /// never renders the private graph to a public path); selection keeps
+    /// only the project's open, public, clean-titled rows; and the rendered
+    /// page's embedded payload passes the three allowlists, so any field
+    /// outside them fails this test.
     #[test]
-    fn every_angle_bracket_escapes() {
-        let out = snapshot_page("<body>x", &json!({"q": "a<b"})).unwrap();
-        assert!(out.contains("a\\u003cb"), "{out}");
+    fn the_public_projection_selects_gates_and_sanitizes() {
+        assert!(serde_json::from_str::<Request>(
+            r#"{"targets":[{"path":"/tmp/b.html"}],"rogue":1}"#
+        )
+        .is_err());
+        let legacy: Request =
+            serde_json::from_str(r#"{"targets":[{"path":"/tmp/b.html"}],"vault":"c3po"}"#).unwrap();
+        assert!(legacy.public.is_none());
+        let public: Request = serde_json::from_str(
+            r#"{"targets":[{"path":"/tmp/b.html"}],"public":{"project":"fno"}}"#,
+        )
+        .unwrap();
+        assert_eq!(public.public.as_ref().unwrap().project, "fno");
+
+        let rows = vec![
+            json!({
+                "id": "x-1", "title": "Public thing", "slug": "public-thing",
+                "status": "ready", "priority": "p1", "project": "fno",
+                "type": "feature", "public": true,
+                "cwd": "/Users/someone/secret", "session_id": "ses-leak",
+                "details": "secret details",
+                "notes": [{"text": "secret note"}],
+                "sessions": [{"session_id": "ses-leak"}],
+                "blocked_by": ["x-2"],
+                "plan_path": "/Users/someone/internal/fno/plans/pub.md",
+            }),
+            json!({"id": "x-2", "title": "Linked private", "slug": "lp",
+                   "status": "ready", "project": "fno", "public": false}),
+            json!({"id": "x-3", "title": "Ship it at /Users/bb/tmp", "slug": "leak",
+                   "status": "ready", "project": "fno"}),
+            json!({"id": "x-4", "title": "Wrong project", "slug": "wp",
+                   "status": "ready", "project": "other"}),
+            json!({"id": "x-5", "title": "Done work", "slug": "dw",
+                   "status": "done", "project": "fno",
+                   "completed_at": "2026-01-01"}),
+            json!({"id": "x-6", "title": "Stale open", "slug": "so",
+                   "status": "in_progress", "project": "fno",
+                   "superseded_by": "x-1", "completed_at": "2026-01-01"}),
+        ];
+        let selected = select_public_rows(&rows, "fno").unwrap();
+        let ids: Vec<&str> = selected.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["x-1"]);
+
+        let inputs = inputs_from_rows(&selected);
+        let (page, count) = render_one(&inputs, None, None, true).unwrap();
+        assert_eq!(count, 1);
+        assert!(page.contains("Public thing"), "{page}");
+        for secret in [
+            "/Users/someone/secret",
+            "ses-leak",
+            "secret details",
+            "secret note",
+            "Linked private",
+            "obsidian://",
+        ] {
+            assert!(!page.contains(secret), "leaked {secret}");
+        }
+        // The structural gate: walk the embedded payload and fail on any
+        // field the allowlists do not name.
+        let marker = "id=\"fno-snapshot\">";
+        let start = page.find(marker).unwrap() + marker.len();
+        let end = page[start..].find("</script>").unwrap() + start;
+        let payload: Value = serde_json::from_str(&page[start..end]).unwrap();
+        for key in payload.as_object().unwrap().keys() {
+            assert!(
+                PUBLIC_PAYLOAD_FIELDS.contains(&key.as_str()),
+                "payload field {key} is not allowlisted"
+            );
+        }
+        for card in payload["cards"].as_array().unwrap() {
+            for key in card.as_object().unwrap().keys() {
+                assert!(
+                    PUBLIC_CARD_FIELDS.contains(&key.as_str()),
+                    "card field {key} is not allowlisted"
+                );
+            }
+        }
+        for view in payload["nodes"].as_object().unwrap().values() {
+            for key in view.as_object().unwrap().keys() {
+                assert!(
+                    PUBLIC_NODE_FIELDS.contains(&key.as_str()),
+                    "node field {key} is not allowlisted"
+                );
+            }
+        }
+        for key in payload["facets"].as_object().unwrap().keys() {
+            assert!(
+                PUBLIC_FACET_FIELDS.contains(&key.as_str()),
+                "facet field {key} is not allowlisted"
+            );
+        }
+        // A link to a non-public id drops.
+        let view = &payload["nodes"]["x-1"];
+        assert_eq!(view["blocked_by"].as_array().map(Vec::len), Some(0));
+
+        // The typo'd-project refusal: nothing public means nothing rendered.
+        assert!(select_public_rows(&rows, "nope").is_err());
     }
 }
