@@ -20,10 +20,12 @@
 // tool before/after, shell env, prompt, system context, compaction - each
 // fed by the SAME hook body its 1.x twin uses.
 //
-// On idle (1.x `session.idle`; 2.x listens to BOTH `session.status` with
-// `status.type === "idle"` and the documented `session.idle` form, deduped
-// by a per-session latch re-armed on the next prompt, so one idle turn
-// runs the gate exactly once whichever form fires) the handler:
+// On idle (1.x `session.idle`; 2.x names the turn end three ways - the live
+// 2.0.19 bus emits `session.execution.succeeded`/`.failed` (measured live
+// 2026-10-02), the published docs use `session.idle`, early docs used
+// `session.status` with `status.type === "idle"`. All are listened to,
+// deduped by a per-session latch re-armed on the next prompt, so one idle
+// turn runs the gate exactly once whichever form fires) the handler:
 //
 //   1. resolves the session's target manifest via `fno-agents state path
 //      target-state` (the space-resolved manifest; the legacy in-repo
@@ -717,11 +719,12 @@ async function server({ directory, worktree, client, $ }) {
 
 // The 2.x arm: hook seams for tool before/after, shell env, prompt, system
 // context and compaction, plus one event subscription for created and idle.
-// v2 reports an idle turn as `session.status` (status.type "idle") and
-// documents `session.idle`; both are listened to and deduped by a
-// per-session latch, so one idle turn runs the gate exactly once (AC3-EDGE).
-// Each hook is registered only when its seam exists; an absent seam is
-// reported once and stays 1.x-only.
+// v2 names its turn-end event three ways: the live 2.0.19 bus emits
+// `session.execution.succeeded` (and `.failed`), the published docs use
+// `session.idle`, and early docs used `session.status` (status.type "idle").
+// All are listened to and deduped by a per-session latch, so one idle turn
+// runs the gate exactly once (AC3-EDGE). Each hook is registered only when
+// its seam exists; an absent seam is reported once and stays 1.x-only.
 function makeV2Io(ctx) {
   return {
     readAssistantTexts: async (sid) => {
@@ -854,6 +857,12 @@ async function setup(ctx) {
           runIdleOnce(event.data?.sessionID)
         } else if (event?.type === "session.status" && event.data?.status?.type === "idle") {
           eventLog("idle via session.status", event.data?.sessionID)
+          runIdleOnce(event.data?.sessionID)
+        } else if (
+          event?.type === "session.execution.succeeded" ||
+          event?.type === "session.execution.failed"
+        ) {
+          eventLog(`idle via ${event.type}`, event.data?.sessionID)
           runIdleOnce(event.data?.sessionID)
         }
       }

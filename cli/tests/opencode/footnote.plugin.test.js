@@ -532,9 +532,12 @@ describe("opencode 2 setup arm", () => {
           stream.push({ type: "message.part.updated", data: { sessionID: "ses_d" } })
           await new Promise((r) => setTimeout(r, 80))
           expect(gateRuns()).toBe(1)
-          // The session's next prompt re-arms the latch: the next idle gates again.
+          // The session's next prompt re-arms the latch: the next turn end
+          // gates again - the live 2.0.19 form (execution.succeeded) takes
+          // the gate, and a same-turn .failed twin is latched out.
           await fire("session", "prompt", { sessionID: "ses_d", prompt: { text: "next turn" } })
-          stream.push(V2_IDLE("ses_d"))
+          stream.push({ type: "session.execution.succeeded", data: { sessionID: "ses_d" } })
+          stream.push({ type: "session.execution.failed", data: { sessionID: "ses_d" } })
           await until(() => gateRuns() === 2)
           cleanup()
           expect(prompts.length).toBeGreaterThan(0) // block decision re-drove the session
