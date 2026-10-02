@@ -125,35 +125,6 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
     let mut announcements: Vec<Value> = Vec::new();
     let mut unreadable = 0usize;
 
-    let note = |participants: &mut BTreeMap<String, Value>, key: &str, row: Option<&Value>| {
-        participants.entry(key.to_string()).or_insert_with(|| {
-            let reg = row;
-            json!({
-                "key": key,
-                "name": reg.and_then(|r| r.get("name")).and_then(Value::as_str)
-                    .filter(|_| !crate::system_sender::is_system_sender(key))
-                    .unwrap_or(key),
-                "session_id": reg.and_then(|r| r.get("harness_session_id"))
-                    .and_then(Value::as_str),
-                "fno_id": reg.and_then(|r| r.get("fno_id")).and_then(Value::as_str),
-                "harness": reg.and_then(|r| r.get("harness")).and_then(Value::as_str),
-                "model": reg.and_then(|r| r.get("model")).and_then(Value::as_str),
-                "effort": reg.and_then(|r| r.get("effort")).and_then(Value::as_str),
-                "node": reg.and_then(|r| r.get("node")).and_then(Value::as_str),
-                "live": reg.is_some_and(|r| {
-                    r.get("liveness").and_then(Value::as_str) == Some("alive")
-                        || r.get("status").and_then(Value::as_str) == Some("live")
-                }),
-                "crown_scope": reg.and_then(|r| r.get("crown_scope")).and_then(Value::as_str),
-                "crown_level": reg.and_then(|r| r.get("crown_level")).and_then(Value::as_u64),
-                "created_at": reg.and_then(|r| r.get("created_at")).and_then(Value::as_str),
-                "exited_at": reg.and_then(|r| r.get("exited_at")).and_then(Value::as_str),
-                "system": crate::system_sender::is_system_sender(key),
-                "archive_scope": Value::Null,
-            })
-        })
-    };
-
     let rd = match std::fs::read_dir(chats) {
         Ok(rd) => rd,
         Err(_) => {
@@ -326,6 +297,36 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
         "channels": channels.into_iter().map(|(scope, rows)| json!({"scope": scope, "rows": rows})).collect::<Vec<_>>(),
         "announcements": announcements,
         "unreadable": unreadable,
+    })
+}
+
+/// One participant row, inserted once per key with its registry join.
+fn note(participants: &mut BTreeMap<String, Value>, key: &str, row: Option<&Value>) -> &mut Value {
+    participants.entry(key.to_string()).or_insert_with(|| {
+        let reg = row;
+        json!({
+            "key": key,
+            "name": reg.and_then(|r| r.get("name")).and_then(Value::as_str)
+                .filter(|_| !crate::system_sender::is_system_sender(key))
+                .unwrap_or(key),
+            "session_id": reg.and_then(|r| r.get("harness_session_id"))
+                .and_then(Value::as_str),
+            "fno_id": reg.and_then(|r| r.get("fno_id")).and_then(Value::as_str),
+            "harness": reg.and_then(|r| r.get("harness")).and_then(Value::as_str),
+            "model": reg.and_then(|r| r.get("model")).and_then(Value::as_str),
+            "effort": reg.and_then(|r| r.get("effort")).and_then(Value::as_str),
+            "node": reg.and_then(|r| r.get("node")).and_then(Value::as_str),
+            "live": reg.is_some_and(|r| {
+                r.get("liveness").and_then(Value::as_str) == Some("alive")
+                    || r.get("status").and_then(Value::as_str) == Some("live")
+            }),
+            "crown_scope": reg.and_then(|r| r.get("crown_scope")).and_then(Value::as_str),
+            "crown_level": reg.and_then(|r| r.get("crown_level")).and_then(Value::as_u64),
+            "created_at": reg.and_then(|r| r.get("created_at")).and_then(Value::as_str),
+            "exited_at": reg.and_then(|r| r.get("exited_at")).and_then(Value::as_str),
+            "system": crate::system_sender::is_system_sender(key),
+            "archive_scope": Value::Null,
+        })
     })
 }
 
