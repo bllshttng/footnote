@@ -1066,9 +1066,12 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
         mail_app,
         ["send", "red", "hello", "--cwd", str(cwd)],
     )
-    assert result.exit_code == 0, result.stdout + (result.stderr or "")
-    assert len(result.stdout.splitlines()) == 1, result.stdout
-    assert "queued (durable) [agent-lock-timeout]" in result.stdout
+    assert result.exit_code == 14, result.stdout + (result.stderr or "")
+    first_line = result.stdout.splitlines()[0]
+    assert "queued (durable) [agent-lock-timeout]" in first_line, result.stdout
+    # The landing verdict rides after the receipt; the lock's own cause
+    # stays on stderr, never in the receipt line.
+    assert "NOT LANDED" in result.stdout, result.stdout
     stderr = result.stderr or ""
     # Past tense: the grace acquire only wins because the holder let go, so a
     # present-tense "lock busy ... held by" would name an owner that released.
@@ -1298,7 +1301,7 @@ def test_cmd_send_transcript_veto_receipt_names_the_reading(
         app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"]
     )
 
-    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+    assert res.exit_code == 14, f"exit={res.exit_code} out={res.output!r}"
     assert attempts == []
     assert "[transcript-stalled, transcript" in res.stdout, f"stdout: {res.stdout!r}"
     assert "live-miss" not in res.stdout, f"stdout: {res.stdout!r}"
@@ -1353,11 +1356,12 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
         mail_app,
         ["send", "red", "hello", "--cwd", str(cwd)],
     )
-    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    assert result.exit_code == 14, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
     assert out.startswith("msg-"), f"stdout: {out!r}"
     assert "queued (durable)" in out, f"stdout: {out!r}"
     assert "delivered" not in out, "stdout must not say 'delivered' for durable path"
+    assert "NOT LANDED" in out, f"the unconfirmed floor must end NOT LANDED: {out!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -2346,7 +2350,7 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
     res = runner.invoke(
         mail_app, ["send", "fno-tgt00001", "does advance() resolve cwd?"]
     )
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 14, res.output
     assert "queued (durable)" in res.output
     # Addressed to the canonical handle, not a project.
     assert "uuid-tgt" in res.output

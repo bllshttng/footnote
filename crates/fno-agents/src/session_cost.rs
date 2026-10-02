@@ -180,6 +180,23 @@ pub fn attribute(
     }
 }
 
+/// Every pid the fleet's own session roots own: the owner map's keys from
+/// the same `root_for` walk `attribute` builds, exported so the machine
+/// arm's outside-group read shares the one ownership answer.
+pub fn owned_pids(table: &[ProcRow], roots: &[SessionRoot]) -> HashSet<u32> {
+    let parents = parent_map(table);
+    let root_map: HashMap<u32, usize> = roots
+        .iter()
+        .enumerate()
+        .flat_map(|(i, root)| root.pids.iter().copied().map(move |pid| (pid, i)))
+        .collect();
+    table
+        .iter()
+        .filter(|row| root_for(row.pid, &parents, &root_map).is_some())
+        .map(|row| row.pid)
+        .collect()
+}
+
 type MapBuckets = BTreeMap<&'static str, (u64, u64, f64)>;
 
 pub fn tree_rss(table: &[ProcRow], pids: &[u32]) -> BTreeMap<u32, u64> {

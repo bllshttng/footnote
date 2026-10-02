@@ -126,12 +126,9 @@ have scripts/install/fno.sh 'refusing to install over a foreign fno' "stable-str
 lacks scripts/install/fno.sh 'refusing to install over it' "over-broad adopt refusal"
 have scripts/install/fno.sh '(version unreadable)' "receipt never prints a blank version"
 
-have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1; sleep 0.2' "15-retry ceiling and 0.2s poll"
-have cli/src/fno/update.py 'if __fno_verify_within; then break' "waited install verify"
-have cli/src/fno/update.py '_fno_n -lt 15' "15-retry ceiling in _await_binary"
-# Anchored to _await_binary's own increment: a bare `sleep 0.2` here would be
-# satisfied by whichever of the two polls did NOT drift, so neither would be pinned.
-have cli/src/fno/update.py '_fno_n=$((_fno_n+1)); sleep 0.2' "0.2s poll in _await_binary"
+have crates/fno/src/doctor_update.rs 'for _ in 0..15' "15-retry ceiling (install verify and fno-py await)"
+have crates/fno/src/doctor_update.rs 'Duration::from_millis(200)' "0.2s poll"
+have crates/fno/src/doctor_update.rs 'if verify_uv_install()' "waited install verify"
 
 have crates/fno/src/bootstrap.rs 'VERIFY_ATTEMPTS: u32 = 15' "15-retry ceiling"
 have crates/fno/src/bootstrap.rs 'VERIFY_POLL: Duration = Duration::from_millis(200)' "0.2s poll"

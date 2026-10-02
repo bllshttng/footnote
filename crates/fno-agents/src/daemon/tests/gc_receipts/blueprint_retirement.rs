@@ -314,6 +314,7 @@ fn staged_probe_unread_home() -> (tempfile::TempDir, AgentsHome) {
             reason: None,
             received_at: "2026-09-01T00:00:00Z".into(),
             ttl_ms: None,
+            posture: None,
         });
         r.entries.push(e);
     })

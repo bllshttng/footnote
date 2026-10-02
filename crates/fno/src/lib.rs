@@ -28,6 +28,10 @@ pub mod context_used;
 pub mod court_overlay;
 pub mod digest_overlay;
 pub mod dispatch_launch;
+pub mod doctor_update;
+#[cfg(test)]
+#[path = "doctor_update_tests.rs"]
+mod doctor_update_tests;
 pub mod event_cli;
 pub mod event_store;
 pub mod feed_overlay;

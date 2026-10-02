@@ -126,7 +126,7 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     assert!(screen.contains("new agent"), "sheet title: {screen}");
     // The chip row paints before any catalog read lands.
     assert!(
-        screen.contains("Local") && screen.contains("What do you want to work on?"),
+        screen.contains("Local") && screen.contains("prompt \u{b7} -- flags"),
         "the Where chip and the placeholder paint: {screen}"
     );
     assert!(

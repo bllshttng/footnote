@@ -68,6 +68,11 @@ pub struct Query {
     kind: Vec<String>,
     tag: Vec<String>,
     q: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub date: Vec<String>,
+    /// fzf-style in-order subsequence matching for `q` (`match=fuzzy`).
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub fuzzy: bool,
     pub all: bool,
 }
 
@@ -120,12 +125,50 @@ impl Query {
                 "type" => push_unique(&mut q.kind, val),
                 "tag" => push_unique(&mut q.tag, val),
                 "q" => q.q = val.map(str::to_string),
+                "date" => match val {
+                    Some(v) => match split_date_filter(v) {
+                        Some(_) => push_unique(&mut q.date, val),
+                        None => {
+                            return Err(format!(
+                                "bad date filter '{v}'; use <created_at|updated_at|completed_at><op><YYYY-MM-DD> with op one of > >= < <= ="
+                            ))
+                        }
+                    },
+                    None => {}
+                },
+                "match" => match val.unwrap_or_default() {
+                    "" | "exact" => q.fuzzy = false,
+                    "fuzzy" => q.fuzzy = true,
+                    other => {
+                        return Err(format!("unknown match '{other}'; use exact or fuzzy"))
+                    }
+                },
                 "all" => q.all = matches!(v.as_str(), "1" | "true" | ""),
                 _ => {}
             }
         }
         Ok(q)
     }
+}
+
+/// Split a `date` filter value into `(field, op, date)`. The field is one of
+/// `created_at`, `updated_at`, `completed_at`; the op is tried longest
+/// first (`>=`, `<=`, then `>`, `<`, `=`); the date is `YYYY-MM-DD`.
+fn split_date_filter(s: &str) -> Option<(&str, &str, &str)> {
+    const FIELDS: [&str; 3] = ["created_at", "updated_at", "completed_at"];
+    let field = FIELDS.iter().find(|f| s.starts_with(**f))?;
+    let rest = &s[field.len()..];
+    const OPS: [&str; 5] = [">=", "<=", ">", "<", "="];
+    let op = OPS.iter().find(|o| rest.starts_with(**o))?;
+    let date = &rest[op.len()..];
+    (date.len() == 10
+        && date.as_bytes()[4] == b'-'
+        && date.as_bytes()[7] == b'-'
+        && date
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit()))
+    .then_some((field, op, date))
 }
 
 /// The crowned row that rules a node's territory.
@@ -166,10 +209,59 @@ pub struct Card {
     /// The row's `completed_at`, for the client-side epic-lane rule (a card
     /// sits in its parent's lane only while the parent row is open).
     pub completed_at: Option<String>,
+    /// The newest stamp on the row or its sessions, for the list view's
+    /// updated column and the `date=updated_at` filter.
+    pub updated_at: Option<String>,
+    /// Rows whose `parent` names this card.
+    pub child_count: usize,
+    /// The parent row's title, for the search's bare-word field.
+    pub parent_title: Option<String>,
+    /// Every session id the row names: `sessions[].session_id`,
+    /// `source_session_id` and `spawned_by_session`, deduplicated, blanks
+    /// dropped. Search matches a full id or its 8-character head.
+    pub session_ids: Vec<String>,
     /// Distinct encounter voters (demand's `encounter_voters` rule).
     pub encounters: usize,
     /// The operator subset (`voter_kind == "operator"`).
     pub encounters_operator: usize,
+}
+
+/// The row's newest stamp: max of `touched_at`, `created_at`, `completed_at`
+/// and every `sessions[].started_at` / `ended_at`. Compared on the first 19
+/// characters (`YYYY-MM-DDTHH:MM:SS`, so `Z` and `+00:00` forms compare
+/// equal); the original string is returned.
+fn newest_stamp(e: &Value) -> Option<String> {
+    let mut stamps: Vec<&str> = Vec::new();
+    for field in ["touched_at", "created_at", "completed_at"] {
+        if let Some(s) = e
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            stamps.push(s);
+        }
+    }
+    if let Some(sessions) = e.get("sessions").and_then(Value::as_array) {
+        for s in sessions {
+            for field in ["started_at", "ended_at"] {
+                if let Some(v) = s
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                {
+                    stamps.push(v);
+                }
+            }
+        }
+    }
+    let mut best: Option<&str> = None;
+    for s in stamps {
+        let newer = best.is_none_or(|b| &s[..s.len().min(19)] > &b[..b.len().min(19)]);
+        if newer {
+            best = Some(s);
+        }
+    }
+    best.map(str::to_string)
 }
 
 /// One encounter record's voter identity: `voter_key`, falling back to
@@ -532,9 +624,35 @@ pub(crate) fn card_of(
             .get("completed_at")
             .and_then(Value::as_str)
             .map(str::to_string),
+        updated_at: newest_stamp(e),
+        child_count: 0,
+        parent_title: None,
+        session_ids: row_session_ids(e),
         encounters,
         encounters_operator,
     })
+}
+
+/// Every session id the row names: `sessions[].session_id`,
+/// `source_session_id` and `spawned_by_session`, deduplicated, blanks
+/// dropped, first-seen order.
+fn row_session_ids(e: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: Option<&str>| {
+        if let Some(s) = v.filter(|s| !s.is_empty()) {
+            if !out.iter().any(|have| have == s) {
+                out.push(s.to_string());
+            }
+        }
+    };
+    if let Some(sessions) = e.get("sessions").and_then(Value::as_array) {
+        for s in sessions {
+            push(s.get("session_id").and_then(Value::as_str));
+        }
+    }
+    push(e.get("source_session_id").and_then(Value::as_str));
+    push(e.get("spawned_by_session").and_then(Value::as_str));
+    out
 }
 
 /// The row's status: the persisted field, tolerating the pre-rename key.
@@ -619,6 +737,30 @@ fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
     {
         return false;
     }
+    for spec in &q.date {
+        let Some((field, op, date)) = split_date_filter(spec) else {
+            continue;
+        };
+        let stamp = match field {
+            "created_at" => card.created_at.as_deref(),
+            "updated_at" => card.updated_at.as_deref(),
+            _ => card.completed_at.as_deref(),
+        };
+        let Some(stamp) = stamp else {
+            return false;
+        };
+        let head = &stamp[..stamp.len().min(10)];
+        let keep = match op {
+            ">=" => head >= date,
+            "<=" => head <= date,
+            ">" => head > date,
+            "<" => head < date,
+            _ => head == date,
+        };
+        if !keep {
+            return false;
+        }
+    }
     if let Some(needle) = &q.q {
         let needle = needle.to_lowercase();
         let slug = card.slug.as_deref().unwrap_or("");
@@ -626,12 +768,61 @@ fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
             .and_then(|r| r.get("details"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let hay = format!("{} {} {} {}", card.id, slug, card.title, details).to_lowercase();
-        if !hay.contains(&needle) {
-            return false;
+        if q.fuzzy {
+            // fzf style: the needle's characters appear in order in any one
+            // of id, slug, title, the parent's title or a session id, or in
+            // any one whitespace-split word of the details.
+            let field_hit = [
+                Some(card.id.as_str()),
+                Some(slug),
+                Some(card.title.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .chain(card.parent_title.as_deref())
+            .chain(card.session_ids.iter().map(String::as_str))
+            .any(|f| fuzzy_hit(&needle, f));
+            let word_hit = details
+                .split_whitespace()
+                .any(|w| fuzzy_hit(&needle, &w.to_lowercase()));
+            if !field_hit && !word_hit {
+                return false;
+            }
+        } else {
+            let hay = format!(
+                "{} {} {} {} {}",
+                card.id,
+                slug,
+                card.title,
+                card.session_ids.join(" "),
+                details
+            )
+            .to_lowercase();
+            if !hay.contains(&needle) {
+                return false;
+            }
         }
     }
     true
+}
+
+/// One fzf-style hit: the needle's characters appear in order in the field,
+/// gaps allowed. Both sides lowercased by the caller.
+fn fuzzy_hit(needle: &str, field: &str) -> bool {
+    let mut chars = needle.chars();
+    let mut want = match chars.next() {
+        Some(c) => c,
+        None => return true,
+    };
+    for ch in field.chars() {
+        if ch == want {
+            match chars.next() {
+                Some(c) => want = c,
+                None => return true,
+            }
+        }
+    }
+    false
 }
 
 /// The pure board answer for a query over gathered inputs.
@@ -677,10 +868,28 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
     }
     // Cards first (the column may drop a row), then scope, then facets,
     // then the query's filters, then totals, then the caps.
+    let mut child_counts: HashMap<&str, usize> = HashMap::new();
+    for r in &inp.rows {
+        if let Some(parent) = r
+            .get("parent")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+        {
+            *child_counts.entry(parent).or_insert(0) += 1;
+        }
+    }
     let mut cards: Vec<Card> = Vec::new();
     for e in &inp.rows {
         let blocked = has_open_dependency(e, &by_ref);
-        if let Some(card) = card_of(inp, e, order, blocked) {
+        if let Some(mut card) = card_of(inp, e, order, blocked) {
+            card.child_count = child_counts.get(card.id.as_str()).copied().unwrap_or(0);
+            card.parent_title = card
+                .parent
+                .as_deref()
+                .and_then(|p| by_ref.get(p))
+                .and_then(|r| r.get("title"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             cards.push(card);
         }
     }
@@ -1437,28 +1646,47 @@ pub(crate) fn session_action(a: Option<&AgentRow>) -> SessionAction {
     SessionAction::Dim("not resumable".into())
 }
 
-/// The node's king: the first crowned row whose territory names the node,
-/// its parent epic, or its project (crown scopes split on `,`, the level-0
-/// separator). Direct membership only - a grandchild epic resolves through
-/// no scope here, and the pane says `none` rather than guessing.
+/// The node's king: the crowned row with the narrowest territory naming the
+/// node, its parent epic, or its project - a scope naming the node beats one
+/// naming the parent, which beats the project; roster order breaks ties.
+/// (crown scopes split on `,`, the level-0 separator). Direct membership
+/// only - a grandchild epic resolves through no scope here, and the pane
+/// says `none` rather than guessing.
 pub(crate) fn king_of(
     agents: &[AgentRow],
     node_id: &str,
     parent: Option<&str>,
     project: Option<&str>,
 ) -> Option<(String, u32)> {
+    let mut best: Option<(usize, &AgentRow)> = None;
     for a in agents {
-        let (Some(scope), Some(level)) = (&a.crown_scope, a.crown_level) else {
+        let (Some(scope), Some(_)) = (&a.crown_scope, a.crown_level) else {
             continue;
         };
+        let mut rank: Option<usize> = None;
         for member in scope.split(',') {
             let m = member.trim();
-            if m == node_id || parent == Some(m) || project == Some(m) {
-                return Some((a.name.clone(), level));
+            let r = if m == node_id {
+                0
+            } else if parent == Some(m) {
+                1
+            } else if project == Some(m) {
+                2
+            } else {
+                continue;
+            };
+            rank = Some(rank.map_or(r, |have| have.min(r)));
+            if rank == Some(0) {
+                break;
+            }
+        }
+        if let Some(r) = rank {
+            if best.as_ref().map_or(true, |(b, _)| r < *b) {
+                best = Some((r, a));
             }
         }
     }
-    None
+    best.map(|(_, a)| (a.name.clone(), a.crown_level.unwrap_or(0)))
 }
 
 #[cfg(test)]

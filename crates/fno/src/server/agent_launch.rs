@@ -247,6 +247,45 @@ fn launch_timeout() -> Duration {
     crate::dispatch_launch::dispatch_timeout()
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What the timeout follow-up's registry read found.
+enum BirthCheck {
+    Yes(String),
+    No,
+    Unreadable,
+}
+
+/// The first registry row born at `since_secs` or later in `cwd`, named.
+/// Both clocks are this machine's, so no row that predates the attempt can
+/// read as the birth. A missing or unparseable registry is `Unreadable`:
+/// the timeout stays unresolved rather than flattened into a no-birth claim.
+async fn registry_birth_since(cwd: &str, since_secs: u64) -> BirthCheck {
+    let raw = match tokio::task::spawn_blocking(|| {
+        std::fs::read_to_string(crate::agents_view::registry_path()).ok()
+    })
+    .await
+    {
+        Ok(Some(raw)) => raw,
+        _ => return BirthCheck::Unreadable,
+    };
+    let Some(rows) = crate::agents_view::derive_rows(&raw, now_secs()) else {
+        return BirthCheck::Unreadable;
+    };
+    match rows
+        .iter()
+        .find(|r| r.cwd == cwd && r.started_at.is_some_and(|t| t >= since_secs))
+    {
+        Some(row) => BirthCheck::Yes(row.name.clone()),
+        None => BirthCheck::No,
+    }
+}
+
 /// The worktree launch's directory resolve: one bounded
 /// `fno-agents launch-workdir` shell-out carrying the project cwd, the
 /// minted worker name, the harness and the picked branch. Its one JSON
@@ -409,6 +448,26 @@ impl super::Core {
             self.send_launch_update(id, update);
             return;
         }
+        // A forced launch journals the user as the actor BEFORE anything
+        // runs: the override is a fact about who asked, best-effort like
+        // every audit append.
+        if req.force {
+            let row = serde_json::json!({
+                "ts": crate::review_invocation::review_invocation_timestamp(),
+                "type": "composer_launch_forced",
+                "source": "server",
+                "data": {
+                    "actor": "user",
+                    "harness": req.harness,
+                    "cwd": req.cwd,
+                    "substrate": req.substrate,
+                }
+            });
+            let _ = crate::pane_send_audit::append_agents_event(
+                &crate::pane_send_audit::pane_send_audit_events_path(),
+                &row,
+            );
+        }
         self.launch_desk.mark_started(
             id,
             req.request_id,
@@ -458,18 +517,35 @@ impl super::Core {
             let fno = super::fno_bin().display().to_string();
             let argv = launch_spawn_argv(&fno, &req, &session);
             let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let attempt_started = now_secs();
+            let cwd = req.cwd.clone();
             let state = match run_fno_captured_with_stdin_full(
                 &borrowed,
                 req.message.as_bytes(),
                 timeout,
                 deadline,
+                req.force,
             )
             .await
             {
                 // A timed-out door is the ambiguous case: the child was
-                // running, so whether a worker was born is unresolved.
-                None => LaunchState::Unknown {
-                    reason: "launch timed out; a worker may have been born".to_string(),
+                // running, so a follow-up registry read settles whether a
+                // worker was born during the window. A clean read with no
+                // birth says so; an unreadable registry stays unresolved.
+                None => match registry_birth_since(&cwd, attempt_started).await {
+                    BirthCheck::Yes(name) => LaunchState::Launched {
+                        name,
+                        pane: None,
+                        seed_delivered: None,
+                    },
+                    BirthCheck::No => LaunchState::Unknown {
+                        reason: "launch timed out; a follow-up read found no worker born"
+                            .to_string(),
+                    },
+                    BirthCheck::Unreadable => LaunchState::Unknown {
+                        reason: "launch timed out; the follow-up registry read failed, a worker may have been born"
+                            .to_string(),
+                    },
                 },
                 Some((ok, out, err, code)) => {
                     crate::dispatch_launch::note_spawn_refused(&borrowed, code, &out, &err);
@@ -630,6 +706,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         }
     }
 

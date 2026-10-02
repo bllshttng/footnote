@@ -11,12 +11,17 @@ from pathlib import Path
 
 import pytest
 
-# Registration binds `update_command` at FIRST import of fno.doctor_cli, and
-# the test_doctor.py tests patch `fno.update.update_command` - a patch that
-# lands before that first import registers the fake permanently. Importing
-# doctor_cli here, at collection, makes the real registration the only order
-# any test process can see (both orders pinned in test_doctor_cli_registration.py).
-import fno.doctor_cli  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _no_send_settle_wait(monkeypatch):
+    """The post-send landed verify reads immediately under test.
+
+    Its settle window waits for a REAL recipient to poll or flush; no test
+    measures the wait itself, and without this every durable-demotion test
+    in the suite pays the window as sleep.
+    """
+    monkeypatch.setenv("FNO_MAIL_LANDED_SETTLE_S", "0")
 
 
 @pytest.fixture(autouse=True)

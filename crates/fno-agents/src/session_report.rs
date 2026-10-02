@@ -86,7 +86,7 @@ fn find_row(
     {
         return Some(Find::Holds(i));
     }
-    if harness == "claude" {
+    if harness == "claude" || harness == "codex" {
         match crate::daemon::find_uuid_backfill_row(entries, session_id) {
             crate::daemon::UuidBackfill::One(i) => return Some(Find::Backfill(i)),
             crate::daemon::UuidBackfill::Ambiguous => return None,
@@ -179,7 +179,14 @@ pub(crate) fn handle_session_report(
         let idx = match find {
             Find::Holds(i) => i,
             Find::Backfill(i) => {
-                r.entries[i].claude_session_uuid = Some(session_id.clone());
+                // The same write the report store path makes: the canonical
+                // id plus the in-memory alias, named by the ROW's harness.
+                if r.entries[i].harness_name() == "codex" {
+                    r.entries[i].harness_session_id = Some(session_id.clone());
+                    r.entries[i].codex_session_id = Some(session_id.clone());
+                } else {
+                    r.entries[i].claude_session_uuid = Some(session_id.clone());
+                }
                 i
             }
             Find::Named(i) => {

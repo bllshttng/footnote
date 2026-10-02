@@ -83,6 +83,7 @@ pub mod capability_leaves;
 pub mod cargo_build_dirs;
 pub mod census;
 pub mod check_supersession;
+pub mod claim_lanes_cli;
 pub mod claim_queue;
 pub mod claim_store;
 pub mod claim_verbs;
@@ -169,6 +170,7 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod footnote_harness;
 pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
@@ -221,6 +223,7 @@ pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
+pub mod lanes;
 pub mod launch_workdir;
 pub mod law_match;
 pub mod ledger_axes;
@@ -239,6 +242,7 @@ pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
+pub mod machine_load;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
@@ -359,6 +363,7 @@ pub mod route_inventory;
 pub mod route_recovery;
 pub mod route_slot;
 pub mod row_truth;
+pub mod row_verdict;
 pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
@@ -1420,6 +1425,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_renamed",
     "agent_model_changed",
     "agent_effort_changed",
+    "agent_posture_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_skipped",

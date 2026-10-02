@@ -4,6 +4,7 @@
 # as a multiset; the line number is not recorded, so the file changes only when a
 # crossing is added or removed. pydoor takes NO baseline: cli/src/fno/rust_binary.py
 # stays the only Python file that execs fno-agents by literal name.
+crossing	crates/fno-agents/src/arm_repair.rs	let child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/attach.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	let out = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	let out = Command::new(crate::scrape::fno_bin())
@@ -34,8 +35,6 @@ crossing	crates/fno-agents/src/gate_probes.rs	let _ = Command::new(crate::scrape
 crossing	crates/fno-agents/src/gc.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	let mut argv = vec![fno_bin()];
-# The Rundown arm owns draining this site: the daemon renders through the
-# front door; the drain would be the front calling the ledger natively.
 crossing	crates/fno-agents/src/king_ledger.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/lifecycle_child.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	return Command::new(crate::scrape::fno_bin());
@@ -120,6 +119,14 @@ resolver	crates/fno-agents/src/scrape.rs	pub fn fno_bin() -> std::ffi::OsString 
 resolver	crates/fno-agents/src/scrape.rs	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/client_tests/theme_import_tests.rs	async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
+resolver	crates/fno/src/doctor_update.rs	fn resolve_source_pin(override_path: Option<&Path>) -> Option<Value> {
+resolver	crates/fno/src/doctor_update.rs	fn component_verdict(
+resolver	crates/fno/src/doctor_update.rs	fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> bool {
+resolver	crates/fno/src/doctor_update.rs	fn resolve_fno_py() -> PathBuf {
+resolver	crates/fno/src/doctor_update.rs	fn verify_uv_install() -> bool {
+resolver	crates/fno/src/doctor_update.rs	fn has_shipped_pyc(td: &Path) -> bool {
+resolver	crates/fno/src/doctor_update.rs	fn read_source_wire(source: &Path) -> Option<u32> {
 resolver	crates/fno/src/mux_cli.rs	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {
 resolver	crates/fno/src/squad_store_tests.rs	fn build_tree_marker_detection_is_pure_over_path() {
+crossing	crates/fno-agents/src/machine_load.rs	let bin = crate::scrape::fno_bin();

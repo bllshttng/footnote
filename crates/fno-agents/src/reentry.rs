@@ -479,19 +479,30 @@ fn resolve_reentry_inner(
         let root = binding.clone().and_then(|b| b.ok().flatten());
         claude_home.listed_job(&short_id, root.as_deref().map(Path::new))
     };
-    // Without the listing a live session cannot be told from a dead one, and
-    // a bg resume of a live one starts a copy the pane never stops.
-    if transition == ReentryTransition::Revive
-        && listing == JobListing::Unread
-        && !short_id.is_empty()
-    {
-        return Err(format!(
-            "row {name:?}: `claude agents --json --all` could not be read, so job {short_id} \
-             cannot be told live or dead; tap again once it answers"
-        ));
-    }
-    let transition = if transition == ReentryTransition::Revive && listing.is_running() {
-        ReentryTransition::Attach
+    // fno's rows decide a revive; the vendor listing is a check. An Unread
+    // listing refused unconditionally, so a cold `claude agents` daemon hung
+    // every restore; now a decided fno verdict short-circuits before the
+    // listing is consulted (a vendor word can never override it), and only
+    // a row fno cannot decide still reads the listing, refusing when even
+    // that is unreadable.
+    let transition = if transition == ReentryTransition::Revive {
+        match crate::row_verdict::fno_verdict(entry) {
+            crate::row_verdict::RowVerdict::Live(_) => ReentryTransition::Attach,
+            crate::row_verdict::RowVerdict::Finished(_) => ReentryTransition::Resume,
+            crate::row_verdict::RowVerdict::Unknown(_) => {
+                if listing == JobListing::Unread && !short_id.is_empty() {
+                    return Err(format!(
+                        "row {name:?}: `claude agents --json --all` could not be read, so job {short_id} \
+                         cannot be told live or dead; tap again once it answers"
+                    ));
+                }
+                if listing.is_running() {
+                    ReentryTransition::Attach
+                } else {
+                    transition
+                }
+            }
+        }
     } else {
         transition
     };
@@ -1764,10 +1775,18 @@ mod tests {
     }
 
     fn revive_with(listing: ClaudeAgentsSnapshot) -> Result<ReentryPlan, String> {
+        revive_with_row(listing, |_| {})
+    }
+
+    fn revive_with_row(
+        listing: ClaudeAgentsSnapshot,
+        tune: impl FnOnce(&mut RegistryEntry),
+    ) -> Result<ReentryPlan, String> {
         let mut e = row("tapped");
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
         e.launch_account = Some("default".into());
+        tune(&mut e);
         let dir = tempfile::tempdir().unwrap();
         let home = ClaudeHome::at(dir.path()).with_listing(listing);
         resolve_reentry_with(
@@ -1791,10 +1810,22 @@ mod tests {
 
     #[test]
     fn revive_rows() {
-        // A bg resume of a session that is in fact live starts a copy the
-        // pane never stops, so an unread listing refuses instead.
+        // fno's rows decide an unread listing. A finished row resumes, and
+        // the old unconditional refusal survives only for a row fno cannot
+        // decide - a bg resume of a session that is in fact live still
+        // starts a copy the pane never stops.
         let err = revive_with(ClaudeAgentsSnapshot::unknown("timed out")).unwrap_err();
         assert!(err.contains("could not be read"), "{err}");
+
+        // AC3: a finished row (terminal status) and an unread listing take
+        // the resume plan the unlisted-job arm already builds, no vendor
+        // answer needed.
+        let plan = revive_with_row(ClaudeAgentsSnapshot::unknown("timed out"), |e| {
+            e.status = crate::AgentStatus::Exited;
+        })
+        .unwrap();
+        assert_eq!(plan.transition, "resume");
+        assert_eq!(plan.mechanism, "bg-resume");
 
         for running in ["working", "blocked", "idle"] {
             let plan = revive_plan(Some(running));

@@ -829,18 +829,6 @@ def test_explicit_thread_on_unbuilt_lane_refused_with_the_reason(unseated):
     assert "headless" in str(exc.value)
 
 
-def test_known_harnesses_covers_readable_set():
-    """The map covers the readable-provider set, which is the invariant here.
-
-    Asserted as the RELATION between the two rosters rather than as a literal
-    list, so a harness added to both keeps this green and a harness added to
-    only one goes red - which is the drift worth catching.
-    """
-    from fno.agents.harnesses import READABLE_PROVIDERS
-
-    assert set(known_harnesses()) == set(READABLE_PROVIDERS)
-
-
 def test_contract_admits_a_row_absent_from_the_complete_roster():
     """AC1-ERR, moved: the rows-stay-a-subset-of-the-roster check no longer
     runs in this parser - a roster read here fired on the module-level parse
