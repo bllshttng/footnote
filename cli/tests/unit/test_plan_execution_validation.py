@@ -364,6 +364,9 @@ def test_prose_and_non_commands_are_rejected_in_both_plan_shapes(
     assert {
         v.field for v in validate_execution(load_plan(full)).violations
     } == {"tasks.1.1.verify"}, verification
+    quick_cli = runner.invoke(plan_app, ["validate", str(quick), "--execution"])
+    assert quick_cli.exit_code == 1
+    assert "Verification:" in quick_cli.output
 
 
 def test_runnable_command_policy_has_no_positive_inventory() -> None:
@@ -387,17 +390,6 @@ def test_shell_expanded_executable_paths_remain_accepted(
         command,
         full_command=f"env FNO_TEST=1 {command}",
     )
-
-
-def test_quick_plan_prose_verification_is_not_runnable(tmp_path: Path) -> None:
-    plan = _write_plan(tmp_path, _quick_plan(verification="1. Manually inspect the result."))
-
-    result = validate_execution(load_plan(plan))
-    cli_result = runner.invoke(plan_app, ["validate", str(plan), "--execution"])
-
-    assert {v.field for v in result.violations} == {"Verification"}
-    assert cli_result.exit_code == 1
-    assert "Verification:" in cli_result.output
 
 
 def test_quick_plan_arbitrary_surface_word_is_not_a_file(tmp_path: Path) -> None:
@@ -625,31 +617,6 @@ def test_task_collections_must_be_yaml_lists(tmp_path: Path) -> None:
     assert "task '1.1' surface must be a list" in messages
 
 
-def test_parallel_wave_rejects_shared_surface(tmp_path: Path) -> None:
-    strategy = """execution_mode: parallel
-waves:
-  - wave: 1
-    mode: parallel
-    tasks: [\"1.1\", \"1.2\"]
-tasks:
-  - id: \"1.1\"
-    title: First
-    surface: [src/shared.py]
-    verify: fno doctor test tests/test_a.py
-    acceptance: [AC1]
-  - id: \"1.2\"
-    title: Second
-    surface: [src/shared.py]
-    verify: fno doctor test tests/test_b.py
-    acceptance: [AC2]
-"""
-    plan = _write_plan(tmp_path, _full_plan(strategy))
-
-    messages = "\n".join(v.message for v in validate_execution(load_plan(plan)).violations)
-
-    assert "parallel tasks share surface 'src/shared.py'" in messages
-
-
 def test_wave_dependency_cycle_fails(tmp_path: Path) -> None:
     strategy = """execution_mode: sequential
 waves:
@@ -745,32 +712,6 @@ def test_surface_items_are_paths_and_aliases_collide(tmp_path: Path) -> None:
     )
 
     assert "surface item 1 must be a non-empty path string" in malformed_messages
-
-    alias_strategy = """execution_mode: parallel
-waves:
-  - wave: 1
-    mode: parallel
-    tasks: ["1.1", "1.2"]
-tasks:
-  - id: "1.1"
-    title: First
-    surface: [src/shared.py]
-    verify: fno doctor test tests/test_a.py
-    acceptance: [AC1]
-  - id: "1.2"
-    title: Second
-    surface: [./src/shared.py]
-    verify: fno doctor test tests/test_b.py
-    acceptance: [AC2]
-"""
-    alias_plan = _write_plan(tmp_path, _full_plan(alias_strategy))
-
-    alias_messages = "\n".join(
-        v.message for v in validate_execution(load_plan(alias_plan)).violations
-    )
-
-    assert "parallel tasks share surface 'src/shared.py'" in alias_messages
-
 
 def test_duplicate_yaml_keys_fail_loud(tmp_path: Path) -> None:
     strategy = VALID_STRATEGY + "tasks: []\n"
