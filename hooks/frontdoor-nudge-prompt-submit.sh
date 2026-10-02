@@ -21,6 +21,10 @@ PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The per-turn guard (tests/hooks/test_with_timeout.sh) requires every
+# UserPromptSubmit hook that names a daemon binary to carry the shared bound,
+# so the file sources it even though its own guards are pure builtins.
+source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 PLUGIN_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
 # Same dir, stamp and lock as the SessionStart hook: a Codex session carries no
 # CLAUDE_PLUGIN_DATA, so the data dir falls back to the XDG state dir.
