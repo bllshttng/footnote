@@ -833,9 +833,13 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
     );
 
     let start = Instant::now();
+    // A pid of its own: the install run above holds build:cargo under the
+    // test pid, and the door's own-holder check would return 0 before the
+    // user lane or the hold was ever consulted.
+    let user_cargo = Command::new("sleep").arg("60").spawn().unwrap();
     let out = Command::new(bin())
         .args(["test-run", "build-admit", "--cargo-pid"])
-        .arg(&cargo_pid)
+        .arg(user_cargo.id().to_string())
         .arg("--worktree")
         .arg(&wt)
         .env("FNO_AGENTS_HOME", &home)
@@ -857,6 +861,8 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
         !stderr.contains("fleet stop holds tests"),
         "the user-origin build must not park at the hold: {stderr}"
     );
+    let _ = user_cargo.kill();
+    let _ = user_cargo.wait();
     let _ = std::fs::remove_dir_all(&wt);
 
     let _ = holder.wait();
