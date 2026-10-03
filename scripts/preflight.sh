@@ -43,11 +43,19 @@ fi
 # Presence is not a login: pushes and the target loop's PR reads fail on an
 # unauthenticated gh. A clean runner (and the install-channel smoke) never
 # logs in, so this warns instead of failing; the target loop itself parks
-# with the same instructions when its PR read hits it.
-if gh auth status >/dev/null 2>&1; then
-  echo "[ok] gh auth"
+# with the same instructions when its PR read hits it. The check names THIS
+# repo's host: an unqualified `gh auth status` exits 1 when any host has an
+# issue, so a stale secondary account on another host would false-warn.
+GH_URL="$(git remote get-url origin 2>/dev/null || true)"
+GH_HOST="$(printf '%s' "$GH_URL" | sed -n -E 's#^(https?|ssh)://([^/@]+@)?([^/:]+).*#\3#p')"
+if [ -z "$GH_HOST" ] && [ -n "$GH_URL" ]; then
+  GH_HOST="$(printf '%s' "$GH_URL" | sed -n -E 's#^([^/@]+@)?([^/:]+):.*#\2#p')"
+fi
+GH_HOST="${GH_HOST:-github.com}"
+if gh auth status --hostname "$GH_HOST" >/dev/null 2>&1; then
+  echo "[ok] gh auth ($GH_HOST)"
 else
-  echo "[warn] gh is present but not authenticated; pushes and PR reads will fail" >&2
+  echo "[warn] gh is not authenticated for $GH_HOST; pushes and PR reads will fail" >&2
   echo "  Run: gh auth login" >&2
   echo "  If pushes still fail afterwards, also run: gh auth setup-git" >&2
 fi
