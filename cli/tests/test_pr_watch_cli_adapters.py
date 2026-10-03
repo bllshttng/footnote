@@ -787,6 +787,9 @@ def test_phase_caps_fit_ceiling():
     assert timeout_s + _MERGE_FLOOR_S + 5 <= merge_cap_s
     assert _MERGE_WINDOW_S - merge_cap_s >= 30
 
+    timeout_s, _ = _merge_budget_for_load(4.25, _MERGE_FLOOR_S)
+    assert timeout_s > 180
+
     timeout_s, merge_cap_s = _merge_budget_for_load(100, _MERGE_FLOOR_S)
     assert timeout_s == (
         _MERGE_WINDOW_S - _MERGE_FLOOR_S - 35

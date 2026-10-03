@@ -455,7 +455,7 @@ _MERGE_WINDOW_S = _PHASE_CAP_S["merge"] + _EVERY_TICK_CAP_S["sweep"]
 
 def _merge_budget_for_load(load_per_core: float, drain_floor_s: float) -> tuple[float, float]:
     timeout_s = min(_MERGE_WINDOW_S - drain_floor_s - 35.0,
-                    _GRANT_QUEUE_READ_TIMEOUT_S * max(1.0, load_per_core / 4.0))
+                    _GRANT_QUEUE_READ_TIMEOUT_S * max(1.0, load_per_core / 2.0))
     return timeout_s, max(_PHASE_CAP_S["merge"], timeout_s + drain_floor_s + 5.0)
 
 
