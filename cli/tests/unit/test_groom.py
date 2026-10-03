@@ -61,14 +61,6 @@ def test_day_key_is_utc_date_scoped():
     assert G.groom_day_key(DAY) == "groom:2026-07-19"
 
 
-def test_groom_key_routes_to_the_global_claims_root():
-    # Grooming operates on the GLOBAL graph, so its daily marker must dedup
-    # across repos - a repo-local root would let two checkouts both groom today.
-    from fno.claims.io import claims_root_for
-
-    assert claims_root_for(G.groom_day_key(DAY)) is not None
-
-
 def test_first_run_dispatches(claims_root, spawns):
     r = G.run_groom(cwd="/tmp", today=DAY)
     assert r["status"] == "dispatched"

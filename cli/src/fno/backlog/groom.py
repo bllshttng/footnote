@@ -99,10 +99,11 @@ def groom_staleness(*, now: Optional[float] = None) -> GroomFreshness:
     scanned. Age comes from the file's mtime (an archive is a rename, which
     preserves it), never from a shelled ``stat`` whose flags differ BSD vs GNU.
     """
-    from fno.claims.io import EXPIRED_SUBDIR, claims_dir, claims_root_for, encode_key
+    from fno.claims.core import native_claims_root
+    from fno.claims.io import EXPIRED_SUBDIR, claims_dir, encode_key
 
     prefix = encode_key(f"{_GROOM_KEY_PREFIX}:")
-    base = claims_dir(claims_root_for(f"{_GROOM_KEY_PREFIX}:probe"))
+    base = claims_dir(native_claims_root(f"{_GROOM_KEY_PREFIX}:probe"))
 
     newest: Optional[float] = None
     for directory in (base, base / EXPIRED_SUBDIR):
@@ -334,7 +335,6 @@ def run_groom(
         claim_status,
         release_claim,
     )
-    from fno.claims.io import claims_root_for
 
     key = groom_day_key(today)
     day = key.split(":", 1)[1]
@@ -354,14 +354,13 @@ def run_groom(
         }
 
     holder = f"groom:{os.getpid()}"
-    root = claims_root_for(key)
 
     # Read before acquiring: `acquire_claim` is idempotent for the SAME holder, so
     # a second call from one process would re-acquire and re-dispatch. The status
     # read catches that; the acquire below still catches the cross-process race.
     claim_read_error: Optional[str] = None
     try:
-        if claim_status(key, root=root).get("state") in ("live", "suspect"):
+        if claim_status(key).get("state") in ("live", "suspect"):
             return {"status": "already-ran", "day": day, "key": key}
     except Exception as exc:  # noqa: BLE001 - an unreadable marker falls through to acquire
         # Safe (the acquire below still catches the cross-process race), but a
@@ -375,7 +374,6 @@ def run_groom(
             holder,
             ttl_ms=_GROOM_TTL_MS,
             reason=f"daily grooming pass {day}",
-            root=root,
         )
     except CLAIM_UNAVAILABLE:
         # A normal dedup race (two groom invocations close together), not a
@@ -405,7 +403,7 @@ def run_groom(
             "mechanical": mechanical,
         }
         try:
-            release_claim(key, holder, strict=True, root=root)
+            release_claim(key, holder, strict=True)
             receipt["released"] = True
         except Exception as rexc:  # noqa: BLE001
             receipt["released"] = False

@@ -409,6 +409,20 @@ pub struct Note {
     pub ts: Option<String>,
     pub text: String,
     pub kind: Option<String>,
+    /// The comment-thread vocabulary, flattened onto comment and reply
+    /// rows: who wrote it, the minted thread id a reply names, the reply
+    /// link, and the ask state (open, accepted, done, declined) with its
+    /// landing link or reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_ref: Option<String>,
 }
 
 /// One node's whole answer.
@@ -1316,29 +1330,58 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
             }
         }
     }
-    // Notes: progress_notes newest first.
-    let mut notes: Vec<Note> = e
+    // Notes: progress_notes newest first, EXCEPT comment-thread rows (kind
+    // comment or reply), which read oldest first - a thread reads top to
+    // bottom. Non-thread rows keep their block after the thread.
+    let rows: Vec<Value> = e
         .get("progress_notes")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|n| Note {
-                    ts: n.get("ts").and_then(Value::as_str).map(str::to_string),
-                    text: n
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    kind: n.get("kind").and_then(Value::as_str).map(str::to_string),
-                })
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
-    notes.sort_by(|a, b| {
+    let is_thread = |n: &Note| matches!(n.kind.as_deref(), Some("comment") | Some("reply"));
+    let mut threads: Vec<Note> = Vec::new();
+    let mut plain: Vec<Note> = Vec::new();
+    for n in rows.iter().map(|n| Note {
+        ts: n.get("ts").and_then(Value::as_str).map(str::to_string),
+        text: n
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        kind: n.get("kind").and_then(Value::as_str).map(str::to_string),
+        author: n.get("author").and_then(Value::as_str).map(str::to_string),
+        comment_id: n
+            .get("comment_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reply_to: n
+            .get("reply_to")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        state: n.get("state").and_then(Value::as_str).map(str::to_string),
+        state_ref: n
+            .get("state_ref")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }) {
+        if is_thread(&n) {
+            threads.push(n);
+        } else {
+            plain.push(n);
+        }
+    }
+    threads.sort_by(|a, b| {
+        a.ts.as_deref()
+            .unwrap_or("")
+            .cmp(b.ts.as_deref().unwrap_or(""))
+    });
+    plain.sort_by(|a, b| {
         b.ts.as_deref()
             .unwrap_or("")
             .cmp(a.ts.as_deref().unwrap_or(""))
     });
+    let mut notes = threads;
+    notes.extend(plain);
     let decisions = e
         .get("decisions")
         .cloned()

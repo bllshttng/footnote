@@ -181,12 +181,9 @@ def _record_spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
             # real --node door refuses a foreign advance:<pid> holder, so the
             # wrapper must have handed it over (released) before shelling.
             from fno.claims.core import claim_status
-            from fno.claims.io import claims_root_for
 
             node_id = argv[argv.index("--node") + 1] if "--node" in argv else ""
-            res = claim_status(
-                f"dispatch:{node_id}", root=claims_root_for(f"dispatch:{node_id}")
-            ) if node_id else {}
+            res = claim_status(f"dispatch:{node_id}") if node_id else {}
             calls.append(
                 {
                     "argv": argv,

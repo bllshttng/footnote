@@ -380,19 +380,17 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
 def test_external_claim_lands_where_every_node_reader_looks(tmp_path, monkeypatch):
     """A `node:` claim written to the cwd-default tree is a lock nobody honors.
 
-    Every reader of a `node:` key resolves the global root through
-    `claims_root_for` (`_read_node_claim` documents the trap in as many words:
-    a bare `claim_status(key)` reads the wrong tree as free). The external arm
-    of `backlog next --claim` was the one `node:` site that passed no `root=`,
-    so its lock landed under the cwd-default root and the node still read
-    `free` to the dispatch guard.
+    The native leg routes every `node:` reader to the global root (the routing
+    golden: crates/fno-agents/tests/claims_root_parity.rs), so the external arm
+    of `backlog next --claim` must write there too: a lock under the
+    cwd-default tree reads `free` to the dispatch guard.
 
     The two roots are pinned APART here on purpose. Every other test in this
     file sets `FNO_CLAIMS_ROOT`, which `claims_dir()` and `global_claims_root()`
     both honor, so they collapse to one directory and the bug is invisible.
     """
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_dir, claims_root_for, global_claims_root
+    from fno.claims.io import claims_dir, global_claims_root
 
     rows = _rows_basic()
     _wire(monkeypatch, tmp_path, rows, {
@@ -417,9 +415,10 @@ def test_external_claim_lands_where_every_node_reader_looks(tmp_path, monkeypatc
     assert json.loads(r.output)["id"] == "EXT-hi"
 
     key = "node:EXT-hi"
-    # The positive marker: the reader that every dispatch surface uses finds
-    # the claim, and names the same holder the acquire was given.
-    info = claim_status(key, root=claims_root_for(key))
+    # The positive marker: the reader that every dispatch surface uses (the
+    # bare native read, global routing inside) finds the claim, and names the
+    # same holder the acquire was given.
+    info = claim_status(key)
     assert info["holder"] == "sess-ext-root"
     # A TTL, and this is the half that makes the lock HONORED rather than merely
     # visible. Selection runs in a process that exits as soon as it prints the
@@ -456,7 +455,6 @@ def test_the_external_claim_still_blocks_after_its_selector_exits(
     import re
 
     from fno.claims.core import claim_path, claim_status
-    from fno.claims.io import claims_root_for
 
     rows = _rows_basic()
     _wire(monkeypatch, tmp_path, rows, {
@@ -470,8 +468,7 @@ def test_the_external_claim_still_blocks_after_its_selector_exits(
     assert json.loads(r.output)["id"] == "EXT-hi"
 
     key = "node:EXT-hi"
-    root = claims_root_for(key)
-    path = claim_path(key, root=root)
+    path = claim_path(key)
 
     dead = 999_999
     import psutil
@@ -485,7 +482,7 @@ def test_the_external_claim_still_blocks_after_its_selector_exits(
 
     # Dead pid INSIDE the TTL is `suspect`, and suspect blocks. Without the TTL
     # the same reading is `stale`, which does not.
-    assert claim_status(key, root=root)["state"] == "suspect"
+    assert claim_status(key)["state"] == "suspect"
 
     from fno.agents.cli import _spawn_guard_decision
 

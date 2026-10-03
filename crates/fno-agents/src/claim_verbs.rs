@@ -32,10 +32,13 @@ use std::path::PathBuf;
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|flight-acquire|flight-release|long-holds|release-stopped"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|root|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
+    if op == "root" {
+        return run_claim_root(&args[1..]);
+    }
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
     }
@@ -89,6 +92,7 @@ pub fn run_claim(args: &[String]) -> i32 {
 
     let mut holder: Option<String> = None;
     let mut opts = crate::claims::AcquireOpts::default();
+    let mut holding_recovery_lock = false;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut take = |name: &str| -> Option<String> {
@@ -129,6 +133,7 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(r) => opts.root = Some(PathBuf::from(r)),
                 None => return 2,
             },
+            "--holding-recovery-lock" => holding_recovery_lock = true,
             "--json" | "-J" => {} // output is always JSON; accepted for symmetry
             other => {
                 eprintln!("fno-agents: claim: unknown flag {other}");
@@ -259,7 +264,12 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim force-release requires --reason");
                 return 2;
             };
-            match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
+            match crate::claim_store::force_release(
+                &key,
+                reason,
+                opts.root.as_deref(),
+                holding_recovery_lock,
+            ) {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -285,6 +295,31 @@ pub fn run_claim(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// `claim root <key>` — the one claims-root resolver: `{"key","root","dir"}`
+/// for the store `key` resolves against (`root` null for a repo-local key).
+/// The Python callers that need the PATH read this op (`_native_claim("root",
+/// key, [])`); the lockfile operations themselves never needed it, they route
+/// inside `claims::acquire`/`claims_dir`.
+fn run_claim_root(args: &[String]) -> i32 {
+    let Some(key) = args.iter().find(|a| !a.starts_with("--")) else {
+        eprintln!("fno-agents: claim root requires a key argument");
+        return 2;
+    };
+    let root = crate::claims_root::claims_root_for(key);
+    let dir = match crate::claims_root::claims_dir(key, root.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("fno-agents: claim root: {e}");
+            return 2;
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({ "key": key, "root": root, "dir": dir })
+    );
+    0
 }
 
 /// `claim session-pid [--from-pid <pid>] [--json|-J]`: the one resolver of

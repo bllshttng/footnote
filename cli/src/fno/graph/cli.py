@@ -382,11 +382,10 @@ def _live_worker(node_id: str) -> Optional[str]:
     probe moved to the native leg, which reads the same lockfiles.
     """
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     key = f"node:{node_id}"
     try:
-        info = claim_status(key, root=claims_root_for(key))
+        info = claim_status(key)
     except Exception:  # noqa: BLE001 - a status read must never crash the table
         return None
     if info.get("state") in ("live", "suspect"):
@@ -2553,7 +2552,6 @@ def cmd_next(
         if pre_entries is not None:
             from fno.claims.cli import _parse_ttl
             from fno.claims.core import ClaimHeldByOther, acquire_claim
-            from fno.claims.io import claims_root_for
 
             occupied, observer = _prepare(pre_entries)
             candidates = _with_observer(
@@ -2566,7 +2564,6 @@ def cmd_next(
                         key,
                         claim,
                         ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
-                        root=claims_root_for(key),
                     )
                 except ClaimHeldByOther:
                     continue

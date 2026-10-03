@@ -55,21 +55,6 @@ from fno.backlog.advance import (
 _PENDING_TTL_MS = 6 * 60 * 60 * 1000  # 6h
 
 
-def _claims_root_for(key: str):
-    """Route reconcile claims so writer and reader agree across repos.
-
-    Delegates to fno.claims.io.claims_root_for: ``node:``/``reconcile:``/
-    ``dispatch:`` all go to the GLOBAL ($HOME) root. The reconcile sentinel is
-    written in the BLOCKER's merge context and read in the DEPENDENT's first-pass
-    context (possibly a different repo), so a cwd-relative root would lose it;
-    ``dispatch:`` is now global too (it keys on the same global node id), so it
-    still shares advance's dedup token -- globally, across repos.
-    """
-    from fno.claims.io import claims_root_for
-
-    return claims_root_for(key)
-
-
 def _pending_holder(node_id: str) -> str:
     """Stable holder for the ``reconcile:<node>`` sentinel.
 
@@ -85,9 +70,9 @@ def _pending_holder(node_id: str) -> str:
 def _sentinel_is_live(node_id: str) -> bool:
     """Liveness of ``reconcile:<node>`` at the GLOBAL root.
 
-    Routes the probe through ``_claims_root_for`` (the shared claims_root_for
-    helper), which roots ``reconcile:`` globally -- the same root the sentinel
-    was written at, even when read from a different repo.
+    The native leg roots ``reconcile:`` globally (the routing list lives in
+    crates/fno-agents/src/claims_root.rs) -- the same root the sentinel was
+    written at, even when read from a different repo.
     """
     from fno.claims.core import claim_status
 
@@ -95,7 +80,7 @@ def _sentinel_is_live(node_id: str) -> bool:
     try:
         # live OR suspect => occupied; a suspect reservation (TTL-
         # unexpired, dead pid) must still dedup so reconcile never double-fires.
-        return claim_status(key, root=_claims_root_for(key)).get("state") in (
+        return claim_status(key).get("state") in (
             "live",
             "suspect",
         )
@@ -217,14 +202,12 @@ def _dispatch_reconcile(
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"reconcile:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
             dispatch_key,
             holder,
             ttl_ms=180_000,  # 3m boot-window bridge, mirroring advance
             reason=f"reconcile dispatch for {node_id}",
-            root=dispatch_root,
         )
     except CLAIM_UNAVAILABLE:
         return skip("already-claimed")
@@ -243,24 +226,24 @@ def _dispatch_reconcile(
             ),
             provider=dep.get("provider"),
             node=dep,
-            dispatch_reservation=(dispatch_key, holder, dispatch_root),
+            dispatch_reservation=(dispatch_key, holder),
             caller="reconcile_dispatch",
             events_path=ev_path,
             receipt=spawn_receipt,
         )
     except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         return skip("already-claimed")
     except SpawnError as exc:
         # Machine-scoped -> skip naming the gate's own sentence; node fault -> failed.
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         refusal = gate_refusal(exc)
         if refusal is None:
             return failed(str(exc))
         return skip(refusal.reason, detail=refusal.detail,
                     retry_at=refusal.retry_at, exit_code=refusal.exit_code)
     except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         return failed(str(exc))
 
     dispatched_data = {
@@ -320,7 +303,6 @@ def _route_one(
                 key, _pending_holder(node_id),
                 ttl_ms=_PENDING_TTL_MS,
                 reason=f"reconcile pending: {node_id} manifest not yet written",
-                root=_claims_root_for(key),
             )
         except CLAIM_UNAVAILABLE:
             pass  # a sentinel already pending -> idempotent, nothing to add
@@ -388,7 +370,6 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
     trouble degrades to None so the manifest write never fails on the re-fire.
     """
     key = f"reconcile:{node_id}"
-    sentinel_root = _claims_root_for(key)
     if not _sentinel_is_live(node_id):
         return None
 
@@ -423,5 +404,5 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
     # the sentinel so a later write/advance retries (Invariant: don't drop it
     # while the dependent is still un-reconciled).
     if result.decision == "dispatched" or result.reason == "already-claimed":
-        _safe_release(key, _pending_holder(node_id), sentinel_root)
+        _safe_release(key, _pending_holder(node_id))
     return result

@@ -839,14 +839,10 @@ def collect_observations(
     claim_fn = claim_status_fn
     if claim_fn is None:
         from fno.claims.core import claim_status
-        from fno.claims.io import claims_root_for
 
         def claim_fn(node_id: str) -> dict:
             key = f"node:{node_id}"
-            root = claims_root_for(key)
-            if root is None:
-                raise ValueError(f"claims root unresolved for {key}")
-            return claim_status(key, root=root)
+            return claim_status(key)
 
     claims_ok = True
     claim_views: dict[str, dict] = {}

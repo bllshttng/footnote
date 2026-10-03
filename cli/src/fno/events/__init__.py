@@ -642,6 +642,26 @@ def validate(event: dict[str, Any]) -> None:
                     f"(allowed: {allowed})"
                 )
 
+    # Same chokepoint rationale: span_kind/route/class drive the eval grouping
+    # (one decision path per trace_id), so a typo'd value must fail at
+    # validate rather than land as an unrecognized hop. The Rust emitters
+    # enforce the same enums at build time; this is the generic-emit path's
+    # check.
+    if type_name == "decision_span":
+        type_props = type_spec["data"]["properties"]
+        allowed = type_props["span_kind"]["enum"]
+        if data.get("span_kind") not in allowed:
+            raise ValidationError(
+                f"unknown decision_span data.span_kind: {data.get('span_kind')!r} "
+                f"(allowed: {allowed})"
+            )
+        for field in ("route", "class"):
+            if field in data and data[field] not in type_props[field]["enum"]:
+                raise ValidationError(
+                    f"unknown decision_span data.{field}: {data[field]!r} "
+                    f"(allowed: {type_props[field]['enum']})"
+                )
+
     # Same chokepoint rationale: skill_eval_finding's dimension/verdict drive
     # downstream ranking logic, so a typo'd enum value must fail here
     # rather than silently landing as an unrecognized bucket.

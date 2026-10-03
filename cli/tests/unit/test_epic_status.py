@@ -290,12 +290,10 @@ def test_live_worker_shown(graph_env):
         _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     from fno.claims.core import acquire_claim, release_claim
-    from fno.claims.io import claims_root_for
 
     key = "node:x-c2"
-    root = claims_root_for(key)
     holder = "target-session:abc123"
-    acquire_claim(key=key, holder=holder, pid=os.getpid(), root=root)
+    acquire_claim(key=key, holder=holder, pid=os.getpid())
     try:
         r = _invoke(["backlog", "epic", "status", "x-epic"])
         assert r.exit_code == 0, r.output
@@ -303,9 +301,9 @@ def test_live_worker_shown(graph_env):
         # a claimed ready child is working, not idle -> no receipt lookup for it
         assert "no receipt found" not in r.output
     finally:
-        # Claims live at the session-global root ($HOME redirect), which
-        # persists across tests - release so the claim never leaks forward.
-        release_claim(key, holder, root=root)
+        # The claim persists across tests (global store) - release so it
+        # never leaks forward.
+        release_claim(key, holder)
 
 
 # -- JSON shape --

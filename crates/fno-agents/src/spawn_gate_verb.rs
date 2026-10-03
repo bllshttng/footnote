@@ -1748,6 +1748,7 @@ mod tests {
         let _g = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let _env = TestEnvRestore::capture(&[
             crate::paths::HOME_ENV,
             "FNO_CLAIMS_ROOT",
@@ -1830,6 +1831,7 @@ mod tests {
         let _g = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let _env = TestEnvRestore::capture(&[
             crate::paths::HOME_ENV,
             "FNO_CLAIMS_ROOT",

@@ -379,6 +379,7 @@ fn no_wait_refusal_receipt_names_a_reservation() {
     let _g = claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
     let dir = std::env::temp_dir().join(format!("fno-gate-nwres-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let root = dir.join("claims-root");
@@ -507,6 +508,7 @@ fn dead_holder_frees_its_headless_slot() {
     let _g = claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
     let dir = std::env::temp_dir().join(format!("fno-gate-deadhold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let root = dir.join("claims-root");
@@ -547,6 +549,7 @@ fn live_holder_keeps_its_headless_slot() {
     let _g = claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
     let dir = std::env::temp_dir().join(format!("fno-gate-livehold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let root = dir.join("claims-root");
@@ -592,6 +595,7 @@ fn corrupted_slot_claim_is_skipped_and_warned() {
     let _g = claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
     let dir = std::env::temp_dir().join(format!("fno-gate-corrupt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let root = dir.join("claims-root");

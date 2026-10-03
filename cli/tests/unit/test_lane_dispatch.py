@@ -546,7 +546,7 @@ def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monk
     ready = _nodes(("n-a", "code"), ("n-c", "docs"))
     _wire(monkeypatch, tmp_path, ready)
     dkey = "dispatch:n-a"
-    acquire_claim(dkey, "advance:other", ttl_ms=180_000, root=advance._claims_root_for(dkey))
+    acquire_claim(dkey, "advance:other", ttl_ms=180_000)
 
     receipts = advance.dispatch_lanes(
         3, project_root=tmp_path, claims_root=tmp_path / "claims"

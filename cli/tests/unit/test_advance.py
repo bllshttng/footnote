@@ -172,8 +172,8 @@ def _events(events_path: Path) -> list[dict]:
 
 
 def _hold(key: str) -> None:
-    """Acquire a live TTL claim at KEY using advance's own root routing."""
-    acquire_claim(key, "test-holder", ttl_ms=60_000, root=adv._claims_root_for(key))
+    """Acquire a live TTL claim at KEY (the iso fixture pins the claims root)."""
+    acquire_claim(key, "test-holder", ttl_ms=60_000)
 
 
 # A real selection projection row (x-0961/x-ebd2): the keys the node-aware
@@ -412,7 +412,6 @@ def test_blueprint_planning_claim_blocks_dispatch(iso, monkeypatch):
         key,
         "blueprint-session:planner-a",
         pid=os.getpid(),
-        root=adv._claims_root_for(key),
     )
     spawned = []
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -436,7 +435,6 @@ def test_blueprint_planning_claim_dead_pid_frees_node(iso, monkeypatch):
         key,
         "blueprint-session:planner-a",
         pid=child.pid,
-        root=adv._claims_root_for(key),
     )
 
     assert adv._node_dispatch_block_reason(NODE["id"]) is None
@@ -675,7 +673,7 @@ def test_dispatched_happy_path_and_claim_survives(iso, monkeypatch):
     assert res.node_id == NODE["id"] and res.short_id == "deadbeef"
     # AC1-CLAIM: the dispatch reservation is live AFTER advance returns.
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+    assert claim_status(key).get("state") == "live"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_dispatched"
     assert evs[0]["data"]["node_id"] == NODE["id"]
@@ -709,7 +707,7 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
     assert res.decision == "failed" and res.node_id == NODE["id"]
     # Reservation released -> node is re-dispatchable on the next trigger.
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
@@ -777,7 +775,7 @@ def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
 
     assert res.decision == "skipped" and res.reason == "already-claimed"
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
 
 
 # ---------------------------------------------------------------------------
@@ -1459,7 +1457,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
-    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         "fno.claims.core.acquire_claim", lambda *a, **k: object()
     )
@@ -1530,7 +1528,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
-    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         "fno.claims.core.acquire_claim", lambda *a, **k: object()
     )
@@ -1997,7 +1995,7 @@ def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
 
     assert res.decision == "failed" and res.node_id == NODE["id"]
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
@@ -2297,7 +2295,7 @@ def test_converge_one_releases_reservation_when_outcome_is_not_dispatched(
             {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
         )
     key = "dispatch:ab-1111aaaa"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
 
 
 def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
@@ -2312,7 +2310,7 @@ def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
     )
     assert result.decision == "dispatched"
     key = "dispatch:ab-1111aaaa"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+    assert claim_status(key).get("state") == "live"
 
 
 # ---------------------------------------------------------------------------
@@ -2463,7 +2461,7 @@ def test_dependents_cross_project_dispatch(iso, monkeypatch):
     assert captured["args"] == ("ab-3333bbbb", "/mapped/web", "frontend-bit")
     # dispatch reservation lives on after return (dedup vs a peer trigger).
     key = f"dispatch:{_DEP['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+    assert claim_status(key).get("state") == "live"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_dispatched"
     assert evs[0]["data"]["node_id"] == _DEP["id"]
@@ -2613,7 +2611,7 @@ def test_dependents_spawn_failure_releases_reservation(iso, monkeypatch):
     )
     assert results[0].decision == "failed"
     key = f"dispatch:{_DEP['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     assert _events(iso)[0]["type"] == "advance_failed"
 
 
@@ -3202,7 +3200,7 @@ def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
 
     assert res.decision == "failed" and res.node_id == NODE["id"]
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     evs = _events(iso)
     assert [e["type"] for e in evs] == ["advance_failed"]
 
@@ -3765,7 +3763,7 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
     assert "64" in evs[0]["data"]["error"]
     # Re-dispatchable: the reservation is released, not stuck holding a lane.
     key = f"dispatch:{node_id}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
 
 
 def test_duplicate_dispatch_converges_on_one_dedup_name():

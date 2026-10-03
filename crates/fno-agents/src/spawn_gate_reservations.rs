@@ -99,7 +99,8 @@ pub(crate) fn release_redeemed_reservation(name: &str, root: Option<&Path>) {
         .get("reserved_reason")
         .and_then(Value::as_str)
         .unwrap_or("no reason recorded");
-    match crate::claim_store::force_release(&key, &format!("redeemed by spawn {name}"), root) {
+    match crate::claim_store::force_release(&key, &format!("redeemed by spawn {name}"), root, false)
+    {
         Ok(_) => {
             eprintln!("spawn-gate: redeemed reservation {key} (reserved by {by}: {why})");
         }
@@ -177,6 +178,7 @@ mod tests {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-resv-ref-{}", std::process::id()));
         let prior_agents_home = std::env::var_os("FNO_AGENTS_HOME");
         let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
@@ -239,6 +241,7 @@ mod tests {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-resv-adm-{}", std::process::id()));
         std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");

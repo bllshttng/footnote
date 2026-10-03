@@ -400,6 +400,11 @@ dual_owner_kinds = {
     # the lead-wake, session-register, and stale-escalate Python arms still
     # emit their own asks until they port.
     "operator_question",
+    # decision_span: the Rust decision_trace emitters are the only writers
+    # (the mail-record leaf, the question intake, the decide door, the king
+    # stop check); the Python side carries it in schema.yaml for the
+    # validator and `doctor event find`, the way pr_watch_unparked above does.
+    "decision_span",
 }
 collisions -= dual_owner_kinds
 if collisions:

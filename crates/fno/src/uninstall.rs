@@ -13,7 +13,7 @@ use std::process::Stdio;
 use clap::Args;
 use serde_json::Value;
 
-use crate::process_admission::{std_command, std_spawn_for_human};
+use crate::process_admission::{std_command, std_spawn};
 
 /// `fno uninstall`'s flags.
 #[derive(Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -113,7 +113,7 @@ fn run(argv: &[String]) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let out = std_spawn_for_human(&mut cmd)
+    let out = std_spawn(&mut cmd)
         .and_then(|child| child.wait_with_output())
         .map_err(|e| format!("{}: {e}", argv[0]))?;
     if out.status.success() {
@@ -142,7 +142,7 @@ fn run_stdin(argv: &[String], input: &str) -> Result<String, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let failed = |e: std::io::Error| format!("{}: {e}", argv[0]);
-    let mut child = std_spawn_for_human(&mut cmd).map_err(failed)?;
+    let mut child = std_spawn(&mut cmd).map_err(failed)?;
     child
         .stdin
         .take()
