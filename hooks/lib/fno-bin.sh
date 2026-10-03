@@ -9,10 +9,10 @@ fno_bin() {
         command -v fno
     elif [[ -n "${UV_TOOL_BIN_DIR:-}" && -x "${UV_TOOL_BIN_DIR}/fno" ]] ; then
         printf '%s' "$UV_TOOL_BIN_DIR/fno"
-    elif [[ -x "${HOME:-}/.cargo/bin/fno" ]] ; then
-        printf '%s' "$HOME/.cargo/bin/fno"
     elif [[ -x "${HOME:-}/.local/bin/fno" ]] ; then
         printf '%s' "$HOME/.local/bin/fno"
+    elif [[ -x "${HOME:-}/.cargo/bin/fno" ]] ; then
+        printf '%s' "$HOME/.cargo/bin/fno"
     else
         printf ''
     fi

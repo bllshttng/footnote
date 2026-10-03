@@ -5,8 +5,12 @@
 # install it. Claude Code has no plugin install hook, so this is the only place a
 # plugin install runs the installer. It runs detached, once per plugin version,
 # under a lock, and logs to ${CLAUDE_PLUGIN_DATA}/postinstall.log. Goes SILENT the
-# moment the front door is active. Stdout becomes session context (same
-# plain-text convention as setup-nudge-session-start.sh).
+# moment the front door is active - resolved beyond this session's PATH first
+# (~/.local/bin, ~/.cargo/bin): a fresh background session's PATH lacks those,
+# and reading a working install as missing once started the installer over a
+# live tool env (2026-10-02 gap audit, blocker 1). A proven door off PATH prints
+# a one-line hint naming the path instead of installing. Stdout becomes session
+# context (same plain-text convention as setup-nudge-session-start.sh).
 
 set -uo pipefail
 
@@ -23,6 +27,11 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
+# Resolve the front door beyond this session's PATH: a fresh background
+# session does not inherit ~/.cargo/bin, and `command -v fno` alone then reads
+# a working install as missing, which started the installer and force-replaced
+# a live tool env mid-study (2026-10-02 gap audit, blocker 1). The shared
+# resolver in hooks/lib/fno-bin.sh serves this hook and the prompt-submit twin.
 source "$HOOK_DIR/lib/fno-bin.sh" 2>/dev/null || true
 FNO_BIN="$(fno_bin)"
 if [[ -n "$FNO_BIN" ]]; then
@@ -41,7 +50,15 @@ if [[ -n "$FNO_BIN" ]]; then
   # than only where Homebrew supplied timeout(1), that misread is reachable
   # everywhere, so it has to be distinguished from a real probe failure.
   if [[ $probe_rc -eq 0 || $probe_rc -eq 124 ]]; then
-    exit 0 # `fno` on PATH IS the Rust mux front door - nothing to remind
+    if command -v fno >/dev/null 2>&1; then
+      exit 0 # `fno` on PATH IS the Rust mux front door - nothing to remind
+    fi
+    # Installed but off this session's PATH. Reinstalling cannot help and can
+    # only clobber the working tool env; name the path and stop.
+    echo "## fno is installed, just not on this session's PATH"
+    echo
+    echo "\`fno\` lives at \`$fno_bin\`, which this session's PATH lacks. New sessions pick it up; this one can call it by that path or \`export PATH=\"\$(dirname \"$fno_bin\"):\$PATH\"\`."
+    exit 0
   fi
 fi
 

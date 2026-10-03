@@ -354,6 +354,13 @@ fn sideline_toggle_rows() {
     });
     assert!(matches!(
         v.sideline_view,
+        crate::view_store::SidelineView::Messages
+    ));
+    rt.block_on(async {
+        cycle_sideline_view(&mut v);
+    });
+    assert!(matches!(
+        v.sideline_view,
         crate::view_store::SidelineView::Backlog
     ));
     assert!(v.backlog_board.is_some(), "backlog view opens the board");

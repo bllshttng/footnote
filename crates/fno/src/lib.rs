@@ -42,6 +42,7 @@ pub(crate) mod lattice;
 pub mod law_cli;
 pub mod link;
 pub mod live_store_fence;
+pub mod messages_model;
 pub mod model_catalog;
 pub mod mouse;
 pub mod mux_cli;

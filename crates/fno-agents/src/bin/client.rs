@@ -669,6 +669,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::chats::run_chats(&args[1..]);
     }
 
+    // `mail-threads`: the mux Messages tab's thread read model (see
+    // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
+    // read must work when the daemon is wedged. Hidden from help and from
+    // ALL_CLIENT_ACTIONS, like court-fold.
+    if verb == "mail-threads" {
+        return fno_agents::mail_threads::run_mail_threads(&args[1..]);
+    }
+
     // `update-journal`: the `fno doctor update` lifecycle's one Rust door
     // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
     // lifecycle rows land even when the daemon is wedged, which is the

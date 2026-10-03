@@ -140,9 +140,11 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
         screen.contains("claude  \u{25be}"),
         "the harness chip shows its value: {screen}"
     );
-    // The tab strip is gone: no axis names paint.
+    // The tab strip is gone: no axis names paint in the content area (the
+    // sideline's own strip row legitimately reads "Messages").
+    let content = pane_region(&screen);
     for tab in ["Harness", "Flags", "Message"] {
-        assert!(!screen.contains(tab), "no tab label {tab}: {screen}");
+        assert!(!content.contains(tab), "no tab label {tab}: {screen}");
     }
 }
 
