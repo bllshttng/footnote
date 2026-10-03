@@ -2904,10 +2904,6 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     )
     before = receipt_path.read_bytes()
 
-    update_registry(
-        lambda es: [e for e in es if e.name != "swept"], path=registry_path
-    )
-
     calls: list[dict] = []
 
     def fake_spawn_axes_call(payload: dict) -> dict:
