@@ -10,7 +10,14 @@ shells to this only under FNO_CAPTURE_GOLDEN=1.
 import json
 import sys
 
-from fno.events import SchemaUnavailableError, ValidationError, validate
+try:
+    from fno.events import SchemaUnavailableError, ValidationError, validate
+except ImportError as exc:
+    # The capture driver cannot run here (no project env). Exit 3 is a
+    # distinct cannot-run code: the Rust side treats it as absence and
+    # skips the row, never as a verdict.
+    print(f"capture driver unavailable: {exc}", file=sys.stderr)
+    sys.exit(3)
 
 
 def main() -> int:

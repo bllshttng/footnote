@@ -38,7 +38,15 @@ fn corpus_rows() -> Vec<(String, String)> {
         if line.trim().is_empty() {
             continue;
         }
-        let row: serde_json::Value = serde_json::from_str(line).expect("corpus row parses");
+        // Rows with literals serde_json cannot represent (non-finite
+        // overflow numbers) never reach the judge: the door answers them at
+        // the substrate layer and the write still never lands. Their
+        // Python-side diagnostic contract stays in the Python suite until
+        // that leg retires.
+        let row: serde_json::Value = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
         let label = row["reason"]
             .as_str()
             .expect("corpus rows carry reasons")
@@ -56,7 +64,11 @@ fn corpus_rows() -> Vec<(String, String)> {
 /// and never fails).
 fn run_python_verdict(tmp: &Path, event_json: &str) -> Option<Golden> {
     std::fs::write(tmp, event_json).ok()?;
-    let output = Command::new("python3")
+    // FNO_PYTHON pins the interpreter (the project venv that has the fno
+    // package deps); bare python3 is the fallback, and a driver that
+    // cannot import answers exit 3, which reads as absence below.
+    let interpreter = std::env::var("FNO_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let output = Command::new(interpreter)
         .arg(driver_path())
         .arg(tmp)
         .env(
@@ -65,6 +77,11 @@ fn run_python_verdict(tmp: &Path, event_json: &str) -> Option<Golden> {
         )
         .output()
         .ok()?;
+    // Only 0/1/2 are verdicts; anything else (3: driver cannot run, or a
+    // crash) reads as absence and skips the row (AC2-ERR).
+    if !matches!(output.status.code(), Some(0) | Some(1) | Some(2)) {
+        return None;
+    }
     Some(Golden {
         exit: output.status.code(),
         streams: vec![

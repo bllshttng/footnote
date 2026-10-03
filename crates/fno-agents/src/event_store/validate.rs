@@ -402,7 +402,7 @@ fn context_snapshot_rules(type_name: &str, data: &Map<String, Value>) -> Result<
     let entry = data.get("entry_state");
     let mut entry_ok = false;
     if let Some(Value::String(s)) = entry {
-        entry_ok = ["startup", "resume", "clear", "post_compact"].contains(s);
+        entry_ok = ["startup", "resume", "clear", "post_compact"].contains(&s.as_str());
     }
     if !entry_ok {
         return Err(format!(
@@ -523,7 +523,7 @@ fn context_snapshot_rules(type_name: &str, data: &Map<String, Value>) -> Result<
     }
     let mc = data.get("measurement_complete");
     let mut mc_ok = false;
-    if let Some(Value::Bool(b)) = mc {
+    if let Some(Value::Bool(_)) = mc {
         mc_ok = true;
     }
     if !mc_ok {
@@ -557,17 +557,15 @@ fn verification_receipt_rules(
     let mode = data.get("mode");
     if !enum_contains(spec.enums.get("mode"), mode) {
         return Err(format!(
-            "unknown verification_receipt data.mode: {} (allowed: {})",
+            "unknown verification_receipt data.mode: {}",
             py_repr(mode.unwrap_or(&Value::Null)),
-            py_value_list(enum_list(spec.enums.get("mode"))),
         ));
     }
     let result = data.get("result");
     if !enum_contains(spec.enums.get("result"), result) {
         return Err(format!(
-            "unknown verification_receipt data.result: {} (allowed: {})",
+            "unknown verification_receipt data.result: {}",
             py_repr(result.unwrap_or(&Value::Null)),
-            py_value_list(enum_list(spec.enums.get("result"))),
         ));
     }
     let candidate_sha = data.get("candidate_sha");
@@ -716,7 +714,7 @@ fn small_enum_rules(
                     }
                 }
             }
-            if truthy(g) && !known {
+            if truthy(Some(g)) && !known {
                 return Err(format!(
                     "unknown gate: {} (allowed: {})",
                     py_repr(g),
@@ -738,22 +736,10 @@ fn small_enum_rules(
         }
     }
     if type_name == "session_satisfied" || type_name == "auto_complete_triggered" {
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "source",
-            std::slice::from_ref("source"),
-        )?;
+        field_enum_rule(type_name, data, spec, "source", &["source"])?;
     }
     if type_name == "termination" {
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "reason",
-            std::slice::from_ref("reason"),
-        )?;
+        field_enum_rule(type_name, data, spec, "reason", &["reason"])?;
     }
     if type_name == "transition_rejected" {
         for field in ["kind", "event", "from"].iter() {
@@ -776,46 +762,16 @@ fn small_enum_rules(
         }
     }
     if type_name == "human_touch" {
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "source",
-            std::slice::from_ref("source"),
-        )?;
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "resolution",
-            std::slice::from_ref("resolution"),
-        )?;
+        field_enum_rule(type_name, data, spec, "source", &["source"])?;
+        field_enum_rule(type_name, data, spec, "resolution", &["resolution"])?;
     }
     if type_name == "operator_submit" {
-        field_enum_rule(type_name, data, spec, "via", std::slice::from_ref("via"))?;
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "resolution",
-            std::slice::from_ref("resolution"),
-        )?;
+        field_enum_rule(type_name, data, spec, "via", &["via"])?;
+        field_enum_rule(type_name, data, spec, "resolution", &["resolution"])?;
     }
     if type_name == "skill_eval_finding" {
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "dimension",
-            std::slice::from_ref("dimension"),
-        )?;
-        field_enum_rule(
-            type_name,
-            data,
-            spec,
-            "verdict",
-            std::slice::from_ref("verdict"),
-        )?;
+        field_enum_rule(type_name, data, spec, "dimension", &["dimension"])?;
+        field_enum_rule(type_name, data, spec, "verdict", &["verdict"])?;
     }
     Ok(())
 }
@@ -849,13 +805,7 @@ fn review_attestation_rules(
     if type_name != "review_attestation" {
         return Ok(());
     }
-    field_enum_rule(
-        type_name,
-        data,
-        spec,
-        "verdict",
-        std::slice::from_ref("verdict"),
-    )?;
+    field_enum_rule(type_name, data, spec, "verdict", &["verdict"])?;
     for count_field in ["findings_blocking", "findings_nonblocking", "review_round"].iter() {
         if let Some(value) = data.get(*count_field) {
             if !value.is_null()
@@ -982,13 +932,7 @@ fn mail_escalation_rule(
     if type_name != "mail_escalation" {
         return Ok(());
     }
-    field_enum_rule(
-        type_name,
-        data,
-        spec,
-        "reason",
-        std::slice::from_ref("reason"),
-    )
+    field_enum_rule(type_name, data, spec, "reason", &["reason"])
 }
 
 /// gate_escape: the reason drives the retro autonomy-debt ranking, so a typo
@@ -1001,13 +945,7 @@ fn gate_escape_rule(
     if type_name != "gate_escape" {
         return Ok(());
     }
-    field_enum_rule(
-        type_name,
-        data,
-        spec,
-        "reason",
-        std::slice::from_ref("reason"),
-    )
+    field_enum_rule(type_name, data, spec, "reason", &["reason"])
 }
 
 /// post_merge_dispatch_receipt: the phase drives the reserved-before-accepted
@@ -1022,7 +960,7 @@ fn post_merge_rule(
         return Ok(());
     }
     for field in ["phase", "route"].iter() {
-        field_enum_rule(type_name, data, spec, field, std::slice::from_ref(field))?;
+        field_enum_rule(type_name, data, spec, field, std::slice::from_ref(&field))?;
     }
     Ok(())
 }
@@ -1120,15 +1058,16 @@ fn overlap_observation_id(repo: &str, wt: &str, obs: &str, peers: &[String]) -> 
     for p in peers.iter() {
         deduped.insert(p.as_str());
     }
-    let arr = Value::Array({
-        let mut fields = vec![
-            Value::String(repo.to_string()),
-            Value::String(wt.to_string()),
-            Value::String(obs.to_string()),
-        ];
-        fields.extend(deduped.into_iter().map(|p| Value::String(p.to_string())));
-        fields
-    });
+    let peer_array: Vec<Value> = deduped
+        .into_iter()
+        .map(|p| Value::String(p.to_string()))
+        .collect();
+    let arr = Value::Array(vec![
+        Value::String(repo.to_string()),
+        Value::String(wt.to_string()),
+        Value::String(obs.to_string()),
+        Value::Array(peer_array),
+    ]);
     let compact = serde_json::to_string(&arr).unwrap_or_default();
     hex(&Sha256::digest(compact.as_bytes()))
 }
@@ -1206,8 +1145,8 @@ fn is_nonneg_integral(v: Option<&Value>) -> bool {
     match v {
         Some(Value::Number(n)) => {
             if let Some(i) = n.as_i64() {
-                *i >= 0
-            } else if let Some(u) = n.as_u64() {
+                i >= 0
+            } else if n.as_u64().is_some() {
                 true
             } else {
                 n.as_f64()
