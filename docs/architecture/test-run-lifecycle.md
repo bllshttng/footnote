@@ -77,7 +77,7 @@ What the cap does not cover: a cargo started outside a footnote checkout reaches
 
 ## Lanes
 
-Every admission door orders its waiters in up to three lanes, best first: `priority`, then `queue` (arrival order), then, at the suite door only, `full`. A lane is one claim-queue dir beside the claim's lockfile. A waiter tries the acquire only while every better lane is empty and it sits at the front of its own lane. An empty lane reserves nothing. No lane ever signals a running holder. A holder runs to completion (or to its own budget) regardless of who waits. The user lane is above all of them and is not a lane: a user-origin cargo never queues at all (Build admission), which is why the by-hand `test:priority` acquire below is a king's lever for an agent worktree, never the user's escape.
+Every admission door orders its waiters in up to three lanes, best first: `priority`, then `queue` (arrival order), then, at the suite door only, `full`. A lane is one claim-queue dir beside the claim's lockfile. A waiter tries the acquire only while every better lane is empty and it sits at the front of its own lane. An empty lane reserves nothing. No lane ever signals a running holder. A holder runs to completion (or to its own budget) regardless of who waits. The user lane is above all of them and is not a lane: a user-origin cargo never queues at all (Build admission). The by-hand `test:priority` acquire below is therefore a king's lever for an agent worktree, never the user's escape.
 
 The priority lane names one checkout. The user sets it, or a king sets it on the user's word:
 
