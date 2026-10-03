@@ -7,9 +7,9 @@
 use super::*;
 
 /// One open-chooser pick. Persisted in `mux-view.json` as its lowercase
-/// name (the `feed_order` shape), so a choice survives a restart. `ModPane`
-/// is deliberately unparseable from disk: it is disabled until the Claude
-/// Code mod lands, and a disabled row never becomes the saved pick.
+/// name (the `feed_order` shape), so a choice survives a restart. The
+/// disabled Mod pane row carries no pick on purpose: nothing in the enum
+/// parses as it, so it can never become the saved pick or a pre-selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenTarget {
     Right,
@@ -17,7 +17,6 @@ pub(crate) enum OpenTarget {
     Up,
     Down,
     Tab,
-    ModPane,
 }
 
 impl OpenTarget {
@@ -28,7 +27,6 @@ impl OpenTarget {
             Self::Up => "up",
             Self::Down => "down",
             Self::Tab => "tab",
-            Self::ModPane => "mod_pane",
         }
     }
 
@@ -44,15 +42,15 @@ impl OpenTarget {
     }
 
     /// The flat target index of the row this pick pre-selects. Targets skip
-    /// the disabled Mod pane entry, so New tab is index 4 of 5; anything
-    /// unselectable (nothing saved, `ModPane`) lands on Split right.
+    /// the disabled Mod pane entry, so New tab is index 4 of 5; Split right
+    /// is the default.
     fn sel(self) -> usize {
         match self {
             Self::Left => 1,
             Self::Up => 2,
             Self::Down => 3,
             Self::Tab => 4,
-            _ => 0,
+            Self::Right => 0,
         }
     }
 }
@@ -265,10 +263,9 @@ mod tests {
         assert_eq!(thread.actions[4], MenuAction::PortalAt(None));
 
         // AC4-ERR. The Mod pane entry draws greyed and carries no target:
-        // arrows, Enter and clicks cannot reach it, so a pick landing there
-        // degrades to Split right and no action exists to mis-fire.
-        let menu = build_open_chooser(&attachable(), Some(OpenTarget::ModPane)).unwrap();
-        assert_eq!(menu.popup.sel, 0);
+        // arrows, Enter and clicks cannot reach it, and no disk spelling
+        // parses as it, so it is never a saved pick nor a pre-selection.
+        let menu = build_open_chooser(&attachable(), None).unwrap();
         let dead = menu
             .popup
             .rows
