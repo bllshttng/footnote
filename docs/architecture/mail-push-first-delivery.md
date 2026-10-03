@@ -45,6 +45,10 @@ The fix is a recipient-level delivery policy, not a heuristic: `delivery_policy:
 - **The raw lane:** `--raw` never queues durable, so a raw send to a bus-only recipient refuses non-zero (`refused: ... is DND (delivery-policy bus-only)`). `--check` answers `not-injectable` naming the policy.
 - **The naming rule:** bus-only is a DELIVERY-POLICY fact, never a liveness verdict. A bus-only session can be alive and mid-turn. It just belongs on the bus. This is the same distinction that renamed `NOT_INJECTABLE` off "not-live" (see `mail_inject.rs`).
 
+### Timed hold release
+
+When a timed hold ends, one live turn carries a framing line with the message count, local sent-time range, and held duration. Rust renders one sender/id header per original message, oldest first. Each header has a summary capped at 12 words. The body follows on its original lines. The recipient harness's mail-header capability selects mention or plain sender form. After confirmed delivery, the receiver records one `agent_mail_drained` receipt per original message. A missed delivery leaves the source cursors unchanged for the next turn boundary.
+
 ## Scope
 
 Bus/handle lane only. Project-inbox markdown delivery honesty and liveness detection (a non-mesh session invisible to the bus) are out of scope.
