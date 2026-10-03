@@ -81,6 +81,19 @@ impl Core {
         slot
     }
 
+    /// The close half of a retune whose caller already removed the slot:
+    /// emits `portal_closed` for the channel the index used to show, with
+    /// no map mutation. The caller journals the open half on the success
+    /// path, so a focus or a failed retune never reads as a closure.
+    pub(super) fn journal_portal_channel_left(&self, idx: u8, previous_row_key: &str, cause: &str) {
+        self.append_portal_event(portal_closed_row(
+            &self.session_name,
+            idx,
+            previous_row_key,
+            cause,
+        ));
+    }
+
     fn append_portal_event(&self, event: serde_json::Value) {
         if crate::pane_send_audit::append_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),

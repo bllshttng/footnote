@@ -731,22 +731,27 @@ pub(crate) fn persist_reconcile_changes(
         applied = apply_reconcile_changes(r, entries, changes, titles, mode, now);
         apply_worker_readings(r, &readings, now);
     });
-    // Every applied transition is one observed process fact for a row fno
-    // owns, journaled with its evidence word (ruling d-e096c669): an exit
-    // and a restart stop being silent.
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    for t in &applied {
-        let _ = emitter.emit(
-            "row_lifecycle_observed",
-            &serde_json::json!({
-                "row": t.row,
-                "harness": t.harness,
-                "harness_session": t.harness_session,
-                "from": t.from,
-                "to": t.to,
-                "cause": t.cause,
-            }),
-        );
+    // Only a landed write journals: the closure can populate `applied`
+    // before a guard or the atomic rename fails, and an event for a
+    // transition that never reached the registry is a lie.
+    if wrote.is_ok() {
+        // Every applied transition is one observed process fact for a row
+        // fno owns, journaled with its evidence word (ruling d-e096c669):
+        // an exit and a restart stop being silent.
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        for t in &applied {
+            let _ = emitter.emit(
+                "row_lifecycle_observed",
+                &serde_json::json!({
+                    "row": t.row,
+                    "harness": t.harness,
+                    "harness_session": t.harness_session,
+                    "from": t.from,
+                    "to": t.to,
+                    "cause": t.cause,
+                }),
+            );
+        }
     }
     wrote
 }
