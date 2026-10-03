@@ -111,7 +111,11 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
         asker.and_then(|a| a.harness.as_deref()).unwrap_or("?"),
         item.node.as_deref().unwrap_or("none"),
         age_short(&item.created_at, now),
-        item.state,
+        if item.settled {
+            "answered"
+        } else {
+            &item.state
+        },
         if item.ready {
             String::new()
         } else {
@@ -821,7 +825,7 @@ impl View {
         self.question_detail = Detail::open(fold, Some(id));
     }
 
-    /// Open the full questions view on the list (the `+N more` gesture).
+    /// Open the full questions view on its first row.
     pub(super) fn open_questions_list(&mut self) {
         let empty = crate::needs_overlay::QuestionsFold::default();
         let fold = self.questions_fold.as_ref().unwrap_or(&empty);
