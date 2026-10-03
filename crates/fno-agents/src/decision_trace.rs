@@ -47,8 +47,7 @@ pub fn actor_kind(session: Option<&str>, source: &str) -> &'static str {
         crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json())
             .map(|teams| {
                 teams.iter().any(|team| {
-                    team
-                        .holder_session
+                    team.holder_session
                         .as_deref()
                         .is_some_and(|s| crate::identity::canonical_handle(s) == handle)
                 })
