@@ -27,6 +27,9 @@ pub(crate) struct KingManifest {
     /// The written reason for a declared/reached term's replacement; absent
     /// on the first declaration.
     pub(crate) term_reason: Option<String>,
+    /// The on-deck queue in seat order, recorded by `org checkin --queue`;
+    /// empty on manifests written before the field existed.
+    pub(crate) queue: Vec<String>,
 }
 
 pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
@@ -61,6 +64,14 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "shape" => out.shape = value,
             "term" => out.term = Some(value),
             "term_reason" => out.term_reason = Some(value),
+            "queue" => {
+                out.queue = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;
@@ -603,6 +614,17 @@ mod tests {
         let manifest = parse_king_manifest("---\nfno_id: k\nharness_session_id: null\n---\n")
             .expect("manifest parses");
         assert!(manifest.harness_session_id.is_none());
+
+        let manifest =
+            parse_king_manifest("---\nfno_id: k\nqueue: x-aa11, x-bb22\n---\n").expect("parses");
+        assert_eq!(
+            manifest.queue,
+            vec!["x-aa11".to_string(), "x-bb22".to_string()]
+        );
+        let manifest = parse_king_manifest("---\nfno_id: k\nqueue: , ,\n---\n").expect("parses");
+        assert!(manifest.queue.is_empty());
+        let manifest = parse_king_manifest("---\nfno_id: k\n---\n").expect("parses");
+        assert!(manifest.queue.is_empty());
     }
 
     fn board_with_queues(queues: Value) -> Value {
