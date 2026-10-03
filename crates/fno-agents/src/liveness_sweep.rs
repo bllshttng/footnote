@@ -718,7 +718,7 @@ pub(crate) fn persist_reconcile_changes(
                         now,
                     );
                 } else {
-                    crate::model_price::mark_session_transcript_unavailable(sid);
+                    crate::model_price::mark_session_transcript_unavailable(sid, now);
                 }
             }
             measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())

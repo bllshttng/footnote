@@ -194,6 +194,7 @@ pub(crate) struct RunningCost {
     compaction_count: u64,
     compaction_readable: bool,
     compaction_parse_error: bool,
+    last_measured_at: Option<String>,
 }
 
 impl RunningCost {
@@ -380,37 +381,47 @@ pub(crate) fn measure_session_cost(
             .unwrap_or_else(|| (RunningCost::new(), None))
     };
     fold.absorb(transcript);
+    if fold.compaction_readable {
+        fold.last_measured_at = Some(now.to_string());
+    }
     let Some(book) = price_book(state) else {
         if let Ok(mut folds) = cell.lock() {
             folds.insert(sid.to_string(), (fold, last_cost));
+            prune_session_folds(&mut folds, now);
         }
         return;
     };
     let mut cost = fold.session(&book, codex_model, route);
     cost.measured_at = now.to_string();
     if let Ok(mut folds) = cell.lock() {
-        if let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(now) {
-            let cutoff = stamp - chrono::Duration::hours(24);
-            folds.retain(|_, (_, last)| {
-                last.as_ref()
-                    .and_then(|c| chrono::DateTime::parse_from_rfc3339(&c.measured_at).ok())
-                    .is_some_and(|m| m > cutoff)
-            });
-        }
         folds.insert(sid.to_string(), (fold, Some(cost)));
+        prune_session_folds(&mut folds, now);
     }
+}
+
+fn prune_session_folds(folds: &mut HashMap<String, (RunningCost, Option<SessionCost>)>, now: &str) {
+    let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(now) else {
+        return;
+    };
+    let cutoff = stamp - chrono::Duration::hours(24);
+    folds.retain(|_, (fold, _)| {
+        fold.last_measured_at
+            .as_deref()
+            .and_then(|measured| chrono::DateTime::parse_from_rfc3339(measured).ok())
+            .is_some_and(|measured| measured > cutoff)
+    });
 }
 
 /// Keep the compaction reading unknown when this sweep cannot resolve its
 /// transcript, without discarding the independently measured running cost.
-pub(crate) fn mark_session_transcript_unavailable(sid: &str) {
+pub(crate) fn mark_session_transcript_unavailable(sid: &str, now: &str) {
     let cell = FOLDS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut folds) = cell.lock() {
-        let (mut fold, cost) = folds
-            .remove(sid)
-            .unwrap_or_else(|| (RunningCost::new(), None));
-        fold.compaction_readable = false;
-        folds.insert(sid.to_string(), (fold, cost));
+        if let Some((mut fold, cost)) = folds.remove(sid) {
+            fold.compaction_readable = false;
+            folds.insert(sid.to_string(), (fold, cost));
+        }
+        prune_session_folds(&mut folds, now);
     }
 }
 
@@ -745,7 +756,25 @@ mod tests {
             "transcript boundaries are measured without a price catalog"
         );
 
-        mark_session_transcript_unavailable("sess-cost-1");
+        let mut stale_fold = RunningCost::new();
+        stale_fold.compaction_count = 1;
+        stale_fold.compaction_readable = true;
+        stale_fold.last_measured_at = Some("2026-10-01T00:00:00Z".into());
+        let mut current_fold = RunningCost::new();
+        current_fold.compaction_readable = true;
+        current_fold.last_measured_at = Some("2026-10-02T00:00:00Z".into());
+        let mut folds = HashMap::from([
+            ("stale".into(), (stale_fold, None)),
+            ("current".into(), (current_fold, None)),
+        ]);
+        prune_session_folds(&mut folds, "2026-10-02T00:00:01Z");
+        assert_eq!(
+            folds.keys().map(String::as_str).collect::<HashSet<_>>(),
+            HashSet::from(["current"]),
+            "count-only folds expire after 24 hours"
+        );
+
+        mark_session_transcript_unavailable("sess-cost-1", "2026-10-02T00:02:00Z");
         assert_eq!(
             served_compaction_count(Some("sess-cost-1")),
             None,
