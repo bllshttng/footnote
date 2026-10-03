@@ -2907,20 +2907,31 @@ def update_registry(
         # Removal accounting runs on the Rust choke point's own path: the
         # before-rows ride the payload, the after-rows read from disk, and
         # the existing accounting stages the receipts and emits the events.
-        # Best-effort by contract: an unavailable binary skips the audit.
-        try:
-            from fno.agents.spawn_axes_client import spawn_axes_call
+        # The in-process pre-check keeps the common no-drop write from
+        # paying a subprocess: a row can only read removed when its name,
+        # session id and short id all left the store.
+        after_names = {e.name for e in new_entries}
+        after_sids = {e.harness_session_id for e in new_entries if e.harness_session_id}
+        after_shorts = {e.short_id for e in new_entries if e.short_id}
+        if any(
+            e.name not in after_names
+            and (e.harness_session_id or "") not in after_sids
+            and e.short_id not in after_shorts
+            for e in current
+        ):
+            try:
+                from fno.agents.spawn_axes_client import spawn_axes_call
 
-            spawn_axes_call(
-                {
-                    "removal_accounting": {
-                        "registry": str(target),
-                        "before": [asdict(entry) for entry in current],
+                spawn_axes_call(
+                    {
+                        "removal_accounting": {
+                            "registry": str(target),
+                            "before": [asdict(entry) for entry in current],
+                        }
                     }
-                }
-            )
-        except Exception:  # noqa: BLE001 - the audit never fails the write
-            pass
+                )
+            except Exception:  # noqa: BLE001 - the audit never fails the write
+                pass
         return new_entries
 
 
