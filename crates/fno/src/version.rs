@@ -51,6 +51,14 @@ pub fn print_version(json_out: bool) {
         let short = if rev.len() >= 12 { &rev[..12] } else { rev };
         let suffix = if dirty { "-dirty" } else { "" };
         println!("fno {pkg} ({short}{suffix}, {profile})");
+        // Name the resolved Python CLI so a user (or a study shim) can see
+        // WHICH install this door actually forwards to - the question the
+        // cached-sentinel resolution made unanswerable (gap audit 9).
+        if let Some(py) = crate::bootstrap::resolved_python_script() {
+            println!("python-cli: {}", py.display());
+        } else {
+            println!("python-cli: unresolved (no sibling, no uv tool dir)");
+        }
     }
 }
 
