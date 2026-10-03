@@ -75,6 +75,10 @@ pub struct FeedRow {
     /// `L{level} {scope}` for the crown kinds and a crowned removal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown: Option<String>,
+    /// The crowned worker's name on `crown_granted` and `crown_vacated`
+    /// rows; the feed search answers `l:` through it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
     /// The king or epic the row rolls up to, set on non-crown rows only:
     /// `king {holder} L{level}` or `epic {parent} {title}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -641,6 +645,7 @@ pub fn project(
                     ts: c.ts.clone(),
                     kind: "crown_granted".into(),
                     crown: Some(rank(c.level, &c.scope)),
+                    holder: Some(c.holder.clone()),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
@@ -661,6 +666,7 @@ pub fn project(
                     ts: c.ts.clone(),
                     kind: "crown_vacated".into(),
                     crown: Some(rank(c.level, &c.scope)),
+                    holder: Some(c.holder.clone()),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
@@ -1598,11 +1604,13 @@ mod tests {
         assert_eq!(granted.len(), 1, "granted dedupes");
         assert_eq!(granted[0].title, "jolly-finch crowned L2 x-eeee");
         assert_eq!(granted[0].crown.as_deref(), Some("Lead of x-eeee"));
+        assert_eq!(granted[0].holder.as_deref(), Some("jolly-finch"));
         assert_eq!(vacated.len(), 1, "vacated dedupes");
         assert_eq!(
             vacated[0].title,
             "warden left L2 x-eeee: succession -> jolly-finch"
         );
+        assert_eq!(vacated[0].holder.as_deref(), Some("warden"));
 
         // AC6: a node in a held crown's scope rolls up to the king; a node
         // whose only tie is a graph parent rolls up to the epic; the crown

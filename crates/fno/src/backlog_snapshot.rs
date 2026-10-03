@@ -114,10 +114,17 @@ fn render_request(request: &Request) -> Result<Receipt, String> {
     let leads_at = (!agents.is_empty()).then_some(now);
     let gathered = runtime.block_on(backlog_model::gather(&graph, agents));
     let public = request.public.is_some();
-    let inputs = match &request.public {
+    let mut inputs = match &request.public {
         Some(spec) => inputs_from_rows(&select_public_rows(&gathered.rows, &spec.project)?),
         None => gathered,
     };
+    // The render already pays the graph read; one registry + question read
+    // here freezes the session-derived keys and `has:question` into the
+    // page. A public projection drops the roster and the search maps with
+    // it, so it reads neither.
+    if !public {
+        backlog_model::read_search_sources(&mut inputs, true);
+    }
     let mut receipt = Receipt {
         written: Vec::new(),
         failed: Vec::new(),
@@ -218,6 +225,17 @@ fn render_one(
         nodes.insert(id.clone(), view);
     }
     let count = ids.len();
+    // Every card's search field map: one builder (the board's), embedded
+    // so the page's grammar filters with no bridge.
+    let by_ref = backlog_model::board_refs(inputs);
+    let mut search = std::collections::HashMap::with_capacity(ids.len());
+    for card in &flat {
+        let row = by_ref.get(card.id.as_str()).copied();
+        search.insert(
+            card.id.clone(),
+            backlog_model::search_fields(inputs, &by_ref, card, row),
+        );
+    }
     let mut payload = json!({
         "schema": 1,
         "generated_at": now_secs(),
@@ -229,6 +247,13 @@ fn render_one(
         "columns": board.stats.totals.iter().map(|t| t.column).collect::<Vec<_>>(),
         "cards": &flat,
         "nodes": nodes,
+        "search": search,
+        "search_keys": crate::search_query::keys_json(),
+        "search_as_of": inputs.read_at,
+        "search_names": !inputs
+            .errors
+            .iter()
+            .any(|e| e.contains("names unavailable")),
         "leads_at": leads_at,
     });
     if public {
@@ -669,6 +694,38 @@ mod tests {
             "payload must precede the page script"
         );
         assert!(out.ends_with("</script></body></html>"));
+        // The render embeds every card's search field map, the grammar's
+        // key table, and the as-of stamp.
+        let rows = vec![
+            json!({"id": "x-s1", "slug": "s1", "title": "One", "status": "ready", "priority": "p2"}),
+            json!({"id": "x-s2", "slug": "s2", "title": "Two", "status": "idea", "priority": "p2"}),
+        ];
+        let inputs = backlog_model::Inputs {
+            backend: "graph".into(),
+            rows,
+            order: vec!["x-s1".into(), "x-s2".into()],
+            flow: json!({"available": false, "reason": "fixture"}),
+            read_at: 1790856000,
+            ..Default::default()
+        };
+        let (page, count) = render_one(&inputs, None, None, None, false).unwrap();
+        assert_eq!(count, 2);
+        let marker = "id=\"fno-snapshot\">";
+        let start = page.find(marker).unwrap() + marker.len();
+        let end = page[start..].find("</script>").unwrap() + start;
+        let payload: Value = serde_json::from_str(&page[start..end]).unwrap();
+        let search = payload.get("search").expect("the search maps ride");
+        assert!(search.get("x-s1").is_some() && search.get("x-s2").is_some());
+        assert_eq!(
+            payload["search_keys"]["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k["names"][0] == "status"),
+            true,
+            "the key table rides"
+        );
+        assert_eq!(payload["search_as_of"], 1790856000);
     }
 
     /// A `</script>` inside the data must not close the tag early: every `<`
@@ -776,7 +833,8 @@ mod tests {
                 "cwd": "/Users/someone/secret", "session_id": "ses-leak",
                 "details": "secret details",
                 "notes": [{"text": "secret note"}],
-                "sessions": [{"session_id": "ses-leak"}],
+                "sessions": [{"phase": "execute",
+                              "session_id": "9b1c2d3e-0000-4000-8000-00000000leak"}],
                 "blocked_by": ["x-2"],
                 "plan_path": "/Users/someone/internal/fno/plans/pub.md",
             }),
@@ -798,12 +856,21 @@ mod tests {
         assert_eq!(ids, vec!["x-1"]);
 
         let inputs = inputs_from_rows(&selected);
+        let (private, _) = render_one(&inputs, None, None, None, false).unwrap();
+        assert!(
+            private
+                .contains("fno agents adopt 9b1c2d3e-0000-4000-8000-00000000leak --cross-project"),
+            "the private page carries the recovery command"
+        );
         let (page, count) = render_one(&inputs, None, None, None, true).unwrap();
         assert_eq!(count, 1);
         assert!(page.contains("Public thing"), "{page}");
         for secret in [
             "/Users/someone/secret",
             "ses-leak",
+            "9b1c2d3e",
+            "fno agents",
+            "--cross-project",
             "secret details",
             "secret note",
             "Linked private",

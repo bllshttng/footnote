@@ -39,18 +39,56 @@ pub fn manifest_path(conf: &Path) -> PathBuf {
 
 /// OpenCode scans the config dir for commands, agents and skills;
 /// `OPENCODE_CONFIG_DIR` moves it (the test and scratch-install seam), then
-/// `$XDG_CONFIG_HOME/opencode`, then the default, matching `opencode debug
-/// paths`.
+/// the `config` row of `<bin> debug paths` (the root the opencode that will
+/// run actually resolves), then `$XDG_CONFIG_HOME/opencode`, then the
+/// default. The binary read is skipped when the env override answers.
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("OPENCODE_CONFIG_DIR")
+    config_dir_resolved().0
+}
+
+/// The config dir plus where it came from, so an install receipt can name a
+/// mismatch: "env" (`OPENCODE_CONFIG_DIR`), "debug paths" (the binary's own
+/// answer), or "fallback" (binary missing or silent).
+pub(crate) fn config_dir_resolved() -> (PathBuf, &'static str) {
+    if let Some(p) = std::env::var_os("OPENCODE_CONFIG_DIR").filter(|p| !p.is_empty()) {
+        return (PathBuf::from(p), "env");
+    }
+    if let Some(row) = debug_paths_config_row(&opencode_bin()) {
+        return (PathBuf::from(row), "debug paths");
+    }
+    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
+        return (PathBuf::from(x).join("opencode"), "fallback");
+    }
+    (dirs_home().join(".config/opencode"), "fallback")
+}
+
+/// The opencode binary an install targets: `FNO_OPENCODE_BIN` when set and
+/// nonempty (the wrapper/seam seam), else `opencode` on PATH.
+pub(crate) fn opencode_bin() -> String {
+    std::env::var("FNO_OPENCODE_BIN")
+        .ok()
         .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|p| !p.is_empty())
-                .map(|x| PathBuf::from(x).join("opencode"))
-        })
-        .unwrap_or_else(|| dirs_home().join(".config/opencode"))
+        .unwrap_or_else(|| "opencode".to_string())
+}
+
+/// The `config` row of `<bin> debug paths`: the first line whose leading
+/// token is `config`, carrying the REST of the line as the path so a home
+/// directory containing a space survives. `None` when the binary is
+/// missing, fails, or prints no config row.
+fn debug_paths_config_row(bin: &str) -> Option<String> {
+    let out = run_bounded(bin, &["debug", "paths"])?;
+    let text = String::from_utf8(out).ok()?;
+    for line in text.lines() {
+        if let Some((token, rest)) = line.split_once(char::is_whitespace) {
+            if token == "config" {
+                let path = rest.trim();
+                if !path.is_empty() {
+                    return Some(path.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn is_footnote_tree(root: &Path) -> bool {
@@ -175,8 +213,9 @@ fn command_stub(verb: &str, description: &str) -> Vec<u8> {
 /// The opencode agent-file contract an install renders against. 1.x reads a
 /// per-agent `permission` record (last matching rule wins); 2.x reads a
 /// `permissions` rule list and renames two tools (bash -> shell, task ->
-/// subagent). `opencode --version` classifies once per install; a missing
-/// binary renders 1.x and says so in the receipt.
+/// subagent). `<bin> --version` classifies once per install; v2 is the
+/// default install, so a missing or silent binary renders 2.x and says the
+/// version was unknown in the receipt.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OpencodeContract {
     V1,
@@ -192,8 +231,8 @@ impl OpencodeContract {
     }
 }
 
-fn classify_contract() -> (OpencodeContract, Option<String>) {
-    match Command::new("opencode").arg("--version").output() {
+pub(crate) fn classify_contract(bin: &str) -> (OpencodeContract, Option<String>) {
+    match Command::new(bin).arg("--version").output() {
         Ok(out) if out.status.success() => {
             let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let contract = if crate::opencode_serve::version_at_least(
@@ -206,7 +245,7 @@ fn classify_contract() -> (OpencodeContract, Option<String>) {
             };
             (contract, Some(reported))
         }
-        _ => (OpencodeContract::V1, None),
+        _ => (OpencodeContract::V2, None),
     }
 }
 
@@ -467,9 +506,14 @@ pub struct InstallReceipt {
     pub removed: usize,
     pub manifest: String,
     /// The opencode contract the agent files were rendered against, and the
-    /// version opencode reported (None when opencode is not on PATH).
+    /// version opencode reported (None when the binary answered nothing, in
+    /// which case the 2.x default was rendered).
     pub contract: &'static str,
     pub opencode_version: Option<String>,
+    /// The binary the install classified and asked for its config root.
+    pub opencode_bin: String,
+    /// Where `config_dir` came from: "env", "debug paths", or "fallback".
+    pub config_dir_source: &'static str,
     /// Pre-manifest bridges footnote replaced, each with its backup path.
     pub replaced_legacy: Vec<LegacyReplacement>,
 }
@@ -509,9 +553,10 @@ fn write_manifest(conf: &Path, manifest: &Manifest) -> Result<(), String> {
 pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
     let root = resolve_source(cwd)?;
     let version = plugin_version(&root);
-    let (contract, opencode_version) = classify_contract();
+    let bin = opencode_bin();
+    let (contract, opencode_version) = classify_contract(&bin);
     let entries = build_entries(&root, contract)?;
-    let conf = config_dir();
+    let (conf, conf_source) = config_dir_resolved();
     let mut manifest: Manifest = read_manifest(&conf).unwrap_or_default();
     manifest.version = version.clone();
     manifest.opencode_contract = contract.label().to_string();
@@ -608,6 +653,8 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
         manifest: manifest_path(&conf).display().to_string(),
         contract: contract.label(),
         opencode_version,
+        opencode_bin: bin,
+        config_dir_source: conf_source,
         replaced_legacy,
     })
 }
@@ -722,7 +769,8 @@ fn run_bounded(cmd: &str, args: &[&str]) -> Option<Vec<u8>> {
 /// plugin's catalog cannot masquerade as footnote's install. Names only.
 fn read_loaded_catalog(conf: &Path) -> LoadedCatalog {
     let conf_str = conf.display().to_string();
-    let commands = run_bounded("opencode", &["debug", "config", "--pure"]).and_then(|out| {
+    let bin = opencode_bin();
+    let commands = run_bounded(&bin, &["debug", "config", "--pure"]).and_then(|out| {
         let value: serde_json::Value = serde_json::from_slice(&out).ok()?;
         let names_for = |key: &str| -> BTreeSet<String> {
             value
@@ -738,7 +786,7 @@ fn read_loaded_catalog(conf: &Path) -> LoadedCatalog {
         };
         Some((names_for("command"), names_for("agent")))
     });
-    let skills = run_bounded("opencode", &["debug", "skill", "--pure"]).and_then(|out| {
+    let skills = run_bounded(&bin, &["debug", "skill", "--pure"]).and_then(|out| {
         let value: serde_json::Value = serde_json::from_slice(&out).ok()?;
         let list = value.as_array()?;
         let mut names = BTreeSet::new();
@@ -782,7 +830,7 @@ fn source_version() -> Option<String> {
 /// reports unknown rather than a wrong answer. A manifest whose version
 /// differs from the resolvable source names a stale install.
 pub fn status_json() -> serde_json::Value {
-    let conf = config_dir();
+    let (conf, conf_source) = config_dir_resolved();
     let manifest = read_manifest(&conf);
     let (cmds, agents, skills) = match &manifest {
         Some(m) => installed_names(m),
@@ -807,7 +855,8 @@ pub fn status_json() -> serde_json::Value {
     let stale: Vec<String> = [stale_commands, stale_agents, stale_skills].concat();
     let source = source_version();
     let behind = matches!((&manifest, &source), (Some(m), Some(sv)) if sv.as_str() != m.version);
-    let (current_contract, _reported) = classify_contract();
+    let bin = opencode_bin();
+    let (current_contract, _reported) = classify_contract(&bin);
     let contract_changed = manifest.as_ref().is_some_and(|m| {
         !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label()
     });
@@ -981,6 +1030,8 @@ pub fn status_json() -> serde_json::Value {
         "version": manifest.as_ref().map(|m| m.version.clone()),
         "source_version": source,
         "config_dir": conf.display().to_string(),
+        "config_dir_source": conf_source,
+        "opencode_bin": bin,
         "bridge_present": conf.join("plugins/footnote.js").is_file(),
         "manifest": manifest.as_ref().map(|m| json!({"path": manifest_path(&conf).display().to_string(), "files": m.files.len()})),
         "installed": {"commands": cmds, "agents": agents, "skills": skills},
@@ -1006,6 +1057,8 @@ pub fn status_json() -> serde_json::Value {
 
 /// The manifest-only verdict the setup adapter's is_installed needs: no
 /// catalog read, so an adapter sweep never pays for two opencode spawns.
+/// With `OPENCODE_CONFIG_DIR` unset it still pays one `<bin> debug paths`
+/// spawn to resolve the root; the env override skips it.
 pub fn installed_status() -> serde_json::Value {
     let conf = config_dir();
     let source = source_version();
@@ -1019,7 +1072,7 @@ pub fn installed_status() -> serde_json::Value {
         Some(m) => {
             let complete = m.files.keys().all(|rel| conf.join(rel).is_file());
             let behind = source.as_deref().is_some_and(|sv| sv != m.version);
-            let (current_contract, _) = classify_contract();
+            let (current_contract, _) = classify_contract(&opencode_bin());
             let contract_changed =
                 !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label();
             let stale = complete && (behind || contract_changed);

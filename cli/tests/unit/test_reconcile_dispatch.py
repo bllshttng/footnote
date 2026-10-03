@@ -177,8 +177,7 @@ def test_disabled_dispatches_nothing(iso, tmp_path, monkeypatch):
 def test_live_node_claim_dedups(iso, tmp_path, monkeypatch):
     # Invariant: at-most-one reconcile. A worker already owns node:<dep>.
     sm.write("x-dep", [], tmp_path, contract_test="true")
-    acquire_claim("node:x-dep", "other-worker", ttl_ms=60_000,
-                  root=rd._claims_root_for("node:x-dep"))
+    acquire_claim("node:x-dep", "other-worker", ttl_ms=60_000)
     _patch_deps(monkeypatch, [_dep(tmp_path)])
     calls = _patch_spawn(monkeypatch)
 
@@ -223,8 +222,7 @@ def test_fire_pending_reconcile_dispatches_and_releases(iso, tmp_path, monkeypat
     # drops the sentinel. The graph lookup is bypassed (no node) so it falls back
     # to {id, cwd=root}; the manifest path is built from root.
     sm.write("x-dep", [], tmp_path, contract_test="true")
-    acquire_claim("reconcile:x-dep", rd._pending_holder("x-dep"), ttl_ms=600_000,
-                  root=rd._claims_root_for("reconcile:x-dep"))
+    acquire_claim("reconcile:x-dep", rd._pending_holder("x-dep"), ttl_ms=600_000)
     monkeypatch.setattr(rd, "_contract_dependents", lambda c: [])  # unused path guard
     calls = _patch_spawn(monkeypatch)
     # graph lookup inside fire_* will read the real graph; force the fallback.

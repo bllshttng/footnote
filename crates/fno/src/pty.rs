@@ -428,8 +428,8 @@ impl LocalPty {
         out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
-        let permit = crate::process_admission::admit_shell_pane()
-            .map_err(|e| PtyError::Spawn(e.to_string()))?;
+        let permit =
+            crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
         Self::spawn_with_permit(
             candidates, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
         )

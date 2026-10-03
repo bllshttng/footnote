@@ -32,7 +32,7 @@ from fno.backlog.single_flight import (
     reconcile_flight_key,
 )
 from fno.claims.core import acquire_claim, claim_status
-from fno.claims.io import claim_path, claims_root_for
+from fno.claims.io import claim_path
 from fno.cli import app
 from fno.rust_binary import find_dev_binary
 
@@ -169,7 +169,7 @@ def test_gate_releases_so_the_next_run_is_not_held(iso, monkeypatch):
     assert json.loads(second.stdout).get("held") is None
     assert calls == [1, 1]
     key = advance_flight_key(None)
-    state = claim_status(key, root=claims_root_for(key))["state"]
+    state = claim_status(key)["state"]
     assert state == "free"
 
 
@@ -521,7 +521,7 @@ def test_budget_trips_a_live_blocked_holder(iso):
         assert stack_file.exists(), "the watchdog must leave the stack file"
         # dump_traceback names the FRAME's function ("in once"), not the line text
         assert b"once" in stack_file.read_bytes(), "the stack must name the blocking frame"
-        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+        assert claim_status(key)["state"] == "free"
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -553,7 +553,7 @@ def test_die_with_parent_exits_the_orphan(iso):
         if not _pid_gone(child_pid):
             os.kill(child_pid, signal.SIGKILL)
             raise AssertionError("orphaned child did not exit within 5s of its parent's death")
-        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+        assert claim_status(key)["state"] == "free"
     finally:
         if intermediate.poll() is None:
             intermediate.kill()
@@ -644,7 +644,7 @@ def test_the_stranger_disarm_keeps_the_budget_watch_armed(iso):
         assert child_pid is not None and _pid_gone(child_pid), (
             "the budget watch must still trip for the disarmed grandchild"
         )
-        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+        assert claim_status(key)["state"] == "free"
     finally:
         if intermediate.poll() is None:
             intermediate.kill()
@@ -711,7 +711,7 @@ def test_a_stale_var_survives_its_launcher_exiting(iso):
             f"the holder must finish its sweep after its launcher exits "
             f"(child {'alive' if child_pid and not _pid_gone(child_pid) else 'gone'})"
         )
-        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+        assert claim_status(key)["state"] == "free"
     finally:
         if intermediate.poll() is None:
             intermediate.kill()
@@ -738,7 +738,7 @@ def test_a_bound_child_orphaned_before_arm_exits_129(iso):
         assert rc == 129, f"orphaned holder must exit 129 (rc={rc}); stderr: {stderr[:400]}"
         assert "backlog reconcile: parent-gone" in stderr
         assert "backlog backlog" not in stderr
-        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+        assert claim_status(key)["state"] == "free"
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -774,7 +774,7 @@ def test_budget_takes_the_subtree_when_session_leader(iso):
             time.sleep(0.2)
         else:
             raise AssertionError("the sleep descendant must die with the holder")
-        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+        assert claim_status(key)["state"] == "free"
     finally:
         if proc.poll() is None:
             proc.kill()

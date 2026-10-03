@@ -43,13 +43,13 @@ CONVERSATION_ID="$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 
 
 STEPS=()
 
-# Announcements on every model call, ahead of any crown line. Same 2-second
+# Announcements on every model call, ahead of any crown line. Same load-aware
 # bound and fail-open posture as inject-announce.sh.
 command -v fno-agents >/dev/null 2>&1 && {
     HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    # shellcheck source=scripts/lib/with-timeout.sh
-    if source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null; then
-        ANNOUNCE_OUT="$(with_timeout 2 fno-agents announce read \
+    # shellcheck source=scripts/lib/hook-budget.sh
+    if source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null; then
+        ANNOUNCE_OUT="$(hook_run_optional fno-agents announce read \
             --session-id "$CONVERSATION_ID" \
             --harness agy \
             --boundary prompt 2>/dev/null || true)"

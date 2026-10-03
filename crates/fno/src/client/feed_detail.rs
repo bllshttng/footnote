@@ -440,14 +440,11 @@ pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
 /// `y` on the modal: the selected value, whole, to the clipboard - local
 /// tool first, OSC 52 to the outer terminal as fallback. The display clips
 /// a long value; the copy never does.
-pub(crate) fn copy_selected(view: &mut View) {
-    let Some(m) = view.feed_detail.as_ref() else {
-        return;
-    };
-    let Some(value) = m.values.get(m.popup.sel) else {
-        return;
-    };
-    let value = value.clone();
+/// Deliver one value to the clipboard and say what happened: local tool
+/// first, OSC 52 to the outer terminal as fallback. The display clips a
+/// long value; the copy never does. Shared by the feed modal and the
+/// backlog detail's y/Y.
+pub(crate) fn copy_value(view: &mut View, value: String) {
     let outcome = crate::clipboard::deliver(&value, raw_out);
     let note = match outcome {
         crate::clipboard::CopyOutcome::Local(_) => format!("copied {value}"),
@@ -460,6 +457,17 @@ pub(crate) fn copy_selected(view: &mut View) {
         crate::clipboard::CopyOutcome::Failed => "copy failed".to_string(),
     };
     view.set_notice(note);
+}
+
+pub(crate) fn copy_selected(view: &mut View) {
+    let Some(m) = view.feed_detail.as_ref() else {
+        return;
+    };
+    let Some(value) = m.values.get(m.popup.sel) else {
+        return;
+    };
+    let value = value.clone();
+    copy_value(view, value);
 }
 
 /// The popup's flat target under a screen cell, `None` off a target. The

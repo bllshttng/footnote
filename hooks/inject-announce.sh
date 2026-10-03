@@ -22,8 +22,8 @@ export PATH
 command -v fno-agents >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/with-timeout.sh
-source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/hook-budget.sh
+source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
 boundary="${1:-prompt}"
 
@@ -38,7 +38,7 @@ if [ "$boundary" = "start" ]; then
     fi
 fi
 
-out="$(with_timeout 2 fno-agents announce read \
+out="$(hook_run_optional fno-agents announce read \
     --session-id "$session" \
     --harness "${FNO_PLATFORM:-claude}" \
     --boundary "$boundary" 2>/dev/null || true)"

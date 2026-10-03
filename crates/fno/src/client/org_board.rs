@@ -239,6 +239,7 @@ impl OrgBoard {
                     agent: Some(agent.name.clone()),
                     action: "none".into(),
                     reason: None,
+                    command: None,
                 },
                 agent: Some(agent.clone()),
             };

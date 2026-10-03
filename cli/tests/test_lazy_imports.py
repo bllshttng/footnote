@@ -411,48 +411,71 @@ def test_fno_backlog_ready_via_real_subprocess():
 # Regression: "Did you mean" suggestion is not duplicated
 # ---------------------------------------------------------------------------
 
-def test_no_duplicate_did_you_mean_for_eager_command_typo():
-    """TyperGroup already adds 'Did you mean' for eager-command typos.
-
-    Codex P2 finding on PR #269: ``LazyTypeGroup.resolve_command`` was
-    appending its own suggestion unconditionally, producing duplicated
-    output like ``Did you mean 'help'?. Did you mean 'help'?`` when the
-    typo matched an eager command (one registered via ``@app.command()``
-    that lives in this file rather than the lazy map).
+def test_did_you_mean_appends_only_when_parent_had_none():
+    """One predicate, both sides: the lazy resolve_command override appends a
+    'Did you mean' hint only when the parent's message has none. Typos of an
+    eager command (defined directly in cli.py, e.g. ``hepl`` for ``help``)
+    must not gain a second hint; typos of a lazy entry (e.g. ``backlg`` for
+    ``backlog``) must keep the one hint the parent cannot produce.
     """
     from fno.cli import app
     from typer.testing import CliRunner
 
     runner = CliRunner()
-    # ``help`` is an eager command (defined directly in cli.py); ``hepl``
-    # is a typo of it.  TyperGroup picks up the suggestion via
-    # ``self.commands``; the lazy override must not add a second one.
-    result = runner.invoke(app, ["hepl"])
-    assert result.exit_code != 0, "Expected non-zero exit for unknown command"
-    # The literal substring should appear at most once.
-    assert result.output.count("Did you mean 'help'") == 1, (
-        f"Duplicate 'Did you mean help' in output: {result.output}"
+    eager = runner.invoke(app, ["hepl"])
+    assert eager.exit_code != 0, "Expected non-zero exit for unknown command"
+    assert eager.output.count("Did you mean 'help'") == 1, (
+        f"Duplicate 'Did you mean help' in output: {eager.output}"
+    )
+    lazy = runner.invoke(app, ["backlg"])
+    assert lazy.exit_code != 0
+    assert "Did you mean 'backlog'" in lazy.output, (
+        f"Missing backlog suggestion: {lazy.output}"
     )
 
 
-def test_did_you_mean_suggests_lazy_commands():
-    """Typos that match a lazy entry still get a 'Did you mean' hint.
+# ---------------------------------------------------------------------------
+# Whole-app build gate: every command group must load via get_command
+# ---------------------------------------------------------------------------
 
-    The lazy override must keep adding suggestions for commands TyperGroup
-    cannot see (the ones in ``self._lazy`` rather than ``self.commands``).
-    Regression for the fix in ``resolve_command``: skip-append must NOT
-    apply when the parent's message has no suggestion at all.
+
+def _load_every_command(group, ctx, path):
+    """Force-build every command under a click group, recursing into groups.
+
+    Lazy entries resolve to _LazyStub placeholders whose module imports only
+    on _load_real(); the walk forces it so a bad parameter annotation fails
+    here, at build time, instead of at the operator's first invocation.
     """
-    from fno.cli import app
-    from typer.testing import CliRunner
+    import click
 
-    runner = CliRunner()
-    # ``backlog`` is a lazy entry; ``backlg`` is a typo.
-    result = runner.invoke(app, ["backlg"])
-    assert result.exit_code != 0
-    assert "Did you mean 'backlog'" in result.output, (
-        f"Missing backlog suggestion: {result.output}"
-    )
+    from fno._lazy_group import _LazyStub
+
+    for name in group.list_commands(ctx):
+        cmd = group.get_command(ctx, name)
+        if isinstance(cmd, _LazyStub):
+            cmd = cmd._load_real()
+        assert cmd is not None, f"{path} {name}: get_command returned None"
+        if isinstance(cmd, click.Group):
+            _load_every_command(cmd, ctx, f"{path} {name}")
+
+
+def test_every_command_group_builds_via_get_command():
+    """The whole fno app must build with typer.main.get_command.
+
+    fno config plugin install crashed only when its command was BUILT (typer
+    0.27 rejects a click.Context parameter annotation with 'Type not yet
+    supported'), and the lazy registry hid that from every --help path. One
+    walk forcing every group to load closes that gap.
+    """
+    import click as click_mod
+
+    import typer.main
+
+    from fno.cli import app
+
+    root = typer.main.get_command(app)
+    ctx = click_mod.Context(root, info_name="fno")
+    _load_every_command(root, ctx, "fno")
 
 
 def test_lazy_group_get_command_imports_on_demand():

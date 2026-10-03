@@ -2694,38 +2694,27 @@ def test_update_registry_accounts_for_a_removed_row(
         ],
     )
 
-    import fno.agents.spawn_axes_client as spawn_axes_client_module
+    calls: list[dict] = []
 
-    answered = spawn_axes_client_module.spawn_axes_call(
-        {"reap_receipt": {
-            "row": {"name": "dropped", "harness": "claude",
-                    "harness_session_id": "dropped-s"},
-            "removed_by": "probe-remover",
-        }}
+    def fake_spawn_axes_call(payload: dict) -> dict:
+        calls.append(payload)
+        return {"removed": 1}
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_axes_client.spawn_axes_call", fake_spawn_axes_call
     )
     update_registry(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
 
-    removals = _removal_events(events_path)
-    assert len(removals) == 1, f"exactly one removal event: {removals}"
-    event = removals[0]
-    assert event["source"] == "agents"
-    data = event["data"]
-    assert data["name"] == "dropped"
-    assert data["harness"] == "claude"
-    assert data["harness_session_id"] == "dropped-s"
-    assert data["receipt_staged"] is True
-    assert data["remover"], "the remover is named, not blank"
-
-    receipt_path = (
-        tmp_path / ".fno" / "agents" / "reap-receipts" / "claude-dropped-s.json"
+    assert len(calls) == 1, "one accounting ask per write"
+    ask = calls[0]["removal_accounting"]
+    assert ask["registry"] == str(registry_path)
+    dropped = [row for row in ask["before"] if row["name"] == "dropped"]
+    assert len(dropped) == 1
+    assert dropped[0]["harness_session_id"] == "dropped-s", (
+        "the pre-write snapshot rides the payload whole"
     )
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    expected = dict(answered["receipt"])
-    # the ask rides the real remover
-    expected["removed_by"] = data["remover"]
-    assert receipt == expected, "the file holds what the spawn-axes ask answered"
 
 
 def test_update_registry_emits_nothing_when_nothing_is_removed(
@@ -2786,33 +2775,35 @@ def test_update_registry_journals_rows_lost_naming_the_writer(
         ],
     )
 
+    calls: list[dict] = []
+
+    def fake_spawn_axes_call(payload: dict) -> dict:
+        calls.append(payload)
+        return {"removed": 1}
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_axes_client.spawn_axes_call", fake_spawn_axes_call
+    )
     update_registry(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
 
-    from tests._event_rows import event_rows
-
-    lines = event_rows(events_path)
-    lost = [e for e in lines if e["type"] == "registry_rows_lost"]
-    assert len(lost) == 1, f"exactly one grouped loss event: {lines}"
-    data = lost[0]["data"]
-    assert data["writer"] == "python"
-    assert isinstance(data["pid"], int)
-    assert data["verb"], "the verb names the door, not just the binary"
-    assert data["lost"] == [
-        {"harness_session_id": "dropped-s", "name": "dropped"}
-    ]
+    # The grouped-loss contract moved Rust-side with the accounting; the
+    # Python door pins its half: the ask carries the whole pre-write
+    # snapshot, kept and dropped rows alike, in store order.
+    ask = calls[0]["removal_accounting"]
+    assert [row["name"] for row in ask["before"]] == ["kept", "dropped"]
 
 
-def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
+def test_update_registry_announces_a_removal_through_the_bridge(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """No resumable identity still announces the removal; the write succeeds."""
+    """update_registry hands the before-rows to the Rust choke point's
+    removal-accounting op; the write succeeds either way."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -2828,6 +2819,15 @@ def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
             ),
         ],
     )
+    calls: list[dict] = []
+
+    def fake_spawn_axes_call(payload: dict) -> dict:
+        calls.append(payload)
+        return {"removed": 1}
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_axes_client.spawn_axes_call", fake_spawn_axes_call
+    )
 
     update_registry(
         lambda es: [e for e in es if e.name != "identity-less"],
@@ -2836,13 +2836,10 @@ def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
 
     survivors = load_registry(path=registry_path)
     assert [e.name for e in survivors] == ["kept"]
-
-    removals = _removal_events(events_path)
-    assert len(removals) == 1
-    assert removals[0]["data"]["name"] == "identity-less"
-    assert removals[0]["data"]["receipt_staged"] is False
-    assert removals[0]["data"]["reason"], "the receipt-build failure is the reason"
-    assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
+    assert len(calls) == 1
+    ask = calls[0]["removal_accounting"]
+    assert ask["registry"] == str(registry_path)
+    assert [row["name"] for row in ask["before"]] == ["kept", "identity-less"]
 
 
 def test_write_registry_has_exactly_one_production_caller() -> None:
@@ -2907,6 +2904,15 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     )
     before = receipt_path.read_bytes()
 
+    calls: list[dict] = []
+
+    def fake_spawn_axes_call(payload: dict) -> dict:
+        calls.append(payload)
+        return {"removed": 1}
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_axes_client.spawn_axes_call", fake_spawn_axes_call
+    )
     update_registry(
         lambda es: [e for e in es if e.name != "swept"], path=registry_path
     )
@@ -2914,25 +2920,23 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     assert (
         receipt_path.read_bytes() == before
     ), "the sweep's receipt was rewritten by the choke point"
-    removals = _removal_events(events_path)
-    assert len(removals) == 1
-    assert removals[0]["data"]["receipt_staged"] is True
-    assert removals[0]["data"]["name"] == "swept"
+    assert len(calls) == 1, "the choke point was still consulted"
 
 
 def test_update_registry_reports_a_stale_binary_and_writes_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A spawn-axes answer with no receipt reads as a binary that predates
-    the field: no file is written, and the event names the update verb."""
+    """An unavailable bridge skips the audit, never the write: the survivors
+    persist and the write returns them."""
     use_tmpdir(monkeypatch, tmp_path)
 
     import fno.agents.spawn_axes_client as spawn_axes_client_module
 
-    monkeypatch.setattr(
-        spawn_axes_client_module, "spawn_axes_call", lambda payload: {}
-    )
-    from fno.agents.registry import AgentEntry, update_registry
+    def _unavailable(payload):
+        raise RuntimeError("spawn-axes answered no removal_accounting field")
+
+    monkeypatch.setattr(spawn_axes_client_module, "spawn_axes_call", _unavailable)
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
@@ -2950,17 +2954,12 @@ def test_update_registry_reports_a_stale_binary_and_writes_nothing(
         ],
     )
 
-    update_registry(
+    survivors = update_registry(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
 
-    removals = _removal_events(events_path)
-    assert len(removals) == 1
-    assert removals[0]["data"]["receipt_staged"] is False
-    assert "fno doctor update --rust" in removals[0]["data"]["reason"], (
-        removals[0]["data"]["reason"]
-    )
-    assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
+    assert [e.name for e in survivors] == ["kept"]
+    assert [e.name for e in load_registry(path=registry_path)] == ["kept"]
 
 
 

@@ -1270,8 +1270,7 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
         error=RegistryVersionError,
         what="registry",
         remedy=(
-            "point this checkout at its own registry "
-            "(config.paths.agents_registry_path, or FNO_AGENTS_HOME for the Rust side)"
+            "point this checkout at its own registry (set FNO_AGENTS_HOME)"
         ),
     )
 
@@ -1348,7 +1347,7 @@ def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: 
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("FNO_TEST_HERMETIC") == "1":
         raise RegistryWriteRefused(
             f"refusing {target}: a test or probe process never writes the shared registry; "
-            "pin its state dir (config.paths.agents_registry_path) instead."
+            "pin its own home (FNO_AGENTS_HOME) instead."
         )
     if os.environ.get("FNO_REGISTRY_ALLOW_ROW_LOSS") == "1":
         return
@@ -2877,136 +2876,6 @@ def record_session_observation(
     return observed[0], outcome
 
 
-def _stage_removal_receipt(
-    entry: AgentEntry, *, home: Path, removed_by: str
-) -> tuple[bool, str]:
-    """Durably write the removal receipt the Rust receipt builder answers.
-    Content comes from the fno-agents builder (a spawn-axes ask); this leg only writes the file.
-
-    Same keys, same ``<agents home>/reap-receipts/`` directory, same filename
-    alphabet as the watchdog reap receipt and the Rust writer, so one
-    directory holds every removal receipt regardless of which writer took the
-    row. Takes the entry already held under the registry lock instead of
-    re-reading the file; ``removed_by`` says who took the row, a key a reap
-    receipt omits.
-    """
-    from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
-
-    try:
-        answer = spawn_axes_call(
-            {"reap_receipt": {"row": asdict(entry), "removed_by": removed_by}}
-        )
-    except SpawnAxesUnavailable as exc:
-        return False, f"row {entry.name!r}: {exc}"
-    if not answer.get("receipt") or not answer.get("file"):
-        return False, f"row {entry.name!r}: " + (answer.get("refused") or (
-            "spawn-axes answered no receipt; the fno-agents binary predates "
-            "this ask - run `fno doctor update --rust`"))
-    dir_path = home / "reap-receipts"
-    path = dir_path / answer["file"]
-    # A receipt already on disk for this session was staged moments ago by
-    # the reap sweep (or the watchdog) BEFORE it dropped the rows - rewriting
-    # it would stamp removed_by onto a pure reap receipt and change the
-    # shape. The record on disk is already the recovery path.
-    if path.exists():
-        return True, f"receipt already staged for this session at {path}"
-    try:
-        dir_path.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(answer["receipt"], indent=2), encoding="utf-8")
-        path.chmod(0o600)
-    except OSError as exc:
-        return False, f"receipt did not persist for {entry.name!r}: {exc}"
-    return True, str(path)
-
-
-def _account_for_removed_rows(
-    target: Path,
-    current: list[AgentEntry],
-    new_entries: list[AgentEntry],
-) -> None:
-    """Removal accounting at the write choke point.
-
-    Every row the updater dropped is announced before the write lands: one
-    ``registry_row_removed`` event per row on the agent-lifecycle log the
-    daemon writes agent_row_reaped to (``<agents home>/events.jsonl``) with
-    ``source: "agents"``, and the recovery receipt staged FIRST, so an
-    announced removal always has a recovery path beside it. Runs after the
-    write persisted: a removal that failed to persist never happened, and
-    announcing it would be a false alarm. A row counts as removed only when
-    NO surviving row shares any of its identity tokens (session id, short
-    id, name), so a rename or a session-id backfill is never a removal.
-    Best-effort by contract: an accounting failure never fails the write
-    that triggered it.
-    """
-    if not current:
-        return
-    kept_sids = {
-        e.harness_session_id for e in new_entries if (e.harness_session_id or "").strip()
-    }
-    kept_short_ids = {e.short_id for e in new_entries if e.short_id}
-    kept_names = {e.name for e in new_entries}
-    removed = [
-        entry
-        for entry in current
-        if (entry.harness_session_id or "").strip() not in kept_sids
-        and entry.short_id not in kept_short_ids
-        and entry.name not in kept_names
-    ]
-    if not removed:
-        return
-    from fno.events import append_event
-
-    home = target.parent
-    events_path = home / "events.jsonl"
-    remover = Path(sys.argv[0]).name or "unknown"
-    pid = os.getpid()
-    for entry in removed:
-        staged, detail = _stage_removal_receipt(entry, home=home, removed_by=remover)
-        event = {
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "type": "registry_row_removed",
-            "source": "agents",
-            "data": {
-                "name": entry.name,
-                "short_id": entry.short_id or "",
-                "harness": (entry.harness or "").strip(),
-                "harness_session_id": (entry.harness_session_id or "").strip(),
-                "remover": remover,
-                "reason": detail if not staged else "removed by an update_registry write",
-                "receipt_staged": staged,
-                "pid": pid,
-            },
-        }
-        try:
-            append_event(event, events_path=events_path)
-        except Exception:  # noqa: BLE001 - an audit gap must not fail the write
-            pass
-    _journal_rows_lost(events_path, removed)
-
-
-def _journal_rows_lost(events_path: Path, removed: list) -> None:
-    """One grouped ``registry_rows_lost`` per lossy save; best-effort like above."""
-    from fno.events import append_event
-
-    argv = [a if i else Path(a).name for i, a in enumerate(sys.argv[:6])]
-    event = {
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "type": "registry_rows_lost",
-        "source": "agents",
-        "data": {
-            "writer": "python",
-            "pid": os.getpid(),
-            "verb": " ".join(argv)[:200],
-            "lost": [{"harness_session_id": (e.harness_session_id or "").strip(), "name": e.name}
-                     for e in removed],
-        },
-    }
-    try:
-        append_event(event, events_path=events_path)
-    except Exception:  # noqa: BLE001 - an audit gap must not fail the write
-        pass
-
-
 def update_registry(
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
     path: Optional[Path] = None,
@@ -3034,9 +2903,34 @@ def update_registry(
         new_entries = updater(list(current))
         _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
-        # After the write persisted: a removal that failed to persist never
-        # happened, and announcing it would be a false alarm.
-        _account_for_removed_rows(target, current, new_entries)
+        # Removal accounting runs on the Rust choke point's own path: the
+        # before-rows ride the payload, the after-rows read from disk, and
+        # the existing accounting stages the receipts and emits the events.
+        # The in-process pre-check keeps the common no-drop write from
+        # paying a subprocess: a row can only read removed when its name,
+        # session id and short id all left the store.
+        after_names = {e.name for e in new_entries}
+        after_sids = {e.harness_session_id for e in new_entries if e.harness_session_id}
+        after_shorts = {e.short_id for e in new_entries if e.short_id}
+        if any(
+            e.name not in after_names
+            and (e.harness_session_id or "") not in after_sids
+            and e.short_id not in after_shorts
+            for e in current
+        ):
+            try:
+                from fno.agents.spawn_axes_client import spawn_axes_call
+
+                spawn_axes_call(
+                    {
+                        "removal_accounting": {
+                            "registry": str(target),
+                            "before": [asdict(entry) for entry in current],
+                        }
+                    }
+                )
+            except Exception:  # noqa: BLE001 - the audit never fails the write
+                pass
         return new_entries
 
 

@@ -1,0 +1,1311 @@
+{
+ "cases": [
+  {
+   "keep": [
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-c33e"
+   ],
+   "q": "s:ready",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c",
+    "n-b22d"
+   ],
+   "q": "s:ready h:codex",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-c33e",
+    "n-f66b"
+   ],
+   "q": "s:ready,idea",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-c33e",
+    "n-d44f",
+    "n-e55a",
+    "n-f66b"
+   ],
+   "q": "h:claude | h:codex",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-c33e",
+    "n-d44f",
+    "n-f66b"
+   ],
+   "q": "-t:epic",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-e55a"
+   ],
+   "q": "s:in",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-e55a"
+   ],
+   "q": "s:in_progress",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-e55a"
+   ],
+   "q": "s:\"in progress\"",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "\"parser ships\"",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-bb1c",
+    "n-d44f",
+    "n-f66b"
+   ],
+   "q": "created:>=2026-09-20",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-bb1c",
+    "n-d44f",
+    "n-f66b"
+   ],
+   "q": "created:2026-09-20..2026-09-30",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-d44f",
+    "n-e55a",
+    "n-f66b"
+   ],
+   "q": "updated:>-7d",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-d44f",
+    "n-e55a",
+    "n-f66b"
+   ],
+   "q": "updated:-7d",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c",
+    "n-b22d",
+    "n-c33e",
+    "n-e55a"
+   ],
+   "q": "age:>11",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "votes:>3",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "votes:1..5",
+   "surface": "node"
+  },
+  {
+   "keep": [],
+   "q": "is:o",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-1717",
+    "n-2828",
+    "n-3939",
+    "n-4a4a",
+    "n-a11c",
+    "n-b22d",
+    "n-bb1c",
+    "n-c33e",
+    "n-e55a",
+    "n-f66b"
+   ],
+   "q": "is:open",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-f66b"
+   ],
+   "q": "has:question",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-b22d"
+   ],
+   "q": "mux sideline -s:done",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "n:x-aaaa",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "x-aaaa",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "49a80492-388e-44a3-bd91-017be26bcaa0",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "49a80492",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c"
+   ],
+   "q": "sid:01a0f3d2",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-d44f"
+   ],
+   "q": "col:done",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-d44f"
+   ],
+   "q": "is:done",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-e55a"
+   ],
+   "q": "children:>0",
+   "surface": "node"
+  },
+  {
+   "keep": [],
+   "q": "cost:3",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-b22d",
+    "n-c33e"
+   ],
+   "q": "is:stale",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-2828"
+   ],
+   "q": "needle",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-f66b"
+   ],
+   "q": "in:x-eeee s:ready,idea sort:priority",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-3939",
+    "n-b22d"
+   ],
+   "q": "ar:mux",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-b22d"
+   ],
+   "q": "ar:fleet",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-4a4a"
+   ],
+   "q": "ar:ship",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-bb1c"
+   ],
+   "q": "ar:ci",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-3939",
+    "n-4a4a",
+    "n-b22d",
+    "n-bb1c"
+   ],
+   "q": "ar:mux | ar:ship | ar:ci",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c",
+    "n-b22d"
+   ],
+   "q": "h:codex is:open -t:epic",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-a11c",
+    "n-b22d"
+   ],
+   "q": "h:codex | ar:mail is:open",
+   "surface": "node"
+  },
+  {
+   "error": "unknown key 'stauts:'; did you mean 'status:'?",
+   "q": "stauts:ready",
+   "surface": "node"
+  },
+  {
+   "error": "'k:' (kind) does not apply to nodes",
+   "q": "k:node",
+   "surface": "node"
+  },
+  {
+   "error": "'s:' (status) does not apply to feed events",
+   "q": "s:ready",
+   "surface": "event"
+  },
+  {
+   "error": "unterminated quote",
+   "q": "\"open quote",
+   "surface": "node"
+  },
+  {
+   "error": "bad date for 'created:': '2026-13-40'",
+   "q": "created:>=2026-13-40",
+   "surface": "node"
+  },
+  {
+   "error": "bad number for 'votes:': 'many'",
+   "q": "votes:>many",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "n-2828"
+   ],
+   "q": "\"fix: crash\"",
+   "surface": "node"
+  },
+  {
+   "keep": [
+    "ev-mail"
+   ],
+   "q": "a:rowan k:question",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-crown"
+   ],
+   "q": "l:heir",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-mail"
+   ],
+   "q": "ar:mail",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-crown",
+    "ev-reap"
+   ],
+   "q": "ar:agents",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-backlog"
+   ],
+   "q": "ar:backlog",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-ci",
+    "ev-ship"
+   ],
+   "q": "ar:ship | ar:ci",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-mail",
+    "ev-ship"
+   ],
+   "q": "ts:>=2026-10-01",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-ship"
+   ],
+   "q": "m:glm k:node_shipped ts:>=2026-10-01",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-mail"
+   ],
+   "q": "sid:s-king",
+   "surface": "event"
+  },
+  {
+   "keep": [
+    "ev-day"
+   ],
+   "q": "k:day_boundary",
+   "surface": "event"
+  }
+ ],
+ "now": "2026-10-01T12:00:00Z",
+ "rows": {
+  "ev-backlog": {
+   "fields": {
+    "area": [
+     "backlog"
+    ],
+    "details": [
+     "node created"
+    ],
+    "id": [
+     "x-ffff"
+    ],
+    "kind": [
+     "node_created"
+    ],
+    "session": [
+     "s-mk"
+    ],
+    "text": [
+     "an idea card created",
+     "x-ffff",
+     "s-mk"
+    ],
+    "title": [
+     "an idea card created"
+    ],
+    "ts": [
+     "2026-09-29T08:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "ev-ci": {
+   "fields": {
+    "area": [
+     "ci"
+    ],
+    "details": [
+     "the workflow matrix went red"
+    ],
+    "id": [
+     "x-5555"
+    ],
+    "kind": [
+     "ci_red"
+    ],
+    "lead": [],
+    "session": [
+     "s-ci"
+    ],
+    "text": [
+     "ci red on main",
+     "x-5555",
+     "s-ci"
+    ],
+    "title": [
+     "ci red on main"
+    ],
+    "ts": [
+     "2026-09-30T11:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "ev-crown": {
+   "fields": {
+    "agent": [
+     "heir"
+    ],
+    "area": [
+     "agents"
+    ],
+    "details": [
+     "heir crowned L2 x-eeee"
+    ],
+    "id": [
+     "x-eeee"
+    ],
+    "kind": [
+     "crown_granted"
+    ],
+    "lead": [
+     "heir"
+    ],
+    "session": [
+     "s-heir"
+    ],
+    "text": [
+     "heir crowned L2 x-eeee",
+     "x-eeee",
+     "heir"
+    ],
+    "title": [
+     "heir crowned L2 x-eeee"
+    ],
+    "ts": [
+     "2026-09-30T10:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "ev-day": {
+   "fields": {
+    "details": [],
+    "id": [],
+    "kind": [
+     "day_boundary"
+    ],
+    "lead": [],
+    "session": [],
+    "text": [
+     "a new day"
+    ],
+    "title": [
+     "a new day"
+    ],
+    "ts": [
+     "2026-09-29T00:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "ev-mail": {
+   "fields": {
+    "agent": [
+     "rowan"
+    ],
+    "area": [
+     "mail"
+    ],
+    "details": [
+     "rowan asks about the merge"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "id": [
+     "x-eeee"
+    ],
+    "is": [
+     "open"
+    ],
+    "kind": [
+     "question_asked"
+    ],
+    "lead": [
+     "rowan"
+    ],
+    "pr": [
+     "2890"
+    ],
+    "session": [
+     "s-king"
+    ],
+    "text": [
+     "proceed with the merge?",
+     "x-eeee",
+     "rowan"
+    ],
+    "title": [
+     "proceed with the merge?"
+    ],
+    "ts": [
+     "2026-10-01T08:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "ev-reap": {
+   "fields": {
+    "agent": [
+     "wren"
+    ],
+    "area": [
+     "agents"
+    ],
+    "details": [
+     "no registry row"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "id": [
+     "x-eeee"
+    ],
+    "kind": [
+     "session_reaped"
+    ],
+    "session": [
+     "s-wren"
+    ],
+    "text": [
+     "wren removed",
+     "x-eeee",
+     "wren"
+    ],
+    "title": [
+     "wren removed"
+    ],
+    "ts": [
+     "2026-09-30T09:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "ev-ship": {
+   "fields": {
+    "area": [
+     "ship"
+    ],
+    "details": [
+     "pr merged"
+    ],
+    "id": [
+     "x-dddd"
+    ],
+    "kind": [
+     "node_shipped"
+    ],
+    "model": [
+     "glm"
+    ],
+    "session": [
+     "s-ship"
+    ],
+    "text": [
+     "merge the case file shipped",
+     "x-dddd",
+     "s-ship"
+    ],
+    "title": [
+     "merge the case file shipped"
+    ],
+    "ts": [
+     "2026-10-01T07:00:00Z"
+    ]
+   },
+   "surface": "event"
+  },
+  "n-1717": {
+   "fields": {
+    "column": [
+     "in_progress"
+    ],
+    "created": [
+     "2026-09-30T10:00:00Z"
+    ],
+    "details": [
+     "in flight now"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-1111"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-7777"
+    ],
+    "slug": [
+     "wip-lane"
+    ],
+    "status": [
+     "in_progress"
+    ],
+    "text": [
+     "x-1111",
+     "wip-lane",
+     "wip lane"
+    ],
+    "title": [
+     "wip lane"
+    ],
+    "type": [
+     "feature"
+    ],
+    "updated": [
+     "2026-09-30T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-2828": {
+   "fields": {
+    "column": [
+     "next"
+    ],
+    "created": [
+     "2026-09-26T10:00:00Z"
+    ],
+    "details": [
+     "the launch code is needle-in-pocket",
+     "fix: crash in the drawer"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-2222"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-8888"
+    ],
+    "slug": [
+     "unrelated"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-2222",
+     "unrelated",
+     "unrelated title"
+    ],
+    "title": [
+     "unrelated title"
+    ],
+    "title_only": [
+     "never"
+    ],
+    "type": [
+     "feature"
+    ],
+    "updated": [
+     "2026-09-26T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-3939": {
+   "fields": {
+    "area": [
+     "backlog",
+     "mux"
+    ],
+    "column": [
+     "next"
+    ],
+    "created": [
+     "2026-09-27T10:00:00Z"
+    ],
+    "details": [
+     "touch crates/fno/src/client/board.rs"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-3333"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-9999"
+    ],
+    "slug": [
+     "board-glue"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-3333",
+     "board-glue",
+     "board glue"
+    ],
+    "title": [
+     "board glue"
+    ],
+    "type": [
+     "task"
+    ],
+    "updated": [
+     "2026-09-27T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-4a4a": {
+   "fields": {
+    "area": [
+     "ship"
+    ],
+    "column": [
+     "next"
+    ],
+    "created": [
+     "2026-09-27T10:00:00Z"
+    ],
+    "details": [
+     "skills/ship flows"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-4444"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-1010"
+    ],
+    "slug": [
+     "cut-a-release"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-4444",
+     "cut-a-release",
+     "cut a release"
+    ],
+    "title": [
+     "cut a release"
+    ],
+    "type": [
+     "task"
+    ],
+    "updated": [
+     "2026-09-27T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-a11c": {
+   "fields": {
+    "children": [
+     "0"
+    ],
+    "column": [
+     "next"
+    ],
+    "cost": [
+     "3.5"
+    ],
+    "created": [
+     "2026-09-20T10:00:00Z"
+    ],
+    "details": [
+     "the parser ships today"
+    ],
+    "harness": [
+     "claude",
+     "codex"
+    ],
+    "has": [
+     "plan",
+     "notes"
+    ],
+    "id": [
+     "x-aaaa"
+    ],
+    "is": [
+     "open",
+     "claimed"
+    ],
+    "priority": [
+     "p1"
+    ],
+    "session": [
+     "sess-cla-1111abcd",
+     "01a0f3d2",
+     "49a80492-388e-44a3-bd91-017be26bcaa0"
+    ],
+    "slug": [
+     "parser"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-aaaa",
+     "parser",
+     "ship the search parser"
+    ],
+    "title": [
+     "ship the search parser"
+    ],
+    "type": [
+     "feature"
+    ],
+    "updated": [
+     "2026-10-01T09:00:00Z"
+    ],
+    "votes": [
+     "5"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-b22d": {
+   "fields": {
+    "area": [
+     "mux",
+     "fleet"
+    ],
+    "column": [
+     "next"
+    ],
+    "created": [
+     "2026-08-20T10:00:00Z"
+    ],
+    "details": [
+     "crates/fno/src/client/sideline.rs sidebar fix"
+    ],
+    "harness": [
+     "codex"
+    ],
+    "has": [],
+    "id": [
+     "x-bbbb"
+    ],
+    "is": [
+     "open",
+     "stale"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cod-2222"
+    ],
+    "slug": [
+     "sideline"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-bbbb",
+     "sideline",
+     "mux sideline shows fleet capacity"
+    ],
+    "title": [
+     "mux sideline shows fleet capacity"
+    ],
+    "type": [
+     "task"
+    ],
+    "updated": [
+     "2026-09-28T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-bb1c": {
+   "fields": {
+    "area": [
+     "ci"
+    ],
+    "column": [
+     "next"
+    ],
+    "created": [
+     "2026-09-27T10:00:00Z"
+    ],
+    "details": [
+     "the .github/workflows matrix"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-5555"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-1212"
+    ],
+    "slug": [
+     "flake-hunt"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-5555",
+     "flake-hunt",
+     "flake hunt"
+    ],
+    "title": [
+     "flake hunt"
+    ],
+    "type": [
+     "task"
+    ],
+    "updated": [
+     "2026-09-27T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-c33e": {
+   "fields": {
+    "column": [
+     "later"
+    ],
+    "created": [
+     "2026-08-22T10:00:00Z"
+    ],
+    "details": [
+     "account routing gaps"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [
+     "blocker"
+    ],
+    "id": [
+     "x-cccc"
+    ],
+    "is": [
+     "open",
+     "stale"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-3333"
+    ],
+    "slug": [
+     "registry-gaps"
+    ],
+    "status": [
+     "ready"
+    ],
+    "text": [
+     "x-cccc",
+     "registry-gaps",
+     "registry gaps"
+    ],
+    "title": [
+     "registry gaps"
+    ],
+    "type": [
+     "feature"
+    ],
+    "updated": [
+     "2026-09-20T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-d44f": {
+   "fields": {
+    "column": [
+     "done"
+    ],
+    "created": [
+     "2026-09-25T10:00:00Z"
+    ],
+    "details": [
+     "merged yesterday"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-dddd"
+    ],
+    "is": [
+     "done"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-4444"
+    ],
+    "slug": [
+     "merge-case"
+    ],
+    "status": [
+     "done"
+    ],
+    "text": [
+     "x-dddd",
+     "merge-case",
+     "merge the case file"
+    ],
+    "title": [
+     "merge the case file"
+    ],
+    "type": [
+     "feature"
+    ],
+    "updated": [
+     "2026-09-28T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-e55a": {
+   "fields": {
+    "children": [
+     "2"
+    ],
+    "column": [
+     "in_progress"
+    ],
+    "created": [
+     "2026-09-01T10:00:00Z"
+    ],
+    "details": [
+     "the epic body"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [],
+    "id": [
+     "x-eeee"
+    ],
+    "in": [
+     "x-eeee"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p2"
+    ],
+    "session": [
+     "s-cla-5555"
+    ],
+    "slug": [
+     "parent"
+    ],
+    "status": [
+     "in_progress"
+    ],
+    "text": [
+     "x-eeee",
+     "parent",
+     "the parent epic"
+    ],
+    "title": [
+     "the parent epic"
+    ],
+    "type": [
+     "epic"
+    ],
+    "updated": [
+     "2026-09-30T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  },
+  "n-f66b": {
+   "fields": {
+    "column": [
+     "triage"
+    ],
+    "created": [
+     "2026-09-28T10:00:00Z"
+    ],
+    "details": [
+     "idea body"
+    ],
+    "harness": [
+     "claude"
+    ],
+    "has": [
+     "question"
+    ],
+    "id": [
+     "x-ffff"
+    ],
+    "in": [
+     "x-ffff",
+     "x-eeee"
+    ],
+    "is": [
+     "open"
+    ],
+    "priority": [
+     "p1"
+    ],
+    "session": [
+     "s-cla-6666"
+    ],
+    "slug": [
+     "idea-card"
+    ],
+    "status": [
+     "idea"
+    ],
+    "text": [
+     "x-ffff",
+     "idea-card",
+     "an idea card"
+    ],
+    "title": [
+     "an idea card"
+    ],
+    "type": [
+     "task"
+    ],
+    "updated": [
+     "2026-09-28T10:00:00Z"
+    ]
+   },
+   "surface": "node"
+  }
+ }
+}

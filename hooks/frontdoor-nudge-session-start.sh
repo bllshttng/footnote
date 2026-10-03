@@ -24,6 +24,11 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
 if command -v fno >/dev/null 2>&1; then
+  # The probe's EXIT CODE is the signal (2 = fno-py, 124 = hung socket that
+  # still proves the Rust door), so it keeps its FIXED bound: the load-aware
+  # budget's silence contract cannot express "the exit code is the answer",
+  # and a runner under shard load measured a 1s fork miss that turned a real
+  # rc 2 into a 124 and silenced a real reminder.
   with_timeout 3 fno mux ls --json >/dev/null 2>&1
   probe_rc=$?
   # 124 means our own bound fired. A wedged socket still PROVES the Rust front

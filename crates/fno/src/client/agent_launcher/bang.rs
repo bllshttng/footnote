@@ -150,12 +150,7 @@ pub(super) async fn run_with(
         cols: None,
         rows: None,
         claim: false,
-        placement: PanePlacement {
-            // The user typed this line: the human's own admission exemption
-            // (brake warns, census still gates), like their own mux start.
-            human: true,
-            ..PanePlacement::default()
-        },
+        placement: PanePlacement::default(),
         worker: None,
     };
     let reply = tokio::task::spawn_blocking(move || roundtrip(verb))
@@ -302,11 +297,7 @@ mod tests {
         });
         {
             let ControlVerb::PaneRun {
-                cwd,
-                argv,
-                claim,
-                placement,
-                ..
+                cwd, argv, claim, ..
             } = seen.lock().unwrap().take().unwrap()
             else {
                 panic!("expected PaneRun");
@@ -316,7 +307,6 @@ mod tests {
             assert_eq!(argv[0], "/bin/sh");
             assert_eq!(argv[4], "printf hi; pwd");
             assert!(!claim);
-            assert!(placement.human, "the ! line rides the human exemption");
         }
         let rows = read_rows(&events);
         assert_eq!(rows.len(), 1);

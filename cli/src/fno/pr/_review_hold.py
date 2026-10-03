@@ -47,7 +47,8 @@ from pathlib import Path
 from fno.review.invocation import VERIFY_FIXES
 
 
-# Not one of ``claims.io._GLOBAL_ID_PREFIXES``, so the key routes to the
+# Not a global-id prefix (the native routing list lives in
+# crates/fno-agents/src/claims_root.rs), so the key routes to the
 # canonical repo root: every linked worktree of a project shares one hold, and
 # a review running in a worktree is visible to a king in the main checkout.
 REVIEW_HOLD_PREFIX = "review:branch:"
