@@ -57,6 +57,7 @@ pub(crate) struct MessagesBoard {
     pub(crate) sel_thread: Option<String>,
     pub(crate) collapsed: HashSet<String>,
     pub(crate) detail: Option<super::messages_detail::SessionDetail>,
+    pub(super) reply: Option<super::messages_reply::ReplyState>,
     pub(crate) gen: u64,
     pub(crate) inflight: bool,
     last_read: Option<Instant>,
@@ -76,6 +77,7 @@ impl MessagesBoard {
             sel_thread: None,
             collapsed: HashSet::new(),
             detail: None,
+            reply: None,
             gen,
             inflight: false,
             last_read: None,
@@ -149,6 +151,17 @@ pub(crate) enum PartnerRow {
 
 fn text_of<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn thread_body(row: &Value, mine: &str, width: usize) -> BLine {
+    let body = text_of(row, "body").to_string();
+    let pad = width.saturating_sub(body.chars().count()).saturating_sub(2);
+    let aligned = if text_of(row, "from_key") == mine {
+        format!("{}{}", " ".repeat(pad), body)
+    } else {
+        body
+    };
+    BLine::of(&[seg(aligned, BRole::Body)])
 }
 
 impl MessagesBoard {
@@ -366,7 +379,7 @@ impl MessagesBoard {
     }
 
     /// The display name for a participant key, falling back to the raw key.
-    fn participant_name(&self, key: &str) -> String {
+    pub(super) fn participant_name(&self, key: &str) -> String {
         let proj = self.projection();
         proj.and_then(|p| p.get("participants"))
             .and_then(Value::as_array)
@@ -378,7 +391,7 @@ impl MessagesBoard {
     /// The thread content the third column shows: rows behind the current
     /// selection - a stored pair thread, a `# channel`, or the System
     /// exchange.
-    fn conversation_rows(&self) -> Vec<&Value> {
+    pub(super) fn conversation_rows(&self) -> Vec<&Value> {
         let Some(sel) = self.sel_thread.as_deref() else {
             return Vec::new();
         };
@@ -417,7 +430,8 @@ impl MessagesBoard {
     pub(crate) fn columns(&self, w: usize) -> (Vec<BLine>, Vec<BLine>, Vec<BLine>) {
         let tree = self.tree_column(w);
         let partners = self.partners_column();
-        let content = self.thread_column(w);
+        let (tree_w, part_w) = split(w);
+        let content = self.thread_column(w.saturating_sub(tree_w + part_w));
         (tree, partners, content)
     }
 
@@ -515,7 +529,7 @@ impl MessagesBoard {
             return lines;
         }
         let mine = self.sel_agent.as_deref().unwrap_or("");
-        for r in &rows {
+        for (index, r) in rows.iter().enumerate() {
             let sys = text_of(r, "system") == "true";
             let name = if sys {
                 text_of(r, "from").to_string()
@@ -524,20 +538,18 @@ impl MessagesBoard {
             };
             let time = text_of(r, "ts").get(11..16).unwrap_or("");
             let badge = if sys { " SYS" } else { "" };
-            lines.push(BLine::of(&[
+            let mut head = BLine::of(&[
                 seg(name, BRole::Head),
                 seg(badge.to_string(), BRole::Meta),
                 seg(format!(" {time}"), BRole::Meta),
-            ]));
-            let body = text_of(r, "body").to_string();
-            let pad = w.saturating_sub(body.chars().count()).saturating_sub(2);
-            let aligned = if text_of(r, "from_key") == mine {
-                format!("{}{}", " ".repeat(pad), body)
-            } else {
-                body
-            };
-            let bubble = BLine::of(&[seg(aligned, BRole::Body)]);
-            lines.extend(bubble.wrap(w.saturating_sub(2)));
+            ]);
+            head.band = index == self.cursors[2];
+            lines.push(head);
+            let mut wrapped = thread_body(r, mine, w).wrap(w.saturating_sub(2));
+            for line in &mut wrapped {
+                line.band = index == self.cursors[2];
+            }
+            lines.extend(wrapped);
         }
         lines
     }
@@ -606,7 +618,12 @@ pub(crate) fn paint(
         thread_w,
         body_h,
         &thread,
-        Some(thread.len().saturating_sub(1)),
+        Some(
+            thread
+                .iter()
+                .rposition(|line| line.band)
+                .unwrap_or_else(|| thread.len().saturating_sub(1)),
+        ),
         &view.theme,
     );
 }
@@ -783,7 +800,7 @@ fn column_len(b: &MessagesBoard) -> usize {
             .as_deref()
             .map(|a| b.partner_rows(a).len())
             .unwrap_or(0),
-        Col::Thread => 0,
+        Col::Thread => b.conversation_rows().len(),
     }
 }
 
@@ -804,6 +821,7 @@ async fn act(
             match row {
                 TreeRow::Channel(scope) => {
                     b.sel_thread = Some(format!("channel:{scope}"));
+                    b.cursors[2] = 0;
                     b.col = Col::Thread;
                 }
                 TreeRow::Lead { key, scope, .. } => {
@@ -847,16 +865,23 @@ async fn act(
             match row {
                 PartnerRow::System { .. } => {
                     b.sel_thread = Some(format!("system:{agent}"));
+                    b.cursors[2] = 0;
                     b.col = Col::Thread;
                 }
                 PartnerRow::Thread { chat_id, ts, .. } => {
                     crate::view_store::save_messages_read_mark(chat_id, ts);
                     b.sel_thread = Some(chat_id.clone());
+                    b.cursors[2] = 0;
                     b.col = Col::Thread;
                 }
             }
         }
-        Col::Thread => {}
+        Col::Thread => {
+            let row = b.conversation_rows().get(b.cursors[2]).cloned();
+            if let Some(row) = row {
+                super::messages_reply::open(view, row);
+            }
+        }
     }
     Ok(())
 }
@@ -951,9 +976,9 @@ pub(crate) async fn mouse(
     if view
         .messages_board
         .as_ref()
-        .is_some_and(|b| b.detail.is_some())
+        .is_some_and(|b| b.detail.is_some() || b.reply.is_some())
     {
-        // The details modal owns the pointer: a click off it dismisses.
+        // Modals own the pointer; clicking outside dismisses a detail card.
         if let Some(d) = view.messages_board.as_ref().and_then(|b| b.detail.as_ref()) {
             if !d.popup.render(view.term).contains(rep.row, rep.col) {
                 if let Some(b) = view.messages_board.as_mut() {
@@ -1020,7 +1045,35 @@ pub(crate) async fn mouse(
             // One header line at row 1.
             (rep.row as usize).checked_sub(2).map(|i| i + start)
         }
-        Col::Thread => None,
+        Col::Thread => {
+            let (tree_w, part_w) = split(view.term.1 as usize);
+            let thread_w = (view.term.1 as usize).saturating_sub(tree_w + part_w);
+            let Some(board) = view.messages_board.as_ref() else {
+                return Ok(());
+            };
+            let rows = board.conversation_rows();
+            let lines = board.columns(view.term.1 as usize).2;
+            let follow = lines
+                .iter()
+                .rposition(|line| line.band)
+                .unwrap_or_else(|| lines.len().saturating_sub(1));
+            let painted_body_h = (view.term.0 as usize).saturating_sub(2);
+            let (start, _) = column_rect(lines.len(), painted_body_h, follow);
+            let visible_line = (rep.row as usize).checked_sub(1).map(|i| i + start);
+            visible_line.and_then(|line| {
+                let mut offset = 1usize;
+                let mine = board.sel_agent.as_deref().unwrap_or("");
+                rows.iter().enumerate().find_map(|(i, row)| {
+                    let wrapped = thread_body(row, mine, thread_w)
+                        .wrap(thread_w.saturating_sub(2))
+                        .len();
+                    let end = offset + 1 + wrapped;
+                    let hit = (offset..end).contains(&line);
+                    offset = end;
+                    hit.then_some(i)
+                })
+            })
+        }
     };
     let Some(b) = view.messages_board.as_mut() else {
         return Ok(());
@@ -1033,7 +1086,7 @@ pub(crate) async fn mouse(
                 .map(|a| i < b.partner_rows(a).len())
                 .unwrap_or(false)
         }),
-        Col::Thread => false,
+        Col::Thread => index.is_some_and(|i| i < b.conversation_rows().len()),
     };
     if !in_range {
         return Ok(());
@@ -1044,6 +1097,14 @@ pub(crate) async fn mouse(
         Col::Partners => 1,
         Col::Thread => 2,
     };
+    if col == Col::Thread {
+        let row = b.conversation_rows().get(i).cloned();
+        b.cursors[2] = i;
+        if let Some(row) = row {
+            super::messages_reply::open(view, row);
+        }
+        return Ok(());
+    }
     if b.cursors[slot] != i {
         b.cursors[slot] = i;
         return Ok(());

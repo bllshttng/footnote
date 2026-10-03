@@ -32,8 +32,8 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     assert!(view.messages_board.is_some(), "the fixture opens the board");
 }
 
-#[test]
-fn messages_board_contracts() {
+#[tokio::test]
+async fn messages_reply_board_contracts() {
     use super::super::LayoutView;
     use serde_json::json;
     let mut view = View::new(
@@ -108,5 +108,79 @@ fn messages_board_contracts() {
     let mut rows2 = Vec::new();
     super::super::feed_detail::info_row("x", None, &mut rows2);
     assert!(rows2.is_empty());
+
+    // Audit gate: protects row navigation, receiver-first recipient choice,
+    // exact reply prefill, and the tap hit map plus no-pane refusal. A cursor,
+    // default, quote or wrapped-row regression can misroute a human reply;
+    // existing fixture coverage owns projection only, so these assertions extend
+    // that owner. It uses the real View/wire and needs no production seam.
+    b.sel_thread = Some("chat-a1".into());
+    b.col = Col::Thread;
+    b.cursors[2] = 0;
+    super::keys(&mut view, b"j", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(view.messages_board.as_ref().unwrap().cursors[2], 1);
+    super::keys(&mut view, b"k", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    super::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let choices = super::super::messages_reply::popup(&view).unwrap();
+    assert_eq!(choices.selected(), Some((2, 0)));
+    let labels = choices
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["first", "candor"]);
+    super::super::messages_reply::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let seed = super::super::messages_reply::popup(&view)
+        .unwrap()
+        .rows
+        .iter()
+        .find_map(|row| match row {
+            crate::popup::PopupRow::Input { text, .. } => Some(text.as_str()),
+            _ => None,
+        });
+    assert_eq!(seed, Some("re candor/m1: \"Ship it.\" "));
+    super::super::messages_reply::keys(&mut view, b"ok", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let (mut writer, mut reader) = tokio::io::duplex(256);
+    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
+        .await
+        .unwrap();
+    let mut bytes = [0; 256];
+    assert!(matches!(
+        reader.try_read(&mut bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert_eq!(
+        view.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("reply: first has no pane on screen; open a portal first")
+    );
+    super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
+        .await
+        .unwrap();
+    super::mouse(
+        &mut view,
+        crate::mouse::MouseReport {
+            kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+            row: 2,
+            col: 60,
+            shift: false,
+        },
+        &mut writer,
+    )
+    .await
+    .unwrap();
+    assert!(super::super::messages_reply::popup(&view).is_some());
     crate::view_store::clear_test_path();
 }

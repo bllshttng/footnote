@@ -1010,6 +1010,7 @@ struct View {
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
+    reply_notice_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// The row-scoped outcome stamp and its armed action, one at a
     /// time - see [`RowStamp`] / [`RowArm`].
     row_stamp: Option<RowStamp>,
@@ -1811,6 +1812,7 @@ pub(crate) use node_detail::wrap_line;
 mod editor;
 mod keys_settings;
 mod messages_detail;
+mod messages_reply;
 mod overlay_lines;
 pub(crate) use overlay_lines::{humanize_age, nav_overlay_lines, peek_overlay_lines};
 mod messages_view;
@@ -1850,7 +1852,7 @@ use input_folds::{
     fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
 
-use mail_input::peek_input_keys;
+use messages_reply::peek_keys;
 use update_menu::{build_sideline_menu, build_update_modal, UpdateProbe};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
@@ -2016,6 +2018,7 @@ impl View {
             court: crate::court_overlay::Panel::default(),
             digest: None,
             notice: None,
+            reply_notice_tx: None,
             row_stamp: None,
             row_arm: None,
             row_slot: None,
@@ -5250,9 +5253,7 @@ impl View {
             // sideline's, so the board paints from row 1.
             self.paint_top_row(&mut cells, cols, cols);
             messages_view::paint(self, &mut cells, rows, cols, cols, rows);
-            if let Some(d) = self.messages_board.as_ref().and_then(|b| b.detail.as_ref()) {
-                draw_popup_overlay(&mut cells, rows, cols, &d.popup, self.term, &self.theme);
-            }
+            messages_reply::paint(self, &mut cells, rows, cols);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -7645,6 +7646,8 @@ async fn attach_and_run(
         Result<serde_json::Value, String>,
         Result<crate::org_model::OrgTree, String>,
     )>();
+    let (reply_notice_tx, mut reply_notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    view.reply_notice_tx = Some(reply_notice_tx);
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -8413,6 +8416,12 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some(text) = reply_notice_rx.recv() => {
+                view.set_notice(text);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -8909,6 +8918,9 @@ async fn handle_stdin(
     }
     if passthrough.is_empty() {
         return Ok(StdinFlow::Continue);
+    }
+    if messages_reply::active(view) {
+        return messages_reply::keys(view, &passthrough, sock_w).await;
     }
     // (AC6-FR): a bare Esc during a seam drag reverts it. The revert is
     // an explicit final command to the drag-start ratio, not a client-side
@@ -10103,168 +10115,6 @@ async fn connections_keys(
                 // it. The modal already repainted its own marker.
                 view.active_account = account;
             }
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-async fn peek_keys(
-    view: &mut View,
-    bytes: &[u8],
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    // Input mode wins the key route: while the `m` reply input is open,
-    // every key types into it (digits/j/k/l/r literal), never peek nav. Checked
-    // before the nav fold so the two folders never share a chunk's bytes.
-    if view.peek_input.is_some() {
-        return peek_input_keys(view, bytes, sock_w).await;
-    }
-    let mut esc = std::mem::take(&mut view.peek_esc);
-    let keys = fold_selector_keys(&mut esc, bytes);
-    view.peek_esc = esc;
-    for &k in &keys {
-        let Some(cursor) = view.peek.as_ref().map(|p| p.cursor) else {
-            break; // closed mid-chunk: swallow the rest, never forward
-        };
-        match k {
-            b'j' | b'k' => {
-                let dir = if k == b'j' { 1 } else { -1 };
-                match view.peek_next_agent(cursor, dir) {
-                    Some(next) => {
-                        let name = match view.display_rows().get(next) {
-                            Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
-                            _ => None,
-                        };
-                        if let Some(name) = name {
-                            fetch_peek(view, next, name, sock_w).await?;
-                        }
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07"); // at the edge: BEL, stay put
-                    }
-                }
-            }
-            b'0'..=b'9' => {
-                // Answer a blocked peeked row in place (reuse): send the
-                // EXACT PaneAnswer payload (fingerprint, region_lines, keystroke)
-                // only when the row is answerable AND pane-hosted; else BEL,
-                // nothing sent (AC1-ERR carried over). The overlay stays
-                // open; the answered row drops from blocked on the next scrape
-                // tick. The daemon-pinned keystroke is relayed opaquely - the
-                // client never fabricates bytes.
-                let payload = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => {
-                        a.answerable
-                            .as_ref()
-                            .zip(a.pane_id)
-                            .and_then(|(ans, pane)| {
-                                ans.options
-                                    .iter()
-                                    .find(|o| o.idx.as_bytes().first() == Some(&k))
-                                    .map(|o| {
-                                        (
-                                            pane,
-                                            ans.fingerprint,
-                                            ans.region_lines as u16,
-                                            o.keystroke.clone(),
-                                        )
-                                    })
-                            })
-                    }
-                    _ => None,
-                };
-                match payload {
-                    Some((pane, fingerprint, region_lines, keystroke)) => {
-                        write_msg(
-                            sock_w,
-                            &ClientMsg::PaneAnswer {
-                                pane,
-                                fingerprint,
-                                region_lines,
-                                keystroke,
-                            },
-                        )
-                        .await
-                        .map_err(|e| format!("answer send failed: {e}"))?;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            b'l' | b'\r' | b'\n' => {
-                // Attach from peek (US4) through the shared agent_hit -> apply_hit
-                // path a click / selector Enter uses: a pane-hosted row focuses;
-                // a paneless live row reaches PORTAL 0 with no placement dialog
-                // (; the explicit picker is `p`, a new portal is `P`). A
-                // Notice refusal (a dead or unresolvable row) keeps BOTH
-                // overlays open (locked 3). Right-arrow folds to `l`.
-                let hit = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
-                    _ => None,
-                };
-                match hit {
-                    Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
-                    Some(hit) => {
-                        view.clear_peek();
-                        view.selector = None;
-                        apply_hit(view, hit, sock_w).await?;
-                    }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            b'm' => {
-                // Open the free-text reply input (US5), capturing the target name
-                // at m-press so a later layout shift can't retarget it. break so
-                // the rest of THIS chunk is swallowed; the next chunk routes to
-                // peek_input_keys.
-                match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => {
-                        view.peek_input = Some((a.name.clone(), String::new()));
-                        view.peek_input_esc.clear();
-                        break;
-                    }
-                    _ => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            b'r' => {
-                // Respawn an exited row (US6). A live row BELs (locked posture);
-                // the server re-validates external/uuid/shape - client gating is
-                // UX, not the guard.
-                let target = match view.display_rows().get(cursor) {
-                    Some(DisplayRow::Agent(a)) => Some((a.name.clone(), a.exited)),
-                    _ => None,
-                };
-                match target {
-                    Some((name, true)) => {
-                        write_msg(sock_w, &ClientMsg::Command(Command::RespawnAgent { name }))
-                            .await
-                            .map_err(|e| format!("respawn send failed: {e}"))?;
-                    }
-                    _ => {
-                        let _ = raw_out(b"\x07");
-                    }
-                }
-            }
-            0x1b | b'q' => {
-                // Close peek. When peek was opened FROM the selector it stays
-                // open underneath, so re-point its cursor to the peeked row
-                // (AC2-UI). When peek was opened standalone (US2:
-                // right-click a row -> Peek, selector closed), Esc must return to
-                // normal pane input, NOT drop into panel-selector mode.
-                let restore = view.selector.is_some();
-                view.clear_peek();
-                if restore {
-                    view.selector = Some(cursor);
-                }
-            }
-            // Everything else is swallowed - never a pane leak (prefix-layer
-            // invariant). h (left-arrow) has no peek action.
-            _ => {}
         }
     }
     Ok(StdinFlow::Continue)
