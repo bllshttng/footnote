@@ -849,6 +849,7 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// fresh row red.
 const FAILURE_SKIPS: &[&str] = &[
     "timeout",
+    "grant_queue_timeout",
     "error",
     "failures",
     "next-error",
@@ -2505,6 +2506,27 @@ mod tests {
         assert!(line.contains("FAIL"), "line: {line}");
         assert!(line.contains("skip=failures"), "line: {line}");
         assert!(line.contains("failing_for=3600s"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:59:00Z",
+                "pr_watch_merge",
+                SCHED_LAUNCHD,
+                0,
+                json!("grant_queue_timeout"),
+                600,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let merge = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert!(merge.failing);
+        assert!(needs_attention(merge));
+        assert_eq!(merge.skip_reason.as_deref(), Some("grant_queue_timeout"));
         std::fs::remove_dir_all(&dir).ok();
 
         // The regression the doc comment protects: degraded is deliberately
