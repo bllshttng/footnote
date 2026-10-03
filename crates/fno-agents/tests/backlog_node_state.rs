@@ -242,6 +242,7 @@ fn ac4_history_failure_preserves_state() {
         .parent()
         .unwrap()
         .to_path_buf();
+    std::fs::remove_file(hist_dir.join("notes.jsonl")).unwrap();
     std::fs::create_dir_all(hist_dir.join("notes.jsonl")).unwrap();
     let err = node_state::replace_state(&graph, &ws(&graph, "c-1", "v3"))
         .unwrap_err()

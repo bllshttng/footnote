@@ -171,9 +171,14 @@ pub fn anchor_path(graph: &Path) -> PathBuf {
         Some(n) => n.to_string(),
         None => return graph.with_extension("json"),
     };
-    if name != "graph.json" && name != "graph-archive.json" {
-        return graph.with_extension("json");
-    }
+    // The db twins of the anchors are spellings of the same graph: a reader
+    // holding graph.db must land where a writer holding graph.json wrote,
+    // so they take the same walk instead of a naive sibling rename.
+    let anchor = match name.as_str() {
+        "graph.json" | "graph.db" => "graph.json",
+        "graph-archive.json" | "graph-archive.db" => "graph-archive.json",
+        _ => return graph.with_extension("json"),
+    };
     let parent = match graph.parent() {
         Some(p) => p,
         None => return graph.with_extension("json"),
@@ -186,7 +191,7 @@ pub fn anchor_path(graph: &Path) -> PathBuf {
     } else {
         parent
     };
-    crate::state_layout::place(root, &name)
+    crate::state_layout::place(root, anchor)
 }
 
 /// The state root an anchor belongs to: the same walk `database_path` does

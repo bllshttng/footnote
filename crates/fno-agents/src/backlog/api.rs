@@ -1085,8 +1085,27 @@ pub fn comment_create(
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
             }
-            let Ok(mut parsed) = Node::from_json(row) else {
-                return Ok(false);
+            let mut parsed = match Node::from_json(row) {
+                Ok(p) => p,
+                Err(_) => {
+                    // A legacy minimal row (no slug/type/status) parks raw
+                    // in the carry; the reader serves it with defaults
+                    // applied, so the write upgrades through the same
+                    // projection instead of refusing every note on such a
+                    // node.
+                    let mut upgraded = vec![row.clone()];
+                    crate::graph_store::apply_defaults(&mut upgraded, false);
+                    crate::graph_store::ensure_slugs(&mut upgraded);
+                    let Ok(p) = Node::from_json(&upgraded[0]) else {
+                        return Err(format!(
+                            "node {id}: the stored row is not representable as the typed \
+                             model, so the comment cannot append. Re-save the node through \
+                             the typed surface first."
+                        ));
+                    };
+                    *row = upgraded[0].clone();
+                    p
+                }
             };
             // the first note append carries the node's note journal
             // (the pre-feed history of replaced states) into the thread and
@@ -1188,7 +1207,11 @@ pub fn comment_create(
             updated = Some(parsed);
             break;
         }
-        Ok(updated.is_some())
+        if updated.is_some() {
+            Ok(true)
+        } else {
+            Err(format!("no node resolves to '{id}' in the store"))
+        }
     })?;
     if ok {
         Ok(Payload {

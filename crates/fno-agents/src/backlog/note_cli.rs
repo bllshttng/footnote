@@ -868,7 +868,9 @@ appends to the thread and cannot conflict"
     };
     let store = super::api::Store::new(graph);
     match super::api::comment_create(&store, &node_id, input) {
-        Ok(_) => {
+        // A refusal payload (success false) is not a landed note: the
+        // receipt must never print ok over one.
+        Ok(payload) if payload.success => {
             let line = format!(
                 "noted {node_id}: {kind} appended to the thread; \
 read the feed: fno backlog note comment {node_id} --list"
@@ -881,6 +883,12 @@ read the feed: fno backlog note comment {node_id} --list"
                 }),
             );
             0
+        }
+        Ok(_) => {
+            eprintln!(
+                "fno-agents backlog-note: the append refused and nothing was written to {node_id}"
+            );
+            1
         }
         Err(e) => {
             eprintln!("fno-agents backlog-note: {}", e.0);

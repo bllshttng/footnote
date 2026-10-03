@@ -150,7 +150,7 @@ fn absent_node_still_reports_absence_at_the_unchanged_code() {
 }
 
 #[test]
-fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
+fn ac5_positional_stdin_and_file_bodies_all_append_to_the_thread() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("t-1", "ready")]);
@@ -164,7 +164,6 @@ fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
         "body one",
     );
     assert_eq!(code, 0);
-    assert_eq!(node_state::current_revision(&graph, "t-1").unwrap(), 1);
     // body file
     let body_file = dir.path().join("body.txt");
     std::fs::write(&body_file, "body two").unwrap();
@@ -184,7 +183,6 @@ fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
         "",
     );
     assert_eq!(code, 0);
-    assert_eq!(node_state::current_revision(&graph, "t-1").unwrap(), 2);
     // positional
     let code = note(
         &graph,
@@ -194,8 +192,17 @@ fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
     assert_eq!(code, 0);
     let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
     let row = entries.iter().find(|r| r["id"] == json!("t-1")).unwrap();
-    assert_eq!(row[node_state::STATE_KEY]["body"], json!("body three"));
-    // A stale explicit revision refuses without overwrite.
+    let notes = row["progress_notes"].as_array().unwrap();
+    let bodies: Vec<&str> = notes
+        .iter()
+        .map(|n| n["text"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(bodies, vec!["body one", "body two", "body three"]);
+    assert!(
+        row.get(node_state::STATE_KEY).is_none(),
+        "a note writes no state"
+    );
+    // --if-revision guards --clear only; on the note route it is usage.
     let code = note(
         &graph,
         &[
@@ -210,7 +217,7 @@ fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
         ],
         "",
     );
-    assert_eq!(code, 3);
+    assert_eq!(code, 2);
     let row = read_graph(&graph)["entries"]
         .as_array()
         .unwrap()
@@ -218,7 +225,34 @@ fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
         .find(|r| r["id"] == json!("t-1"))
         .unwrap()
         .clone();
-    assert_eq!(row[node_state::STATE_KEY]["body"], json!("body three"));
+    assert_eq!(row["progress_notes"].as_array().unwrap().len(), 3);
+    // A legacy minimal row (no slug/type/status) parks raw in the carry.
+    // The reader serves it with defaults applied, so a note appends to its
+    // thread through the same upgrade instead of refusing.
+    write_graph(&graph, &[json!({"id": "l-row", "title": "legacy"})]);
+    let code = note(
+        &graph,
+        &[
+            "l-row",
+            "a note on a raw row",
+            "--json",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0);
+    let row = read_graph(&graph)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!("l-row"))
+        .unwrap()
+        .clone();
+    let notes = row["progress_notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["text"], json!("a note on a raw row"));
 }
 
 #[test]
@@ -227,7 +261,8 @@ fn ac7_machine_and_wave_records_go_to_history_only() {
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("m-1", "in_progress")]);
     let g = graph_arg(&graph);
-    // A human state first so there is something a machine must not overwrite.
+    // A human note first: it appends a thread row and writes no state, so
+    // there is no state a machine record could clobber.
     note(
         &graph,
         &[
@@ -258,7 +293,13 @@ fn ac7_machine_and_wave_records_go_to_history_only() {
         .find(|r| r["id"] == json!("m-1"))
         .unwrap()
         .clone();
-    assert_eq!(row[node_state::STATE_KEY]["body"], json!("human state"));
+    assert!(
+        row.get(node_state::STATE_KEY).is_none(),
+        "a human note writes no state for a machine record to clobber"
+    );
+    let notes = row["progress_notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "the machine record skips the thread");
+    assert_eq!(notes[0]["text"], json!("human state"));
     let (_, total) = fno_agents::backlog::note_history::read(&graph, Some("m-1"), 0, 50).unwrap();
     assert_eq!(total, 1, "machine record landed in history");
     // Wave addition: history + the refresh marker.
