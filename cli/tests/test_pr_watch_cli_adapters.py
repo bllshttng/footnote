@@ -742,9 +742,7 @@ def test_phase_caps_fit_ceiling():
     from fno.pr_watch.cli import (
         _EVERY_TICK_CAP_S,
         _FLEET_CAP_S,
-        _MERGE_WINDOW_S,
         _PHASE_CAP_S,
-        _merge_budget_for_load,
         _resolve_tick_deadline,
     )
     from fno.pr_watch._dispatch import _MERGE_FLOOR_S
@@ -782,22 +780,6 @@ def test_phase_caps_fit_ceiling():
         f"merge cap {merge_cap}s does not fit 480s wall: room {tight_merge_room}s; "
         f"needs read {_GRANT_QUEUE_READ_TIMEOUT_S}s + floor {_MERGE_FLOOR_S}s"
     )
-    timeout_s, merge_cap_s = _merge_budget_for_load(8.5, _MERGE_FLOOR_S)
-    assert timeout_s > 90
-    assert timeout_s + _MERGE_FLOOR_S + 5 <= merge_cap_s
-    assert _MERGE_WINDOW_S - merge_cap_s >= 30
-
-    timeout_s, _ = _merge_budget_for_load(4.25, _MERGE_FLOOR_S)
-    assert timeout_s > 180
-
-    timeout_s, merge_cap_s = _merge_budget_for_load(100, _MERGE_FLOOR_S)
-    assert timeout_s == (
-        _MERGE_WINDOW_S - _MERGE_FLOOR_S - 35
-    )
-    assert merge_cap_s == timeout_s + _MERGE_FLOOR_S + 5
-    assert _MERGE_WINDOW_S - merge_cap_s == 30
-
-
 def _cadence_settings() -> SimpleNamespace:
     return SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
@@ -813,7 +795,7 @@ def _cadence_settings() -> SimpleNamespace:
     )
 
 
-def _run_merge_tick_with_counts(monkeypatch, counts, *, queue_call=None):
+def _run_merge_tick_with_counts(monkeypatch, counts, *, queue_call=None, load_per_core=1.0):
     import typer
     from typer.testing import CliRunner
 
@@ -828,7 +810,7 @@ def _run_merge_tick_with_counts(monkeypatch, counts, *, queue_call=None):
         "fno.pr_watch._dispatch.tick", lambda **_kw: TickResult(open_prs=1, acted=0))
     monkeypatch.setattr("fno.agents.watchdog.lane_armed", lambda _s: False)
     monkeypatch.setattr("fno.agents.watchdog.lane_off_detail", lambda _s: "off")
-    monkeypatch.setattr(prcli.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+    monkeypatch.setattr(prcli.os, "getloadavg", lambda: (load_per_core,) * 3)
     monkeypatch.setattr(prcli.os, "cpu_count", lambda: 1)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [])
     monkeypatch.setattr(prcli, "_emit_event", lambda *a, **_kw: None)
@@ -855,14 +837,31 @@ def _run_merge_tick_with_counts(monkeypatch, counts, *, queue_call=None):
     return rows, observed_left, drained
 
 
-def test_merge_phase_runs_before_the_sweep_on_the_fresh_wall(monkeypatch):
-    """The merge drain gets first access to the wall within its phase cap."""
+def test_merge_phase_uses_load_scaled_queue_bound_before_the_sweep(monkeypatch):
+    """The read scales under load and keeps enough wall for a merge attempt."""
     counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
     rows, left, drained = _run_merge_tick_with_counts(monkeypatch, counts)
     assert len(drained) == 1 and 0 < left[0] <= 245
     merge_at = rows.index(next(r for r in rows if r[0] == "pr_watch_merge"))
     sweep_at = rows.index(next(r for r in rows if r[0] == "pr_watch_sweep"))
     assert merge_at < sweep_at
+
+    observed_timeouts = []
+
+    def queued(*_args, **kwargs):
+        observed_timeouts.append(kwargs["timeout"])
+        return {
+            "candidates": 1, "verdicts": {"granted": 1}, "elapsed_ms": 0,
+            "queue": [{"node_id": "x-planted", "pr": 88, "repo_slug": "owner/repo",
+                       "cwd": str(Path.cwd()), "grant": {"source": "config"}}],
+        }
+
+    rows, _, drained = _run_merge_tick_with_counts(
+        monkeypatch, counts, queue_call=queued, load_per_core=4.25
+    )
+    assert observed_timeouts == [191.25]
+    assert len(drained) == 1
+
     from fno.rust_binary import VerbUnavailable
 
     def timeout(*_args, **_kwargs):
