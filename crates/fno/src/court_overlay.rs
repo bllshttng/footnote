@@ -481,13 +481,15 @@ impl Panel {
         let busy = court.arm_num("whole-machine cpu", "busy_fraction");
         let agents = court.arm_num("cpu admission", "share_low");
         match (busy, agents) {
-            (Some(busy), Some(agents)) => format!(
-                "  CPU       {} {:.0}% busy: agents {:.0}%, everything else {:.0}%",
-                self.spark(),
-                busy * 100.0,
-                agents * 100.0,
-                (busy - agents).max(0.0) * 100.0
-            ),
+            (Some(busy), Some(agents)) => {
+                // Split the ROUNDED numbers so the printed parts add up.
+                let (busy, agents) = ((busy * 100.0).round(), (agents * 100.0).round());
+                format!(
+                    "  CPU       {} {busy:.0}% busy: agents {agents:.0}%, everything else {:.0}%",
+                    self.spark(),
+                    (busy - agents).max(0.0)
+                )
+            }
             (Some(busy), None) => format!("  CPU       {} {:.0}% busy", self.spark(), busy * 100.0),
             (None, Some(agents)) => format!("  CPU       agents {:.0}%", agents * 100.0),
             (None, None) => "  CPU       unknown".to_string(),
