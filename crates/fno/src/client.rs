@@ -379,14 +379,14 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // An interactive client drops an inherited worker identity: no composer child reads as agent-origin.
+    std::env::remove_var("FNO_AGENT_SELF");
     // Resolve + record the config warning BEFORE any early exit below (the
     // nested-session guard, an invalid session name): a pinned config whose
     // dir diverged must say so on every path, not only the happy attach. The
     // write rides the client log, never stderr - we are pre-alternate-screen,
-    // and any stderr byte lands in the PTY the harness is about to read as
-    // the TUI (the NEVER-stderr rule). The mux dir is ensured first:
-    // on a fresh state root nothing creates it until connect_or_spawn, and an
-    // append to a missing parent silently drops the warning.
+    // and any stderr byte lands in the PTY the harness reads as the TUI. The
+    // mux dir is ensured first because nothing creates it until connect_or_spawn.
     let _ = proto::mux_dir();
     if let Some((w, _remedy)) = proto::pending_config_warning() {
         let _ = proto::ensure_mux_dir();

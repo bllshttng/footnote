@@ -2205,7 +2205,7 @@ class ProviderBudget(BaseModel):
 
 
 class ProcessAdmissionBlock(BaseModel):
-    """Fail-closed native process admission, expressed only in OS processes."""
+    """The agent-spawn door's process ceiling, expressed only in OS processes."""
 
     model_config = ConfigDict(extra="ignore")
 

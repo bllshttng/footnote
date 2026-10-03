@@ -32,7 +32,6 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 max_panes: None,
                 thread_pane: false,
                 fit: false,
-                human: false,
             },
             None,
         )
@@ -72,7 +71,6 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 max_panes: None,
                 thread_pane: false,
                 fit: false,
-                human: false,
             },
             None,
         )
@@ -115,7 +113,6 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-            human: false,
         },
         worker: None,
         reply: tx,
@@ -154,7 +151,6 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
             max_panes: None,
             thread_pane: false,
             fit: false,
-            human: false,
         },
         worker: None,
         reply: tx,

@@ -277,7 +277,7 @@ pub(crate) async fn run_fno_captured_with_stdin(
     timeout: Duration,
     deadline: tokio::time::Instant,
 ) -> Option<(bool, String, String)> {
-    run_fno_captured_with_stdin_full(argv, stdin_bytes, timeout, deadline, false)
+    run_fno_captured_with_stdin_full(argv, stdin_bytes, timeout, deadline)
         .await
         .map(|(ok, out, err, _)| (ok, out, err))
 }
@@ -287,7 +287,6 @@ pub(crate) async fn run_fno_captured_with_stdin_full(
     stdin_bytes: &[u8],
     timeout: Duration,
     deadline: tokio::time::Instant,
-    human: bool,
 ) -> Option<(bool, String, String, i32)> {
     let mut command = crate::process_admission::tokio_command(argv[0]);
     command
@@ -298,22 +297,8 @@ pub(crate) async fn run_fno_captured_with_stdin_full(
         .kill_on_drop(true);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let fut = async move {
-        // `human` is the composer's per-request force: the child is admitted
-        // the way a human's own start is, so the runaway brake warns instead
-        // of refusing the launch the user pressed shift+enter for. An
-        // admission refusal that still lands here is returned as the door's
-        // stderr so the composer sees a REFUSED attempt, never an ambiguous
-        // timeout.
-        let spawn = if human {
-            crate::process_admission::tokio_spawn_for_human(&mut command)
-        } else {
-            crate::process_admission::tokio_spawn(&mut command)
-        };
-        let mut child = match spawn {
+        let mut child = match crate::process_admission::tokio_spawn(&mut command) {
             Ok(child) => child,
-            Err(e) if e.to_string().contains("process admission refused") => {
-                return Some((false, String::new(), e.to_string(), 1));
-            }
             Err(_) => return None,
         };
         if let Some(mut stdin) = child.stdin.take() {

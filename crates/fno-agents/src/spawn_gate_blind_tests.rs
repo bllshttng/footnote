@@ -3,6 +3,22 @@
 
 use super::*;
 
+/// The fixtures below exercise the agent-fan-out arms of the gate, so they
+/// carry the worker identity those arms key on. Removed on drop, before the
+/// env lock releases.
+struct AgentSelfFixture;
+impl AgentSelfFixture {
+    fn set() -> Self {
+        std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
+        AgentSelfFixture
+    }
+}
+impl Drop for AgentSelfFixture {
+    fn drop(&mut self) {
+        std::env::remove_var("FNO_AGENT_SELF");
+    }
+}
+
 /// The shared admission fixture's payload for one verdict, as the probe
 /// would print it: the same file the Python suite pins, so these tests
 /// cannot grow their own reading.
@@ -32,6 +48,7 @@ fn a_blind_read_refuses_after_bounded_rereads() {
     let _g = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _id = AgentSelfFixture::set();
     let dir = std::env::temp_dir().join(format!("fno-gate-blind-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
@@ -118,6 +135,7 @@ fn no_wait_refuses_a_blind_read_on_the_first_sample() {
     let _g = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _id = AgentSelfFixture::set();
     let dir = std::env::temp_dir().join(format!("fno-gate-blind-nowait-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
@@ -201,6 +219,7 @@ fn a_blind_read_then_an_admit_admits() {
     let _g = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _id = AgentSelfFixture::set();
     let dir = std::env::temp_dir().join(format!("fno-gate-admit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
@@ -296,6 +315,7 @@ fn an_unreadable_instrument_never_admits_by_rereading() {
     let _g = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _id = AgentSelfFixture::set();
     let dir = std::env::temp_dir().join(format!("fno-gate-dead-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
@@ -373,6 +393,7 @@ fn an_admit_resets_blind_samples_before_slot_wait() {
     let _g = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _id = AgentSelfFixture::set();
     let dir = std::env::temp_dir().join(format!("fno-gate-admit-reset-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
@@ -470,6 +491,7 @@ fn a_blind_sample_breaks_the_held_under_threshold_streak() {
     let _g = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _id = AgentSelfFixture::set();
     let dir = std::env::temp_dir().join(format!("fno-gate-streak-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let original_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");

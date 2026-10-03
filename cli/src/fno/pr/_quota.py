@@ -370,7 +370,13 @@ def admit(argv: Sequence[str]) -> Optional[str]:
     machine is in distress, so refuse instead of admitting a gh-call flood,
     and name the exit code - "ledger unavailable" alone reads as a missing
     ledger when the real story is the OOM killer.
+
+    A caller with no worker identity is the user's own typed verb, and no
+    budget holds it: the reserve protects the fleet from its own fan-out,
+    never from the human at the terminal.
     """
+    if not (os.environ.get("FNO_AGENT_SELF") or "").strip():
+        return None
     try:
         answer = _gh_budget({"op": "admit", "argv": [str(a) for a in argv]})
     except VerbUnavailable as exc:
