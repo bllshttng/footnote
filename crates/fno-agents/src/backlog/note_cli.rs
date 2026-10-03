@@ -5,6 +5,7 @@
 //! history routing (machine, wave); the bridge keeps the shipped recipient
 //! walk (`note_notify`, its test contract), evidence checks, identity,
 //! archived refusal, and the mail transport.
+use crate::backlog::model::Node;
 use crate::backlog::node_state::{self, StateError};
 use crate::backlog::note_history;
 use crate::graph_store::{self};
@@ -946,6 +947,7 @@ fn comment_identity(self_session: Option<&str>) -> CommentIdentity {
         harness,
         agent_name,
         model: None,
+        working_node,
     }
 }
 

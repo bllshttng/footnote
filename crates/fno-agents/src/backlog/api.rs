@@ -1102,6 +1102,23 @@ pub fn comment_create(
                     Value::String(crate::graph_store::now_isoformat()),
                 );
             }
+            // The writer's identity: typed session/harness, plus
+            // the extras the thread renders. Absent fields stay absent - an
+            // honest unknown beats a wrong label. The model resolves here
+            // when the caller did not name one: the session registry's
+            // observation rides the row this mutation already loaded.
+            // Computed before the row's comments borrow, which the push
+            // below holds to the end of the block.
+            let model = input
+                .model
+                .clone()
+                .or_else(|| session_observed_model(&parsed, input.session_id.as_deref()))
+                .or_else(|| {
+                    std::env::var("FNO_ROUTE_MODEL")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                });
             let comments = parsed.comments.get_or_insert_with(Vec::new);
             let mut extras = serde_json::Map::new();
             if kind == "reply" {
@@ -1124,21 +1141,6 @@ pub fn comment_create(
             if kind == "comment" {
                 extras.insert("state".into(), Value::String("open".into()));
             }
-            // The writer's identity: typed session/harness, plus
-            // the extras the thread renders. Absent fields stay absent - an
-            // honest unknown beats a wrong label. The model resolves here
-            // when the caller did not name one: the session registry's
-            // observation rides the row this mutation already loaded.
-            let model = input
-                .model
-                .clone()
-                .or_else(|| session_observed_model(&parsed, input.session_id.as_deref()))
-                .or_else(|| {
-                    std::env::var("FNO_ROUTE_MODEL")
-                        .ok()
-                        .map(|v| v.trim().to_string())
-                        .filter(|v| !v.is_empty())
-                });
             if let Some(model) = &model {
                 extras.insert("model".into(), Value::String(model.clone()));
             }
