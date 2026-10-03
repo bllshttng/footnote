@@ -4656,7 +4656,7 @@ event_types:
 
   - name: row_lifecycle_observed
     retention: durable
-    description: "The reconcile sweep's observed lifecycle word for a row fno owns: one row per applied status transition (an exit or a restart) with its evidence cause, so an exit or a restart is never silent again (ruling d-e096c669). The pane_closed row stays the pane-level fact; this is the row-level one."
+    description: "The reconcile sweep's observed lifecycle word for a row fno owns: one row per applied status transition (an exit or a restart) with its evidence cause, so an exit or a restart is never silent again. The pane_closed row stays the pane-level fact; this is the row-level one."
     sources: [daemon]
     data:
       required: [row, from, to, cause]
