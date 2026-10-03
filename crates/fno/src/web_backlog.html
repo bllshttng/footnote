@@ -120,6 +120,13 @@ button, select, input { font: inherit; }
 .sess td { padding: 3px 6px 3px 0; vertical-align: top; }
 .sess td.dim { color: var(--overlay1); }
 .sess .sid { color: var(--subtext0); }
+@media (max-width: 720px) {
+  .sess thead { display: none; }
+  .sess tr { display: block; border: 1px solid var(--surface1); margin: 0 0 8px; padding: 4px 6px; }
+  .sess td { display: flex; gap: 6px; justify-content: space-between; align-items: baseline; padding: 1px 0; }
+  .sess td::before { content: attr(data-label); color: var(--overlay1); font-weight: 700; flex: 0 0 auto; }
+  .sess td.empty { display: none; }
+}
 .cmd { display: flex; align-items: center; gap: 4px; }
 .cmd code { font: inherit; font-size: 11px; color: var(--yellow); overflow-wrap: anywhere; }
 .copybtn { font-size: 10px; cursor: pointer; flex: 0 0 auto; background: var(--base); color: var(--subtext0); border: 1px solid var(--surface1); border-radius: 0; padding: 2px 7px; min-height: 22px; }
@@ -1633,27 +1640,39 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       table.appendChild(tbody);
       for (const s of sessions) {
         const tr = document.createElement("tr");
-        const tds = [s.phase, s.harness, s.model, s.started_at, s.ended_at, s.agent];
-        for (const val of tds) {
+        const cells = [
+          ["phase", s.phase],
+          ["harness", s.harness],
+          ["model", s.model],
+          ["session", s.session_id, true],
+          ["started", s.started_at],
+          ["ended", s.ended_at],
+          ["agent", s.agent],
+        ];
+        for (const [label, val, isSid] of cells) {
           const td = document.createElement("td");
-          td.textContent = val || "";
+          td.dataset.label = label;
+          if (isSid && val) {
+            const code = document.createElement("code");
+            code.className = "sid";
+            code.textContent = val;
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "copybtn";
+            btn.textContent = "copy";
+            btn.addEventListener("click", () => copyText(s.session_id, btn));
+            td.appendChild(code);
+            td.appendChild(btn);
+          } else {
+            td.textContent = val || "";
+          }
+          if (!val) {
+            td.className = "empty";
+          }
           tr.appendChild(td);
         }
-        const sidTd = document.createElement("td");
-        if (s.session_id) {
-          const code = document.createElement("code");
-          code.className = "sid";
-          code.textContent = s.session_id;
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "copybtn";
-          btn.textContent = "copy";
-          btn.addEventListener("click", () => copyText(s.session_id, btn));
-          sidTd.appendChild(code);
-          sidTd.appendChild(btn);
-        }
-        tr.appendChild(sidTd);
         const actionTd = document.createElement("td");
+        actionTd.dataset.label = "action";
         addSessionAction(actionTd, s);
         tr.appendChild(actionTd);
         tbody.appendChild(tr);
