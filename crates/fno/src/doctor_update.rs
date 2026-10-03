@@ -1706,13 +1706,13 @@ fn live_tool_env_processes() -> Vec<String> {
     let Ok((0, out, _)) = run_captured(&uv, &["tool".into(), "dir".into()], None) else {
         return Vec::new();
     };
-    let needle = PathBuf::from(out.trim())
-        .join("fno")
-        .to_string_lossy()
-        .to_string();
-    if needle.is_empty() {
+    let dir = out.trim();
+    if dir.is_empty() {
+        // An unreadable tool dir would leave the needle bare "fno", which
+        // matches every fno argv on the machine - refuse to scan instead.
         return Vec::new();
     }
+    let needle = PathBuf::from(dir).join("fno").to_string_lossy().to_string();
     let ps = PathBuf::from("ps");
     let Ok((0, ps_out, _)) = run_captured(&ps, &["-axo".into(), "pid=,args=".into()], None) else {
         return Vec::new();
