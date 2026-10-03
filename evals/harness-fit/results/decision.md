@@ -12,7 +12,7 @@ zcode is `unavailable` in both runs, so only opencode is tested.
 
 ### Accepted changes: a tie
 
-- Run 0, paired on the 59 tasks both arms graded: opencode minus Claude Code is -1.7 points, 95% interval -10.2 to +6.8. opencode alone passed 3 of them, Claude Code alone 4.
+- Run 0 pairs the 59 tasks both arms graded. opencode minus Claude Code is -1.7 points, 95% interval -10.2 to +6.8. opencode alone passed 3 of them, Claude Code alone 4.
 - Run 1, paired over the 10 tasks: opencode minus Claude Code is +3.3 points, 95% interval -10.0 to +20.0. opencode accepted 2 of 30, Claude Code 1 of 30.
 - Both intervals hold zero, and both differences sit inside the 15-point noise band. Neither arm beats the other.
 
@@ -39,7 +39,7 @@ Most of the gap is spend on rate-limited trials. 27 Claude Code trials timed out
 ## Caveats
 
 - Claude Code lost 27 of 89 Run 0 trials to rate limits, against 7 for opencode. It ran last, from 05:36Z to 12:00Z on 2026-10-03, so its hours of the day differ from the other arms.
-- The study ran 5 GLM sessions at once on one shared z.ai account (4 Run 0 trials and 1 Run 1 attempt). Rate limits follow the account, not the arm.
+- The study ran 5 GLM sessions at once on one shared z.ai account. That was 4 Run 0 trials and 1 Run 1 attempt. Rate limits follow the account, not the arm.
 - Run 1's bank is hard for both harnesses: 3 accepted changes in 60 scored attempts. Run 1 agrees with Run 0 but adds little power.
 - zcode was never measured, and pi had no Run 1 lane. Rule 1 says nothing about either.
 - Prices are list prices for glm-5.3-flash (manifest). One machine, one model, one pass of Terminal-Bench 2.
