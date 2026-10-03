@@ -158,6 +158,11 @@ pub fn for_notice(url: &str) -> String {
 /// rejects it, so it can never reach the platform opener.
 pub const SENDER_SCHEME: &str = "fno-sender:";
 
+/// The pseudo scheme for a tapped `fmail-` message id. Like the sender
+/// pseudo URI, it is intercepted by the mux client and never reaches an OS
+/// opener.
+pub const MESSAGE_SCHEME: &str = "fno-message:";
+
 /// True when `s` is exactly the sender pseudo URI for a `fmail-` id: scheme
 /// plus `fmail-` plus 12 hex, nothing else. A legacy `msg-` header has no
 /// sender session to find, so it resolves no span and no URI.
@@ -169,6 +174,17 @@ pub fn is_sender_uri(s: &str) -> bool {
         return false;
     };
     hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The message id carried by an exact `fno-message:` pseudo URI.
+pub fn message_id_from_uri(s: &str) -> Option<&str> {
+    let id = s.strip_prefix(MESSAGE_SCHEME)?;
+    let hex = id.strip_prefix("fmail-")?;
+    (hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+}
+
+pub fn is_message_uri(s: &str) -> bool {
+    message_id_from_uri(s).is_some()
 }
 
 /// The `@name` span of a delivered-mail header line in pane text, as a
@@ -226,6 +242,17 @@ pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String)> {
         return Some((name_start, name_end, format!("fmail-{id}")));
     }
     None
+}
+
+/// The fmail id span in a well-formed delivered-mail header. Reuse the
+/// sender parser as the header validator so a coincidental id in body text
+/// does not become a message link.
+pub fn find_mail_message(text: &str) -> Option<(usize, usize, String)> {
+    let (_, sender_end, id) = find_mail_sender(text)?;
+    let byte_start = text.char_indices().nth(sender_end)?.0;
+    let id_byte = byte_start + text[byte_start..].find(&id)?;
+    let start = text[..id_byte].chars().count();
+    Some((start, start + id.chars().count(), id))
 }
 
 /// Hand `url` to the platform opener, blocking until it exits. `Err` carries

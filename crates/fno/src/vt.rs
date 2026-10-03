@@ -497,6 +497,14 @@ impl Pane {
         }
         let (text, points) = self.logical_line(point.line)?;
         let idx = points.iter().position(|p| *p == point)?;
+        if let Some((start, end, id)) = crate::link::find_mail_message(&text) {
+            if idx >= start && idx < end {
+                return Some(LinkSpan {
+                    uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
+                    cells: self.visible_cells(&points[start..end]),
+                });
+            }
+        }
         if let Some((start, end, id)) = crate::link::find_mail_sender(&text) {
             if idx >= start && idx < end {
                 return Some(LinkSpan {
