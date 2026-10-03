@@ -486,6 +486,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         .clone()
         .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
     let mut route_span_id: Option<String> = None;
+    let mut pending_route: Option<(Trace, Map<String, Value>)> = None;
     if let Some(ask_span) = parsed
         .answers_ask
         .as_deref()
@@ -510,10 +511,10 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         if let Some(rec) = parsed.recommend {
             attrs.insert("recommendation".to_string(), json!(rec.to_string()));
         }
-        match emit_span_to(&journal_path, "route", &trace, &attrs) {
-            Ok(()) => route_span_id = Some(trace.span_id.clone()),
-            Err(e) => eprintln!("outstanding: route span skipped: {e}"),
-        }
+        // Minted now, emitted after the question row lands: a failed
+        // question write must not leave an orphan route span.
+        route_span_id = Some(trace.span_id.clone());
+        pending_route = Some((trace, attrs));
     }
 
     let mut data = Map::new();
@@ -641,6 +642,12 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         answer.refusal = Some("write".to_string());
         answer.exit_code = 1;
         return answer;
+    }
+    // The question row is durable: now the route span it parents.
+    if let Some((trace, attrs)) = pending_route {
+        if let Err(e) = emit_span_to(&journal_path, "route", &trace, &attrs) {
+            eprintln!("outstanding: route span skipped: {e}");
+        }
     }
 
     // Machine-wide recall index: best-effort, reported.
