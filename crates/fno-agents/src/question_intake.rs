@@ -15,6 +15,7 @@
 //! once the request parsed, the question-intake shape); refusal MESSAGES stay
 //! in the shim, which owns the user's name.
 
+use crate::decision_trace::{actor_kind, emit_span_to, new_span_id, Trace};
 use crate::paths::AgentsHome;
 use crate::provider_cap::questions_path;
 use serde::{Deserialize, Serialize};
@@ -349,6 +350,19 @@ question and ask again: only the user may record that retraction.";
     }
 
     let parsed = crate::escalation::parse(&req.question);
+    // A mistyped class would land as an unroutable hop, so it refuses the
+    // way the reversible field does (x-2de0 encounter 1): exit 2, the six
+    // values named, nothing written.
+    let asked_class = parsed.class.trim();
+    if !asked_class.is_empty() && !crate::decision_trace::DECISION_CLASSES.contains(&asked_class) {
+        answer.lines.push(format!(
+            "outstanding: refused: unknown class '{asked_class}'. Allowed: {}.",
+            crate::decision_trace::DECISION_CLASSES.join(", ")
+        ));
+        answer.refusal = Some("class".to_string());
+        answer.exit_code = 2;
+        return answer;
+    }
     let from_file = is_question_file(&req.question);
     // File options carry a per-option next; flag options stay bare strings.
     let file_options = !parsed.options.is_empty();
@@ -464,9 +478,47 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         req.question.clone()
     };
 
+    // The escalate route: an `answers_ask:` pointer turns the intake into the
+    // lead's route span, so the question links the hop it answers. Same
+    // journal as the question row.
+    let journal_path = req
+        .journal_path
+        .clone()
+        .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
+    let mut route_span_id: Option<String> = None;
+    if let Some(ask_span) = parsed
+        .answers_ask
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let trace = Trace {
+            trace_id: node.unwrap_or("none").to_string(),
+            span_id: new_span_id(),
+            parent_span_id: Some(ask_span.to_string()),
+            actor_session: req.session_id.clone(),
+            actor_kind: actor_kind(req.session_id.as_deref(), "question"),
+            comms: "question",
+            recipient_session: None,
+            recipient_kind: None,
+        };
+        let mut attrs = Map::new();
+        attrs.insert("route".to_string(), json!("escalate"));
+        if !asked_class.is_empty() {
+            attrs.insert("class".to_string(), json!(asked_class));
+        }
+        if let Some(rec) = parsed.recommend {
+            attrs.insert("recommendation".to_string(), json!(rec.to_string()));
+        }
+        match emit_span_to(&journal_path, "route", &trace, &attrs) {
+            Ok(()) => route_span_id = Some(trace.span_id.clone()),
+            Err(e) => eprintln!("outstanding: route span skipped: {e}"),
+        }
+    }
+
     let mut data = Map::new();
     let qid = mint_id();
-    data.insert("question_id".into(), json!(qid));
+    data.insert("question_id".into(), json!(&qid));
     data.insert("question".into(), json!(stored_question));
     for (key, value) in [
         ("session_id", &req.session_id),
@@ -549,10 +601,22 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     // durable half and its failure is fatal. The journal path travels in
     // the request (the Python sandbox stays the single path authority, as
     // with index_path); the legacy .fno path is the fallback.
-    let journal_path = req
-        .journal_path
-        .clone()
-        .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
+    // The question span: the question row IS the span (span_id = question_id),
+    // parented at the route span an answers_ask pointer produced.
+    data.insert(
+        "trace".into(),
+        serde_json::to_value(&Trace {
+            trace_id: node.unwrap_or("none").to_string(),
+            span_id: qid,
+            parent_span_id: route_span_id,
+            actor_session: req.session_id.clone(),
+            actor_kind: actor_kind(req.session_id.as_deref(), "question"),
+            comms: "question",
+            recipient_session: None,
+            recipient_kind: Some("user"),
+        })
+        .unwrap_or(Value::Null),
+    );
     let event = json!({
         "ts": crate::events::now_rfc3339(),
         "type": "operator_question",
@@ -1074,6 +1138,57 @@ stops
             row.pointer("/data/why_user").and_then(Value::as_str),
             Some("a product or taste call")
         );
+        // AC6: with answers_ask + class in the frontmatter, the journal holds
+        // the escalate route span and the question parents at it.
+        let mut r2 = req(
+            &question.replace(
+                "why_user: a product or taste call",
+                "why_user: a product or taste call\nanswers_ask: s-1a2b3c4d\nclass: irreversible",
+            ),
+            &root,
+        );
+        r2.node = Some("x-aaaa".to_string());
+        let answer2 = run_intake(&r2, &home);
+        assert_eq!(answer2.exit_code, 0, "lines: {:?}", answer2.lines);
+        let lines: Vec<Value> = journal_text(&root)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let route = lines
+            .iter()
+            .find(|l| l["data"]["span_kind"] == "route")
+            .expect("a route span landed");
+        assert_eq!(route["data"]["route"], "escalate");
+        assert_eq!(route["data"]["class"], "irreversible");
+        assert_eq!(route["data"]["trace"]["parent_span_id"], "s-1a2b3c4d");
+        let question_row = lines
+            .iter()
+            .filter(|l| l["type"] == "operator_question")
+            .last()
+            .expect("the question landed");
+        assert_eq!(
+            question_row["data"]["trace"]["parent_span_id"],
+            route["data"]["trace"]["span_id"]
+        );
+        // AC7: `class: cheap` refuses with exit 2, names the six values,
+        // and writes no row.
+        let mut r3 = req(
+            &question.replace(
+                "why_user: a product or taste call",
+                "why_user: a product or taste call\nclass: cheap",
+            ),
+            &root,
+        );
+        r3.node = Some("x-aaaa".to_string());
+        let answer3 = run_intake(&r3, &home);
+        assert_eq!(answer3.exit_code, 2);
+        assert_eq!(answer3.refusal.as_deref(), Some("class"));
+        let message = answer3.lines.join("\n");
+        for value in crate::decision_trace::DECISION_CLASSES {
+            assert!(message.contains(value), "names {value}: {message}");
+        }
+        // Only the two earlier rows sit in the journal; the refusal wrote none.
+        assert_eq!(journal_text(&root).lines().count(), 2);
     }
 
     #[test]
