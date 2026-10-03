@@ -2,18 +2,27 @@
 //!
 //! The breaker's doors stop NEW test runs; this module reaches the ones
 //! already running. While the machine-wide record holds `tests`, every cargo
-//! test, nextest and pytest run under a live registry row gets SIGSTOP with
-//! its whole process subtree, and the paused incarnations are recorded in
-//! `agents/test-pause.json`. When the hold lifts, exactly those incarnations
-//! get SIGCONT and the file goes. The first pass of a hold announces it on
-//! the bus; the lift announces the all-clear under the same subject, so the
-//! all-clear supersedes the standing hold line.
+//! test, nextest and pytest run under a live registry row is killed
+//! (SIGKILL) with its whole process subtree. A hold must not pause a run:
+//! a SIGSTOPped cargo stays alive, so the pid-anchored claims it holds
+//! (`build:cargo`, its `test:cargo-run:N` slot) stay Live and every build
+//! queues behind a run that cannot progress (x-ea7b: two paused runs held
+//! all three for 2.5h and the canonical fno update stalled behind them).
+//! Tests are CI-gated (law d-50986bf8), so a held run ends instead of
+//! waiting. The first pass of a hold announces it on the bus; the lift
+//! announces the all-clear under the same subject, so the all-clear
+//! supersedes the standing hold line.
+//!
+//! `agents/test-pause.json` keeps recording what an OLDER build paused, and
+//! a lift still SIGCONTs exactly those incarnations, so a hold armed before
+//! an upgrade resumes cleanly. Kills need no resume record.
 //!
 //! [`reconcile`] is idempotent and is the one entry. The incident verb runs
 //! it after every machine-wide transition, and the daemon's machine tick
-//! runs it every interval, so an expired TTL still resumes the paused
-//! processes and a bare pytest started mid-hold (no door gates it) pauses at
-//! the next tick. An unreadable breaker changes nothing in either direction.
+//! runs it every interval, so an expired TTL still resumes what an older
+//! build paused and a bare pytest started mid-hold (no door gates it) ends
+//! at the next tick. An unreadable breaker changes nothing in either
+//! direction.
 //!
 //! Registry rows are the fleet: spawn writes the row, so a test under one is
 //! a test a fleet worker started. The user's own terminal is never a row.
@@ -43,6 +52,7 @@ struct PauseState {
 pub struct Outcome {
     pub paused: usize,
     pub resumed: usize,
+    pub killed: usize,
     pub announced: Option<String>,
     pub announce_error: Option<String>,
 }
@@ -51,12 +61,16 @@ impl Outcome {
     pub fn line(&self) -> Option<String> {
         if self.paused == 0
             && self.resumed == 0
+            && self.killed == 0
             && self.announced.is_none()
             && self.announce_error.is_none()
         {
             return None;
         }
-        let mut line = format!("tests: paused {}, resumed {}", self.paused, self.resumed);
+        let mut line = format!(
+            "tests: paused {}, resumed {}, killed {}",
+            self.paused, self.resumed, self.killed
+        );
         match (&self.announced, &self.announce_error) {
             (Some(id), _) => line.push_str(&format!("; announced {id}")),
             (None, Some(error)) => line.push_str(&format!("; announcement failed: {error}")),
@@ -190,8 +204,8 @@ fn announce(outcome: &mut Outcome, body: &str) {
     }
 }
 
-/// Make the running tests follow the machine-wide record: paused while it
-/// holds `tests`, resumed once it does not.
+/// Make the running tests follow the machine-wide record: killed while it
+/// holds `tests`, resumed once it does not (only what an older build paused).
 pub fn reconcile(home: &AgentsHome) -> Result<Outcome, String> {
     let path = home.test_pause_json();
     let lock_path = path.with_extension("json.lock");
@@ -254,12 +268,12 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
         }
         for pid in fresh {
             done.insert(pid);
-            let Some(birth) = crate::daemon::process_start_time(pid) else {
-                continue;
-            };
-            if signal(pid, libc::SIGSTOP) {
-                state.paused.push((pid, birth));
-                outcome.paused += 1;
+            // SIGKILL, not SIGSTOP: a stopped pid stays alive and every
+            // pid-anchored claim it holds reads Live, so builds queue behind
+            // a run that cannot progress until the TTL lifts. SIGKILL lands
+            // on a stopped process and frees the claims at once.
+            if signal(pid, libc::SIGKILL) {
+                outcome.killed += 1;
             }
         }
     }
@@ -268,7 +282,7 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
         // stop names who held the tests and why.
         let lead = if record.changed_by == fleet_incident::MACHINE_ORIGIN {
             format!(
-                "{}. Tests are paused until it cools down. New workers pause too if it stays this busy.",
+                "{}. Running fleet tests end now (CI covers them) until it cools down. New workers pause too if it stays this busy.",
                 record.reason
             )
         } else {
@@ -288,7 +302,7 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
 }
 
 /// The machine arm's first move on a runaway: arm a `tests`-only stop that
-/// expires after `ttl_secs` and pause the running tests. `Ok(None)` when a
+/// expires after `ttl_secs` and end the running tests. `Ok(None)` when a
 /// stop is already armed or unreadable; the arm then brakes spawns as before.
 pub fn hold_for_runaway(
     home: &AgentsHome,
@@ -313,8 +327,8 @@ pub fn hold_for_runaway(
     )?;
     let outcome = reconcile(home)?;
     Ok(Some(format!(
-        "tests held first (generation {}, {} paused)",
-        record.generation, outcome.paused
+        "tests held first (generation {}, {} ended)",
+        record.generation, outcome.killed
     )))
 }
 
@@ -346,5 +360,133 @@ mod tests {
         assert_eq!(pick(&table, &fleet, &HashSet::new()), vec![12, 13, 14, 30]);
         let spare: HashSet<u32> = [30].into();
         assert_eq!(pick(&table, &fleet, &spare), vec![12, 13, 14]);
+    }
+
+    /// A held fleet test run ends (SIGKILL, not SIGSTOP) within one
+    /// reconcile pass, and the pid-anchored claims it held (`build:cargo`,
+    /// a run slot) admit a waiting build at once. x-ea7b.
+    #[test]
+    fn a_held_test_run_ends_and_frees_its_claims_within_one_tick() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        struct HomeGuard {
+            previous: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl HomeGuard {
+            fn set(path: &Path) -> Self {
+                let _lock = crate::claims::test_env_lock()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let previous = std::env::var_os("FNO_AGENTS_HOME");
+                std::env::set_var("FNO_AGENTS_HOME", path);
+                Self { previous, _lock }
+            }
+        }
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match self.previous.take() {
+                    Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+                    None => std::env::remove_var("FNO_AGENTS_HOME"),
+                }
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("fno-test-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        // A shim named `cargo` that naps: its argv in the process table
+        // reads `<root>/bin/cargo test -p ea7b-held`, a fleet test root.
+        let shim = root.join("bin/cargo");
+        std::fs::write(&shim, "#!/bin/sh\n/bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new(&shim)
+            .args(["test", "-p", "ea7b-held"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+
+        let _home = HomeGuard::set(&root);
+        let home = crate::paths::AgentsHome::from_env();
+        let mut visible = false;
+        for _ in 0..50 {
+            let (table, _) = crate::census::process_table();
+            if table
+                .iter()
+                .any(|r| r.pid == pid && is_test_root(&r.command))
+            {
+                visible = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(visible, "the shim never surfaced as a fleet test root");
+
+        let mut entry = crate::state::RegistryEntry::default();
+        entry.name = "ea7b-held-worker".into();
+        entry.status = crate::AgentStatus::Busy;
+        entry.pid = Some(pid);
+        entry.pid_start_time = crate::daemon::process_start_time(pid);
+        entry.harness_session_id = Some("ea7b-held-sess".into());
+        crate::state::update_registry(&home.registry_json(), |r| r.entries.push(entry)).unwrap();
+
+        crate::fleet_incident::write_transition_with_metadata(
+            &fleet_incident::fleet_stop_path(&home),
+            "stopped",
+            Some("machine overloaded"),
+            Some(fleet_incident::MACHINE_ORIGIN),
+            vec!["tests".to_string()],
+            fleet_incident::RecordMetadata {
+                origin: Some(fleet_incident::MACHINE_ORIGIN.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // The run's slots, anchored to its pid exactly as the admission
+        // doors write them.
+        let holder = format!("cargo:{}:{}", pid, root.display());
+        let opts = |reason: &'static str| crate::claims::AcquireOpts {
+            pid: Some(pid),
+            reason: Some(reason.into()),
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            crate::claims::acquire("build:cargo", &holder, opts("held build")),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert!(matches!(
+            crate::claims::acquire("test:cargo-run:0", &holder, opts("held slot")),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+
+        let outcome = reconcile(&home).unwrap();
+        assert_eq!(outcome.paused, 0, "a hold must never pause: {outcome:?}");
+        assert!(
+            outcome.killed >= 1,
+            "the hold must end the run: {outcome:?}"
+        );
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+
+        // The reaped pid frees its no-TTL claims: a waiting build admits at
+        // once instead of queueing behind the corpse (x-ea7b).
+        for key in ["build:cargo", "test:cargo-run:0"] {
+            let mut next = opts("waiting build");
+            next.pid = Some(std::process::id());
+            assert!(
+                matches!(
+                    crate::claims::acquire(key, "cargo:next", next),
+                    crate::claims::AcquireOutcome::Acquired(_)
+                ),
+                "{key} did not free within one tick"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
