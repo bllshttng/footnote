@@ -126,27 +126,35 @@ pub fn resolve_tiers<'a>(entries: &'a [Value], query: &str) -> Option<&'a Value>
 /// ambiguous prefix names the candidates on stderr and reads as a miss, the
 /// caller's not-found contract.
 pub fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
+    entries.get(find_node_index(entries, node_id)?)
+}
+
+/// The find_node tiers over indices, for callers that must mutate the row
+/// they resolved (the same node the immutable view would have returned).
+pub fn find_node_index(entries: &[Value], node_id: &str) -> Option<usize> {
     // Same leaked-flag refusal as resolve_tiers: a dash-leading token never
     // reaches the graph.
     if node_id.starts_with('-') {
         return None;
     }
     if node_id.starts_with("ab-") && node_id.len() < 11 {
-        let candidates: Vec<&Value> = entries
+        let candidates: Vec<usize> = entries
             .iter()
-            .filter(|e| {
+            .enumerate()
+            .filter(|(_, e)| {
                 e.get("id")
                     .and_then(Value::as_str)
                     .is_some_and(|id| id.starts_with(node_id))
             })
+            .map(|(i, _)| i)
             .collect();
         return match candidates.as_slice() {
-            [one] => Some(one),
+            [one] => Some(*one),
             [] => None,
             many => {
                 let ids: Vec<&str> = many
                     .iter()
-                    .filter_map(|e| e.get("id").and_then(Value::as_str))
+                    .filter_map(|i| entries[*i].get("id").and_then(Value::as_str))
                     .collect();
                 eprintln!(
                     "[graph] ambiguous prefix '{node_id}' matches: {}",
@@ -160,14 +168,14 @@ pub fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
     // confirms the id, not the spelling. Exact spelling wins first.
     if let Some(exact) = entries
         .iter()
-        .find(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
+        .position(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
     {
         return Some(exact);
     }
     for alt in dash_variants(&node_id.to_lowercase()) {
         if let Some(hit) = entries
             .iter()
-            .find(|e| e.get("id").and_then(Value::as_str) == Some(alt.as_str()))
+            .position(|e| e.get("id").and_then(Value::as_str) == Some(alt.as_str()))
         {
             return Some(hit);
         }

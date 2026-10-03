@@ -358,7 +358,7 @@ fn append_receipt(
     }
 }
 
-fn parse_iso(raw: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_iso(raw: &str) -> Option<DateTime<Utc>> {
     let s = raw.trim();
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -996,15 +996,15 @@ fn compute_staleness(deps: &Deps, cwd: &Path, fetch: bool) -> Staleness {
     }
 }
 
-struct CatchupOut {
-    exit: i32,
-    stdout: Vec<String>,
-    stderr: Vec<String>,
-    outcome: String,
-    pr_number: Option<u64>,
-    swept: u64,
-    detail: String,
-    stale: bool,
+pub(crate) struct CatchupOut {
+    pub(crate) exit: i32,
+    pub(crate) stdout: Vec<String>,
+    pub(crate) stderr: Vec<String>,
+    pub(crate) outcome: String,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) swept: u64,
+    pub(crate) detail: String,
+    pub(crate) stale: bool,
 }
 
 impl CatchupOut {
@@ -1028,7 +1028,7 @@ impl CatchupOut {
 /// marker-stamped afterwards so they stop reading as stale - but ONLY once
 /// the newest SHA's marker proves the sync actually landed, so a claim-held
 /// skip or a failed sync can never backdate a lie.
-fn run_catchup(deps: &Deps, cwd: &Path) -> CatchupOut {
+pub(crate) fn run_catchup(deps: &Deps, cwd: &Path) -> CatchupOut {
     let cfg = read_config(cwd);
     if !cfg.auto_run {
         return CatchupOut::bare("disabled");
