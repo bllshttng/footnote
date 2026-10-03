@@ -42,7 +42,8 @@ def _reply(payload=None, rc=0, stdout=None):
 
 
 def test_verb_answer_fills_both_halves():
-    """One JSON read answers pid and harness together (AC6)."""
+    """One JSON read answers pid and harness together (AC6). The native
+    front is the first exec; the Python front is its fallback."""
     with patch.object(
         session_pid.subprocess,
         "run",
@@ -52,8 +53,7 @@ def test_verb_answer_fills_both_halves():
         assert resolve_session_harness(from_pid=10) == "claude"
     (call,) = run.call_args_list
     assert call.args[0] == [
-        "fno",
-        "agents",
+        "fno-agents",
         "claim",
         "session-pid",
         "--json",

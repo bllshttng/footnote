@@ -39,8 +39,7 @@ def test_both_halves_come_from_one_cached_read():
     # AC6: one exec total, whatever the call order.
     assert run.call_count == 1
     assert run.call_args.args[0] == [
-        "fno",
-        "agents",
+        "fno-agents",
         "claim",
         "session-pid",
         "--json",
