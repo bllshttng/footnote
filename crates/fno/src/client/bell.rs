@@ -57,6 +57,7 @@ pub(crate) fn open(view: &mut View) {
     let generation = view.bell.generation.wrapping_add(1);
     view.bell.open = true;
     view.bell.generation = generation;
+    view.bell.last_read = None;
     view.questions_kick_at = None;
     if let Some(projection) = view.bell.projection.as_ref() {
         mark_seen(projection);
