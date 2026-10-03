@@ -956,8 +956,7 @@ pub fn revert_stale_pending(
                 // are all terminal by the join's construction, so the first
                 // names why the succession reverts.
                 match reg.entries.iter().find(|e| {
-                    e.name == pending.heir_name
-                        || e.aliases.iter().any(|a| *a == pending.heir_name)
+                    e.name == pending.heir_name || e.aliases.iter().any(|a| *a == pending.heir_name)
                 }) {
                     None => "heir row removed".to_string(),
                     Some(row) => format!("heir row {:?}", row.status),
@@ -1929,11 +1928,11 @@ mod tests {
                     ),
                     (
                         "x-dupd".into(),
-                        pending_record("heir-dup", "king-five", Some("sess-5"), &now_stamp()),
+                        pending_record("heir-dup", "king-five", Some("sess-5"), old_ts()),
                     ),
                     (
                         "x-twin".into(),
-                        pending_record("heir-twin", "king-six", Some("sess-6"), &now_stamp()),
+                        pending_record("heir-twin", "king-six", Some("sess-6"), old_ts()),
                     ),
                 ]),
             },

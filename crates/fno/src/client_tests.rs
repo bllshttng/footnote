@@ -855,7 +855,10 @@ fn confirm_agent_anchor_prefers_identity_and_refuses_duplicate_names() {
     };
     let seven = idx_of(&v, |a| a.pane_id == Some(7));
     let solo = idx_of(&v, |a| a.name == "solo");
-    let action = |kind| ConfirmAction { action: kind, label: "x".into() };
+    let action = |kind| ConfirmAction {
+        action: kind,
+        label: "x".into(),
+    };
     let pane_cap = action(ConfirmKind::StopAgent {
         sid: None,
         name: "dup".into(),

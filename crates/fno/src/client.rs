@@ -5494,16 +5494,21 @@ impl View {
                         s.tab.is_none() && s.squad == *squad
                     }
                     (
-                        ConfirmKind::StopAgent { name, sid, pane_id, .. }
-                            | ConfirmKind::RemoveAgent { name, sid, pane_id, .. },
+                        ConfirmKind::StopAgent {
+                            name, sid, pane_id, ..
+                        }
+                        | ConfirmKind::RemoveAgent {
+                            name, sid, pane_id, ..
+                        },
                         DisplayRow::Agent(a),
                     ) => {
                         // The sid is the row's identity; a sid-carrying capture
                         // never falls through to name matching.
-                        if let (Some(cap), Some(row_sid)) =
-                            (sid.as_deref(), a.harness_session_id.as_deref())
-                        {
-                            cap == row_sid
+                        if let Some(cap) = sid.as_deref() {
+                            // A sid-carrying capture matches only sid-bearing
+                            // rows: a sidless row is never proven to be the
+                            // target, so no pane or name fallthrough.
+                            a.harness_session_id.as_deref() == Some(cap)
                         } else {
                             match (pane_id, a.pane_id) {
                                 // No sid on one side: the pane is the next
@@ -5520,8 +5525,8 @@ impl View {
                     }
                     (
                         ConfirmKind::StopExternal { attach_id, .. }
-                            | ConfirmKind::RemoveExternal { attach_id, .. }
-                            | ConfirmKind::DismissMember { attach_id, .. },
+                        | ConfirmKind::RemoveExternal { attach_id, .. }
+                        | ConfirmKind::DismissMember { attach_id, .. },
                         DisplayRow::Agent(a),
                     ) => a.attach_id.as_deref() == Some(attach_id.as_str()),
                     _ => false,

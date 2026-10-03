@@ -1013,19 +1013,25 @@ struct SessionRegistryIndex {
     served: std::collections::HashMap<String, (Option<String>, Option<String>)>,
 }
 
-/// One by-name join entry: the unique sid, or `None` once two rows claim the
-/// name. First write wins; a disagreeing second write poisons the key.
+/// One by-name join entry: the unique sid, or `None` once a second live row
+/// claims the name, or the claimer itself carries no sid. First write wins; a
+/// disagreeing or idless second claim poisons the key.
 fn note_name(
     map: &mut std::collections::HashMap<String, Option<String>>,
     key: String,
-    sid: String,
+    sid: Option<String>,
 ) {
     match map.entry(key) {
         std::collections::hash_map::Entry::Vacant(slot) => {
-            slot.insert(Some(sid));
+            slot.insert(sid);
         }
         std::collections::hash_map::Entry::Occupied(mut slot) => {
-            if slot.get().as_deref() != Some(sid.as_str()) {
+            let poison = match (slot.get(), &sid) {
+                (None, _) => false,
+                (Some(_), None) => true,
+                (Some(held), Some(new)) => held != new,
+            };
+            if poison {
                 *slot.get_mut() = None;
             }
         }
@@ -1045,29 +1051,33 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     let known = registry.is_ok();
     if let Ok(registry) = registry {
         for e in &registry.entries {
-            let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            if let (Some(pid), Some(start)) = (e.pid, e.pid_start_time) {
-                by_session.insert(sid.to_string(), (pid, start));
+            let sid = e.harness_session_id.as_deref().filter(|s| !s.is_empty());
+            if let Some(sid) = sid {
+                if let (Some(pid), Some(start)) = (e.pid, e.pid_start_time) {
+                    by_session.insert(sid.to_string(), (pid, start));
+                }
+                served.insert(
+                    sid.to_string(),
+                    (e.liveness.clone(), e.liveness_measured_at.clone()),
+                );
             }
-            served.insert(
-                sid.to_string(),
-                (e.liveness.clone(), e.liveness_measured_at.clone()),
-            );
             // The registry's own name contract (state.rs row_for_token): a
             // name OR any prior alias resolves the row. A handover holder
             // carries the name from mint time, so a worker renamed inside its
             // window must still resolve through the alias. The mail_envelope
-            // join shape: terminal rows never join, and a name two rows claim
-            // maps to None rather than a last-write-wins sid.
+            // join shape: terminal rows never join, a name two rows claim
+            // maps to None rather than a last-write-wins sid, and an idless
+            // live row still claims its name - session-capture races leave
+            // rows briefly idless, so a claim without a unique sid behind it
+            // is its own ambiguity.
             if !crate::loop_reign::is_terminal(e) {
+                let claim = sid.map(str::to_string);
                 if !e.name.is_empty() {
-                    note_name(&mut by_name, e.name.clone(), sid.to_string());
+                    note_name(&mut by_name, e.name.clone(), claim.clone());
                 }
                 for alias in &e.aliases {
                     if !alias.is_empty() {
-                        note_name(&mut by_name, alias.clone(), sid.to_string());
+                        note_name(&mut by_name, alias.clone(), claim.clone());
                     }
                 }
             }
@@ -2166,6 +2176,28 @@ mod tests {
                     witness(&plain),
                     crate::claims::SessionLiveness::Live(_)
                 ));
+            },
+        );
+        // Two live rows claiming one name, one of them idless (a
+        // session-capture race): the handover resolves to neither row.
+        with_registry(
+            serde_json::json!([
+                {
+                    "name": "twin", "status": "live", "cwd": "/w",
+                    "created_at": "2026-09-17T00:00:00Z",
+                    "harness_session_id": "s-t1",
+                },
+                {
+                    "name": "twin", "status": "live", "cwd": "/w",
+                    "created_at": "2026-09-17T00:00:00Z",
+                },
+            ]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                load_session_registry_index(&index);
+                let rec = witness_rec("spawn-gate:1:twin", "s-king");
+                assert!(resolve_subject_session(&rec, &index).is_none());
             },
         );
     }

@@ -2396,7 +2396,10 @@ mod tests {
             live_name_join(&reg.entries, "heir"),
             NameJoin::One(_)
         ));
-        assert!(matches!(live_name_join(&reg.entries, "king"), NameJoin::None));
+        assert!(matches!(
+            live_name_join(&reg.entries, "king"),
+            NameJoin::None
+        ));
         assert!(matches!(
             terminal_name_join(&reg.entries, "heir"),
             NameJoin::One(_)
