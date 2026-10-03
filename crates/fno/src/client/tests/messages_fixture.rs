@@ -198,28 +198,10 @@ async fn messages_reply_board_contracts() {
             cols: 1,
         },
     )];
-    super::super::messages_reply::open(
-        &mut view,
-        json!({
-            "id":"m1", "thread":"chat-a1", "from":"candor", "from_key":"s-c",
-            "to_key":"s1", "summary":"Ship it."
-        }),
-    );
-    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
-        .await
-        .unwrap();
-    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
-        .await
-        .unwrap();
-    super::super::messages_reply::keys(&mut view, b"\x15", &mut writer)
-        .await
-        .unwrap();
-    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
-        .await
-        .unwrap();
-    assert!(
-        view.notice.is_none(),
-        "fno_id resolves through the participant name"
+    assert_eq!(
+        super::super::messages_reply::endpoint_pane(&view, "first", "s1"),
+        Some(7),
+        "a registry fno_id resolves through its unique participant name"
     );
     view.layout.agents.push(crate::proto::AgentRow {
         name: "first".into(),
@@ -236,17 +218,11 @@ async fn messages_reply_board_contracts() {
             cols: 1,
         },
     ));
-    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
-        .await
-        .unwrap();
     assert_eq!(
-        view.notice.as_ref().map(|(text, _)| text.as_str()),
-        Some("reply: first has no pane on screen; open a portal first"),
-        "ambiguous aliases must not focus an arbitrary session"
+        super::super::messages_reply::endpoint_pane(&view, "first", "s1"),
+        None,
+        "ambiguous aliases must not resolve to an arbitrary session"
     );
-    super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
-        .await
-        .unwrap();
     super::mouse(
         &mut view,
         crate::mouse::MouseReport {

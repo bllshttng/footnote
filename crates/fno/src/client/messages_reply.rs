@@ -126,7 +126,7 @@ pub(super) fn paint(view: &View, cells: &mut [Cell], rows: usize, cols: usize) {
     }
 }
 
-fn endpoint_pane(view: &View, target: &Endpoint) -> Option<u64> {
+pub(super) fn endpoint_pane(view: &View, target_name: &str, target_session: &str) -> Option<u64> {
     let visible_pane = |agent: &crate::proto::AgentRow| {
         agent
             .pane_id
@@ -136,7 +136,7 @@ fn endpoint_pane(view: &View, target: &Endpoint) -> Option<u64> {
         .layout
         .agents
         .iter()
-        .filter(|a| !a.exited && a.harness_session_id.as_deref() == Some(target.session.as_str()))
+        .filter(|a| !a.exited && a.harness_session_id.as_deref() == Some(target_session))
         .filter_map(visible_pane);
     let exact_match = exact.next();
     if exact.next().is_some() {
@@ -149,7 +149,7 @@ fn endpoint_pane(view: &View, target: &Endpoint) -> Option<u64> {
         .layout
         .agents
         .iter()
-        .filter(|a| !a.exited && a.name == target.name)
+        .filter(|a| !a.exited && a.name == target_name)
         .filter_map(visible_pane);
     let named_match = named.next();
     if named.next().is_some() {
@@ -216,7 +216,7 @@ pub(super) async fn keys(
                         break;
                     }
                     SearchKey::Byte(b'\r' | b'\n') => {
-                        let Some(pane) = endpoint_pane(view, target) else {
+                        let Some(pane) = endpoint_pane(view, &target.name, &target.session) else {
                             view.set_notice(format!(
                                 "reply: {} has no pane on screen; open a portal first",
                                 target.name
