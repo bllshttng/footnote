@@ -118,8 +118,11 @@ pub fn decide(
         .and_then(|value| value.as_array())
         .filter(|issues| !issues.is_empty())
     {
+        // A mux finding is its own incident, not resource pressure: it
+        // pages through its own verdict and never feeds the hot streak the
+        // runaway brake escalates from.
         return (
-            "hot".into(),
+            "mux".into(),
             format!("mux owner/socket issue: {} finding(s)", issues.len()),
         );
     }
@@ -326,6 +329,10 @@ pub fn tick_machine_watch_with_thresholds(
                 };
             }
             emit_notice(state, sample, &reason, now, HOT_TITLE, "hot", &mut notify)
+        }
+        "mux" => {
+            state.calm_streak = 0;
+            emit_notice(state, sample, &reason, now, HOT_TITLE, "mux", &mut notify)
         }
         _ => WatchOutcome {
             acted: 0,
@@ -913,6 +920,36 @@ mod tests {
         assert_eq!(verdict, "unreadable");
         let (verdict, _) = decide(&sample(None, Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "unreadable");
+
+        // A mux finding is its own verdict: it pages through the notice
+        // throttle, never brakes, and never feeds the hot streak the brake
+        // escalates from.
+        let mut muxed = sample(Some(0.4), Some(150.0));
+        muxed.load_1m = Some(96.0);
+        muxed.mux_issues = Some(serde_json::json!([{ "kind": "duplicate-server" }]));
+        let (verdict, reason) = decide(&muxed, 0.9, 10.0, None);
+        assert_eq!(verdict, "mux");
+        assert!(reason.contains("mux owner/socket issue"), "{reason}");
+        let mut mux_state = MachineWatchState::default();
+        let mux_start = Instant::now();
+        let mut mux_notices = 0;
+        let mut mux_brakes = 0;
+        for elapsed in [0, 1803] {
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut mux_state,
+                Ok(&muxed),
+                |_, _| {
+                    mux_notices += 1;
+                    true
+                },
+                mux_start + Duration::from_secs(elapsed),
+                |_, _| mux_brakes += 1,
+                Thresholds::default(),
+            );
+            assert_eq!(outcome.verdict, "mux", "tick at {elapsed}s");
+        }
+        assert_eq!(mux_notices, 2, "mux pages through the notice throttle");
+        assert_eq!(mux_brakes, 0, "a mux finding never arms the brake");
 
         // Churn walk: sustained load with idle busy never brakes. The
         // 2026-10-03 shape: 8 jobs per core waiting, about 5 of 12 cores
