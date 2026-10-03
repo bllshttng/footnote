@@ -1046,11 +1046,11 @@ pub(crate) fn run_categories(
         doc["scorecard"] = json!({"prior": prior_path, "verdicts": scorecard(&prior, &doc)});
     }
     // The judgment summary: every aggregate the report and the renderer
-    // read, minus the per-session bulk. The raw rows stay in the sidecar
-    // (.fold.json) beside the report.
+    // read, minus the per-session bulk. The `nodes` mail graph stays (it is
+    // small and the Relay section reads it); the per-session rows stay in
+    // the sidecar (.fold.json) beside the report.
     if let Some(obj) = doc.as_object_mut() {
         obj.remove("sessions");
-        obj.remove("nodes");
     }
     println!(
         "{}",

@@ -83,7 +83,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
    The script is watermark-idempotent: a second run adds no rows.
 
-8. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
+8. Relay section: computed from the raw sidecar's `relay` facets and the summary's `nodes` rows. The judgment summary drops session rows, so per-session relay facets read from the sidecar. No model judgment: delivery, answers, contract breaches, and silences are facts.
 
 9. Render the shareable HTML copy. Run:
 

@@ -272,6 +272,19 @@ impl RollupStore {
                 entry.offset = start + consumed;
             }
         }
+        // Delivery ids: a bus-row id found in this run's consumed text stays
+        // delivered on every later run, whose tail is empty.
+        for row in bus.rows() {
+            if row.to_session.as_deref() != Some(file.session_id.as_str())
+                || row.id.is_empty()
+                || entry.relay_ids.contains(&row.id)
+            {
+                continue;
+            }
+            if text.contains(row.id.as_str()) {
+                entry.relay_ids.insert(row.id.clone());
+            }
+        }
         self.cache.entries.insert(key, entry.clone());
         (entry, text)
     }
@@ -398,10 +411,11 @@ impl<'a> TailPass<'a> {
     fn finish(self) {
         let act = self.fold.finish();
         // Token merge follows the source: a cumulative total replaces, a
-        // per-pass sum adds.
-        if self.cumulative {
+        // per-pass sum adds. A tail with no token_count row reads zero, and
+        // a zero total never replaces a stored one.
+        if self.cumulative && act.tokens.input + act.tokens.output > 0 {
             self.entry.tokens = act.tokens;
-        } else {
+        } else if !self.cumulative {
             self.entry.tokens.input += act.tokens.input;
             self.entry.tokens.output += act.tokens.output;
             self.entry.tokens.cache_read += act.tokens.cache_read;
