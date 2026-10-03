@@ -66,6 +66,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "loop-check",
     "loops",
     "mail-inject",
+    "mail-record",
     "manifest-eval",
     "manifest-for-session",
     "name-codes",
@@ -313,6 +314,12 @@ async fn run(args: Vec<String>) -> i32 {
             return fno_agents::mail_control_drain::run(&rest);
         }
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
+    }
+
+    // `mail-record` is the same shape as `mail-inject`: the one-shot
+    // origin-record leaf `fno agents mail send/reply` calls binary-direct.
+    if matches!(verb, "mail-record") {
+        return fno_agents::decision_trace::run_mail_record(&args[1..]);
     }
 
     if matches!(verb, "mail-envelope") {

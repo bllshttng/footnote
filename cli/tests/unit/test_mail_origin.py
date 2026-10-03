@@ -111,7 +111,7 @@ def test_appended_thread_reply_stamps_the_reply_origin(tmp_path, monkeypatch):
     assert messages[-1].origin == "peer"
 
 
-def test_mail_origin_event_marks_presumed_human_positively():
+def test_mail_origin_event_marks_presumed_human_positively(monkeypatch):
     from fno.events import mail_origin_classified
 
     event = mail_origin_classified(
@@ -124,6 +124,33 @@ def test_mail_origin_event_marks_presumed_human_positively():
     assert event["type"] == "mail_origin_classified"
     assert event["data"]["origin"] == "operator"
     assert event["data"]["presumed_human"] is True
+
+    # The record path is now the Rust mail-record leaf: the port passes the
+    # body and reply id through, and an absent leaf never breaks the send.
+    from fno.mail.cli import _record_mail_origin
+
+    seen: dict = {}
+
+    def fake_run(argv, *, input, timeout, capture_output):
+        seen["argv"] = argv
+        seen["input"] = input
+
+    monkeypatch.setattr("shutil.which", lambda name: "/fake/fno-agents")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    _record_mail_origin(origin="peer", lane="reply", sender="w-1",
+                        body="Approval: X", reply_to="m-1")
+    assert seen["argv"][1] == "mail-record"
+    assert "--origin=peer" in seen["argv"]
+    assert "--lane=reply" in seen["argv"]
+    assert "--sender=w-1" in seen["argv"]
+    assert "--reply-to=m-1" in seen["argv"]
+    assert seen["input"] == "Approval: X"
+
+    def missing_binary(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr("subprocess.run", missing_binary)
+    _record_mail_origin(origin="peer", lane="reply")  # AC5: must not raise
 
 
 def test_raw_inject_event_carries_origin_without_an_envelope():
