@@ -1,5 +1,5 @@
 //! The operator leaf surface for `fno agents claim`, ported wave by wave
-//! from `cli/src/fno/claims/cli.py` (epic x-eafd).
+//! from `cli/src/fno/claims/cli.py`.
 //!
 //! `claim_verbs.rs::run_claim` dispatches one op per wave here. The Python
 //! leaf forwards binary-direct (the `_forward_to_binary` shape), so this
@@ -36,11 +36,18 @@ pub fn parse_ttl_expression(value: &str) -> Result<Option<i128>, String> {
         ));
     }
     let n: i128 = num_part.parse().unwrap_or(i128::MAX);
-    let ms = match unit {
-        'm' => n * 60_000,
-        'h' => n * 3_600_000,
-        _ => n * 1_000,
+    let mult = match unit {
+        'm' => 60_000i128,
+        'h' => 3_600_000,
+        _ => 1_000,
     };
+    let ms = n.checked_mul(mult).ok_or_else(|| {
+        format!(
+            "ttl_ms={num_part} out of range [{}{}]",
+            crate::claims::MIN_TTL_MS,
+            crate::claims::MAX_TTL_MS
+        )
+    })?;
     Ok(Some(ms))
 }
 

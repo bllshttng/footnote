@@ -172,7 +172,7 @@ fn run_parsed(a: LeafArgs) -> i32 {
         Err(msg) => return bad_parameter("--ttl", &msg),
     };
     if a.pid_bad {
-        return bad_parameter("--pid", "'{value}' is not a valid integer");
+        return bad_parameter("--pid", "value is not a valid integer");
     }
     // An omitted --pid anchors to the durable session (the nearest harness
     // ancestor), degrading to pid-unavailable on a TTL claim when no session
