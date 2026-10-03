@@ -57,6 +57,7 @@ JSON_MANIFESTS=(
   .codex-plugin/plugin.json
   .opencode/package.json
   plugins/openclaw/promise-tag-reader/package.json
+  plugins/buddy/.claude-plugin/plugin.json
 )
 
 # --check: fail (exit 1) if any surface disagrees with the wheel version. The

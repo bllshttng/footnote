@@ -7615,9 +7615,7 @@ async fn attach_and_run(
     let (link_tx, mut link_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<(), String>)>();
 
-    // the @sender tap of a mail header resolves OFF the UI loop too: `chats
-    // resolve` can cold-start the CLI, so the select loop keeps drawing while
-    // it runs. Reports the fmail id plus whatever resolve made of it.
+    // Resolve sender taps off-loop; the CLI can cold-start.
     let (sender_tx, mut sender_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
 
@@ -8094,14 +8092,14 @@ async fn attach_and_run(
                     });
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
-                    // the server resolved a clicked URL (OSC 8 or
-                    // linkified text) and vetted its scheme; `open_url` vets it
-                    // again before exec. Off-loop for the same reason Copy is -
-                    // a cold browser launch must not stall the render loop.
-                    if crate::link::is_sender_uri(&url) {
-                        // A mail-header @sender tap: resolve the fmail id to
-                        // the sender's session off-loop, then open the shared
-                        // chooser on its row. Never the platform opener.
+                    // External URL opens run off-loop; a cold browser must not stall rendering.
+                    if let Some(id) = crate::link::message_id_from_uri(&url) {
+                        messages_view::open_message(&mut view, id.to_string());
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    } else if crate::link::is_sender_uri(&url) {
+                        // Resolve the sender session, then open its chooser row.
                         let tx = sender_tx.clone();
                         tokio::task::spawn_blocking(move || {
                             let id = url

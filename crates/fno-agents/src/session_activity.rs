@@ -93,10 +93,45 @@ fn extension_of(path: &str) -> Option<String> {
     plausible.then_some(ext)
 }
 
+/// A `file_path` a model sent is not always a path: fragments of code and
+/// prose carry dots too, and everything after the last dot became a
+/// languages key (`fn facet_keys(view: &mut view, bytes: &[u8]) {` was one
+/// such key in the 2026-09-28 fold). A key must look like an extension:
+/// 1 to 12 characters of `[a-z0-9]`.
+/// A `file_path` a model sent is not always a path: fragments of code and
+/// prose carry dots too, and everything after the last dot became a
+/// languages key (`fn facet_keys(view: &mut view, bytes: &[u8]) {` was one
+/// such key in the 2026-09-28 fold). A key must look like an extension:
+/// 1 to 12 characters of `[a-z0-9]`.
 fn note_extension(extensions: &mut BTreeMap<String, u64>, path: &str) {
     if let Some(ext) = extension_of(path) {
-        *extensions.entry(ext).or_insert(0) += 1;
+        let shaped = !ext.is_empty()
+            && ext.len() <= 12
+            && ext
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        if shaped {
+            *extensions.entry(ext).or_insert(0) += 1;
+        }
     }
+}
+
+/// The assistant API message id of one transcript row, when the row repeats
+/// an assistant message: the token-dedupe key shared by the fold and the
+/// rollup's cross-run window.
+pub(crate) fn assistant_message_id(row: &Value) -> Option<&str> {
+    let is_assistant = row.get("type").and_then(|v| v.as_str()) == Some("assistant")
+        || row
+            .get("message")
+            .and_then(|m| m.get("role"))
+            .and_then(|v| v.as_str())
+            == Some("assistant");
+    if !is_assistant {
+        return None;
+    }
+    row.get("message")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
 }
 
 fn block_text(content: &Value) -> String {
@@ -135,6 +170,30 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
 pub(crate) struct ActivityFold {
     act: Activity,
     seen_ids: HashSet<String>,
+    /// Whether this pass saw a codex token_count row: presence, not
+    /// magnitude, decides whether a cumulative total replaces the stored
+    /// one (a real row can legitimately carry zero).
+    tokens_seen: bool,
+}
+
+impl ActivityFold {
+    /// Pre-seed the dedupe set with ids seen on an earlier pass over the
+    /// same transcript, so a message repeated across an offset boundary
+    /// still counts once.
+    pub(crate) fn seed_seen(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.seen_ids.extend(ids);
+    }
+
+    /// The most recent assistant timestamp this fold has seen, in row
+    /// order: the running anchor a rollup's response gaps hang off.
+    pub(crate) fn last_assistant_ts(&self) -> Option<f64> {
+        self.act.assistant_ts.last().copied()
+    }
+
+    /// Whether a codex token_count row arrived in this pass.
+    pub(crate) fn saw_tokens(&self) -> bool {
+        self.tokens_seen
+    }
 }
 
 impl ActivityFold {
@@ -156,10 +215,7 @@ impl ActivityFold {
             // Transcripts repeat one API message across several rows; a
             // token sum that skips the dedupe overcounts about 2x (measured
             // 2026-09-21). A row with no id counts once by itself.
-            let id = row
-                .get("message")
-                .and_then(|m| m.get("id"))
-                .and_then(|v| v.as_str());
+            let id = assistant_message_id(row);
             let fresh = match id {
                 Some(id) => self.seen_ids.insert(id.to_string()),
                 None => true,
@@ -263,6 +319,7 @@ impl ActivityFold {
             (Some("event_msg"), Some("token_count")) => {
                 if let Some(total) = codex_token_total(row) {
                     act.tokens = total;
+                    self.tokens_seen = true;
                 }
             }
             (Some("event_msg"), Some("turn_aborted")) => act.aborted_turns += 1,
@@ -456,14 +513,20 @@ mod tests {
                 {"old_string": "x\ny", "new_string": "x\nz"}]}});
         let write = json!({"type": "tool_use", "name": "Write",
                            "input": {"file_path": "a/b.RS", "content": "one\ntwo\nthree"}});
+        let fragment = json!({"type": "tool_use", "name": "Write",
+                              "input": {"file_path": "y.rs (x)", "content": "body"}});
         let raw = claude_lines(
             &[json!({"type": "assistant", "message": {"role": "assistant",
-                    "content": [edit("x.rs"), multiedit, write]}})],
+                    "content": [edit("x.rs"), multiedit, write, fragment]}})],
         );
         let act = claude_activity(&raw);
-        assert_eq!(act.lines_added, 6);
+        // The fragment's body line still counts as a line; it never
+        // counts as a language.
+        assert_eq!(act.lines_added, 7);
         assert_eq!(act.lines_removed, 3);
         assert_eq!(act.extensions.get("rs"), Some(&3));
+        assert!(act.extensions.get("rs (x)").is_none());
+        assert_eq!(act.extensions.len(), 1);
     }
 
     #[test]

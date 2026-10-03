@@ -460,6 +460,67 @@ fn real_git_pull(canonical: &Path) -> Result<String, String> {
     }
 }
 
+// The chain's liveness anchor, beside the markers. The single-flight claim
+// names the syncing process, so a chain still queued on cargo admission
+// after that process dies (the reconcile sweep's own timeout kill) reads
+// stale and the next reconcile starts a second chain - 13 chains ran at
+// once under load ~200. The gate refuses while this file names a live
+// process instead; create-time equality keeps a recycled pid from posing
+// as the old chain.
+const CHAIN_ANCHOR: &str = "post-merge-sync-chain.json";
+
+fn chain_anchor_path(canonical: &Path) -> PathBuf {
+    canonical.join(".fno").join(CHAIN_ANCHOR)
+}
+
+fn write_chain_anchor(canonical: &Path, pid: u32) {
+    let created = match crate::claims::probe_pid(pid as i32) {
+        crate::claims::PidProbe::Created(ms) => Some(ms),
+        _ => None,
+    };
+    let path = chain_anchor_path(canonical);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        &path,
+        json!({"pid": pid, "created_ms": created}).to_string(),
+    );
+}
+
+fn clear_chain_anchor(canonical: &Path, pid: u32) {
+    let path = chain_anchor_path(canonical);
+    let still_ours = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(raw.trim()).ok())
+        .and_then(|row| row.get("pid").and_then(|v| v.as_u64()))
+        .is_some_and(|recorded| recorded == pid as u64);
+    if still_ours {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Some(pid) while the anchored chain process still runs; None when the
+/// anchor is gone, unreadable, or names a dead or recycled pid.
+fn chain_alive(canonical: &Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(chain_anchor_path(canonical)).ok()?;
+    let row: Value = serde_json::from_str(raw.trim()).ok()?;
+    let pid = row.get("pid").and_then(|v| v.as_i64())? as i32;
+    let born = row.get("created_ms").and_then(|v| v.as_i64());
+    match crate::claims::probe_pid(pid) {
+        crate::claims::PidProbe::Created(ms) => match born {
+            Some(b) if b == ms => Some(pid as u32),
+            // Birth unrecorded: count a same-pid process alive. Refusing to
+            // sync is the safe direction; a false dead re-fires the burst.
+            None => Some(pid as u32),
+            Some(_) => None,
+        },
+        // The holder refuses inspection: treat as alive rather than race it.
+        crate::claims::PidProbe::Refused => Some(pid as u32),
+        crate::claims::PidProbe::Absent => None,
+    }
+}
+
 fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
     // Output goes to temp FILES, never pipes: a sync_command ending in
     // `fno agents restart` detaches a daemon that inherits the child's
@@ -483,6 +544,7 @@ fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
     let out_path = dir.join("stdout");
     let err_path = dir.join("stderr");
     let outcome = (|| -> std::io::Result<ShellOutcome> {
+        use std::os::unix::process::CommandExt;
         let outf = std::fs::File::create(&out_path)?;
         let errf = std::fs::File::create(&err_path)?;
         let mut child = std::process::Command::new("bash")
@@ -492,7 +554,12 @@ fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
             .stdin(std::process::Stdio::null())
             .stdout(outf)
             .stderr(errf)
+            // The chain runs as its own process group, so the timeout kill
+            // can take the cargo/npm grandchildren with bash; a bare
+            // child.kill() left them queued as orphans.
+            .process_group(0)
             .spawn()?;
+        write_chain_anchor(cwd, child.id());
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(SYNC_COMMAND_TIMEOUT_SECS);
         let mut timed_out = false;
@@ -503,13 +570,16 @@ fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 None => {
-                    let _ = child.kill();
+                    // Group kill: grandchildren share bash's process group,
+                    // so a timed-out chain leaves no queued orphan behind.
+                    crate::bounded_spawn::kill_process_group(&mut child);
                     let s = child.wait()?;
                     timed_out = true;
                     break s;
                 }
             }
         };
+        clear_chain_anchor(cwd, child.id());
         Ok(ShellOutcome {
             // A killed child reads as a signal (no code); the timed-out path
             // reports the 124 the receipt contract names.
@@ -667,6 +737,19 @@ fn run_sync_with_shell(deps: &Deps, cwd: &Path, pr: u64, shell: &ShellRun) -> Sy
     let marker = synced_marker(&canonical, &sha);
     if marker.exists() {
         stdout.push(format!("post-merge sync: already synced {}", sha12(&sha)));
+        return (0, stdout, stderr);
+    }
+
+    // 4.5 Chain-alive gate: one chain per checkout, even across our own
+    // death. The claim below names THIS process, so a chain still queued on
+    // cargo admission after a timeout kill read stale and the next
+    // reconcile started a second chain. A live anchor means a chain runs:
+    // mark pending, skip, converge at the winner's re-pull.
+    if let Some(pid) = chain_alive(&canonical) {
+        write_pending(&canonical, &sha, &mut stderr);
+        stdout.push(format!(
+            "post-merge sync: chain already running for this checkout (pid {pid}); marked pending; skipping"
+        ));
         return (0, stdout, stderr);
     }
 
@@ -1558,6 +1641,37 @@ mod tests {
     }
 
     #[test]
+    fn live_chain_anchor_skips_a_second_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_cfg(tmp.path(), CFG_BODY);
+        let (shell, ran) = spy_shell(0);
+        let deps = sync_deps(
+            view_row("MERGED", SHA, &["cli/x.py"], PR_URL),
+            shell,
+            Rc::new(|_| json!({})),
+        );
+        // Half 1 - a live chain anchor holds the gate: no second chain, the
+        // merge is marked pending for the running chain's re-pull.
+        write_chain_anchor(tmp.path(), std::process::id());
+        let (exit, stdout, _) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
+        assert_eq!(exit, 0);
+        assert!(!*ran.borrow(), "no second chain behind a live anchor");
+        let line = stdout.join("\n");
+        assert!(line.contains("chain already running"), "{line}");
+        assert!(pending_dir(tmp.path()).join(SHA).exists());
+        clear_chain_anchor(tmp.path(), std::process::id());
+        // Half 2 - a dead chain's leftover anchor leaves the gate open: the
+        // sync proceeds (self-healing after a crash).
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        write_chain_anchor(tmp.path(), dead_pid);
+        let (exit, _, _) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
+        assert_eq!(exit, 0);
+        assert!(*ran.borrow(), "a dead anchor leaves the gate open");
+    }
+
+    #[test]
     fn path_gate_skips_and_marks_without_a_shell() {
         let tmp = tempfile::tempdir().unwrap();
         write_cfg(tmp.path(), CFG_BODY);
@@ -1588,6 +1702,19 @@ mod tests {
         assert_eq!(exit, 0);
         assert!(!*ran.borrow());
         assert!(stdout.join("\n").contains("not merged (state=OPEN)"));
+        // Same skip shape for a merged row with no merge commit yet.
+        let view = json!({
+            "state": "MERGED",
+            "mergeCommit": Value::Null,
+            "files": [],
+            "url": PR_URL,
+        })
+        .to_string();
+        let deps = sync_deps(view, deps.shell, Rc::new(|_| json!({})));
+        let (exit, stdout, _) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
+        assert_eq!(exit, 0);
+        assert!(!*ran.borrow());
+        assert!(stdout.join("\n").contains("no merge commit yet"));
     }
 
     #[test]
@@ -1605,25 +1732,6 @@ mod tests {
         assert_eq!(exit, 0);
         assert!(!*ran.borrow());
         assert!(stdout.join("\n").contains("already synced"));
-    }
-
-    #[test]
-    fn missing_merge_commit_skips() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_cfg(tmp.path(), CFG_BODY);
-        let (shell, ran) = spy_shell(0);
-        let view = json!({
-            "state": "MERGED",
-            "mergeCommit": Value::Null,
-            "files": [],
-            "url": PR_URL,
-        })
-        .to_string();
-        let deps = sync_deps(view, shell, Rc::new(|_| json!({})));
-        let (exit, stdout, _) = run_sync_with_shell(&deps, tmp.path(), 5, &deps.shell);
-        assert_eq!(exit, 0);
-        assert!(!*ran.borrow());
-        assert!(stdout.join("\n").contains("no merge commit yet"));
     }
 
     #[test]

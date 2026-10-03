@@ -30,6 +30,18 @@
       "description": "Footnote nightly: yesterday's green main, rolling and replaceable.",
       "category": "workflow",
       "tags": ["workflow", "nightly", "tdd", "planning", "autonomous", "target"]
+    },
+    {
+      "name": "buddy",
+      "source": {
+        "source": "git-subdir",
+        "url": "bllshttng/footnote",
+        "path": "plugins/buddy",
+        "ref": "stable"
+      },
+      "description": "Bring back buddy: a terminal companion beside your status line. /buddy or /bbb.",
+      "category": "fun",
+      "tags": ["buddy", "companion", "statusline", "mod"]
     }
   ]
 }

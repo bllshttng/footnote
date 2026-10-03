@@ -159,26 +159,39 @@ pub fn content_version(entries: &[Value]) -> String {
 /// legacy and new spellings reach one physical file; every other parent
 /// (a space, a test fixture) keeps the sibling store.
 pub fn database_path(graph: &Path) -> PathBuf {
+    anchor_path(graph).with_extension("db")
+}
+
+/// The canonical anchor spelling behind any graph spelling: the same walk
+/// `database_path` makes, without the db substitution. The journal anchors
+/// here, so a writer holding the anchor and a reader holding the db twin
+/// derive one journal file.
+pub fn anchor_path(graph: &Path) -> PathBuf {
     let name = match graph.file_name().and_then(|n| n.to_str()) {
-        Some(n) => n,
-        None => return graph.with_extension("db"),
+        Some(n) => n.to_string(),
+        None => return graph.with_extension("json"),
     };
-    if name != "graph.json" && name != "graph-archive.json" {
-        return graph.with_extension("db");
-    }
+    // The db twins of the anchors are spellings of the same graph: a reader
+    // holding graph.db must land where a writer holding graph.json wrote,
+    // so they take the same walk instead of a naive sibling rename.
+    let anchor = match name.as_str() {
+        "graph.json" | "graph.db" => "graph.json",
+        "graph-archive.json" | "graph-archive.db" => "graph-archive.json",
+        _ => return graph.with_extension("json"),
+    };
     let parent = match graph.parent() {
         Some(p) => p,
-        None => return graph.with_extension("db"),
+        None => return graph.with_extension("json"),
     };
     let root = if parent.file_name().is_some_and(|n| n == "db") {
         match parent.parent() {
             Some(r) => r,
-            None => return graph.with_extension("db"),
+            None => return graph.with_extension("json"),
         }
     } else {
         parent
     };
-    crate::state_layout::place(root, name).with_extension("db")
+    crate::state_layout::place(root, anchor)
 }
 
 /// The state root an anchor belongs to: the same walk `database_path` does
