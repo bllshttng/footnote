@@ -202,7 +202,7 @@ fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usiz
         ],
         Some(source_root),
     )?;
-    let dest = stage_parent.join("fno");
+    let dest = stage_parent.join(STAGE_DIR);
     let pid = std::process::id();
     let new_dir = stage_parent.join(format!(".fno.new-{pid}"));
     let old_dir = stage_parent.join(format!(".fno.old-{pid}"));
@@ -1316,6 +1316,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 build_stage(&root, &parent).map(|(p, _)| p)
             }) {
                 Ok(stage) => {
+                    prime_plugin_root_pointer(&stage);
                     println!("{}", stage.display());
                     0
                 }
@@ -1570,6 +1571,7 @@ fn run_opencode_arm(
             }
             let home = AgentsHome::from_env();
             let _ = crate::reclaim::run_reclaim(&["--apply".to_string()], &home);
+            prime_plugin_root_pointer(&state_root().join("plugin-stage").join(STAGE_DIR));
             if receipt.status == "partial" {
                 3
             } else {
@@ -1886,6 +1888,10 @@ fn zcode_install_config(config_path: &Path, stage: &Path) -> Result<String, Stri
     ))
 }
 
+/// The stage dir name under plugin-stage; build_stage and the pointer prime
+/// must agree on it.
+const STAGE_DIR: &str = "fno";
+
 fn install_harness(harness: &str, force: bool) -> Result<String, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let root = repo_root(&cwd)?;
@@ -1903,7 +1909,31 @@ fn install_harness(harness: &str, force: bool) -> Result<String, String> {
             ))
         }
     };
+    prime_plugin_root_pointer(&stage);
     Ok(detail)
+}
+
+/// Persist the installed stage to `<state-root>/install/plugin-root`, the
+/// pointer the session-start hook primes and every env-less reader (provider
+/// verb rosters, opencode install, the lead skill's fallback) resolves. The
+/// install verb must not depend on a session ever starting: on a fresh machine
+/// the first `fno config plugin install` is exactly when no hook has run yet
+/// (2026-10-02 gap audit 6). Best-effort: a failed write never fails the
+/// install. The stage is a self-contained copy (no `.git`), so unlike a
+/// worktree root it is safe as the machine-global value.
+fn prime_plugin_root_pointer(stage: &Path) {
+    if !stage.join(".claude-plugin").join("plugin.json").is_file() {
+        return;
+    }
+    let anchor = match std::env::var_os("FNO_HOME") {
+        Some(home) if !home.is_empty() => std::path::PathBuf::from(home),
+        _ => state_root(),
+    };
+    let ptr = crate::state_layout::place(&anchor, "plugin-root");
+    if let Some(parent) = ptr.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&ptr, format!("{}\n", stage.display()));
 }
 
 /// The env exports as (line, is_error) pairs, so an arm that must keep
@@ -2612,6 +2642,39 @@ mod tests {
                 .unwrap();
         assert_eq!(public["plugins"][0]["source"]["ref"], json!("stable"));
         assert_eq!(check_stage_report(&stage, &source).status, "fresh");
+        // The install verb primes the plugin-root pointer from the built
+        // stage and ignores a manifest-less one, so the same contract rides
+        // this real stage: the pointer lands at <state>/install/plugin-root.
+        let previous_root = std::env::var_os("FNO_RECLAIM_STATE_ROOT");
+        let previous_home = std::env::var_os("FNO_HOME");
+        std::env::remove_var("FNO_HOME");
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &base);
+        prime_plugin_root_pointer(&stage);
+        assert_eq!(
+            fs::read_to_string(base.join("install").join("plugin-root"))
+                .unwrap()
+                .trim(),
+            stage.to_str().unwrap(),
+            "the primed pointer names the built stage"
+        );
+        let bare = base.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        prime_plugin_root_pointer(&bare);
+        assert_eq!(
+            fs::read_to_string(base.join("install").join("plugin-root"))
+                .unwrap()
+                .trim(),
+            stage.to_str().unwrap(),
+            "a manifest-less stage writes nothing"
+        );
+        match previous_root {
+            Some(v) => std::env::set_var("FNO_RECLAIM_STATE_ROOT", v),
+            None => std::env::remove_var("FNO_RECLAIM_STATE_ROOT"),
+        }
+        match previous_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
         let _ = fs::remove_dir_all(&base);
     }
 
