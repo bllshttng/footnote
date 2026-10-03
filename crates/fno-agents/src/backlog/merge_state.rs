@@ -310,11 +310,9 @@ pub(crate) fn str_field(v: Option<&Value>) -> Option<String> {
 /// is read against must come from one fetch).
 #[derive(Debug, Clone)]
 pub(crate) struct ClosureContext {
-    pub number: i64,
     pub body: String,
     pub url: Option<String>,
     pub state: String,
-    pub merged_at: Option<String>,
     pub changed_files: Vec<String>,
 }
 
@@ -374,10 +372,6 @@ pub(crate) fn fetch_pr_closure_context(
         })
         .unwrap_or_default();
     Ok(ClosureContext {
-        number: row
-            .get("number")
-            .and_then(Value::as_i64)
-            .unwrap_or(pr_number),
         body: row
             .get("body")
             .and_then(Value::as_str)
@@ -389,7 +383,6 @@ pub(crate) fn fetch_pr_closure_context(
             .and_then(Value::as_str)
             .unwrap_or("UNKNOWN")
             .to_string(),
-        merged_at: str_field(row.get("mergedAt")),
         changed_files,
     })
 }

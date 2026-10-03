@@ -18,26 +18,6 @@ pub(crate) fn normalize_surface(path: &str) -> String {
     replaced.strip_prefix("./").unwrap_or(&replaced).to_string()
 }
 
-/// A PR URL reduced to its comparable form, or None.
-///
-/// Query, fragment and a trailing slash are display noise; the graph and gh
-/// can differ on all three for the same PR. Lowercased because the host and
-/// owner segments are case-insensitive in practice and the path segments
-/// the comparison relies on are already lowercase.
-pub(crate) fn normalized_pr_url(url: Option<&str>) -> Option<String> {
-    let url = url?;
-    let mut stripped = url.trim();
-    for sep in ['?', '#'] {
-        stripped = stripped.split(sep).next().unwrap_or(stripped);
-    }
-    let stripped = stripped.trim_end_matches('/');
-    if stripped.is_empty() {
-        None
-    } else {
-        Some(stripped.to_lowercase())
-    }
-}
-
 /// Verify predecessor cause surfaces against one merged PR's file set.
 ///
 /// Full contract: docs/architecture/backlog-graph-verb-contracts.md
@@ -218,20 +198,6 @@ mod tests {
         assert_eq!(normalize_surface(".github/ci.yml"), ".github/ci.yml");
         assert_eq!(normalize_surface("./github/ci.yml"), "github/ci.yml");
         assert_eq!(normalize_surface(" a\\b.rs "), "a/b.rs");
-    }
-
-    #[test]
-    fn normalized_pr_url_strips_display_noise() {
-        assert_eq!(
-            normalized_pr_url(Some("https://GitHub.com/O/R/pull/7?diff=split#issue")),
-            Some("https://github.com/o/r/pull/7".into())
-        );
-        assert_eq!(
-            normalized_pr_url(Some("https://x.y/pull/7/")),
-            Some("https://x.y/pull/7".into())
-        );
-        assert_eq!(normalized_pr_url(Some("  ")), None);
-        assert_eq!(normalized_pr_url(None), None);
     }
 
     #[test]

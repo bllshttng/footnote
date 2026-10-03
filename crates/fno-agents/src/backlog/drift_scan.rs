@@ -924,10 +924,6 @@ mod tests {
 
     #[test]
     fn an_open_listing_row_means_no_drift_and_no_query() {
-        let entries = vec![open_node(json!({
-            "pr_number": 7,
-            "pr_url": "https://github.com/o/r/pull/7",
-        }))];
         let cache = ListingCache::new();
         let open_rows = vec![pr_row(7, "feature/x-aaaa", "OPEN")];
         cache

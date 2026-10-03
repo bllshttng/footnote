@@ -23,16 +23,14 @@ pub(crate) struct PrRowBinding {
 #[derive(Debug, Clone)]
 pub(crate) struct PrRowBindResult {
     pub outcome: &'static str,
-    pub claimed_ids: Vec<String>,
     pub bindings: Vec<PrRowBinding>,
     pub refusal: Option<String>,
 }
 
 impl PrRowBindResult {
-    fn refused(claimed_ids: &[String], refusal: impl Into<String>) -> Self {
+    fn refused(refusal: impl Into<String>) -> Self {
         Self {
             outcome: "refused",
-            claimed_ids: claimed_ids.to_vec(),
             bindings: Vec::new(),
             refusal: Some(refusal.into()),
         }
@@ -59,7 +57,7 @@ pub(crate) fn bind_pr_rows(
     rebind: bool,
 ) -> PrRowBindResult {
     if claimed_ids.is_empty() {
-        return PrRowBindResult::refused(claimed_ids, "no closure claims to bind");
+        return PrRowBindResult::refused("no closure claims to bind");
     }
     let our_repo = repo
         .map(str::to_string)
@@ -68,7 +66,7 @@ pub(crate) fn bind_pr_rows(
     let mut resolved: Vec<usize> = Vec::with_capacity(claimed_ids.len());
     for nid in claimed_ids {
         let Some(index) = find_node_index(entries, nid) else {
-            return PrRowBindResult::refused(claimed_ids, format!("unknown node: {nid}"));
+            return PrRowBindResult::refused(format!("unknown node: {nid}"));
         };
         if let Some(our) = &our_repo {
             for (number, url) in node_pr_refs(&entries[index]) {
@@ -83,23 +81,17 @@ pub(crate) fn bind_pr_rows(
                     );
                 };
                 if !existing_repo.eq_ignore_ascii_case(our) {
-                    return PrRowBindResult::refused(
-                        claimed_ids,
-                        format!(
-                            "{nid} already carries a {existing_repo} PR ref; \
-                             this PR is {our} - refusing a cross-repo claim"
-                        ),
-                    );
+                    return PrRowBindResult::refused(format!(
+                        "{nid} already carries a {existing_repo} PR ref; \
+                         this PR is {our} - refusing a cross-repo claim"
+                    ));
                 }
             }
         } else if !node_pr_refs(&entries[index]).is_empty() {
-            return PrRowBindResult::refused(
-                claimed_ids,
-                format!(
-                    "{nid} already carries a PR ref and this PR's repo is \
-                     unresolvable - refusing an unscoped claim"
-                ),
-            );
+            return PrRowBindResult::refused(format!(
+                "{nid} already carries a PR ref and this PR's repo is \
+                 unresolvable - refusing an unscoped claim"
+            ));
         }
         resolved.push(index);
     }
@@ -173,7 +165,6 @@ pub(crate) fn bind_pr_rows(
 
     PrRowBindResult {
         outcome: "bound",
-        claimed_ids: claimed_ids.to_vec(),
         bindings,
         refusal: None,
     }
@@ -293,7 +284,7 @@ mod tests {
             Some("o/r"),
             false,
         );
-        assert_eq!(result.outcome, "bound", "{result.refusal:?}");
+        assert_eq!(result.outcome, "bound", "{:?}", result.refusal);
         assert_eq!(result.bindings[0].action, "filled_primary");
         assert_eq!(result.bindings[1].action, "appended_additional");
         assert_eq!(result.bound_ids(), vec!["x-aaaa", "x-bbbb"]);

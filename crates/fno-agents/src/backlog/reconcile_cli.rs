@@ -227,7 +227,7 @@ fn report_held(key: &str, held_by: &str, json_out: bool) {
 
 /// The sweep body, gate-free: one reconcile pass. Legs in _reconcile_once's
 /// order; every leg degrades to a warning, never aborts the sweep.
-pub(crate) fn once_at(args: &Args, graph_path: &Path) -> i32 {
+fn once_at(args: &Args, graph_path: &Path) -> i32 {
     let mut entries = match read_rows(graph_path) {
         Ok(rows) => rows,
         Err(e) => {
@@ -895,17 +895,6 @@ struct Sweep {
     owed_evidence: Vec<(String, Value)>,
     owed_failures: Vec<Value>,
     settlement: Value,
-}
-
-impl Sweep {
-    /// The probe found nothing pending: the settlement term of the
-    /// in-sync gate reads true.
-    fn settlement_receipts_empty(&self) -> bool {
-        self.settlement["receipts"]
-            .as_array()
-            .map(|r| r.is_empty())
-            .unwrap_or(true)
-    }
 }
 
 fn partition_and_probe(
@@ -2113,6 +2102,7 @@ fn report_leg(
             "candidates": sweep.closeable.iter().map(|r| json!({
                 "node_id": r.node_id, "pr_number": r.pr_number,
                 "pr_url": r.pr_url, "plan_path": r.plan_path,
+                "merge_sha": r.merge_sha,
             })).collect::<Vec<_>>(),
             "closed": closed_rows,
             "healed_epics": healed_epics,
