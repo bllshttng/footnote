@@ -1802,6 +1802,35 @@ mod tests {
             state.registry_session.as_deref(),
             Some("bbbb2222-0000-4000-8000-000000000002")
         );
+        // The mail_envelope join contract, on both liveness sides: a
+        // dead twin never answers a live name, a live twin never answers
+        // a terminal name, and a side that still matches two rows refuses.
+        let dir = tmp("name-join");
+        let rows = [
+            row("heir", "s-1", None, AgentStatus::Live),
+            row("heir", "s-2", None, AgentStatus::Exited),
+            row("king", "s-3", None, AgentStatus::Orphaned),
+            row("king", "s-4", None, AgentStatus::Exited),
+        ];
+        registry_file(&dir, &rows);
+        let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+        assert!(matches!(
+            live_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            live_name_join(&reg.entries, "king"),
+            NameJoin::None
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "king"),
+            NameJoin::Ambiguous
+        ));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2375,39 +2404,6 @@ mod tests {
             Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
             None => std::env::remove_var("FNO_SPACES_DIR"),
         }
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// The mail_envelope join contract, on both liveness sides: a dead twin
-    /// never answers a live name, a live twin never answers a terminal name,
-    /// and a side that still matches two rows refuses instead of guessing.
-    #[test]
-    fn name_joins_skip_the_other_side_and_refuse_duplicates() {
-        let dir = tmp("name-join");
-        let rows = [
-            row("heir", "s-1", None, AgentStatus::Live),
-            row("heir", "s-2", None, AgentStatus::Exited),
-            row("king", "s-3", None, AgentStatus::Orphaned),
-            row("king", "s-4", None, AgentStatus::Exited),
-        ];
-        registry_file(&dir, &rows);
-        let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
-        assert!(matches!(
-            live_name_join(&reg.entries, "heir"),
-            NameJoin::One(_)
-        ));
-        assert!(matches!(
-            live_name_join(&reg.entries, "king"),
-            NameJoin::None
-        ));
-        assert!(matches!(
-            terminal_name_join(&reg.entries, "heir"),
-            NameJoin::One(_)
-        ));
-        assert!(matches!(
-            terminal_name_join(&reg.entries, "king"),
-            NameJoin::Ambiguous
-        ));
         let _ = fs::remove_dir_all(&dir);
     }
 }

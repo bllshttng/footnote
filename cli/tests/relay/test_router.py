@@ -69,24 +69,7 @@ def test_default_node_resolver_tolerates_graph_read_failure(monkeypatch):
 
 def test_resolve_name():
     assert resolve("bob", index=_idx()).session_id == "B"
-
-
-def test_resolve_unknown_name_is_unroutable():
-    with pytest.raises(Unroutable):
-        resolve("nobody", index=_idx())
-
-
-def test_resolve_duplicate_live_name_is_refused():
-    # two live rows answering one name must never route - first-match
-    # could deliver mail to the wrong session.
-    dup = dict(_idx())
-    dup["B2"] = RegistryEntry(session_id="B2", provider="codex", pid=7, name="bob")
-    with pytest.raises(Unroutable, match="relay_ambiguous"):
-        resolve("bob", index=dup)
-
-
-def test_resolve_name_skips_terminal_rows():
-    # a dead twin never answers for the name; the live twin routes.
+    # A dead twin never answers for the name; the live twin routes.
     reg = {
         "DEAD": RegistryEntry(session_id="DEAD", provider="claude", pid=1,
                               name="bob", status="exited"),
@@ -94,3 +77,15 @@ def test_resolve_name_skips_terminal_rows():
                            inject_handle="pty:42", name="bob"),
     }
     assert resolve("bob", index=reg).session_id == "B"
+    # Two live rows answering one name never route: first-match could
+    # deliver mail to the wrong session.
+    dup = dict(reg)
+    dup["B2"] = RegistryEntry(session_id="B2", provider="codex", pid=7, name="bob")
+    with pytest.raises(Unroutable, match="relay_ambiguous"):
+        resolve("bob", index=dup)
+
+
+def test_resolve_unknown_name_is_unroutable():
+    with pytest.raises(Unroutable):
+        resolve("nobody", index=_idx())
+
