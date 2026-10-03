@@ -317,6 +317,77 @@ fn write_ledger(path: &Path, doc: &Value) -> Result<(), String> {
     }
 }
 
+/// The ported `harvest_ledger_sessions`: fill an ABSENT `sessions` key on
+/// every execution row from its graph node, never overwrite, under the same
+/// ledger lock the append path takes. Returns (filled, marked). An
+/// unreadable ledger reads as nothing to fill - a fill-only leg never
+/// resets a corrupt file.
+pub(crate) fn harvest_sessions(
+    ledger: &Path,
+    nodes_by_id: &serde_json::Map<String, Value>,
+    dry_run: bool,
+) -> Result<(usize, usize), String> {
+    if !ledger.exists() {
+        return Ok((0, 0));
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOCK_PATH)
+        .map_err(|e| format!("cannot open {LOCK_PATH}: {e}"))?;
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    let result = harvest_locked(ledger, nodes_by_id, dry_run);
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+    result
+}
+
+fn harvest_locked(
+    ledger: &Path,
+    nodes_by_id: &serde_json::Map<String, Value>,
+    dry_run: bool,
+) -> Result<(usize, usize), String> {
+    let text = std::fs::read_to_string(ledger).map_err(|e| format!("{}: {e}", ledger.display()))?;
+    let mut data: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({"entries": []}));
+    let Some(entries) = data.get_mut("entries").and_then(Value::as_array_mut) else {
+        return Ok((0, 0));
+    };
+    let mut filled = 0;
+    let mut marked = 0;
+    for row in entries.iter_mut() {
+        if row.get("type").and_then(Value::as_str) != Some("execution") {
+            continue;
+        }
+        if row.get("sessions").is_some() {
+            continue; // the Python leg skips the KEY's presence, null included
+        }
+        let node = row
+            .get("graph_node_id")
+            .and_then(Value::as_str)
+            .and_then(|id| nodes_by_id.get(id));
+        let ids: Vec<String> = node
+            .and_then(|n| n.get("sessions"))
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|s| s.get("session_id"))
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        row["sessions"] = sessions_or_unresolved(&ids);
+        if ids.is_empty() {
+            marked += 1;
+        } else {
+            filled += 1;
+        }
+    }
+    if !dry_run && (filled > 0 || marked > 0) {
+        write_ledger(ledger, &data)?;
+    }
+    Ok((filled, marked))
+}
+
 #[derive(Default)]
 struct FillCounts {
     scanned: usize,

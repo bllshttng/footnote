@@ -49,6 +49,7 @@ impl MergeEvidence {
 /// A PR-state read failure with a machine-readable operator remedy (the
 /// ReconcileError twin). `availability` is the retryable class; every other
 /// kind is a policy refusal.
+#[derive(Debug)]
 pub(crate) struct PrReadError {
     pub message: String,
     pub kind: String,
