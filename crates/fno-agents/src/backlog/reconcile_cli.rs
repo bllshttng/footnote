@@ -271,7 +271,7 @@ pub(crate) fn once_at(args: &Args, graph_path: &Path) -> i32 {
     if full_sweep || args.node.is_some() {
         let (heals, advisories) = collect_open_binding_heals(
             &entries,
-            single_scope(args.node.as_deref()),
+            single_scope(args.node.as_deref()).as_ref(),
             Some(&listings),
             query_seam,
         );
@@ -830,8 +830,13 @@ fn auto_discover_leg(
         let repo_for_pr = record
             .pr_url
             .as_deref()
-            .and_then(repo_slug_from_url)
-            .or_else(|| record.cwd.as_deref().and_then(resolve_current_repo_slug));
+            .and_then(|u| repo_slug_from_url(Some(u)))
+            .or_else(|| {
+                record
+                    .cwd
+                    .as_deref()
+                    .and_then(|c| resolve_current_repo_slug(Some(c)))
+            });
         let Some(repo_for_pr) = repo_for_pr else {
             continue;
         };
@@ -1140,7 +1145,7 @@ fn summarize_promise_held(held: &[HeldRow], dry_run: bool) -> String {
         ("reopen_held", "deliberate reopen postdates the merge"),
     ];
     let mut order: Vec<&str> = headlines.iter().map(|(k, _)| *k).collect();
-    for (outcome, _) in held.iter().map(|(_, _, o)| o.as_str()) {
+    for outcome in held.iter().map(|(_, _, o)| o.as_str()) {
         if !order.contains(&outcome) {
             order.push(outcome);
         }
@@ -1525,7 +1530,7 @@ fn post_close_leg(
         };
         emit_session_satisfied_for_record(record, "reconcile_detected_merge");
         emit_human_touch_for_record(record);
-        ledger_backstop_leg(record, post_entries, &ledger, stderr_log);
+        ledger_backstop_leg(record, post_entries, ledger.as_deref(), stderr_log);
         let bots = required_bots_for(record.cwd.as_deref());
         emit_gate_escape_for_record(record, &bots, None);
         closed_rows.push(json!({

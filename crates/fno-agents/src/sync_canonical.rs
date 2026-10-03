@@ -358,7 +358,7 @@ fn append_receipt(
     }
 }
 
-fn parse_iso(raw: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_iso(raw: &str) -> Option<DateTime<Utc>> {
     let s = raw.trim();
     DateTime::parse_from_rfc3339(s)
         .ok()

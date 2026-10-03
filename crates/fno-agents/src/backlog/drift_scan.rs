@@ -381,7 +381,7 @@ pub(crate) fn reverse_map_unstamped(
 ) -> Vec<MergeDriftRecord> {
     let mut fallback = HashMap::new();
     let (groups, cwd_by_nid, skipped_dead_cwd) = {
-        let cache_memo;
+        let mut cache_memo;
         let memo: &mut HashMap<String, String> = match listings {
             Some(cache) => {
                 cache_memo = cache.repo_keys.borrow_mut();
@@ -1115,7 +1115,7 @@ pub(crate) fn collect_open_binding_heals(
                         continue;
                     };
                     let Some(node) = nodes.iter().find(|i| {
-                        entries[*i].get("id").and_then(Value::as_str) == Some(heal_nid.as_str())
+                        entries[**i].get("id").and_then(Value::as_str) == Some(heal_nid.as_str())
                     }) else {
                         continue;
                     };

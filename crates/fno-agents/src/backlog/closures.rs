@@ -184,7 +184,7 @@ pub(crate) fn cascade_close_contained(
                 continue;
             }
         } else if let Some(unit) = &unit {
-            if reopen_outranks_child_closes(e, std::slice::from_ref(unit)) {
+            if reopen_outranks_child_closes(e, &[unit]) {
                 continue;
             }
         }
