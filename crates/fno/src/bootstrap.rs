@@ -1134,8 +1134,13 @@ pub(crate) fn env_override_python() -> BootResult<Option<PathBuf>> {
 /// forwarding priority in [`run`]: the `FNO_PY` override wins first, then the
 /// packaged sibling, and the uv tool dir answers otherwise.
 pub fn resolved_python_script() -> Option<PathBuf> {
-    if let Ok(Some(overridden)) = env_override_python() {
-        return Some(overridden);
+    match env_override_python() {
+        Ok(Some(overridden)) => return Some(overridden),
+        // A set-but-unusable override answers unresolved, never the fallback:
+        // forwarding refuses in this state, so the legs below would name a
+        // script nothing will ever exec.
+        Err(_) => return None,
+        Ok(None) => {}
     }
     env::current_exe()
         .ok()

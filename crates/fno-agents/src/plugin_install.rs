@@ -1316,6 +1316,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 build_stage(&root, &parent).map(|(p, _)| p)
             }) {
                 Ok(stage) => {
+                    prime_plugin_root_pointer(&stage);
                     println!("{}", stage.display());
                     0
                 }
@@ -1570,6 +1571,7 @@ fn run_opencode_arm(
             }
             let home = AgentsHome::from_env();
             let _ = crate::reclaim::run_reclaim(&["--apply".to_string()], &home);
+            prime_plugin_root_pointer(&state_root().join("plugin-stage").join("fno"));
             if receipt.status == "partial" {
                 3
             } else {
@@ -1919,7 +1921,11 @@ fn prime_plugin_root_pointer(stage: &Path) {
     if !stage.join(".claude-plugin").join("plugin.json").is_file() {
         return;
     }
-    let ptr = crate::state_layout::place(&state_root(), "plugin-root");
+    let anchor = match std::env::var_os("FNO_HOME") {
+        Some(home) if !home.is_empty() => std::path::PathBuf::from(home),
+        _ => state_root(),
+    };
+    let ptr = crate::state_layout::place(&anchor, "plugin-root");
     if let Some(parent) = ptr.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

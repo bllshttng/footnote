@@ -40,9 +40,10 @@ BASE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 # A fake plugin root: real hooks, stub installer, version 9.9.9.
 PLUG="$WORK/plug"
-mkdir -p "$PLUG/hooks" "$PLUG/scripts/lib" "$PLUG/.claude-plugin"
+mkdir -p "$PLUG/hooks" "$PLUG/hooks/lib" "$PLUG/scripts/lib" "$PLUG/.claude-plugin"
 cp "$WRAPPER" "$PLUG/hooks/"
 cp "$SESSION_HOOK" "$PLUG/hooks/"
+cp "$REPO_ROOT_REAL/hooks/lib/fno-bin.sh" "$PLUG/hooks/lib/"
 cp "$REPO_ROOT_REAL/scripts/lib/with-timeout.sh" "$PLUG/scripts/lib/"
 printf '{\n  "name": "fno",\n  "version": "9.9.9"\n}\n' >"$PLUG/.claude-plugin/plugin.json"
 MARK="$WORK/installer-ran"

@@ -7,6 +7,8 @@
 fno_bin() {
     if command -v fno >/dev/null 2>&1; then
         command -v fno
+    elif [[ -n "${UV_TOOL_BIN_DIR:-}" && -x "${UV_TOOL_BIN_DIR}/fno" ]] ; then
+        printf '%s' "$UV_TOOL_BIN_DIR/fno"
     elif [[ -x "${HOME:-}/.cargo/bin/fno" ]] ; then
         printf '%s' "$HOME/.cargo/bin/fno"
     elif [[ -x "${HOME:-}/.local/bin/fno" ]] ; then
