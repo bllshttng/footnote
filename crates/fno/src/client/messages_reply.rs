@@ -393,7 +393,7 @@ pub(super) async fn peek_keys(
             },
             b'm' => match view.display_rows().get(cursor) {
                 Some(DisplayRow::Agent(a)) => {
-                    view.peek_input = Some((a.name.clone(), String::new()));
+                    view.peek_input = Some((a.name.clone(), super::composer_draft::load(&a.name)));
                     view.peek_input_esc.clear();
                     break;
                 }

@@ -165,8 +165,10 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
 }
 
 /// The production runner: the bare sweep, cwd-free (the graph is one store).
+/// The native door, not the wheel: the Python verb is deleted, and the arm's
+/// JSON contract lives in the Rust arm now.
 fn run_reconcile() -> Result<String, String> {
-    let output = std::process::Command::new(crate::scrape::fno_py())
+    let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(["backlog", "reconcile", "--json"])
         .stdin(std::process::Stdio::null())
         .output()

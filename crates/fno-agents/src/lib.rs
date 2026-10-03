@@ -208,6 +208,7 @@ pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
 pub mod intel_insights;
+pub mod intel_rollup;
 pub mod interrupt_classify;
 pub mod json_output;
 pub(crate) mod keeper_revival;
@@ -1401,6 +1402,10 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // Reconcile's post-close emits (the Python twins declared both in
+    // events/schema.yaml; session_satisfied carries the pr_merge data source).
+    "session_satisfied",
+    "human_touch",
     // The pr-watch sweep flipped an open fno-bound draft PR back to ready
     // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
     "pr_watch_draft_flip",
@@ -1438,6 +1443,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",
     "agent_exited",
+    // The sweep's observed lifecycle word for an owned row: one row per
+    // applied status transition (exit or restart) with its evidence cause
+    // (ruling d-e096c669), so an exit or a restart is never silent again.
+    "row_lifecycle_observed",
     "agent_removed",
     // Served facts (daemon-emitted): the sweep is the only writer of the
     // registry's measured surfaces, so each of these announces a change that

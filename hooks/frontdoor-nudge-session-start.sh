@@ -30,27 +30,17 @@ source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 # Resolve the front door beyond this session's PATH: a fresh background
 # session does not inherit ~/.cargo/bin, and `command -v fno` alone then reads
 # a working install as missing, which started the installer and force-replaced
-# a live tool env mid-study (2026-10-02 gap audit, blocker 1). PATH first,
-# then the known install dirs, mirroring hooks/lib/agents-bin.sh.
-fno_bin=""
-if command -v fno >/dev/null 2>&1; then
-  fno_bin="$(command -v fno)"
-else
-  for known_dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
-    if [[ -x "$known_dir/fno" ]]; then
-      fno_bin="$known_dir/fno"
-      break
-    fi
-  done
-fi
-
-if [[ -n "$fno_bin" ]]; then
+# a live tool env mid-study (2026-10-02 gap audit, blocker 1). The shared
+# resolver in hooks/lib/fno-bin.sh serves this hook and the prompt-submit twin.
+source "$HOOK_DIR/lib/fno-bin.sh" 2>/dev/null || true
+FNO_BIN="$(fno_bin)"
+if [[ -n "$FNO_BIN" ]]; then
   # The probe's EXIT CODE is the signal (2 = fno-py, 124 = hung socket that
   # still proves the Rust door), so it keeps its FIXED bound: the load-aware
   # budget's silence contract cannot express "the exit code is the answer",
   # and a runner under shard load measured a 1s fork miss that turned a real
   # rc 2 into a 124 and silenced a real reminder.
-  with_timeout 3 "$fno_bin" mux ls --json >/dev/null 2>&1
+  with_timeout 3 "$FNO_BIN" mux ls --json >/dev/null 2>&1
   probe_rc=$?
   # 124 means our own bound fired. A wedged socket still PROVES the Rust front
   # door is present: `fno-py` has no `mux` verb and fails fast with a usage
@@ -67,7 +57,7 @@ if [[ -n "$fno_bin" ]]; then
     # only clobber the working tool env; name the path and stop.
     echo "## fno is installed, just not on this session's PATH"
     echo
-    echo "\`fno\` lives at \`$fno_bin\`, which this session's PATH lacks. New sessions pick it up; this one can call it by that path or \`export PATH=\"\$(dirname \"$fno_bin\"):\$PATH\"\`."
+    echo "\`fno\` lives at \`$FNO_BIN\`, which this session's PATH lacks. New sessions pick it up; this one can call it by that path or \`export PATH=\"\$(dirname \"$FNO_BIN\"):\$PATH\"\`."
     exit 0
   fi
 fi

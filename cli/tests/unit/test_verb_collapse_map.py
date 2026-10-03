@@ -280,8 +280,9 @@ def test_map_covers_current_surface_once():
     # The decide family ported native, freeing its four backlog rows and the
     # two decide-shim rows with the registrations they kept: 599 -> 593.
     # The two daemon-free read projections (sessions-map, revival-check)
-    # allocated their rows: 593 -> 595.
-    assert len(mapped) == 595, (
+    # allocated their rows: 593 -> 595. The reconcile port retired the
+    # `backlog reconcile` KEEP row with the verb: 595 -> 594.
+    assert len(mapped) == 594, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -352,7 +353,8 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     # The native decisions listing retired the `decide list` KEEP shim: 79 -> 78.
     # The decide family ported native: its dispatch group and the KEEP
     # reindex leaf left the map with the registrations: 78 -> 76.
-    assert projected == 76
+    # The reconcile port retired the `backlog reconcile` KEEP leaf: 76 -> 75.
+    assert projected == 75
     assert projected <= 99
 
 

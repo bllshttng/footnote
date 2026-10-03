@@ -785,7 +785,8 @@ pub(super) async fn execute_row_menu_action(
                     // (6.2) Mail arms the SAME free-text composer peek
                     // `m` opens - one input surface, two doors.
                     if matches!(action, MenuAction::Mail) {
-                        view.peek_input = Some((a.name.clone(), String::new()));
+                        view.peek_input =
+                            Some((a.name.clone(), super::composer_draft::load(&a.name)));
                         view.peek_input_esc.clear();
                     }
                 }

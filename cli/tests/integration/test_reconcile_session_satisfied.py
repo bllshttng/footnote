@@ -231,66 +231,45 @@ def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
 
 
-def test_cli_reconcile_emits_session_satisfied_for_owner(tmp_path, monkeypatch):
-    """AC1-HP: out-of-band merge -> node closed -> session_satisfied lands for
-    the owning session_id in that session's events.jsonl."""
-    graph_path = tmp_path / "graph.json"
-    _patch_graph_path(monkeypatch, graph_path)
-    sentinel_dir = tmp_path / "retro-pending"
-    import fno.paths as paths
-    monkeypatch.setattr(paths, "retro_pending_dir", lambda: sentinel_dir)
+    """Worktree binding: two sibling worktrees each with their own state file.
+    Reconciling node A's record must write A's event ONLY to A's events.jsonl,
+    bound to A's gate_state_hash - B's events.jsonl stays empty."""
+    cwd_a = tmp_path / "wt-a"
+    cwd_b = tmp_path / "wt-b"
+    state_a = _write_state(cwd_a, session_id="sid-a", pr_number=42)
+    _write_state(cwd_b, session_id="sid-b", pr_number=43)
+    hash_a = _md5(state_a)
 
-    owner_cwd = tmp_path / "owner-repo"
-    state = _write_state(owner_cwd, session_id="owner-sid", pr_number=100)
-    expected_hash = _md5(state)
-
-    graph_path.parent.mkdir(parents=True, exist_ok=True)
-    seed_graph(graph_path, json.dumps({"entries": [{
-        "id": "ab-hp", "title": "t", "pr_number": 100,
-        "pr_url": "https://github.com/test-owner/test-repo/pull/100",
-        "additional_prs": [], "completed_at": None, "superseded_by": None,
-        "plan_path": None, "cwd": str(owner_cwd), "session_id": "owner-sid",
-    }]}, indent=2) + "\n")
-
-    monkeypatch.setattr(rec, "query_pr_merge_state", lambda n, repo=None, cwd=None: PrMergeState(
-        number=n, state="MERGED", url=f"https://github.com/o/r/pull/{n}", merged_at="2026-06-02T00:00:00Z"))
-
-    result = runner.invoke(app, ["backlog", "reconcile"])
-    assert result.exit_code == 0, result.output
-
-    ss = [e for e in _events(owner_cwd) if e["type"] == "session_satisfied"]
-    assert len(ss) == 1, f"expected one session_satisfied, got {_events(owner_cwd)}"
-    assert ss[0]["data"]["session_id"] == "owner-sid"
-    assert ss[0]["data"]["source"] == "pr_merge"
-    assert ss[0]["data"]["gate_state_hash"] == expected_hash
+    out = emit_session_satisfied_for_record(_record(cwd_a, session_id="sid-a", pr_number=42))
+    assert out is not None
+    a_events = [e for e in _events(cwd_a) if e["type"] == "session_satisfied"]
+    assert len(a_events) == 1
+    assert a_events[0]["data"]["session_id"] == "sid-a"
+    assert a_events[0]["data"]["gate_state_hash"] == hash_a
+    # B is untouched.
+    assert _events(cwd_b) == []
 
 
-def test_cli_reconcile_no_emit_when_query_fails(tmp_path, monkeypatch):
-    """AC1-ERR: a gh query failure closes nothing and emits no event."""
-    graph_path = tmp_path / "graph.json"
-    _patch_graph_path(monkeypatch, graph_path)
-    sentinel_dir = tmp_path / "retro-pending"
-    import fno.paths as paths
-    monkeypatch.setattr(paths, "retro_pending_dir", lambda: sentinel_dir)
+# ---------------------------------------------------------------------------
+# CLI end-to-end: closing a drifted node emits the event (AC1-HP)
+# ---------------------------------------------------------------------------
 
-    owner_cwd = tmp_path / "owner-repo"
-    _write_state(owner_cwd, session_id="owner-sid")
+@pytest.fixture(autouse=True)
+def _no_revert_fetch(monkeypatch):
+    """Keep reconcile hermetic: never shell `gh pr list` from tests. W4 revert
+    detection has its own unit tests (test_causal_fields.py)."""
+    monkeypatch.setattr(rec, "fetch_recent_merged_prs", lambda **kw: [])
 
-    graph_path.parent.mkdir(parents=True, exist_ok=True)
-    seed_graph(graph_path, json.dumps({"entries": [{
-        "id": "ab-fail", "title": "t", "pr_number": 800,
-        "pr_url": "https://github.com/test-owner/test-repo/pull/800",
-        "additional_prs": [], "completed_at": None, "superseded_by": None,
-        "plan_path": None, "cwd": str(owner_cwd), "session_id": "owner-sid",
-    }]}, indent=2) + "\n")
 
-    from fno.graph._reconcile import ReconcileError
+def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
+    monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
+    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", graph_path.parent / "graph-archive.json")
+    monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
+    # Seam readers resolve fno.paths.graph_json at call time; pin the
+    # resolver to the same hermetic file (module-attr pins do not reach it).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
 
-    def _boom(number, repo=None, cwd=None):
-        raise ReconcileError("gh auth required")
 
-    monkeypatch.setattr(rec, "query_pr_merge_state", _boom)
-
-    result = runner.invoke(app, ["backlog", "reconcile"])
-    assert result.exit_code == 4, result.output
-    assert [e for e in _events(owner_cwd) if e["type"] == "session_satisfied"] == []
