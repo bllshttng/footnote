@@ -107,6 +107,9 @@ impl View {
         if let Some(id) = self.card_node_hit(i, col) {
             return Some(ChromeHit::OpenNode(id));
         }
+        if let Some(url) = self.card_pr_hit(i, col) {
+            return Some(ChromeHit::OpenPr(url));
+        }
         self.row_action(i)
     }
 
@@ -120,11 +123,23 @@ impl View {
         let DisplayRow::Agent(a) = rows.get(i)? else {
             return None;
         };
-        let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rect = self.worker_column_rects(text_w as u16)[2];
-        let span = card_line::meter_node(a, rect.width as usize).node?;
-        let at = (col as usize).checked_sub(rect.x as usize)?;
-        span.contains(&at).then(|| a.node.clone()).flatten()
+        let span = card_line::node_span(a, self.sideline_paint_w().checked_sub(1)?)?;
+        span.contains(&(col as usize))
+            .then(|| a.node.clone())
+            .flatten()
+    }
+
+    fn card_pr_hit(&self, i: usize, col: u16) -> Option<String> {
+        if self.sideline_layout != sideline_color::SidelineLayout::Card {
+            return None;
+        }
+        let rows = self.painted_rows();
+        let DisplayRow::Agent(a) = rows.get(i)? else {
+            return None;
+        };
+        let span = card_line::pr_span(a, self.sideline_paint_w().checked_sub(1)?)?;
+        span.contains(&(col as usize))
+            .then(|| format!("https://github.com/bllshttng/footnote/pull/{}", a.pr?))
     }
 
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {

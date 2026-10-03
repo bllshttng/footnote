@@ -3785,6 +3785,7 @@ impl View {
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank
             | DisplayRow::CardDetail(..)
+            | DisplayRow::CardMetrics(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -4161,6 +4162,7 @@ impl View {
             // Agent row painted above it. Inert for the selector, clickable
             // here - the same split a Header has.
             DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
+            DisplayRow::CardMetrics(..) => self.row_action(i.checked_sub(2)?),
             // Inert rows (spacer, table column header) resolve to no action.
             DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay.
@@ -6310,18 +6312,10 @@ enum DisplayRow<'a> {
     /// The `+` create-workspace affordance, a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
-    /// (US3) A one-line spacer between workspace groups and before the
-    /// trailing sections. Inert: every painted line stays one display row
-    /// (the single-enumeration invariant), so scroll, hover, and hit-test
-    /// index math are untouched.
+    /// An inert one-line separator retained in card mode.
     Blank,
-    /// Line 2 of a card-mode card (the dims under `[sideline] layout =
-    /// "card"`): harness/model, parent-or-role, message, with the lifetime
-    /// and age right-aligned in a DIM legacy row. Inert - every painted
-    /// line stays one display row (the single-enumeration invariant) - and
-    /// a click on it acts on the `Agent` row above it via
-    /// [`View::row_action`]'s index shift.
     CardDetail(&'a AgentRow),
+    CardMetrics(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6447,6 +6441,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Blank
             | DisplayRow::CardDetail(..)
+            | DisplayRow::CardMetrics(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
@@ -6675,6 +6670,7 @@ enum ChromeHit {
     OpenQuestionsList,
     /// A card's node tap: the plan in Obsidian, else the node details pane.
     OpenNode(String),
+    OpenPr(String),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -9745,6 +9741,7 @@ async fn apply_hit(
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
         ChromeHit::OpenNode(id) => node_link::open(view, id).await,
+        ChromeHit::OpenPr(url) => update_menu::open_pr(view, url).await,
     }
     Ok(())
 }

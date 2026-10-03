@@ -1,112 +1,57 @@
-//! What a sideline card's two lines say: the slug, the `harness/model`
-//! lead of line 2, and the context-bar + node cell of line 1. The paint and
-//! the click resolver both read [`meter_node`], so a node tap lands where
-//! the node is drawn.
+//! Shared sideline card fields and hit ranges.
 
 use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::row_meter::{cost_cell, ctx_bar, CTX_BAR_CELLS, CTX_BAR_W};
 use crate::proto::{AgentRow, BacklogCard};
 
-/// Line 1's context cell: the bar, then the running cost, then the node.
-/// A narrow cell drops the bar first, then the cost, then the node, as
-/// whole fields; nothing is ever ellipsized.
-pub(super) struct MeterNode {
-    pub text: String,
-    /// The bar's fill columns, relative to the cell start.
-    pub fill: Option<Range<usize>>,
-    /// The node's columns, relative to the cell start: the tap target.
-    pub node: Option<Range<usize>>,
+/// Keep node and PR adjacent at the panel's right edge, separated by ` · `.
+pub(super) fn identity_spans(a: &AgentRow, text_w: usize) -> IdentitySpans {
+    let node = a.node.as_deref().filter(|s| !s.is_empty());
+    let node_w = node.map_or(0, |s| s.width());
+    let pr_w = a.pr.map(|n| format!("#{n}").width()).filter(|w| *w <= 6);
+    let pr = pr_w.filter(|w| *w <= text_w).map(|w| text_w - w..text_w);
+    let gap = usize::from(node_w > 0 && pr.is_some()) * 3;
+    let node_end = pr
+        .as_ref()
+        .map_or(text_w, |span| span.start.saturating_sub(gap));
+    let node_span = (node_w > 0 && node_end >= node_w).then(|| node_end - node_w..node_end);
+    let separator = node_span
+        .as_ref()
+        .zip(pr.as_ref())
+        .map(|(node, pr)| node.end..pr.start);
+    IdentitySpans {
+        node: node_span,
+        separator,
+        pr,
+    }
 }
 
-pub(super) fn meter_node(a: &AgentRow, width: usize) -> MeterNode {
-    let bar = ctx_bar(a.context_used_pct);
-    let cost = cost_cell(a.session_cost_cents, a.session_tokens);
-    let node = a.node.as_deref().unwrap_or("");
-    let node_w = node.width();
-    // The bar's glyph cells sit at the cell's start; the percent after
-    // them is text, not fill.
-    let fill = a.context_used_pct.is_some().then(|| 0..CTX_BAR_CELLS);
-    // The cost field pads to 8 so nodes line up card to card.
-    let cost_field = if cost.is_empty() {
-        String::new()
-    } else {
-        format!("{cost:<8}")
-    };
-    let cost_w = cost_field.width();
-    if node_w == 0 && cost_w == 0 && width >= CTX_BAR_W {
-        return MeterNode {
-            text: bar,
-            fill,
-            node: None,
-        };
-    }
-    if node_w > 0 && cost_w == 0 && width > CTX_BAR_W + node_w {
-        let at = CTX_BAR_W + 1;
-        return MeterNode {
-            text: format!("{bar} {node}"),
-            fill,
-            node: Some(at..at + node_w),
-        };
-    }
-    let drop_bar = |text: String, node_at: Option<usize>| MeterNode {
-        text,
-        fill: None,
-        node: node_at.map(|at| at..at + node_w),
-    };
-    // Bar dropped first, then the cost, then the node, as whole fields.
-    if node_w > 0 && cost_w > 0 {
-        let with_bar = CTX_BAR_W + 1 + cost_w + 1 + node_w;
-        if width >= with_bar {
-            let node_at = CTX_BAR_W + 1 + cost_w + 1;
-            return MeterNode {
-                text: format!("{bar} {cost_field} {node}"),
-                fill,
-                node: Some(node_at..node_at + node_w),
-            };
-        }
-        let without_bar = cost_w + 1 + node_w;
-        if width >= without_bar {
-            return drop_bar(format!("{cost_field} {node}"), Some(cost_w + 1));
-        }
-        if width >= node_w {
-            return drop_bar(node.to_string(), Some(0));
-        }
-        return MeterNode {
-            text: String::new(),
-            fill: None,
-            node: None,
-        };
-    }
-    if cost_w > 0 {
-        if width >= cost_w {
-            return MeterNode {
-                text: cost_field,
-                fill: None,
-                node: None,
-            };
-        }
-        return MeterNode {
-            text: String::new(),
-            fill: None,
-            node: None,
-        };
-    }
-    // Node only (no cost reading).
-    if node_w > 0 && width >= node_w {
-        return MeterNode {
-            text: node.to_string(),
-            fill: None,
-            node: Some(0..node_w),
-        };
-    }
-    MeterNode {
-        text: String::new(),
-        fill: None,
-        node: None,
-    }
+pub(super) fn node_span(a: &AgentRow, text_w: usize) -> Option<Range<usize>> {
+    identity_spans(a, text_w).node
+}
+
+pub(super) fn pr_span(a: &AgentRow, text_w: usize) -> Option<Range<usize>> {
+    identity_spans(a, text_w).pr
+}
+
+pub(super) struct IdentitySpans {
+    pub node: Option<Range<usize>>,
+    pub separator: Option<Range<usize>>,
+    pub pr: Option<Range<usize>>,
+}
+
+pub(super) fn metrics(a: &AgentRow, status: &str) -> String {
+    let context = a.context_used_pct.map_or_else(
+        || "????  ?".into(),
+        |pct| super::row_meter::ctx_meter_text(pct, 4),
+    );
+    let count = a
+        .compaction_count
+        .map_or_else(|| "?c".into(), |n| format!("{n}c"));
+    let cost = super::row_meter::cost_cell(a.session_cost_cents);
+    format!("{context} · {count} · {cost} · {status}")
 }
 
 /// The card's short model: no `[1m]` window tag, and a `claude-` id names

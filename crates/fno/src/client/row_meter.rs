@@ -48,28 +48,18 @@ pub(super) fn ctx_bar(pct: Option<u8>) -> String {
     format!("{:<CTX_BAR_W$}", ctx_meter_text(pct, CTX_BAR_CELLS))
 }
 
-/// The card's running cost cell: `~$0.42`, `~$44.97`, `~$1.2k` from $1,000.
-/// Unpriced shows the raw tokens (`78.0M tok`, `412k tok`), never a dollar
-/// guess; no reading at all shows nothing.
-pub(super) fn cost_cell(cents: Option<u64>, tokens: Option<u64>) -> String {
-    let Some(tokens) = tokens else {
-        return String::new();
-    };
-    match cents {
-        None => format!("{} tok", tok_short(tokens)),
-        Some(cents) if cents >= 100_000 => format!("~${:.1}k", cents as f64 / 100_000.0),
-        Some(cents) => format!("~${}.{:02}", cents / 100, cents % 100),
-    }
-}
-
-fn tok_short(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.0}k", tokens as f64 / 1_000.0)
-    } else {
-        format!("{tokens}")
-    }
+/// A priced dollar amount or an unknown marker; never a token substitute.
+pub(super) fn cost_cell(cents: Option<u64>) -> String {
+    cents.map_or_else(
+        || "?".into(),
+        |c| {
+            if c >= 100_000 {
+                format!("${:.1}k", c as f64 / 100_000.0)
+            } else {
+                format!("${}.{:02}", c / 100, c % 100)
+            }
+        },
+    )
 }
 
 /// The name column's width at a panel text width: the fixed cells and a
@@ -117,25 +107,13 @@ impl View {
 mod tests {
     use super::cost_cell;
     use super::name_w;
-    use super::tok_short;
-
     #[test]
-    fn cost_formats_dollars_tokens_and_nothing() {
-        assert_eq!(cost_cell(Some(42), Some(1_000)), "~$0.42");
-        assert_eq!(cost_cell(Some(4497), Some(78_019_345)), "~$44.97");
-        assert_eq!(cost_cell(Some(120_000), Some(1)), "~$1.2k");
-        assert_eq!(cost_cell(None, Some(78_019_345)), "78.0M tok");
-        assert_eq!(cost_cell(None, Some(412_345)), "412k tok");
-        assert_eq!(cost_cell(None, Some(999)), "999 tok");
-        assert_eq!(cost_cell(None, None), "");
-        assert_eq!(cost_cell(Some(0), Some(500)), "~$0.00");
-    }
-
-    #[test]
-    fn tok_short_rounds_per_band() {
-        assert_eq!(tok_short(78_019_345), "78.0M");
-        assert_eq!(tok_short(1_999_999), "2.0M");
-        assert_eq!(tok_short(900_000), "900k");
+    fn cost_is_dollars_or_unknown() {
+        assert_eq!(cost_cell(Some(42)), "$0.42");
+        assert_eq!(cost_cell(Some(4497)), "$44.97");
+        assert_eq!(cost_cell(Some(120_000)), "$1.2k");
+        assert_eq!(cost_cell(Some(0)), "$0.00");
+        assert_eq!(cost_cell(None), "?");
     }
 
     // The unit test the plan names: 50, 80, 120, 200 and 320 columns, both
