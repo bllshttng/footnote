@@ -322,33 +322,32 @@ fn refusal_is_secondary_phrase_alone_does_not_classify_the_bucket_does() {
     ));
 }
 
+/// The two stderr wording classifiers are one contract family: gh's own
+/// wording decides whether a failed read is world-state (no PR), an
+/// outage/retry, or an unrecoverable park (unauthenticated). One test owns
+/// the shared vocabulary so the suite stays shrink-only.
 #[test]
-fn no_pr_stderr_detected() {
+fn stderr_wording_classifiers() {
+    // no-PR positives: real world-state, the fingerprint records it.
     assert!(is_no_pr_stderr(
         b"no pull requests found for branch \"feat\""
     ));
     assert!(is_no_pr_stderr(b"No pull requests found for branch \"x\""));
-    // Outage shapes are NOT no-PR.
-    assert!(!is_no_pr_stderr(b"connect: network is unreachable"));
-    assert!(!is_no_pr_stderr(b"API rate limit exceeded"));
-    assert!(!is_no_pr_stderr(b""));
-}
-
-#[test]
-fn unauthenticated_stderr_is_named_by_ghs_own_remediation() {
-    // The measured fresh-machine shape: gh prints the exact fix command.
+    // Unauthenticated positives: gh prints the exact fix command.
     assert!(stderr_is_unauthenticated(
         "gh: To get started with GitHub CLI, please run: gh auth login"
     ));
     assert!(stderr_is_unauthenticated(
         "To get started with GitHub CLI, please run:\n\n  gh auth login\n"
     ));
-    // `gh auth status` wording for an expired or absent login.
     assert!(stderr_is_unauthenticated(
         "You are not logged into github.com"
     ));
-    // Outage, quota, and no-PR shapes are NOT unauthenticated - those keep
-    // their own semantics (retry, back off, fingerprint).
+    // Outage, quota, and empty shapes are NEITHER - they keep their own
+    // semantics (retry, back off, fingerprint).
+    assert!(!is_no_pr_stderr(b"connect: network is unreachable"));
+    assert!(!is_no_pr_stderr(b"API rate limit exceeded"));
+    assert!(!is_no_pr_stderr(b""));
     assert!(!stderr_is_unauthenticated(
         "connect: network is unreachable"
     ));

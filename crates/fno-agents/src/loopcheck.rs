@@ -1923,10 +1923,18 @@ pub(crate) fn decide_with_payload(
                 // An unauthenticated gh cannot recover inside the loop - no
                 // fire logs in - so the block-and-retry below would re-wake
                 // the session on every stop until a cap, each wake failing
-                // identically. Park instead: one message naming the fix, then
-                // the session stops cleanly and `/target --resume` re-opens
-                // the loop once the login landed.
+                // identically. Park as HeldOnQuestion instead: the operator
+                // answers (logs in), a later run ships. The termination event
+                // is what the cross-session loop runtime reads to stop
+                // re-dispatching the exited session; the JSON termination
+                // reason is what the stop hook treats as terminal.
                 if stderr_is_unauthenticated(&failed_stderr) {
+                    let reason = format!(
+                        "gh is not authenticated: the loop's PR read '{failed_read}' cannot \
+                         succeed until the login lands, so the run is parked instead of \
+                         re-waking on every stop. Run `gh auth login` (and `gh auth setup-git` \
+                         if pushes fail), then `/target --resume`."
+                    );
                     emit(
                         "loop_check_gh_error",
                         serde_json::json!({
@@ -1937,6 +1945,7 @@ pub(crate) fn decide_with_payload(
                             "parked": true
                         }),
                     );
+                    term_row("HeldOnQuestion", &reason);
                     fire_row(
                         "allow",
                         if intent == Intent::Promise {
@@ -1951,16 +1960,7 @@ pub(crate) fn decide_with_payload(
                             "reviewed": false
                         }),
                     );
-                    let reason = format!(
-                        "gh is not authenticated: the loop's PR read '{failed_read}' cannot \
-                         succeed until the login lands, so the run is parked instead of \
-                         re-waking on every stop. Run `gh auth login` (and `gh auth setup-git` \
-                         if pushes fail), then `/target --resume`."
-                    );
-                    return (
-                        0,
-                        allow_output("allow", None, &reason, this_fire, Some(fingerprint)),
-                    );
+                    return terminal("allow", Some(TerminationReason::HeldOnQuestion), &reason);
                 }
                 // US4 (locked decision 6, REVERSES the wedge's behavior): a
                 // gh-errored done() read NEVER terminates NoProgress, even
