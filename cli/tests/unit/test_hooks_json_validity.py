@@ -580,7 +580,7 @@ def _declaration_groups() -> dict:
 def test_both_postcompact_reinject_hooks_are_registered_on_supported_harnesses() -> None:
     expected_sources = [
         "target-postcompact-reinject",
-        "king-postcompact-reinject",
+        "lead-postcompact-reinject",
     ]
     groups = _declaration_groups()
     claude_compact = [

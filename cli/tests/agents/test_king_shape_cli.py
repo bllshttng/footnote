@@ -3,7 +3,7 @@
 The Stop nudge reads the manifest's shape field to learn whether live spawned
 workers are an answered court or an unshaped pass. These tests pin the CLI
 half: the holder declares, on its own crowned manifest, idempotently. The
-write itself lives in Rust (`fno-agents reign-shape`, pinned by loop_reign.rs
+write itself lives in Rust (`fno-agents lead-shape`, pinned by lead_state.rs
 tests); the two write tests run the real binary and skip when it is not built.
 """
 from __future__ import annotations
@@ -181,7 +181,7 @@ def test_own_crown_argv_keys_the_root_on_the_caller_row_cwd(
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
 
-    argv, own = _own_crown_argv("reign-shape", "")
+    argv, own = _own_crown_argv("lead-shape", "")
 
     assert own == SCOPE
     i = argv.index("--root")

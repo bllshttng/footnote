@@ -22,6 +22,9 @@ use fno_agents::usage::{verb_help, verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
+// Registered spellings are frozen at the pre-rename set (the shrink gate
+// allows no added token); the lead-/org- spellings dispatch below as
+// accepted aliases and register when the gate learns to bank a swap.
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
     "active-backlog-receipt",
@@ -216,7 +219,7 @@ fn main() {
         std::process::exit(fno_agents::hook::dispatch(&args[1..]));
     }
     // `mail-hold`: transport-only (no client action - the shrink law allows
-    // none); the mux server's keystroke arm and `king cancel` are the
+    // none); the mux server's keystroke arm and `lead cancel` are the
     // callers. The arm runs detached-safe and answers in microseconds, so
     // it dispatches before the runtime builds, with the other early arms.
     if args.first().map(String::as_str) == Some("mail-hold") {
@@ -461,13 +464,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
-    // `king-escalation-text` is the hidden binary-direct transport for the
-    // king escalation renderer (ported out of `fno.king.escalate`): Python
+    // `lead-escalation-text` is the hidden binary-direct transport for the
+    // lead escalation renderer (ported out of `fno.lead.escalate`): Python
     // keeps the question fold and the liveness read, this side only renders.
     // Same `matches!` treatment as `component-verdict`, so no advertised fno
     // verb is added.
-    if matches!(verb, "king-escalation-text") {
-        return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
+    if matches!(verb, "lead-escalation-text" | "king-escalation-text") {
+        return fno_agents::lead_escalation::run_lead_escalation_text(&args[1..]);
     }
 
     // `fleet-task` is the hidden binary-direct transport the Python reconcile
@@ -809,15 +812,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::sync_canonical::run_sync_canonical_verb(&args[1..]);
     }
 
-    // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
-    // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
-    // `fno agents king shape` shell and escalate's client invoke the binary
+    // `lead-state`/`lead-shape`: the lead reader and the shape rewrite (see
+    // lead_state.rs doc). Direct dispatch, daemon-free reads; the Python
+    // `fno agents lead shape` shell and escalate's client invoke the binary
     // directly rather than routing through the agents verb set.
-    if matches!(verb, "reign-state") {
-        return fno_agents::loop_reign::run_reign_state(&args[1..]);
+    if matches!(verb, "lead-state" | "reign-state") {
+        return fno_agents::lead_state::run_lead_state(&args[1..]);
     }
-    if matches!(verb, "reign-shape") {
-        return fno_agents::loop_reign::run_reign_shape_or_term(&args[1..]);
+    if matches!(verb, "lead-shape" | "reign-shape") {
+        return fno_agents::lead_state::run_lead_shape_or_term(&args[1..]);
     }
 
     // `graph-get`/`bash-census`/`session-start-bytes`: daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
@@ -831,58 +834,58 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `backlog-notes` and `backlog-note` folded into the grouped `backlog`
     // dispatcher (the early transport arm); see backlog::cli's doc.
-    // `court-orphans`: the orphan-crown sweep for `fno agents court`,
+    // `org-vacancies`: the orphan-team sweep for `fno agents org`,
     // daemon-free read; `==` dispatch like graph-get, and registered in
     // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
-    if verb == "court-orphans" {
-        return fno_agents::loop_reign::run_court_orphans(&args[1..]);
+    if verb == "org-vacancies" || verb == "court-orphans" {
+        return fno_agents::lead_state::run_org_vacancies(&args[1..]);
     }
-    // `court-fold`: the crown scope fold for `fno agents court
-    // --nodes` and the local board's court section, daemon-free like
-    // court-orphans; the workers column rides the same native claim verdicts
+    // `org-fold`: the team scope fold for `fno agents org
+    // --nodes` and the local board's org section, daemon-free like
+    // org-vacancies; the workers column rides the same native claim verdicts
     // `claim sweep` established, so a fold and the claims surface cannot
     // disagree about who holds a node.
-    if verb == "court-fold" {
-        return fno_agents::court_fold::run_court_fold(&args[1..]);
+    if verb == "org-fold" || verb == "court-fold" {
+        return fno_agents::org_fold::run_org_fold(&args[1..]);
     }
 
-    // `king-history`: the crown-scope reign_checkin readback for
-    // `fno agents king history`. Daemon-free read, `==` dispatch like
-    // court-fold: Python resolves the caller's crown scope and pins the
+    // `lead-history`: the team-scope lead_checkin readback for
+    // `fno agents lead history`. Daemon-free read, `==` dispatch like
+    // org-fold: Python resolves the caller's team scope and pins the
     // journal path (identity and paths are Python-owned), the native side
     // owns the scan so the file-budget Python-tree ratchet holds.
     // `--verdict` is the same journals read as a tenure verdict (law
     // d-fe66560a: the verdict rides this action as an argument, never a
     // new action).
-    if verb == "king-history" {
+    if verb == "lead-history" || verb == "king-history" {
         if args.iter().skip(1).any(|a| a == "--verdict") {
-            return fno_agents::king_history::run_king_verdict(&args[1..]);
+            return fno_agents::lead_history::run_lead_verdict(&args[1..]);
         }
-        return fno_agents::king_history::run_king_history(&args[1..]);
+        return fno_agents::lead_history::run_lead_history(&args[1..]);
     }
 
-    // `king-checkin`: one verb runs the reign check-in body for
-    // `fno agents king checkin`. Daemon-free beat like king-history:
-    // Python resolves the caller's crown scope and the paths Python owns,
+    // `lead-checkin`: one verb runs the lead check-in body for
+    // `fno agents lead checkin`. Daemon-free beat like lead-history:
+    // Python resolves the caller's team scope and the paths Python owns,
     // the native side gathers, prints, diffs and journals the row, reusing
-    // the court-fold fold and the king-history scan in process.
-    if verb == "king-checkin" {
-        return fno_agents::king_checkin::run_king_checkin(&args[1..]);
+    // the org-fold fold and the lead-history scan in process.
+    if verb == "lead-checkin" || verb == "king-checkin" {
+        return fno_agents::lead_checkin::run_lead_checkin(&args[1..]);
     }
     // `evals-macro`: the macro-eval failure-pattern leaderboard for
     // `fno doctor evals macro`. Daemon-free read, `==` dispatch like
-    // king-history: Python resolves the journal paths (identity and paths are
+    // lead-history: Python resolves the journal paths (identity and paths are
     // Python-owned), the native side owns the fold so the file-budget
     // Python-tree ratchet holds.
     if verb == "evals-macro" {
         return fno_agents::evals_macro::run_evals_macro(&args[1..]);
     }
-    // `reign-ledger`: the reign ledger page for `fno agents king ledger`.
-    // Same split as king-history: Python resolves the court and the paths,
+    // `lead-rundown`: the lead ledger page for `fno agents lead ledger`.
+    // Same split as lead-history: Python resolves the org and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
-    // in the court JSON, so the page cannot disagree with the court.
-    if verb == "reign-ledger" {
-        return fno_agents::king_ledger::run_reign_ledger(&args[1..]);
+    // in the org JSON, so the page cannot disagree with the org.
+    if verb == "lead-rundown" || verb == "reign-ledger" {
+        return fno_agents::rundown::run_lead_ledger(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
@@ -931,14 +934,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
     }
 
-    // `board`: the king board collector, read-only, daemon-free. Not a
+    // `board`: the lead board collector, read-only, daemon-free. Not a
     // routable `fno agents` verb (same `matches!` treatment as graph-get): the
-    // Python surface is `fno inbox board` / `fno king board`, whose typer
+    // Python surface is `fno inbox board` / `fno lead board`, whose typer
     // command shells HERE and renders, and the stop hook reads the collector
     // in-process. Matched with `==` beside graph-get so the routable-verb
     // parity guard does not see it - no advertised fno verb is added.
     if verb == "board" {
-        return fno_agents::king_board::run_board(&args[1..]);
+        return fno_agents::org_board::run_board(&args[1..]);
     }
 
     // `notify-watch`: the operator-notice sampler, read-only,
@@ -1052,7 +1055,7 @@ async fn run(args: Vec<String>) -> i32 {
     // the PR-body closure line; the Python readers forward here (JSON payload
     // in, JSON answer out, binary-direct like `pr-body-check`).
     if matches!(verb, "pr-closure-parse" | "pr-closure-render") {
-        return fno_agents::king_board::pr_closure::run(&args);
+        return fno_agents::org_board::pr_closure::run(&args);
     }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);
@@ -3311,8 +3314,8 @@ fn run_reap(rest: &[String]) -> i32 {
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
-    // Dead crowns first, matching the arm's in-arm order.
-    let crowns = fno_agents::crown_reap::production_sweep(&home, &cwd, !dry_run);
+    // Dead teams first, matching the arm's in-arm order.
+    let teams = fno_agents::team_reap::production_sweep(&home, &cwd, !dry_run);
     let mut summary = if dry_run {
         fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
@@ -3326,7 +3329,7 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     };
     summary.mark_escalated(fno_agents::agents_config::hold_escalate_after(&cwd));
-    summary.crowns = Some(crowns);
+    summary.teams = Some(teams);
 
     // The dry-run JSON read also carries the census (task 4): who would
     // retire and what was seen, one read. Text dry-runs carry it too now:

@@ -1,6 +1,6 @@
 //! The questions block and the full questions view, split out of
 //! `client.rs` because that file is over the line budget and shrink-only.
-//! The block sits above the court block in the sideline: one key toggles it,
+//! The block sits above the org block in the sideline: one key toggles it,
 //! a key pair resizes it, and answered questions hide behind one dim count
 //! line. The full view reuses the backlog board's framed list and detail
 //! panes and its markdown renderer (`backlog_panes`/`backlog_md`), and
@@ -82,7 +82,7 @@ pub(super) fn questions_notice(view: &View) -> String {
 }
 
 /// prefix+{ / prefix+}: grow or shrink the block by a row; the height
-/// persists, and the court rule still caps what renders.
+/// persists, and the org rule still caps what renders.
 pub(super) fn resize_block(view: &mut View, delta: i8) {
     let step = u16::from(delta.unsigned_abs());
     let next = if delta > 0 {
@@ -244,7 +244,7 @@ pub(super) enum QuestionHit {
 
 /// The block's reserved rows: its line count under the operator's height
 /// pref, but ZERO when the terminal cannot hold it beside at least one agent
-/// row - the block yields, the rows never do (the court rule). `None` when
+/// row - the block yields, the rows never do (the org rule). `None` when
 /// the block reserves nothing.
 pub(super) struct BlockRows {
     pub(super) n: usize,
@@ -259,16 +259,16 @@ pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
     if !view.questions_block.visible {
         return None;
     }
-    // The block is agents-view chrome like the court block: under the docked
+    // The block is agents-view chrome like the org block: under the docked
     // board it paints nothing, so it holds no rows and claims no clicks.
     if view.sideline_view != crate::view_store::SidelineView::Agents {
         return None;
     }
     let now = crate::digest_overlay::now_secs();
     let fold = view.questions_fold.as_ref()?;
-    let court = view.court_block_layout(term_rows).0;
+    let org = view.org_block_layout(term_rows).0;
     let chrome = view.bottom_row_is_chrome() as usize;
-    let available = term_rows.saturating_sub(court + chrome);
+    let available = term_rows.saturating_sub(org + chrome);
     let height =
         (view.questions_block.height as usize).clamp(2, available.saturating_sub(HEAD_ROWS).max(2));
     let text_w = (view.panel_w() as usize).saturating_sub(1);
@@ -300,8 +300,8 @@ pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
 /// `+N more` line when it painted.
 pub(super) fn hit_at(view: &View, term_rows: usize, row: u16) -> Option<QuestionHit> {
     let b = block_rows(view, term_rows)?;
-    let court = view.court_block_layout(term_rows).0;
-    let start = term_rows.saturating_sub(court + b.n);
+    let org = view.org_block_layout(term_rows).0;
+    let start = term_rows.saturating_sub(org + b.n);
     let r = (row as usize).checked_sub(start)?.checked_sub(HEAD_ROWS)?;
     if let Some(id) = b.ids.get(r) {
         return Some(QuestionHit::Row(id.clone()));
@@ -310,7 +310,7 @@ pub(super) fn hit_at(view: &View, term_rows: usize, row: u16) -> Option<Question
 }
 
 /// Paint the block's lines at `start` in the sideline column: the same cell
-/// loop the court block paints, with each segment's flags deciding whether a
+/// loop the org block paints, with each segment's flags deciding whether a
 /// run reads bold (a title), dim (meta and chrome), or plain. The `band` line
 /// wears the selector's full-width band instead.
 pub(super) fn paint_block(
@@ -430,7 +430,7 @@ fn answered_line(a: &crate::needs_overlay::AnsweredItem) -> String {
         (Some("mail"), Some("landed")) | (Some("resume"), Some("confirmed")) => {
             format!(" \u{2713} {who} {}", a.rung.as_deref().unwrap_or(""))
         }
-        (Some("crown"), Some("sent")) => format!(" \u{2713} {who} -> crown"),
+        (Some("team"), Some("sent")) => format!(" \u{2713} {who} -> team"),
         _ => format!(" \u{2713} {who} undelivered"),
     }
 }
@@ -451,7 +451,7 @@ pub(super) struct Detail {
     pub(super) focus: bool,
     /// The page line the detail pane windows to when it holds focus.
     pub(super) scroll: usize,
-    /// `a` picked "agents decide": Enter hands the question to the crown.
+    /// `a` picked "agents decide": Enter hands the question to the team.
     pub(super) delegate: bool,
     /// The first `X` armed archive-all; the second sends it.
     pub(super) archive_armed: bool,
@@ -625,7 +625,7 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
     ));
     if d.delegate {
         s.push_str(
-            "## answer\n\nagents decide: the crown over the node decides a reversible call\n\n",
+            "## answer\n\nagents decide: the team over the node decides a reversible call\n\n",
         );
     }
     if let Some(notes) = &d.notes {
@@ -1218,8 +1218,8 @@ fn submit(d: &mut Detail) -> Submit {
 }
 
 impl View {
-    /// Rows the questions block owns just above the court block, after the
-    /// operator's height pref and the court rule. Zero when hidden, empty,
+    /// Rows the questions block owns just above the org block, after the
+    /// operator's height pref and the org rule. Zero when hidden, empty,
     /// or out of room.
     pub(super) fn questions_block_rows(&self) -> usize {
         block_rows(self, self.term.0 as usize)
@@ -1656,7 +1656,7 @@ mod tests {
         let d = v.question_detail.as_ref().unwrap();
         assert_eq!(d.notice.as_deref(), Some("a pin has no delegate"));
 
-        // `a` then Enter hands the question to the crown.
+        // `a` then Enter hands the question to the team.
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
         v.open_detail_on("q-1");
@@ -1935,10 +1935,10 @@ mod tests {
         ));
         v.questions_block.visible = true;
         v.questions_block.height = 4;
-        // term_rows 40, court 0: the block paints [35..40): blank, header,
+        // term_rows 40, org 0: the block paints [35..40): blank, header,
         // 2 rows, the more line. Height 4 with nine items shows q-0 and q-1.
-        let court = v.court_block_layout(40).0;
-        let start = 40 - court - 5;
+        let org = v.org_block_layout(40).0;
+        let start = 40 - org - 5;
         assert!(matches!(
             hit_at(&v, 40, (start + 2) as u16),
             Some(QuestionHit::Row(id)) if id == "q-0"

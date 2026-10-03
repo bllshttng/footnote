@@ -462,10 +462,10 @@ fn node_lists_children_blockers_and_live_sessions() {
     assert!(tree.unowned.is_empty());
     let mut snapshot = crate::org_model::OrgSnapshot::default();
     snapshot.apply(&org, 100);
-    org.fold = Err("court-fold exited 1".into());
+    org.fold = Err("org-fold exited 1".into());
     snapshot.apply(&org, 160);
     assert_eq!(snapshot.tree.as_ref().unwrap().measured_at, 100);
-    assert_eq!(snapshot.error.as_deref(), Some("court-fold exited 1"));
+    assert_eq!(snapshot.error.as_deref(), Some("org-fold exited 1"));
     assert_eq!(snapshot.error_at, Some(160));
     let mut first = crate::org_model::OrgSnapshot::default();
     first.apply(&org, 160);
@@ -655,16 +655,16 @@ fn a_board_facts_failure_degrades_to_created_at_order() {
 
 #[test]
 fn moved_helpers_still_answer() {
-    let mut king = row(None);
-    king.name = "kd".into();
-    king.crown_level = Some(2);
-    king.crown_scope = Some("x-9".into());
+    let mut lead = row(None);
+    lead.name = "kd".into();
+    lead.crown_level = Some(2);
+    lead.crown_scope = Some("x-9".into());
     assert_eq!(
-        king_of(&[king.clone()], "x-9", None, None),
+        lead_of(&[lead.clone()], "x-9", None, None),
         Some(("kd".into(), 2))
     );
     assert_eq!(
-        king_of(std::slice::from_ref(&king), "x-1", Some("x-9"), None),
+        lead_of(std::slice::from_ref(&lead), "x-1", Some("x-9"), None),
         Some(("kd".into(), 2))
     );
     let mut node_crown = row(None);
@@ -677,11 +677,11 @@ fn moved_helpers_still_answer() {
     project_crown.crown_scope = Some("fno".into());
     let both = [project_crown, node_crown];
     assert_eq!(
-        king_of(&both, "x-9", None, Some("fno")),
+        lead_of(&both, "x-9", None, Some("fno")),
         Some(("node-lead".into(), 1)),
-        "a node-scope crown beats an earlier project-scope crown"
+        "a node-scope team beats an earlier project-scope team"
     );
-    assert_eq!(king_of(&[row(None)], "x-1", None, None), None);
+    assert_eq!(lead_of(&[row(None)], "x-1", None, None), None);
     assert_eq!(
         session_action(None),
         SessionAction::Dim("no registry row".into())

@@ -129,15 +129,6 @@ pub mod context_run;
 pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
-pub mod court_fold;
-pub mod court_rivals;
-pub mod crown_alarm;
-pub mod crown_identity;
-pub mod crown_names;
-pub mod crown_reap;
-pub mod crown_settle;
-pub mod crown_split;
-pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod day;
@@ -211,23 +202,25 @@ pub mod interrupt_classify;
 pub mod json_output;
 pub(crate) mod keeper_revival;
 pub mod kill_criteria;
-pub mod king_answers;
-pub mod king_board;
-pub mod king_checkin;
-pub mod king_checkin_blueprint;
-pub mod king_checkin_machine;
-pub mod king_escalation;
-pub mod king_history;
-pub mod king_ledger;
-pub mod king_mail;
-pub mod king_settle;
-pub mod king_term;
-pub mod king_termination;
-pub mod king_verdict_inputs;
 pub mod lane_heal;
 pub mod lanes;
 pub mod launch_workdir;
 pub mod law_match;
+pub mod lead_answers;
+pub mod lead_checkin;
+pub mod lead_checkin_blueprint;
+pub mod lead_checkin_machine;
+pub mod lead_escalation;
+pub mod lead_eval;
+pub mod lead_goal;
+pub mod lead_history;
+pub mod lead_hygiene;
+pub mod lead_mail;
+pub mod lead_settle;
+pub mod lead_state;
+pub mod lead_term;
+pub mod lead_termination;
+pub mod lead_verdict_inputs;
 pub mod ledger_axes;
 pub(crate) mod ledger_workers;
 mod lifecycle_child;
@@ -237,9 +230,8 @@ pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
-pub mod loop_king;
+pub mod loop_lead;
 pub mod loop_readiness;
-pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
@@ -287,6 +279,9 @@ pub mod opencode_transcript;
 pub mod operator_notice;
 pub mod operator_turns;
 pub mod operator_witness;
+pub mod org_board;
+pub mod org_fold;
+pub mod org_rivals;
 pub mod orphan_reap;
 pub mod osc;
 pub mod otel_ingest;
@@ -339,9 +334,6 @@ pub mod refusal_rate;
 pub mod refusal_trend;
 pub mod registry_guard;
 pub mod registry_json;
-pub mod reign_eval;
-pub mod reign_goal;
-pub mod reign_hygiene;
 pub mod release_notes;
 pub mod removals;
 pub mod rename;
@@ -371,6 +363,7 @@ pub mod row_truth;
 pub mod row_verdict;
 pub mod run_outcome;
 pub mod run_state;
+pub mod rundown;
 pub mod sandbox_probe;
 pub mod scoreboard;
 pub mod scoreboard_escalation;
@@ -424,6 +417,13 @@ pub mod surface_check;
 pub mod sync_canonical;
 pub mod system_sender;
 pub mod task_context;
+pub mod team_alarm;
+pub mod team_identity;
+pub mod team_names;
+pub mod team_reap;
+pub mod team_settle;
+pub mod team_split;
+pub mod team_widen;
 pub mod terminal_stop;
 pub mod territory;
 pub mod test_delta;
@@ -894,17 +894,17 @@ mod tests {
     // surfaces. This test scans every production call site and fails on drift.
 
     // ── fire the registry check HERE, not only in CI ──────────────────────
-    /// The reign events: a king journals these from the session, and
+    /// The lead events: a lead journals these from the session, and
     /// `fno doctor event audit --type` resolves the name through this table.
     /// A kind dropped here makes the done-probe read "unknown type", which is
     /// the absence-lie in audit form.
     #[test]
-    fn event_table_knows_reign() {
+    fn event_table_knows_lead() {
         for kind in [
-            "reign_armed",
-            "reign_checkin",
-            "reign_dispatch_exception",
-            "king_term",
+            "lead_armed",
+            "lead_checkin",
+            "lead_dispatch_exception",
+            "lead_term",
         ] {
             assert!(
                 KNOWN_EVENT_KINDS.contains(&kind),
@@ -1260,8 +1260,8 @@ mod tests {
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
+            ("org_board/claims.rs", 1),
             ("hook/session_state.rs", 1),
-            ("king_board/claims.rs", 1),
             ("operator_turns.rs", 1),
             ("client_tests.rs", 2),
             ("plan_doc/codec.rs", 1),
@@ -1514,7 +1514,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Stale-question reconcile (daemon-emitted): `fno agents stale-escalate`
     // ran on its 6h floor and reconciled the lane's fleet tasks (the former
     // [watchdog-stale:*] operator question) to the measured fleet through
-    // the Rust fleet-task door. Report-only: a king reads open tasks on the
+    // the Rust fleet-task door. Report-only: a lead reads open tasks on the
     // board's fleet_task queue.
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
@@ -1532,7 +1532,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // run, so a quiet run cannot be mistaken for a sweep that never ran.
     "park_sweep",
     // A parked PR resumed polling (pr-park-emitted): retries reset, by hand
-    // (the king row's verb) or by the sweep.
+    // (the lead row's verb) or by the sweep.
     "pr_watch_unparked",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
@@ -1609,26 +1609,26 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "reconcile_deferred",
     "reconcile_done",
     "reconcile_error",
-    // Reign (king-emitted): the tenured-king skill journals these from
-    // the reigning session; audit resolves the names through this table.
-    "reign_armed",
-    "reign_checkin",
-    "reign_dispatch_exception",
-    // A crown's term declared or extended (`fno agents king term <spec>
+    // Lead (lead-emitted): the tenured-lead skill journals these from
+    // the leading session; audit resolves the names through this table.
+    "lead_armed",
+    "lead_checkin",
+    "lead_dispatch_exception",
+    // A team's term declared or extended (`fno agents lead term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
-    // The receipt a reign's tenure bound leaves; `fno doctor event audit`
-    // resolves it through this table exactly like the reign kinds above.
-    "king_term",
-    // A crown whose holder session is proven dead left its territory: the
-    // dead-crown sweep journals the vacate with cause holder_dead, the
-    // death evidence, and the inheritor (crown_reap.rs; the daemon retire
-    // arm and `fno agents reap`). Python's attended `king done` emits the
+    // The receipt a lead's tenure bound leaves; `fno doctor event audit`
+    // resolves it through this table exactly like the lead kinds above.
+    "lead_term",
+    // A team whose holder session is proven dead left its territory: the
+    // dead-team sweep journals the vacate with cause holder_dead, the
+    // death evidence, and the inheritor (team_reap.rs; the daemon retire
+    // arm and `fno agents reap`). Python's attended `lead done` emits the
     // same kind through the shared emitter.
-    "agent_crown_vacated",
+    "agent_team_vacated",
     // A succession reverted: the reap sweep restored the predecessor's
-    // session after an heir died unbound past the window (crown_reap.rs;
+    // session after an heir died unbound past the window (team_reap.rs;
     // the daemon retire arm and `fno agents reap`).
-    "crown_succession_reverted",
+    "team_succession_reverted",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",

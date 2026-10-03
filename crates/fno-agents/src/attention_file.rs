@@ -92,9 +92,9 @@ pub struct PageFront {
     #[serde(default)]
     pub epic: String,
     #[serde(default)]
-    pub crown: String,
+    pub team: String,
     #[serde(default)]
-    pub king: String,
+    pub lead: String,
     /// The user's typed answer cell: a letter (a, b, c), a number, or words.
     /// An empty value is present from render so the Base shows the cell, and
     /// is never an answer (rule 8).
@@ -120,7 +120,7 @@ pub fn option_letter(n: u32) -> String {
 
 /// The words a delegate answer records. Plain prose with no command names:
 /// the clear checks answer text for authority claims.
-pub const DELEGATE_TEXT: &str = "Delegated by the user: the crown decides this if it is reversible (yes or costly) and asks the user again if it is not.";
+pub const DELEGATE_TEXT: &str = "Delegated by the user: the team decides this if it is reversible (yes or costly) and asks the user again if it is not.";
 
 /// The user's answer read out of one page.
 #[derive(Debug, Clone, PartialEq)]
@@ -201,8 +201,8 @@ pub fn render_page(item: &AttentionItem, routing: &Routing) -> String {
         node: fill_none(if node.is_empty() { None } else { Some(&node) }),
         blocks: item.blocks.clone(),
         epic: fill_none(routing.epic.as_ref()),
-        crown: fill_none(routing.crown.as_ref()),
-        king: fill_none(routing.king.as_ref()),
+        team: fill_none(routing.team.as_ref()),
+        lead: fill_none(routing.lead.as_ref()),
         answer: Some(String::new()),
         answered_at: None,
         recorded_by: None,
@@ -525,7 +525,7 @@ pub struct IndexEntry {
     pub title: String,
     pub kind: String,
     pub blocks: Vec<String>,
-    pub king: String,
+    pub lead: String,
     /// The page's ask time; the index sorts newest first.
     pub created: String,
 }
@@ -546,7 +546,7 @@ fn index_line(entry: &IndexEntry) -> String {
     if !entry.blocks.is_empty() {
         line.push_str(&format!(" · blocks {}", entry.blocks.join(", ")));
     }
-    line.push_str(&format!(" · {}", entry.king));
+    line.push_str(&format!(" · {}", entry.lead));
     line
 }
 
@@ -610,18 +610,18 @@ views:
       - b
       - c
       - node
-      - king
+      - lead
       - formula.age_days
     sort:
       - property: asked_at
         direction: DESC
   - type: table
-    name: "Open by king"
+    name: "Open by lead"
     filters:
       and:
         - 'status == "open"'
     groupBy:
-      property: king
+      property: lead
       direction: ASC
     order:
       - formula.question
@@ -642,7 +642,7 @@ views:
     order:
       - formula.question
       - recommend
-      - king
+      - lead
       - formula.age_days
     sort:
       - property: asked_at
@@ -755,8 +755,8 @@ mod tests {
             harness: Some("claude".into()),
             model: None,
             epic: Some("x-aaaa".into()),
-            crown: None,
-            king: Some("king-fno".into()),
+            team: None,
+            lead: Some("lead-fno".into()),
         }
     }
 
@@ -783,8 +783,8 @@ mod tests {
         assert_eq!(front.node, "x-bbbb");
         assert_eq!(front.blocks, vec!["x-aaaa"]);
         assert_eq!(front.epic, "x-aaaa");
-        assert_eq!(front.crown, "none", "absent routing fact reads none");
-        assert_eq!(front.king, "king-fno");
+        assert_eq!(front.team, "none", "absent routing fact reads none");
+        assert_eq!(front.lead, "lead-fno");
         assert_eq!(front.answer.as_deref(), Some(""));
         assert_eq!(front.ask, front.title);
         assert_eq!(
@@ -923,8 +923,8 @@ mod tests {
         let page = render_page(&item(), &routing());
         // A vault plugin's stamp adds an unknown key; the body is untouched.
         let stamped = page.replacen(
-            "king: king-fno",
-            "king: king-fno\nplugin_stamp: 2026-09-22T09:05",
+            "lead: lead-fno",
+            "lead: lead-fno\nplugin_stamp: 2026-09-22T09:05",
             1,
         );
         assert_eq!(body_hash(&page), body_hash(&stamped));
@@ -939,7 +939,7 @@ mod tests {
                 title: "Rule on the Python-tree law: which reading?".into(),
                 kind: "question".into(),
                 blocks: vec!["x-aaaa".into()],
-                king: "king-fno".into(),
+                lead: "lead-fno".into(),
                 created: "2026-09-22T12:00:00Z".into(),
             },
             IndexEntry {
@@ -948,7 +948,7 @@ mod tests {
                 title: "a newer page".into(),
                 kind: "question".into(),
                 blocks: vec![],
-                king: "none".into(),
+                lead: "none".into(),
                 created: "2026-09-23T09:00:00Z".into(),
             },
         ];
@@ -968,7 +968,7 @@ mod tests {
         let older = index.find("q-e5e5520b").unwrap();
         assert!(newer < older, "the index lists newest first: {index}");
         assert!(index.contains(
-            "- [[20260922-q-e5e5520b-rule-on-the-python-tree-x-bbbb|Rule on the Python-tree law: which reading?]] · question · blocks x-aaaa · king-fno"
+            "- [[20260922-q-e5e5520b-rule-on-the-python-tree-x-bbbb|Rule on the Python-tree law: which reading?]] · question · blocks x-aaaa · lead-fno"
         ));
         assert!(index.contains("- [[20260921-q-11111111-done-item-x-none|an older one]] · answered 2026-09-21 · narrow"));
         assert!(BASE.starts_with("# GENERATED by the fno attention arm"));
@@ -979,7 +979,7 @@ mod tests {
             BASE.contains("age_days: 'if(asked_at, (now() - date(asked_at)).days.round(0), \"\")'")
         );
         assert!(BASE.contains("name: \"Needs you\""));
-        assert!(BASE.contains("name: \"Open by king\""));
+        assert!(BASE.contains("name: \"Open by lead\""));
         assert!(BASE.contains("name: Answered"));
         assert!(BASE.contains("name: Board"));
         assert!(BASE.contains("displayName: \"Age (d)\""));
@@ -990,7 +990,7 @@ mod tests {
             "b",
             "c",
             "node",
-            "king",
+            "lead",
             "formula.age_days",
         ] {
             assert!(
@@ -1033,8 +1033,8 @@ mod tests {
         let typed = page.replacen("answer: ''", "answer: b", 1);
         assert_ne!(key0, settle_key(&typed));
         let stamped = page.replacen(
-            "king: king-fno",
-            "king: king-fno\nplugin_stamp: 2026-09-23T10:00:00Z",
+            "lead: lead-fno",
+            "lead: lead-fno\nplugin_stamp: 2026-09-23T10:00:00Z",
             1,
         );
         assert_eq!(key0, settle_key(&stamped));

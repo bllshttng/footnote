@@ -207,9 +207,9 @@ pub(crate) fn route_settings_files() -> Vec<(PathBuf, serde_json::Value)> {
     out
 }
 
-/// One frontmatter scalar from a king manifest: `key: value`, quotes stripped,
-/// empty reads as absent. The line-scan idiom `cleanup_king_manifest` uses; a
-/// full parser lives in loopcheck (shrink-only) and carries no crown fields.
+/// One frontmatter scalar from a lead manifest: `key: value`, quotes stripped,
+/// empty reads as absent. The line-scan idiom `cleanup_lead_manifest` uses; a
+/// full parser lives in loopcheck (shrink-only) and carries no team fields.
 pub(crate) fn manifest_field(content: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     content

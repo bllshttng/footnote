@@ -76,7 +76,7 @@ A	cli/src/fno/verify_advise.py	events.jsonl	unowned	Python journal site survivin
 A	cli/src/fno/wake/detect.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/worker/cli.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/worktree_stranded.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	crates/fno-agents/src/king_board.rs	events.jsonl	unowned	the board port's project-journal anchor: the needs fold reads the same journals the needs verb reads, and no Rust project-events resolver exists yet; owns draining Rust journal sites.
+A	crates/fno-agents/src/org_board.rs	events.jsonl	unowned	the board port's project-journal anchor: the needs fold reads the same journals the needs verb reads, and no Rust project-events resolver exists yet; owns draining Rust journal sites.
 A	crates/fno-agents/src/active_backlog.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/claims.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/daemon.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.

@@ -4,7 +4,7 @@
 //!
 //! 2026-09-27 a worker's probe called Python's `write_registry` with no
 //! pinned state dir and replaced the live `~/.fno/agents/registry.json` with
-//! a 1-row fixture; every crown stamp since the last backup was lost. Two
+//! a 1-row fixture; every team stamp since the last backup was lost. Two
 //! independent arms, either of which stops that class:
 //!
 //! 1. A process carrying a test or probe marker (`cargo test`,

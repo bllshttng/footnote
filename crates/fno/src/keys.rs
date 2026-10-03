@@ -445,7 +445,7 @@ pub enum Event {
     /// a notice while the pref is off.
     OpenBacklogBoard,
     CycleSidelineView,
-    /// (redefined by) Toggle the court block on the left
+    /// (redefined by) Toggle the org block on the left
     /// sideline between its three-line glance and the full reading: load
     /// against the cap, what saturates the box, the working/idle/dead
     /// census, and the lane advisor's own answer. The block is always
@@ -1277,10 +1277,10 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         b(
             b'C',
-            "court",
+            "org",
             OpenCourt,
             Global,
-            "the court block (load, census, lanes)", // minimize/expand, sideline
+            "the org block (load, census, lanes)", // minimize/expand, sideline
         ),
         b(
             b'q',

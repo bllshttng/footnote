@@ -89,7 +89,7 @@ pub struct BurnState {
     pub task_key: Option<String>,
     #[serde(default)]
     pub task_cwd: Option<String>,
-    /// The capability escalation note went to the crown (or its board) for
+    /// The capability escalation note went to the team (or its board) for
     /// this worker; every later pass skips the counter reads.
     #[serde(default)]
     pub escalation_noted: bool,
@@ -771,7 +771,7 @@ fn escalation_note_text(
     };
     format!(
         "{SENDER_LINE} node {node}, session {sid} on {harness} / {model}: {}. \
-         Other readings: {untripped_word}. The crown chooses the destination: \
+         Other readings: {untripped_word}. The team chooses the destination: \
          `skills/target/scripts/handoff.sh --harness <harness> --model <model>` \
          (docs/architecture/target-self-handoff.md). Nothing was moved. \
          This note is sent once per worker.",
@@ -779,7 +779,7 @@ fn escalation_note_text(
     )
 }
 
-/// The node's owning crown scope, resolved once per pass and cached.
+/// The node's owning team scope, resolved once per pass and cached.
 /// An unreadable registry reads as no owner.
 fn node_owner(
     config_cwd: &Path,
@@ -789,11 +789,11 @@ fn node_owner(
     node: &str,
 ) -> Option<String> {
     if cache.is_none() {
-        let crowns = crate::territory::live_crowns(registry_path).ok()?;
+        let teams = crate::territory::live_teams(registry_path).ok()?;
         let (map, _) = crate::territory::node_owners(
-            &crowns,
+            &teams,
             rows,
-            &Ok(crate::king_board::project_map(config_cwd).unwrap_or_default()),
+            &Ok(crate::org_board::project_map(config_cwd).unwrap_or_default()),
         );
         *cache = Some(map);
     }
@@ -1014,7 +1014,7 @@ fn run_pass(
                 let text = escalation_note_text(node, sid, harness, model, &counters, &tripped);
                 let owner = node_owner(config_cwd, &home.registry_json(), &rows, &mut owners, node);
                 let delivered = match &owner {
-                    Some(king_scope) => {
+                    Some(lead_scope) => {
                         let argv = vec![
                             "fno".to_string(),
                             "agents".to_string(),
@@ -1024,8 +1024,8 @@ fn run_pass(
                             SENDER.to_string(),
                             "--origin".to_string(),
                             "scheduler".to_string(),
-                            "--to-king".to_string(),
-                            king_scope.clone(),
+                            "--to-lead".to_string(),
+                            lead_scope.clone(),
                             text.clone(),
                         ];
                         let (code, stdout, _) = runner(&argv, "");
@@ -1810,7 +1810,7 @@ mod tests {
         );
     }
 
-    /// One scenario: a fresh tree, a store row of the real shape, a crown
+    /// One scenario: a fresh tree, a store row of the real shape, a team
     /// over `proj-a`, a staged world, one run_pass.
     #[allow(clippy::type_complexity)]
     fn escalation_scenario(
@@ -1928,18 +1928,18 @@ mod tests {
             "[work.workspaces.ws]\n[[work.workspaces.ws.projects]]\nname = \"proj-a\"\n",
         )
         .unwrap();
-        let mut crown = crate::state::RegistryEntry::default();
-        crown.name = "crown-1".into();
-        crown.status = crate::AgentStatus::Live;
-        crown.pid = Some(std::process::id());
-        crown.harness = Some("claude".into());
-        crown.crown_scope = Some("proj-a".into());
-        crown.crown_level = Some(1);
-        crown.harness_session_id = Some("5e5c-aaaa-bbbb-cccc-000000000001".into());
-        crown.cwd = workdir.to_string_lossy().into_owned();
-        crown.model = Some("glm-5.3-flash".into());
+        let mut team = crate::state::RegistryEntry::default();
+        team.name = "team-1".into();
+        team.status = crate::AgentStatus::Live;
+        team.pid = Some(std::process::id());
+        team.harness = Some("claude".into());
+        team.crown_scope = Some("proj-a".into());
+        team.crown_level = Some(1);
+        team.harness_session_id = Some("5e5c-aaaa-bbbb-cccc-000000000001".into());
+        team.cwd = workdir.to_string_lossy().into_owned();
+        team.model = Some("glm-5.3-flash".into());
         let mut registry = crate::state::Registry::default();
-        registry.entries.push(crown);
+        registry.entries.push(team);
         std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
         let mut calls: Vec<Vec<String>> = Vec::new();
         let mut runner_inner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
@@ -1962,7 +1962,7 @@ mod tests {
                 };
                 return (0, listing, String::new());
             }
-            if argv[0] == "fno" && argv[2] == "mail" && joined.contains("--to-king") {
+            if argv[0] == "fno" && argv[2] == "mail" && joined.contains("--to-lead") {
                 return if mail_ok {
                     (0, "delivered (hosted)\n".into(), String::new())
                 } else {
@@ -2021,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn escalation_trips_once_and_reaches_the_crown_or_the_board() {
+    fn escalation_trips_once_and_reaches_the_team_or_the_board() {
         // The pure trip shape keeps the exact example: a 70-minute wait
         // against the 60-minute default.
         let trips = escalation_trips(
@@ -2035,7 +2035,7 @@ mod tests {
             trips,
             vec!["70m waiting at the cargo build door (threshold 60m)".to_string()]
         );
-        // Each threshold trips alone; the note reaches the crown. The slot
+        // Each threshold trips alone; the note reaches the team. The slot
         // row trips at one minute because the marker anchors at the holder's
         // real creation (a fresh CI runner is younger than a fixed offset).
         for (trip, phrase, thresholds) in [
@@ -2071,7 +2071,7 @@ mod tests {
             let (calls, home, _td, tasks) = escalation_scenario(trip, thresholds, true, 1);
             let notes: Vec<_> = calls
                 .iter()
-                .filter(|a| a.join(" ").contains("--to-king"))
+                .filter(|a| a.join(" ").contains("--to-lead"))
                 .collect();
             assert_eq!(notes.len(), 1, "{trip}: one note");
             let text = notes[0].last().unwrap();
@@ -2082,7 +2082,7 @@ mod tests {
                 "{trip}: {text}"
             );
             assert!(text.contains(phrase), "{trip}: {text}");
-            // An accepted --to-king send files no task.
+            // An accepted --to-lead send files no task.
             assert!(tasks.is_empty(), "{trip}: {tasks:?}");
             let state =
                 load_state(&home, "5e5c-aaaa-bbbb-cccc-000000000001").expect("state written");
@@ -2092,7 +2092,7 @@ mod tests {
         {
             let (calls, home, _td, tasks) =
                 escalation_scenario("nothing", Thresholds::default(), true, 1);
-            assert!(!calls.iter().any(|a| a.join(" ").contains("--to-king")));
+            assert!(!calls.iter().any(|a| a.join(" ").contains("--to-lead")));
             assert!(tasks.is_empty());
             assert!(
                 !load_state(&home, "5e5c-aaaa-bbbb-cccc-000000000001")
@@ -2111,7 +2111,7 @@ mod tests {
                 true,
                 1,
             );
-            assert!(!calls.iter().any(|a| a.join(" ").contains("--to-king")));
+            assert!(!calls.iter().any(|a| a.join(" ").contains("--to-lead")));
             assert!(tasks.is_empty());
         }
         // A refused send files exactly one fleet task.
@@ -2120,7 +2120,7 @@ mod tests {
                 escalation_scenario("hours", Thresholds::default(), false, 1);
             let notes: Vec<_> = calls
                 .iter()
-                .filter(|a| a.join(" ").contains("--to-king"))
+                .filter(|a| a.join(" ").contains("--to-lead"))
                 .collect();
             assert_eq!(notes.len(), 1);
             assert_eq!(tasks.len(), 1);
@@ -2137,7 +2137,7 @@ mod tests {
                 escalation_scenario("hours", Thresholds::default(), true, 2);
             let notes: Vec<_> = calls
                 .iter()
-                .filter(|a| a.join(" ").contains("--to-king"))
+                .filter(|a| a.join(" ").contains("--to-lead"))
                 .collect();
             assert_eq!(notes.len(), 1, "the note is sent once across two passes");
         }

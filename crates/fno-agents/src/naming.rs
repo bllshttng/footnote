@@ -1,5 +1,5 @@
 //! The x-aaaa worker-name vocabulary owner, ported from Python `naming.py`
-//! (crown ruling on laws d-4b39ad4c / d-52ae01cb: the tree budget ports the
+//! (team ruling on laws d-4b39ad4c / d-52ae01cb: the tree budget ports the
 //! touched verb to crates/ rather than raising the allowance).
 //!
 //! One data file stays the contract: the tables are read from the crate-local

@@ -986,7 +986,7 @@ pub(crate) fn mux_restore_policy(cwd: &Path) -> MuxRestorePolicy {
 /// (sole candidate) else the global config. The mux resolves its state root
 /// through this, deliberately NOT through the project tier below: one
 /// machine's mux fleet is shared infrastructure invoked from many cwds
-/// (kings, watchdogs, mail inject, pane transport), and a cwd-anchored
+/// (leads, watchdogs, mail inject, pane transport), and a cwd-anchored
 /// project tier would silently split those external callers off a project's
 /// sessions. Explicit isolation (`FNO_CONFIG`, inherited by every subprocess
 /// an isolated environment spawns) is the supported isolation for the mux.
@@ -999,7 +999,7 @@ pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
 }
 
 /// A TOP-LEVEL key read through the FULL ladder: `$FNO_CONFIG` (sole
-/// candidate) else the project tier, else the global config. The reign page
+/// candidate) else the project tier, else the global config. The lead page
 /// resolver reads through this so the bridge serves the state root Python's
 /// renderer wrote to (`fno.paths.state_dir()` is project-aware); the mux's
 /// sockets and sidecars keep the existing explicit-only reader (see
@@ -1475,7 +1475,7 @@ mod tests {
         std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
 
         // The project tier answers where the explicit-only reader saw only
-        // the global file: this is the reign-page resolution the bridge owed
+        // the global file: this is the lead-page resolution the bridge owed
         // Python's renderer.
         assert_eq!(
             config_top_str(&base, "state_dir").as_deref(),

@@ -1,5 +1,5 @@
 //! The sideline column's paint: the agent Table, the per-row overlays, the
-//! docked new-agent composer, the court block and the divider. One Buffer,
+//! docked new-agent composer, the org block and the divider. One Buffer,
 //! one blit. Draw_sideline and its two exclusive helpers live here; the
 //! file-budget gate names this module the answer to "how does the sideline
 //! column paint".
@@ -134,7 +134,7 @@ impl View {
 
     /// Sideline rows the cursor can occupy: the full terminal height (the
     /// sideline owns row 0 since US1) minus the bottom chrome row,
-    /// minus the court block's rows at the bottom. The block is the
+    /// minus the org block's rows at the bottom. The block is the
     /// subtraction point's only second customer, so `clamp_sideline_scroll`
     /// and `reveal_focus_row` inherit the shrunk window without a second
     /// fix.
@@ -143,10 +143,10 @@ impl View {
         // region before the scroll math runs (h): scrolling to the end lands
         // the last row above the footer, never under the block. The footer
         // only reserves a row it can spare - a region down to its last row
-        // keeps that row as list, never as chrome (the court rule).
+        // keeps that row as list, never as chrome (the org rule).
         let rows = (self.term.0 as usize)
             .saturating_sub(self.bottom_row_is_chrome() as usize)
-            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.org_block_rows())
             .saturating_sub(self.questions_block_rows());
         let pinned = self.painted_rows().len() > rows && rows >= 2;
         rows.saturating_sub(pinned as usize)
@@ -191,7 +191,7 @@ impl View {
         // raw region `sideline_visible_rows` starts from, so a list that
         // exactly fits never reads as pinned here.
         let list_rows = (self.term.0 as usize)
-            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.org_block_rows())
             .saturating_sub(self.questions_block_rows());
         let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
         let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
@@ -295,10 +295,10 @@ impl View {
         };
         // The new-agent composer is a centered sheet overlay now, in every
         // surface: the sideline paints untouched (the sheet is drawn by the
-        // client's overlay chain), and the passive court block yields to an
+        // client's overlay chain), and the passive org block yields to an
         // active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
-        let (block_rows, block_lines) = self.court_block_layout(rows);
+        let (block_rows, block_lines) = self.org_block_layout(rows);
         let q_block = questions::block_rows(self, rows);
         let q_rows = q_block.as_ref().map_or(0, |b| b.n);
         let list_rows = rows.saturating_sub(block_rows).saturating_sub(q_rows);
@@ -318,7 +318,7 @@ impl View {
         let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
         // backend) and the blit copies it into the compositor's cells. The
-        // court block and the dock own the rows below the list, so the
+        // org block and the dock own the rows below the list, so the
         // widget area stops above them. The dock paints into the SAME Buffer
         // before that one blit.
         let btn_reserved = self
@@ -585,12 +585,12 @@ impl View {
                 }
             }
         }
-        // The court block: three glance lines minimized, the full
+        // The org block: three glance lines minimized, the full
         // reading expanded, pinned to the bottom rows of the column. The row
         // list already stopped above it; the block renders DIM so it reads as
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
-        // The questions block just above the court block: the row list
+        // The questions block just above the org block: the row list
         // stopped above both; the open rows render normal, the not-ready and
         // answered rows DIM. The sticky menu footer rides directly above the
         // block when the rows overflow (h). The pinned copy yields while the
@@ -607,7 +607,7 @@ impl View {
         if let Some(b) = q_block {
             questions::paint_block(b, cells, list_rows, (rows, cols, text_w), &self.theme);
         }
-        court_block::paint_court_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
+        org_block::paint_org_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - US1.
         //
@@ -689,7 +689,7 @@ impl View {
                 let cell_flags_v = flags | focus_bit;
                 // The name cell keeps the compact row's identity vocabulary:
                 // recruit mark, DND, deviation token, portal index, tab
-                // context, orphan cwd, reason, crown badge - depth-indented,
+                // context, orphan cwd, reason, team badge - depth-indented,
                 // ellipsized to the width the solver admits.
                 let mark = if a
                     .attach_id
@@ -883,7 +883,7 @@ impl View {
     /// each `Agent` a two-line card - `Blank, Agent, CardDetail` - with one
     /// blank of padding above and below, adjacent cards sharing one blank,
     /// and an existing spacer counting as the bottom padding. Every agent
-    /// depth is forced to 0: the king shows on line 2, not as an indent. A
+    /// depth is forced to 0: the lead shows on line 2, not as an indent. A
     /// foreign-cwd `Sub` row folds into the card's detail line, so a card
     /// never grows a third painted row.
     pub(super) fn card_rows<'a>(
@@ -1047,7 +1047,7 @@ impl View {
     /// Line 2 of a card: two spaces, then `harness/model · parent-or-role ·
     /// message`, with `lifetime  age` right-aligned to the panel edge.
     /// Segments that are `None` drop out of the join; a worker with no
-    /// harness, king or message paints just its right-side cells. The cwd
+    /// harness, lead or message paints just its right-side cells. The cwd
     /// left line 2: a member with a different project or worktree path shows
     /// it inline in parens after the slug (ruling d-36438ea4).
     pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
@@ -1055,7 +1055,7 @@ impl View {
         if let Some(h) = card_line::harness_model(a) {
             segments.push(h);
         }
-        if let Some(k) = self.king_label(a) {
+        if let Some(k) = self.lead_label(a) {
             segments.push(k);
         }
         let msg = row_message_text(a);
@@ -1119,12 +1119,12 @@ impl View {
         }
     }
 
-    /// The lead label for line 2 of a card: the crowned row itself shows its
-    /// people title, else its crown scope; a worker walks its lineage to the
-    /// first crowned ancestor and shows [`crown_display_name`]. No crowned
+    /// The lead label for line 2 of a card: the teamed row itself shows its
+    /// people title, else its team scope; a worker walks its lineage to the
+    /// first teamed ancestor and shows [`team_display_name`]. No teamed
     /// ancestor, or a lineage cycle (capped at one step per agent), labels
     /// nothing.
-    pub(super) fn king_label(&self, a: &AgentRow) -> Option<String> {
+    pub(super) fn lead_label(&self, a: &AgentRow) -> Option<String> {
         if a.crown_level.is_some() {
             if let Some(title) = a.crown_title.as_deref().filter(|t| !t.is_empty()) {
                 return Some(title.to_string());
@@ -1143,7 +1143,7 @@ impl View {
                 .iter()
                 .find(|r| r.harness_session_id.as_deref() == Some(pid))?;
             if row.crown_level.is_some() {
-                return Some(crown_display_name(row).to_string());
+                return Some(team_display_name(row).to_string());
             }
             parent = lineage_parent(row);
             steps += 1;
@@ -1163,10 +1163,10 @@ fn row_age(a: &AgentRow, now: u64) -> String {
     }
 }
 
-/// The name a crowned row shows on its workers' cards. Today the king's
-/// handle; the crown's own name replaces it when the wire carries one.
-fn crown_display_name(king: &AgentRow) -> &str {
-    &king.name
+/// The name a teamed row shows on its workers' cards. Today the lead's
+/// handle; the team's own name replaces it when the wire carries one.
+fn team_display_name(lead: &AgentRow) -> &str {
+    &lead.name
 }
 
 /// The message text an agent's row shows: the markup-stripped tail, or the

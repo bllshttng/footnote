@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verify the Codex Stop hook nudges the author in-session on one non-clean
-# native review result, without a king or daemon transport.
+# native review result, without a lead or daemon transport.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,8 +49,8 @@ grep -q "When it reads rounds_exhausted true" "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not name the at-cap path"; exit 1; }
 grep -q 'merge on green CI' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not explain the at-cap disposition"; exit 1; }
-! grep -qE 'fno agents mail|daemon|king' "$TMP/turn-findings.err" \
-  || { echo "FAIL: nudge routed through forbidden king/daemon/mail path"; exit 1; }
+! grep -qE 'fno agents mail|daemon|lead' "$TMP/turn-findings.err" \
+  || { echo "FAIL: nudge routed through forbidden lead/daemon/mail path"; exit 1; }
 
 rc="$(run_hook turn-findings "$findings")"
 [[ "$rc" == "0" ]] || { echo "FAIL: same review turn was nudged twice"; exit 1; }

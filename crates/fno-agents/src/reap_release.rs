@@ -152,7 +152,7 @@ pub(crate) fn row_bucket_in(home: &AgentsHome, dry: &gc_sweep::GcSummary, handle
     let in_plain = dry
         .kept_operator
         .iter()
-        .chain(&dry.kept_crowned)
+        .chain(&dry.kept_teamed)
         .chain(&dry.kept_no_provenance)
         .chain(&dry.kept_graph_unreadable)
         .any(|id| id == handle);

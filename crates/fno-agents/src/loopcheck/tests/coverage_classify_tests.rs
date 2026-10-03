@@ -6,7 +6,7 @@ fn refused_invocation_row_reads_reviewer_refused_not_unreviewed() {
     // recipient sitting on the base branch, read nothing, and the producer
     // refused to attest. Before the refused terminal row, that attempt was
     // byte-identical to "never attempted" at every coverage surface, so a
-    // king re-fired the review and reproduced the failure exactly.
+    // lead re-fired the review and reproduced the failure exactly.
     let events = format!(
         "{}\n{}\n",
         serde_json::json!({

@@ -1,14 +1,14 @@
 //! `fno-agents hook stop` - the Stop hook's native handler.
 //!
 //! Owns the translation the 451-line shell shim carried: payload read,
-//! ownership (one native evaluation: target manifest, pending delivery, king
+//! ownership (one native evaluation: target manifest, pending delivery, lead
 //! manifest), the bounded-block counters, the foreign-session guard, the
 //! cargo build-dir export, the in-process decide call, harness-shaped block
 //! output, and terminal cleanup (claim release, finalize, delivery retry).
 //! The stop/allow decision itself stays in `loopcheck.rs`; this module is
 //! transport plus the shell's translation, with the ownership code salvaged
 //! from the abandoned WIP `stop_gate.rs` (its registry scan replaced by the one
-//! matcher, `loop_reign::find_by_session`).
+//! matcher, `lead_state::find_by_session`).
 
 use serde_json::Value;
 use std::io::Read as _;
@@ -232,7 +232,7 @@ fn run_owned(
     // The manifest's stamped harness id (claude_session_id, then
     // claude_transcript_id, then harness_session_id) must name THIS
     // transcript. Codex rollout suffixes count. The guard's allow now
-    // journals a correlated stop_decision first: king admission reads one
+    // journals a correlated stop_decision first: lead admission reads one
     // after the newest snapshot for EVERY session, and a fresh heir resolves
     // HERE - to its predecessor's manifest - until init, the very thing the
     // silent allow starved, writes its own.
@@ -340,7 +340,7 @@ fn run_owned(
     let (verb_rc, decision_json) = crate::loopcheck::decide_with_payload(&parsed, Some(payload));
 
     // A non-zero exit means a BROKEN checker only when the output carries no
-    // verdict. The king driver sends a full decision payload on both block
+    // verdict. The lead driver sends a full decision payload on both block
     // shapes, so key on the field, never the code.
     let has_decision = serde_json::from_str::<Value>(decision_json.trim())
         .is_ok_and(|v| v.get("decision").is_some());
@@ -440,9 +440,9 @@ fn translate(
 
     // ── Terminal ──────────────────────────────────────────────────────────────
     if !termination_reason.is_empty() {
-        if driver == "king" {
+        if driver == "lead" {
             eprintln!(
-                "target stop-hook: king terminal ({termination_reason}); the king loop has no plan to stamp"
+                "target stop-hook: lead terminal ({termination_reason}); the lead loop has no plan to stamp"
             );
             return 0;
         }
@@ -552,17 +552,17 @@ fn parse_reason(s: &str) -> crate::loopcheck::TerminationReason {
 fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
     let space = super::events_space(cwd);
     let _ = std::fs::create_dir_all(&space);
-    // The king counter keys on the transcript id (SESSION_ID is not derived
+    // The lead counter keys on the transcript id (SESSION_ID is not derived
     // until a state file is chosen).
-    let id = if kind == "king" {
+    let id = if kind == "lead" {
         &fire.hook_harness_id
     } else {
         &fire.resolve_harness_id
     };
     let name = format!(
         ".{}-unavail-{}",
-        if kind == "king" {
-            "king-resolve"
+        if kind == "lead" {
+            "lead-resolve"
         } else {
             "loop-check"
         },
@@ -576,9 +576,9 @@ fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
         + 1;
     let _ = std::fs::write(&counter, count.to_string());
     if count <= MAX_UNAVAIL_RETRIES {
-        let msg = if kind == "king" {
+        let msg = if kind == "lead" {
             format!(
-                "king manifest resolver unavailable ({count}/{MAX_UNAVAIL_RETRIES}) for an active kings dir, keeping session running"
+                "lead manifest resolver unavailable ({count}/{MAX_UNAVAIL_RETRIES}) for an active leads dir, keeping session running"
             )
         } else {
             format!("checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running")
@@ -595,9 +595,9 @@ fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
         );
         return emit_block_for_harness(&msg);
     }
-    if kind == "king" {
+    if kind == "lead" {
         eprintln!(
-            "target stop-hook: king manifest resolver unavailable {count} times (counter {}); allowing stop. The counter only increments, so the king gate stays OFF for the rest of this session. Delete {} to re-arm it.",
+            "target stop-hook: lead manifest resolver unavailable {count} times (counter {}); allowing stop. The counter only increments, so the lead gate stays OFF for the rest of this session. Delete {} to re-arm it.",
             counter.display(),
             counter.display()
         );
@@ -892,7 +892,7 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
         pre_manifest_no_file = true;
         // A stranger stop with no other worktree present cannot be a
         // worktree-ownership question, so an unreadable listing falls
-        // through to the king and visitor arms instead of blocking.
+        // through to the lead and visitor arms instead of blocking.
         resolve_across_worktrees(cwd, &fire.resolve_ids)
             .map_err(|_| git_worktree_paths(cwd).map_or(false, |w| w.len() > 1))
     };
@@ -915,7 +915,7 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
         };
     }
 
-    // Pending delivery, then king: the shim's order. Either converts a
+    // Pending delivery, then lead: the shim's order. Either converts a
     // stranger into an owner before the visitor allow fires.
     if let Some(pending) = delivery_pending_for(cwd, fire, None) {
         return Verdict::Owner {
@@ -924,12 +924,12 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
             owner_cwd: cwd.to_path_buf(),
         };
     }
-    match resolve_king(cwd, fire) {
-        KingResolve::None => {}
-        KingResolve::Found(state) => {
+    match resolve_lead(cwd, fire) {
+        LeadResolve::None => {}
+        LeadResolve::Found(state) => {
             return Verdict::Owner {
                 state,
-                driver: "king",
+                driver: "lead",
                 owner_cwd: cwd.to_path_buf(),
             };
         }
@@ -1027,20 +1027,20 @@ fn resolve_across_worktrees(
     Ok(None)
 }
 
-enum KingResolve {
+enum LeadResolve {
     None,
     Found(PathBuf),
 }
 
-/// The king manifest resolution: the registry row - not file presence -
+/// The lead manifest resolution: the registry row - not file presence -
 /// proves authority, and the manifest is read through the row's own cwd, so
-/// a shell or Stop payload outside the repo still resolves the court it
+/// a shell or Stop payload outside the repo still resolves the org it
 /// declared. Any unreadable step answers None (the same fail-open the Python
 /// resolver's catch-all ships). The row lookup is the ONE matcher,
-/// `loop_reign::find_by_session`.
-fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
+/// `lead_state::find_by_session`.
+fn resolve_lead(cwd: &Path, fire: &Fire) -> LeadResolve {
     if fire.hook_harness_id.is_empty() {
-        return KingResolve::None;
+        return LeadResolve::None;
     }
     let sid = if fire.resolve_harness_id.is_empty() {
         &fire.hook_harness_id
@@ -1050,26 +1050,26 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
     let rows =
         match crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json()) {
             Ok(r) => r.entries,
-            Err(_) => return KingResolve::None,
+            Err(_) => return LeadResolve::None,
         };
-    match king_manifest_in(&rows, sid, fire.harness.as_deref(), cwd) {
-        Some(path) => KingResolve::Found(path),
-        None => KingResolve::None,
+    match lead_manifest_in(&rows, sid, fire.harness.as_deref(), cwd) {
+        Some(path) => LeadResolve::Found(path),
+        None => LeadResolve::None,
     }
 }
 
-/// The manifest through the crown row: the row's cwd names the space, and a
+/// The manifest through the team row: the row's cwd names the space, and a
 /// row whose cwd names a since-removed directory (a deleted linked worktree
 /// keys its own dead slug) falls back to the payload cwd's space before
-/// answering None. `loop_reign::manifest_path` carries the unsafe-scope
+/// answering None. `lead_state::manifest_path` carries the unsafe-scope
 /// refusal.
-fn king_manifest_in(
+fn lead_manifest_in(
     rows: &[crate::state::RegistryEntry],
     sid: &str,
     harness: Option<&str>,
     cwd: &Path,
 ) -> Option<PathBuf> {
-    let row = crate::loop_reign::find_by_session(rows, sid, harness)?;
+    let row = crate::lead_state::find_by_session(rows, sid, harness)?;
     use crate::AgentStatus;
     if matches!(
         row.status,
@@ -1093,7 +1093,7 @@ fn king_manifest_in(
     roots
         .iter()
         .map(|root| {
-            crate::loop_reign::manifest_path(&super::events_space(root), scope)
+            crate::lead_state::manifest_path(&super::events_space(root), scope)
                 .ok()
                 .filter(|path| path.is_file())
         })
@@ -1367,12 +1367,12 @@ mod tests {
             &fire,
             "{}",
             state,
-            "king",
+            "lead",
             dir.path().to_path_buf(),
         );
         assert_eq!(rc, 0, "the foreign manifest allows the stop unjudged");
 
-        // Read the journal the way king admission reads it: live text plus
+        // Read the journal the way lead admission reads it: live text plus
         // the store, one query for the stop_decision type.
         let project = crate::paths::events_path(dir.path());
         let query = crate::event_store::EventQuery::of_types(&["stop_decision"]);
@@ -1497,38 +1497,38 @@ mod tests {
             "scope: scope-a\nfno_id: scope-a\nharness_session_id: session-full\nharness: codex\n";
         let active = crate::codex_thread::NativeGoal {
             thread_id: "session-full".to_string(),
-            objective: "$fno:reign scope-a".to_string(),
+            objective: "$fno:lead scope-a".to_string(),
             status: crate::codex_thread::GoalStatus::Active,
             usage: crate::codex_thread::GoalUsage::default(),
         };
         assert_eq!(
             arbitrate_codex_continuation_from_reading(
-                "king",
+                "lead",
                 &fire,
                 manifest,
                 Ok(Some(active.clone()))
             ),
             GoalArbitration::Delegated
         );
-        let conflicting_owner = format!("{manifest}continuation_owner: king:scope-b\n");
+        let conflicting_owner = format!("{manifest}continuation_owner: lead:scope-b\n");
         assert!(matches!(
             arbitrate_codex_continuation_from_reading(
-                "king",
+                "lead",
                 &fire,
                 &conflicting_owner,
                 Ok(Some(active.clone()))
             ),
-            GoalArbitration::Refusal(reason) if reason.contains("derive from crown scope")
+            GoalArbitration::Refusal(reason) if reason.contains("derive from team scope")
         ));
         assert_eq!(
-            arbitrate_codex_continuation_from_reading("king", &fire, manifest, Ok(None)),
+            arbitrate_codex_continuation_from_reading("lead", &fire, manifest, Ok(None)),
             GoalArbitration::None
         );
         let mut wrong_thread = active.clone();
         wrong_thread.thread_id = "other-thread".to_string();
         assert!(matches!(
             arbitrate_codex_continuation_from_reading(
-                "king",
+                "lead",
                 &fire,
                 manifest,
                 Ok(Some(wrong_thread))
@@ -1546,7 +1546,7 @@ mod tests {
         );
         assert!(matches!(
             arbitrate_codex_continuation_from_reading(
-                "king",
+                "lead",
                 &fire,
                 manifest,
                 Err("timeout".to_string())
@@ -1555,11 +1555,11 @@ mod tests {
         ));
 
         let stale_manifest = format!(
-            "{manifest}goal_objective: {}\ngoal_status: active\ngoal_owner: king:scope-a\n",
+            "{manifest}goal_objective: {}\ngoal_status: active\ngoal_owner: lead:scope-a\n",
             active.objective
         );
         assert!(matches!(
-            arbitrate_codex_continuation_from_reading("king", &fire, &stale_manifest, Ok(None)),
+            arbitrate_codex_continuation_from_reading("lead", &fire, &stale_manifest, Ok(None)),
             GoalArbitration::None
         ));
     }
@@ -1592,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_goal_owner_is_a_named_refusal() {
+    fn goal_owner_conflicts_and_spellings_arbitrate_honestly() {
         let fire = fire_with_goal(serde_json::json!({
             "objective": "finish the target",
             "status": "active",
@@ -1602,6 +1602,35 @@ mod tests {
         assert!(
             matches!(refusal, GoalArbitration::Refusal(reason) if reason.contains("conflicting goal truth"))
         );
+        // A live codex goal keeps the objective and owner strings it was
+        // created with: the lead spelling delegates, the pre-rename one
+        // still delegates, a foreign scope and a non-deriving owner refuse.
+        let manifest = "driver: lead\nscope: fno\nnode_id: x-aaaa\n";
+        let truth = |objective: &str, owner: &str| {
+            Some(super::goal_arbitration::GoalTruth {
+                objective: objective.to_string(),
+                status: "active".to_string(),
+                continuation_owner: owner.to_string(),
+            })
+        };
+        let arbitrate =
+            |goal| super::goal_arbitration::arbitrate_goal_truth("lead", manifest, goal);
+        assert!(matches!(
+            arbitrate(truth("$fno:lead fno", "lead:fno")),
+            GoalArbitration::Delegated
+        ));
+        assert!(matches!(
+            arbitrate(truth("$fno:reign fno", "king:fno")),
+            GoalArbitration::Delegated
+        ));
+        assert!(matches!(
+            arbitrate(truth("$fno:lead other", "lead:fno")),
+            GoalArbitration::Refusal(_)
+        ));
+        assert!(matches!(
+            arbitrate(truth("$fno:lead fno", "target:x-aaaa")),
+            GoalArbitration::Refusal(_)
+        ));
     }
 
     #[test]
@@ -1647,7 +1676,7 @@ mod tests {
     }
 
     /// The tick row names the fire's session so a reader of `fno agents
-    /// status` can tell a king's own fire from its newest neighbor.
+    /// status` can tell a lead's own fire from its newest neighbor.
     #[test]
     fn the_tick_row_names_its_session_and_an_empty_one_omits_the_field() {
         let _guard = crate::claims::test_env_lock()
@@ -1662,7 +1691,7 @@ mod tests {
             dir.path(),
             "block",
             "live",
-            "king",
+            "lead",
             "41725e5f-1c20-4b81-824e",
         );
         let tick_row = || {
@@ -1677,7 +1706,7 @@ mod tests {
         };
         let row = tick_row();
         assert!(
-            row.contains("driver=king decision=block reason=live session=41725e5f"),
+            row.contains("driver=lead decision=block reason=live session=41725e5f"),
             "{row}"
         );
 
@@ -1699,16 +1728,16 @@ mod tests {
         std::env::remove_var("GLOBAL_EVENTS_PATH");
     }
 
-    /// The manifest resolves through the crown ROW's cwd, not the Stop
-    /// payload's: a king whose shell sits outside the repo still resolves its
-    /// court. Every unreadable reading answers None, the fail-open
+    /// The manifest resolves through the team ROW's cwd, not the Stop
+    /// payload's: a lead whose shell sits outside the repo still resolves its
+    /// org. Every unreadable reading answers None, the fail-open
     /// the hook ships.
     #[test]
-    fn king_manifest_in_keys_on_the_crown_row_cwd() {
+    fn lead_manifest_in_keys_on_the_team_row_cwd() {
         use crate::paths::DeclaredRoot;
         use crate::state::RegistryEntry;
 
-        let _root = DeclaredRoot::declare("stop-king-row");
+        let _root = DeclaredRoot::declare("stop-lead-row");
         let _events_path = EventsPathRestore::clear();
         let repo = _root.path().join("repo");
         let elsewhere = _root.path().join("elsewhere");
@@ -1720,20 +1749,20 @@ mod tests {
             "positive control: the row cwd and the payload cwd must key different spaces"
         );
         let scope = "x-test-epic";
-        let kings = crate::hook::events_space(&repo).join("kings");
-        std::fs::create_dir_all(&kings).unwrap();
-        let manifest = kings.join(format!("{scope}.md"));
-        std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: court\n---\n").unwrap();
+        let leads = crate::hook::events_space(&repo).join("kings");
+        std::fs::create_dir_all(&leads).unwrap();
+        let manifest = leads.join(format!("{scope}.md"));
+        std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: org\n---\n").unwrap();
         let sid = "0c1f2f9a-7777-4000-8000-000000000007";
-        let crowned = RegistryEntry {
+        let teamed = RegistryEntry {
             cwd: repo.to_string_lossy().into_owned(),
             harness_session_id: Some(sid.into()),
             crown_scope: Some(scope.into()),
             ..Default::default()
         };
-        let rows = vec![crowned];
+        let rows = vec![teamed];
         assert_eq!(
-            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            super::lead_manifest_in(&rows, sid, None, &elsewhere),
             Some(manifest.clone()),
             "the row's cwd, not the payload cwd, names the space"
         );
@@ -1745,7 +1774,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::king_manifest_in(&[terminal], "gone-session", None, &elsewhere),
+            super::lead_manifest_in(&[terminal], "gone-session", None, &elsewhere),
             None
         );
         let uncrowned = RegistryEntry {
@@ -1754,7 +1783,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::king_manifest_in(&[uncrowned], "plain-session", None, &elsewhere),
+            super::lead_manifest_in(&[uncrowned], "plain-session", None, &elsewhere),
             None
         );
         let unsafe_scope = RegistryEntry {
@@ -1764,7 +1793,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::king_manifest_in(&[unsafe_scope], "sneaky-session", None, &elsewhere),
+            super::lead_manifest_in(&[unsafe_scope], "sneaky-session", None, &elsewhere),
             None
         );
         let no_file = RegistryEntry {
@@ -1774,20 +1803,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::king_manifest_in(&[no_file], "bare-session", None, &elsewhere),
+            super::lead_manifest_in(&[no_file], "bare-session", None, &elsewhere),
             None
         );
         assert_eq!(
-            super::king_manifest_in(&rows, "no-such-session", None, &elsewhere),
+            super::lead_manifest_in(&rows, "no-such-session", None, &elsewhere),
             None
         );
 
         // A row whose cwd names a removed directory (a deleted linked
         // worktree keys its own dead slug) falls back to the payload cwd's
         // space before answering None.
-        let payload_kings = crate::hook::events_space(&elsewhere).join("kings");
-        std::fs::create_dir_all(&payload_kings).unwrap();
-        std::fs::write(payload_kings.join(format!("{scope}.md")), "fallback").unwrap();
+        let payload_leads = crate::hook::events_space(&elsewhere).join("kings");
+        std::fs::create_dir_all(&payload_leads).unwrap();
+        std::fs::write(payload_leads.join(format!("{scope}.md")), "fallback").unwrap();
         let dead_cwd = RegistryEntry {
             cwd: _root
                 .path()
@@ -1800,13 +1829,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::king_manifest_in(&[dead_cwd], "ghost-session", None, &elsewhere),
-            Some(payload_kings.join(format!("{scope}.md"))),
+            super::lead_manifest_in(&[dead_cwd], "ghost-session", None, &elsewhere),
+            Some(payload_leads.join(format!("{scope}.md"))),
             "a dead row-cwd falls back to the payload cwd's space"
         );
         // With BOTH spaces holding a manifest, the row's own still wins.
         assert_eq!(
-            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            super::lead_manifest_in(&rows, sid, None, &elsewhere),
             Some(manifest),
             "the row's cwd keeps precedence over the payload fallback"
         );

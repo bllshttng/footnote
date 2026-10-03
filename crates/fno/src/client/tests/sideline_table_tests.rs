@@ -16,14 +16,14 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
     // field (both read the same startup default).
     let agents = vec![
         {
-            let mut king = agent_row("king-a", 4, Some(AgentBadge::Working), false);
-            king.harness_session_id = Some("sess-king".into());
-            king
+            let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
+            lead.harness_session_id = Some("sess-lead".into());
+            lead
         },
         {
             let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
             w1.lineage_kind = Some("child".into());
-            w1.spawned_by_session = Some("sess-king".into());
+            w1.spawned_by_session = Some("sess-lead".into());
             w1.harness_session_id = Some("sess-w1".into());
             w1
         },
@@ -47,7 +47,7 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
 }
 
 #[test]
-fn crown_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
+fn team_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
     let mut view = wide_view(vec![
         {
             let mut row = agent_row("folio", 4, Some(AgentBadge::Working), false);
@@ -68,8 +68,8 @@ fn crown_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
     let rendered: String = frame.cells.iter().map(|cell| cell.c).collect();
     crate::frame_html::write_shot(
         &frame,
-        "crown-worker-labels",
-        "Crown and worker rows use their registry labels",
+        "team-worker-labels",
+        "Team and worker rows use their registry labels",
     );
 
     assert!(rendered.contains("folio"), "{rendered:?}");

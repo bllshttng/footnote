@@ -3,7 +3,7 @@
 //! A green board read is not evidence the loop works: the 70-second board run
 //! also returned a valid 48KB payload and was still killed. And iteration 1
 //! has already happened once under a broken board. The positive marker is a
-//! `loop_unit_dispatched` row naming a real crown scope at iteration 2 or
+//! `loop_unit_dispatched` row naming a real team scope at iteration 2 or
 //! higher, and a health read must separate fixture titles from real ones -
 //! a journal of only fixture rows reports ZERO real dispatches, never 756.
 
@@ -20,7 +20,7 @@ fn a_journal_of_only_fixture_rows_reports_zero_real_dispatches() {
     // AC5-ERR: every fixture title the suites mint, and nothing else. 756
     // fixture rows must never read as a busy subsystem.
     let journal: String = [
-        "king reign over epic-x",
+        "lead lead over epic-x",
         "persist history test",
         "ceiling mission",
         "real driver test",
@@ -38,14 +38,14 @@ fn a_journal_of_only_fixture_rows_reports_zero_real_dispatches() {
 }
 
 #[test]
-fn the_positive_marker_is_a_real_crown_scope_at_iteration_two_or_later() {
-    // AC5-HP's shape: `king reign over fno` at iteration 2 clears the bar;
+fn the_positive_marker_is_a_real_team_scope_at_iteration_two_or_later() {
+    // AC5-HP's shape: `lead lead over fno` at iteration 2 clears the bar;
     // the same title at iteration 1 does not (AC5-EDGE - iteration 1 already
     // happened once under a board that could not be read twice).
     let journal = format!(
         "{}\n{}\n",
-        row("king reign over fno", 1),
-        row("king reign over fno", 2)
+        row("lead lead over fno", 1),
+        row("lead lead over fno", 2)
     );
     let census = census_loop_unit_dispatches(&journal);
     assert_eq!(census.real, 2);
@@ -56,7 +56,7 @@ fn the_positive_marker_is_a_real_crown_scope_at_iteration_two_or_later() {
 fn malformed_lines_and_other_events_are_skipped_not_counted() {
     let journal = format!(
         "not json at all\n{}\n{}\n",
-        row("king reign over fno", 3),
+        row("lead lead over fno", 3),
         r#"{"ts":"2026-09-02T22:00:01Z","type":"loop_terminated","source":"loop","data":{"reason":"DonePRGreen"}}"#
     );
     let census = census_loop_unit_dispatches(&journal);
@@ -66,9 +66,9 @@ fn malformed_lines_and_other_events_are_skipped_not_counted() {
 
 #[test]
 fn fixture_titles_answer_true_and_real_scopes_answer_false() {
-    assert!(is_fixture_dispatch_title("king reign over epic-x"));
+    assert!(is_fixture_dispatch_title("lead lead over epic-x"));
     assert!(is_fixture_dispatch_title(""));
     assert!(is_fixture_dispatch_title("  "));
-    assert!(!is_fixture_dispatch_title("king reign over fno"));
-    assert!(!is_fixture_dispatch_title("king reign over epic-9f2a"));
+    assert!(!is_fixture_dispatch_title("lead lead over fno"));
+    assert!(!is_fixture_dispatch_title("lead lead over epic-9f2a"));
 }

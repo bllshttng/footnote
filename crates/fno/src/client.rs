@@ -994,7 +994,7 @@ struct View {
     /// [`View::ans_esc`]).
     yard_esc: Vec<u8>,
     /// The identity fold's last result while the overlay is open
-    /// (`None` = not yet fetched this open). Species/rarity/crown/
+    /// (`None` = not yet fetched this open). Species/rarity/team/
     /// first-sighting only - no status field, ever: the eye is derived from
     /// the row's own badge/need values so the sprite cannot disagree.
     yard_fold: Option<Vec<crate::yard_overlay::YardItem>>,
@@ -1003,9 +1003,9 @@ struct View {
     yard_want: bool,
     yard_inflight: bool,
     yard_gen: u64,
-    /// The court panel. The whole thing - open flag, cached fold,
+    /// The org panel. The whole thing - open flag, cached fold,
     /// generation - lives in its own module, so this is one field.
-    court: crate::court_overlay::Panel,
+    org: crate::org_overlay::Panel,
     /// Catch-up "while you were gone" digest lines, set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
@@ -2008,7 +2008,7 @@ impl View {
             yard_want: false,
             yard_inflight: false,
             yard_gen: 0,
-            court: crate::court_overlay::Panel::default(),
+            org: crate::org_overlay::Panel::default(),
             digest: None,
             notice: None,
             row_stamp: None,
@@ -2316,9 +2316,9 @@ impl View {
         }
     }
 
-    /// The yard crowd: every roster agent as `(name, eye, crown)`,
+    /// The yard crowd: every roster agent as `(name, eye, team)`,
     /// the eye derived from that row's own badge/need reading at render time
-    /// and the crown read off the same wire field the sideline orders by.
+    /// and the team read off the same wire field the sideline orders by.
     /// This is the whole multi-citizen surface - one glyph each, no sprite,
     /// so any density including Slim can hold it.
     fn yard_crowd(&self) -> Vec<(&str, crate::sprites::Eye, u32)> {
@@ -5086,7 +5086,7 @@ impl View {
             // crowd is one eye glyph per roster citizen (each glyph computed
             // from that row's own badge/need values); the spotlight is ONE
             // 12-column sprite for the selected citizen, its eye from the
-            // same reading, its species/rarity/crown/first-sighting from the
+            // same reading, its species/rarity/team/first-sighting from the
             // identity fold. A failed fold degrades to readings-only, never
             // blocks, never guesses a species.
             let crowd = self.yard_crowd();
@@ -5915,7 +5915,7 @@ impl View {
 
     /// Sorts agent runs the way the extended table orders them: each
     /// contiguous run of agent rows between non-agent rows orders by the
-    /// active column (kings compared against each other, workers ordered
+    /// active column (leads compared against each other, workers ordered
     /// inside their own lineage level), so the card view and the table read
     /// in the sorted order and the painted age is the value sorted on.
     fn sort_agent_runs<'a>(
@@ -7872,10 +7872,10 @@ async fn attach_and_run(
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
-    // The court fold leg: single-flight + the TTL are the whole
+    // The org fold leg: single-flight + the TTL are the whole
     // concurrency contract; no generation to supersede.
-    let (court_tx, mut court_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Option<crate::court_overlay::Court>>();
+    let (org_fold_tx, mut org_fold_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Option<crate::org_overlay::Org>>();
 
     // the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
@@ -8024,10 +8024,10 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result));
             });
         }
-        if view.court.take_want() {
-            let tx = court_tx.clone();
+        if view.org.take_want() {
+            let tx = org_fold_tx.clone();
             tokio::spawn(async move {
-                let _ = tx.send(crate::court_overlay::fold_now().await);
+                let _ = tx.send(crate::org_overlay::fold_now().await);
             });
         }
         // kick a wanted Connections read off the UI loop, at most one in
@@ -8145,7 +8145,7 @@ async fn attach_and_run(
             )
             .min();
         // Refresh timer; the deadline is None while a fold runs.
-        let court_tick = view.court.refresh_deadline();
+        let org_tick = view.org.refresh_deadline();
         let frame_tick = view.frame_deadline();
         // The meter's one-shot spawn: the settings toggle sets
         // `resource_meter_sampling`, and the loop - which owns meter_tx -
@@ -8518,9 +8518,9 @@ async fn attach_and_run(
                     }
                 }
             }
-            Some(result) = court_rx.recv() => {
+            Some(result) = org_fold_rx.recv() => {
                 // The fold landed; `apply` owns the merge rules.
-                view.court.apply(result);
+                view.org.apply(result);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -8889,11 +8889,11 @@ async fn attach_and_run(
                 }
             }
             _ = async {
-                match court_tick {
+                match org_tick {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
                 }
-            }, if court_tick.is_some() => {
+            }, if org_tick.is_some() => {
                 // The wake itself is a no-op: the next loop pass runs
                 // take_want at the top and spawns the refresh if due.
             }
@@ -9346,7 +9346,7 @@ async fn dispatch_event(
         }
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
-        Event::OpenCourt => view.court.toggle(),
+        Event::OpenCourt => view.org.toggle(),
         Event::ToggleQuestionsBlock => questions::toggle_block(view),
         Event::ResizeQuestionsBlock(delta) => questions::resize_block(view, delta),
         Event::ToggleQuestionsDone => questions::toggle_show_done(view),
@@ -11174,8 +11174,8 @@ use compositor::Compositor;
 mod tests;
 
 #[cfg(test)]
-#[path = "client_tests/court_block_tests.rs"]
-mod court_block_tests;
+#[path = "client_tests/org_block_tests.rs"]
+mod org_block_tests;
 #[cfg(test)]
 #[path = "client_tests/theme_ground_tests.rs"]
 mod theme_ground_tests;
@@ -11204,8 +11204,8 @@ mod keys_modal_tests;
 #[path = "client_tests/ground_tests.rs"]
 mod ground_tests;
 
-#[path = "client/court_block.rs"]
-mod court_block;
+#[path = "client/org_block.rs"]
+mod org_block;
 
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
