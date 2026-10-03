@@ -143,6 +143,7 @@ pub mod daemon;
 pub mod day;
 pub mod decide_door;
 pub mod decision_index;
+pub mod decision_trace;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
@@ -1248,8 +1249,9 @@ mod tests {
             }
         }
 
-        // The allowed files: production binary repair (install_verify), three
-        // production dir modes (paths, fleet_incident, chats), two dir-mode
+        // The allowed files: production binary repair (install_verify), four
+        // production dir modes (paths, fleet_incident, chats, the
+        // session-state pin dir), two dir-mode
         // restores in tests (claims, operator_turns); the bin test target
         // cannot see a cfg(test) lib fn (client_tests); and the plan writer's
         // production mode-preserve on its atomic plan-file replace
@@ -1257,6 +1259,7 @@ mod tests {
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
+            ("hook/session_state.rs", 1),
             ("king_board/claims.rs", 1),
             ("operator_turns.rs", 1),
             ("client_tests.rs", 2),
@@ -1398,6 +1401,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",
+    // One hop in a traced decision (decision_trace.rs): ask, route,
+    // correction, or guard block, written through emit_span into the
+    // project journal; the Python side documents the shape for the
+    // validator, the way operator_question does.
+    "decision_span",
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     // Spawn coordinator: the durable accepted record written BEFORE

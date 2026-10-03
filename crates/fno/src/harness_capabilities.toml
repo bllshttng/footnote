@@ -1904,11 +1904,23 @@ reason = "no fno hook registration for zcode (no plugin hook file and no capabil
 
 [harness.claude.hooks.session_state]
 state = "supported"
-via = ["hooks/inside-leg-report.sh", "hooks/hooks.json"]
+via = ["hooks/session-state.sh", "hooks/hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
+
+[harness.claude.hooks.session_state.wiring]
+events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done", PostModelSwitch = "model" }
+blocked = "Notification"
 
 [harness.codex.hooks.session_state]
 state = "supported"
-via = ["hooks/inside-leg-report.sh", "hooks/codex-hooks.json"]
+via = ["hooks/session-state.sh", "hooks/codex-hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
+
+# PreToolUse is the load-bearing entry: a goal-mode continuation is a
+# user-role row, so UserPromptSubmit never fires and the goal leg is only
+# visible through its tool calls. PermissionRequest is NOT wired: the
+# payload shape was never captured, so `blocked` stays "none" until one is.
+[harness.codex.hooks.session_state.wiring]
+events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done" }
+blocked = "none"
 
 [harness.footnote.hooks.session_state]
 state = "supported"

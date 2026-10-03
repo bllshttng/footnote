@@ -14,7 +14,9 @@ import unicodedata
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
-MIN_ROWS, MAX_ROWS = 4, 6
+MIN_ROWS, MAX_ROWS = 3, 6
+# Under this many columns the original buddy showed a one-line face.
+NARROW = 100
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
@@ -82,16 +84,20 @@ def layout(left, frame, cols):
     """Returns the rows to print. Inner text stays on top; the buddy stands on the bottom row."""
     if not frame:
         return left
+    if cols + 4 < NARROW:
+        return face_row(left, frame, cols)
     color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
     art = [r.rstrip() for r in frame.get("sprite", [])]
     while art and not art[0].strip():
         art.pop(0)
-    art = art[-(MAX_ROWS - 1):]
-    aw = max([width(a) for a in art] + [len(frame.get("name", ""))])
-    art.append(frame.get("name", "").center(aw).rstrip())
-    # Speech sits beside the body, the fleet line beside the name.
+    name = frame.get("name", "")
+    fleet = frame.get("fleet") or ""
+    # Like the original: the full sprite with its name row below, at 100 columns or more.
+    aw = max([width(a) for a in art] + [len(name)])
+    art.append(name.center(aw).rstrip())
+    # Speech sits beside the body, the fleet line beside the name row.
     labels = [""] * len(art)
-    labels[-1] = frame.get("fleet") or ""
+    labels[-1] = fleet
     if len(art) > 1:
         labels[-2] = frame.get("speech") or ""
 
@@ -108,7 +114,12 @@ def layout(left, frame, cols):
                 out.append(l + " " * (cols - width(l) - width(right)) + color + right + "\x1b[0m")
             return out
 
-    # Too wide to share any 6-row stack: the one-line face on the first row that fits.
+    return face_row(left, frame, cols)
+
+
+def face_row(left, frame, cols):
+    """The one-line face on the lowest row that has room."""
+    color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
     face = f"{frame.get('face', '')} {frame.get('name', '')}"
     if frame.get("speech"):
         face += f": {frame['speech']}"
