@@ -723,6 +723,38 @@ pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Point `FNO_AGENTS_HOME` at `path` for the rest of the scope. Serialized by
+/// [`crate::claims::test_env_lock`], so every test that resolves the agents
+/// home shares one lane, and the previous value is restored on drop, panic
+/// included.
+#[cfg(test)]
+pub(crate) struct AgentsHomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl AgentsHomeEnvGuard {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", path);
+        Self { previous, _lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AgentsHomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+    }
+}
+
 /// The process `PATH` with `dir` in front. PREPEND, never replace: PATH is
 /// process-global, so a test that replaces it takes the system tools away from
 /// every concurrent test in the binary, and a stub only needs to win.
