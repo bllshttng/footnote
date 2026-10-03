@@ -1551,6 +1551,18 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
 
     // Machine-global mutations start here (cargo bins, the uv/pip env), so
     // this is where the machine-scoped guard belongs.
+    // Before replacing the tool env in place, name anything still running
+    // from it (2026-10-02 gap audit, blockers 1 and 3): the repair is the
+    // same move that replaced a live study's CLI unnoticed. Advisory - the
+    // update proceeds, the naming is the fix.
+    let live_env = live_tool_env_processes();
+    if !live_env.is_empty() {
+        eprintln!(
+            "fno doctor update: {} live process(es) run from the tool env, e.g. {}. This update replaces that env in place; stop them first if the run matters.",
+            live_env.len(),
+            live_env[0]
+        );
+    }
     if let Err(code) = acquire_update_claim(rev.as_deref()) {
         return code;
     }
@@ -1679,6 +1691,40 @@ fn which_uv() -> Option<PathBuf> {
 
 fn which_pip() -> Option<PathBuf> {
     on_path(if cfg!(windows) { "pip.exe" } else { "pip" })
+}
+
+/// Live processes whose argv names a path inside the uv fno tool env. The
+/// update replaces that env in place, so `run` names anything still running
+/// from it before the claim: a session-start installer once replaced a live
+/// study's CLI this way unnoticed (2026-10-02 gap audit, blockers 1 and 3).
+/// Over-catching is safe: the line is advisory. Empty when uv, the env, or
+/// the process table is unreadable.
+fn live_tool_env_processes() -> Vec<String> {
+    let Some(uv) = which_uv() else {
+        return Vec::new();
+    };
+    let Ok((0, out, _)) = run_captured(&uv, &["tool".into(), "dir".into()], None) else {
+        return Vec::new();
+    };
+    let needle = PathBuf::from(out.trim())
+        .join("fno")
+        .to_string_lossy()
+        .to_string();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let ps = PathBuf::from("ps");
+    let Ok((0, ps_out, _)) = run_captured(&ps, &["-axo".into(), "pid=,args=".into()], None) else {
+        return Vec::new();
+    };
+    let me = format!("{} ", std::process::id());
+    ps_out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains(&needle))
+        .filter(|l| !l.starts_with(&me) && !l.contains(" awk -") && !l.contains(" ps -"))
+        .map(String::from)
+        .collect()
 }
 
 /// `fno doctor update --check`: readiness as JSON on stdout, exit 0. The
