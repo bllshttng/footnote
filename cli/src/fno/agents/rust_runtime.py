@@ -132,6 +132,11 @@ RUST_CLIENT_VERBS = frozenset(
         "adopt",
         "attach",
         "logs",
+        # The daemon-free read projections the top view and the spawn path
+        # call: the session-to-node join and the revival decision. Client-side
+        # dispatch starts nothing.
+        "sessions-map",
+        "revival-check",
         # registry-json: the daemon-free registry projection the hooks read.
         # Reads the registry file client-side (load_registry_entries) and
         # derives the served liveness pair with the vendored freshness rule.

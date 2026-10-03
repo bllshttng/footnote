@@ -2316,7 +2316,7 @@ event_types:
 
   - name: agent_revived
     description: "A reaped session came back: one per revive naming the verb, the actor session, the prior name and the session id; the revived row reads origin=revived."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [verb, prior_name, name, harness, harness_session_id]
 

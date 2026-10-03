@@ -125,25 +125,6 @@ def _mk(**kw) -> AgentEntry:
     return AgentEntry(**base)
 
 
-def test_is_revival_gate(monkeypatch) -> None:
-    from fno.agents.harnesses import claude as claude_mod
-
-    # Dead supervisor: a --resume that matches the row's own uuid is a revival.
-    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
-    row = _mk()
-    assert dispatch._is_revival(row, "claude", DEAD_UUID) is True
-    assert dispatch._is_revival(row, "claude", None) is False  # no --resume
-    assert dispatch._is_revival(row, "claude", OTHER_UUID) is False  # uuid mismatch
-    assert dispatch._is_revival(row, "codex", DEAD_UUID) is False  # non-claude spawn
-    assert (
-        dispatch._is_revival(_mk(harness="codex"), "claude", DEAD_UUID) is False
-    )  # non-claude row
-
-    # A live supervisor is a collision, never a revival - even with a uuid match.
-    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: True)
-    assert dispatch._is_revival(row, "claude", DEAD_UUID) is False
-
-
 # ---------------------------------------------------------------------------
 # Integration: the CLI spawn path
 # ---------------------------------------------------------------------------
