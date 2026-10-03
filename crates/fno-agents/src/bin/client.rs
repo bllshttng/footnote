@@ -405,6 +405,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::test_delta::run_test_delta(&args[1..]);
     }
 
+    // The style gate's hidden binary-direct door (mail, encounters, markdown);
+    // matched with `matches!` so the routable-verb parity sets never see it.
+    if matches!(verb, "style-check") {
+        return fno_agents::backlog::style_check::run_cli(&args[1..]);
+    }
+
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct
