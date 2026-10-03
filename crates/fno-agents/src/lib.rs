@@ -216,6 +216,7 @@ pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_checkin_blueprint;
+pub mod king_checkin_lineup;
 pub mod king_checkin_machine;
 pub mod king_escalation;
 pub mod king_history;
