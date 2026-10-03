@@ -544,6 +544,7 @@ fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
     let out_path = dir.join("stdout");
     let err_path = dir.join("stderr");
     let outcome = (|| -> std::io::Result<ShellOutcome> {
+        use std::os::unix::process::CommandExt;
         let outf = std::fs::File::create(&out_path)?;
         let errf = std::fs::File::create(&err_path)?;
         let mut child = std::process::Command::new("bash")
