@@ -170,6 +170,10 @@ pub(crate) fn claude_activity(raw: &str) -> Activity {
 pub(crate) struct ActivityFold {
     act: Activity,
     seen_ids: HashSet<String>,
+    /// Whether this pass saw a codex token_count row: presence, not
+    /// magnitude, decides whether a cumulative total replaces the stored
+    /// one (a real row can legitimately carry zero).
+    tokens_seen: bool,
 }
 
 impl ActivityFold {
@@ -184,6 +188,11 @@ impl ActivityFold {
     /// order: the running anchor a rollup's response gaps hang off.
     pub(crate) fn last_assistant_ts(&self) -> Option<f64> {
         self.act.assistant_ts.last().copied()
+    }
+
+    /// Whether a codex token_count row arrived in this pass.
+    pub(crate) fn saw_tokens(&self) -> bool {
+        self.tokens_seen
     }
 }
 
@@ -310,6 +319,7 @@ impl ActivityFold {
             (Some("event_msg"), Some("token_count")) => {
                 if let Some(total) = codex_token_total(row) {
                     act.tokens = total;
+                    self.tokens_seen = true;
                 }
             }
             (Some("event_msg"), Some("turn_aborted")) => act.aborted_turns += 1,

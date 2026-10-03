@@ -22,7 +22,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-const VERSION: u32 = 1;
+// Version 2 invalidates caches written before the relay-id scan and the
+// presence-based token merge: their entries hold consumed offsets with
+// empty relay_ids, which no later run can repopulate from an unchanged
+// tail. A version mismatch resets the store and the next run backfills.
+const VERSION: u32 = 2;
 const CHUNK: u64 = crate::transcript_activity::CHUNK;
 const HEAD_SAMPLE_BYTES: u64 = crate::transcript_activity::HEAD_SAMPLE_BYTES;
 const RECENT_IDS: usize = 64;
@@ -409,11 +413,12 @@ impl<'a> TailPass<'a> {
     }
 
     fn finish(self) {
+        let saw_tokens = self.fold.saw_tokens();
         let act = self.fold.finish();
-        // Token merge follows the source: a cumulative total replaces, a
-        // per-pass sum adds. A tail with no token_count row reads zero, and
-        // a zero total never replaces a stored one.
-        if self.cumulative && act.tokens.input + act.tokens.output > 0 {
+        // Token merge follows the source: a cumulative total replaces when
+        // this pass saw a token_count row (presence, not magnitude: a real
+        // row can carry zero), a per-pass sum adds.
+        if self.cumulative && saw_tokens {
             self.entry.tokens = act.tokens;
         } else if !self.cumulative {
             self.entry.tokens.input += act.tokens.input;
@@ -615,7 +620,7 @@ pub(crate) fn build_row(
 mod tests {
     use super::*;
     use crate::operator_witness::SubmitIndex;
-    use crate::provenance::ClaudeSource;
+    use crate::provenance::{ClaudeSource, CodexSource};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -767,6 +772,67 @@ mod tests {
         );
         assert_eq!(bytes_after_second.first_ms, we.first_ms);
         assert_eq!(bytes_after_second.last_ms, we.last_ms);
+
+        // Codex parity: a cumulative total survives a token-less tail, and
+        // a real zero total replaces it. Presence, not magnitude.
+        let cdir = tmp_dir("codexparity");
+        let cpath = cdir.join("rollout.jsonl");
+        let token_row = |n: u64| {
+            json!({"type": "event_msg",
+                       "payload": {"type": "token_count",
+                                   "info": {"total_token_usage": {
+                                       "input_tokens": n, "output_tokens": 0,
+                                       "cached_input_tokens": 0}}}})
+            .to_string()
+        };
+        let plain = json!({"type": "event_msg",
+                           "payload": {"type": "agent_message",
+                                       "message": "no tokens here"}})
+        .to_string();
+        let csrc = CodexSource {
+            sessions_dir: None,
+            roots: None,
+        };
+        let mut cstore = RollupStore::open(cdir.join("rollups.json"));
+        let cfile = |size: u64| SessionFile {
+            session_id: "r1".to_string(),
+            path: cpath.clone(),
+            mtime: 0,
+            size,
+        };
+        std::fs::write(&cpath, format!("{}\n", token_row(500))).unwrap();
+        let (ce1, _) = cstore.advance(
+            &cfile(std::fs::metadata(&cpath).unwrap().len()),
+            &csrc,
+            &BusIndex::empty(),
+        );
+        assert_eq!(ce1.tokens.input, 500);
+        // A tail with no token_count row keeps the stored total.
+        std::fs::write(&cpath, format!("{}\n{}\n", token_row(500), plain)).unwrap();
+        let (ce2, _) = cstore.advance(
+            &cfile(std::fs::metadata(&cpath).unwrap().len()),
+            &csrc,
+            &BusIndex::empty(),
+        );
+        assert_eq!(ce2.tokens.input, 500);
+        // A real zero total replaces it, matching the whole-file path where
+        // the last token_count row wins.
+        std::fs::write(
+            &cpath,
+            format!("{}\n{}\n{}\n", token_row(500), plain, token_row(0)),
+        )
+        .unwrap();
+        let (ce3, _) = cstore.advance(
+            &cfile(std::fs::metadata(&cpath).unwrap().len()),
+            &csrc,
+            &BusIndex::empty(),
+        );
+        assert_eq!(ce3.tokens.input, 0);
+        let cwhole_path = cdir.join("whole.jsonl");
+        let cwhole = write_lines(&cwhole_path, &[token_row(500), plain.clone(), token_row(0)]);
+        let mut cwhole_store = RollupStore::open(cdir.join("whole-rollups.json"));
+        let (cwe, _) = cwhole_store.advance(&cwhole, &csrc, &BusIndex::empty());
+        assert_eq!(ce3.tokens, cwe.tokens);
     }
 
     #[test]
