@@ -12,6 +12,9 @@ use crate::org_model::{OrgLead, OrgTree};
 use crate::view_store::SidelineView;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MESSAGES_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn seg(text: impl Into<String>, role: BRole) -> BSeg {
     BSeg {
@@ -633,11 +636,7 @@ pub(crate) fn paint(
 
 /// Lifecycle.
 pub(crate) fn open(view: &mut View) {
-    let gen = view
-        .messages_board
-        .as_ref()
-        .map(|b| b.gen.wrapping_add(1))
-        .unwrap_or(0);
+    let gen = NEXT_MESSAGES_GEN.fetch_add(1, Ordering::Relaxed);
     view.messages_board = Some(MessagesBoard::new(gen));
     view.backlog_board = None;
     view.org_board = None;

@@ -1992,9 +1992,7 @@ mod tests {
 
     #[test]
     fn sender_span_cells_in_a_pane_line() {
-        // The header the mail transport types into a worker pane. The span is
-        // exactly the `@name` cells - the id, the separators and the summary
-        // are not part of the affordance.
+        // The sender and message ID are separate clickable spans.
         let line = "`@t-glm-9663 · fmail-840a07863897 · fix the gate`";
         let mut pane = Pane::new(4, 60);
         pane.feed(line.as_bytes());
@@ -2005,8 +2003,14 @@ mod tests {
             (1..12).map(|c| (0, c)).collect::<Vec<_>>(),
             "cols 1..=11, the @name run and nothing else"
         );
-        // The summary and the id token are not tappable.
-        assert!(pane.link_span(0, 15).is_none(), "the id token is not");
+        // The ID opens the message; the summary remains plain text.
+        let message = pane.link_span(0, 15).expect("the fmail ID resolves");
+        assert_eq!(message.uri, "fno-message:fmail-840a07863897");
+        assert_eq!(
+            message.cells,
+            (15..33).map(|c| (0, c)).collect::<Vec<_>>(),
+            "the fmail token alone is clickable"
+        );
         assert!(pane.link_span(0, 36).is_none(), "the summary is not");
 
         // The matcher tolerates a harness prompt prefix before the header.
