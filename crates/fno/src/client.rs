@@ -5417,7 +5417,7 @@ impl View {
                                 // No sid on one side: the pane is the next
                                 // identity, and a pane-keyed capture never
                                 // falls through to the label either.
-                                (Some(cap), Some(pane)) => cap == *pane,
+                                (Some(cap), Some(pane)) => cap == pane,
                                 // A capture with no identity keys can only
                                 // name the row, and a name two rows answer is
                                 // ambiguous: anchor nowhere, never first-match.
