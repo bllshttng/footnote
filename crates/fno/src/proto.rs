@@ -366,13 +366,13 @@ fn default_true() -> bool {
 /// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
 /// v102: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
 /// `session_tokens`), both optional; floor stays 58.
-/// v103: `AgentRow` gains the optional daemon-served `compaction_count`;
-/// `PanePlacement.human` is removed as admission inverts: the
+/// v103: `PanePlacement.human` is removed as admission inverts: the
 /// default is admit and only the agent-spawn door opts into the machine
 /// gate, so no per-call-site human ask exists to carry. Serde reads an old
 /// peer's field as an unknown-key ignore; a new field's `#[serde(default)]`
 /// keeps old peers reading new placements. Floor stays 58.
-pub const PROTO_VERSION: u32 = 103;
+/// v104: `AgentRow` gains the optional daemon-served `compaction_count`; floor stays 58.
+pub const PROTO_VERSION: u32 = 104;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1205,7 +1205,7 @@ pub struct AgentRow {
     pub session_cost_cents: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_tokens: Option<u64>,
-    /// (v103) Number of compaction boundaries in the session transcript.
+    /// (v104) Number of compaction boundaries in the session transcript.
     /// `None` means its transcript or identity was unavailable; never a
     /// fabricated zero. `#[serde(default)]` keeps a v102 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4404,7 +4404,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 103);
+        assert_eq!(PROTO_VERSION, 104);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

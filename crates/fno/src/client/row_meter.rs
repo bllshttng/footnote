@@ -37,9 +37,6 @@ pub(super) fn ctx_cell(pct: Option<u8>) -> String {
 /// after it line up card to card. The bar itself is [`CTX_BAR_CELLS`] wide.
 pub(super) const CTX_BAR_W: usize = 13;
 pub(super) const CTX_BAR_CELLS: usize = 8;
-/// At or past this share the bar paints red: claude compacts near the top
-/// of the window, so this is the warning before it happens.
-pub(super) const CTX_NEAR_COMPACT_PCT: u8 = 80;
 
 pub(super) fn ctx_bar(pct: Option<u8>) -> String {
     let Some(pct) = pct else {

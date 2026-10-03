@@ -209,7 +209,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
     let over_window = frame_text(&over_frame);
-    assert!(over_window.contains("████  129%"), "{over_window:?}");
+    assert!(over_window.contains("▂▃▃▄ 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
     let unmeasured = frame_text(&v.compose());
     assert!(unmeasured.contains("????  ? · ?c · ?"), "{unmeasured:?}");
@@ -418,6 +418,11 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
+    let rows = v.painted_rows();
+    let pr_span = match rows.get(agent_i) {
+        Some(DisplayRow::Agent(a)) => card_line::pr_span(a, text_w),
+        _ => None,
+    };
     for display_i in [agent_i, detail_i, detail_i + 1] {
         let row = display_i - offset;
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
@@ -425,7 +430,9 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
             .enumerate()
         {
             assert_eq!(cell.bg, Color::Indexed(0), "one background everywhere");
-            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) {
+            let keeps_identity_color =
+                display_i == agent_i && pr_span.as_ref().is_some_and(|span| span.contains(&j));
+            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
                 assert_eq!(cell.fg, Color::Indexed(3), "accent band text");
             }
             assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
@@ -484,6 +491,11 @@ fn chosen_card_paints_accent_across_both_lines() {
     let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
+    let rows = v.painted_rows();
+    let pr_span = match rows.get(agent_i) {
+        Some(DisplayRow::Agent(a)) => card_line::pr_span(a, text_w),
+        _ => None,
+    };
     for display_i in [agent_i, detail_i, detail_i + 1] {
         let row = display_i - offset;
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
@@ -491,7 +503,9 @@ fn chosen_card_paints_accent_across_both_lines() {
             .enumerate()
         {
             assert_eq!(cell.bg, band_bg, "the surface band fills the card line");
-            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) {
+            let keeps_identity_color =
+                display_i == agent_i && pr_span.as_ref().is_some_and(|span| span.contains(&j));
+            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
                 assert_eq!(cell.fg, band_fg, "the band's accent text everywhere");
             }
             assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
