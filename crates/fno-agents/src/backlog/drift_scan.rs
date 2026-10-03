@@ -1047,7 +1047,7 @@ pub(crate) fn collect_open_binding_heals(
     query: impl Fn(i64, Option<&str>, Option<&str>, bool) -> Result<PrMergeState, PrReadError>,
 ) -> (Vec<OpenBindingHeal>, Vec<String>) {
     let mut fallback = HashMap::new();
-    let cache_memo;
+    let mut cache_memo;
     let memo: &mut HashMap<String, String> = match listings {
         Some(cache) => {
             cache_memo = cache.repo_keys.borrow_mut();

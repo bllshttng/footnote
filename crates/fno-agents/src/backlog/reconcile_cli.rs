@@ -470,7 +470,7 @@ fn heals_leg_persist(
     entries: &mut Vec<Value>,
     graph_path: &Path,
     heals: Vec<OpenBindingHeal>,
-    node: Option<&str>,
+    _node: Option<&str>,
     dry_run: bool,
 ) -> Vec<Value> {
     if heals.is_empty() {
@@ -790,7 +790,7 @@ fn auto_discover_leg(
     closure_bound: &mut Vec<String>,
     dry_run: bool,
     json_out: bool,
-    stderr_log: &mut Vec<String>,
+    _stderr_log: &mut Vec<String>,
 ) {
     const MAX_AUTO_DISCOVER: usize = 20;
     const AUTO_DISCOVER_BUDGET_S: u64 = 60;
@@ -1487,7 +1487,7 @@ fn retro_pending_dir() -> Option<PathBuf> {
 fn post_close_leg(
     close: &CloseResult,
     post_entries: &[Value],
-    json_out: bool,
+    _json_out: bool,
     stderr_log: &mut Vec<String>,
 ) -> Vec<Value> {
     let mut closed_rows: Vec<Value> = Vec::new();
@@ -2024,7 +2024,7 @@ fn report_leg(
     open_advisories: &[String],
     supersession_unverified: &[Value],
     outcomes: &LegOutcomes,
-    full_sweep: bool,
+    _full_sweep: bool,
 ) -> i32 {
     let healed_epics: Vec<String> = close
         .map(|c| c.cascade_closed.clone())

@@ -464,7 +464,7 @@ mod tests {
             "merged",
             "o/r",
             Some(pr as u64),
-            merged_info_row(pr, json!(null)),
+            &merged_info_row(pr, json!(null)),
         );
         // Without files in the row a files-asking read misses; with
         // include_files false the same row serves.
@@ -486,12 +486,13 @@ mod tests {
             Some("o/r"),
             Path::new("."),
             false,
-            |_| Ok(json!({"pr": 7, "state": "WIP"})),
+            |_, _, _| Ok(json!({"pr": 7, "state": "WIP"})),
             |_, _, _| unreachable!("files never read for a refused state"),
         )
         .expect_err("malformed state");
         assert_eq!(err.kind, "malformed");
-        assert!(err.message.contains("malformed state"), "{err.message}");
+        let msg = err.message.clone();
+        assert!(msg.contains("malformed state"), "{msg}");
     }
 
     #[test]
@@ -502,12 +503,13 @@ mod tests {
                 Some("o/r"),
                 Path::new("."),
                 false,
-                |_| Ok(info.clone()),
+                |_, _, _| Ok(info.clone()),
                 |_, _, _| unreachable!(),
             )
             .expect_err("omitted key");
             assert_eq!(err.kind, "malformed");
-            assert!(err.message.contains("omitted required"), "{err.message}");
+            let msg = err.message.clone();
+            assert!(msg.contains("omitted required"), "{msg}");
         }
     }
 
@@ -519,7 +521,7 @@ mod tests {
             Some("o/r"),
             Path::new("."),
             true,
-            |_| Ok(info("OPEN")),
+            |_, _, _| Ok(info("OPEN")),
             |_, _, _| panic!("files must not be read for an open PR"),
         )
         .expect("open read");
@@ -529,7 +531,7 @@ mod tests {
             Some("o/r"),
             Path::new("."),
             true,
-            |_| Ok(info("MERGED")),
+            |_, _, _| Ok(info("MERGED")),
             |_, _, _| Ok(vec!["x.py".into()]),
         )
         .expect("merged read");
@@ -540,7 +542,7 @@ mod tests {
             Some("o/r"),
             Path::new("."),
             false,
-            |_| Ok(info("MERGED")),
+            |_, _, _| Ok(info("MERGED")),
             |_, _, _| panic!("files must not be read when not asked"),
         )
         .expect("merged read");
@@ -566,7 +568,8 @@ mod tests {
         assert_eq!(paths.len(), FILES_PAGE_SIZE + 3);
         let cap = paginate_files(|_| Ok(full_page.clone())).expect_err("cap fails closed");
         assert_eq!(cap.kind, "evidence_incomplete", "{}", cap.kind);
-        assert!(cap.message.contains("3,000-file cap"), "{cap.message}");
+        let cap_msg = cap.message.clone();
+        assert!(cap_msg.contains("3,000-file cap"), "{cap_msg}");
     }
 
     #[test]
@@ -574,10 +577,8 @@ mod tests {
         let err = paginate_files(|_| Ok(json!([{"filename": "ok.rs"}, {"filename": ""}])))
             .expect_err("malformed row");
         assert_eq!(err.kind, "malformed");
-        assert!(
-            err.message.contains("page 1 carried malformed row 1"),
-            "{err.message}"
-        );
+        let msg = err.message.clone();
+        assert!(msg.contains("page 1 carried malformed row 1"), "{msg}");
     }
 
     #[test]
