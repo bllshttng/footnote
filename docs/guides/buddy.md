@@ -78,7 +78,7 @@ If you hatched a buddy before Claude Code removed it, its name and personality a
 
 ## Cost and models
 
-Each model line is one call on your own plan, with a limit of 60 output tokens. `/buddy off` stops these calls for every session.
+Each model line is one call on your own plan, with a limit of 80 output tokens. `/buddy off` stops these calls for every session.
 
 The buddy asks for the `haiku` model through the API client of your session. On an Anthropic session, that is Claude Haiku. If your session uses a different endpoint, the `haiku` name goes to that endpoint. For example, a session with `ANTHROPIC_DEFAULT_HAIKU_MODEL` set to a GLM model gets GLM lines.
 

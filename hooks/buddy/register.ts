@@ -7,7 +7,7 @@ import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityProm
 const TICK_MS = 500
 const BUBBLE_MS = 30_000
 // After this long with nothing said, the buddy says a canned line (no model call).
-const IDLE_TALK_MS = 90_000
+const IDLE_TALK_MS = 45_000
 const PET_MS = 2_500
 const MIN_TURN_MS = 5_000
 const REACT_GAP_MS = 10_000
@@ -240,7 +240,7 @@ async function react($: EngineInterface): Promise<void> {
     model: 'haiku',
     system: systemPrompt(buddy),
     prompt: reactionPrompt(summary),
-    maxTokens: 60,
+    maxTokens: 80,
     timeoutMs: 20_000,
   })
   const line = reply.isAnswered ? cleanReaction(reply.text) : ''
@@ -401,6 +401,7 @@ export function register(on: On) {
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
         if (wrapped && !was) await $.ui.close({ id: PANE_ID }).catch(() => {})
+        if (wrapped) $.ui.invalidate('ui.render')
       }
       if (wrapped) {
         drawnAt = at
@@ -491,6 +492,11 @@ export function register(on: On) {
   // the buddy standing at the bottom and its words above it.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID || !buddy || muted) return next(e)
+    // One buddy on screen: a pane left open (a resumed session, a late open) closes once the status line has it.
+    if (wrapped) {
+      void $.ui.close({ id: PANE_ID }).catch(() => {})
+      return next(e)
+    }
     const now = await $.clock.now()
     drawnAt = paneDrawnAt = now
     const { Box, Text, Button } = $.ui.resolve(e)
