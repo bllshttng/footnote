@@ -421,12 +421,14 @@ impl<'a> TailPass<'a> {
     }
 }
 
-/// The response gap of one operator turn over stored ms: kept in the same
-/// 2 to 3600 s window, truncated to whole seconds exactly as the f64 path.
+/// The response gap of one operator turn over stored ms, reproducing the
+/// whole-transcript path exactly: the turn's epoch truncates to whole
+/// seconds there, the assistant anchor stays f64, the window is the
+/// inclusive 2.0 to 3600.0 f64 range, and the kept value truncates.
 fn gap_s(ms: i64, prev_ms: Option<i64>) -> Option<u64> {
     let prev = prev_ms?;
-    let d = ms - prev;
-    (2000..=3_600_000).contains(&d).then_some((d / 1000) as u64)
+    let gap = (ms.div_euclid(1000)) as f64 - prev as f64 / 1000.0;
+    (2.0..=3600.0).contains(&gap).then(|| gap as u64)
 }
 
 /// The report row of a stored entry: the counters replay through the
