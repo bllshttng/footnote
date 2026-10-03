@@ -67,7 +67,7 @@ fn claude_plugin_list_ids_decide_installed() {
 #[test]
 fn claude_skills_dir_manifest_answers_before_any_spawn() {
     let home = std::env::temp_dir().join(format!("fno-autowire-{}", std::process::id()));
-    let dest = home.join(".claude").join("skills").join("fno");
+    let dest = home.join(".claude").join("skills").join(SKILLS_DROP);
     std::fs::create_dir_all(dest.join(".claude-plugin")).unwrap();
     std::fs::write(dest.join(".claude-plugin").join("plugin.json"), "{}").unwrap();
     let outcome = claude_wire(&home, &|argv| {

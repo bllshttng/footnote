@@ -330,3 +330,7 @@ A	{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped	py=cli/sr
 A	{task_id} is already done	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# offender - carry a reason or fix in this PR
+A	https://github.com/bllshttng/footnote	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# auto-wire mirrors the wizard adapter until the wizard delegates (dual-implementation-inventory 2026-10-02)
+A	skills-dir; no `claude plugin update`	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs|crates/fno/src/setup_autowire_tests.rs	# auto-wire mirrors the wizard adapter until the wizard delegates (dual-implementation-inventory 2026-10-02)
+A	unreadable install receipt	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# auto-wire mirrors the wizard adapter until the wizard delegates (dual-implementation-inventory 2026-10-02)
+A	{} file(s) (footnote {}) -> {}	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# auto-wire mirrors the wizard adapter until the wizard delegates (dual-implementation-inventory 2026-10-02)

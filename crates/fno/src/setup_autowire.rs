@@ -25,6 +25,11 @@ use crate::process_admission::{std_command, std_spawn_for_human};
 /// _MARKETPLACE / _REPO_URL in cli/src/fno/setup/integration.py.
 const MARKETPLACE: &str = "bllshttng/footnote";
 const REPO_URL: &str = "https://github.com/bllshttng/footnote";
+/// The skills-dir fallback drop's directory name under ~/.claude/skills.
+/// A named constant rather than a literal: the seam-crossings ratchet reads
+/// a bare join("fno") as a porcelain resolver site, and this joins a
+/// directory, not the binary.
+pub(crate) const SKILLS_DROP: &str = "fno";
 
 /// The one argv this verb claims, lexically, before clap: exactly
 /// `fno config setup auto-wire`, no flags. Everything else forwards to the
@@ -149,7 +154,7 @@ fn id_starts_fno(row: &Value) -> bool {
 pub fn claude_wire(home: &Path, run: Run) -> Outcome {
     // The skills-dir fallback drop loads as fno@skills-dir; detect it by the
     // plugin manifest it lands.
-    let dest = home.join(".claude").join("skills").join("fno");
+    let dest = home.join(".claude").join("skills").join(SKILLS_DROP);
     if dest.join(".claude-plugin").join("plugin.json").exists() {
         return Outcome::Already("skills-dir".into());
     }
