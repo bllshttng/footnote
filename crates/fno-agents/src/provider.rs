@@ -539,8 +539,12 @@ pub(crate) fn plugin_root() -> Option<PathBuf> {
         }
     }
     let mut pointer = match std::env::var("FNO_HOME") {
-        Ok(home) => PathBuf::from(home),
-        Err(_) => home_dir()?,
+        Ok(home) if !home.is_empty() => PathBuf::from(home),
+        // The pointer anchors at the STATE ROOT (~/.fno), not $HOME: the
+        // session-start hook and the install verb write
+        // ~/.fno/install/plugin-root, so a $HOME anchor read a file that
+        // never existed (2026-10-02 gap audit 6).
+        Err(_) => crate::paths::dirs_home().join(".fno"),
     };
     pointer = crate::state_layout::place(&pointer, "plugin-root");
     let text = std::fs::read_to_string(pointer).ok()?;

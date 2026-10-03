@@ -1903,7 +1903,27 @@ fn install_harness(harness: &str, force: bool) -> Result<String, String> {
             ))
         }
     };
+    prime_plugin_root_pointer(&stage);
     Ok(detail)
+}
+
+/// Persist the installed stage to `<state-root>/install/plugin-root`, the
+/// pointer the session-start hook primes and every env-less reader (provider
+/// verb rosters, opencode install, the lead skill's fallback) resolves. The
+/// install verb must not depend on a session ever starting: on a fresh machine
+/// the first `fno config plugin install` is exactly when no hook has run yet
+/// (2026-10-02 gap audit 6). Best-effort: a failed write never fails the
+/// install. The stage is a self-contained copy (no `.git`), so unlike a
+/// worktree root it is safe as the machine-global value.
+fn prime_plugin_root_pointer(stage: &Path) {
+    if !stage.join(".claude-plugin").join("plugin.json").is_file() {
+        return;
+    }
+    let ptr = crate::state_layout::place(&state_root(), "plugin-root");
+    if let Some(parent) = ptr.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&ptr, format!("{}\n", stage.display()));
 }
 
 /// The env exports as (line, is_error) pairs, so an arm that must keep
@@ -2403,6 +2423,42 @@ fn swap_grok_symlink(plugins: &Path, link: &Path, stage: &Path) -> Result<(), St
 mod tests {
     use super::*;
     use std::fs;
+
+    // Install primes the plugin-root pointer at <state>/install/plugin-root
+    // (the path every env-less reader resolves through the layout table), and
+    // a stage without a manifest writes nothing.
+    #[test]
+    fn install_primes_plugin_root_pointer() {
+        let root = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("FNO_RECLAIM_STATE_ROOT");
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", root.path());
+        let stage = root.path().join("stage");
+        std::fs::create_dir_all(stage.join(".claude-plugin")).unwrap();
+        std::fs::write(stage.join(".claude-plugin").join("plugin.json"), b"{}").unwrap();
+
+        prime_plugin_root_pointer(&stage);
+
+        let ptr = root.path().join("install").join("plugin-root");
+        assert_eq!(
+            fs::read_to_string(&ptr).unwrap().trim(),
+            stage.to_str().unwrap(),
+            "the pointer names the installed stage"
+        );
+
+        let bare = root.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        prime_plugin_root_pointer(&bare);
+        assert_eq!(
+            fs::read_to_string(&ptr).unwrap().trim(),
+            stage.to_str().unwrap(),
+            "a manifest-less stage writes nothing; pointer still names the stage"
+        );
+
+        match previous {
+            Some(v) => std::env::set_var("FNO_RECLAIM_STATE_ROOT", v),
+            None => std::env::remove_var("FNO_RECLAIM_STATE_ROOT"),
+        }
+    }
 
     // zcode install: a malformed config is refused byte-identical.
     #[test]
