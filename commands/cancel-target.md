@@ -7,27 +7,11 @@ description: Cancel an active target pipeline
 
 Cancels a target pipeline. Behavior depends on whether a state file exists:
 
-- **Live session (manifest present):** assert the `.target-cancelled`
-  signal and let the stop hook author `status: BLOCKED` on the next stop. This
-  is the sanctioned cancel path (the reader is `check_cancel_sentinel` in
-  `crates/fno-agents/src/cancel_sentinel.rs`) and is independent of the transcript-id match
-  and the "latest user turn" check, so it works whether a human types the
-  command or the assistant invokes the skill. The state file is NOT removed:
-  removing it re-arms the orphan detector (the transcript permanently records
-  the `/fno:target` invocation), which re-blocks exit on every stop.
-  Leaving it lets the hook write `BLOCKED` as a durable terminal record
-  (postmortem + ledger + the backlog node returning to `ready`); the next
-  `fno do target init` archives that terminal state cleanly.
+- **Live session (manifest present):** assert the `.target-cancelled` signal and let the stop hook author `status: BLOCKED` on the next stop. This is the sanctioned cancel path. The reader is `check_cancel_sentinel` in `crates/fno-agents/src/cancel_sentinel.rs`. It is independent of the transcript-id match and the "latest user turn" check. A human typing the command and an assistant invoking the skill both work. The state file is NOT removed. Removing it re-arms the orphan detector, and the transcript permanently records the `/fno:target` invocation. That re-blocks exit on every stop. Leaving it lets the hook write `BLOCKED` as a durable terminal record. That record carries the postmortem, the ledger entry, and the backlog node returning to `ready`. The next `fno do target init` archives that terminal state cleanly.
 
   The `ready` return is the claim's doing. The cancel terminal releases the run's `node:<id>` claim. That release closes the `execute` row that was pinning the status.
 
-- **Orphan (no manifest):** the session was driven off-ceremony (init
-  skipped) or a prior cancel removed the manifest. Clearing the orphan block
-  requires a genuine human-typed `/fno:target cancel` (the anti-forgery
-  factor the assistant cannot satisfy by invoking this skill itself). The skill
-  writes a session-keyed tombstone so a human's command is honored; the
-  orphan block is bounded (it self-terminates after a few stops and records the
-  bypass) so an unattended loop cannot burn credits indefinitely.
+- **Orphan (no manifest):** the session was driven off-ceremony (init skipped) or a prior cancel removed the manifest. Clearing the orphan block requires a genuine human-typed `/fno:target cancel` (the anti-forgery factor the assistant cannot satisfy by invoking this skill itself). The skill writes a session-keyed tombstone so a human's command is honored; the orphan block is bounded (it self-terminates after a few stops and records the bypass) so an unattended loop cannot burn credits indefinitely.
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
