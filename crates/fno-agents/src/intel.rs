@@ -1178,7 +1178,7 @@ fn fold_all(
         .count();
     let witness = ctx.witness.receipt(window_start_ms, unwitnessed_sessions);
     let events = events_counts(
-        &ctx.events,
+        events_journal,
         if days == 0 {
             0
         } else {
@@ -1246,19 +1246,23 @@ fn fold_all(
 }
 
 fn read_events(path: &Path) -> Vec<Value> {
-    // Every row, not just loop_check: the events block counts the whole
-    // journal by type, and commits_for filters loop_check itself.
-    let raw = crate::event_store::journal_text(path, &[]);
+    let raw = crate::event_store::journal_text(path, &["loop_check"]);
     raw.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect()
 }
 
 /// Dated event rows in the window, by type: the evidence block suggestions
-/// cite. A row with no parsable stamp lands in no count.
-fn events_counts(events: &[Value], window_start_s: u64, now: u64) -> BTreeMap<String, u64> {
+/// cite. Streams the whole journal one line at a time: the count needs
+/// every type, never the retained rows (the journal is tens of MB). A row
+/// with no parsable stamp lands in no count.
+fn events_counts(journal: &Path, window_start_s: u64, now: u64) -> BTreeMap<String, u64> {
+    let raw = crate::event_store::journal_text(journal, &[]);
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
-    for v in events {
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let kind = v
             .get("type")
             .and_then(|t| t.as_str())
@@ -1604,15 +1608,20 @@ mod tests {
 
     #[test]
     fn events_counts_keep_only_dated_rows_in_the_window() {
-        let rows = vec![
-            json!({"type": "hook_blocked", "ts": "2026-09-16T12:00:00Z"}),
-            json!({"type": "hook_blocked", "ts": "2026-09-16T13:00:00Z"}),
-            json!({"type": "spawn_refused", "ts": "2026-09-01T00:00:00Z"}),
-            json!({"type": "help_emitted"}),
-            json!({"kind": "loop_check", "ts": "2026-09-16T14:00:00Z"}),
-        ];
+        let fx = build_fixture("events-counts");
+        let journal = fx.dir.join("events.jsonl");
+        write_lines(
+            &journal,
+            &[
+                json!({"type": "hook_blocked", "ts": "2026-09-16T12:00:00Z"}),
+                json!({"type": "hook_blocked", "ts": "2026-09-16T13:00:00Z"}),
+                json!({"type": "spawn_refused", "ts": "2026-09-01T00:00:00Z"}),
+                json!({"type": "help_emitted"}),
+                json!({"kind": "loop_check", "ts": "2026-09-16T14:00:00Z"}),
+            ],
+        );
         let now = ts_secs("2026-09-16T15:00:00Z").unwrap();
-        let counts = events_counts(&rows, now - 3600 * 12, now);
+        let counts = events_counts(&journal, now - 3600 * 12, now);
         assert_eq!(counts.get("hook_blocked"), Some(&2));
         assert_eq!(counts.get("loop_check"), Some(&1));
         assert!(counts.get("spawn_refused").is_none());
