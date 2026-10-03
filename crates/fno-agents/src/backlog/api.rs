@@ -947,15 +947,26 @@ fn journal_thread_rows(
     graph: &std::path::Path,
     node_id: &str,
     existing: &[Comment],
-) -> Vec<Comment> {
+) -> Result<Vec<Comment>, String> {
     let done: std::collections::HashSet<&str> = existing
         .iter()
         .filter_map(|c| c.extras.get("migrated_hash").and_then(Value::as_str))
         .collect();
+    // A genuinely absent journal is an empty migration; an unreadable one
+    // is an error, so the append refuses before the one-time marker stamps
+    // and every later append can retry the import.
+    let journal_file = crate::backlog::note_history::history_path(graph);
     let (records, _) = match crate::backlog::note_history::read(graph, Some(node_id), 0, usize::MAX)
     {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            if journal_file.exists() {
+                return Err(format!(
+                    "note journal unreadable, migration not marked: {e}"
+                ));
+            }
+            return Ok(Vec::new());
+        }
     };
     let mut out = Vec::new();
     for rec in &records {
@@ -990,18 +1001,23 @@ fn journal_thread_rows(
             details: None,
             difficulty: None,
             source: None,
-            source_session_id: rec
+            // The replacing session identified the WRAPPER; the state's own
+            // writer rode `original`. Identity reads from `original` first
+            // so cross-session history names who wrote the state.
+            source_session_id: original
                 .get("source_session_id")
                 .and_then(Value::as_str)
+                .or_else(|| rec.get("source_session_id").and_then(Value::as_str))
                 .map(str::to_string),
-            source_harness: rec
+            source_harness: original
                 .get("source_harness")
                 .and_then(Value::as_str)
+                .or_else(|| rec.get("source_harness").and_then(Value::as_str))
                 .map(str::to_string),
             extras,
         });
     }
-    out
+    Ok(out)
 }
 
 /// One threaded comment row. `kind: comment` is a thread head (the user's
@@ -1036,14 +1052,22 @@ pub fn comment_create(
                 "a reply names its thread: reply_to is required".into(),
             ));
         };
-        let known = comments(store, id, &Page::default())?
-            .nodes
+        let known = comments(store, id, &Page::default())?.nodes;
+        let head = known
             .iter()
-            .any(|c| c.extras.get("comment_id").and_then(Value::as_str) == Some(target.as_str()));
-        if !known {
+            .find(|c| c.extras.get("comment_id").and_then(Value::as_str) == Some(target.as_str()));
+        let Some(head) = head else {
             return Err(ApiError(format!(
                 "reply_to '{target}' names no comment on {id}"
             )));
+        };
+        // A stateful answer moves its head; feed rows take no state, so a
+        // stateful reply aimed at one is usage, not a silent no-op.
+        if input.state.is_some() && head.kind.as_deref() != Some("comment") {
+            return Err(ApiError(
+                "state moves a comment head only: reply_to names a feed row, which takes no state"
+                    .into(),
+            ));
         }
     }
     let state = input.state.clone();
@@ -1114,7 +1138,7 @@ pub fn comment_create(
             // nothing (each migrated row carries its journal content hash).
             if note_kind && row.get("thread_migrated_at").is_none() {
                 let comments = parsed.comments.get_or_insert_with(Vec::new);
-                let migrated = journal_thread_rows(&store.graph, id, comments);
+                let migrated = journal_thread_rows(&store.graph, id, comments)?;
                 comments.extend(migrated);
                 parsed.extras.insert(
                     "thread_migrated_at".into(),
@@ -1128,16 +1152,22 @@ pub fn comment_create(
             // observation rides the row this mutation already loaded.
             // Computed before the row's comments borrow, which the push
             // below holds to the end of the block.
-            let model = input
-                .model
-                .clone()
-                .or_else(|| session_observed_model(&parsed, input.session_id.as_deref()))
-                .or_else(|| {
-                    std::env::var("FNO_ROUTE_MODEL")
-                        .ok()
-                        .map(|v| v.trim().to_string())
-                        .filter(|v| !v.is_empty())
-                });
+            // A user-authored row carries no model attribution: the model
+            // fallback names the process, not the human who typed the ask.
+            let model = if input.author.as_deref() == Some("user") {
+                None
+            } else {
+                input
+                    .model
+                    .clone()
+                    .or_else(|| session_observed_model(&parsed, input.session_id.as_deref()))
+                    .or_else(|| {
+                        std::env::var("FNO_ROUTE_MODEL")
+                            .ok()
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                    })
+            };
             let comments = parsed.comments.get_or_insert_with(Vec::new);
             let mut extras = serde_json::Map::new();
             if kind == "reply" {

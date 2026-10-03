@@ -9,16 +9,20 @@ use serde_json::Value;
 
 pub const READING_KEY: &str = "_reading";
 
-/// The newest thread row carrying prose (any kind), by list position.
+/// The newest feed row carrying prose, by list position. Ask rows
+/// (`comment`) and their answers (`reply`) are the question thread, not
+/// the reading, so only the feed kinds select here.
+const FEED_KINDS: [&str; 4] = ["progress", "finding", "ruling", "collision"];
 fn newest_thread_row(row: &Value) -> Option<&Value> {
     row.get("progress_notes")
         .and_then(Value::as_array)
         .and_then(|rows| {
             rows.iter()
                 .filter(|r| {
-                    r.get("text")
-                        .and_then(Value::as_str)
-                        .is_some_and(|t| !t.is_empty())
+                    FEED_KINDS.contains(&r.get("kind").and_then(Value::as_str).unwrap_or(""))
+                        && r.get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|t| !t.is_empty())
                 })
                 .last()
         })
