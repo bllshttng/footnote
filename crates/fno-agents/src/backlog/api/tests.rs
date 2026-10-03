@@ -1378,7 +1378,7 @@ fn api_comment_thread_write_and_reply_state_rules() {
             bad_kind.0
         );
 
-        // x-fb4f: a note-kind row is a feed record - identity on the row,
+        // a note-kind row is a feed record - identity on the row,
         // no ask state, and no reply threading.
         let note = comment_create(
             store,
@@ -1389,7 +1389,7 @@ fn api_comment_thread_write_and_reply_state_rules() {
                 author: Some("agent".into()),
                 session_id: Some("sess-1".into()),
                 harness: Some("claude".into()),
-                agent_name: Some("t-x-fb4f-glm".into()),
+                agent_name: Some("t-note-glm".into()),
                 model: Some("glm-5.3-flash".into()),
                 working_node: Some("ab-two".into()),
                 ..Default::default()
@@ -1404,7 +1404,7 @@ fn api_comment_thread_write_and_reply_state_rules() {
         assert!(last.extras.get("comment_id").is_some(), "pointer minted");
         assert_eq!(
             last.extras.get("agent_name").and_then(Value::as_str),
-            Some("t-x-fb4f-glm")
+            Some("t-note-glm")
         );
         assert_eq!(
             last.extras.get("model").and_then(Value::as_str),
@@ -1436,7 +1436,7 @@ fn api_comment_thread_write_and_reply_state_rules() {
     }
 }
 
-/// x-fb4f: the first note append carries the node's note journal into the
+/// the first note append carries the node's note journal into the
 /// thread once - every record a progress row keyed by its journal content
 /// hash, the marker stamped in the same mutation, a retry adding nothing.
 #[test]

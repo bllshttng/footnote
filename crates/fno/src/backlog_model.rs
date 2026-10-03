@@ -423,7 +423,7 @@ pub struct Note {
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_ref: Option<String>,
-    /// Who wrote it, for an agent row (x-fb4f): the worker name, the model
+    /// Who wrote it, for an agent row: the worker name, the model
     /// it ran, and the node it was working. The session id is the row's
     /// `source_session_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1361,7 +1361,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
         }
     }
     // Notes: progress_notes newest first, EXCEPT thread rows (kind
-    // comment, reply, or one of the x-fb4f note kinds), which read oldest
+    // comment, reply, or one of the note kinds), which read oldest
     // first - a thread reads top to bottom. Non-thread rows keep their
     // block after the thread.
     let rows: Vec<Value> = e

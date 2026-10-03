@@ -1,6 +1,6 @@
 //! `fno-agents backlog-note` (wave 2): the native note action the
 //! Python `fno backlog note` bridge calls. The Rust side owns the note
-//! feed (x-fb4f: every note appends a comment row to the node's thread,
+//! feed (every note appends a comment row to the node's thread,
 //! stamped with the writer's identity), the `--clear` state route, and
 //! history routing (machine, wave); the bridge keeps the shipped recipient
 //! walk (`note_notify`, its test contract), evidence checks, identity,
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::graph_get::default_graph_path;
 
-/// The note-kind feed vocabulary (x-fb4f). These are thread rows, not asks:
+/// The note-kind feed vocabulary. These are thread rows, not asks:
 /// no open state, no reply threading.
 const NOTE_KINDS: [&str; 4] = ["progress", "finding", "ruling", "collision"];
 
@@ -592,7 +592,7 @@ pub fn run_comment(args: &[String]) -> i32 {
                 _ => " ",
             };
             println!("{indent}{mark} {author} · {age}  {body}");
-            // Who wrote it, shown in the thread and copyable (x-fb4f).
+            // Who wrote it, shown in the thread and copyable.
             let mut who: Vec<String> = Vec::new();
             if let Some(name) = row.extras.get("agent_name").and_then(Value::as_str) {
                 who.push(name.to_string());
@@ -619,7 +619,7 @@ pub fn run_comment(args: &[String]) -> i32 {
         return 2;
     }
     let kind = if reply.is_some() { "reply" } else { "comment" };
-    // An agent comment carries who wrote it (x-fb4f): the process-provable
+    // An agent comment carries who wrote it: the process-provable
     // session and harness, the worker name, the observed model, and the
     // node the session is working. A user comment carries the user's own
     // word; no stamp.
@@ -786,8 +786,25 @@ fn write_human(
         .unwrap_or("")
         .to_string();
     // --clear stays the one state route: it empties current_state, it does
-    // not append to the thread.
+    // not append to the thread. The cross-session guard survives here: a
+    // clear over a revision this session cannot prove it wrote refuses
+    // until --if-revision names that revision deliberate.
     if parsed.clear {
+        if let Some(p) = node_state::read_state(entry) {
+            let mine = p.source_session_id.as_deref() == parsed.self_session.as_deref();
+            if !mine && parsed.if_revision != Some(p.revision) {
+                eprintln!(
+                    "Error: note --clear refused: current state on {node_id} is revision {}, \
+written by session {}. Nothing was cleared. Pass --if-revision {} to clear it deliberately.",
+                    p.revision,
+                    p.source_session_id
+                        .as_deref()
+                        .unwrap_or("an unknown session"),
+                    p.revision,
+                );
+                return 3;
+            }
+        }
         let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);
         let submitted = parsed.if_revision.unwrap_or(rev);
         if let Err(e) = node_state::clear_state(graph, &node_id, Some(submitted)) {
@@ -812,6 +829,13 @@ fn write_human(
 thread and cannot clobber anything. Read the feed: fno backlog note comment {node_id} --list"
         );
         return 3;
+    }
+    if parsed.if_revision.is_some() {
+        eprintln!(
+            "fno-agents backlog-note: --if-revision guards --clear only: a note \
+appends to the thread and cannot conflict"
+        );
+        return 2;
     }
     let body = node_state::normalize_prose(&body);
     if body.is_empty() {
@@ -869,7 +893,7 @@ read the feed: fno backlog note comment {node_id} --list"
     }
 }
 
-/// The writer identity a thread row stamps (x-fb4f): what this process can
+/// The writer identity a thread row stamps: what this process can
 /// prove, plus the model and working node the fleet already knows. An
 /// absent field stays absent - an honest unknown beats a wrong label.
 struct CommentIdentity {
@@ -1093,7 +1117,7 @@ mod tests {
         assert!(parse_args(&args(&["x-1", "--JSON"])).is_err());
     }
 
-    /// x-fb4f: a note appends a thread row and leaves current_state alone;
+    /// a note appends a thread row and leaves current_state alone;
     /// the node's journal rides into the thread on the first append; a
     /// second note adds a row without migrating again; --replace refuses.
     #[test]

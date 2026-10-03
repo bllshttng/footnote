@@ -1,6 +1,6 @@
 """``fno backlog note``: the Rust note action's public bridge.
 
-The native action owns the note feed (x-fb4f: every note appends a comment
+The native action owns the note feed (every note appends a comment
 row to the node's thread, stamped with the writer's identity); this bridge
 keeps the recipient walk, evidence checks, identity, and transport.
 """
@@ -210,8 +210,9 @@ def cmd_note(
         kind=kind,
     )
     if code != 0:
-        # 3 = a refusal that wrote nothing (an unknown --kind); the child
-        # printed the reason on stderr.
+        # 2 = usage (an unknown --kind); 3 = a refusal that wrote nothing (a
+        # retired --replace, or a refused --clear). The child printed the
+        # reason on stderr.
         raise typer.Exit(code=code)
 
     if claims:

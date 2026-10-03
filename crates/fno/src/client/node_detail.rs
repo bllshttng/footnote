@@ -394,7 +394,7 @@ pub(crate) fn pane_lines(
 
     // The comment thread: bold header + thin rule, oldest first, replies
     // indented under their heads; the ask state rides as a mark. Note-kind
-    // feed rows render in the same thread (x-fb4f), each with its writer
+    // feed rows render in the same thread, each with its writer
     // identity line when one is stamped.
     let thread: Vec<&crate::backlog_model::Note> = view
         .notes
@@ -442,7 +442,7 @@ pub(crate) fn pane_lines(
             row.push_str(&format!(" \u{b7} {refer}"));
         }
         lines.push(BLine::plain(row));
-        // Who wrote it, shown in the thread and copyable (x-fb4f).
+        // Who wrote it, shown in the thread and copyable.
         let mut who: Vec<String> = Vec::new();
         if let Some(name) = &note.agent_name {
             who.push(name.clone());

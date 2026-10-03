@@ -1,6 +1,6 @@
 //! Which of a node's prose fields is the current answer about that node.
-//! `details` is the original filing and nothing rewrites it; since x-fb4f
-//! the newest thread row is the live reading (the feed is the state), with
+//! `details` is the original filing and nothing rewrites it; the newest
+//! thread row is the live reading (the feed is the state), with
 //! current_state as the legacy fallback; `plan_path` names the document
 //! that owns the file list once a plan exists. A reader that sees only the
 //! first of those reaches a confident wrong answer.
@@ -132,7 +132,7 @@ mod tests {
             "current_state": {"body": "", "revision": 1, "updated_at": "t"},
         });
         assert_eq!(reading_for(&row), None);
-        // x-fb4f: the thread outranks a stale state - the newest row is the
+        // the thread outranks a stale state - the newest row is the
         // live reading even when current_state is present and empty.
         let threaded = json!({
             "id": "x-aaaa",

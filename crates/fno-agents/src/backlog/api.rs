@@ -231,7 +231,7 @@ pub struct CommentCreateInput {
     pub state: Option<String>,
     #[serde(default)]
     pub state_ref: Option<String>,
-    /// Who wrote it, for an agent author (x-fb4f): the typed session and
+    /// Who wrote it, for an agent author: the typed session and
     /// harness columns plus the extras the thread renders - the worker
     /// name, the model it ran, and the node it was working when it wrote.
     #[serde(default)]
@@ -938,7 +938,7 @@ pub fn label_remove(store: &Store, id: &str, name: &str) -> Result<Payload<Node>
     label_mutation(store, id, name, false)
 }
 
-/// The node's note journal pulled into thread rows (x-fb4f): one progress
+/// The node's note journal pulled into thread rows: one progress
 /// row per journal record, marked migrated and keyed by the journal's
 /// content hash so a retried migration re-runs nothing. A missing journal
 /// contributes nothing. The record's own authorship and wire time ride
@@ -1006,7 +1006,7 @@ fn journal_thread_rows(
 
 /// One threaded comment row. `kind: comment` is a thread head (the user's
 /// ask); `kind: reply` is a threaded answer; the note kinds (`progress`,
-/// `finding`, `ruling`, `collision`) are agent feed rows (x-fb4f): no ask
+/// `finding`, `ruling`, `collision`) are agent feed rows: no ask
 /// state, no reply threading, stamped with the writer's identity. Extras
 /// carry the vocabulary: `comment_id` (`c-<6 hex>`, minted per node),
 /// `author` (default `agent`), `reply_to`, and the ask state. A fresh
@@ -1088,7 +1088,7 @@ pub fn comment_create(
             let Ok(mut parsed) = Node::from_json(row) else {
                 return Ok(false);
             };
-            // x-fb4f: the first note append carries the node's note journal
+            // the first note append carries the node's note journal
             // (the pre-feed history of replaced states) into the thread and
             // stamps the marker, all in this one mutation. A node with no
             // journal just gets the marker; a retried append re-runs
@@ -1104,52 +1104,27 @@ pub fn comment_create(
             }
             let comments = parsed.comments.get_or_insert_with(Vec::new);
             let mut extras = serde_json::Map::new();
-            if kind == "comment" {
-                let taken: Vec<&str> = comments
-                    .iter()
-                    .filter_map(|c| c.extras.get("comment_id").and_then(Value::as_str))
-                    .collect();
-                loop {
-                    let minted = mint_comment_id();
-                    if !taken.contains(&minted.as_str()) {
-                        extras.insert("comment_id".into(), Value::String(minted));
-                        break;
-                    }
-                }
-                extras.insert(
-                    "author".into(),
-                    Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
-                );
-                extras.insert("state".into(), Value::String("open".into()));
-            } else if kind == "reply" {
+            if kind == "reply" {
                 extras.insert(
                     "reply_to".into(),
                     Value::String(reply_to.clone().unwrap_or_default()),
                 );
-                extras.insert(
-                    "author".into(),
-                    Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
-                );
             } else {
-                // A note-kind feed row: no ask state, but it carries the
-                // same pointer id so renders and replies can name it.
-                let taken: Vec<&str> = comments
-                    .iter()
-                    .filter_map(|c| c.extras.get("comment_id").and_then(Value::as_str))
-                    .collect();
-                loop {
-                    let minted = mint_comment_id();
-                    if !taken.contains(&minted.as_str()) {
-                        extras.insert("comment_id".into(), Value::String(minted));
-                        break;
-                    }
-                }
+                // A thread head or a note-kind feed row: either way it
+                // carries the pointer id renders and replies name.
                 extras.insert(
-                    "author".into(),
-                    Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
+                    "comment_id".into(),
+                    Value::String(mint_unique_comment_id(comments)),
                 );
             }
-            // The writer's identity (x-fb4f): typed session/harness, plus
+            extras.insert(
+                "author".into(),
+                Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
+            );
+            if kind == "comment" {
+                extras.insert("state".into(), Value::String("open".into()));
+            }
+            // The writer's identity: typed session/harness, plus
             // the extras the thread renders. Absent fields stay absent - an
             // honest unknown beats a wrong label.
             if let Some(name) = &input.agent_name {
@@ -1217,6 +1192,19 @@ fn mint_comment_id() -> String {
     getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!("c-{hex}")
+}
+
+/// Mint a pointer id no existing row on the node carries.
+fn mint_unique_comment_id(comments: &[Comment]) -> String {
+    loop {
+        let minted = mint_comment_id();
+        let taken = comments
+            .iter()
+            .any(|c| c.extras.get("comment_id").and_then(Value::as_str) == Some(minted.as_str()));
+        if !taken {
+            return minted;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
