@@ -407,7 +407,6 @@ mod tests {
         )
         .unwrap();
         let built = std::process::Command::new("rustc")
-            .arg("-O0")
             .arg("-o")
             .arg(&shim)
             .arg(&source)
