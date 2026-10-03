@@ -645,6 +645,8 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             for form, got in form_mail:
                 for message in got:
                     advance_cursor(form, getattr(message, "id", ""))
+            for message in messages:
+                _emit_drain_marker(message.id, handle, handle, message.from_, "printed")
         else:
             outcome = "inject-missed"
 
