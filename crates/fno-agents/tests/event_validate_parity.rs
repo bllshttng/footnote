@@ -1,19 +1,20 @@
-//! parity-stage: differential
+//! parity-stage: characterization
 //! parity-oracle: fno.events.validate
 //!
-//! Differential parity: the Python judge (cli/src/fno/events/__init__.py,
-//! `def validate`) is the live oracle; the native judge in
-//! crates/fno-agents/src/event_store/validate.rs must answer every corpus
-//! row with the same verdict and the same one-line diagnostic. Goldens
-//! freeze the Python verdict per row (276 rows in
-//! cli/tests/events/parity_corpus.jsonl); capture mode (FNO_CAPTURE_GOLDEN=1)
-//! re-derives them from the live Python and asserts Rust==Python at
-//! freeze time, so the frozen goldens are proven current, not inherited.
-//! When the Python judge is deleted (the reader families port), this file
-//! flips to `parity-stage: characterization` and the goldens stand alone.
+//! Characterization tests for the native envelope judge, frozen against
+//! goldens captured from the Python judge (`def validate` in
+//! cli/src/fno/events/__init__.py) BEFORE that leg was deleted. The
+//! goldens under tests/golden/event_validate/ freeze one
+//! (exit, stdout, stderr) triple per corpus row (275 of the 276 rows in
+//! cli/tests/events/parity_corpus.jsonl; the overflow-literals row is
+//! answered by the door's substrate refusal and stays in the Python
+//! suite). The native judge in crates/fno-agents/src/event_store/
+//! validate.rs must answer every frozen case identically.
 //!
-//! AC2-ERR: when Python is absent the capture path skips the row and
-//! never fails the run.
+//! Capture mode (FNO_CAPTURE_GOLDEN=1, only meaningful while a live
+//! oracle leg exists) re-derives goldens from the oracle and asserts
+//! Rust==oracle at freeze time. AC2-ERR: when Python is absent the
+//! capture path skips the row and never fails the run.
 
 use common::{assert_golden, capture_mode, Golden};
 use std::fs;
