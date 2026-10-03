@@ -369,9 +369,18 @@ fn split_sentences(line: &str) -> Vec<String> {
             continue;
         }
         // The ender, then one or more whitespace chars: a split boundary.
+        // Unicode-aware like the Python re \s it replaced: the byte scan
+        // stops at a multibyte char (never ASCII whitespace), decodes it,
+        // and advances by the whole code point.
         let mut j = i + 1;
-        while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
-            j += 1;
+        while j < bytes.len() {
+            let Some(c) = protected[j..].chars().next() else {
+                break;
+            };
+            if !c.is_whitespace() {
+                break;
+            }
+            j += c.len_utf8();
         }
         if j == i + 1 {
             i += 1;
