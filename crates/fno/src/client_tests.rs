@@ -7466,20 +7466,10 @@ fn tab_badge_rows() {
         focus_node: None,
     };
     // Focus on the top agent row's pane: it already fits, so no scroll.
+    // The term carries the strip row and the 4-row court glance reserve.
+    view.term = (12, 100);
     view.set_layout(layout(100, agents.clone()));
-    assert_eq!(
-        view.sideline_offset(),
-        0,
-        "a top focus needs no scroll: visible={} painted={} idx_of_100={:?} term={:?} chrome={} court={}",
-        view.sideline_visible_rows(),
-        view.painted_rows().len(),
-        view.display_rows()
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(100))),
-        view.term,
-        view.bottom_row_is_chrome(),
-        view.court_block_rows()
-    );
+    assert_eq!(view.sideline_offset(), 0, "a top focus needs no scroll");
     // Focus jumps to the last agent (pane 107), well below the fold.
     view.set_layout(layout(107, agents.clone()));
     let visible = view.sideline_visible_rows();
@@ -10497,11 +10487,12 @@ fn wheel_rows() {
     assert_eq!(v.sideline_offset(), 0, "fits -> offset resets to 0");
 
     // AC4 (x-a621): an offset left too large by a catalog shrink re-clamps into
-    // [0, rows - visible]; it never scrolls past the last row.
+    // [0, rows - visible]; it never scrolls past the last row. The term
+    // carries the strip row and the 4-row court glance reserve.
     let mut v = two_pane_view();
     let total = v.display_rows().len();
     assert!(total >= 2);
-    v.term = (total as u16, 100); // visible = total - 1
+    v.term = (total as u16 + 5, 100); // visible = total - 1
     v.selector = None;
     v.hover_row = None;
     v.set_sideline_offset(999); // absurd, e.g. after the catalog shrank
@@ -10509,13 +10500,7 @@ fn wheel_rows() {
     assert_eq!(
         v.sideline_offset(),
         total - v.sideline_visible_rows(),
-        "clamped to the last full window: total={total} visible={} term={:?} chrome={} court={} q={} pinned_hint={}",
-        v.sideline_visible_rows(),
-        v.term,
-        v.bottom_row_is_chrome(),
-        v.court_block_rows(),
-        v.questions_block_rows(),
-        v.painted_rows().len()
+        "clamped to the last full window"
     );
 
     // Regression (code-reviewer): the bottom status row is chrome-owned and
@@ -15269,30 +15254,3 @@ mod lineage_paint_tests;
 
 #[path = "client_tests/composer_fullscreen_tests.rs"]
 mod composer_fullscreen_tests;
-
-#[test]
-fn zz_scroll_probe() {
-    let mut v = two_pane_view();
-    let total = v.display_rows().len();
-    eprintln!(
-        "PROBE total={total} term={:?} visible={} painted={} chrome={} court={} q={} off={}",
-        v.term,
-        v.sideline_visible_rows(),
-        v.painted_rows().len(),
-        v.bottom_row_is_chrome(),
-        v.court_block_rows(),
-        v.questions_block_rows(),
-        v.sideline_offset()
-    );
-    v.term = ((total - 1) as u16, 100);
-    eprintln!(
-        "PROBE2 term={:?} visible={} chrome={}",
-        v.term,
-        v.sideline_visible_rows(),
-        v.bottom_row_is_chrome()
-    );
-    v.selector = None;
-    v.set_sideline_offset(0);
-    v.scroll_sideline(true);
-    eprintln!("PROBE3 offset={}", v.sideline_offset());
-}
