@@ -537,7 +537,7 @@ fn mine_items(lane_text: &str) -> Vec<AttentionItem> {
             ready: true,
             missing: vec![],
             state: "open".to_string(),
-        settled: false,
+            settled: false,
         });
     }
     out

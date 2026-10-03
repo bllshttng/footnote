@@ -888,35 +888,9 @@ fn run_clear_settled(home: &AgentsHome, cwd: &Path) -> i32 {
     let (statuses, raw) = crate::question_sweep::read_closed_rung_facts(cwd, home);
     let statuses: std::collections::BTreeMap<String, String> = statuses.into_iter().collect();
     let ids = node_closed_question_ids(&raw, &statuses);
-    let mut cleared = Vec::new();
-    let mut errors = Vec::new();
-    if !ids.is_empty() {
-        let store = crate::provider_cap::questions_path(home);
-        let now = crate::claims::now_ms() / 1000;
-        for qid in &ids {
-            match crate::provider_cap::append_questions_row(
-                &store,
-                &json!({
-                    "ts": crate::provider_cap::epoch_to_rfc3339(now),
-                    "type": "operator_question_closed",
-                    "source": "daemon",
-                    "data": {
-                        "question_id": qid,
-                        // Empty answer, deliberately: the sweep's own rule. A
-                        // non-empty answer would arm the unrecorded-decision
-                        // gate against the asking session for a decision
-                        // nobody made.
-                        "answer": "",
-                        "reason": "node-closed",
-                        "closed_by": "clear-settled",
-                    },
-                }),
-            ) {
-                Ok(()) => cleared.push(qid.clone()),
-                Err(error) => errors.push(format!("question {qid}: {error}")),
-            }
-        }
-    }
+    let now = crate::claims::now_ms() / 1000;
+    let (cleared, errors) =
+        crate::question_sweep::close_questions(home, &ids, now, "clear-settled");
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let _ = emitter.emit(
         "question_sweep",

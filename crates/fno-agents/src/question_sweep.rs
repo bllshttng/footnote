@@ -68,6 +68,39 @@ pub(crate) fn statuses_of(store: &crate::backlog::api::Store) -> Vec<(String, St
     out
 }
 
+/// Append the shared derived-close row for each question id and return its
+/// per-id receipt. The sweep and the user's Clear all action share this writer.
+pub(crate) fn close_questions(
+    home: &AgentsHome,
+    ids: &[String],
+    now: i64,
+    closed_by: &str,
+) -> (Vec<String>, Vec<String>) {
+    let store = crate::provider_cap::questions_path(home);
+    let mut closed = Vec::new();
+    let mut errors = Vec::new();
+    for qid in ids {
+        match crate::provider_cap::append_questions_row(
+            &store,
+            &json!({
+                "ts": crate::provider_cap::epoch_to_rfc3339(now),
+                "type": "operator_question_closed",
+                "source": "daemon",
+                "data": {
+                    "question_id": qid,
+                    "answer": "",
+                    "reason": "node-closed",
+                    "closed_by": closed_by,
+                },
+            }),
+        ) {
+            Ok(()) => closed.push(qid.clone()),
+            Err(error) => errors.push(format!("question {qid}: {error}")),
+        }
+    }
+    (closed, errors)
+}
+
 fn fno_dir_of(home: &AgentsHome) -> PathBuf {
     home.root()
         .parent()
@@ -113,10 +146,9 @@ pub fn question_sweep_in(
     let ids = crate::needs::node_closed_question_ids(&raw, &statuses);
     let task_ids = crate::fleet_task::node_closed_task_ids(&raw, &statuses);
     let legacy_ids = crate::fleet_task::legacy_question_ids(&raw);
-    let mut closed = Vec::new();
     let mut tasks_closed = Vec::new();
     let mut legacy_moved = Vec::new();
-    let mut errors = Vec::new();
+    let (closed, mut errors) = close_questions(home, &ids, now, "question-sweep");
     if ids.is_empty() && task_ids.is_empty() && legacy_ids.is_empty() {
         let _ = emitter.emit(
             "question_sweep",
@@ -124,28 +156,6 @@ pub fn question_sweep_in(
         );
     } else {
         let store = crate::provider_cap::questions_path(home);
-        for qid in &ids {
-            match crate::provider_cap::append_questions_row(
-                &store,
-                &json!({
-                    "ts": crate::provider_cap::epoch_to_rfc3339(now),
-                    "type": "operator_question_closed",
-                    "source": "daemon",
-                    "data": {
-                        "question_id": qid,
-                        // Empty answer, deliberately: a non-empty answer arms
-                        // the unrecorded-decision gate against the asking
-                        // session for a decision nobody made.
-                        "answer": "",
-                        "reason": "node-closed",
-                        "closed_by": "question-sweep",
-                    },
-                }),
-            ) {
-                Ok(()) => closed.push(qid.clone()),
-                Err(error) => errors.push(format!("question {qid}: {error}")),
-            }
-        }
         for tid in &task_ids {
             match crate::provider_cap::append_questions_row(
                 &store,
