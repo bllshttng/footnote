@@ -2300,17 +2300,10 @@ def _emit_human(
                     "Run fno doctor update (or fno doctor --fix); the component "
                     "lines below name which one."
                 )
-        # The proposed repair replaces the tool env in place. Name anything
-        # still running from it, so the user never repeats the 2026-10-02
-        # clobber: a session-start repair replaced a study's CLI mid-run
-        # (gap audit blocker 3).
-        live = _live_tool_env_processes()
-        if live:
-            out(
-                f"fno doctor: {len(live)} live process(es) run from the installed "
-                f"tool env, e.g. {live[0][:160]}. The repair above would replace "
-                "them mid-run; stop them first."
-            )
+        # The proposed repair replaces the tool env in place; name anything
+        # still running from it (gap audit blocker 3, the study clobber).
+        if live := _live_tool_env_processes():
+            out(f"fno doctor: {len(live)} live process(es) run from the installed tool env, e.g. {live[0][:160]}. The repair above would replace them mid-run; stop them first.")
     elif (
         result.get("content_indeterminate")
         and result.get("installed_rev") is not None
