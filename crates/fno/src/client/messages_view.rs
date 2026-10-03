@@ -744,6 +744,9 @@ pub(crate) async fn keys(
     bytes: &[u8],
     sock: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
+    if super::messages_reply::active(view) {
+        return super::messages_reply::keys(view, bytes, sock).await;
+    }
     let Some(b) = view.messages_board.as_mut() else {
         return Ok(StdinFlow::Continue);
     };

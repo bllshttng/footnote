@@ -8919,9 +8919,6 @@ async fn handle_stdin(
     if passthrough.is_empty() {
         return Ok(StdinFlow::Continue);
     }
-    if messages_reply::active(view) {
-        return messages_reply::keys(view, &passthrough, sock_w).await;
-    }
     // (AC6-FR): a bare Esc during a seam drag reverts it. The revert is
     // an explicit final command to the drag-start ratio, not a client-side
     // rollback - the server owns the layout, so putting the seam back has to
