@@ -1977,8 +1977,8 @@ def _intake_impl(
 
             born_node = _find_node(wire_rows(path=_graph_path()), new_id_holder[0])
             if born_node is not None:
-                # Already the persisted, slugged node -> skip the re-read.
-                on_node_born(born_node, persisted=True)
+                # The native hook re-reads the durable row from the graph.
+                on_node_born(born_node, graph_path=_graph_path())
         except Exception:  # noqa: BLE001 - additive; never wedge the intake
             pass
 

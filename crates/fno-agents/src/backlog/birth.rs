@@ -501,6 +501,50 @@ pub fn on_node_born(graph: &Path, node: &Value) -> Option<ThinkSpawnResult> {
     .ok()
 }
 
+/// The door the Python birth forwarder execs: `fno-agents backlog birth-hook
+/// --graph <path> --node-id <id>`. Transport only - the ladder stays in
+/// [`maybe_spawn_think`]/[`on_node_born`], whose offer line and events land
+/// inside this process. Prints the result JSON on stdout (`null` when the
+/// gate sent nothing anywhere) and exits 0; a malformed argv exits 2.
+pub fn run_birth_hook(tail: &[String]) -> i32 {
+    const USAGE: &str = "usage: birth-hook --graph <path> --node-id <id>";
+    let mut graph: Option<PathBuf> = None;
+    let mut node_id = String::new();
+    let mut it = tail.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--graph" => graph = it.next().map(PathBuf::from),
+            "--node-id" => node_id = it.next().cloned().unwrap_or_default(),
+            other => {
+                eprintln!("birth-hook: unknown argument {other}\n{USAGE}");
+                return 2;
+            }
+        }
+    }
+    let Some(graph) = graph else {
+        eprintln!("birth-hook: --graph <path> is required\n{USAGE}");
+        return 2;
+    };
+    if node_id.is_empty() {
+        eprintln!("birth-hook: --node-id <id> is required\n{USAGE}");
+        return 2;
+    }
+    let payload = match on_node_born(&graph, &serde_json::json!({ "id": node_id })) {
+        None => Value::Null,
+        Some(r) => serde_json::json!({
+            "kind": r.kind,
+            "event": r.event,
+            "reason": r.reason,
+            "node_id": r.node_id,
+            "presence": r.presence,
+            "resolved": r.resolved,
+            "offer_line": r.offer_line,
+        }),
+    };
+    println!("{payload}");
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +629,21 @@ mod tests {
         );
         assert_eq!(scan_md_field(text, "attended").as_deref(), Some("true"));
         assert_eq!(scan_md_field(text, "graph_node_id"), None);
+    }
+
+    #[test]
+    fn the_birth_hook_door_refuses_a_malformed_argv() {
+        let argv =
+            |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(run_birth_hook(&argv(&["--node-id", "ab-1"])), 2);
+        assert_eq!(run_birth_hook(&argv(&["--graph", "/tmp/g.db"])), 2);
+        assert_eq!(
+            run_birth_hook(&argv(&["--graph", "/tmp/g.db", "--bogus"])),
+            2
+        );
+        assert_eq!(
+            run_birth_hook(&argv(&["--graph", "/tmp/g.db", "--node-id", "ab-1"])),
+            0
+        );
     }
 }

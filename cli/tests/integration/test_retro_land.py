@@ -160,19 +160,13 @@ def test_inbox_default_appends_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 # ---------------------------------------------------------------------------
 
 
-def test_a1_birth_hook_fires_per_created_node_sharing_one_run_state(tmp_path, monkeypatch):
-    """Every retro-filed node routes through on_node_born once; the whole batch
-    threads ONE RunState so the blast cap bounds the harvest, not each node."""
+def test_a1_birth_hook_fires_per_created_node(tmp_path, monkeypatch):
+    """Every retro-filed node routes through the birth hook once; the hook
+    itself is the native door forwarder, so the batch needs no shared state."""
     import fno.provenance.spawn_think as st
 
     calls: list[str] = []
-    seen_rs: list = []
-
-    def fake(node, *, run_state=None, **k):
-        calls.append(node["id"])
-        seen_rs.append(run_state)
-
-    monkeypatch.setattr(st, "on_node_born", fake)
+    monkeypatch.setattr(st, "on_node_born", lambda node, **k: calls.append(node["id"]))
     rec = _Recorder()
     land_candidates(
         [_node(title="a", chash="h1"), _node(title="b", chash="h2")],
@@ -180,7 +174,6 @@ def test_a1_birth_hook_fires_per_created_node_sharing_one_run_state(tmp_path, mo
         create_fn=rec.create, inbox_fn=rec.inbox_append,
     )
     assert calls == ["ab-00000001", "ab-00000002"]
-    assert seen_rs[0] is seen_rs[1] is not None  # one shared cap across the batch
 
 
 def test_a1_birth_hook_skips_inbox_and_failed_creates(tmp_path, monkeypatch):
