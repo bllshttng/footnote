@@ -6,7 +6,7 @@
 //! (SIGKILL) with its whole process subtree. A hold must not pause a run:
 //! a SIGSTOPped cargo stays alive, so the pid-anchored claims it holds
 //! (`build:cargo`, its `test:cargo-run:N` slot) stay Live and every build
-//! queues behind a run that cannot progress (x-ea7b: two paused runs held
+//! queues behind a run that cannot progress (two paused runs once held
 //! all three for 2.5h and the canonical fno update stalled behind them).
 //! Tests are CI-gated (law d-50986bf8), so a held run ends instead of
 //! waiting. The first pass of a hold announces it on the bus; the lift
@@ -337,8 +337,17 @@ mod tests {
     use super::*;
     use crate::census::test_proc_row as row;
 
+    /// A held fleet test run ends (SIGKILL, not SIGSTOP) within one
+    /// reconcile pass, and the pid-anchored claims it held (`build:cargo`,
+    /// a run slot) admit a waiting build at once. The selection matrix the
+    /// hold kills on (root detection, subtree, spare) travels with it: one
+    /// end-to-end pass over the surface, nothing unguarded.
     #[test]
-    fn a_hold_pauses_fleet_test_subtrees_and_spares_the_rest() {
+    fn a_hold_ends_fleet_test_subtrees_and_frees_their_claims() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // The selection matrix the kill runs on: root detection, whole
+        // subtree, the spare set.
         assert!(is_test_root("/Users/u/.cargo/bin/cargo test -p fno-agents"));
         assert!(is_test_root("cargo +nightly nextest run"));
         assert!(is_test_root("/venv/bin/python3 /venv/bin/pytest cli/tests"));
@@ -360,15 +369,6 @@ mod tests {
         assert_eq!(pick(&table, &fleet, &HashSet::new()), vec![12, 13, 14, 30]);
         let spare: HashSet<u32> = [30].into();
         assert_eq!(pick(&table, &fleet, &spare), vec![12, 13, 14]);
-    }
-
-    /// A held fleet test run ends (SIGKILL, not SIGSTOP) within one
-    /// reconcile pass, and the pid-anchored claims it held (`build:cargo`,
-    /// a run slot) admit a waiting build at once. x-ea7b.
-    #[test]
-    fn a_held_test_run_ends_and_frees_its_claims_within_one_tick() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::process::ExitStatusExt as _;
 
         struct HomeGuard {
             previous: Option<std::ffi::OsString>,
@@ -396,13 +396,30 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fno-test-hold-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("bin")).unwrap();
-        // A shim named `cargo` that naps: its argv in the process table
-        // reads `<root>/bin/cargo test -p ea7b-held`, a fleet test root.
+        // A real binary named `cargo` that naps. A shebang script will not
+        // do: the process table shows the interpreter's argv (`/bin/sh
+        // <path>/cargo test ...`), which `is_test_root` never matches.
         let shim = root.join("bin/cargo");
-        std::fs::write(&shim, "#!/bin/sh\n/bin/sleep 30\n").unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let source = root.join("bin/shim.rs");
+        std::fs::write(
+            &source,
+            "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+        )
+        .unwrap();
+        let built = std::process::Command::new("rustc")
+            .arg("-O0")
+            .arg("-o")
+            .arg(&shim)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "rustc failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
         let mut child = std::process::Command::new(&shim)
-            .args(["test", "-p", "ea7b-held"])
+            .args(["test", "-p", "held-crate"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -426,11 +443,11 @@ mod tests {
         assert!(visible, "the shim never surfaced as a fleet test root");
 
         let mut entry = crate::state::RegistryEntry::default();
-        entry.name = "ea7b-held-worker".into();
+        entry.name = "held-run-worker".into();
         entry.status = crate::AgentStatus::Busy;
         entry.pid = Some(pid);
         entry.pid_start_time = crate::daemon::process_start_time(pid);
-        entry.harness_session_id = Some("ea7b-held-sess".into());
+        entry.harness_session_id = Some("held-run-sess".into());
         crate::state::update_registry(&home.registry_json(), |r| r.entries.push(entry)).unwrap();
 
         crate::fleet_incident::write_transition_with_metadata(
@@ -474,7 +491,7 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGKILL));
 
         // The reaped pid frees its no-TTL claims: a waiting build admits at
-        // once instead of queueing behind the corpse (x-ea7b).
+        // once instead of queueing behind the corpse.
         for key in ["build:cargo", "test:cargo-run:0"] {
             let mut next = opts("waiting build");
             next.pid = Some(std::process::id());
