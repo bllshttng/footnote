@@ -8,7 +8,7 @@
 //! traceback; this port lands it on the leaf's ordinary validation exit
 //! (`validation error: ...`, 2).
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 use super::{

@@ -330,3 +330,7 @@ A	{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped	py=cli/sr
 A	{task_id} is already done	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# offender - carry a reason or fix in this PR
+A	--metadata must be a json object	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/mod.rs	# CLASSIFY msg-twin|port-x-cb60-wave1: the python copy serves the unported leaves (release, status); retires leaf by leaf
+A	validation error: key is required (or use --lane <id>)	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|port-x-cb60-wave1: the python copy serves the unported release leaf; retires in its wave
+A	claim corrupted; cannot verify ownership (use `fno agents claim release --force`)	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|port-x-cb60-wave1: compare_and_rebind stays until the deletion wave retires it with its python test suite
+A	claim recovery mutex busy; retry the resume bind	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|port-x-cb60-wave1: compare_and_rebind stays until the deletion wave retires it with its python test suite
