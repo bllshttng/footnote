@@ -1400,7 +1400,7 @@ mod tests {
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Reconcile's post-close emits (the Python twins declared both in
-    // events/schema.yaml; session_satisfied carries data.source "pr_merge").
+    // events/schema.yaml; session_satisfied carries the pr_merge data source).
     "session_satisfied",
     "human_touch",
     // The pr-watch sweep flipped an open fno-bound draft PR back to ready
