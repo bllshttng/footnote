@@ -57,6 +57,142 @@ pub fn summary_of(body: &str) -> String {
     cut_words(&first_sentence, SUMMARY_MAX_WORDS)
 }
 
+#[derive(serde::Deserialize)]
+pub struct HeldMessage {
+    pub sender: String,
+    pub sent_at: String,
+    pub id: String,
+    pub body: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct HeldRelease {
+    pub held_for_s: i64,
+    pub harness: Option<String>,
+    pub messages: Vec<HeldMessage>,
+}
+
+/// Render one held-mail delivery with the original message identities intact.
+/// The framing line describes the delay; every following header belongs to
+/// the sender and id of one message from the bus.
+pub fn render_held_release(release: &HeldRelease) -> String {
+    let mut messages: Vec<&HeldMessage> = release.messages.iter().collect();
+    messages.sort_by(|left, right| {
+        match (parse_sent_at(&left.sent_at), parse_sent_at(&right.sent_at)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    let sent: Vec<String> = messages
+        .iter()
+        .map(|message| local_sent_time(&message.sent_at))
+        .collect();
+    let sent_range = match (sent.first(), sent.last()) {
+        (Some(first), Some(last)) if first != last => format!("{first} to {last}"),
+        (Some(first), _) => first.clone(),
+        _ => "unknown".to_string(),
+    };
+    let minutes = if release.held_for_s > 0 {
+        (release.held_for_s + 59) / 60
+    } else {
+        0
+    };
+    let count = messages.len();
+    let form = release
+        .harness
+        .as_deref()
+        .and_then(crate::harness_capabilities::packaged_mail_header_at)
+        .map(|at| {
+            if at {
+                HeaderForm::Mention
+            } else {
+                HeaderForm::Plain
+            }
+        })
+        .unwrap_or(HeaderForm::Mention);
+    let mut lines = vec![format!(
+        "{count} held messages · sent {sent_range} · held {minutes}m"
+    )];
+    for message in messages {
+        let body = unwrap_held_body(&message.body);
+        let (body, existing_header) = strip_leading_header(&body);
+        let summary = existing_header
+            .as_deref()
+            .and_then(header_summary)
+            .unwrap_or_else(|| summary_of(&body));
+        let body = strip_summary_prefix(&body, &summary);
+        lines.push(render_header(
+            form,
+            crate::system_sender::canonical(&message.sender),
+            &message.id,
+            &summary,
+        ));
+        lines.push(body);
+    }
+    lines.join("\n")
+}
+
+fn local_sent_time(value: &str) -> String {
+    parse_sent_at(value)
+        .map(|stamp| {
+            stamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn unwrap_held_body(body: &str) -> String {
+    let trimmed = body.trim();
+    let Some(block) = paired_envelope_block(trimmed) else {
+        return body.to_string();
+    };
+    if block != trimmed {
+        return body.to_string();
+    }
+    let Some(open_end) = block.find('>') else {
+        return body.to_string();
+    };
+    block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
+}
+
+fn strip_leading_header(body: &str) -> (String, Option<String>) {
+    let Some((header, rest)) = body.split_once('\n') else {
+        return (body.to_string(), None);
+    };
+    if !is_header_line(header) {
+        return (body.to_string(), None);
+    }
+    (rest.to_string(), Some(header.to_string()))
+}
+
+fn header_summary(header: &str) -> Option<String> {
+    let (inner, _) = split_header_span(header.trim())?;
+    let (_, _, summary) = header_fields(inner)?;
+    Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
+}
+
+fn strip_summary_prefix(body: &str, summary: &str) -> String {
+    let leading_len = body.len() - body.trim_start().len();
+    let (leading, content) = body.split_at(leading_len);
+    let Some(rest) = content.strip_prefix(summary) else {
+        return body.to_string();
+    };
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .or_else(|| rest.strip_prefix(' '))
+        .unwrap_or(rest);
+    format!("{leading}{rest}")
+}
+
 /// The first sentence: up to the first `.`, `!` or `?` that ends a word
 /// (so `e.g.` mid-line does not end one), else the first line.
 fn first_sentence_of(text: &str) -> String {

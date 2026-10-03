@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -43,8 +42,6 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
-_FNO_MAIL_FRAME = re.compile(r"<fno_mail\b[^>]*>(.*?)</fno_mail>", re.I | re.S)
-_FNO_MAIL_TAG = re.compile(r"</?fno_mail\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -482,64 +479,38 @@ def set_policy(handle: str, policy: Optional[str]) -> bool:
     return True
 
 
-def dedupe(messages: list) -> list[tuple[object, int, list[str]]]:
-    """Collapse identical bodies from one sender into one entry with a count.
+def render_digest(
+    messages: list, held_for_s: int, harness: str | None = None
+) -> str:
+    """Render held mail through the Rust header and release formatter."""
+    from fno import rust_binary
 
-    Returns ``(representative, count, every_id)`` per survivor, oldest first.
-    Every id travels with its survivor because the cursor must still be
-    advanced past a suppressed duplicate - a message that is not rendered is
-    consumed, never left behind to resurface on the next drain.
-
-    A worker that gets no answer re-sends, so a ten minute hold turns one
-    report into five. The dedupe is needed even without a retry: a
-    duplicate-delivery rate of 4.1 percent was measured on this bus on
-    2026-08-19, with identical body md5 AND identical message id.
-    """
-    import hashlib
-
-    order: list[tuple[str, str]] = []
-    groups: dict[tuple[str, str], list] = {}
-    for message in messages:
-        body = getattr(message, "body", "") or ""
-        digest = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
-        key = (getattr(message, "from_", "") or "", digest)
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(message)
-    out = []
-    for key in order:
-        members = groups[key]
-        out.append((members[0], len(members), [getattr(m, "id", "") for m in members]))
-    return out
-
-
-def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
-    """The one text the release injects. Mirrors the notify-self render."""
-    total = sum(count for _, count, _ in survivors)
-    minutes = max(1, math.ceil(held_for_s / 60)) if held_for_s else 0
-    lines = [
-        f"[fno agents mail] busy mode ended after ~{minutes}m. "
-        f"{total} message(s) held for {handle}:"
-    ]
-    for message, count, _ids in survivors:
-        suffix = f"  (x{count} identical, deduped)" if count > 1 else ""
-        lines.append(
-            f"\n--- from {getattr(message, 'from_', '?')} "
-            f"({getattr(message, 'ts', '?')})  id:{getattr(message, 'id', '?')} "
-            f"---{suffix}"
-        )
-        lines.append(_digest_message_body(getattr(message, "body", "") or "").rstrip("\n"))
-    lines.append('\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."')
-    return "\n".join(lines)
-
-
-def _digest_message_body(body: str) -> str:
-    """Unwrap one peer frame so the outer digest gets one frame."""
-    match = _FNO_MAIL_FRAME.fullmatch(body.strip())
-    if match and not _FNO_MAIL_TAG.search(match.group(1)):
-        return match.group(1).strip("\n")
-    return _FNO_MAIL_TAG.sub(lambda match: "&lt;" + match.group()[1:], body)
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        raise RuntimeError("fno-agents is required to render held-mail delivery")
+    payload = {
+        "held_for_s": held_for_s,
+        "harness": harness,
+        "messages": [
+            {
+                "sender": getattr(message, "from_", "?") or "?",
+                "sent_at": getattr(message, "ts", "") or "",
+                "id": getattr(message, "id", "?") or "?",
+                "body": getattr(message, "body", "") or "",
+            }
+            for message in messages
+        ],
+    }
+    proc = subprocess.run(
+        [str(binary), "mail-hold", "--render-digest"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "held-mail rendering failed")
+    return proc.stdout
 
 
 def release(handle: str, *, held_for_s: int = 0) -> dict:
@@ -605,18 +576,16 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             if getattr(message, "id", "") not in seen_ids:
                 seen_ids.add(getattr(message, "id", ""))
                 messages.append(message)
-    survivors = dedupe(messages)
     held_count = len(messages)
-    deduped_count = held_count - len(survivors)
+    deduped_count = 0
 
     outcome = "empty"
     miss_reason: list = []
-    if survivors:
+    if messages:
         from fno.agents.dispatch import _deliver_live
         from fno.inbox.store import generate_msg_id
         from fno.mail.envelope import wrap_fno_mail
 
-        digest = render_digest(handle, survivors, held_for_s)
         # Route through the LANE DISPATCHER, not the claude injector: wired to
         # one injector this was a producer on one of N lanes, a hold that
         # lifted on time and delivered nothing.
@@ -625,6 +594,9 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             miss_reason.append("no-registry-row")
         else:
             try:
+                digest = render_digest(
+                    messages, held_for_s, getattr(entry, "harness", None)
+                )
                 framed = wrap_fno_mail(
                     digest,
                     from_="fno-mail-hold",
@@ -641,6 +613,8 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             for form, got in form_mail:
                 for message in got:
                     advance_cursor(form, getattr(message, "id", ""))
+            for message in messages:
+                _emit_drain_marker(message.id, handle, handle, message.from_, "printed")
         else:
             outcome = "inject-missed"
 
