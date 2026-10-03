@@ -78,11 +78,19 @@ fn changed_lines(old: &str, new: &str) -> (u64, u64) {
     ((n.len() - shared) as u64, (o.len() - shared) as u64)
 }
 
+/// A countable language key: a non-empty ASCII-alphanumeric extension with
+/// at least one letter. `Path::extension` alone admits code fragments and
+/// version digits from tool arguments that are not paths (`md\``, `html~`,
+/// `0`, whole function bodies).
 fn extension_of(path: &str) -> Option<String> {
-    std::path::Path::new(path)
+    let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
+        .map(|e| e.to_ascii_lowercase())?;
+    let plausible = !ext.is_empty()
+        && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        && ext.bytes().any(|b| b.is_ascii_alphabetic());
+    plausible.then_some(ext)
 }
 
 fn note_extension(extensions: &mut BTreeMap<String, u64>, path: &str) {
@@ -481,6 +489,34 @@ mod tests {
         let act = claude_activity(&raw);
         assert!(act.extensions.is_empty());
         assert_eq!(act.lines_added, 2);
+    }
+
+    #[test]
+    fn non_extension_and_fragment_keys_never_count() {
+        // Real extensions count; code fragments, backup and version tails,
+        // and empty tails read no language key.
+        for (path, want) in [
+            ("src/main.rs", Some("rs")),
+            ("notes/v2/page.md", Some("md")),
+            ("a.c", Some("c")),
+            ("backup.html~", None),
+            ("release.2", None),
+            ("trailing.md`", None),
+            ("file.", None),
+            ("fn facet_keys(view: &mut view, bytes: &[u8]) {", None),
+            ("cre \\\nn  function stoppoll() {", None),
+        ] {
+            let mut exts = BTreeMap::new();
+            note_extension(&mut exts, path);
+            assert_eq!(
+                exts.get(want.unwrap_or("zzznone")),
+                want.map(|_| &1),
+                "path {path:?}"
+            );
+            if want.is_none() {
+                assert!(exts.is_empty(), "path {path:?} counted {exts:?}");
+            }
+        }
     }
 
     #[test]
