@@ -38,6 +38,8 @@ One JSON object per line (`fno.bus.log.Envelope`):
 
 A root message threads under its own id. A reply sets `in_reply_to`.
 
+From the Messages tab, the user types a reply into the chosen pane. After focus and input succeed, the client records one `delivery: "typed"` bus row. The row sets `from` to `user` and `in_reply_to` to the tapped message id, then enters the paired chat projection. Typed rows are audit records, so the drain does not deliver them again. If the selected session has no pane, the client writes no reply.
+
 ### Control lane word ledger
 
 Before any outward control send, `fno.mail.budget.reserve_control` charges the authored word count to one canonical sender-recipient pair. The fixed policy is 60 masked words over a rolling 10-minute window. An ordinary send writes no ledger row: rule 7 is its only word gate.
