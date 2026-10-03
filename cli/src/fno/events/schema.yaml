@@ -4612,6 +4612,75 @@ event_types:
           description: "How many panes the server held at exit."
     consumers: [operator]
 
+  - name: portal_opened
+    retention: durable
+    description: "A portal index entered the mux server's portals map: a reach open, a reseat, or a restore re-arm. A retune emits a closed-and-open pair for the same index (the channel moved, the window stayed), so the journal answers which door opened a portal and when."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, portal, row_key, seat]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name."
+        portal:
+          type: integer
+          description: "The portal index that opened."
+        row_key:
+          type: string
+          description: "The channel the portal tuned to: the row key the portal seat shows."
+        seat:
+          type: integer
+          description: "The pane id the portal seats."
+    consumers: [operator]
+
+  - name: portal_closed
+    retention: durable
+    description: "A portal index left the mux server's portals map: the operator's close gesture, a death whose parked screen could not take the seat, a displaced seat, a stale half-created seat, or a retune. Closes are the portal-outlives-viewer contract's paper trail."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, portal, row_key, cause]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name."
+        portal:
+          type: integer
+          description: "The portal index that closed."
+        row_key:
+          type: string
+          description: "The channel the portal last showed."
+        cause:
+          enum: [operator, viewer_died, displaced, stale_seat, retune]
+          description: "The door's word for why the entry left the map."
+    consumers: [operator]
+
+  - name: row_lifecycle_observed
+    retention: durable
+    description: "The reconcile sweep's observed lifecycle word for a row fno owns: one row per applied status transition (an exit or a restart) with its evidence cause, so an exit or a restart is never silent again (ruling d-e096c669). The pane_closed row stays the pane-level fact; this is the row-level one."
+    sources: [daemon]
+    data:
+      required: [row, from, to, cause]
+      properties:
+        row:
+          type: string
+          description: "The registry row's name."
+        harness:
+          type: [string, "null"]
+          description: "The row's harness axis. Null when the row carries none."
+        harness_session:
+          type: [string, "null"]
+          description: "The row's harness session id. Null when the row carries none."
+        from:
+          type: string
+          description: "The status word before the write."
+        to:
+          type: string
+          description: "The status word after the write."
+        cause:
+          enum: [pid_proven, revival, probe_inferred]
+          description: "The evidence word: the row's own dead pid, a guarded crown revival, or the probe's inference."
+    consumers: [operator]
+
   - name: composer_shell_ran
     retention: durable
     description: "The composer's bang mode ran one shell line: a leading ! turned the input into a shell prompt and Enter sent the line through PaneRun. One row per run, naming the project cwd, the resolved login shell, the line and the pane that hosts it."

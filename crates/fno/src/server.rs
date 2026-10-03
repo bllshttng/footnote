@@ -78,6 +78,7 @@ mod pane_identity;
 mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
+mod portal_journal;
 mod portal_reach;
 mod restore_route_gate;
 mod resume_argv;
@@ -10479,7 +10480,7 @@ impl Core {
                         .find(|(_, portal)| portal.seat == focus)
                         .map(|(idx, _)| *idx)
                     {
-                        self.portals.remove(&idx);
+                        self.journal_portal_take(idx, "displaced");
                     }
                     // Persist B as a member of the viewed squad so it survives a
                     // restart pane-hosted (US2); the take-over already succeeded.

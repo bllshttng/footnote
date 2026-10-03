@@ -21,6 +21,17 @@ enum CloseCause {
     Operator,
 }
 
+impl CloseCause {
+    /// The schema's cause word for the close, shared by the pane_closed
+    /// row and the portal_closed row the same path emits.
+    fn word(self) -> &'static str {
+        match self {
+            CloseCause::ViewerDied => "viewer_died",
+            CloseCause::Operator => "operator",
+        }
+    }
+}
+
 /// The `pane_closed` journal row, pure so tests can assert the
 /// envelope. Cause is the enum's word, never the free text alone; identity
 /// fields ride null when no registry row binds the pane.
@@ -225,7 +236,7 @@ impl Core {
                     portal.row_key
                 ));
             }
-            self.portals.remove(&idx);
+            self.journal_portal_take(idx, cause.word());
         }
         self.emit_pane_closed(
             pid,

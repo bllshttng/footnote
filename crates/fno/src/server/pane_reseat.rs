@@ -365,7 +365,7 @@ impl Core {
                 if let Some(id) = row.attach_id.clone() {
                     self.attached.insert(id, pane);
                 }
-                self.portals.insert(
+                self.journal_portal_open(
                     slot,
                     Portal {
                         row_key: key.clone(),
@@ -409,7 +409,7 @@ impl Core {
         if let Some(id) = row.attach_id.clone() {
             self.attached.insert(id, pane);
         }
-        self.portals.insert(
+        self.journal_portal_open(
             slot,
             Portal {
                 row_key: key.clone(),

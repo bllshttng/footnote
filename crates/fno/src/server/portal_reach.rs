@@ -119,7 +119,7 @@ pub(super) fn rearm_held_portal_seats(
             }
             continue;
         }
-        core.portals.insert(
+        core.journal_portal_open(
             index,
             Portal {
                 row_key: row.clone(),
@@ -667,7 +667,7 @@ impl Core {
                 // blocking every later reach for this row.
                 None => {
                     self.reap_pane(other_seat);
-                    self.portals.remove(&other_idx);
+                    self.journal_portal_take(other_idx, "stale_seat");
                 }
             }
         }
@@ -716,7 +716,7 @@ impl Core {
         // diff-pane stale-id guard - a recorded pane closed by any other path
         // reads as closed and never wedges the portal). Only this index is
         // removed; every other portal is untouched by this reach.
-        let slot = self.portals.remove(&portal_idx);
+        let slot = self.journal_portal_take(portal_idx, "retune");
         // The seat's tab id, kept out of the stale-seat paths: a
         // fresh-open (below) prefers it when the tab still exists.
         let mut remembered_tab_id: Option<TabId> = None;
@@ -851,7 +851,7 @@ impl Core {
                     // Reap-last: the displaced viewer dies, the session it
                     // showed keeps running daemon-hosted.
                     self.reap_pane(pid);
-                    self.portals.insert(
+                    self.journal_portal_open(
                         portal_idx,
                         Portal {
                             row_key: key.to_string(),
@@ -998,7 +998,7 @@ impl Core {
         if let Some(id) = row.attach_id.clone() {
             self.attached.insert(id, pid);
         }
-        self.portals.insert(
+        self.journal_portal_open(
             portal_idx,
             Portal {
                 row_key: key.to_string(),
