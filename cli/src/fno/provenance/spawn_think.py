@@ -1065,10 +1065,23 @@ def on_node_born(
             graph_path = graph_json()
         error, result = call_binary_json(
             "backlog",
-            ["birth-hook", "--graph", str(graph_path), "--node-id", str(node_id)],
+            [
+                "birth-hook",
+                "--graph", str(graph_path),
+                "--node-id", str(node_id),
+                "--events-path", str(_events_path(None)),
+            ],
         )
         if error or not isinstance(result, dict):
             return None
+        if result.get("kind") == "offered":
+            # The door's stderr offer line is captured (and dropped) by the
+            # door call; re-render it here so the operator still sees it.
+            print(
+                f"spawn_think: OFFER PENDING (nothing spawned). "
+                f"Ask {display_name()} whether to run `{result.get('offer_line')}` now, or skip.",
+                file=sys.stderr,
+            )
         return ThinkSpawnResult(
             decision=result.get("kind", "noop"),
             event=result.get("event"),

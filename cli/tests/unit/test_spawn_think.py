@@ -1039,8 +1039,27 @@ def test_on_node_born_execs_the_native_door(iso, tmp_path, monkeypatch):
     monkeypatch.setattr(st, "call_binary_json", fake_door)
     g = tmp_path / "graph.json"
     res = st.on_node_born({"id": "x-2222aaaa"}, graph_path=g)
-    assert seen["argv"] == ("backlog", ["birth-hook", "--graph", str(g), "--node-id", "x-2222aaaa"])
+    assert seen["argv"] == (
+        "backlog",
+        ["birth-hook", "--graph", str(g), "--node-id", "x-2222aaaa",
+         "--events-path", str(st._events_path(None))],
+    )
     assert res is not None and res.decision == "offered" and res.event == st.EVENT_OFFERED
+
+
+def test_on_node_born_reprints_the_offer_line(iso, tmp_path, monkeypatch, capsys):
+    """The door's stderr is captured by the door call, so the forwarder
+    re-renders the OFFER PENDING line from the receipt: the operator still
+    sees the copy-pasteable /think prompt the in-process hook used to print."""
+    monkeypatch.setenv("FNO_THINK_SPAWN", "1")
+    monkeypatch.setattr(
+        st, "call_binary_json",
+        lambda *a, **k: (None, {"kind": "offered", "event": st.EVENT_OFFERED,
+                                "node_id": "x-2222aaaa", "offer_line": "/think x-2222aaaa"}),
+    )
+    st.on_node_born({"id": "x-2222aaaa"}, graph_path=tmp_path / "g.json")
+    err = capsys.readouterr().err
+    assert "OFFER PENDING" in err and "/think x-2222aaaa" in err
 
 
 def test_on_node_born_is_strictly_non_fatal(iso, monkeypatch):
