@@ -469,13 +469,15 @@ fn context_snapshot_rules(type_name: &str, data: &Map<String, Value>) -> Result<
                 .to_string(),
         );
     }
-    let expected_bytes: i128 = {
-        let mut total: i128 = 0;
-        for item in observed.iter() {
-            total += py_int(&item["bytes"]);
-        }
-        total
-    };
+    // Byte and token counts compare as f64: Python's int() of an integral
+    // float is exact, and the f64 values here are the same numbers the JSON
+    // carried, so equality on the f64 avoids the saturating-cast divergence
+    // at magnitudes past i128. Every member passed is_nonneg_integral above,
+    // so the values are whole and nonnegative.
+    let mut expected_bytes: f64 = 0.0;
+    for item in observed.iter() {
+        expected_bytes += f64_of(item.get("bytes"));
+    }
     let mut expected_hashes: Vec<&str> = Vec::new();
     for item in observed.iter() {
         expected_hashes.push(item["content_hash"].as_str().unwrap_or_default());
@@ -489,7 +491,7 @@ fn context_snapshot_rules(type_name: &str, data: &Map<String, Value>) -> Result<
     let context_bytes = data.get("context_bytes");
     let mut cb_ok = is_nonneg_integral(context_bytes);
     if cb_ok {
-        if py_int(context_bytes.unwrap()) != expected_bytes {
+        if f64_of(context_bytes) != expected_bytes {
             cb_ok = false;
         }
     }
@@ -499,8 +501,8 @@ fn context_snapshot_rules(type_name: &str, data: &Map<String, Value>) -> Result<
     let estimated = data.get("estimated_tokens");
     let mut est_ok = is_nonneg_integral(estimated);
     if est_ok {
-        let want = (expected_bytes + 3) / 4;
-        if py_int(estimated.unwrap()) != want {
+        let want = ((expected_bytes + 3.0) / 4.0).floor();
+        if f64_of(estimated) != want {
             est_ok = false;
         }
     }
@@ -641,20 +643,22 @@ fn verification_receipt_rules(
     let generation = data.get("generation");
     let expected = data.get("steps_expected");
     let executed = data.get("steps_executed");
-    let gen = py_int(generation.unwrap_or(&Value::Null));
-    let exp = py_int(expected.unwrap_or(&Value::Null));
-    let exe = py_int(executed.unwrap_or(&Value::Null));
+    // Counts compare as f64 for the same reason as the context_snapshot
+    // arithmetic: no saturating-cast divergence at absurd magnitudes.
+    let gen = f64_of(generation);
+    let exp = f64_of(expected);
+    let exe = f64_of(executed);
     let mut counts_ok =
-        is_nonneg_integral(generation) && gen >= 1 && gen <= MAX_SAFE_EVENT_INTEGER as i128;
+        is_nonneg_integral(generation) && gen >= 1.0 && gen <= MAX_SAFE_EVENT_INTEGER as f64;
     counts_ok = counts_ok && is_nonneg_integral(expected) && is_nonneg_integral(executed);
     counts_ok = counts_ok && exe <= exp;
-    counts_ok = counts_ok && exp == scope_len(data);
+    counts_ok = counts_ok && exp == scope_len(data) as f64;
     if !counts_ok {
         return Err("verification_receipt step counts are invalid".to_string());
     }
     let mode_str = mode.and_then(|v| v.as_str()).unwrap_or_default();
     let result_str = result.and_then(|v| v.as_str()).unwrap_or_default();
-    if mode_str == "full" && result_str == "passed" && (exp == 0 || exe != exp) {
+    if mode_str == "full" && result_str == "passed" && (exp == 0.0 || exe != exp) {
         return Err("verification_receipt full pass requires every nonzero step".to_string());
     }
     if mode_str == "void" && result_str == "passed" {
@@ -1122,6 +1126,12 @@ fn truthy(v: Option<&Value>) -> bool {
         Some(Value::Object(o)) => !o.is_empty(),
     }
 }
+/// The JSON number as f64, NEG_INFINITY when absent (a sentinel no real
+/// count equals, so an absent member fails the comparison).
+fn f64_of(v: Option<&Value>) -> f64 {
+    v.and_then(|x| x.as_f64()).unwrap_or(f64::NEG_INFINITY)
+}
+
 /// Python int() truncation over a JSON number (0 for non-numbers; callers
 /// guard integrality separately).
 fn py_int(v: &Value) -> i128 {
@@ -1284,10 +1294,9 @@ fn is_hex(s: &str, len: usize, ci: bool) -> bool {
         })
 }
 
-/// Lowercase hex encoding of raw bytes (sha256 digest form).
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+// Lowercase hex encoding is the parent module's encoder; shared here so the
+// digest form has one spelling.
+use super::hex;
 
 /// The scope array's length, 0 when absent or not an array.
 fn scope_len(data: &Map<String, Value>) -> i128 {
