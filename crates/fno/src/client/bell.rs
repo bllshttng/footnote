@@ -127,6 +127,12 @@ pub(crate) fn button_range(view: &View, text_w: usize) -> std::ops::Range<usize>
     }
 }
 
+pub(super) fn button_at(view: &View, row: u16, col: u16) -> bool {
+    let top = view.sideline_top();
+    let text_w = view.sideline_paint_w().saturating_sub(1);
+    row as usize + 1 == top && button_range(view, text_w).contains(&(col as usize))
+}
+
 pub(crate) fn paint_button(view: &View, cells: &mut [Cell], text_w: usize, cols: usize) {
     let range = button_range(view, text_w);
     paint(

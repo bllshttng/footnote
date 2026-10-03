@@ -141,6 +141,13 @@ pub(super) async fn mouse_pre_pass(
         if view.question_detail.is_some() {
             continue;
         }
+        if view.bell.open
+            && !matches!(rep.kind, MouseKind::Move)
+            && bell::hit(view, rep.row, rep.col).is_none()
+            && !bell::button_at(view, rep.row, rep.col)
+        {
+            bell::close(view);
+        }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
