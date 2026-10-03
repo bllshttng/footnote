@@ -1443,6 +1443,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",
     "agent_exited",
+    // The sweep's observed lifecycle word for an owned row: one row per
+    // applied status transition (exit or restart) with its evidence cause
+    // (ruling d-e096c669), so an exit or a restart is never silent again.
+    "row_lifecycle_observed",
     "agent_removed",
     // Served facts (daemon-emitted): the sweep is the only writer of the
     // registry's measured surfaces, so each of these announces a change that

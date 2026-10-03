@@ -79,6 +79,7 @@ mod pane_identity;
 mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
+mod portal_journal;
 mod portal_reach;
 mod restore_route_gate;
 mod resume_argv;
@@ -10447,19 +10448,17 @@ impl Core {
                     // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
                     // and resurfaces watch-only (external-lifecycle - viewport moved, nothing killed).
                     self.reap_pane(focus);
-                    // An explicit open-here onto a portal seat
-                    // repurposed its geometry for an ordinary attach: that
-                    // portal no longer describes what the pane shows. Drop it
-                    // so a later reach opens fresh instead of trusting an
-                    // entry that names the wrong row. Only the portal
-                    // seated on THIS pane is dropped; the rest are untouched.
+                    // An explicit open-here onto a portal seat repurposed
+                    // its geometry for an ordinary attach: the portal no
+                    // longer describes what the pane shows. Drop it so a
+                    // later reach opens fresh; the rest are untouched.
                     if let Some(idx) = self
                         .portals
                         .iter()
                         .find(|(_, portal)| portal.seat == focus)
                         .map(|(idx, _)| *idx)
                     {
-                        self.portals.remove(&idx);
+                        self.journal_portal_take(idx, "displaced");
                     }
                     // Persist B as a member of the viewed squad so it survives a
                     // restart pane-hosted (US2); the take-over already succeeded.
