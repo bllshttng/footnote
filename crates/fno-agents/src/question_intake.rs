@@ -1187,8 +1187,9 @@ stops
         for value in crate::decision_trace::DECISION_CLASSES {
             assert!(message.contains(value), "names {value}: {message}");
         }
-        // Only the two earlier rows sit in the journal; the refusal wrote none.
-        assert_eq!(journal_text(&root).lines().count(), 2);
+        // Only the three earlier rows sit in the journal; the refusal wrote
+        // none.
+        assert_eq!(journal_text(&root).lines().count(), 3);
     }
 
     #[test]
