@@ -5316,7 +5316,14 @@ from fno.graph.selection_evidence import (  # noqa: E402
     read_occupancy,
 )
 
-# In graph/_closures.py: this file is over the source budget.
+# In graph/_closures.py: this file is over the source budget; these four ride
+# this module's namespace for the tests that import them from here.
+from fno.graph._closures import (  # noqa: E402, F401
+    _cascade_close_contained as _cascade_close_contained,
+    _strandable_contained_ids as _strandable_contained_ids,
+    _strandable_epic_ids as _strandable_epic_ids,
+    _sweep_close_done_epics as _sweep_close_done_epics,
+)
 
 
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
