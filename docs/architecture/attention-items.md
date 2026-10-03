@@ -35,6 +35,8 @@ The fields ride a question file handed to `--question-file`:
 ```markdown
 ---
 recommend: 1
+answers_ask: s-1a2b3c4d
+class: irreversible
 ---
 Is a net-zero Python repair legal with no grant?
 
@@ -82,6 +84,8 @@ outstanding: refused: a question needs why, two options, a recommendation. Write
 ```
 
 A reversible question that carries a recommendation is one the asker must decide itself. The port refuses it too, naming the door: record the ruling as the asking session or its king with `fno backlog decide <node> "<ruling>"`, then continue. It reaches the user only with a user-only reason in a `why_user:` frontmatter key. The four reasons are: irreversible, spends money or a credential, reaches outside the machine, or a product or taste call. The user sees a decide-it-yourself ruling only as a one-line FYI in the check-in, never as a question.
+
+The two trace keys name the hop the question answers: `answers_ask:` is the ask span id, and `class:` is one of public-surface, irreversible, money-security, law-change, gate-override, none. The intake turns `answers_ask:` into the escalate route span and stamps the question row's trace (docs/architecture/decision-record.md, "Traced decisions").
 
 ## Question pages
 
