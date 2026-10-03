@@ -8,7 +8,7 @@
 //! traceback; this port lands it on the leaf's ordinary validation exit
 //! (`validation error: ...`, 2).
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -347,6 +347,18 @@ fn ordinary_acquire(
         } => {
             let pid_s = p.map(|v| v.to_string()).unwrap_or_else(|| "None".into());
             eprintln!("claim '{key}' held by {h} (pid={pid_s}, host={host})");
+            // In JSON mode stdout carries the machine surface
+            // core._native_claim reconstructs ClaimHeldByOther from; the
+            // human surface stays stderr-only.
+            if a.json_output {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "outcome": "held_by_other", "holder": h,
+                        "pid": p, "host": host,
+                    })
+                );
+            }
             1
         }
         AcquireOutcome::Error(e) => {

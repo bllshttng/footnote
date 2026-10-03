@@ -359,13 +359,22 @@ fn the_acquire_leaf_matches_the_python_leg_on_every_frozen_case() {
     );
 
     // 4. Held by a foreign holder: exit 1, named stderr.
+    // The plant anchors to the test process's own pid: a pid-liveness
+    // claim whose pid is dead reads STALE (reclaimable) on hosts without a
+    // live 4242, which would make this case host-sensitive.
     case(
         "held_by_other",
         &["session:par-held", "--holder", "pty:other", "--pid", "4242"],
         |root| {
             plant(
                 root,
-                &["session:par-held", "--holder", "pty:par", "--pid", "4242"],
+                &[
+                    "session:par-held",
+                    "--holder",
+                    "pty:par",
+                    "--pid",
+                    &std::process::id().to_string(),
+                ],
             )
         },
     );
@@ -491,4 +500,37 @@ fn the_acquire_leaf_matches_the_python_leg_on_every_frozen_case() {
 
     // 16. --max-lanes without --lane.
     case("max_lanes_needs_lane", &["--max-lanes", "2"], |_| {});
+
+    // 17. The JSON held surface library callers parse (core._native_claim
+    // reconstructs ClaimHeldByOther from stdout): exit 1 and the engine
+    // payload shape, structurally - the host-specific pid is scrubbed in
+    // the human-surface golden above, so this case asserts the fields.
+    let root = tempfile::tempdir().unwrap();
+    plant(
+        root.path(),
+        &[
+            "session:par-heldjson",
+            "--holder",
+            "pty:par",
+            "--pid",
+            "4242",
+        ],
+    );
+    let out = run_raw(
+        root.path(),
+        &[
+            "--json",
+            "session:par-heldjson",
+            "--holder",
+            "pty:other",
+            "--pid",
+            "4242",
+        ],
+    );
+    assert_eq!(out.0, 1, "held exits 1");
+    let v: serde_json::Value = serde_json::from_str(out.1.trim()).expect("held json on stdout");
+    assert_eq!(v["outcome"], "held_by_other");
+    assert_eq!(v["holder"], "pty:par");
+    assert_eq!(v["pid"], 4242);
+    assert!(v["host"].is_string(), "host names the recorded host");
 }

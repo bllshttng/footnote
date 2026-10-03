@@ -34,7 +34,6 @@ from .core import (
     ClaimContended,
     ClaimCorrupted,
     ClaimGoneAway,
-    ClaimHeldByOther,
     ClaimValidationError,
     ClaimVerdictError,
     ClaimVerdictUnavailable,
