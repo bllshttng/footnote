@@ -833,12 +833,14 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
     if let Ok(registry) = crate::state::load_registry(&home.registry_json()) {
         crate::attention::attach_reach(&mut items, &registry);
     }
-    // The settled flag: an open question whose fact resolved (its node or
-    // any blocks id reads done/superseded). An unreadable graph marks
-    // nothing (AC11-ERR) - the sweep's own reader returns empty statuses
-    // then, and mark_settled with no statuses marks nothing.
-    let (statuses, _) = crate::question_sweep::read_closed_rung_facts(cwd, home);
-    mark_settled(&mut items, &statuses);
+    // The settled flag shares the sweep's open-question fold, including its
+    // user-only exemption. An unreadable graph yields no settled ids.
+    let (statuses, raw) = crate::question_sweep::read_closed_rung_facts(cwd, home);
+    let statuses = statuses.into_iter().collect();
+    let settled = node_closed_question_ids(&raw, &statuses)
+        .into_iter()
+        .collect();
+    mark_settled(&mut items, &settled);
     let as_of = now_secs();
     let answered = crate::attention::answered(&journals_raw, as_of);
     let payload = json!({
@@ -861,21 +863,16 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
     0
 }
 
-/// Mark open question/pin items whose fact has resolved: the item's node or
-/// any blocks id reads `done` or `superseded` (R4). Pure over its inputs; an
-/// empty status map (unreadable graph) marks nothing.
-fn mark_settled(items: &mut [crate::attention::AttentionItem], statuses: &[(String, String)]) {
-    let by_id: std::collections::BTreeMap<&str, &str> = statuses
-        .iter()
-        .map(|(id, s)| (id.as_str(), s.as_str()))
-        .collect();
-    let closed = |id: &str| matches!(by_id.get(id), Some(&("done" | "superseded")));
+/// Mark only open question/pin items the canonical node-closed fold returned.
+fn mark_settled(
+    items: &mut [crate::attention::AttentionItem],
+    settled: &std::collections::HashSet<String>,
+) {
     for item in items.iter_mut() {
         if item.state != "open" || !matches!(item.kind.as_str(), "question" | "pin") {
             continue;
         }
-        item.settled = item.node.as_deref().map(closed).unwrap_or(false)
-            || item.blocks.iter().any(|b| closed(b));
+        item.settled = settled.contains(&item.id);
     }
 }
 

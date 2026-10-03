@@ -107,10 +107,17 @@ fn scope_of(line: &Value) -> String {
 /// True while an announce row still stands: no usable `expires`, or one in
 /// the future.
 fn standing(line: &Value, now: u64) -> bool {
-    match line.get("expires").and_then(Value::as_str) {
+    match expires_at(line) {
         Some(e) => crate::state::rfc3339_like_to_secs(e).is_none_or(|t| t > now),
         None => true,
     }
+}
+
+fn expires_at(line: &Value) -> Option<&str> {
+    line.get("meta")
+        .and_then(|meta| meta.get("expires_at"))
+        .and_then(Value::as_str)
+        .or_else(|| line.get("expires").and_then(Value::as_str))
 }
 
 /// The projection of one chats store. `now` decides which announcements
@@ -184,7 +191,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                     v.get("body").and_then(Value::as_str).unwrap_or(""),
                 ),
                 "body": v.get("body").and_then(Value::as_str).unwrap_or(""),
-                "expires": v.get("expires").and_then(Value::as_str),
+                "expires": expires_at(&v),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
                 "delivery": v.get("delivery").and_then(Value::as_str),
                 "system": system_row,
@@ -593,8 +600,16 @@ mod tests {
                 json!({
                     "type": "message", "kind": "announce", "v": 1,
                     "id": "fmail-666666666666", "ts": "2026-10-01T09:01:00Z",
-                    "from": "fno/fleet-incident", "to": "fleet:fno", "meta": {"scope": "fno"},
+                    "from": "fno/fleet-incident", "to": "fleet:fno",
+                    "meta": {"scope": "fno", "expires_at": "2026-10-03T12:00:00Z"},
                     "body": "Heavy benchmark running.",
+                }),
+                json!({
+                    "type": "message", "kind": "announce", "v": 1,
+                    "id": "fmail-999999999999", "ts": "2026-10-01T09:01:30Z",
+                    "from": "fno/fleet-incident", "to": "fleet:fno",
+                    "meta": {"scope": "fno", "expires_at": "2026-10-01T10:00:00Z"},
+                    "body": "expired incident",
                 }),
                 json!({
                     "type": "message", "kind": "announce", "v": 1,
@@ -666,6 +681,10 @@ mod tests {
         assert_eq!(
             ann[0].get("id").and_then(Value::as_str),
             Some("fmail-666666666666")
+        );
+        assert_eq!(
+            ann[0].get("expires").and_then(Value::as_str),
+            Some("2026-10-03T12:00:00Z")
         );
         // The hold digest never appears (R8) and the broken line counts (AC1-ERR).
         let bodies = serde_json::to_string(&projection).unwrap();

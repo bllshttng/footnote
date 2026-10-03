@@ -141,12 +141,22 @@ pub(super) async fn mouse_pre_pass(
         if view.question_detail.is_some() {
             continue;
         }
-        if view.bell.open
-            && !matches!(rep.kind, MouseKind::Move)
-            && bell::hit(view, rep.row, rep.col).is_none()
-            && !bell::button_at(view, rep.row, rep.col)
-        {
-            bell::close(view);
+        if view.bell.open {
+            if bell::button_at(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                continue;
+            }
+            if let Some(hit) = bell::hit(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, hit, sock_w).await?;
+                }
+                continue;
+            }
+            if !matches!(rep.kind, MouseKind::Move) {
+                bell::close(view);
+            }
         }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
