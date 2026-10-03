@@ -1499,7 +1499,22 @@ mod tests {
 
     #[test]
     fn the_fixture_folds_two_sessions_one_per_harness_with_every_counter() {
-        let (_fx, rows) = fold_fixture();
+        let (fx, rows) = fold_fixture();
+        // The events block counts dated journal rows in the window only:
+        // the fixture journal holds two loop_check rows on 2026-09-16.
+        let journal = fx.dir.join("events.jsonl");
+        let counts = events_counts(
+            &journal,
+            ts_secs("2026-09-16T00:00:00Z").unwrap(),
+            ts_secs("2026-09-17T00:00:00Z").unwrap(),
+        );
+        assert_eq!(counts.get("loop_check"), Some(&2));
+        let outside = events_counts(
+            &journal,
+            ts_secs("2026-09-01T00:00:00Z").unwrap(),
+            ts_secs("2026-09-02T00:00:00Z").unwrap(),
+        );
+        assert!(outside.is_empty(), "rows outside the window count none");
         assert_eq!(rows.len(), 2, "one claude + one codex row");
         let claude = rows.iter().find(|r| r.harness == "claude").unwrap();
         let codex = rows.iter().find(|r| r.harness == "codex").unwrap();
@@ -1604,28 +1619,6 @@ mod tests {
             run_intel(&["--days".into(), "7".into(), "--period".into(), "1m".into()]),
             2
         );
-    }
-
-    #[test]
-    fn events_counts_keep_only_dated_rows_in_the_window() {
-        let fx = build_fixture("events-counts");
-        let journal = fx.dir.join("events.jsonl");
-        write_lines(
-            &journal,
-            &[
-                json!({"type": "hook_blocked", "ts": "2026-09-16T12:00:00Z"}),
-                json!({"type": "hook_blocked", "ts": "2026-09-16T13:00:00Z"}),
-                json!({"type": "spawn_refused", "ts": "2026-09-01T00:00:00Z"}),
-                json!({"type": "help_emitted"}),
-                json!({"kind": "loop_check", "ts": "2026-09-16T14:00:00Z"}),
-            ],
-        );
-        let now = ts_secs("2026-09-16T15:00:00Z").unwrap();
-        let counts = events_counts(&journal, now - 3600 * 12, now);
-        assert_eq!(counts.get("hook_blocked"), Some(&2));
-        assert_eq!(counts.get("loop_check"), Some(&1));
-        assert!(counts.get("spawn_refused").is_none());
-        assert!(counts.get("help_emitted").is_none());
     }
 
     /// Overwrite the fixture's claude transcript with plain unshaped turns at

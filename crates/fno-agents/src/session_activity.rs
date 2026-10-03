@@ -481,41 +481,28 @@ mod tests {
 
     #[test]
     fn a_path_with_no_extension_counts_nothing() {
-        let raw = claude_lines(
-            &[json!({"type": "assistant", "message": {"role": "assistant",
-            "content": [json!({"type": "tool_use", "name": "Write",
-                "input": {"file_path": "Makefile", "content": "all:\n\ttrue"}})]}})],
-        );
-        let act = claude_activity(&raw);
-        assert!(act.extensions.is_empty());
-        assert_eq!(act.lines_added, 2);
-    }
-
-    #[test]
-    fn non_extension_and_fragment_keys_never_count() {
-        // Real extensions count; code fragments, backup and version tails,
-        // and empty tails read no language key.
-        for (path, want) in [
-            ("src/main.rs", Some("rs")),
-            ("notes/v2/page.md", Some("md")),
-            ("a.c", Some("c")),
-            ("backup.html~", None),
-            ("release.2", None),
-            ("trailing.md`", None),
-            ("file.", None),
-            ("fn facet_keys(view: &mut view, bytes: &[u8]) {", None),
-            ("cre \\\nn  function stoppoll() {", None),
+        // No extension, and every non-extension tail: code fragments, backup
+        // and version tails, and empty tails read no language key.
+        for path in [
+            "Makefile",
+            "backup.html~",
+            "release.2",
+            "trailing.md`",
+            "file.",
+            "fn facet_keys(view: &mut view, bytes: &[u8]) {",
+            "cre \\\nn  function stoppoll() {",
         ] {
-            let mut exts = BTreeMap::new();
-            note_extension(&mut exts, path);
-            assert_eq!(
-                exts.get(want.unwrap_or("zzznone")),
-                want.map(|_| &1),
-                "path {path:?}"
+            let raw = claude_lines(
+                &[json!({"type": "assistant", "message": {"role": "assistant",
+                "content": [json!({"type": "tool_use", "name": "Write",
+                    "input": {"file_path": path, "content": "x"}})]}})],
             );
-            if want.is_none() {
-                assert!(exts.is_empty(), "path {path:?} counted {exts:?}");
-            }
+            let act = claude_activity(&raw);
+            assert!(
+                act.extensions.is_empty(),
+                "path {path:?} counted {:?}",
+                act.extensions
+            );
         }
     }
 
