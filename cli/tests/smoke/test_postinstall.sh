@@ -82,6 +82,22 @@ done
 grep -q 'command -v fno >' .claude-plugin/postinstall.sh \
   || { echo "FAIL: postinstall.sh idempotency guard does not require the fno front door"; exit 1; }
 
+# x-7b2e (gap audit blockers 1-2, hurdle B11): the installer must refuse to
+# replace a foreign-source or in-use tool env (one named override), an
+# INCOMPLETE install must exit non-zero (no success stamp, so the session-start
+# hook retries), and the source install must bust uv's unchanged-version wheel
+# cache.
+for needle in \
+  "clobber_guard" \
+  "FNO_INSTALL_REPLACE" \
+  "direct_url.json" \
+  "live_tool_env_processes" \
+  "reinstall-package fno --refresh-package fno" \
+  "exit 3"; do
+  grep -q "$needle" .claude-plugin/postinstall.sh \
+    || { echo "FAIL: postinstall.sh missing x-7b2e clobber/incomplete/cache content: $needle"; exit 1; }
+done
+
 # Syntax check: a broken postinstall silently no-ops the plugin install.
 bash -n .claude-plugin/postinstall.sh \
   || { echo "FAIL: postinstall.sh has a syntax error"; exit 1; }
