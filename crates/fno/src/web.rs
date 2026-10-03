@@ -2400,11 +2400,6 @@ const eq = (got, want, what) => {
 eq(cellHead({column: "Now", total: 12}), "Now 12", "cell head");
 // laneTotal: the lane's whole count from its cells' (uncapped) totals.
 eq(laneTotal({cells: [{total: 3}, {total: 4}, {}]}), 7, "lane total");
-// sessionCommand: attach by agent name, resume by the FULL session id, null when dim.
-eq(sessionCommand({action: "attach", agent: "w1"}), "fno agents attach w1", "attach cmd");
-eq(sessionCommand({action: "resume", session_id: "abcd1234-full-id"}),
-   "fno agents resume abcd1234-full-id", "resume cmd carries the full id");
-eq(sessionCommand({action: "none", reason: "done"}), null, "dim row has no command");
 // mergeBoard: an errors-only answer keeps the last lanes and stamps staleness.
 const last = {lanes: [{key: "p"}], fetched_at: 111};
 const bad = mergeBoard(last, {errors: ["boom"], lanes: []}, 222);
@@ -2417,14 +2412,13 @@ const good = mergeBoard(last, {errors: [], lanes: [{key: "q"}]}, 333);
 eq(good.lanes.length, 1, "a good answer lanes carry");
 eq(good.errors.length, 0, "a good answer clears the errors");
 eq(good.fetched_at, 333, "a good answer is stamped at its fetch time");
-console.log("backlog page helpers: 12 cases ok");
+console.log("backlog page helpers: 9 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cellHead"),
             lift_js_fn(BACKLOG_PAGE, "laneTotal"),
             lift_js_fn(BACKLOG_PAGE, "mergeBoard"),
-            lift_js_fn(BACKLOG_PAGE, "sessionCommand"),
             asserts
         );
         let path =
@@ -2449,7 +2443,7 @@ console.log("backlog page helpers: 12 cases ok");
                 // The end-of-harness marker is the whole verdict.
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 assert!(
-                    stdout.contains("backlog page helpers: 12 cases ok"),
+                    stdout.contains("backlog page helpers: 9 cases ok"),
                     "the shipped backlog helpers did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)

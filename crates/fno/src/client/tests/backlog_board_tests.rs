@@ -11,7 +11,10 @@ fn board_inputs() -> backlog_model::Inputs {
     inp.backend = "graph".into();
     inp.order = vec!["x-1".into(), "x-2".into(), "x-3".into()];
     inp.rows = vec![
-        json!({"id": "x-1", "status": "ready", "priority": "p1", "title": "First card", "project": "fno"}),
+        json!({"id": "x-1", "status": "ready", "priority": "p1", "title": "First card", "project": "fno",
+               "cwd": "/tmp/x519f", "sessions": [
+                   {"phase": "execute", "harness": "claude",
+                    "session_id": "4d4ea752-1063-4515-8366-b9946ed8f64d"}]}),
         json!({"id": "x-2", "status": "in_progress", "priority": "p2", "title": "mux card", "project": "fno"}),
         json!({"id": "x-3", "status": "ready", "priority": "p2", "title": "Other project", "project": "other"}),
     ];
@@ -397,6 +400,7 @@ fn sideline_toggle_rows() {
                 agent: Some("worker".into()),
                 action: "attach".into(),
                 reason: None,
+                command: Some("fno agents attach worker".into()),
             },
             agent,
         })
@@ -1130,6 +1134,35 @@ fn detail_field_labels_go_dim_and_values_stay_normal() {
         &field.roles[..=colon]
     );
     assert_eq!(field.roles[colon + 2], BRole::Body, "value stays normal");
+    let sid = "4d4ea752-1063-4515-8366-b9946ed8f64d";
+    let adopt = format!("$ fno agents adopt {sid} --cross-project");
+    assert!(
+        lines.iter().any(|l| l.trim() == sid),
+        "the session row shows the full id"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with(&adopt)),
+        "the session row shows the adopt command"
+    );
+    let nv = crate::backlog_model::node(b.inputs.as_ref().expect("inputs"), "x-1")
+        .expect("the fixture node resolves");
+    assert_eq!(
+        node_detail::copy_target(&nv, "x-1", 0, false).as_deref(),
+        Some(sid)
+    );
+    assert_eq!(
+        node_detail::copy_target(&nv, "x-1", 0, true).as_deref(),
+        Some(&adopt[2..])
+    );
+    // A link row copies the linked id and carries no command (AC4-EDGE).
+    let mut linked = board_inputs();
+    linked.rows[0]["blocked_by"] = json!(["x-2"]);
+    let nv2 = crate::backlog_model::node(&linked, "x-1").expect("the linked node resolves");
+    assert_eq!(
+        node_detail::copy_target(&nv2, "x-1", 0, false).as_deref(),
+        Some("x-2")
+    );
+    assert_eq!(node_detail::copy_target(&nv2, "x-1", 0, true), None);
 }
 
 // AC4-HP: Space on value rows builds a multi-select set; the board keeps
