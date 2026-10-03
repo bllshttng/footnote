@@ -206,6 +206,9 @@ struct StoreFile {
     /// every other pref; absent reads as all-unread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     messages_read_marks: Option<serde_json::Value>,
+    /// Newest fleet announcement timestamp seen in the notifications panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bell_seen_at: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -316,6 +319,22 @@ pub fn save_messages_read_mark(chat_id: &str, ts: &str) {
         let mut marks = load_messages_read_marks();
         marks.insert(chat_id.to_string(), ts.to_string());
         file.messages_read_marks = serde_json::to_value(marks).ok();
+    });
+}
+
+pub fn load_bell_seen_at() -> Option<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .bell_seen_at
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
+pub fn save_bell_seen_at(ts: &str) {
+    mutate(|file| {
+        file.bell_seen_at = serde_json::to_value(ts).ok();
     });
 }
 

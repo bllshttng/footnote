@@ -5,8 +5,6 @@ use super::*;
 use serde_json::Value;
 
 const PANEL_W: usize = 48;
-/// Outside the `chat-<hex>` namespace used by Messages read marks.
-const READ_MARK: &str = "__notifications_bell__";
 
 pub(crate) struct Panel {
     pub(super) open: bool,
@@ -196,7 +194,7 @@ fn mark_seen(projection: &Value) {
         .max_by_key(|(epoch, _)| *epoch)
         .map(|(_, ts)| ts)
     {
-        crate::view_store::save_messages_read_mark(READ_MARK, ts);
+        crate::view_store::save_bell_seen_at(ts);
     }
 }
 
@@ -265,11 +263,19 @@ fn rows(view: &View) -> Vec<Row> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
-                out.push(Row::Info(format!("  {body}")));
+                let width = PANEL_W.min(view.term.1 as usize).saturating_sub(4).max(1);
+                out.extend(
+                    wrap_body(body, width)
+                        .into_iter()
+                        .map(|line| Row::Info(format!("  {line}"))),
+                );
             }
             if let Some(expires) = item.get("expires").and_then(Value::as_str) {
                 out.push(Row::Info(format!("  expires {expires}")));
             }
+        }
+        if let Some(error) = view.bell.error.as_ref() {
+            out.push(Row::Info(format!("stale: {error}")));
         }
     } else if let Some(error) = view.bell.error.as_ref() {
         out.push(Row::Info(format!("unavailable: {error}")));
@@ -330,6 +336,47 @@ fn question_title(view: &View, id: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(id)
         .to_string()
+}
+
+fn wrap_body(body: &str, width: usize) -> Vec<String> {
+    let sanitized: String = body
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut cols = 0usize;
+    for word in sanitized.split_whitespace() {
+        let word_cols = unicode_width::UnicodeWidthStr::width(word);
+        if !line.is_empty() && cols + 1 + word_cols > width {
+            lines.push(std::mem::take(&mut line));
+            cols = 0;
+        }
+        if word_cols <= width {
+            if !line.is_empty() {
+                line.push(' ');
+                cols += 1;
+            }
+            line.push_str(word);
+            cols += word_cols;
+            continue;
+        }
+        for ch in word.chars() {
+            let ch_cols = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(0)
+                .max(1);
+            if cols + ch_cols > width {
+                lines.push(std::mem::take(&mut line));
+                cols = 0;
+            }
+            line.push(ch);
+            cols += ch_cols;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 pub(crate) fn keys(view: &mut View, bytes: &[u8]) {
@@ -527,9 +574,7 @@ fn has_unread_in(projection: &Value) -> bool {
     let Some(items) = projection.get("announcements").and_then(Value::as_array) else {
         return false;
     };
-    let seen = crate::view_store::load_messages_read_marks()
-        .remove(READ_MARK)
-        .unwrap_or_default();
+    let seen = crate::view_store::load_bell_seen_at().unwrap_or_default();
     let seen_at = timestamp_key(&seen);
     items
         .iter()
