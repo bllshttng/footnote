@@ -515,23 +515,37 @@ def dedupe(messages: list) -> list[tuple[object, int, list[str]]]:
 
 
 def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
-    """The one text the release injects. Mirrors the notify-self render."""
-    total = sum(count for _, count, _ in survivors)
-    minutes = max(1, math.ceil(held_for_s / 60)) if held_for_s else 0
-    lines = [
-        f"[fno agents mail] busy mode ended after ~{minutes}m. "
-        f"{total} message(s) held for {handle}:"
-    ]
-    for message, count, _ids in survivors:
-        suffix = f"  (x{count} identical, deduped)" if count > 1 else ""
-        lines.append(
-            f"\n--- from {getattr(message, 'from_', '?')} "
-            f"({getattr(message, 'ts', '?')})  id:{getattr(message, 'id', '?')} "
-            f"---{suffix}"
-        )
-        lines.append(_digest_message_body(getattr(message, "body", "") or "").rstrip("\n"))
-    lines.append('\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."')
-    return "\n".join(lines)
+    """Render held mail through the Rust header and release formatter."""
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        raise RuntimeError("fno-agents is required to render held-mail delivery")
+    messages = []
+    for item in survivors:
+        if isinstance(item, tuple):
+            message, _count, ids = item
+        else:
+            message, ids = item, [getattr(item, "id", "")]
+        for message_id in ids:
+            messages.append(
+                {
+                    "sender": getattr(message, "from_", "?") or "?",
+                    "sent_at": getattr(message, "ts", "") or "",
+                    "id": message_id or "?",
+                    "body": getattr(message, "body", "") or "",
+                }
+            )
+    proc = subprocess.run(
+        [str(binary), "mail-hold", "--render-digest"],
+        input=json.dumps({"held_for_s": held_for_s, "messages": messages}),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "held-mail rendering failed")
+    return proc.stdout
 
 
 def _digest_message_body(body: str) -> str:
@@ -605,18 +619,17 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             if getattr(message, "id", "") not in seen_ids:
                 seen_ids.add(getattr(message, "id", ""))
                 messages.append(message)
-    survivors = dedupe(messages)
     held_count = len(messages)
-    deduped_count = held_count - len(survivors)
+    deduped_count = 0
 
     outcome = "empty"
     miss_reason: list = []
-    if survivors:
+    if messages:
         from fno.agents.dispatch import _deliver_live
         from fno.inbox.store import generate_msg_id
         from fno.mail.envelope import wrap_fno_mail
 
-        digest = render_digest(handle, survivors, held_for_s)
+        digest = render_digest(handle, messages, held_for_s)
         # Route through the LANE DISPATCHER, not the claude injector: wired to
         # one injector this was a producer on one of N lanes, a hold that
         # lifted on time and delivered nothing.
