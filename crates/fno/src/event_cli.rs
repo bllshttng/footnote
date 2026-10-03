@@ -157,8 +157,13 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            1
+            if let Some(msg) = e.strip_prefix(crate::event_store::VALIDATE_PREFIX) {
+                eprintln!("error: {msg}");
+                3
+            } else {
+                eprintln!("error: {e}");
+                1
+            }
         }
     }
 }

@@ -267,10 +267,11 @@ def emit_envelope(
             break
         time.sleep(0.25 * (attempt + 1))
     if detail:
-        if proc.returncode == 1 and "database is locked" not in detail:
-            # The judge refused the write: the diagnostic is the contract.
-            # Deferred import: fno.events imports this module at package
-            # load, so the error type resolves at call time only.
+        if proc.returncode == 3:
+            # Exit 3 is a judged refusal (the door marks it): the diagnostic
+            # is the contract, and it is a validation error, not a store
+            # fault. Deferred import: fno.events imports this module at
+            # package load, so the error type resolves at call time only.
             from fno.events import ValidationError
 
             raise ValidationError(detail.removeprefix("error: "))

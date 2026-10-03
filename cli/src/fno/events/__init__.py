@@ -1324,6 +1324,10 @@ def append_event(
         return emit_envelope(event, requested_path, timeout=lock_timeout_seconds)
     except EventStoreUnavailable:
         raise
+    except ValidationError:
+        # A judged refusal is the caller's named error class, never a store
+        # failure: the broad catch below exists for everything else.
+        raise
     except Exception as exc:  # noqa: BLE001 - one named failure class for callers
         raise EventStoreUnavailable(f"event store commit failed: {exc}") from exc
 
