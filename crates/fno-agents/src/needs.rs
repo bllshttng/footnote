@@ -2894,6 +2894,7 @@ mod tests {
             fires_floor: 0,
             json: false,
             items: false,
+            clear_settled: false,
             answer: Some("q-door".to_string()),
             option: Some(2),
             words: None,
