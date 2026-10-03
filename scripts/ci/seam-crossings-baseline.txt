@@ -113,7 +113,6 @@ resolver	crates/fno-agents/src/loop_dispatch.rs	pub(crate) fn fno_cmd(fno_bin: &
 resolver	crates/fno-agents/src/loopcheck.rs	pub(crate) fn loopcheck_fno_bin() -> String {
 resolver	crates/fno-agents/src/loops_pause.rs	fn fno_cli_binary() -> PathBuf {
 resolver	crates/fno-agents/src/opencode_install.rs	fn resolve_source(cwd: &Path) -> Result<PathBuf, String> {
-resolver	crates/fno-agents/src/plugin_install.rs	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
 resolver	crates/fno-agents/src/plugin_install.rs	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
 resolver	crates/fno-agents/src/reclaim.rs	fn fno_plugin_dir(root: &Path) -> PathBuf {
 resolver	crates/fno-agents/src/scrape.rs	pub fn fno_bin() -> std::ffi::OsString {
