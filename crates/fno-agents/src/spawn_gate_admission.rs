@@ -33,3 +33,21 @@ pub(crate) fn process_admission_gate() -> Result<(), Refusal> {
         }
     }
 }
+
+/// Fixtures that exercise the agent-fan-out refusal arms carry the worker
+/// identity those arms key on; removed on drop, before the env lock.
+#[cfg(test)]
+pub(crate) struct AgentSelfFixture;
+#[cfg(test)]
+impl AgentSelfFixture {
+    pub(crate) fn set() -> Self {
+        std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
+        AgentSelfFixture
+    }
+}
+#[cfg(test)]
+impl Drop for AgentSelfFixture {
+    fn drop(&mut self) {
+        std::env::remove_var("FNO_AGENT_SELF");
+    }
+}

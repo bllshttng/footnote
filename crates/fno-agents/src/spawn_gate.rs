@@ -3597,6 +3597,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-nowait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -3921,6 +3922,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-rows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -4012,6 +4014,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-wrows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -4121,6 +4124,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-share-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -4904,6 +4908,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = tempfile::tempdir().unwrap();
         let fnodir = dir.path().join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
