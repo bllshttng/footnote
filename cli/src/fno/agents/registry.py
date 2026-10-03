@@ -316,9 +316,8 @@ class AgentEntry:
     - ``mcp_channel_id`` is the server-generated UUIDv4 the fno
       MCP sidecar uses to route inbound pokes to the session that was
       launched with ``--channels fno``. ``None`` for legacy
-      (US2/socket-only) sessions; ``str`` for MCP-backed sessions. Only
-      ``register_mcp_channel`` (dispatch.py) writes this field; no other
-      code path mutates it (spec invariant).
+      (US2/socket-only) sessions; ``str`` for MCP-backed sessions. No
+      code path mutates it after creation (spec invariant).
     """
 
     name: str

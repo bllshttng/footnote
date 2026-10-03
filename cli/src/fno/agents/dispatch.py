@@ -4745,126 +4745,6 @@ def reconcile_agents(
     )
 
 
-# =====================================================================
-# Phase 5 (US6) — register_mcp_channel write verb
-# =====================================================================
-#
-# Locked Decision 11 says channel registration happens at session-create
-# time only. ``register_mcp_channel(name)`` is the write verb the create
-# path calls (after a successful bg-claude spawn but BEFORE the user
-# sees a "ready" signal) to assign an mcp_channel_id to the AgentEntry.
-#
-# The write uses ``with_agent_lock_and_entry`` so the entry is read
-# under the per-agent flock AND the registry-wide flock; concurrent
-# create-or-ask calls against the same name therefore serialize on the
-# per-agent lock and the rename is atomic.
-#
-# Design note: ``mcp_channel_id`` currently equals the claude jobId (``short_id``)
-# (1:1 mapping; see harnesses/claude.py module-level note). The value
-# is generated here at registration time so a future UUIDv4 swap is a
-# one-line change.
-
-
-def register_mcp_channel(
-    name: str,
-    *,
-    registry_path: Optional[Path] = None,
-) -> str:
-    """Assign an ``mcp_channel_id`` to an existing claude agent.
-
-    Idempotent on the server side: calling twice for the same name
-    returns the existing ``mcp_channel_id`` without allocating a fresh
-    one (per spec invariant "registration is idempotent on the server
-    side").
-
-    Args:
-        name: agent name (must already exist in the registry).
-        registry_path: optional override forwarded to the lock + read.
-
-    Returns:
-        The assigned ``mcp_channel_id`` (today this equals the agent's
-        ``short_id``; in a follow-up it will be a UUIDv4
-        generated here).
-
-    Raises:
-        DispatchAskError(exit_code=2): agent name not found, or entry
-            has no ``short_id`` (cannot generate an mcp id for
-            a non-Claude or pre-create entry).
-    """
-    with with_agent_lock_and_entry(name, registry_path=registry_path) as (
-        _lock_handle,
-        entry,
-    ):
-        if entry.harness != "claude":
-            raise DispatchAskError(
-                f"register_mcp_channel: agent {name!r} provider is "
-                f"{entry.harness!r}; MCP channel backend is Claude-only "
-                "this release",
-                exit_code=2,
-            )
-        if not entry.short_id:
-            raise DispatchAskError(
-                f"register_mcp_channel: agent {name!r} has no "
-                "short id on file; cannot derive mcp_channel_id",
-                exit_code=12,
-            )
-        # Idempotent: if already set, return the existing value.
-        if entry.mcp_channel_id:
-            events.emit(
-                events.KIND_MCP_CHANNEL_REGISTERED,
-                name=name,
-                short_id=entry.short_id,
-                mcp_channel_id=entry.mcp_channel_id,
-                idempotent=True,
-            )
-            return entry.mcp_channel_id
-
-        # Today the mcp_channel_id IS the claude jobId in short_id (1:1; see
-        # harnesses/claude.py module note). A follow-up will swap in
-        # uuid.uuid4().hex here without a schema change.
-        new_id = entry.short_id
-
-        from dataclasses import replace
-
-        def _set_mcp_id(entries: list[AgentEntry]) -> list[AgentEntry]:
-            out: list[AgentEntry] = []
-            for e in entries:
-                if e.name == name:
-                    out.append(replace(e, mcp_channel_id=new_id))
-                else:
-                    out.append(e)
-            return out
-
-        try:
-            update_registry(_set_mcp_id, path=registry_path)
-        except (OSError, RegistryVersionError) as exc:
-            # Spec AC1-ROLLBACK: callers who already spawned bg-claude
-            # need a single exception class to match so they can SIGTERM
-            # the PGID and clean up. Surfacing the raw OSError directly
-            # would force every caller to handle two exception shapes.
-            events.emit(
-                "mcp_channel_register_failed",
-                name=name,
-                short_id=entry.short_id,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            raise DispatchAskError(
-                f"register_mcp_channel: registry write failed for "
-                f"{name!r}: {exc}. The agent's bg-claude spawn (if any) "
-                "may need to be SIGTERM'd by the caller (AC1-ROLLBACK).",
-                exit_code=12,
-            ) from exc
-        events.emit(
-            events.KIND_MCP_CHANNEL_REGISTERED,
-            name=name,
-            short_id=entry.short_id,
-            mcp_channel_id=new_id,
-            idempotent=False,
-        )
-        return new_id
-
-
 # ---------------------------------------------------------------------------
 # G2 Task 2.1 — send verb (async, durable-first)
 # ---------------------------------------------------------------------------
@@ -7253,8 +7133,8 @@ def _deliver_live(
     # short id) and confirms transcript growth before reporting delivered.
     #
     # Recipient resolution guarantees no former MCP recipient is stranded:
-    # mcp_channel_id is minted 1:1 from short_id by its sole producer
-    # (register_mcp_channel), so it IS a roster-resolvable id. Live rows can carry
+    # mcp_channel_id is minted 1:1 from short_id, so it IS a roster-resolvable
+    # id. Live rows can carry
     # an empty plain `short_id`, so mcp_channel_id is the load-bearing
     # fallback for an MCP-registered row whose short_id field was since cleared.
     recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
