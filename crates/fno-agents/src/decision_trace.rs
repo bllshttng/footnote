@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-/// Who acted on a span. `lead` needs a live crown bound to the session,
+/// Who acted on a span. `lead` needs a live team bound to the session,
 /// `worker` is any other resolved session, `user` is an attended terminal
 /// with no session identity (the decide door's state 2), `sweep` is daemon
 /// work. The same vocabulary names a span's recipient.
@@ -43,20 +43,20 @@ pub fn actor_kind(session: Option<&str>, source: &str) -> &'static str {
         return "user";
     };
     let handle = crate::identity::canonical_handle(handle);
-    let crowned =
-        crate::territory::live_crowns(&crate::paths::AgentsHome::from_env().registry_json())
-            .map(|crowns| {
-                crowns.iter().any(|crown| {
-                    crown
+    let teamed =
+        crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json())
+            .map(|teams| {
+                teams.iter().any(|team| {
+                    team
                         .holder_session
                         .as_deref()
                         .is_some_and(|s| crate::identity::canonical_handle(s) == handle)
                 })
             })
-            // A registry read error reads as not crowned (fail closed), the
+            // A registry read error reads as not teamed (fail closed), the
             // same reading question_clear's caller resolution takes.
             .unwrap_or(false);
-    if crowned {
+    if teamed {
         "lead"
     } else {
         "worker"
