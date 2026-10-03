@@ -366,7 +366,8 @@ fn default_true() -> bool {
 /// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
 /// v102: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
 /// `session_tokens`), both optional; floor stays 58.
-pub const PROTO_VERSION: u32 = 102;
+/// v103: AgentRow gains the optional daemon-served `compaction_count`; floor stays 58.
+pub const PROTO_VERSION: u32 = 103;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1199,6 +1200,11 @@ pub struct AgentRow {
     pub session_cost_cents: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_tokens: Option<u64>,
+    /// (v103) Number of compaction boundaries in the session transcript.
+    /// `None` means its transcript or identity was unavailable; never a
+    /// fabricated zero. `#[serde(default)]` keeps a v102 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4340,6 +4346,7 @@ mod tests {
         assert_eq!(row.context_measured_at, None);
         assert_eq!(row.session_cost_cents, None);
         assert_eq!(row.session_tokens, None);
+        assert_eq!(row.compaction_count, None);
         assert_eq!(row.started_at, None);
         assert_eq!(row.mail_unread, None);
         assert_eq!(row.node, None);
@@ -4354,6 +4361,7 @@ mod tests {
             "context_measured_at",
             "session_cost_cents",
             "session_tokens",
+            "compaction_count",
             "started_at",
             "mail_unread",
             "node",
@@ -4369,11 +4377,13 @@ mod tests {
         );
         let filled_json = r#"{"squad":null,"name":"z","pane_id":null,
                       "badge":null,"reason":null,"exited":false,
-                      "harness":"claude","model":"glm-5.3-flash[1m]","route":"zai"}"#;
+                      "harness":"claude","model":"glm-5.3-flash[1m]","route":"zai",
+                      "compaction_count":3}"#;
         let filled: AgentRow = serde_json::from_str(filled_json).unwrap();
         assert_eq!(filled.harness.as_deref(), Some("claude"));
         assert_eq!(filled.model.as_deref(), Some("glm-5.3-flash[1m]"));
         assert_eq!(filled.route.as_deref(), Some("zai"));
+        assert_eq!(filled.compaction_count, Some(3));
         let mut filled = filled;
         filled.context_used_pct = Some(26);
         filled.context_tokens = Some((258687, 1000000));
@@ -4390,7 +4400,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 102);
+        assert_eq!(PROTO_VERSION, 103);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

@@ -150,6 +150,9 @@ impl Core {
                                 last_activity_age_s: self.truth_age(a),
                                 session_cost_cents: self.truth_cost(a).0,
                                 session_tokens: self.truth_cost(a).1,
+                                compaction_count: self
+                                    .truth_reading(a)
+                                    .and_then(|t| t.compaction_count),
                                 resumable: false,
                                 no_pane_reason: None,
                                 // A registry-hosted pane's badge is its primary
@@ -203,6 +206,7 @@ impl Core {
                                 context_measured_at: None,
                                 session_cost_cents: None,
                                 session_tokens: None,
+                                compaction_count: None,
                                 started_at: None,
                                 mail_unread: None,
                                 node: None,
@@ -337,6 +341,7 @@ impl Core {
                         last_activity_age_s: self.truth_age(a),
                         session_cost_cents: self.truth_cost(a).0,
                         session_tokens: self.truth_cost(a).1,
+                        compaction_count: self.truth_reading(a).and_then(|t| t.compaction_count),
                         resumable,
                         no_pane_reason: if detached_live {
                             Some(AgentNoPaneReason::LivePaneless)
@@ -422,6 +427,7 @@ impl Core {
                         last_activity_age_s: self.truth_age(a),
                         session_cost_cents: self.truth_cost(a).0,
                         session_tokens: self.truth_cost(a).1,
+                        compaction_count: self.truth_reading(a).and_then(|t| t.compaction_count),
                         resumable: self.row_resumable_in_session(a),
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
@@ -551,6 +557,7 @@ impl Core {
                 context_measured_at: None,
                 session_cost_cents: None,
                 session_tokens: None,
+                compaction_count: None,
                 started_at: None,
                 mail_unread: None,
                 node: None,
