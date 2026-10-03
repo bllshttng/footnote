@@ -26,7 +26,7 @@ use crate::claude_resume::claude_resume_argv;
 use crate::lifecycle_child::heal_token;
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
-use crate::manifest_lookup::{find_manifest_for_session, ManifestIdentity};
+use crate::manifest_lookup::ManifestIdentity;
 use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments};
 use crate::paths::AgentsHome;
 use crate::resume_route::ResumeRoute;
