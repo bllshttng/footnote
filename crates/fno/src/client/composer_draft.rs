@@ -8,16 +8,19 @@ use crate::proto::{mux_dir, MAX_MAIL_TEXT};
 use std::path::PathBuf;
 
 fn draft_path(target: &str) -> PathBuf {
-    let safe: String = target
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
+    // Percent-escape everything outside the safe set, so two distinct
+    // target names can never land on one file (a space and an underscore
+    // used to collide under a blanket `_` rewrite).
+    let mut safe = String::new();
+    for b in target.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' => safe.push(b as char),
+            _ => {
+                safe.push('%');
+                safe.push_str(&format!("{b:02X}"));
             }
-        })
-        .collect();
+        }
+    }
     mux_dir().join("composer-drafts").join(safe)
 }
 

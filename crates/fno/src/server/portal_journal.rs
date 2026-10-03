@@ -1,4 +1,4 @@
-//! Portal open and close become events (x-82e9 fix 3). One row on the first
+//! Portal open and close become events. One row on the first
 //! entry of an index into the portals map (`portal_opened`) and one on its
 //! removal (`portal_closed`), so an incident like the draft-loss portal can
 //! be answered from the journal alone: which door opened it, and what took
