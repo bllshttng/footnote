@@ -496,8 +496,8 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
             # The same door precompact-canon-doc.sh uses: a scoped team's
             # rolling doc is scope-keyed, so this ask must name THAT file or
             # the lead's judgment lands where the pipeline never reads.
-            if [[ -n "$CROWN_SCOPE" ]]; then
-                CANON_DOC=$(with_timeout "$NUDGE_BUDGET" fno config paths handoff --scope "${CROWN_SCOPE}" 2>/dev/null | head -1 || true)
+            if [[ -n "$TEAM_SCOPE" ]]; then
+                CANON_DOC=$(with_timeout "$NUDGE_BUDGET" fno config paths handoff --scope "${TEAM_SCOPE}" 2>/dev/null | head -1 || true)
             else
                 CANON_DOC=$(with_timeout "$NUDGE_BUDGET" fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
@@ -571,8 +571,8 @@ if [[ "$IS_LEAD" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
     if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
         KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout "$NUDGE_BUDGET" fno agents king \
             manifest-path --harness-session-id "$SESSION_ID" 2>/dev/null || true)
-        if [[ -n "$LEAD_MANIFEST" && -f "$LEAD_MANIFEST" ]]; then
-            LEAD_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')
+        if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
+            LEAD_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
             # Stored manifests carry either spelling this release; both mean
             # the holder declared the team and the orphan nag is answered.
             [[ "$LEAD_SHAPE" == "org" || "$LEAD_SHAPE" == "court" ]] && RESOLVED=1
