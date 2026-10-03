@@ -147,6 +147,11 @@ pub fn run(args: &[String]) -> i32 {
         // shape still carries Python-owned legs (evidence, identity,
         // reader walk, delivery) and rides the forward until its port.
         "note" if leads_with_engine_door(resolved.tail) => super::note_cli::run_note(resolved.tail),
+        // The comment thread: `note comment <id> ...` routes here before the
+        // generic note arm, so the thread owns its word.
+        "note" if resolved.tail.first().map(String::as_str) == Some("comment") => {
+            super::note_cli::run_comment(&resolved.tail[1..])
+        }
         // The folded patch door: the same leading-`--graph` contract the
         // lifecycle door speaks. The full public flag surface stays
         // Python-owned until its port.

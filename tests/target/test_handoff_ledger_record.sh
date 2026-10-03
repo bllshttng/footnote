@@ -153,11 +153,14 @@ ABIEOF
 chmod +x "${BIN_DIR}/fno"
 
 # Stub `fno-agents`: record any `finalize` invocation (args verbatim).
+# The claim operations run for real: the handoff's custody release goes native
+# (the legacy Python leg is idle for global keys), so the stub must forward
+# `claim` to the real binary instead of answering it with a silent exit 0.
 FIN_MARKER="${TMP_DIR}/finalize_called"
 cat > "${BIN_DIR}/fno-agents" <<AGEOF
 #!/usr/bin/env bash
 case "\$1" in
-  name-mint|name-codes|name-parse)
+  name-mint|name-codes|name-parse|claim)
     exec "${REAL_AGENTS_BIN}" "\$@" ;;
 esac
 if [[ "\$1" == "finalize" ]]; then

@@ -66,14 +66,12 @@ def _isolated_claims_root(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims))
     yield
     from fno.claims.core import claim_status, release_claim
-    from fno.claims.io import claims_root_for
 
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
         try:
-            root = claims_root_for(key)
-            holder = claim_status(key, root=root).get("holder")
+            holder = claim_status(key).get("holder")
             if holder:
-                release_claim(key, holder=holder, root=root)
+                release_claim(key, holder=holder)
         except Exception:
             pass
 
@@ -156,7 +154,6 @@ def test_spawn_with_node_and_review_verb_is_refused(
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     result = CliRunner().invoke(
@@ -173,7 +170,7 @@ def test_spawn_with_node_and_review_verb_is_refused(
     assert load_registry() == []
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
-        assert claim_status(key, root=claims_root_for(key)).get("holder") is None
+        assert claim_status(key).get("holder") is None
 
 
 @pytest.mark.dev_build
@@ -187,7 +184,6 @@ def test_spawn_review_label_or_seed_is_refused(
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     result = CliRunner().invoke(
@@ -203,7 +199,7 @@ def test_spawn_review_label_or_seed_is_refused(
     assert load_registry() == []
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
-        assert claim_status(key, root=claims_root_for(key)).get("holder") is None
+        assert claim_status(key).get("holder") is None
 
 
 def test_spawn_with_prose_and_node_composes_a_labeled_seed(
@@ -363,7 +359,6 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     result = CliRunner().invoke(
         agents_app,
@@ -381,7 +376,7 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
     assert load_registry() == []  # nothing launched
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
-        assert claim_status(key, root=claims_root_for(key)).get("holder") is None, key
+        assert claim_status(key).get("holder") is None, key
 
 
 def _blueprint_row(monkeypatch) -> None:

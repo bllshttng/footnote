@@ -1365,8 +1365,10 @@ class TestSweepReadsWalkedDir:
         import fno.claims.core as claims_core
 
         monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
-        space = tmp_path / "spaces" / "slug"
-        monkeypatch.setattr("fno.paths.space_dir", lambda *_a, **_k: space)
+        # The space root rides env: the native acquire below resolves it in
+        # the binary's process, where a Python path-symbol patch is invisible.
+        monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
+        space = claims_dir().parent
         # Session-prover pid not running, no session id: the shape the
         # native classifier reads Stale on its own (dead pid proves death on
         # this machine regardless of the TTL arm).
