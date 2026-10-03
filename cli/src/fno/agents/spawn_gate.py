@@ -89,7 +89,7 @@ CPU_HOLD_POLL_S = 15.0
 CPU_ADMIT_SAMPLES = 2
 #: : a slow bg-socket census names its own wait instead of silence.
 SLOW_SCAN_WARN_S = 5.0
-#: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
+#: The mutex claim key. Prefixed so the native leg routes it to the global
 #: root the gate writes; the old colon-less `spawn-gate` key unrouted, so
 #: `claim status`/`release --force` read `<space>/claims/spawn-gate.lock`
 #: while the gate held `~/.fno/claims/spawn-gate.lock` and both lied.

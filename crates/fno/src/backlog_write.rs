@@ -9,40 +9,6 @@ use std::time::Duration;
 /// One `fno backlog ...` write verb's budget (the board read's).
 const VERB_BUDGET: Duration = Duration::from_secs(10);
 
-/// The values `fno backlog update` accepts per field; the pickers' rows.
-pub const PRIORITIES: &[&str] = &["p0", "p1", "p2", "p3"];
-pub const SIZES: &[&str] = &["S", "M", "L"];
-pub const STATUSES: &[&str] = &["idea", "design", "ready", "deferred", "done"];
-
-/// Which field a board edit sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Field {
-    Title,
-    Priority,
-    Size,
-    Status,
-}
-
-impl Field {
-    fn allowed(self) -> Option<&'static [&'static str]> {
-        match self {
-            Field::Title => None,
-            Field::Priority => Some(PRIORITIES),
-            Field::Size => Some(SIZES),
-            Field::Status => Some(STATUSES),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Field::Title => "title",
-            Field::Priority => "priority",
-            Field::Size => "size",
-            Field::Status => "status",
-        }
-    }
-}
-
 /// Where a rank move puts the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
@@ -50,55 +16,6 @@ pub enum Place {
     Bottom,
     Before,
     After,
-}
-
-/// The argv for one field edit: `fno backlog update <id> ...`. The value is
-/// refused here, so no process starts on a value the verb would reject. The
-/// title rides one `--title=<text>` token, so a title that starts with `-`
-/// is never read as a flag. A `deferred` status carries the reason the
-/// patch door requires, naming the board that deferred it.
-pub fn field_argv(id: &str, field: Field, value: &str, from: &str) -> Result<Vec<String>, String> {
-    if let Some(allowed) = field.allowed() {
-        if !allowed.contains(&value) {
-            return Err(format!(
-                "{}: {value:?} is not one of {}",
-                field.name(),
-                allowed.join(", ")
-            ));
-        }
-    }
-    if field == Field::Title {
-        if value.is_empty() {
-            return Err("title: empty".into());
-        }
-        if value.chars().count() > 200 {
-            return Err("title: over 200 characters".into());
-        }
-        if value.chars().any(char::is_control) {
-            return Err("title: control characters are not allowed".into());
-        }
-    }
-    let mut args: Vec<String> = vec!["backlog".into(), "update".into(), id.into()];
-    match field {
-        Field::Title => args.push(format!("--title={value}")),
-        Field::Priority => {
-            args.push("--priority".into());
-            args.push(value.into());
-        }
-        Field::Size => {
-            args.push("--size".into());
-            args.push(value.into());
-        }
-        Field::Status => {
-            args.push("--status".into());
-            args.push(value.into());
-        }
-    }
-    if field == Field::Status && value == "deferred" {
-        args.push("--set".into());
-        args.push(format!("deferred_reason=deferred from {from}"));
-    }
-    Ok(args)
 }
 
 /// The argv for one card move: `fno backlog rank <id> <place> ...`, always
@@ -192,51 +109,6 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    // AC1-HP: the deferred status argv, and the same builder answering the
-    // mux picker's own `from`.
-    #[test]
-    fn field_argv_deferred_status_carries_the_reason() {
-        let args = field_argv("x-1", Field::Status, "deferred", "the web backlog board")
-            .expect("a listed value passes");
-        assert_eq!(
-            args,
-            vec![
-                "backlog",
-                "update",
-                "x-1",
-                "--status",
-                "deferred",
-                "--set",
-                "deferred_reason=deferred from the web backlog board",
-            ]
-        );
-        let mux = field_argv("x-1", Field::Status, "deferred", "the mux backlog view")
-            .expect("a listed value passes");
-        assert!(mux.contains(&"deferred_reason=deferred from the mux backlog view".to_string()));
-    }
-
-    // AC2-ERR: a value outside the list, an over-long title and a control
-    // character are refused with the field named, and nothing runs.
-    #[test]
-    fn field_argv_refuses_unknown_values_and_bad_titles() {
-        let err = field_argv("x-1", Field::Priority, "p9", "w").unwrap_err();
-        assert!(err.contains("priority"), "{err}");
-        assert!(err.contains("p0, p1, p2, p3"), "{err}");
-        let long = "x".repeat(201);
-        let err = field_argv("x-1", Field::Title, &long, "w").unwrap_err();
-        assert!(err.contains("title") && err.contains("200"), "{err}");
-        let err = field_argv("x-1", Field::Title, "two\nlines", "w").unwrap_err();
-        assert!(err.contains("title"), "{err}");
-        assert!(field_argv("x-1", Field::Title, "", "w").is_err());
-    }
-
-    // AC3-EDGE: a title that looks like a flag rides one token.
-    #[test]
-    fn field_argv_title_rides_one_token() {
-        let args = field_argv("x-1", Field::Title, "-rf", "w").expect("a plain title passes");
-        assert_eq!(args, vec!["backlog", "update", "x-1", "--title=-rf"]);
-    }
-
     #[test]
     fn rank_argv_always_ends_operator_and_needs_an_anchor() {
         let args = rank_argv("x-1", Place::Top, None).expect("top needs no anchor");
@@ -282,7 +154,7 @@ mod tests {
         let previous = std::env::var_os("FNO_BIN");
         std::env::set_var("FNO_BIN", &stub);
         let (ok, notice) = run_verb(
-            &field_argv("x-1", Field::Priority, "p1", "tests").expect("passes"),
+            &rank_argv("x-1", Place::Top, None).expect("top needs no anchor"),
             None,
         )
         .await;

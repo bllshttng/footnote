@@ -16,9 +16,9 @@ from typing import Optional
 from .core import acquire_claim, release_claim
 from .types import Claim
 
-#: Task claim key namespace. Not a global-id prefix (see
-#: claims.io._GLOBAL_ID_PREFIXES), so task claims stay repo-local and
-#: coordinate across the project's worktrees like lane slots.
+#: Task claim key namespace. Not a global-id prefix (the native routing list
+#: lives in crates/fno-agents/src/claims_root.rs), so task claims stay
+#: repo-local and coordinate across the project's worktrees like lane slots.
 TASK_PREFIX = "task:"
 
 TASK_CLAIM_TTL_MS = 7_200_000  # 2 hours, the node-claim default

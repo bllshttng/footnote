@@ -94,11 +94,9 @@ def _node_ids_for_pr(pr_number: int) -> list[str]:
 def _resolve_node(node_id: str) -> JobHolder:
     """Resolve a ``node:<id>`` to its claim holder over the global claims root."""
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     key = f"node:{node_id}"
-    root = claims_root_for(key)
-    status = claim_status(key, root=root)
+    status = claim_status(key)
     return JobHolder(
         node_id=node_id,
         address=key,

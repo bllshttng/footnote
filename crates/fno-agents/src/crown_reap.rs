@@ -63,7 +63,7 @@ pub(crate) fn holder_verdict(
         crate::state::Lineage::captured((None, None, None)),
     );
     holder.harness = Some("claude".into());
-    if let Some(reason) = crate::gc_sweep::claude_death_reason(&holder, snapshot) {
+    if let Some(reason) = crate::daemon::row_death_reason(&holder, snapshot) {
         return HolderVerdict::Dead(reason);
     }
     let row_id = crate::daemon::roster_death::claude_row_id(&holder);

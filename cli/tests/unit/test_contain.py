@@ -272,10 +272,9 @@ def test_contain_refuses_a_target_with_a_live_claim(tmp_graph, monkeypatch):
 
 def test_contain_live_worker_positive_control_on_an_unclaimed_node(tmp_graph):
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     owner, kids = _seed_owner_with_children(tmp_graph, 1)
-    info = claim_status(f"node:{kids[0]}", root=claims_root_for(f"node:{kids[0]}"))
+    info = claim_status(f"node:{kids[0]}")
     assert info.get("state") not in ("live", "suspect")
     assert _native_contain(tmp_graph, owner, *kids)[0] == 0
 

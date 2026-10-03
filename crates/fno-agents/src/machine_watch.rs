@@ -413,6 +413,10 @@ pub(crate) fn brake_path() -> PathBuf {
 /// spawn gate's own door on the brake. The arm attributes load before it
 /// arms the brake, so a hold here means fno's own fan-out. A missing,
 /// unreadable, or expired file holds nothing.
+/// The hold line for an unexpired brake, `None` when none is armed: the
+/// spawn gate's own door on the brake. The arm attributes load before it
+/// arms the brake, so a hold here means fno's own fan-out. A missing,
+/// unreadable, or expired file holds nothing.
 pub fn brake_holds() -> Option<String> {
     // Test seam, same shape as the footprint probe's: with no pinned brake
     // file, tests never read the live machine's brake.

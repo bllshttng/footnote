@@ -349,15 +349,45 @@ pub(crate) fn pane_lines(
     }
     lines.push(BLine::plain(String::new()));
 
-    // Notes section: bold header + thin rule, the newest three.
+    // The comment thread: bold header + thin rule, oldest first, replies
+    // indented under their heads; the ask state rides as a mark. Plain
+    // progress notes do not render here.
+    let thread: Vec<&crate::backlog_model::Note> = view
+        .notes
+        .iter()
+        .filter(|n| matches!(n.kind.as_deref(), Some("comment") | Some("reply")))
+        .collect();
+    let open = thread
+        .iter()
+        .filter(|n| n.state.as_deref() == Some("open"))
+        .count();
     lines.push(BLine::head(format!(
-        "notes ({}) \u{b7} decisions ({})",
-        view.notes.len(),
+        "comments ({}, {} open) \u{b7} decisions ({})",
+        thread.len(),
+        open,
         view.decisions.len()
     )));
     lines.push(BLine::meta(rule(w)));
-    for note in view.notes.iter().take(3) {
-        lines.push(BLine::plain(format!("   {}", note.text)));
+    for note in &thread {
+        let mark = match note.state.as_deref() {
+            Some("open") => "\u{25cb}",
+            Some("accepted") => "\u{25d0}",
+            Some("done") => "\u{2713}",
+            Some("declined") => "\u{2717}",
+            _ => " ",
+        };
+        let indent = if note.kind.as_deref() == Some("reply") {
+            "  "
+        } else {
+            ""
+        };
+        let author = note.author.as_deref().unwrap_or("?");
+        let age = note_age(&note.ts);
+        let mut row = format!("{indent}{mark} {author} \u{b7} {age}  {}", note.text);
+        if let Some(reference) = &note.state_ref {
+            row.push_str(&format!(" \u{b7} {reference}"));
+        }
+        lines.push(BLine::plain(row));
     }
     lines.push(BLine::plain(String::new()));
     // Document section: the node's markdown plan when readable, else its
@@ -447,11 +477,30 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// Relative age for a thread row, from the row's RFC 3339 stamp.
+fn note_age(ts: &Option<String>) -> String {
+    use chrono::{DateTime, Utc};
+    let Some(text) = ts.as_deref() else {
+        return "?".into();
+    };
+    let Ok(then) = DateTime::parse_from_rfc3339(text) else {
+        return text.to_string();
+    };
+    let secs = (Utc::now() - then.with_timezone(&Utc)).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
 /// The detail pane's keys. j/k (and arrows) move the selection, Enter
 /// runs the selected row (a link drills in, a session launches through
 /// the hit cascade, a dim row answers with its reason), PgUp/PgDn scroll
 /// the document, `b` plans, `t` launches the node as a target through the
 /// prefilled launcher, and `A` asks the king (the board's own sends).
+/// `c` posts a user comment on the node's thread.
 pub(crate) async fn detail_keys(
     view: &mut View,
     bytes: &[u8],
@@ -503,13 +552,7 @@ pub(crate) async fn detail_keys(
             ModalKey::Byte(b'b') => backlog_board::dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => backlog_board::launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => backlog_board::ask_the_king(view, sock_w).await?,
-            ModalKey::Byte(b'e') => backlog_board::edit_title(view)?,
-            ModalKey::Byte(b'p') => backlog_board::edit_priority(view)?,
-            ModalKey::Byte(b's') => backlog_board::edit_size(view)?,
-            ModalKey::Byte(b'S') => backlog_board::edit_status(view)?,
-            ModalKey::Byte(b'D') => backlog_board::append_details(view)?,
-            ModalKey::Byte(b'N') => backlog_board::add_note(view)?,
-            ModalKey::Byte(b'E') => backlog_board::edit_description(view).await?,
+            ModalKey::Byte(b'c') => backlog_board::begin_comment(view),
             ModalKey::Byte(b'?') => {
                 if let Some(b) = view.backlog_board.as_mut() {
                     b.keys_overlay = !b.keys_overlay;

@@ -2976,6 +2976,19 @@ event_types:
           type: array
           description: "One object per held row: id, reason, detail, age_s (nullable), escalated."
 
+  - name: row_liveness_drift
+    description: "The retirement sweep held a claude row whose fno verdict reads Live while the vendor roster reads it finished: the recorded disagreement between fno's rows and the vendor check, emitted at the keep decision. Never an override; the row stays."
+    sources: [daemon]
+    data:
+      required: [row, detail]
+      properties:
+        row:
+          type: string
+          description: "The row handle the verdict kept."
+        detail:
+          type: string
+          description: "The disagreement: fno's verdict against the vendor's word."
+
   - name: pr_nudge_sent
     description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed. red_head names the head whose settled red caused this wake. reason carries a failed resume's last stderr line; resume_exit and resume_reason carry the fallback resume's outcome on a mail pass. pr is null for a dead-worker row: a session the sweep keeps on an in_progress node whose roster process is gone, whose remedy is resume, not a PR."
     sources: [daemon]
@@ -4022,6 +4035,9 @@ event_types:
         context:
           type: object
           description: "Optional. The structured context the Rust intake writes: blocked_because, options_rationale, recommendation {option, why, downside}, unknowns, reversible, cost_if_wrong, meanwhile. Keys are open; the attention projection reads each by name."
+        trace:
+          type: object
+          description: "Optional. The traced-decision envelope (shape: decision_span.trace), stamped by the intake when the question files with answers_ask: span_id is this question's question_id and parent_span_id names the escalate route span."
     consumers: [operator, fno-agents needs]
 
   - name: fleet_task
@@ -4281,7 +4297,78 @@ event_types:
         paths:
           type: array
           description: "Optional. Repo-relative globs. A live law with paths prints at the first Edit or Write of a matching file in each session (hooks/law-stage-inject.sh)."
+        trace:
+          type: object
+          description: "Optional. The traced-decision envelope (shape: decision_span.trace). The answer row carries span_id = decision_id and parent_span_id = the question_id it answers, so one query on trace_id reads the whole chain."
+        overturns:
+          type: string
+          description: "Optional. The span id this decision overturns when the overturned hop has no decision id of its own; `supersedes` stays the decision-over-decision link. Written by `fno inbox decide --overturns` under operator authority."
     consumers: [operator, fno inbox decisions]
+
+  - name: decision_span
+    retention: durable
+    description: "One hop in a traced decision (docs/architecture/decision-record.md): a worker ask, a lead's route (answer-self versus escalate, with the class), a correction, or a guard block. Emitted only by Rust through crates/fno-agents/src/decision_trace.rs::emit_span into the project journal. Every span carries one trace envelope (trace_id, span_id, parent_span_id, actor, recipient, comms) so one query keyed on trace_id reads the whole decision path for a node, which is what the evals need. Later surfaces (reap, merge, gate override, spawn model and force choices) adopt the envelope by adding a span_kind value here, never a new event type. Every span also carries the comms tag and the actor and recipient fields a Notifications tab renders."
+    sources: [target, hook, subagent, daemon, test]
+    data:
+      required: [span_kind, trace]
+      properties:
+        span_kind:
+          type: string
+          enum: [ask, route, correction, block]
+          description: "The hop this row records: ask (a worker asked its lead), route (the lead answered itself or escalated), correction (a later ruling overturns a span), block (a guard refused a chat ask that skipped the route span). More values land as later surfaces adopt the envelope."
+        trace:
+          type: object
+          required: [trace_id, span_id, actor_kind, comms]
+          properties:
+            trace_id:
+              type: string
+              description: "The node the decision chain is about, or the literal 'none' when no node is bound; the eval query groups by it."
+            span_id:
+              type: string
+              description: "This hop's id: s-<hex> for ask, route and block spans; a hop with a natural id (question_id, decision_id) reuses it."
+            parent_span_id:
+              type: string
+              description: "Optional. The span this one answers or overturns."
+            actor_session:
+              type: string
+              description: "Optional. The acting session's canonical handle; absent for an attended terminal."
+            actor_kind:
+              type: string
+              enum: [user, lead, worker, sweep]
+              description: "Who acted: user (attended terminal, no session identity), lead (live crown holder), worker (any other resolved session), sweep (daemon work)."
+            comms:
+              type: string
+              enum: [mail, chat, question]
+              description: "The comms surface the span traveled on, the tag the Notifications tab groups by: mail (the agent mail bus), chat (the harness transcript), question (the operator question lane)."
+            recipient_session:
+              type: string
+              description: "Optional. The session the span was addressed to, when there is one."
+            recipient_kind:
+              type: string
+              enum: [user, lead, worker, sweep]
+              description: "Optional. The recipient's kind, the same vocabulary as actor_kind."
+          description: "The provenance envelope shared with the trace field on operator_question and operator_decision."
+        route:
+          type: string
+          enum: [self, escalate]
+          description: "Optional, span_kind=route only. The lead's choice: answer the ask itself, or escalate to the user."
+        class:
+          type: string
+          enum: [public-surface, irreversible, money-security, law-change, gate-override, none]
+          description: "Optional. The decision class the route weighed; none is a plain coordination route with nothing at stake beyond throughput."
+        recommendation:
+          type: string
+          description: "Optional. The recommended option, copied from the ask or the route so an eval reads it without the mail body."
+        msg_id:
+          type: string
+          description: "Optional. The mail message the ask or route traveled on."
+        ask_key:
+          type: string
+          description: "Optional. The sha256(sender NUL target NUL body) head that links a route span back to the ask span it answers."
+        overturns:
+          type: string
+          description: "Optional, span_kind=correction. The span id this correction overturns."
+    consumers: [notifications, evals]
 
   - name: operator_notice
     description: "One operator-attention notice left the notify chokepoint (fno.notify._impl.send_notification). The local OS toast is one leg; this row is the other: a status sink with events=[operator_notice] carries it off the host, so a remote operator sees it. A notice is a POINTER to the durable queue, never a copy: pointer names the verb that shows the content, and body carries counts, never rows."

@@ -187,13 +187,11 @@ def test_no_node_id_is_unknown():  # AC7-FR (unresolvable join)
     assert r["state"] == "unknown"
 
 
-def test_default_root_routes_through_global_claim_root(monkeypatch):
-    # codex P2 regression guard: node:<id> claims are GLOBAL. With claims_root
-    # omitted the resolver must probe the global root (claims_root_for), NOT
-    # claim_status's canonical-repo default (root=None), or `fno agents list`
-    # reads `free` for every live worker and the fill never appears.
-    from fno.claims.io import claims_root_for
-
+def test_default_root_defers_to_the_native_leg(monkeypatch):
+    # codex P2 regression guard: with claims_root omitted the resolver must NOT
+    # probe a per-repo default itself; it passes no root and the native leg
+    # routes node:<id> to the global store (the routing golden lives in
+    # crates/fno-agents/tests/claims_root_parity.rs).
     captured: dict = {}
 
     def fake_claim_status(key, root=None):
@@ -205,8 +203,7 @@ def test_default_root_routes_through_global_claim_root(monkeypatch):
     r = ts.resolve_truth_status("x-4a48", loop_check_ages={SID: 60})
 
     assert captured["key"] == "node:x-4a48"
-    assert captured["root"] == claims_root_for("node:x-4a48")  # global root
-    assert captured["root"] is not None  # NOT the buggy canonical-repo default
+    assert captured["root"] is None  # routing is the native leg's job
     assert r["state"] == "working"
 
 

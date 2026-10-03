@@ -45,7 +45,6 @@ from .io import (
     atomic_create_exclusive,
     claim_path,
     claims_dir,
-    claims_root_for,
     decode_key,
     dedup_claims_roots,
     global_claims_root,
@@ -1381,22 +1380,13 @@ def _legacy_claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, 
         pid, host, acquired_at, expires_at, reason, metadata: when readable
         error:     string (only when state == corrupted)
 
-    With no ``root``, the store is resolved from the key via
-    :func:`fno.claims.io.claims_root_for`, so ``free`` means the key routed
-    and nothing holds it - never "some tree was read".
+    With no ``root``, the default store is read (the repo's space, or
+    ``$FNO_CLAIMS_ROOT``); root ROUTING is the native leg's job, and the
+    legacy leg survives only for explicit-root and python-runtime callers.
     """
-    from fno.graph._constants import is_wellformed_node_id
-
-    if ":" not in key and is_wellformed_node_id(key):
-        # A bare node id names no store; free here reads as safe-to-dispatch.
-        return {
-            "key": key,
-            "state": "unknown",
-            "basis": "key-unrouted",
-            "detail": f"{key!r} has no claim prefix; node claims are keyed node:{key}",
-        }
-    if root is None:
-        root = claims_root_for(key)
+    unrouted = _unrouted_key_verdict(key)
+    if unrouted is not None:
+        return unrouted
     path = claim_path(key, root=root)
     try:
         claim = read_claim_file(path)
@@ -1984,6 +1974,18 @@ def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
     return [cdir for _, cdir in dedup_claims_roots(roots)]
 
 
+def native_claims_root(key: str) -> Optional[Path]:
+    """The claims root the native leg resolves ``key`` against, or None for a
+    repo-local key. The ONE routing read for callers that need the PATH (the
+    prefix list lives once, in the Rust
+    ``claims_root.rs``); the lockfile operations themselves never needed it.
+    Raises :class:`ClaimVerdictUnavailable` when the fno-agents binary is
+    missing, like every native claim call."""
+    payload = _native_claim("root", key, [])
+    root = payload.get("root")
+    return Path(str(root)) if root else None
+
+
 def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
     """Run one native claim operation and decode its JSON reply."""
     import json
@@ -1994,7 +1996,10 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
             "fno-agents claim unavailable: set FNO_AGENTS_BIN or reinstall fno"
         )
     command = [str(binary), "claim", operation]
-    if key:
+    # The root op's key IS the question, and an empty key is a legal input
+    # (a colon-less key routes repo-local); list/reap pass key="" to mean no
+    # key at all, so the falsy skip stays for them.
+    if key or operation == "root":
         command.append(key)
     command.extend(flags)
     command.append("--json")
@@ -2042,7 +2047,10 @@ def _configured_claim_root() -> Optional[Path]:
     return Path(value) if value else None
 
 def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
-    return root is not None or _python_claim_runtime() or (bool(key) and claims_root_for(key) is None)
+    # Only an explicit root or the python-runtime opt-in takes the legacy leg;
+    # root ROUTING (which store a key names) is decided by the native leg.
+    del key
+    return root is not None or _python_claim_runtime()
 
 
 def _legacy_sweep_roots_if_present() -> Optional[list[Optional[Path]]]:
@@ -2171,7 +2179,27 @@ def refresh_claim(
     return _native_claim_model(payload)
 
 
+def _unrouted_key_verdict(key: str) -> Optional[dict[str, Any]]:
+    """A bare well-formed node id names no store, and ``free`` there reads as
+    safe-to-dispatch. Both legs answer the same unknown."""
+    if not key or ":" in key:
+        return None
+    from fno.graph._constants import is_wellformed_node_id
+
+    if not is_wellformed_node_id(key):
+        return None
+    return {
+        "key": key,
+        "state": "unknown",
+        "basis": "key-unrouted",
+        "detail": f"{key!r} has no claim prefix; node claims are keyed node:{key}",
+    }
+
+
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+    unrouted = _unrouted_key_verdict(key)
+    if unrouted is not None:
+        return unrouted
     if _legacy_claim_call(key, root):
         return _LEGACY_CLAIM_STATUS(key, root=root)
     if not key:
@@ -2236,14 +2264,16 @@ def force_release_claim(
             root=root,
             holding_recovery_lock=holding_recovery_lock,
         )
-    del holding_recovery_lock
     if not key:
         raise ClaimValidationError("key must be non-empty")
     if not reason:
         raise ClaimValidationError("reason must be non-empty for force-release")
+    flags = ["--reason", reason]
+    if holding_recovery_lock:
+        flags.append("--holding-recovery-lock")
     payload = _native_claim(
         "force-release", key,
-        ["--reason", reason, *_native_root_flags(root or _configured_claim_root())],
+        [*_native_root_flags(root or _configured_claim_root()), *flags],
     )
     return ForceReleaseOutcome(
         path=Path(str(payload.get("path") or "")),

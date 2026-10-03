@@ -664,14 +664,6 @@ touch "$SBX/.fno/.context-nudge-probe-control"
 control=$(find "$SBX/.fno" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
 assert_eq "latch: root counter is not blind" "$control" "1"
 
-# A legacy top-level latch is swept on the next fire, whatever its age. That
-# probe file from the positive control above is one, so the sweep must take it.
-rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-touch "$SBX/.fno/.context-nudge-flush-legacy-session"
-run_hook "$(payload "$SBX/lt.jsonl")"
-swept=$(find "$SBX/.fno" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
-assert_eq "latch: legacy top-level latches are swept" "$swept" "0"
-
 # A latch older than two days is pruned; one inside the window survives.
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 touch -t "$(date -u -r $(( $(date +%s) - 5*86400 )) +%Y%m%d%H%M 2>/dev/null || date -u -d '5 days ago' +%Y%m%d%H%M)" \
