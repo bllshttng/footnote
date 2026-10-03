@@ -47,7 +47,7 @@ The fix is a recipient-level delivery policy, not a heuristic: `delivery_policy:
 
 ### Timed hold release
 
-When a timed hold ends, one live turn carries a framing line with the message count, local sent-time range, and held duration. Rust then renders one real sender/id header per original message, oldest first, with a summary capped at 12 words and the remaining body text on its original lines. The recipient harness's mail-header capability selects mention or plain sender form. After confirmed delivery, the receiver records one `agent_mail_drained` receipt per original message; a missed delivery leaves the source cursors unchanged for the next turn boundary.
+When a timed hold ends, one live turn carries a framing line with the message count, local sent-time range, and held duration. Rust renders one sender/id header per original message, oldest first. Each header has a summary capped at 12 words. The body follows on its original lines. The recipient harness's mail-header capability selects mention or plain sender form. After confirmed delivery, the receiver records one `agent_mail_drained` receipt per original message. A missed delivery leaves the source cursors unchanged for the next turn boundary.
 
 ## Scope
 
