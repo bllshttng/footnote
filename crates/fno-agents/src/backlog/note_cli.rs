@@ -1,17 +1,21 @@
 //! `fno-agents backlog-note` (wave 2): the native note action the
-//! Python `fno backlog note` bridge calls. The Rust side owns the bounded
-//! state policy, revision-checked replacement, history routing (machine,
-//! wave, terminal), and the combined-prose budget; the bridge keeps the
-//! shipped recipient walk (`note_notify`, its test contract), evidence
-//! checks, identity, archived refusal, and the mail transport.
-use crate::backlog::model::Node;
-use crate::backlog::node_state::{self, StateError, StateWriteInput};
+//! Python `fno backlog note` bridge calls. The Rust side owns the note
+//! feed (x-fb4f: every note appends a comment row to the node's thread,
+//! stamped with the writer's identity), the `--clear` state route, and
+//! history routing (machine, wave); the bridge keeps the shipped recipient
+//! walk (`note_notify`, its test contract), evidence checks, identity,
+//! archived refusal, and the mail transport.
+use crate::backlog::node_state::{self, StateError};
 use crate::backlog::note_history;
 use crate::graph_store::{self};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use crate::graph_get::default_graph_path;
+
+/// The note-kind feed vocabulary (x-fb4f). These are thread rows, not asks:
+/// no open state, no reply threading.
+const NOTE_KINDS: [&str; 4] = ["progress", "finding", "ruling", "collision"];
 
 /// One parsed invocation of the note action.
 struct NoteArgs {
@@ -36,6 +40,7 @@ struct NoteArgs {
     resolve: Option<String>,
     block_cmd: Option<String>,
     block_excerpt_file: Option<String>,
+    kind: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
@@ -61,6 +66,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
         resolve: None,
         block_cmd: None,
         block_excerpt_file: None,
+        kind: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -156,6 +162,14 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
                 out.self_session = Some(
                     args.get(i)
                         .ok_or_else(|| "--self-session needs an id".to_string())?
+                        .clone(),
+                );
+            }
+            "--kind" => {
+                i += 1;
+                out.kind = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--kind needs a kind".to_string())?
                         .clone(),
                 );
             }
@@ -476,6 +490,7 @@ pub fn run_comment(args: &[String]) -> i32 {
     let mut state: Option<String> = None;
     let mut state_ref: Option<String> = None;
     let mut author: Option<String> = None;
+    let mut self_session: Option<String> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -488,6 +503,7 @@ pub fn run_comment(args: &[String]) -> i32 {
             "--state" => state = it.next().cloned(),
             "--ref" => state_ref = it.next().cloned(),
             "--author" => author = it.next().cloned(),
+            "--self-session" => self_session = it.next().cloned(),
             other => positionals.push(other.to_string()),
         }
     }
@@ -576,6 +592,23 @@ pub fn run_comment(args: &[String]) -> i32 {
                 _ => " ",
             };
             println!("{indent}{mark} {author} · {age}  {body}");
+            // Who wrote it, shown in the thread and copyable (x-fb4f).
+            let mut who: Vec<String> = Vec::new();
+            if let Some(name) = row.extras.get("agent_name").and_then(Value::as_str) {
+                who.push(name.to_string());
+            }
+            if let Some(model) = row.extras.get("model").and_then(Value::as_str) {
+                who.push(model.to_string());
+            }
+            if let Some(session) = &row.source_session_id {
+                who.push(format!("session {session}"));
+            }
+            if let Some(working) = row.extras.get("working_node").and_then(Value::as_str) {
+                who.push(format!("on {working}"));
+            }
+            if !who.is_empty() {
+                println!("{indent}      · {}", who.join(" · "));
+            }
         }
         return 0;
     }
@@ -586,6 +619,21 @@ pub fn run_comment(args: &[String]) -> i32 {
         return 2;
     }
     let kind = if reply.is_some() { "reply" } else { "comment" };
+    // An agent comment carries who wrote it (x-fb4f): the process-provable
+    // session and harness, the worker name, the observed model, and the
+    // node the session is working. A user comment carries the user's own
+    // word; no stamp.
+    let ident = if author.as_deref() != Some("user") {
+        let entry = graph_store::read_rows(&graph)
+            .ok()
+            .and_then(|rows| crate::graph_get::find_entry(&rows, &node_id).cloned());
+        Some(comment_identity(
+            entry.as_ref().unwrap_or(&Value::Null),
+            self_session.as_deref(),
+        ))
+    } else {
+        None
+    };
     let input = super::api::CommentCreateInput {
         body: text.clone(),
         kind: Some(kind.to_string()),
@@ -594,6 +642,12 @@ pub fn run_comment(args: &[String]) -> i32 {
         reply_to: reply.clone(),
         state,
         state_ref,
+        session_id: ident.as_ref().and_then(|i| i.session_id.clone()),
+        harness: ident.as_ref().and_then(|i| i.harness.clone()),
+        agent_name: ident.as_ref().and_then(|i| i.agent_name.clone()),
+        model: ident.as_ref().and_then(|i| i.model.clone()),
+        working_node: ident.as_ref().and_then(|i| i.working_node.clone()),
+        reads: None,
     };
     match super::api::comment_create(&store, &node_id, input) {
         Ok(payload) => {
@@ -726,76 +780,13 @@ fn write_human(
         );
         return 2;
     };
-    // Terminal nodes: the note goes to history only, never hot state.
-    let status = entry.get("status").and_then(Value::as_str).unwrap_or("");
-    if matches!(status, "done" | "superseded") {
-        let node_id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-        let rev = node_state::current_revision(graph, node_id).unwrap_or(0);
-        let original = json!({
-            "body": node_state::normalize_prose(&body),
-            "ts": graph_store::now_isoformat(),
-            "source_session_id": parsed.self_session,
-        });
-        if let Err(e) = note_history::append(
-            graph,
-            node_id,
-            note_history::REASON_TERMINAL_EVACUATED,
-            Some(rev),
-            None,
-            &original,
-            parsed.self_session.as_deref(),
-            None,
-        ) {
-            eprintln!("fno-agents backlog-note: history write failed: {e}");
-            return 1;
-        }
-        let out = json!({
-            "status": "ok", "routed": "history", "node_id": node_id, "id": node_id,
-            "text": node_state::normalize_prose(&body), "revision": rev, "replaced": Value::Null,
-            "line": format!("recorded {node_id}: history (node is done or superseded)"),
-        });
-        emit_human(parsed.json_out, &out);
-        return 0;
-    }
     let node_id = entry
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let body = node_state::normalize_prose(&body);
-    if body.is_empty() && !parsed.clear {
-        eprintln!("Error: note text is empty");
-        return 1;
-    }
-    // The cross-session guard: a note replaces the ONE current state, so a
-    // write (a new note, or --clear) over a revision this session cannot
-    // prove it wrote refuses until --replace names it deliberate. Write
-    // policy, not delivery: --quiet does not bypass it. Nothing is written
-    // on a refusal.
-    let prior = node_state::read_state(entry);
-    if let Some(p) = &prior {
-        if !parsed.replace && p.source_session_id != parsed.self_session {
-            let author = p
-                .source_session_id
-                .as_deref()
-                .unwrap_or("an unknown session");
-            let owned = p
-                .source_harness
-                .as_deref()
-                .map(|h| format!(" (harness {h})"))
-                .unwrap_or_default();
-            eprintln!(
-                "Error: note refused: current state on {node_id} is revision {}, \
-written by session {author}{owned} at {}. Nothing was written.\n\
-Append instead of replacing: read the current text with `fno backlog get {node_id}`, \
-combine it with yours, and resubmit with --replace.\n\
-Every replaced revision stays readable: fno backlog notes history {node_id}",
-                p.revision,
-                p.updated_at.as_deref().unwrap_or("an unknown time"),
-            );
-            return 3;
-        }
-    }
+    // --clear stays the one state route: it empties current_state, it does
+    // not append to the thread.
     if parsed.clear {
         let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);
         let submitted = parsed.if_revision.unwrap_or(rev);
@@ -815,121 +806,149 @@ Every replaced revision stays readable: fno backlog notes history {node_id}",
         }
         return 0;
     }
-    // The revision the CLI submits: explicit --if-revision, else the fetched
-    // current revision (the optimistic-concurrency guard is always on).
-    let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);
-    let submitted = parsed.if_revision.unwrap_or(rev);
+    if parsed.replace {
+        eprintln!(
+            "fno-agents backlog-note: --replace is retired: a note appends to the \
+thread and cannot clobber anything. Read the feed: fno backlog note comment {node_id} --list"
+        );
+        return 3;
+    }
+    let body = node_state::normalize_prose(&body);
+    if body.is_empty() {
+        eprintln!("Error: note text is empty");
+        return 1;
+    }
+    let kind = parsed
+        .kind
+        .clone()
+        .unwrap_or_else(|| "progress".to_string());
+    if !NOTE_KINDS.contains(&kind.as_str()) {
+        eprintln!(
+            "fno-agents backlog-note: --kind must be one of {} (default progress)",
+            NOTE_KINDS.join(", ")
+        );
+        return 2;
+    }
+    let ident = comment_identity(entry, parsed.self_session.as_deref());
     let reads: Option<Value> = parsed
         .reads
         .as_deref()
         .and_then(|r| serde_json::from_str(r).ok());
-    let text = body.clone();
-    let chars = body.chars().count();
-    let input = StateWriteInput {
-        node_id: node_id.clone(),
-        body,
-        if_revision: Some(submitted),
-        source_session_id: parsed.self_session.clone(),
-        source_harness: None,
+    let input = super::api::CommentCreateInput {
+        body: body.clone(),
+        kind: Some(kind.clone()),
+        author: Some("agent".to_string()),
+        session_id: ident.session_id,
+        harness: ident.harness,
+        agent_name: ident.agent_name,
+        model: ident.model,
+        working_node: ident.working_node,
         reads,
+        ..Default::default()
     };
-    let receipt = match node_state::replace_state(graph, &input) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("fno-agents backlog-note: {e}");
-            return map_state_err(&e);
+    let store = super::api::Store::new(graph);
+    match super::api::comment_create(&store, &node_id, input) {
+        Ok(_) => {
+            let line = format!(
+                "noted {node_id}: {kind} appended to the thread; \
+read the feed: fno backlog note comment {node_id} --list"
+            );
+            emit_human(
+                parsed.json_out,
+                &json!({
+                    "status": "ok", "routed": "thread", "node_id": node_id, "id": node_id,
+                    "kind": kind, "text": body, "line": line,
+                }),
+            );
+            0
         }
-    };
-    let (replaced, replaced_line) = replaced_parts(&receipt.node_id, receipt.replaced.as_ref());
-    let mut line = format!(
-        "noted {}: revision {}, {chars} chars\n{replaced_line}",
-        receipt.node_id, receipt.revision
-    );
-    // The encounters snapshot rides the receipt from inside the publication
-    // lock, so the hint can never fire on an encounter the write could not
-    // see.
-    let hint = encounter_hint(
-        &receipt.node_id,
-        &receipt.encounters,
-        parsed.self_session.as_deref(),
-        receipt.replaced.as_ref(),
-    );
-    if let Some(h) = hint {
-        line.push('\n');
-        line.push_str(&h);
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {}", e.0);
+            1
+        }
     }
-    let out = json!({
-        "status": "ok", "routed": "state", "node_id": receipt.node_id, "id": receipt.node_id,
-        "text": text, "revision": receipt.revision, "journaled": receipt.journaled,
-        "total_prose": receipt.total_prose, "replaced": replaced,
-        "line": line,
+}
+
+/// The writer identity a thread row stamps (x-fb4f): what this process can
+/// prove, plus the model and working node the fleet already knows. An
+/// absent field stays absent - an honest unknown beats a wrong label.
+struct CommentIdentity {
+    session_id: Option<String>,
+    harness: Option<String>,
+    agent_name: Option<String>,
+    model: Option<String>,
+    working_node: Option<String>,
+}
+
+fn comment_identity(entry: &Value, self_session: Option<&str>) -> CommentIdentity {
+    let ident = crate::spawn_context::resolve_self_identity(
+        &|k| std::env::var(k).ok(),
+        None,
+        None,
+        &crate::paths::AgentsHome::from_env(),
+    );
+    let session_id = self_session
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| ident.session_id.clone())
+        .filter(|s| !s.is_empty());
+    let harness = ident.harness.clone().filter(|h| !h.is_empty());
+    // The claim this session holds names the node it is working and, in the
+    // spawn-handover holder form, the worker name.
+    let mut working_node = None;
+    let mut holder_name = None;
+    if let Some(sid) = session_id.as_deref() {
+        if let Ok(claims) = crate::backlog::nodes::node_claims_by_id() {
+            for (node_id, claim) in &claims {
+                if claim.harness_session.as_deref() != Some(sid) {
+                    continue;
+                }
+                working_node = Some(node_id.clone());
+                if let Some(name) = claim
+                    .locked_by
+                    .as_deref()
+                    .and_then(|h| h.strip_prefix("spawn-handover:"))
+                {
+                    holder_name = Some(name.to_string());
+                }
+                break;
+            }
+        }
+    }
+    let agent_name = std::env::var("FNO_AGENT_NAME")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or(holder_name);
+    let model = observed_model_for(entry, session_id.as_deref()).or_else(|| {
+        std::env::var("FNO_ROUTE_MODEL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     });
-    emit_human(parsed.json_out, &out);
-    0
+    CommentIdentity {
+        session_id,
+        harness,
+        agent_name,
+        model,
+        working_node,
+    }
 }
 
-/// The first line of a body, cut at 80 characters; "..." marks what is left out.
-fn head(body: &str) -> String {
-    let mut out: String = body.lines().next().unwrap_or("").chars().take(80).collect();
-    if out.len() < body.len() {
-        out.push_str("...");
+/// The model the session registry observed for this session id, read off
+/// the node's served sessions rows. Only a concrete observed name counts.
+fn observed_model_for(entry: &Value, session_id: Option<&str>) -> Option<String> {
+    let sid = session_id?;
+    for s in entry.get("sessions").and_then(Value::as_array)? {
+        if s.get("session_id").and_then(Value::as_str) != Some(sid) {
+            continue;
+        }
+        let om = s.get("observed_model")?;
+        if om.get("kind").and_then(Value::as_str) == Some("observed") {
+            return om.get("model").and_then(Value::as_str).map(str::to_string);
+        }
     }
-    out
-}
-
-/// What a human note replaced, as JSON and as one receipt line.
-fn replaced_parts(node_id: &str, prior: Option<&node_state::CurrentStateView>) -> (Value, String) {
-    let Some(p) = prior else {
-        return (
-            Value::Null,
-            format!("replaced nothing: {node_id} had no current state"),
-        );
-    };
-    let chars = p.body.chars().count();
-    let excerpt = head(&p.body);
-    let author = p.source_session_id.as_deref().unwrap_or("unknown");
-    let when = p.updated_at.as_deref().unwrap_or("an unknown time");
-    let json = json!({
-        "revision": p.revision, "chars": chars, "source_session_id": &p.source_session_id,
-        "updated_at": &p.updated_at, "head": &excerpt,
-    });
-    let line = format!(
-        "replaced revision {} ({chars} chars, written by session {author} at {when}): \"{excerpt}\". Read it back: fno backlog notes history {node_id}",
-        p.revision
-    );
-    (json, line)
-}
-
-/// The repeat-note nudge: when the session writing this note also wrote the
-/// state it replaces, and that session has no encounter on the node yet, name
-/// the verb that feeds `fno backlog demand`. Teaching at the point of use,
-/// never a gate.
-fn encounter_hint(
-    node_id: &str,
-    encounters: &Value,
-    self_session: Option<&str>,
-    prior: Option<&node_state::CurrentStateView>,
-) -> Option<String> {
-    let s = self_session.filter(|s| !s.is_empty())?;
-    let p = prior?;
-    if p.source_session_id.as_deref() != Some(s) {
-        return None;
-    }
-    let already = encounters
-        .as_array()
-        .map(|items| {
-            items.iter().any(|e| {
-                e.get("session_id").and_then(Value::as_str) == Some(s)
-                    || e.get("voter_key").and_then(Value::as_str) == Some(s)
-            })
-        })
-        .unwrap_or(false);
-    if already {
-        return None;
-    }
-    Some(format!(
-        "this session noted {node_id} before and has no encounter on it. If it cost you, record that: fno backlog encounter {node_id} --evidence \"<what it cost>\""
-    ))
+    None
 }
 
 /// Print one human receipt: the object under --json, else its `line`.
@@ -1074,68 +1093,91 @@ mod tests {
         assert!(parse_args(&args(&["x-1", "--JSON"])).is_err());
     }
 
-    fn view(rev: u64, session: Option<&str>) -> node_state::CurrentStateView {
-        node_state::CurrentStateView {
-            revision: rev,
-            body: "prior state".into(),
-            updated_at: Some("2026-09-22T00:00:00+00:00".into()),
-            source_session_id: session.map(|s| s.to_string()),
-            source_harness: None,
-        }
-    }
-
+    /// x-fb4f: a note appends a thread row and leaves current_state alone;
+    /// the node's journal rides into the thread on the first append; a
+    /// second note adds a row without migrating again; --replace refuses.
     #[test]
-    fn same_author_and_no_encounter_hints_encounter() {
-        let hint = encounter_hint(
-            "t-1",
-            &json!(null),
-            Some("sess-a"),
-            Some(&view(3, Some("sess-a"))),
+    fn a_note_appends_a_thread_row_and_leaves_the_state() {
+        let (_lock, _root) = claims_root_pin();
+        let (_dir, graph) = comment_graph();
+        let graph_s = graph.to_string_lossy().into_owned();
+        // A prior state and a journal record: exactly what a pre-flip node
+        // carries, so the append proves both untouched-or-migrated.
+        node_state::replace_state(
+            graph.as_path(),
+            &node_state::StateWriteInput {
+                node_id: "x-t1".into(),
+                body: "prior state".into(),
+                if_revision: Some(0),
+                source_session_id: Some("sess-old".into()),
+                source_harness: None,
+                reads: None,
+            },
+        )
+        .unwrap();
+        note_history::append(
+            graph.as_path(),
+            "x-t1",
+            note_history::REASON_STATE_REPLACED,
+            Some(1),
+            None,
+            &json!({"revision": 1, "body": "prior state"}),
+            Some("sess-old"),
+            None,
+        )
+        .unwrap();
+        let rc = run_note(&argv(&[
+            "--graph",
+            &graph_s,
+            "x-t1",
+            "hello thread",
+            "--kind",
+            "finding",
+            "--self-session",
+            "sess-me",
+        ]));
+        assert_eq!(rc, 0, "the note appends");
+        let store = super::super::api::Store::new(graph.as_path());
+        let thread =
+            super::super::api::comments(&store, "x-t1", &super::super::api::Page::default())
+                .unwrap();
+        assert_eq!(
+            thread.nodes.len(),
+            2,
+            "the migrated journal row plus the new finding"
         );
-        let hint = hint.expect("same author, no encounter: hint fires");
-        assert!(hint.contains("fno backlog encounter t-1 --evidence"));
-    }
-
-    #[test]
-    fn a_matching_encounter_silences_the_hint() {
-        let by_session = json!([
-            {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "session_id": "sess-a"}
-        ]);
-        assert!(encounter_hint(
-            "t-1",
-            &by_session,
-            Some("sess-a"),
-            Some(&view(3, Some("sess-a")))
-        )
-        .is_none());
-        let by_voter = json!([
-            {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "voter_key": "sess-a"}
-        ]);
-        assert!(encounter_hint(
-            "t-1",
-            &by_voter,
-            Some("sess-a"),
-            Some(&view(3, Some("sess-a")))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn a_different_prior_author_gets_no_hint() {
-        assert!(encounter_hint(
-            "t-1",
-            &json!(null),
-            Some("sess-b"),
-            Some(&view(3, Some("sess-a")))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn no_self_session_gets_no_hint() {
-        assert!(
-            encounter_hint("t-1", &json!(null), None, Some(&view(3, Some("sess-a")))).is_none()
+        assert_eq!(
+            thread.nodes[0]
+                .extras
+                .get("migrated")
+                .and_then(Value::as_bool),
+            Some(true)
         );
+        assert_eq!(
+            thread.nodes[0].body.as_deref(),
+            Some("prior state"),
+            "the journal record verbatim"
+        );
+        assert_eq!(thread.nodes[1].kind.as_deref(), Some("finding"));
+        let state = node_state::read_state(
+            &graph_store::read_rows(graph.as_path())
+                .unwrap()
+                .into_iter()
+                .find(|r| graph_store::entry_id(r) == Some("x-t1"))
+                .unwrap(),
+        )
+        .expect("state still present");
+        assert_eq!(state.body, "prior state", "the state is untouched");
+        assert_eq!(state.revision, 1);
+        // --replace refuses: appends cannot clobber.
+        let rc = run_note(&argv(&[
+            "--graph",
+            &graph_s,
+            "x-t1",
+            "clobber",
+            "--replace",
+        ]));
+        assert_eq!(rc, 3, "--replace refuses");
     }
 
     // -- import route -----------------------------------------------------
