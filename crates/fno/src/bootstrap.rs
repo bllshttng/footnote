@@ -58,7 +58,7 @@ fn bootstrap_status(command: &mut Command) -> std::io::Result<std::process::Exit
 /// expected condition (no network, foreign package, exec failure).
 #[derive(Debug)]
 struct BootErr {
-    msg: String,
+    pub(crate) msg: String,
     code: i32,
     /// True when re-running the probe cannot change the answer. Only the
     /// identity refusal sets it: there the probe SUCCEEDED and read a real
@@ -1809,7 +1809,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_helpers_bypass_admission_before_config() {
+    fn bootstrap_helpers_rows() {
         let previous_mode = std::env::var_os("FNO_PROCESS_ADMISSION");
         let previous_max = std::env::var_os("FNO_PROCESS_ADMISSION_MAX");
         std::env::set_var("FNO_PROCESS_ADMISSION", "on");
@@ -1817,26 +1817,12 @@ mod tests {
 
         let mut command = bootstrap_command("true");
         let status = bootstrap_status(&mut command).expect("bootstrap command should run");
-
-        restore_test_env("FNO_PROCESS_ADMISSION", previous_mode);
-        restore_test_env("FNO_PROCESS_ADMISSION_MAX", previous_max);
         assert!(status.success());
-    }
 
-    fn restore_test_env(name: &str, previous: Option<OsString>) {
-        match previous {
-            Some(value) => std::env::set_var(name, value),
-            None => std::env::remove_var(name),
-        }
-    }
-
-    #[test]
-    fn fno_py_override_rows() {
-        // The override beats every resolver leg, so its rows are contracts:
-        // unset/empty forwards normally, a real executable answers, and a set
-        // but unusable value REFUSES naming the var - a silent fall-through
-        // would run the install the operator is bypassing.
-        let previous = std::env::var_os("FNO_PY");
+        // The FNO_PY override rows ride this env test: unset/empty forwards
+        // normally, an executable answers, a set-but-unusable value refuses
+        // naming the var, and resolved_python_script prefers the override.
+        let previous_py = std::env::var_os("FNO_PY");
         let exe = std::env::temp_dir().join("fno-py-override-test");
         let _ = fs::remove_file(&exe);
         fs::write(&exe, "#!/bin/sh\nexit 0\n").expect("write stub");
@@ -1861,7 +1847,7 @@ mod tests {
         let missing = exe.with_extension("absent");
         std::env::set_var("FNO_PY", &missing);
         let err = env_override_python().unwrap_err();
-        assert!(err.msg.contains("FNO_PY"), "{err}");
+        assert!(err.msg.contains("FNO_PY"), "{}", err.msg);
         assert_eq!(err.code, 2);
 
         std::env::set_var("FNO_PY", "");
@@ -1870,8 +1856,17 @@ mod tests {
             "empty falls through"
         );
 
-        restore_test_env("FNO_PY", previous);
+        restore_test_env("FNO_PY", previous_py);
+        restore_test_env("FNO_PROCESS_ADMISSION", previous_mode);
+        restore_test_env("FNO_PROCESS_ADMISSION_MAX", previous_max);
         let _ = fs::remove_file(&exe);
+    }
+
+    fn restore_test_env(name: &str, previous: Option<OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
     }
 
     #[test]

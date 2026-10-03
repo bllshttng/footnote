@@ -202,7 +202,7 @@ fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usiz
         ],
         Some(source_root),
     )?;
-    let dest = stage_parent.join("fno");
+    let dest = stage_parent.join(STAGE_DIR);
     let pid = std::process::id();
     let new_dir = stage_parent.join(format!(".fno.new-{pid}"));
     let old_dir = stage_parent.join(format!(".fno.old-{pid}"));
@@ -1571,7 +1571,7 @@ fn run_opencode_arm(
             }
             let home = AgentsHome::from_env();
             let _ = crate::reclaim::run_reclaim(&["--apply".to_string()], &home);
-            prime_plugin_root_pointer(&state_root().join("plugin-stage").join("fno"));
+            prime_plugin_root_pointer(&state_root().join("plugin-stage").join(STAGE_DIR));
             if receipt.status == "partial" {
                 3
             } else {
@@ -1887,6 +1887,10 @@ fn zcode_install_config(config_path: &Path, stage: &Path) -> Result<String, Stri
         stage.display()
     ))
 }
+
+/// The stage dir name under plugin-stage; build_stage and the pointer prime
+/// must agree on it.
+const STAGE_DIR: &str = "fno";
 
 fn install_harness(harness: &str, force: bool) -> Result<String, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2430,42 +2434,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // Install primes the plugin-root pointer at <state>/install/plugin-root
-    // (the path every env-less reader resolves through the layout table), and
-    // a stage without a manifest writes nothing.
-    #[test]
-    fn install_primes_plugin_root_pointer() {
-        let root = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("FNO_RECLAIM_STATE_ROOT");
-        std::env::set_var("FNO_RECLAIM_STATE_ROOT", root.path());
-        let stage = root.path().join("stage");
-        std::fs::create_dir_all(stage.join(".claude-plugin")).unwrap();
-        std::fs::write(stage.join(".claude-plugin").join("plugin.json"), b"{}").unwrap();
-
-        prime_plugin_root_pointer(&stage);
-
-        let ptr = root.path().join("install").join("plugin-root");
-        assert_eq!(
-            fs::read_to_string(&ptr).unwrap().trim(),
-            stage.to_str().unwrap(),
-            "the pointer names the installed stage"
-        );
-
-        let bare = root.path().join("bare");
-        std::fs::create_dir_all(&bare).unwrap();
-        prime_plugin_root_pointer(&bare);
-        assert_eq!(
-            fs::read_to_string(&ptr).unwrap().trim(),
-            stage.to_str().unwrap(),
-            "a manifest-less stage writes nothing; pointer still names the stage"
-        );
-
-        match previous {
-            Some(v) => std::env::set_var("FNO_RECLAIM_STATE_ROOT", v),
-            None => std::env::remove_var("FNO_RECLAIM_STATE_ROOT"),
-        }
-    }
-
     // zcode install: a malformed config is refused byte-identical.
     #[test]
     fn zcode_malformed_config_refused_byte_identical() {
@@ -2674,6 +2642,39 @@ mod tests {
                 .unwrap();
         assert_eq!(public["plugins"][0]["source"]["ref"], json!("stable"));
         assert_eq!(check_stage_report(&stage, &source).status, "fresh");
+        // The install verb primes the plugin-root pointer from the built
+        // stage and ignores a manifest-less one, so the same contract rides
+        // this real stage: the pointer lands at <state>/install/plugin-root.
+        let previous_root = std::env::var_os("FNO_RECLAIM_STATE_ROOT");
+        let previous_home = std::env::var_os("FNO_HOME");
+        std::env::remove_var("FNO_HOME");
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &base);
+        prime_plugin_root_pointer(&stage);
+        assert_eq!(
+            fs::read_to_string(base.join("install").join("plugin-root"))
+                .unwrap()
+                .trim(),
+            stage.to_str().unwrap(),
+            "the primed pointer names the built stage"
+        );
+        let bare = base.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        prime_plugin_root_pointer(&bare);
+        assert_eq!(
+            fs::read_to_string(base.join("install").join("plugin-root"))
+                .unwrap()
+                .trim(),
+            stage.to_str().unwrap(),
+            "a manifest-less stage writes nothing"
+        );
+        match previous_root {
+            Some(v) => std::env::set_var("FNO_RECLAIM_STATE_ROOT", v),
+            None => std::env::remove_var("FNO_RECLAIM_STATE_ROOT"),
+        }
+        match previous_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
         let _ = fs::remove_dir_all(&base);
     }
 
