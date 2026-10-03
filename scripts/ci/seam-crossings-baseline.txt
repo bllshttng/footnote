@@ -4,6 +4,7 @@
 # as a multiset; the line number is not recorded, so the file changes only when a
 # crossing is added or removed. pydoor takes NO baseline: cli/src/fno/rust_binary.py
 # stays the only Python file that execs fno-agents by literal name.
+crossing	crates/fno-agents/src/active_backlog.rs	let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
 crossing	crates/fno-agents/src/arm_repair.rs	let child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/attach.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	let out = Command::new(crate::scrape::fno_bin())
@@ -15,7 +16,6 @@ crossing	crates/fno-agents/src/bin/client.rs	let mut cmd = Command::new(fno_agen
 crossing	crates/fno-agents/src/blueprint_judge.rs	return match Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/blueprint_judge.rs	let out = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/crown_alarm.rs	let fno = crate::scrape::fno_bin();
-crossing	crates/fno-agents/src/active_backlog.rs	let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
 crossing	crates/fno-agents/src/daemon.rs	let mut child = match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon/fleet_arms.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
@@ -47,6 +47,7 @@ crossing	crates/fno-agents/src/loopcheck.rs	&loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck/args.rs	let mut fno_bin = super::loopcheck_fno_bin();
 crossing	crates/fno-agents/src/loopcheck/block_reason.rs	&super::loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck/review_coverage_verb.rs	let fno_bin = loopcheck_fno_bin();
+crossing	crates/fno-agents/src/machine_load.rs	let bin = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/machine_mail.rs	let mut command = Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/mail_inject.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_bin();
@@ -125,8 +126,8 @@ resolver	crates/fno/src/doctor_update.rs	fn install_mux_front_door(source: &Path
 resolver	crates/fno/src/doctor_update.rs	fn resolve_fno_py() -> PathBuf {
 resolver	crates/fno/src/doctor_update.rs	fn verify_uv_install() -> bool {
 resolver	crates/fno/src/doctor_update.rs	fn has_shipped_pyc(td: &Path) -> bool {
+resolver	crates/fno/src/doctor_update.rs	fn live_tool_env_processes() -> Vec<String> {
 resolver	crates/fno/src/doctor_update.rs	fn read_source_wire(source: &Path) -> Option<u32> {
 resolver	crates/fno/src/mux_cli.rs	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {
 resolver	crates/fno/src/squad_store_tests.rs	fn build_tree_marker_detection_is_pure_over_path() {
-crossing	crates/fno-agents/src/machine_load.rs	let bin = crate::scrape::fno_bin();

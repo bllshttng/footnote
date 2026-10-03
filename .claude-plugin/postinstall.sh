@@ -219,14 +219,100 @@ uv_tool_install_retry() {
   done
 }
 
+# The clobber guard (gap audit blocker 1, 2026-10-02): an existing `fno` tool
+# env may be a working install from a DIFFERENT source (a dev checkout, a study
+# build) or have live processes running from it. `uv tool install --force`
+# replaces that env in place - the exact move that broke a live study when a
+# session-start installer ran unnoticed. Every install path here routes through
+# one call to this guard first. FNO_INSTALL_REPLACE=1 is the named override.
+tool_env_dir() {
+  if command -v uv >/dev/null 2>&1; then
+    NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null && return 0
+    return 1
+  fi
+  # uv itself is absent (the fno.sh delegation path): the env it left behind
+  # still lives at the default location, and the guard must still read it.
+  if [[ -n "${UV_TOOL_DIR:-}" ]]; then
+    printf '%s\n' "$UV_TOOL_DIR"
+    return 0
+  fi
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools"
+}
+
+# The direct_url.json uv records for a local-path install, stripped to its
+# path. Empty when there is no env, or the install came from a registry or a
+# remote URL (https, a nightly GitHub Release wheel) - neither is ever "a
+# different local source", so only file:// receipts leave this function.
+tool_receipt_source() {
+  local td f url
+  td="$(tool_env_dir)" || return 0
+  f="$(find "$td/fno/lib" -path '*.dist-info/direct_url.json' -print -quit 2>/dev/null)"
+  [[ -n "$f" ]] || return 0
+  url="$(sed -n -E 's/.*"url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$f")"
+  url="${url%%$'\n'*}"
+  case "$url" in
+    file://*) printf '%s\n' "$url" ;;
+  esac
+}
+
+# One ps line per live process whose argv names a path inside the tool env.
+# Over-catching is safe: the guard refuses with a named override, so a merely
+# suspicious line costs a deliberate confirmation, never a broken env.
+live_tool_env_processes() {
+  local td
+  td="$(tool_env_dir)" || return 0
+  [[ -d "$td/fno" ]] || return 0
+  ps -axo pid=,args= 2>/dev/null | awk -v td="$td/fno" 'index($0, td) > 0 && $0 !~ / (awk|ps) -/'
+}
+
+clobber_guard() {
+  if [[ "${FNO_INSTALL_REPLACE:-0}" == "1" ]]; then
+    log "FNO_INSTALL_REPLACE=1: replacing any existing fno tool env on request."
+    return 0
+  fi
+  local td live receipt receipt_dir
+  td="$(tool_env_dir)" || return 0
+  [[ -d "$td/fno" ]] || return 0 # no existing env: nothing to clobber
+  live="$(live_tool_env_processes)"
+  if [[ -n "$live" ]]; then
+    err "refusing to reinstall: process(es) are running from the existing fno tool env ($td/fno):"
+    printf '%s\n' "$live" | head -5 >&2
+    err "stop them first, or set FNO_INSTALL_REPLACE=1 to replace the env anyway."
+    return 1
+  fi
+  receipt="$(tool_receipt_source)"
+  if [[ -n "$receipt" ]]; then
+    receipt_dir="${receipt#file://}"
+    receipt_dir="${receipt_dir%/}"
+    # Physical-path both sides before comparing: uv records the path AS GIVEN,
+    # so a symlinked install must not read as a foreign source (a dead source
+    # dir keeps its recorded path and still refuses).
+    cli_physical="$(cd "$CLI_DIR" 2>/dev/null && pwd -P)" || cli_physical="$CLI_DIR"
+    receipt_physical="$(cd "$receipt_dir" 2>/dev/null && pwd -P)" || receipt_physical="$receipt_dir"
+    if [[ "$receipt_physical" != "$cli_physical" ]]; then
+      err "refusing to reinstall: the existing fno tool env was installed from $receipt_dir, not this plugin's $CLI_DIR."
+      err "Replacing it would discard that install. Re-run the install from that source instead, or set FNO_INSTALL_REPLACE=1."
+      return 1
+    fi
+  fi
+  return 0
+}
+
 install_source_via_uv() {
   log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
-  if uv_tool_install_retry "$CLI_DIR"; then
+  # --reinstall-package/--refresh-package: uv serves a cached wheel when the
+  # version string is unchanged, silently reinstalling stale bytes from a
+  # switched checkout (hurdle B11); fno doctor update uses the same flags.
+  if uv_tool_install_retry --reinstall-package fno --refresh-package fno "$CLI_DIR"; then
     log "installed Python-only fno from source. INCOMPLETE install: no 'fno' front door and no Rust binaries -"
     log "run 'cargo install --locked --path <repo>/crates/fno' for the daemon-backed verbs, or install a published PyPI wheel for the advertised 'fno' command."
     log "restart your shell (or source your env) to pick up PATH."
     next_steps
-    return 0
+    # Incomplete installs exit 3, not 0: the session-start hook stamps
+    # postinstall.version (and so stops retrying) only on exit 0, and a user
+    # following "the log ends with installer exit 0" must never be handed a
+    # half install as done (gap audit blocker 2).
+    return 3
   fi
   return 1
 }
@@ -265,6 +351,10 @@ if ! command -v uv >/dev/null 2>&1; then
     esac
     if [[ -n "$fno_sh_spec" ]]; then
       log "uv not found; delegating to scripts/install/fno.sh (it provisions uv)..."
+      # The guard reads the env at its default location while uv itself is
+      # absent: a tool env outliving a removed uv is exactly the one the
+      # delegation would otherwise replace unguarded.
+      clobber_guard || exit 3
       fno_sh_rc=0
       env "$fno_sh_spec" sh "$FNO_SH" || fno_sh_rc=$?
       if [[ "$fno_sh_rc" -eq 0 ]]; then
@@ -296,6 +386,11 @@ if command -v uv >/dev/null 2>&1; then
     exit 0
   fi
 
+  # One guard in front of every replacing install (channel wheel, source
+  # build). The idempotent skip above never replaces anything, so it runs
+  # without the guard.
+  clobber_guard || exit 3
+
   # Install the release matching THIS plugin's channel, then prove it is ours.
   # stdout only is silenced: the retry wrapper's stderr (uv's verbatim error,
   # the verify refusal, the three-attempts race message) is the diagnostic
@@ -308,7 +403,12 @@ if command -v uv >/dev/null 2>&1; then
         # The receipt proves the advertised command, not uv's exit code. A wheel
         # that predates the complete payload stays installed (the Python CLI
         # works) but the missing front door is named with its repair (AC2-EDGE).
-        verify_frontdoor || true
+        # An incomplete receipt exits 3 with no success stamp (gap audit 2), so
+        # the session-start hook retries instead of declaring the install done.
+        if ! verify_frontdoor; then
+          finish_success
+          exit 3
+        fi
         shim_sweep || exit 1
         log "restart your shell (or source your env) to pick up PATH."
         finish_success
@@ -345,9 +445,14 @@ if command -v uv >/dev/null 2>&1; then
       ;;
   esac
 
-  if install_source_via_uv; then
+  # install_source_via_uv returns 3 when it INSTALLED but Python-only
+  # (incomplete): still a terminal outcome for this path, but a non-zero one -
+  # no success stamp, the session-start hook retries a complete install.
+  src_rc=0
+  install_source_via_uv || src_rc=$?
+  if [[ "$src_rc" -eq 3 ]]; then
     finish_success
-    exit 0
+    exit 3
   fi
   err "uv tool install failed; falling through to pip fallback."
 fi
@@ -360,7 +465,8 @@ if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then
     log "ensure ~/.local/bin (or your user site-scripts dir) is on PATH."
     finish_success
     next_steps
-    exit 0
+    # Incomplete: exit non-zero so no success stamp is written (gap audit 2).
+    exit 3
   else
     err "pip install --user failed."
   fi
