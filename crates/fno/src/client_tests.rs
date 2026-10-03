@@ -7467,7 +7467,19 @@ fn tab_badge_rows() {
     };
     // Focus on the top agent row's pane: it already fits, so no scroll.
     view.set_layout(layout(100, agents.clone()));
-    assert_eq!(view.sideline_offset(), 0, "a top focus needs no scroll");
+    assert_eq!(
+        view.sideline_offset(),
+        0,
+        "a top focus needs no scroll: visible={} painted={} idx_of_100={} term={:?} chrome={} court={}",
+        view.sideline_visible_rows(),
+        view.painted_rows().len(),
+        view.display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(100))),
+        view.term,
+        view.bottom_row_is_chrome(),
+        view.court_block_rows()
+    );
     // Focus jumps to the last agent (pane 107), well below the fold.
     view.set_layout(layout(107, agents.clone()));
     let visible = view.sideline_visible_rows();
@@ -10497,7 +10509,13 @@ fn wheel_rows() {
     assert_eq!(
         v.sideline_offset(),
         total - v.sideline_visible_rows(),
-        "clamped to the last full window"
+        "clamped to the last full window: total={total} visible={} term={:?} chrome={} court={} q={} pinned_hint={}",
+        v.sideline_visible_rows(),
+        v.term,
+        v.bottom_row_is_chrome(),
+        v.court_block_rows(),
+        v.questions_block_rows(),
+        v.painted_rows().len()
     );
 
     // Regression (code-reviewer): the bottom status row is chrome-owned and
