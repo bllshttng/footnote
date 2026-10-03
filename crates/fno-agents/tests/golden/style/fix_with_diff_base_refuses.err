@@ -1,0 +1,1 @@
+style: --fix rewrites whole inputs; it does not combine with --diff-base.
