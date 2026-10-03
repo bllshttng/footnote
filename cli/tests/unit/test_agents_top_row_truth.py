@@ -174,10 +174,14 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
         "_session_node_map",
         lambda: {
             "979e1acc-e240-4af5-9998-0a74ec6c0683": {
-                "node": "x-4dc0", "pr": 2965, "basis": "claim",
+                "node": "x-4dc0", "pr": 2965, "pr_basis": "node", "basis": "claim",
             },
-            "full-session-uuid": {"node": "x-06f7", "pr": None, "basis": "claim"},
-            "released-session-uuid": {"node": "x-4dc0", "pr": None, "basis": "graph"},
+            "full-session-uuid": {
+                "node": "x-06f7", "pr": None, "pr_basis": "no-pr", "basis": "claim",
+            },
+            "released-session-uuid": {
+                "node": "x-4dc0", "pr": None, "pr_basis": "no-pr", "basis": "graph",
+            },
         },
     )
     (row,) = _rows(
