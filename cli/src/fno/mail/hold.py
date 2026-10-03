@@ -608,9 +608,13 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
                     held_release=True,
                 )
                 delivered = _deliver_live(entry, framed, "fno-mail-hold", reason_out=miss_reason)
-            except Exception:  # noqa: BLE001 - report the miss, never crash the timer
+            except Exception as exc:  # noqa: BLE001 - report the miss, never crash the timer
                 delivered = False
-                miss_reason.append("deliver-raised")
+                detail = " ".join(str(exc).split())[:160]
+                miss_reason.append(
+                    f"deliver-raised:{type(exc).__name__}"
+                    + (f": {detail}" if detail else "")
+                )
         if delivered:
             outcome = "delivered"
             for form, got in form_mail:
