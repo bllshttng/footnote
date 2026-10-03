@@ -153,6 +153,10 @@ enum Role {
     /// the sibling fno-agents `style-check` verb. Args from the check name
     /// onward; Python keeps every other lint check until its port.
     DoctorLintStyle(Vec<OsString>),
+    /// `fno doctor update` and root `fno update`: the native updater (the
+    /// Python leg is deleted in the same change). Args from the verb name
+    /// onward.
+    DoctorUpdate(Vec<OsString>),
     /// `fno agents history ... --graph ...`: the native session-card reader.
     AgentsHistory(Vec<OsString>),
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
