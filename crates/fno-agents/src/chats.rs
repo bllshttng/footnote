@@ -1011,7 +1011,7 @@ fn render_message(line: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             line.get("id").and_then(Value::as_str).unwrap_or(""),
-            crate::mail_header::summary_of(message_body(line)),
+            &crate::mail_header::summary_of(message_body(line)),
         ),
         message_body(line),
     )
@@ -1125,7 +1125,7 @@ pub(crate) fn show_list_at(chats_dir: &Path, q: &ShowQuery) -> Result<String, St
     }
     let mut out = String::new();
     for m in rows {
-        let mut body1 = message_body(m).trim().replace('\n', " ");
+        let mut body1 = message_body(&m).trim().replace('\n', " ");
         if body1.chars().count() > 80 {
             body1 = format!("{}...", body1.chars().take(77).collect::<String>());
         }
@@ -1134,7 +1134,7 @@ pub(crate) fn show_list_at(chats_dir: &Path, q: &ShowQuery) -> Result<String, St
         }
         out.push_str(&format!(
             "{}  {} -> {} ({}/{}): {}",
-            ts_of(m),
+            ts_of(&m),
             m.get("from").and_then(Value::as_str).unwrap_or("unknown"),
             m.get("to").and_then(Value::as_str).unwrap_or(""),
             m.get("kind").and_then(Value::as_str).unwrap_or(""),
