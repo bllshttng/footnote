@@ -168,6 +168,8 @@ pub(crate) fn served_word(
     }
 }
 
+use crate::events::EventEmitter;
+
 /// A status change reconcile decided for one probed entry. `new_status: None`
 /// means "probed, status unchanged" — its `last_reconciled_at` is still bumped
 /// so the fairness ordering rotates.
@@ -724,10 +726,57 @@ pub(crate) fn persist_reconcile_changes(
             measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())
         })
         .collect();
-    state::update_registry(&home.registry_json(), |r| {
-        apply_reconcile_changes(r, entries, changes, titles, mode, now);
+    let mut applied = Vec::new();
+    let wrote = state::update_registry(&home.registry_json(), |r| {
+        applied = apply_reconcile_changes(r, entries, changes, titles, mode, now);
         apply_worker_readings(r, &readings, now);
-    })
+    });
+    // Every applied transition is one observed process fact for a row fno
+    // owns, journaled with its evidence word (ruling d-e096c669): an exit
+    // and a restart stop being silent.
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    for t in &applied {
+        let _ = emitter.emit(
+            "row_lifecycle_observed",
+            &serde_json::json!({
+                "row": t.row,
+                "harness": t.harness,
+                "harness_session": t.harness_session,
+                "from": t.from,
+                "to": t.to,
+                "cause": t.cause,
+            }),
+        );
+    }
+    wrote
+}
+
+/// One observed lifecycle transition of an owned row: the journal fuel for
+/// `row_lifecycle_observed` (ruling d-e096c669). `cause` is the evidence
+/// word: `pid_proven` (the row's own dead pid), `revival` (a guarded crown
+/// revival), or `probe_inferred` (the reachability probe's word).
+pub(crate) struct AppliedTransition {
+    pub(crate) row: String,
+    pub(crate) harness: Option<String>,
+    pub(crate) harness_session: Option<String>,
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) cause: &'static str,
+}
+
+fn status_word(s: AgentStatus) -> &'static str {
+    match s {
+        AgentStatus::Spawning => "spawning",
+        AgentStatus::Ready => "ready",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Busy => "busy",
+        AgentStatus::Live => "live",
+        AgentStatus::Restarting => "restarting",
+        AgentStatus::Orphaned => "orphaned",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Exited => "exited",
+        AgentStatus::PermanentDead => "permanent_dead",
+    }
 }
 
 /// The one batched registry write both modes share: apply every planned
@@ -742,7 +791,8 @@ pub(crate) fn apply_reconcile_changes(
     titles: &std::collections::HashMap<String, Option<String>>,
     mode: &SweepMode,
     now: &str,
-) {
+) -> Vec<AppliedTransition> {
+    let mut applied: Vec<AppliedTransition> = Vec::new();
     for ch in changes {
         // Keyed on the probed row's identity read off the same snapshot the
         // sweep planned from, so a row replaced under the same label between
@@ -773,7 +823,26 @@ pub(crate) fn apply_reconcile_changes(
             } else {
                 None
             };
+            let from = e.status;
             apply_reconcile_change(e, status, ch.new_liveness, now);
+            if let Some(to) = status {
+                if from != to {
+                    applied.push(AppliedTransition {
+                        row: e.name.clone(),
+                        harness: e.harness.clone(),
+                        harness_session: e.harness_session_id.clone(),
+                        from: status_word(from),
+                        to: status_word(to),
+                        cause: if ch.crown_revive {
+                            "revival"
+                        } else if ch.pid_proven {
+                            "pid_proven"
+                        } else {
+                            "probe_inferred"
+                        },
+                    });
+                }
+            }
         }
     }
     // Apply the batch's title readings in the SAME lock window: the row's
@@ -784,6 +853,7 @@ pub(crate) fn apply_reconcile_changes(
     // readers that cannot link fno-agents read the edge kind as a served
     // fact instead of re-deriving it.
     crate::spawn_edge::stamp_lineage_kinds(r);
+    applied
 }
 
 /// One tick's gate decision: due only past the cadence AND with the previous
@@ -1610,5 +1680,104 @@ mod tests {
         blind.serve_listing(&entries, &mut changes);
         assert_eq!(changes[0].new_liveness, Some("unmeasured"));
         assert_eq!(changes[1].new_liveness, Some("unmeasured"));
+    }
+
+    /// The observed-exit journal: a pid-proven exit plans a transition the
+    /// applier reports with the evidence word, so the exit stops being
+    /// silent (ruling d-e096c669).
+    #[test]
+    fn an_applied_exit_reports_the_transition_with_its_cause() {
+        let mut entry = pane_entry("dying", Some(4243));
+        entry.status = AgentStatus::Live;
+        entry.harness = Some("claude".into());
+        let entries = vec![entry];
+        let changes = vec![crate::daemon::ReconcileChange {
+            name: "dying".into(),
+            new_status: Some(AgentStatus::Exited),
+            new_liveness: Some("dead"),
+            pid_proven: true,
+            crown_revive: false,
+        }];
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles = std::collections::HashMap::new();
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &changes,
+            &titles,
+            &SweepMode::ServeOnly,
+            "2026-10-03T12:00:00Z",
+        );
+        assert_eq!(applied.len(), 1, "the exit is reported");
+        let t = &applied[0];
+        assert_eq!(t.row, "dying");
+        assert_eq!(t.harness.as_deref(), Some("claude"));
+        assert_eq!(t.from, "live");
+        assert_eq!(t.to, "exited");
+        assert_eq!(t.cause, "pid_proven");
+    }
+
+    /// A revival reports itself as a restart, and a change whose status did
+    /// not move reports nothing (the sweep's routine refreshes stay quiet).
+    #[test]
+    fn a_revival_reports_a_restart_and_a_noop_reports_nothing() {
+        let mut entry = pane_entry("revived", Some(4242));
+        entry.status = AgentStatus::Orphaned;
+        entry.harness = Some("claude".into());
+        entry.harness_session_id = Some("sess-r".into());
+        entry.crown_scope = Some("scope".into());
+        entry.crown_level = Some(1);
+        let entries = vec![entry];
+        let changes = vec![crate::daemon::ReconcileChange {
+            name: "revived".into(),
+            new_status: Some(AgentStatus::Live),
+            new_liveness: Some("alive"),
+            pid_proven: false,
+            crown_revive: true,
+        }];
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles = std::collections::HashMap::new();
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &changes,
+            &titles,
+            &SweepMode::Full,
+            "2026-10-03T12:00:00Z",
+        );
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].from, "orphaned");
+        assert_eq!(applied[0].to, "live");
+        assert_eq!(applied[0].cause, "revival");
+    }
+
+    /// A same-status write reports nothing: the sweep's routine refreshes
+    /// stay quiet, so the journal carries moves, not noise.
+    #[test]
+    fn a_same_status_write_reports_nothing() {
+        let mut entry = pane_entry("steady", Some(4244));
+        entry.status = AgentStatus::Live;
+        let entries = vec![entry];
+        let changes = vec![crate::daemon::ReconcileChange {
+            name: "steady".into(),
+            new_status: Some(AgentStatus::Live),
+            new_liveness: Some("alive"),
+            pid_proven: false,
+            crown_revive: false,
+        }];
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles = std::collections::HashMap::new();
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &changes,
+            &titles,
+            &SweepMode::Full,
+            "2026-10-03T12:00:00Z",
+        );
+        assert!(applied.is_empty(), "a no-op writes no transition row");
     }
 }
