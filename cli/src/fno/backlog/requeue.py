@@ -61,20 +61,18 @@ def _release_node_lockfile(node_id: str) -> str:
     """Best-effort release of the ``node:<id>`` lockfile; never raises. Releases stale or own holders; keeps a LIVE foreign holder."""
     try:
         from fno.claims.core import claim_status, release_claim
-        from fno.claims.io import claims_root_for
     except Exception:
         return "lockfile untouched (claims module unavailable)"
 
     key = f"node:{node_id}"
     try:
-        root = claims_root_for(key)
-        status = claim_status(key, root=root)
+        status = claim_status(key)
         state = status.get("state")
 
         if state == "free":
             return "no lockfile"
         if state == "stale":
-            return "released stale lockfile" if release_claim(key, status.get("holder") or "", root=root) else "lockfile changed"
+            return "released stale lockfile" if release_claim(key, status.get("holder") or "") else "lockfile changed"
         if state == "corrupted":
             typer.echo(f"warning: lockfile {key} is corrupted; graph claim cleared but lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to repair.", err=True)
             return "lockfile left (corrupted)"
@@ -82,7 +80,7 @@ def _release_node_lockfile(node_id: str) -> str:
         # live or suspect: only release when it is ours; a suspect claim (TTL-unexpired, dead pid) is still owned.
         holder = status.get("holder") or ""
         if holder == _invoking_claim_holder():
-            return "released own lockfile" if release_claim(key, holder, root=root) else "lockfile changed"
+            return "released own lockfile" if release_claim(key, holder) else "lockfile changed"
 
         typer.echo(f"warning: lockfile {key} held by LIVE holder {holder!r}; lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to override.", err=True)
         return "lockfile left (live foreign holder)"
@@ -140,7 +138,6 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     from fno.agents.reachability import REACHABLE, classify_reachability, inference_samples
     from fno.agents.session_truth import _humanize_age, resolve_session_truth
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
     from fno.graph import api as graph_api
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row
@@ -166,7 +163,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
 
     # The lockfile reader, never `fno agents claim status`: requeue wants the claim record, and the composite verdict still reads unknown when an unresolved roster row's worktree names this node.
     key = f"node:{node_id}"
-    claim = claim_status(key, root=claims_root_for(key))
+    claim = claim_status(key)
     state = claim.get("state")
     if state not in _REQUEUEABLE_CLAIM_STATES:
         from fno.claims.verdict import reclaimable_note

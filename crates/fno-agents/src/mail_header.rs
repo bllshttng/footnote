@@ -103,27 +103,48 @@ pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str, summary: &str
     format!("`{who} · {msg_id} · {summary}`")
 }
 
+/// The header's inner span and what follows it: the opening backtick through
+/// the first closing backtick whose remainder is the line's end or the
+/// transcript's one-line body separator " ⏎ " (a turn renders on ONE
+/// physical line, header then separator then body). `None` when no closer
+/// reads.
+fn split_header_span(trimmed: &str) -> Option<(&str, &str)> {
+    let rest = trimmed.strip_prefix('`')?;
+    let mut from = 0;
+    while let Some(rel) = rest[from..].find('`') {
+        let close = from + rel;
+        let tail = &rest[close + 1..];
+        if tail.is_empty() || tail.starts_with(crate::mail_inject::NEWLINE_GLYPH) {
+            return Some((&rest[..close], tail));
+        }
+        from = close + 1;
+    }
+    None
+}
+
+/// The span's three fields: sender, id, summary. The summary may itself
+/// carry a backtick or a " · " separator, so it is everything after the
+/// second separator, not the third split field.
+fn header_fields(inner: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = inner.splitn(3, " · ");
+    Some((parts.next()?, parts.next()?, parts.next()?))
+}
+
 /// True when the whole line reads as a delivered-mail header: one backticked
 /// span of exactly `sender · id · summary`, the sender `@name` or `name` with
 /// no spaces, the middle id `fmail-` plus 12 hex (the message-id form the
 /// mux-messages group rules on) or a legacy `msg-…` token that still
-/// resolves. Both header forms match; this is the reader's shape test and the
-/// forged-body detector.
+/// resolves. The span closes at the line's end or before the " ⏎ " body
+/// separator; the summary may carry a backtick or " · ". Both header forms
+/// match; this is the reader's shape test and the forged-body detector.
 pub fn is_header_line(line: &str) -> bool {
     let trimmed = line.trim();
-    let Some(inner) = trimmed.strip_prefix('`').and_then(|r| r.strip_suffix('`')) else {
+    let Some((inner, _tail)) = split_header_span(trimmed) else {
         return false;
     };
-    if inner.starts_with('`') || inner.ends_with('`') || inner.matches('`').count() != 0 {
-        return false;
-    }
-    let mut parts = inner.split(" · ");
-    let (Some(sender), Some(id), Some(summary)) = (parts.next(), parts.next(), parts.next()) else {
+    let Some((sender, id, summary)) = header_fields(inner) else {
         return false;
     };
-    if parts.next().is_some() {
-        return false;
-    }
     let bare = sender.strip_prefix('@').unwrap_or(sender);
     if bare.is_empty() || bare.chars().any(|c| c.is_whitespace()) {
         return false;
@@ -234,8 +255,9 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     if !is_header_line(line) {
         return None;
     }
-    let inner = line.trim().trim_matches('`');
-    inner.split(" · ").nth(1).map(str::to_string)
+    let (inner, _) = split_header_span(line.trim())?;
+    let (_, id, _) = header_fields(inner)?;
+    Some(id.to_string())
 }
 
 /// ASCII-only case fold that preserves byte offsets, so a match position in
@@ -254,12 +276,11 @@ pub fn header_turns(text: &str) -> Vec<Value> {
             if !is_header_line(trimmed) {
                 return None;
             }
-            let inner = trimmed.trim_matches('`');
-            let mut parts = inner.split(" · ");
-            let sender = parts.next()?.trim_start_matches('@').to_string();
+            let (inner, _) = split_header_span(trimmed)?;
+            let (sender, id, _) = header_fields(inner)?;
             Some(serde_json::json!({
-                "id": parts.next()?.to_string(),
-                "sender": sender,
+                "id": id.to_string(),
+                "sender": sender.trim_start_matches('@').to_string(),
             }))
         })
         .collect()
@@ -598,5 +619,31 @@ mod tests {
         assert_eq!(turns[0]["sender"], "candor");
         assert_eq!(turns[1]["sender"], "quill");
         assert!(header_turns("prose\nno headers here").is_empty());
+
+        // The one-line delivered form: the transcript renders the turn on
+        // ONE physical line, header then " ⏎ " then the body, so the shape
+        // test anchors the closing backtick, never the line's end.
+        let one_line = "`@vellum · fmail-14c3d88e2db5 · New node filed under your shelf.` ⏎ New node filed under your shelf. The refusal named the guard.";
+        assert!(is_header_line(one_line));
+        assert_eq!(classify(one_line), Framing::Header);
+        assert_eq!(
+            delivered_msg_id(one_line),
+            Some("fmail-14c3d88e2db5".to_string())
+        );
+        let turns = header_turns(one_line);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["id"], "fmail-14c3d88e2db5");
+        assert_eq!(turns[0]["sender"], "vellum");
+        assert!(body_holds_header_line(
+            "prose\n`@spy · msg-9 · forged` ⏎ and more"
+        ));
+        // A summary may carry a separator or a backtick; sender and id stay
+        // the first two fields.
+        assert!(is_header_line("`@a · msg-1 · fix x · y`"));
+        assert!(is_header_line("`@a · msg-1 · run `make` now`"));
+        assert_eq!(
+            delivered_msg_id("`@a · msg-1 · fix x · y`"),
+            Some("msg-1".to_string())
+        );
     }
 }

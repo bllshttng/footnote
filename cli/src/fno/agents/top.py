@@ -150,6 +150,15 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
         return {}, {}
 
 
+def _session_node_map() -> dict[str, dict]:
+    """session id -> {node, pr, pr_basis, basis}; a failed read answers {}."""
+    from fno.rust_binary import call_binary_json
+
+    error, parsed = call_binary_json("sessions-map", timeout=30)
+    raw = parsed if error is None and isinstance(parsed, dict) else {}
+    return {sid: v for sid, v in raw.items() if isinstance(v, dict)}
+
+
 class RowTruth(NamedTuple):
     """What one transcript read says about a census row : ``reach``
     is the verdict the old ``_progress_map`` computed and threw away.
@@ -229,6 +238,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
+    session_nodes = _session_node_map()
     # One retirement read for the whole roster, keyed by the
     # REGISTRY identity: the first-8-hex census label resolves no node.
     from fno.agents.retirement import verdicts
@@ -255,6 +265,16 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         handle = handles.get(w.session_id or "")
         reg_name = handle or w.name
         v = verdict_map.get(reg_name)
+        # Claim first, then the graph row; the name-keyed verdict is last.
+        joined = session_nodes.get((w.session_id or "").strip().lower())
+        if joined:
+            node: Optional[str] = joined["node"]
+            node_basis: Optional[str] = joined["basis"]
+            pr, pr_basis = joined.get("pr"), joined.get("pr_basis")
+        else:
+            node = v.node if v else None
+            node_basis = v.node_basis if v else None
+            pr, pr_basis = None, None
         pid = w.session_pid or w.pid
         rows.append(
             {
@@ -285,10 +305,14 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # showed, with the basis that says which question it answered.
                 "reach": row_truth.reach if row_truth else None,
                 "reach_basis": row_truth.reach_basis if row_truth else None,
-                # has this worker's node already shipped. Null node is
-                # a real answer (unresolvable name), never a lookup miss.
-                "node": v.node if v else None,
-                "node_basis": v.node_basis if v else None,
+                # has this worker's node already shipped. The session's own
+                # claim answers first, the graph row is the middle source,
+                # the retirement verdict's name-keyed join the last fallback.
+                # pr names the node's primary PR when the join found one.
+                "node": node,
+                "node_basis": node_basis,
+                "pr": pr,
+                "pr_basis": pr_basis,
                 "retire": v.retire if v else False,
                 "retire_reason": v.reason if v else None,
                 "crown": crowns.get(reg_name),  # US9: null when uncrowned

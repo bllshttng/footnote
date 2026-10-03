@@ -28,6 +28,12 @@ fn notes_of(row: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+        .into_iter()
+        .filter(|row| {
+            let kind = row.get("kind").and_then(Value::as_str);
+            kind != Some("comment") && kind != Some("reply")
+        })
+        .collect()
 }
 
 fn char_len(v: Option<&Value>) -> usize {

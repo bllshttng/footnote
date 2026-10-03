@@ -614,6 +614,9 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
             let mut e = ask_row(name, None);
             e.harness_session_id = Some(format!("sess-{name}"));
             e.origin = Some("spawn".into());
+            // The verdict door reads the stored status first; these scenarios vary
+            // the vendor word, so the row itself must be fno-undecided.
+            e.status = crate::AgentStatus::Idle;
             r.entries.push(e);
         }
     })
@@ -3534,6 +3537,9 @@ fn spawn_row(reg: &mut state::Registry, name: &str, sid: &str) {
     e.harness = Some("claude".into());
     e.harness_session_id = Some(sid.into());
     e.origin = Some("spawn".into());
+    // The verdict door reads the stored status first; these scenarios vary
+    // the vendor word, so the row itself must be fno-undecided.
+    e.status = crate::AgentStatus::Idle;
     reg.entries.push(e);
 }
 
@@ -4425,6 +4431,10 @@ pub(super) fn claude_worker_row(name: &str, short: &str) -> state::RegistryEntry
     row.harness = Some("claude".into());
     row.harness_session_id = Some(format!("{short}-1111-2222-3333-444444444444"));
     row.origin = Some("spawn".into());
+    // The verdict door reads the stored status first (Exited would decide
+    // the row fno-Finished before the vendor word these scenarios vary);
+    // a live worker row is non-terminal.
+    row.status = crate::AgentStatus::Idle;
     row
 }
 

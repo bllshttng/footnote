@@ -726,14 +726,23 @@ fn r_crown() -> Result<Value, String> {
                 .stale
                 .iter()
                 .map(|s| {
-                    let reading = registry_read
+                    let reading = match registry_read
                         .as_ref()
                         .ok()
-                        .and_then(|r| r.entries.iter().find(|e| e.name == s.row))
-                        .map(|e| crate::crown_split::dead_call(e, boot))
-                        .unwrap_or(crate::crown_split::DeadCallReading::Unread(
+                        .map(|r| crate::loop_reign::terminal_name_join(&r.entries, &s.row))
+                    {
+                        Some(crate::loop_reign::NameJoin::One(e)) => {
+                            crate::crown_split::dead_call(e, boot)
+                        }
+                        Some(crate::loop_reign::NameJoin::Ambiguous) => {
+                            crate::crown_split::DeadCallReading::Unread(
+                                "crowned row name ambiguous in the registry".to_string(),
+                            )
+                        }
+                        _ => crate::crown_split::DeadCallReading::Unread(
                             "crowned row not found in the registry".to_string(),
-                        ));
+                        ),
+                    };
                     (s.row.clone(), reading)
                 })
                 .collect(),

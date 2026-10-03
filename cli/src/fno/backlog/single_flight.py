@@ -24,7 +24,8 @@ from typing import Callable, IO, Iterator, Optional
 
 import typer
 
-from fno.claims.io import claim_path, claims_root_for
+from fno.claims.core import native_claims_root
+from fno.claims.io import claim_path
 from fno.rust_binary import resolve_binary
 
 # Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
@@ -66,11 +67,13 @@ class Flight:
 
     def release(self) -> None:
         try:
-            _verb([
+            argv = [
                 "claim", "flight-release", self.key,
                 "--holder", self.holder,
-                "--claims-root", str(self.root or claims_root_for(self.key)),
-            ])
+            ]
+            if self.root is not None:
+                argv.extend(("--claims-root", str(self.root)))
+            _verb(argv)
         except Exception:
             pass  # the TTL plus the pid probe retire it; never mask the work's outcome
 
@@ -94,7 +97,6 @@ def acquire_flight(
     itself: the holder here is a one-shot subprocess, so the
     transcript-liveness basis the claims layer prefers for node claims is the
     wrong policy."""
-    claims_root = root or claims_root_for(key)
     if resolve_binary() is None:
         typer.echo(
             f"warning: single-flight gate unavailable for {key} (no fno-agents binary)",
@@ -102,14 +104,16 @@ def acquire_flight(
         )
         return None
     try:
-        receipt = _verb([
+        argv = [
             "claim", "flight-acquire", key,
             "--scope", scope,
             "--ttl-ms", str(ttl_ms),
             "--holder", f"{name}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
             "--pid", str(os.getpid()),
-            "--claims-root", str(claims_root),
-        ])
+        ]
+        if root is not None:
+            argv.extend(("--claims-root", str(root)))
+        receipt = _verb(argv)
     except Exception as exc:  # noqa: BLE001 - fail open, never break the verb
         typer.echo(f"warning: single-flight gate unavailable for {key} ({exc})", err=True)
         return None
@@ -202,7 +206,13 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     exits 129 when an opted-in parent dies, 124 when the budget trips. The
     thread stops once the claim file is gone; os._exit is safe because graph
     writes commit server-side and reconcile is idempotent."""
-    root = flight.root or claims_root_for(flight.key) or Path.home()
+    try:
+        root = flight.root or native_claims_root(flight.key) or Path.home()
+    except Exception:
+        # An older fno-agents without the `claim root` op: the stack file and
+        # the watch are diagnostics with their own budget/parent bounds, so
+        # degrade to the machine-wide default rather than kill the flight.
+        root = Path.home()
     stack_path = root / ".fno" / "flight" / f"stack-{os.getpid()}.txt"
     fh = None
     try:
@@ -217,7 +227,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     if parent_pid is not None and os.getppid() not in (parent_pid, 1):
         parent_pid = None  # an ancestor's pid, not an opt-in by this parent
     start = time.monotonic()
-    claim_file = claim_path(flight.key, root=flight.root or claims_root_for(flight.key))
+    claim_file = claim_path(flight.key, root=root)
 
     def _watch() -> None:
         while claim_file.exists():

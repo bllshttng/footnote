@@ -204,9 +204,8 @@ def test_manifest_liveness_claim_read_error_biased_live(monkeypatch) -> None:
 def test_claim_state_routes_to_global_node_root(monkeypatch) -> None:
     # Regression: a node:/dispatch: claim lives at the GLOBAL claims root, not the
     # per-repo default. Without routing, _claim_state reads `free` from every
-    # worktree and marks a LIVE session dead (would archive its manifest).
-    from fno.claims.io import claims_root_for
-
+    # worktree and marks a LIVE session dead (would archive its manifest). The
+    # native leg does the routing now, so the caller passes no root at all.
     captured = {}
 
     def _fake_status(key, root=None):
@@ -215,7 +214,7 @@ def test_claim_state_routes_to_global_node_root(monkeypatch) -> None:
 
     monkeypatch.setattr("fno.claims.core.claim_status", _fake_status)
     assert orient._claim_state("node:x-1") == "live"
-    assert captured["root"] == claims_root_for("node:x-1")
+    assert captured["root"] is None
 
 
 def test_attended_line_dead_manifest_is_attended(monkeypatch) -> None:

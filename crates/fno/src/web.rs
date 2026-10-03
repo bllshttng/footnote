@@ -1205,11 +1205,6 @@ fn write_guard(headers: &HeaderMap, writable: bool) -> Result<(), (StatusCode, S
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "act", rename_all = "snake_case")]
 enum Act {
-    Field {
-        id: String,
-        field: String,
-        value: String,
-    },
     Rank {
         id: String,
         place: String,
@@ -1237,8 +1232,7 @@ impl Act {
 
 fn act_id(act: &Act) -> &str {
     match act {
-        Act::Field { id, .. }
-        | Act::Rank { id, .. }
+        Act::Rank { id, .. }
         | Act::Blueprint { id }
         | Act::Target { id }
         | Act::Encounter { id, .. } => id,
@@ -1273,21 +1267,6 @@ fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (Statu
             .map(|u| u.reason.clone())
     };
     match act {
-        Act::Field { field, value, .. } => {
-            if let Some(reason) = unavailable(backlog_model::unavailable_features::FIELD_EDITS) {
-                return Err((StatusCode::CONFLICT, reason));
-            }
-            let field = match field.as_str() {
-                "title" => crate::backlog_write::Field::Title,
-                "priority" => crate::backlog_write::Field::Priority,
-                "size" => crate::backlog_write::Field::Size,
-                "status" => crate::backlog_write::Field::Status,
-                other => return Err((StatusCode::BAD_REQUEST, format!("unknown field {other:?}"))),
-            };
-            crate::backlog_write::field_argv(id, field, value, "the web backlog board")
-                .map_err(|e| (StatusCode::BAD_REQUEST, e))
-                .map(Planned::Verb)
-        }
         Act::Rank { place, .. } => {
             if let Some(reason) = unavailable(backlog_model::unavailable_features::CARD_MOVES) {
                 return Err((StatusCode::CONFLICT, reason));
@@ -2421,11 +2400,6 @@ const eq = (got, want, what) => {
 eq(cellHead({column: "Now", total: 12}), "Now 12", "cell head");
 // laneTotal: the lane's whole count from its cells' (uncapped) totals.
 eq(laneTotal({cells: [{total: 3}, {total: 4}, {}]}), 7, "lane total");
-// sessionCommand: attach by agent name, resume by the FULL session id, null when dim.
-eq(sessionCommand({action: "attach", agent: "w1"}), "fno agents attach w1", "attach cmd");
-eq(sessionCommand({action: "resume", session_id: "abcd1234-full-id"}),
-   "fno agents resume abcd1234-full-id", "resume cmd carries the full id");
-eq(sessionCommand({action: "none", reason: "done"}), null, "dim row has no command");
 // mergeBoard: an errors-only answer keeps the last lanes and stamps staleness.
 const last = {lanes: [{key: "p"}], fetched_at: 111};
 const bad = mergeBoard(last, {errors: ["boom"], lanes: []}, 222);
@@ -2438,14 +2412,13 @@ const good = mergeBoard(last, {errors: [], lanes: [{key: "q"}]}, 333);
 eq(good.lanes.length, 1, "a good answer lanes carry");
 eq(good.errors.length, 0, "a good answer clears the errors");
 eq(good.fetched_at, 333, "a good answer is stamped at its fetch time");
-console.log("backlog page helpers: 12 cases ok");
+console.log("backlog page helpers: 9 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cellHead"),
             lift_js_fn(BACKLOG_PAGE, "laneTotal"),
             lift_js_fn(BACKLOG_PAGE, "mergeBoard"),
-            lift_js_fn(BACKLOG_PAGE, "sessionCommand"),
             asserts
         );
         let path =
@@ -2470,7 +2443,7 @@ console.log("backlog page helpers: 12 cases ok");
                 // The end-of-harness marker is the whole verdict.
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 assert!(
-                    stdout.contains("backlog page helpers: 12 cases ok"),
+                    stdout.contains("backlog page helpers: 9 cases ok"),
                     "the shipped backlog helpers did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)
@@ -3252,18 +3225,6 @@ console.log("recent searches: 12 cases ok");
         let inp = backlog_model::fixture(vec![serde_json::json!({
             "id": "x-1", "status": "ready", "priority": "p1"
         })]);
-        // AC4's argv half: a priority act plans the field_argv form.
-        let act = Act::Field {
-            id: "x-1".into(),
-            field: "priority".into(),
-            value: "p1".into(),
-        };
-        match plan_act(&inp, &act) {
-            Ok(Planned::Verb(args)) => {
-                assert_eq!(args, vec!["backlog", "update", "x-1", "--priority", "p1"]);
-            }
-            _ => panic!("a field act plans a verb argv"),
-        }
         // AC9-EDGE: a claimed card refuses a launch, naming the node.
         let claimed = backlog_model::fixture(vec![serde_json::json!({
             "id": "x-2", "status": "in_progress"
@@ -3274,22 +3235,8 @@ console.log("recent searches: 12 cases ok");
             err.1,
             "x-2 is already being worked; open its session instead"
         );
-        // AC10-ERR: an external backend's field-edits reason is the 409 body.
-        let mut github = backlog_model::fixture(vec![serde_json::json!({
-            "id": "x-3", "status": "ready"
-        })]);
-        github.backend = "github".into();
-        let err = plan_act(
-            &github,
-            &Act::Field {
-                id: "x-3".into(),
-                field: "status".into(),
-                value: "done".into(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::CONFLICT);
-        assert_eq!(err.1, "edit it in github");
+        // AC10-ERR: an external backend's field-edits reason is gone with
+        // the field act itself; fields are agent-owned.
         // A failed read is 503; a miss is 404 naming the id; a bad field is
         // 400.
         let mut bad = backlog_model::fixture(Vec::new());
@@ -3311,16 +3258,22 @@ console.log("recent searches: 12 cases ok");
             .0,
             StatusCode::NOT_FOUND
         );
+        // A field POST no longer deserializes: the Act enum has no field
+        // variant, so the act route refuses it as unknown (AC7).
+        let raw = serde_json::json!({
+            "act": "field", "id": "x-1", "field": "color", "value": "blue"
+        });
+        let parsed: Result<Act, _> = serde_json::from_value(raw);
+        assert!(parsed.is_err(), "act field is not an act any more");
         let err = plan_act(
             &inp,
-            &Act::Field {
-                id: "x-1".into(),
-                field: "color".into(),
-                value: "blue".into(),
+            &Act::Rank {
+                id: "x-nope".into(),
+                place: "before".into(),
             },
         )
         .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
     // The route's refusal order over a real listener: guards, token, then
@@ -3361,7 +3314,7 @@ console.log("recent searches: 12 cases ok");
             stream.read_to_string(&mut reply).await.unwrap();
             reply
         }
-        let body = br#"{"act":"field","id":"x-1","field":"priority","value":"p1"}"#;
+        let body = br#"{"act":"rank","id":"x-1","place":"top"}"#;
         // AC6-ERR: a read-only bridge refuses every act.
         let readonly_state = AppState {
             writable: false,

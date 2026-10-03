@@ -930,8 +930,8 @@ def _spawn_worker(
     # sub-second window. A racing dispatcher in that window is refused by the
     # door's own atomic node-handover, so the release cannot double-dispatch.
     if dispatch_reservation is not None:
-        _res_key, _res_holder, _res_root = dispatch_reservation
-        _safe_release(_res_key, _res_holder, _res_root)
+        _res_key, _res_holder = dispatch_reservation
+        _safe_release(_res_key, _res_holder)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=args.env or None
     )
@@ -1512,7 +1512,6 @@ def dispatch_lanes(
             )
             dispatch_key = f"dispatch:{node_id}"
             dispatch_holder = f"advance:{os.getpid()}"
-            dispatch_root = _claims_root_for(dispatch_key)
         except LaneRootError as exc:
             _skip(f"lane-root: {exc}")
             continue
@@ -1530,7 +1529,6 @@ def dispatch_lanes(
                 dispatch_holder,
                 ttl_ms=_DISPATCH_TTL_MS,
                 reason=f"parallel lane dispatch for {node_id}",
-                root=dispatch_root,
             )
         except CLAIM_UNAVAILABLE:
             # Two advance() passes racing this key is ordinary contention,
@@ -1603,7 +1601,7 @@ def dispatch_lanes(
                     verb=node.get("dispatch_verb"),
                     brief=_brief,
                     node=node,
-                    dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
+                    dispatch_reservation=(dispatch_key, dispatch_holder),
                     caller="dispatch_lanes",
                     source=source,
                     events_path=ev_path,
@@ -1648,7 +1646,7 @@ def dispatch_lanes(
             dispatched = True
         finally:
             if not dispatched:
-                _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+                _safe_release(dispatch_key, dispatch_holder)
 
     if report is not None:
         report["dispatched"] = sum(
@@ -1956,37 +1954,23 @@ def _bands_from_graph(graph: _PlanTaskGraph) -> list[str]:
     bands: set[str] = {b for b in graph.wave_bands if b}
     return sorted(bands, key=lambda b: -_BAND_RANK[b])
 
-# Terminal states of the claude harness store (`claude agents --json --all`);
-# anything else (working, blocked, a future spelling) reads as alive.
-_HARNESS_TERMINAL_STATES = {"done", "stopped", "failed"}
-
 # A joiner transcript untouched this long reads idle-dead even when the
 # harness store has no row for it yet (registration can lag the spawn).
 _JOINER_IDLE_WINDOW = 30 * 60
 
 
-def _claude_harness_session_states() -> dict[str, str]:
-    """``{sessionId: state}`` from the claude harness store, else ``{}``.
-
-    Read-only; a missing CLI or an unreadable answer means "unknown" and the
-    caller falls through to the transcript probe.
-    """
-    try:
-        proc = subprocess.run(
-            ["claude", "agents", "--json", "--all"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
+def _claude_harness_session_states(session_ids: list[str]) -> dict[str, str]:
+    """``{sessionId: state}`` from fno's truth probe; absence reads unknown."""
+    if not (ids := [str(s) for s in session_ids if s]):
         return {}
     try:
-        data = json.loads(proc.stdout)
-        rows = data if isinstance(data, list) else data.get("agents", [])
+        cmd = [*_subprocess_util.fno_py_cmd(), "agents", "truth", "--handles", ",".join(ids), "--json"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return {
-            str(r["sessionId"]): str(r.get("state", ""))
-            for r in rows
-            if isinstance(r, dict) and r.get("sessionId")
-        }
-    except (TypeError, ValueError, KeyError):
+            str(k): ("unreachable" if v.get("reachability") == "unreachable" else str(v["state"]))
+            for k, v in json.loads(proc.stdout).items()
+            if isinstance(v, dict) and v.get("state") not in (None, "", "unknown")}
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError, KeyError):
         return {}
 
 
@@ -2030,10 +2014,9 @@ def _live_joiner_names(node_id: str) -> list[str]:
     JOINER itself re-ran join on its own node. But the registry's
     ``status: live`` is a stored field: a crashed daemon leaves it behind and
     a bare read would lock every later join out of the node. So a row counts
-    only when something still answers: the claude harness store lists its
+    only when something still answers: fno's truth probe answers its
     session non-terminally, or its transcript moved inside the idle window.
-    Join spawns are claude-only (the thread substrate), so the claude probes
-    cover every row this guard can collide with.
+    Join spawns are claude-only, so the claude probes cover every row here.
     """
     from fno.paths import agents_registry_path
 
@@ -2057,11 +2040,11 @@ def _live_joiner_names(node_id: str) -> list[str]:
     ]
     if not candidates:
         return []
-    harness_states = _claude_harness_session_states()
+    harness_states = _claude_harness_session_states([sid for _, sid in candidates])
     live = []
     for name, session_id in candidates:
         state = harness_states.get(session_id)
-        if state is not None and state not in _HARNESS_TERMINAL_STATES:
+        if state is not None and state not in ("done", "unreachable"):
             live.append(name)
         elif state is None and _transcript_recently_active(session_id):
             live.append(name)
@@ -2181,7 +2164,7 @@ def _join_node(
     if not plan_raw:
         raise JoinRefuse(4, f"{node_id} has no bound plan")
     claim_key = f"node:{node_id}"
-    status = claim_status(claim_key, root=_claims_root_for(claim_key))
+    status = claim_status(claim_key)
     if status.get("state") != "live":
         raise JoinRefuse(
             2,
@@ -2531,22 +2514,8 @@ def _join_node(
 
 
 # ---------------------------------------------------------------------------
-# Claim helpers (route each key like the `fno agents claim` CLI's _node_aware_root)
+# Claim helpers
 # ---------------------------------------------------------------------------
-
-
-def _claims_root_for(key: str):
-    """Resolve the claims root for a key (delegates to the shared helper).
-
-    Global-id kinds (``node:``/``dispatch:``/``reconcile:``) live in the global
-    ($HOME) root; repo-local keys use the cwd/env default (canonical repo root,
-    honoring FNO_CLAIMS_ROOT). Delegating to fno.claims.io.claims_root_for keeps
-    advance, reconcile_dispatch, spawn-guard, and the `fno agents claim` CLI on ONE
-    routing rule so they cannot drift -- and roots the boot-window dispatch:<id>
-    token globally so cross-repo dispatchers dedup against each other."""
-    from fno.claims.io import claims_root_for
-
-    return claims_root_for(key)
 
 
 def _walker_key() -> str:
@@ -2720,13 +2689,13 @@ def _claim_is_live(
     from fno.claims.verdict import claim_verdicts
 
     try:
-        rows = verdicts or claim_verdicts([key], root=_claims_root_for(key))
+        rows = verdicts or claim_verdicts([key])
         return rows.get(key, {}).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not crash advance
         return False
 
 
-def _safe_release(key: str, holder: str, root) -> None:
+def _safe_release(key: str, holder: str) -> None:
     """Release a claim, swallowing any error.
 
     ``release_claim`` is best-effort by intent but NOT contractually no-raise
@@ -2739,7 +2708,7 @@ def _safe_release(key: str, holder: str, root) -> None:
     from fno.claims.core import release_claim
 
     try:
-        release_claim(key, holder, root=root)
+        release_claim(key, holder)
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("advance: dispatch-reservation release failed for %s: %s", key, exc)
 
@@ -2992,14 +2961,12 @@ def advance(
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"advance:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
             dispatch_key,
             holder,
             ttl_ms=_DISPATCH_TTL_MS,
             reason=f"auto-continue dispatch for {node_id}",
-            root=dispatch_root,
         )
     except CLAIM_UNAVAILABLE:
         return skip("already-claimed", node_id=node_id)
@@ -3033,25 +3000,25 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
-            dispatch_reservation=(dispatch_key, holder, dispatch_root),
+            dispatch_reservation=(dispatch_key, holder),
             caller="advance",
             source=source,
             events_path=ev_path,
             receipt=next_receipt,
         )
     except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         return skip("already-claimed", node_id=node_id)
     except SpawnError as exc:
         # Machine-scoped: skip (row ready, no strike, no defer); else fail.
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         refusal = gate_refusal(exc)
         if refusal is None:
             return failed(node_id, str(exc))
         return skip(refusal.reason, node_id=node_id, detail=refusal.detail,
                     retry_at=refusal.retry_at, exit_code=refusal.exit_code)
     except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
+        _safe_release(dispatch_key, holder)
         return failed(node_id, str(exc))
 
     # 7. Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
@@ -3362,7 +3329,6 @@ def _converge_one(
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"advance:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
             dispatch_key,
@@ -3371,7 +3337,6 @@ def _converge_one(
             reason=f"converge dispatch for {node_id}"
             + (f" (mission {mission})" if mission else "")
             + (f" (dep of {closed_node_id})" if closed_node_id else ""),
-            root=dispatch_root,
         )
     except CLAIM_UNAVAILABLE:
         return skip("already-claimed")
@@ -3399,7 +3364,7 @@ def _converge_one(
                 verb=node_meta.get("dispatch_verb"),
                 brief=_brief,
                 node=node_meta,
-                dispatch_reservation=(dispatch_key, holder, dispatch_root),
+                dispatch_reservation=(dispatch_key, holder),
                 caller="_converge_one",
                 source=source,
                 events_path=ev_path,
@@ -3457,7 +3422,7 @@ def _converge_one(
         )
     finally:
         if not dispatched:
-            _safe_release(dispatch_key, holder, dispatch_root)
+            _safe_release(dispatch_key, holder)
 
 
 def _dispatch_one_dependent(

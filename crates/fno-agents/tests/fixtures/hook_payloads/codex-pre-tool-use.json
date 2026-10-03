@@ -1,0 +1,7 @@
+{
+  "session_id": "0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "cargo test -p fno-agents report_codex" },
+  "cwd": "/Users/bb16/code/footnote/footnote"
+}

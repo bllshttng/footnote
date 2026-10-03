@@ -669,6 +669,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::chats::run_chats(&args[1..]);
     }
 
+    // `mail-threads`: the mux Messages tab's thread read model (see
+    // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
+    // read must work when the daemon is wedged. Hidden from help and from
+    // ALL_CLIENT_ACTIONS, like court-fold.
+    if verb == "mail-threads" {
+        return fno_agents::mail_threads::run_mail_threads(&args[1..]);
+    }
+
     // `update-journal`: the `fno doctor update` lifecycle's one Rust door
     // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
     // lifecycle rows land even when the daemon is wedged, which is the
@@ -982,6 +990,16 @@ async fn run(args: Vec<String>) -> i32 {
     // Starts nothing, so the Stop hook's never-lazy-start promise holds.
     if verb == "registry-json" {
         return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
+    }
+    // sessions-map: the daemon-free session-to-node join the top view reads
+    // (graph sessions rows + node claims, claim precedence). Starts nothing.
+    if verb == "sessions-map" {
+        return fno_agents::session_join::run_sessions_map(&AgentsHome::from_env());
+    }
+    // revival-check: whether a spawn --resume revives an existing row instead
+    // of forking. Starts nothing.
+    if verb == "revival-check" {
+        return fno_agents::revival_check::run_revival_check(&args[1..], &AgentsHome::from_env());
     }
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);

@@ -1,9 +1,12 @@
-"""x-9844 Fix 3: `spawn --resume` revives an exited same-name claude row in place.
+"""x-9844 Fix 3: `spawn --resume` revives an exited claude row in place.
 
 The name-collision check stops refusing the one case that is a revival: an
 exited claude row whose own recorded ``claude_session_uuid`` equals the
 ``--resume`` target. That row is updated in place (new short_id, same uuid)
-instead of refused or duplicated. Everything else stays fail-closed.
+instead of refused or duplicated. The row is found by name first, then by the
+resumed uuid itself, so a row that answers to another name (an adopted
+short-id-named row) revives under the caller's explicit --name and no stale
+second row is left behind. Everything else stays fail-closed.
 
 Coverage:
   - ``_is_revival`` gate: dead+uuid-match -> True; live / mismatch / no-resume /
@@ -42,9 +45,36 @@ def _admit_spawn_gate(monkeypatch):
     and the smoke-pytest shard leave unresolved, so every spawn here refused
     exit 87 before reaching the revival paths under test. Sibling spawn suites
     stub the same seam; the gate's own behavior is covered in
-    test_spawn_gate_agreement.py.
+    test_spawn_gate_agreement.py. The revival answer rides the same runtime:
+    the stub mirrors the binary's predicate (claude, uuid match, not live,
+    by-name wins) against the seeded registry, driven by each test's own
+    session_is_live stub.
     """
     _admitting_gate(monkeypatch)
+
+    def _stub_revival(name, harness, sid):
+        from fno.agents.harnesses import claude as claude_mod
+        from fno.agents.registry import load_registry
+
+        rows = load_registry()
+        named = next((e for e in rows if e.name == name), None)
+        row = named or next(
+            (e for e in rows if e.harness_session_id == sid), None
+        )
+        if row is None:
+            return {"revive": False, "by": None}
+        live = False
+        if row.short_id:
+            live = claude_mod.session_is_live(row.short_id)
+        revive = (
+            harness == "claude"
+            and row.harness == "claude"
+            and row.harness_session_id == sid
+            and not live
+        )
+        return {"revive": revive, "by": "name" if named else "session"}
+
+    monkeypatch.setattr(dispatch, "_revival_answer", _stub_revival)
 
 
 @pytest.fixture
@@ -93,25 +123,6 @@ def _mk(**kw) -> AgentEntry:
     )
     base.update(kw)
     return AgentEntry(**base)
-
-
-def test_is_revival_gate(monkeypatch) -> None:
-    from fno.agents.harnesses import claude as claude_mod
-
-    # Dead supervisor: a --resume that matches the row's own uuid is a revival.
-    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
-    row = _mk()
-    assert dispatch._is_revival(row, "claude", DEAD_UUID) is True
-    assert dispatch._is_revival(row, "claude", None) is False  # no --resume
-    assert dispatch._is_revival(row, "claude", OTHER_UUID) is False  # uuid mismatch
-    assert dispatch._is_revival(row, "codex", DEAD_UUID) is False  # non-claude spawn
-    assert (
-        dispatch._is_revival(_mk(harness="codex"), "claude", DEAD_UUID) is False
-    )  # non-claude row
-
-    # A live supervisor is a collision, never a revival - even with a uuid match.
-    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: True)
-    assert dispatch._is_revival(row, "claude", DEAD_UUID) is False
 
 
 # ---------------------------------------------------------------------------
@@ -183,20 +194,17 @@ def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> 
     assert result.exit_code == 2, result.output
 
 
-def test_spawn_resume_fork_carries_node_and_predecessor(
+def test_spawn_resume_onto_another_named_row_renames_it(
     workdir_claude, monkeypatch
 ) -> None:
-    """x-50d0: a --resume to a NEW name forks a fresh incarnation (the mail-wake
-    rung). The minted row carries the source row's node and records the resumed
-    uuid as a predecessor, so the node-to-session join survives the wake."""
+    """A --resume to a NEW name onto a session that already has a row revives
+    THAT row under the caller's name: the row and the harness title agree, the
+    node carry survives, and the registry keeps one row for the session (never
+    a stale second row the revival left behind)."""
     from fno.agents.cli import agents_app
     from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
-    monkeypatch.setattr(
-        claude_mod, "resolve_session_uuid",
-        lambda short_id: "beefface-2222-3333-4444-555555555555",
-    )
     _seed_row("ac-t-source", "deadbeef", DEAD_UUID, node="x-256c")
 
     result = CliRunner().invoke(
@@ -207,10 +215,12 @@ def test_spawn_resume_fork_carries_node_and_predecessor(
     )
     assert result.exit_code == 0, result.output
 
-    row = next((e for e in load_registry() if e.name == "wake-f8b81903"), None)
-    assert row is not None, "fork must register its own row"
+    rows = load_registry()
+    row = next((e for e in rows if e.name == "wake-f8b81903"), None)
+    assert row is not None, "the revived row takes the caller's name"
     assert row.node == "x-256c"  # the join a wake must not lose
-    assert DEAD_UUID in (row.predecessor_session_ids or [])
+    assert row.harness_session_id == DEAD_UUID  # the uuid stays primary
+    assert not [e for e in rows if e.name == "ac-t-source"], "no stale second row"
 
 
 def test_spawn_resume_fork_explicit_node_wins(workdir_claude, monkeypatch) -> None:

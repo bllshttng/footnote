@@ -47,6 +47,16 @@ const BUILD_IDLE_TAKEOVER: Duration = Duration::from_secs(30);
 fn install_build() -> bool {
     std::env::var_os("FNO_INSTALL_BUILD").is_some_and(|v| v == "1")
 }
+
+/// True when the cargo at these doors is not agent-origin: its env carries
+/// no `FNO_AGENT_SELF`, the same one caller key the spawn brake arms on.
+/// The user typed this build, and law d-705a00a3 says an fno call the user
+/// types is never refused or held by any gate: it admits at once at both
+/// doors, past the tests hold and every queue. Only a spawned worker's
+/// cargo queues.
+fn user_origin() -> bool {
+    !crate::spawn_gate_admission::gate_agent_origin()
+}
 /// Grace window for a SIGTERM to land before escalating to SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
@@ -992,6 +1002,36 @@ fn run_build_admit(args: &[String]) -> i32 {
             return code;
         }
 
+        // The user lane outranks the priority lane: a user-origin build does
+        // not queue at this door at all. It takes a free claim, so agent
+        // waiters then queue behind it; when an agent holds the door it
+        // compiles beside that holder instead of waiting out its crates (law
+        // d-705a00a3). No preempt-release: the holder keeps its claim, so
+        // its next crate queues normally and no third compile starts.
+        if user_origin() {
+            match crate::claims::acquire(
+                BUILD_CLAIM_KEY,
+                &holder,
+                crate::claims::AcquireOpts {
+                    pid: Some(cargo_pid),
+                    reason: Some(
+                        "cargo build; user origin admits at once (law d-705a00a3)".to_string(),
+                    ),
+                    events_dir: Some(worktree.clone()),
+                    ..Default::default()
+                },
+            ) {
+                crate::claims::AcquireOutcome::Acquired(_) => {}
+                crate::claims::AcquireOutcome::HeldByOther { holder: h, .. } => eprintln!(
+                    "cargo admission: user build compiles beside {h}; the user's cargo never waits (law d-705a00a3)"
+                ),
+                crate::claims::AcquireOutcome::Error(e) => {
+                    eprintln!("cargo admission: user build proceeds claimless ({e})")
+                }
+            }
+            return 0;
+        }
+
         let mut wait = CargoWait::new(cargo_pid, &worktree);
         let mut idle = HolderIdle::new();
         // The reason is decided inside the wait (a takeover) but read by opts,
@@ -1308,8 +1348,11 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path) -> Result<(), i32> {
     // says nothing stops fno loading for the user. It never waits at the
     // tests hold and never queues behind worker run slots; it serializes
     // only on the one-at-a-time build:cargo claim, where its lane is
-    // Priority (run_build_admit below).
-    if install_build() {
+    // Priority (run_build_admit below). A user-origin build (no
+    // FNO_AGENT_SELF: the user typed it) holds the same pass, wider: law
+    // d-705a00a3 never holds it at any gate, so it skips the build queue
+    // too (run_build_admit below).
+    if install_build() || user_origin() {
         return Ok(());
     }
     // The tests hold parks the cargo doors instead of failing them: a
