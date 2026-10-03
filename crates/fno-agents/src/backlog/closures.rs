@@ -413,6 +413,7 @@ mod tests {
 
     #[test]
     fn an_orphan_under_a_terminal_parent_is_strandable() {
+        // argv-fence: exempt - graph fixture ids in a Rust test literal, not a worker seed.
         let entries = vec![done("x-dddd"), seed("x-cccc", Some("x-dddd"))];
         assert_eq!(
             strandable_orphan_ids(&entries),
