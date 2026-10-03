@@ -21,7 +21,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.hook_logs_dir` | str (optional) | _(none)_ | never | Override path to hook logs. |
 | `paths.inbox_dir` | str (optional) | _(none)_ | never | Override path to the cross-project messaging inbox dir. |
 | `paths.inbox_path` | str (optional) | _(none)_ | never | Override path to the capture-tier inbox/parking-lot file. |
-| `paths.agents_registry_path` | str (optional) | _(none)_ | never | Override path to the agents registry.json. |
 | `paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
 | `paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
 | `paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
