@@ -73,6 +73,7 @@ mod grid_reconcile;
 mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
+mod open_link;
 mod pane_close;
 mod pane_identity;
 mod pane_release;
@@ -9128,30 +9129,6 @@ impl Core {
         };
         if c.reliable_tx.try_send(ServerMsg::Copy { text }).is_err() {
             eprintln!("fno mux: client {client_id} reliable channel wedged on Copy; dropping it");
-            self.clients.retain(|c| c.id != client_id);
-            self.push_layout(true);
-        }
-    }
-
-    /// Ship a clicked URL to the client that clicked it, mirroring
-    /// [`Self::send_copy`]: only the requesting client, over the reliable
-    /// channel. Re-checks the scheme allowlist so a future caller cannot reach
-    /// the client's opener with an unvetted URL - `link_at` already filters, and
-    /// this is the second lock on the same door.
-    fn send_open_link(&mut self, client_id: u64, url: String) {
-        if !(crate::link::is_openable(&url)
-            || crate::link::is_sender_uri(&url)
-            || crate::link::is_message_uri(&url))
-        {
-            return;
-        }
-        let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
-            return;
-        };
-        if c.reliable_tx.try_send(ServerMsg::OpenLink { url }).is_err() {
-            eprintln!(
-                "fno mux: client {client_id} reliable channel wedged on OpenLink; dropping it"
-            );
             self.clients.retain(|c| c.id != client_id);
             self.push_layout(true);
         }
