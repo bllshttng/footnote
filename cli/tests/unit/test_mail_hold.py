@@ -340,24 +340,15 @@ def test_tidy_lapsed_clears_a_timed_hold_but_never_a_permanent_policy(monkeypatc
     assert cleared == [(HANDLE, None)]
 
 
-# --- Task 4: dedupe ---------------------------------------------------------
+# --- Release rendering -----------------------------------------------------
 
 
 def test_five_identical_held_messages_keep_their_own_headers():
     messages = [_msg(f"msg-{i}", "worker", "same report") for i in range(5)]
-    digest = hold_mod.render_digest(HANDLE, messages, held_for_s=600)
+    digest = hold_mod.render_digest(messages, held_for_s=600)
     assert digest.count("`@worker · msg-") == 5
     assert digest.count("same report") == 5
     assert "(x5 identical, deduped)" not in digest
-
-
-def test_same_body_from_two_senders_is_not_deduped():
-    survivors = hold_mod.dedupe(
-        [_msg("a", "one", "ping"), _msg("b", "two", "ping")]
-    )
-    assert len(survivors) == 2
-
-
 # --- Task 3: the release ----------------------------------------------------
 
 
