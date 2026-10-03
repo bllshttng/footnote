@@ -626,7 +626,7 @@ mod tests {
         // The transcript renders the turn on ONE physical line: the header,
         // then " ⏎ ", then the body. The shape test anchors the closing
         // backtick, never the line's end.
-        let one_line = "`@vellum · fmail-14c3d88e2db5 · New node x-3810 under your x-eff0.` ⏎ New node x-3810 under your x-eff0. The refusal named the guard.";
+        let one_line = "`@vellum · fmail-14c3d88e2db5 · New node filed under your shelf.` ⏎ New node filed under your shelf. The refusal named the guard.";
         assert!(is_header_line(one_line));
         assert_eq!(classify(one_line), Framing::Header);
         assert_eq!(
