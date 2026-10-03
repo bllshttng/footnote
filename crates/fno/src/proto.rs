@@ -372,7 +372,8 @@ fn default_true() -> bool {
 /// peer's field as an unknown-key ignore; a new field's `#[serde(default)]`
 /// keeps old peers reading new placements. Floor stays 58.
 /// v104: `AgentRow` gains the optional daemon-served `compaction_count`; floor stays 58.
-pub const PROTO_VERSION: u32 = 104;
+/// v105: `ClientMsg::PaneInput` addresses user bytes to one pane and adds a delivery result; floor stays 58.
+pub const PROTO_VERSION: u32 = 105;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -559,6 +560,14 @@ pub enum ClientMsg {
     /// `request_id`. Structured values only - the message rides stdin at
     /// the spawn door, never an argv element.
     AgentLaunch(crate::proto::agent_launch::AgentLaunchRequest),
+    /// (v105) User input addressed to one pane. The server replies with
+    /// [`ServerMsg::PaneInputResult`] only after that pane accepts the bytes.
+    PaneInput {
+        request_id: u64,
+        pane: u64,
+        expected_identity: String,
+        bytes: Vec<u8>,
+    },
 }
 
 /// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
@@ -2489,6 +2498,12 @@ pub enum ServerMsg {
         tab_id: TabId,
         pane_ids: Vec<u64>,
         forced: bool,
+    },
+    /// (v105) Delivery result for one addressed [`ClientMsg::PaneInput`].
+    PaneInputResult {
+        request_id: u64,
+        pane_id: u64,
+        result: Result<(), String>,
     },
 }
 

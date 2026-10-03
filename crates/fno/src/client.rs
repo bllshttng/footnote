@@ -1011,6 +1011,8 @@ struct View {
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
     reply_notice_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    next_reply_request_id: u64,
+    pending_reply_journals: HashMap<u64, messages_reply::PendingJournal>,
     /// The row-scoped outcome stamp and its armed action, one at a
     /// time - see [`RowStamp`] / [`RowArm`].
     row_stamp: Option<RowStamp>,
@@ -2021,6 +2023,8 @@ impl View {
             digest: None,
             notice: None,
             reply_notice_tx: None,
+            next_reply_request_id: 1,
+            pending_reply_journals: HashMap::new(),
             row_stamp: None,
             row_arm: None,
             row_slot: None,
@@ -8022,6 +8026,12 @@ async fn attach_and_run(
                     // tab-bar notice takes the full text.
                     view.resolve_row_stamp(&text);
                     view.set_notice(text);
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
+                Ok(ServerMsg::PaneInputResult { request_id, pane_id, result }) => {
+                    messages_reply::input_result(&mut view, request_id, pane_id, result);
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }

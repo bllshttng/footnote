@@ -200,7 +200,7 @@ async fn messages_reply_board_contracts() {
     )];
     assert_eq!(
         super::super::messages_reply::endpoint_pane(&view, "first", "s1"),
-        Some(7),
+        Some((7, "session-uuid".into())),
         "a registry fno_id resolves through its unique participant name"
     );
     view.layout.agents.push(crate::proto::AgentRow {
@@ -222,6 +222,49 @@ async fn messages_reply_board_contracts() {
         super::super::messages_reply::endpoint_pane(&view, "first", "s1"),
         None,
         "ambiguous aliases must not resolve to an arbitrary session"
+    );
+    view.layout.agents.truncate(1);
+    view.layout.panes.truncate(1);
+    super::super::messages_reply::open(
+        &mut view,
+        json!({"id":"m1","from_key":"s-c","to_key":"s1","summary":"Ship it."}),
+    );
+    super::super::messages_reply::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    super::super::messages_reply::keys(&mut view, b"ok", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let (mut reply_writer, mut reply_reader) = tokio::io::duplex(512);
+    super::super::messages_reply::keys(&mut view, b"\r", &mut reply_writer)
+        .await
+        .unwrap();
+    let request = crate::proto::read_msg::<_, crate::proto::ClientMsg>(&mut reply_reader)
+        .await
+        .unwrap();
+    let crate::proto::ClientMsg::PaneInput {
+        request_id,
+        pane,
+        expected_identity,
+        bytes,
+    } = request
+    else {
+        panic!("reply must address one pane and wait for its receipt")
+    };
+    assert_eq!(pane, 7);
+    assert_eq!(expected_identity, "session-uuid");
+    assert!(bytes.ends_with(b"ok\r"));
+    assert_eq!(view.pending_reply_journals.len(), 1);
+    super::super::messages_reply::input_result(
+        &mut view,
+        request_id,
+        pane,
+        Err("pane exited before delivery".into()),
+    );
+    assert!(view.pending_reply_journals.is_empty());
+    assert_eq!(
+        view.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("reply not delivered: pane exited before delivery")
     );
     super::mouse(
         &mut view,

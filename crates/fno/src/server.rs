@@ -573,6 +573,14 @@ pub(crate) enum CoreMsg {
         id: u64,
         bytes: Vec<u8>,
     },
+    PaneInput {
+        id: u64,
+        request_id: u64,
+        pane: u64,
+        expected_identity: String,
+        bytes: Vec<u8>,
+        agents: Result<Vec<RegistryAgent>, &'static str>,
+    },
     Resize {
         id: u64,
         rows: u16,
@@ -9313,6 +9321,50 @@ impl Core {
         rerun_allowed(&self.agents, &self.session_name, pane)
     }
 
+    fn pane_input(
+        &mut self,
+        client_id: u64,
+        pane: u64,
+        expected_identity: &str,
+        bytes: &[u8],
+        agents: Result<Vec<RegistryAgent>, &'static str>,
+    ) -> Result<(), String> {
+        let visible = self
+            .client_view(client_id)
+            .and_then(|view| self.viewed_tab(view))
+            .is_some_and(|tab| crate::tree::leaves(&tab.root).contains(&pane));
+        if !visible {
+            return Err("pane is no longer in the current view".into());
+        }
+        if let Some(&holder) = self.claims.get(&pane) {
+            if pid_alive(holder) {
+                return Err("busy: relay".into());
+            }
+            self.claims.remove(&pane);
+        }
+        // This is direct user input, so it bypasses DND like keyboard input;
+        // the fresh identity check and relay claim still gate the write.
+        match self.pane_send(pane, bytes, false, Some(expected_identity), agents, true) {
+            ServerMsg::Ok => {
+                let scrolled = self.panes.get_mut(&pane).is_some_and(|entry| {
+                    if entry.vt.display_offset() == 0 {
+                        false
+                    } else {
+                        entry.vt.scroll_to_bottom();
+                        true
+                    }
+                });
+                if scrolled {
+                    self.broadcast_pane(pane);
+                }
+                self.input_tail(pane, bytes);
+                Ok(())
+            }
+            ServerMsg::Err { msg, .. } => Err(msg),
+            _ => Err("pane input failed".into()),
+        }
+    }
+
     /// Write `bytes` to `pane`'s PTY. When `guarded`, apply the same authority
     /// as the block-rerun path (idle badge FIRST, then the writer-claim
     /// interlock) immediately before the write - and because the core loop is
@@ -11456,6 +11508,7 @@ impl Core {
         // client); Detach/Gone/Query/etc. are not mutations and pass through.
         let mutating_sender = match &msg {
             CoreMsg::Input { id, .. }
+            | CoreMsg::PaneInput { id, .. }
             | CoreMsg::Command { id, .. }
             | CoreMsg::Mouse { id, .. }
             | CoreMsg::BlockNav { id, .. }
@@ -11547,6 +11600,40 @@ impl Core {
                     }
                     // Touch telemetry, the attended hold, the submit witness.
                     self.input_tail(focus, &bytes);
+                }
+                Flow::Continue
+            }
+            CoreMsg::PaneInput {
+                id,
+                request_id,
+                pane,
+                expected_identity,
+                bytes,
+                agents,
+            } => {
+                let result = self.pane_input(id, pane, &expected_identity, &bytes, agents);
+                let failed = self
+                    .clients
+                    .iter()
+                    .find(|client| client.id == id)
+                    .is_some_and(|client| {
+                        let failed = client
+                            .reliable_tx
+                            .try_send(ServerMsg::PaneInputResult {
+                                request_id,
+                                pane_id: pane,
+                                result,
+                            })
+                            .is_err();
+                        if !failed {
+                            client.notify.notify_one();
+                        }
+                        failed
+                    });
+                if failed {
+                    eprintln!("fno mux: client {id} reliable channel wedged on PaneInputResult; dropping it");
+                    self.clients.retain(|client| client.id != id);
+                    self.push_layout(true);
                 }
                 Flow::Continue
             }

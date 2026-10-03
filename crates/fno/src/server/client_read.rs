@@ -15,6 +15,28 @@ pub(super) async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<Co
                     break;
                 }
             }
+            Ok(ClientMsg::PaneInput {
+                request_id,
+                pane,
+                expected_identity,
+                bytes,
+            }) => {
+                let agents = read_guard_agents_for_send().await;
+                if core_tx
+                    .send(CoreMsg::PaneInput {
+                        id,
+                        request_id,
+                        pane,
+                        expected_identity,
+                        bytes,
+                        agents,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMsg::Resize { rows, cols }) => {
                 if core_tx
                     .send(CoreMsg::Resize { id, rows, cols })

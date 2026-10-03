@@ -31,6 +31,14 @@ pub(super) struct ReplyState {
     esc: Vec<u8>,
 }
 
+pub(super) struct PendingJournal {
+    pane: u64,
+    to: String,
+    session: String,
+    message: String,
+    body: String,
+}
+
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
     row.get(field).and_then(Value::as_str).unwrap_or("")
 }
@@ -126,11 +134,16 @@ pub(super) fn paint(view: &View, cells: &mut [Cell], rows: usize, cols: usize) {
     }
 }
 
-pub(super) fn endpoint_pane(view: &View, target_name: &str, target_session: &str) -> Option<u64> {
+pub(super) fn endpoint_pane(
+    view: &View,
+    target_name: &str,
+    target_session: &str,
+) -> Option<(u64, String)> {
     let visible_pane = |agent: &crate::proto::AgentRow| {
-        agent
+        let pane = agent
             .pane_id
-            .filter(|id| view.layout.panes.iter().any(|(pane, _)| pane == id))
+            .filter(|id| view.layout.panes.iter().any(|(visible, _)| visible == id))?;
+        Some((pane, agent.effective_identity()?.to_string()))
     };
     let mut exact = view
         .layout
@@ -216,7 +229,9 @@ pub(super) async fn keys(
                         break;
                     }
                     SearchKey::Byte(b'\r' | b'\n') => {
-                        let Some(pane) = endpoint_pane(view, &target.name, &target.session) else {
+                        let Some((pane, expected_identity)) =
+                            endpoint_pane(view, &target.name, &target.session)
+                        else {
                             view.set_notice(format!(
                                 "reply: {} has no pane on screen; open a portal first",
                                 target.name
@@ -226,28 +241,35 @@ pub(super) async fn keys(
                         if body.trim().is_empty() {
                             break;
                         }
-                        write_msg(sock, &ClientMsg::Command(Command::FocusPane(pane)))
-                            .await
-                            .map_err(|e| format!("reply focus failed: {e}"))?;
+                        let request_id = view.next_reply_request_id;
+                        view.next_reply_request_id =
+                            view.next_reply_request_id.wrapping_add(1).max(1);
                         let mut input = body.as_bytes().to_vec();
                         input.push(b'\r');
-                        write_msg(sock, &ClientMsg::Input(input))
-                            .await
-                            .map_err(|e| format!("reply input failed: {e}"))?;
-                        let (to, sid, msg, sent) = (
-                            target.name.clone(),
-                            target.session.clone(),
-                            state.message.clone(),
-                            body.clone(),
+                        // A bus reply is a delivery claim; journal only after
+                        // the server acknowledges this exact pane write.
+                        write_msg(
+                            sock,
+                            &ClientMsg::PaneInput {
+                                request_id,
+                                pane,
+                                expected_identity,
+                                bytes: input,
+                            },
+                        )
+                        .await
+                        .map_err(|e| format!("reply input send failed: {e}"))?;
+                        view.pending_reply_journals.insert(
+                            request_id,
+                            PendingJournal {
+                                pane,
+                                to: target.name.clone(),
+                                session: target.session.clone(),
+                                message: state.message.clone(),
+                                body: body.clone(),
+                            },
                         );
-                        let notice_tx = view.reply_notice_tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(reason) = journal_reply(&to, &sid, &msg, &sent).await {
-                                if let Some(tx) = notice_tx {
-                                    let _ = tx.send(format!("reply journal failed: {reason}"));
-                                }
-                            }
-                        });
+                        view.set_notice(format!("reply to {} sending", target.name));
                         close = true;
                         break;
                     }
@@ -308,6 +330,42 @@ async fn journal_reply(to: &str, sid: &str, msg: &str, body: &str) -> Result<(),
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
+}
+
+pub(super) fn input_result(
+    view: &mut View,
+    request_id: u64,
+    pane: u64,
+    result: Result<(), String>,
+) {
+    let Some(pending) = view.pending_reply_journals.remove(&request_id) else {
+        return;
+    };
+    if pending.pane != pane {
+        view.set_notice("reply delivery receipt named a different pane".into());
+        return;
+    }
+    let Err(reason) = result else {
+        let PendingJournal {
+            to,
+            session,
+            message,
+            body,
+            ..
+        } = pending;
+        let notice_to = to.clone();
+        let notice_tx = view.reply_notice_tx.clone();
+        tokio::spawn(async move {
+            if let Err(reason) = journal_reply(&to, &session, &message, &body).await {
+                if let Some(tx) = notice_tx {
+                    let _ = tx.send(format!("reply journal failed: {reason}"));
+                }
+            }
+        });
+        view.set_notice(format!("reply delivered to {notice_to}"));
+        return;
+    };
+    view.set_notice(format!("reply not delivered: {reason}"));
 }
 
 /// The peek overlay's established key path lives here alongside reply input.
