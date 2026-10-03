@@ -191,8 +191,8 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
             "active Codex goal owner must derive from crown scope: expected {expected_owner:?}, got {owner:?}"
         ));
     }
-    let expected_objective = crate::codex_thread::reign_objective(&scope);
-    if live.objective != expected_objective {
+    if !crate::codex_thread::is_lead_objective(&live.objective, &scope) {
+        let expected_objective = crate::codex_thread::lead_objective(&scope);
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected objective {expected_objective:?}, got {:?}",
             live.objective
@@ -245,8 +245,8 @@ fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -
                 "active goal truth cannot be verified: manifest scope is missing".into(),
             );
         };
-        let expected = crate::codex_thread::reign_objective(&scope);
-        if goal.objective != expected {
+        if !crate::codex_thread::is_lead_objective(&goal.objective, &scope) {
+            let expected = crate::codex_thread::lead_objective(&scope);
             return GoalArbitration::Refusal(format!(
                 "conflicting goal truth: expected objective {expected:?}, got {:?}",
                 goal.objective
