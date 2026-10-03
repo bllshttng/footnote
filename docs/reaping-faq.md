@@ -32,6 +32,20 @@ rg '"type":"retire_holds"' ~/.fno/agents/events.jsonl
 
 A tick with zero holds writes no `retire_holds` row, so silence is the zero-reading.
 
+## Who decides a session is live
+
+**fno's rows decide. The vendor only checks.** Ruling d-e096c669 (2026-10-01) set the order. fno holds the provenance, so every attach, restore, liveness, and reap path reads fno's own evidence first. A vendor surface can confirm a decided verdict or raise a drift event. It never decides alone, and its silence never blocks fno.
+
+**The one door is `crates/fno-agents/src/row_verdict.rs`.** `fno_verdict` reads fno's evidence in this order:
+
+- a terminal registry status or finalize outcome
+- an `inside_leg` report inside its TTL
+- a recorded pid the ESRCH probe proves gone
+- a live pid
+- else `Unknown`
+
+`reconcile` folds a vendor word in. A vendor word turns an `Unknown` into a verdict. A word that disagrees with a decided verdict keeps fno's verdict and names the disagreement. The reentry revive gate, the gc and rm death proofs, the liveness sweep, and the worked fold read through it (`reentry.rs`, `gc_sweep.rs`, `daemon/roster_death.rs`, `liveness_sweep.rs`, `backlog/worked.rs`). The Python legs in `advance.py` and `watchdog.py` read fno's truth probe and registry spine, with the vendor roster demoted to a state column.
+
 ## Why is my finished worker still on the roster
 
 Three keeps used to hold finished rows with no way out. Each now reads a live reason, and each keeps refusing a specific wrong answer.

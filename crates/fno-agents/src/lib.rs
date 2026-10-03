@@ -49,6 +49,7 @@ pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
 pub(crate) mod adopt_carry;
+pub(crate) mod adopt_identity;
 mod agent_lock;
 pub mod agents_config;
 pub(crate) mod agents_event;
@@ -208,6 +209,7 @@ pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
 pub mod intel_insights;
+pub mod intel_rollup;
 pub mod interrupt_classify;
 pub mod json_output;
 pub(crate) mod keeper_revival;
@@ -216,6 +218,7 @@ pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_checkin_blueprint;
+pub mod king_checkin_lineup;
 pub mod king_checkin_machine;
 pub mod king_escalation;
 pub mod king_history;
@@ -254,6 +257,7 @@ pub mod mail_envelope;
 pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod mail_threads;
 pub mod main_ci;
 pub mod main_ci_proof;
 pub mod manifest;
@@ -358,6 +362,7 @@ pub mod resume_wake;
 pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod revival_check;
 pub mod revive_proof;
 pub mod rm_receipt;
 pub mod rm_tombstone;
@@ -384,6 +389,7 @@ pub(crate) mod served_liveness;
 pub mod session_activity;
 pub mod session_backfill;
 pub mod session_cost;
+pub mod session_join;
 pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
@@ -1397,6 +1403,10 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // Reconcile's post-close emits (the Python twins declared both in
+    // events/schema.yaml; session_satisfied carries the pr_merge data source).
+    "session_satisfied",
+    "human_touch",
     // The pr-watch sweep flipped an open fno-bound draft PR back to ready
     // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
     "pr_watch_draft_flip",
@@ -1416,6 +1426,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // A launch the spawn gate or the dispatch door refused before any
     // worker existed; the feed projects it so a refused launch shows.
     "agent_spawn_refused",
+    // A reaped session came back (client-emitted): one event per revive
+    // naming the verb, the actor session, the prior name and the session id.
+    "agent_revived",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
@@ -1431,6 +1444,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",
     "agent_exited",
+    // The sweep's observed lifecycle word for an owned row: one row per
+    // applied status transition (exit or restart) with its evidence cause
+    // (ruling d-e096c669), so an exit or a restart is never silent again.
+    "row_lifecycle_observed",
     "agent_removed",
     // Served facts (daemon-emitted): the sweep is the only writer of the
     // registry's measured surfaces, so each of these announces a change that

@@ -23,6 +23,23 @@ from pathlib import Path
 from typing import Any
 
 
+def fno_cmd() -> list[str]:
+    """Resolve the `fno` mux binary (the Rust CLI) as an argv prefix, for the
+    verbs whose engine is native (the mux owns `fno backlog` outright). Same
+    resolution shape as [`fno_py_cmd`]: PATH first, then the sibling of the
+    running interpreter, then the bare name so a missing mux surfaces a real
+    subprocess error rather than a silent no-op.
+    """
+    found = shutil.which("fno")
+    if found:
+        return [found]
+    if sys.executable:
+        sibling = Path(sys.executable).parent / "fno"
+        if sibling.exists():
+            return [str(sibling)]
+    return ["fno"]
+
+
 def fno_py_cmd() -> list[str]:
     """Resolve the `fno-py` console script (the Python CLI) as an argv prefix for
     Python self-shellouts, robust to PATH.

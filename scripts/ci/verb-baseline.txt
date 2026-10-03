@@ -55,7 +55,6 @@ backlog done
 backlog get
 backlog next
 backlog queued
-backlog reconcile
 bundle
 carveout
 claim

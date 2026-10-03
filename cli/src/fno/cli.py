@@ -292,7 +292,7 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "agents": {"ask", "list", "logs", "loop", "loop-check", "needs", "resume", "rm", "spawn"},
     "annotate": {"list"},
     "approvals": set(),
-    "backlog": {"advance", "done", "get", "next", "queued", "reconcile"},
+    "backlog": {"advance", "done", "get", "next", "queued"},
     "bundle": set(),
     "carveout": set(),
     "claim": {"release"},

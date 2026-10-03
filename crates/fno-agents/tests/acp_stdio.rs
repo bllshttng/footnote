@@ -315,7 +315,16 @@ fn writing_after_child_exit_reports_the_exit_code_and_stderr() {
     .unwrap();
     thread::sleep(Duration::from_millis(50));
 
-    let error = session.request("initialize", json!({})).unwrap_err();
+    // A loaded runner can start the child late: the request may win the race
+    // against the exit, so poll until the pipe actually breaks (5s deadline).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let error = loop {
+        let err = session.request("initialize", json!({})).unwrap_err();
+        if matches!(&err, AcpError::BrokenPipe { .. }) || std::time::Instant::now() > deadline {
+            break err;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
 
     assert!(matches!(&error, AcpError::BrokenPipe { .. }));
     assert_eq!(error.exit_code(), 7);

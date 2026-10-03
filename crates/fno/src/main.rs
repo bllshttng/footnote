@@ -64,6 +64,10 @@ enum Role {
     /// `fno uninstall`: native, because it removes the Python wheel it would
     /// otherwise forward to.
     Uninstall(fno::uninstall::Opts),
+    /// `fno config setup auto-wire`: detect agent CLIs on PATH and wire the
+    /// fno plugin into each. Native, because it must answer before the wheel
+    /// exists on a mid-install machine and forwards would 127 there.
+    SetupAutowire,
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
@@ -254,6 +258,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::law_cli::classify_inbox_decide(args) {
         return Role::InboxDecide(rest);
     }
+    if fno::setup_autowire::classify(args).is_some() {
+        return Role::SetupAutowire;
+    }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
         FrontDoor::Usage { message } => {
@@ -408,6 +415,7 @@ fn main() {
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
         Role::Uninstall(opts) => std::process::exit(fno::uninstall::run_uninstall(opts)),
+        Role::SetupAutowire => std::process::exit(fno::setup_autowire::run()),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(kill_req) => {
             if kill_req.stale_idle || kill_req.all {

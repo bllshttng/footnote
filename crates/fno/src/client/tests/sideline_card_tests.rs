@@ -47,7 +47,7 @@ fn card_highlight_snapshot(view: &View, frame: &Frame, agent_i: usize, detail_i:
     [agent_i, detail_i, detail_i + 1]
         .into_iter()
         .map(|display_i| {
-            let row = display_i - offset;
+            let row = display_i - offset + 1; // the strip row owns row 0
             frame.cells[row * cols..row * cols + text_w]
                 .iter()
                 .map(|cell| if cell.bg != Color::Default { '#' } else { '.' })
@@ -64,7 +64,7 @@ fn card_pair_cells(view: &View, frame: &Frame, agent_i: usize, detail_i: usize) 
     [agent_i, detail_i, detail_i + 1]
         .into_iter()
         .flat_map(|display_i| {
-            let row = display_i - offset;
+            let row = display_i - offset + 1; // the strip row owns row 0
             frame.cells[row * cols..row * cols + text_w].iter().cloned()
         })
         .collect()
@@ -204,7 +204,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("x-4310"), "{text:?}");
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
     assert!(text.contains("3h · 36s"), "{text:?}");
-    let head = text.lines().next().unwrap_or_default();
+    let head = text.lines().nth(1).unwrap_or_default(); // under the strip row
     assert!(
         head.contains("node · PR") && !head.contains("last msg"),
         "the card head names the card's own cells: {head:?}"
@@ -283,7 +283,7 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     v.sideline_width = 80;
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let line = row_text(&frame, row, v.sideline_paint_w() - 1);
     assert!(line.contains("x-4310 · #42"), "adjacent identity: {line:?}");
     let col = line.chars().position(|c| c == 'x').expect("node painted") as u16 + 2;
@@ -439,7 +439,7 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
         _ => (None, None),
     };
     for display_i in [agent_i, detail_i, detail_i + 1] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
             .iter()
             .enumerate()
@@ -520,7 +520,7 @@ fn chosen_card_paints_accent_across_both_lines() {
         _ => (None, None),
     };
     for display_i in [agent_i, detail_i, detail_i + 1] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
             .iter()
             .enumerate()
@@ -555,7 +555,7 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
     for display_i in [agent_i, detail_i, detail_i + 1] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, band_bg, "the band wins on hover");
         }
@@ -584,7 +584,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
     for display_i in [agent_i, detail_i, detail_i + 1] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, v.theme.sel, "the band is the sel surface");
             assert_ne!(cell.fg, v.theme.needs_you, "no signal fills a banded row");
@@ -604,8 +604,8 @@ fn card_pr_and_created_activity_ages_keep_right_side_fields() {
     let offset = v.sideline_offset();
     let cols = frame.cols as usize;
     let width = v.sideline_paint_w() - 1;
-    let agent_row = agent_i - offset;
-    let detail_row = detail_i - offset;
+    let agent_row = agent_i - offset + 1; // the strip row owns row 0
+    let detail_row = detail_i - offset + 1;
     let agent_cells = &frame.cells[agent_row * cols..agent_row * cols + width];
     let detail_cells = &frame.cells[detail_row * cols..detail_row * cols + width];
     let pr_end = agent_cells
@@ -637,7 +637,7 @@ fn regular_card_snapshot_shows_a_pr_when_it_fits() {
     v.term = (30, 140);
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
 
@@ -658,7 +658,7 @@ fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
     v.term = (30, 140);
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
     let cols = frame.cols as usize;
@@ -843,12 +843,12 @@ fn composed_bands_hold_contrast_on_dark_and_light_frames() {
     let mut chosen_cells: Vec<crate::proto::Cell> = Vec::new();
     let mut hover_cells: Vec<crate::proto::Cell> = Vec::new();
     for display_i in [agent_i, detail_i, detail_i + 1] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         chosen_cells.push(frame.cells[row * cols]);
         chosen_cells.push(frame.cells[row * cols + text_w - 1]);
     }
     for display_i in [king_i, king_detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         hover_cells.push(frame.cells[row * cols]);
         hover_cells.push(frame.cells[row * cols + text_w - 1]);
     }
@@ -923,7 +923,7 @@ fn unhighlighted_rows_read_on_a_light_terminal() {
     let frame = v.compose();
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
-    let row = detail_i - v.sideline_offset();
+    let row = detail_i - v.sideline_offset() + 1; // the strip row owns row 0
     let cells = &frame.cells[row * cols..row * cols + text_w];
     let painted = cells.iter().filter(|c| c.c != ' ').count();
     assert!(painted > 0, "detail row has text");

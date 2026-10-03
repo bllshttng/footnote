@@ -101,10 +101,13 @@ impl View {
     /// Rows of chrome the full-screen sideline paints under (the tab strip),
     /// so the click mappers invert the same offset the painter used.
     pub(super) fn sideline_top(&self) -> usize {
+        // The strip row (`Agents  Messages`) owns the first painted row in
+        // every view, so the content region starts one row down. Full-screen
+        // composes below the tab strip, normal mode at the slice's row 0.
         if self.sideline_full {
-            TAB_BAR_ROWS as usize
+            (TAB_BAR_ROWS as usize) + 1
         } else {
-            0
+            1
         }
     }
 
@@ -145,6 +148,7 @@ impl View {
         // only reserves a row it can spare - a region down to its last row
         // keeps that row as list, never as chrome (the court rule).
         let rows = (self.term.0 as usize)
+            .saturating_sub(1) // the strip row
             .saturating_sub(self.bottom_row_is_chrome() as usize)
             .saturating_sub(self.court_block_rows())
             .saturating_sub(self.questions_block_rows());
@@ -191,11 +195,12 @@ impl View {
         // raw region `sideline_visible_rows` starts from, so a list that
         // exactly fits never reads as pinned here.
         let list_rows = (self.term.0 as usize)
+            .saturating_sub(1) // the strip row
             .saturating_sub(self.court_block_rows())
             .saturating_sub(self.questions_block_rows());
         let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
         let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
-        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(1) {
+        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(2) {
             return self
                 .painted_rows()
                 .iter()
@@ -206,6 +211,44 @@ impl View {
             return Some(i);
         }
         None
+    }
+
+    /// The strip row's words with their column spans, shared by the paint
+    /// and the click map so the two cannot drift (R15).
+    pub(super) fn top_row_spans(&self) -> Vec<(usize, usize, crate::view_store::SidelineView)> {
+        let words = [
+            ("Agents", crate::view_store::SidelineView::Agents),
+            ("Messages", crate::view_store::SidelineView::Messages),
+        ];
+        let mut out = Vec::new();
+        let mut c = 2usize;
+        for (word, view) in words {
+            let w = word.chars().count();
+            out.push((c, w, view));
+            c += w + 3;
+        }
+        out
+    }
+
+    /// Paint the strip row at the slice's row 0: `Agents  Messages`, the
+    /// current view's word bold.
+    pub(super) fn paint_top_row(&self, cells: &mut [Cell], cols: usize, text_w: usize) {
+        let limit = text_w.min(cols.saturating_sub(1));
+        for (start, _, view) in self.top_row_spans() {
+            let active = self.sideline_view == view;
+            for (i, ch) in format!("{view:?}").chars().enumerate() {
+                let col = start + i;
+                if col >= limit {
+                    break;
+                }
+                cells[col] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: if active { cell_flags::BOLD } else { 0 },
+                };
+            }
+        }
     }
 
     pub(super) fn draw_sideline(
@@ -220,17 +263,24 @@ impl View {
                                   // second border, the cursor row wearing the sideline band. The
                                   // divider paints as in the agents view, then the agent path stops.
         if self.sideline_view != crate::view_store::SidelineView::Agents {
+            // The strip row owns row 0 (R15) unless a board claims it: the
+            // Org board paints rows 1 and below, the docked backlog board
+            // frames its filter bar at row 0 and wins.
+            self.paint_top_row(cells, cols, text_w);
             if self.sideline_view == crate::view_store::SidelineView::Org {
                 if !self.board_full {
                     org_board::paint(
                         self,
-                        cells,
-                        rows,
+                        &mut cells[cols..],
+                        rows - 1,
                         cols,
                         text_w,
-                        rows.saturating_sub(self.bottom_row_is_chrome() as usize),
+                        rows.saturating_sub(self.bottom_row_is_chrome() as usize) - 1,
                     );
                 }
+            } else if self.sideline_view == crate::view_store::SidelineView::Messages {
+                // A full-surface view: the compose overlay paints it across
+                // the whole terminal, so the column keeps only the strip.
             } else if let Some(b) = &self.backlog_board {
                 if !self.board_full {
                     let chrome_rows = self.bottom_row_is_chrome() as usize;
@@ -239,7 +289,7 @@ impl View {
                         cells,
                         rows,
                         cols,
-                        (0, 0, rows - chrome_rows, text_w),
+                        (0, 1, rows - chrome_rows - 1, text_w),
                         self.input_owner() == super::region_focus::RegionOwner::Board,
                         &self.theme,
                     );
@@ -306,14 +356,14 @@ impl View {
         // the terminal minus the bottom chrome row; the widget area must
         // answer to the same height, or the render-time scroll lands the
         // selected row under the chrome that paints over it.
-        let table_rows_n = list_rows.saturating_sub(chrome_rows);
-        // The sticky menu row (h): when the rows overflow the region, the
-        // menu/add-workspace footer pins directly above the questions block
-        // and the widget area gives up its last row, so the footer is never
-        // covered and the rows scroll to their true end above it. A region
-        // down to one row keeps that row as list, never as footer. The pinned
-        // copy yields while the in-list NewSquad row is inside the visible
-        // window - one instance of the label in every scroll state.
+        let table_rows_n = list_rows.saturating_sub(chrome_rows).saturating_sub(1); // strip row
+                                                                                    // The sticky menu row (h): when the rows overflow the region, the
+                                                                                    // menu/add-workspace footer pins directly above the questions block
+                                                                                    // and the widget area gives up its last row, so the footer is never
+                                                                                    // covered and the rows scroll to their true end above it. A region
+                                                                                    // down to one row keeps that row as list, never as footer. The pinned
+                                                                                    // copy yields while the in-list NewSquad row is inside the visible
+                                                                                    // window - one instance of the label in every scroll state.
         let sticky_footer = table_rows_n > 1 && display.len() > table_rows_n;
         let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
@@ -327,8 +377,9 @@ impl View {
         let area = RtRect::new(0, 0, text_w as u16, rows as u16);
         let mut buf = RtBuffer::empty(area);
         // The widget area is the top slice of the column; the dock paints
-        // into the same Buffer below it, before the one blit.
-        let table_area = RtRect::new(0, 0, text_w as u16, table_h as u16);
+        // into the same Buffer below it, before the one blit. The strip row
+        // is painted AFTER this blit (it owns row 0, which the blit wipes).
+        let table_area = RtRect::new(0, 1, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
         let mut st = self
@@ -366,6 +417,9 @@ impl View {
             self.sideline_state.set(st);
         }
         crate::ratatui_blit::blit(&buf, cells, cols);
+        // The strip row owns row 0 (R15), so its words go down after the
+        // one blit that would otherwise erase them.
+        self.paint_top_row(cells, cols, text_w);
         let mut card_index = if card {
             display[..off.min(display.len())]
                 .iter()
@@ -387,8 +441,8 @@ impl View {
         // de-inverts under the cursor. Card mode clears the Table's selection
         // style; its Agent and CardDetail rows use one paired overlay here.
         for (i, drow) in display.iter().enumerate().skip(off) {
-            let r = i - off;
-            if r >= table_h {
+            let r = i - off + 1; // content paints under the strip row
+            if r > table_h {
                 break;
             }
             let mark_caret = matches!(
@@ -1164,6 +1218,15 @@ pub(super) async fn route_mouse(
         }
         MouseKind::Press(MouseButton::Left) => {
             let top = view.sideline_top() as u16;
+            if rep.row + 1 == top {
+                // The strip row: only its words act (R15).
+                let pw = view.sideline_paint_w().max(1) as u16;
+                let col = rep.col.min(pw.saturating_sub(2));
+                if let Some(hit) = view.chrome_hit(rep.row, col) {
+                    apply_hit(view, hit, sock_w).await?;
+                }
+                return Ok(());
+            }
             if rep.row < top {
                 return Ok(());
             }

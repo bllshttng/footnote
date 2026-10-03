@@ -1374,7 +1374,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             else:
                 skipped_no_sid += 1
             continue
-        match: Any = by_sid.get(sid)
+        match: Any = by_sid.pop(sid, None)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
         cwd = str(r.get("cwd") or getattr(match, "cwd", "") or "")
         state, state_warning = _row_state(r)
@@ -1395,6 +1395,21 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             cwd=cwd,
             agent="claude",
             stopped_at=(getattr(match, "stop", None) or {}).get("at"),
+        ))
+    for sid, entry in by_sid.items():  # fno-first: vendor-omitted rows list (d-e096c669)
+        state, state_warning = _row_state({"status": str(getattr(entry, "status", "") or "")})
+        if state_warning:
+            unmapped_states.add(state_warning)
+        cwd = str(getattr(entry, "cwd", "") or "")
+        node = getattr(entry, "node", None)
+        if node is None and _is_linked_worktree(cwd):
+            node = _node_id_from_worktree(cwd)
+        out.append(Row(
+            row_id=sid, name=str(getattr(entry, "name", None) or sid),
+            state=state, node=node, cwd=cwd, agent="claude",
+            pid=getattr(entry, "pid", None), pid_start_time=getattr(entry, "pid_start_time", None),
+            mux=getattr(entry, "mux", None),
+            stopped_at=(getattr(entry, "stop", None) or {}).get("at"),
         ))
     from fno.agents.spawn_gate import LIVE_STATUSES
 

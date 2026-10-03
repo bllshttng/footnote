@@ -592,8 +592,9 @@ def test_a_long_note_warns_and_still_lands(probe):
     result = probe("backlog", "note", "zz-0001", _words(400), "-q")
     assert result.returncode == 0, result.stderr
     assert "400" in result.stderr
-    state = [e for e in _entries(probe) if e["id"] == "zz-0001"][0]["current_state"]
-    assert len(state["body"].split()) == 400
+    row = [e for e in _entries(probe) if e["id"] == "zz-0001"][0]
+    body = row["progress_notes"][-1]["text"]
+    assert len(body.split()) == 400
 
 
 def test_an_ordinary_note_says_nothing(probe):

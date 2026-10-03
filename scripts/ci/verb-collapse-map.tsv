@@ -98,8 +98,10 @@ agents recover	T1	agents recover	0
 agents reign-ledger	T1	agents reign-ledger	0
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
-agents registry-repair	T1	agents registry-repair	4	
+agents registry-repair	T1	agents registry-repair	4
 agents rename	T1	agents rename	0
+agents revival-check	T1	agents revival-check	1
+agents sessions-map	T1	agents sessions-map	1
 agents report	T1	agents report	3
 agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
@@ -211,7 +213,6 @@ backlog queue	T1	backlog queue	1
 backlog queued	KEEP	backlog queued	1	ruled KEEP: read-back half of the live backlog queue path
 backlog rank	T1	backlog rank	20
 backlog ready	T1	backlog ready	21
-backlog reconcile	KEEP	backlog reconcile	44	deliberate readability slack for a high-traffic distinct operation
 backlog reconcile-findings	T1	backlog reconcile-findings	0
 backlog relatedness build	T1	backlog relatedness build	0
 backlog relatedness get	T1	backlog relatedness get	0

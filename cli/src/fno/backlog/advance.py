@@ -1954,37 +1954,23 @@ def _bands_from_graph(graph: _PlanTaskGraph) -> list[str]:
     bands: set[str] = {b for b in graph.wave_bands if b}
     return sorted(bands, key=lambda b: -_BAND_RANK[b])
 
-# Terminal states of the claude harness store (`claude agents --json --all`);
-# anything else (working, blocked, a future spelling) reads as alive.
-_HARNESS_TERMINAL_STATES = {"done", "stopped", "failed"}
-
 # A joiner transcript untouched this long reads idle-dead even when the
 # harness store has no row for it yet (registration can lag the spawn).
 _JOINER_IDLE_WINDOW = 30 * 60
 
 
-def _claude_harness_session_states() -> dict[str, str]:
-    """``{sessionId: state}`` from the claude harness store, else ``{}``.
-
-    Read-only; a missing CLI or an unreadable answer means "unknown" and the
-    caller falls through to the transcript probe.
-    """
-    try:
-        proc = subprocess.run(
-            ["claude", "agents", "--json", "--all"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
+def _claude_harness_session_states(session_ids: list[str]) -> dict[str, str]:
+    """``{sessionId: state}`` from fno's truth probe; absence reads unknown."""
+    if not (ids := [str(s) for s in session_ids if s]):
         return {}
     try:
-        data = json.loads(proc.stdout)
-        rows = data if isinstance(data, list) else data.get("agents", [])
+        cmd = [*_subprocess_util.fno_py_cmd(), "agents", "truth", "--handles", ",".join(ids), "--json"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return {
-            str(r["sessionId"]): str(r.get("state", ""))
-            for r in rows
-            if isinstance(r, dict) and r.get("sessionId")
-        }
-    except (TypeError, ValueError, KeyError):
+            str(k): ("unreachable" if v.get("reachability") == "unreachable" else str(v["state"]))
+            for k, v in json.loads(proc.stdout).items()
+            if isinstance(v, dict) and v.get("state") not in (None, "", "unknown")}
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError, KeyError):
         return {}
 
 
@@ -2028,10 +2014,9 @@ def _live_joiner_names(node_id: str) -> list[str]:
     JOINER itself re-ran join on its own node. But the registry's
     ``status: live`` is a stored field: a crashed daemon leaves it behind and
     a bare read would lock every later join out of the node. So a row counts
-    only when something still answers: the claude harness store lists its
+    only when something still answers: fno's truth probe answers its
     session non-terminally, or its transcript moved inside the idle window.
-    Join spawns are claude-only (the thread substrate), so the claude probes
-    cover every row this guard can collide with.
+    Join spawns are claude-only, so the claude probes cover every row here.
     """
     from fno.paths import agents_registry_path
 
@@ -2055,11 +2040,11 @@ def _live_joiner_names(node_id: str) -> list[str]:
     ]
     if not candidates:
         return []
-    harness_states = _claude_harness_session_states()
+    harness_states = _claude_harness_session_states([sid for _, sid in candidates])
     live = []
     for name, session_id in candidates:
         state = harness_states.get(session_id)
-        if state is not None and state not in _HARNESS_TERMINAL_STATES:
+        if state is not None and state not in ("done", "unreachable"):
             live.append(name)
         elif state is None and _transcript_recently_active(session_id):
             live.append(name)

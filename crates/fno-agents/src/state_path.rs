@@ -91,8 +91,8 @@ pub fn run(args: &[String]) -> i32 {
     0
 }
 
-/// The name-to-path table, mirroring Python `fno do state path`'s accessors
-/// (which the hooks previously called). `events` honors `FNO_EVENTS_PATH` and
+/// The name-to-path table, mirroring the accessor table in Python
+/// `fno.paths`. `events` honors `FNO_EVENTS_PATH` and
 /// migrates the legacy checkout journal so a hook append never splits the
 /// file; `target-state` falls back to the pre-space checkout manifest.
 /// `pub(crate)`: the route-slot verb resolves its refusal-journal path here,

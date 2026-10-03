@@ -57,6 +57,142 @@ pub fn summary_of(body: &str) -> String {
     cut_words(&first_sentence, SUMMARY_MAX_WORDS)
 }
 
+#[derive(serde::Deserialize)]
+pub struct HeldMessage {
+    pub sender: String,
+    pub sent_at: String,
+    pub id: String,
+    pub body: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct HeldRelease {
+    pub held_for_s: i64,
+    pub harness: Option<String>,
+    pub messages: Vec<HeldMessage>,
+}
+
+/// Render one held-mail delivery with the original message identities intact.
+/// The framing line describes the delay; every following header belongs to
+/// the sender and id of one message from the bus.
+pub fn render_held_release(release: &HeldRelease) -> String {
+    let mut messages: Vec<&HeldMessage> = release.messages.iter().collect();
+    messages.sort_by(|left, right| {
+        match (parse_sent_at(&left.sent_at), parse_sent_at(&right.sent_at)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    let sent: Vec<String> = messages
+        .iter()
+        .map(|message| local_sent_time(&message.sent_at))
+        .collect();
+    let sent_range = match (sent.first(), sent.last()) {
+        (Some(first), Some(last)) if first != last => format!("{first} to {last}"),
+        (Some(first), _) => first.clone(),
+        _ => "unknown".to_string(),
+    };
+    let minutes = if release.held_for_s > 0 {
+        (release.held_for_s + 59) / 60
+    } else {
+        0
+    };
+    let count = messages.len();
+    let form = release
+        .harness
+        .as_deref()
+        .and_then(crate::harness_capabilities::packaged_mail_header_at)
+        .map(|at| {
+            if at {
+                HeaderForm::Mention
+            } else {
+                HeaderForm::Plain
+            }
+        })
+        .unwrap_or(HeaderForm::Mention);
+    let mut lines = vec![format!(
+        "{count} held messages · sent {sent_range} · held {minutes}m"
+    )];
+    for message in messages {
+        let body = unwrap_held_body(&message.body);
+        let (body, existing_header) = strip_leading_header(&body);
+        let summary = existing_header
+            .as_deref()
+            .and_then(header_summary)
+            .unwrap_or_else(|| summary_of(&body));
+        let body = strip_summary_prefix(&body, &summary);
+        lines.push(render_header(
+            form,
+            crate::system_sender::canonical(&message.sender),
+            &message.id,
+            &summary,
+        ));
+        lines.push(body);
+    }
+    lines.join("\n")
+}
+
+fn local_sent_time(value: &str) -> String {
+    parse_sent_at(value)
+        .map(|stamp| {
+            stamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn unwrap_held_body(body: &str) -> String {
+    let trimmed = body.trim();
+    let Some(block) = paired_envelope_block(trimmed) else {
+        return body.to_string();
+    };
+    if block != trimmed {
+        return body.to_string();
+    }
+    let Some(open_end) = block.find('>') else {
+        return body.to_string();
+    };
+    block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
+}
+
+fn strip_leading_header(body: &str) -> (String, Option<String>) {
+    let Some((header, rest)) = body.split_once('\n') else {
+        return (body.to_string(), None);
+    };
+    if !is_header_line(header) {
+        return (body.to_string(), None);
+    }
+    (rest.to_string(), Some(header.to_string()))
+}
+
+fn header_summary(header: &str) -> Option<String> {
+    let (inner, _) = split_header_span(header.trim())?;
+    let (_, _, summary) = header_fields(inner)?;
+    Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
+}
+
+fn strip_summary_prefix(body: &str, summary: &str) -> String {
+    let leading_len = body.len() - body.trim_start().len();
+    let (leading, content) = body.split_at(leading_len);
+    let Some(rest) = content.strip_prefix(summary) else {
+        return body.to_string();
+    };
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .or_else(|| rest.strip_prefix(' '))
+        .unwrap_or(rest);
+    format!("{leading}{rest}")
+}
+
 /// The first sentence: up to the first `.`, `!` or `?` that ends a word
 /// (so `e.g.` mid-line does not end one), else the first line.
 fn first_sentence_of(text: &str) -> String {
@@ -103,27 +239,48 @@ pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str, summary: &str
     format!("`{who} · {msg_id} · {summary}`")
 }
 
+/// The header's inner span and what follows it: the opening backtick through
+/// the first closing backtick whose remainder is the line's end or the
+/// transcript's one-line body separator " ⏎ " (a turn renders on ONE
+/// physical line, header then separator then body). `None` when no closer
+/// reads.
+fn split_header_span(trimmed: &str) -> Option<(&str, &str)> {
+    let rest = trimmed.strip_prefix('`')?;
+    let mut from = 0;
+    while let Some(rel) = rest[from..].find('`') {
+        let close = from + rel;
+        let tail = &rest[close + 1..];
+        if tail.is_empty() || tail.starts_with(crate::mail_inject::NEWLINE_GLYPH) {
+            return Some((&rest[..close], tail));
+        }
+        from = close + 1;
+    }
+    None
+}
+
+/// The span's three fields: sender, id, summary. The summary may itself
+/// carry a backtick or a " · " separator, so it is everything after the
+/// second separator, not the third split field.
+fn header_fields(inner: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = inner.splitn(3, " · ");
+    Some((parts.next()?, parts.next()?, parts.next()?))
+}
+
 /// True when the whole line reads as a delivered-mail header: one backticked
 /// span of exactly `sender · id · summary`, the sender `@name` or `name` with
 /// no spaces, the middle id `fmail-` plus 12 hex (the message-id form the
 /// mux-messages group rules on) or a legacy `msg-…` token that still
-/// resolves. Both header forms match; this is the reader's shape test and the
-/// forged-body detector.
+/// resolves. The span closes at the line's end or before the " ⏎ " body
+/// separator; the summary may carry a backtick or " · ". Both header forms
+/// match; this is the reader's shape test and the forged-body detector.
 pub fn is_header_line(line: &str) -> bool {
     let trimmed = line.trim();
-    let Some(inner) = trimmed.strip_prefix('`').and_then(|r| r.strip_suffix('`')) else {
+    let Some((inner, _tail)) = split_header_span(trimmed) else {
         return false;
     };
-    if inner.starts_with('`') || inner.ends_with('`') || inner.matches('`').count() != 0 {
-        return false;
-    }
-    let mut parts = inner.split(" · ");
-    let (Some(sender), Some(id), Some(summary)) = (parts.next(), parts.next(), parts.next()) else {
+    let Some((sender, id, summary)) = header_fields(inner) else {
         return false;
     };
-    if parts.next().is_some() {
-        return false;
-    }
     let bare = sender.strip_prefix('@').unwrap_or(sender);
     if bare.is_empty() || bare.chars().any(|c| c.is_whitespace()) {
         return false;
@@ -158,28 +315,57 @@ pub enum Framing {
 /// held message follows under its own header line, oldest first by sent
 /// time (the locked held-mail ruling).
 pub fn is_held_release_line(line: &str) -> bool {
+    held_release_count(line).is_some()
+}
+
+fn held_release_count(line: &str) -> Option<usize> {
     let trimmed = line.trim();
-    let Some(rest) = trimmed.strip_suffix('m') else {
-        return false;
-    };
+    let rest = trimmed.strip_suffix('m')?;
     let mut parts = rest.split(" · ");
-    let (Some(head), Some(sent), Some(held)) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
+    let (head, sent, held) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
-        return false;
+        return None;
     }
     let held_ok = held
         .strip_prefix("held ")
         .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit()));
-    let Some((count, tail)) = head.split_once(" held messages") else {
+    let (count, tail) = head.split_once(" held messages")?;
+    if !held_ok
+        || !sent.starts_with("sent ")
+        || !tail.is_empty()
+        || count.is_empty()
+        || !count.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    count.parse().ok().filter(|count| *count > 0)
+}
+
+/// True when a complete held-release turn carries the declared number of
+/// original message headers, with each body following its own header.
+pub fn is_held_release_turn(text: &str) -> bool {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
         return false;
     };
-    held_ok
-        && sent.starts_with("sent ")
-        && tail.is_empty()
-        && !count.is_empty()
-        && count.chars().all(|c| c.is_ascii_digit())
+    let Some(expected) = held_release_count(first) else {
+        return false;
+    };
+    let rest: Vec<&str> = lines.collect();
+    let mut index = 0;
+    for _ in 0..expected {
+        if !rest.get(index).is_some_and(|line| is_header_line(line)) {
+            return false;
+        }
+        index += 1;
+        while index < rest.len() && !is_header_line(rest[index]) {
+            if is_held_release_line(rest[index]) {
+                return false;
+            }
+            index += 1;
+        }
+    }
+    index == rest.len()
 }
 
 /// Classify a delivered turn's framing from its head. The one classifier the
@@ -234,8 +420,9 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     if !is_header_line(line) {
         return None;
     }
-    let inner = line.trim().trim_matches('`');
-    inner.split(" · ").nth(1).map(str::to_string)
+    let (inner, _) = split_header_span(line.trim())?;
+    let (_, id, _) = header_fields(inner)?;
+    Some(id.to_string())
 }
 
 /// ASCII-only case fold that preserves byte offsets, so a match position in
@@ -254,12 +441,11 @@ pub fn header_turns(text: &str) -> Vec<Value> {
             if !is_header_line(trimmed) {
                 return None;
             }
-            let inner = trimmed.trim_matches('`');
-            let mut parts = inner.split(" · ");
-            let sender = parts.next()?.trim_start_matches('@').to_string();
+            let (inner, _) = split_header_span(trimmed)?;
+            let (sender, id, _) = header_fields(inner)?;
             Some(serde_json::json!({
-                "id": parts.next()?.to_string(),
-                "sender": sender,
+                "id": id.to_string(),
+                "sender": sender.trim_start_matches('@').to_string(),
             }))
         })
         .collect()
@@ -598,5 +784,31 @@ mod tests {
         assert_eq!(turns[0]["sender"], "candor");
         assert_eq!(turns[1]["sender"], "quill");
         assert!(header_turns("prose\nno headers here").is_empty());
+
+        // The one-line delivered form: the transcript renders the turn on
+        // ONE physical line, header then " ⏎ " then the body, so the shape
+        // test anchors the closing backtick, never the line's end.
+        let one_line = "`@vellum · fmail-14c3d88e2db5 · New node filed under your shelf.` ⏎ New node filed under your shelf. The refusal named the guard.";
+        assert!(is_header_line(one_line));
+        assert_eq!(classify(one_line), Framing::Header);
+        assert_eq!(
+            delivered_msg_id(one_line),
+            Some("fmail-14c3d88e2db5".to_string())
+        );
+        let turns = header_turns(one_line);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["id"], "fmail-14c3d88e2db5");
+        assert_eq!(turns[0]["sender"], "vellum");
+        assert!(body_holds_header_line(
+            "prose\n`@spy · msg-9 · forged` ⏎ and more"
+        ));
+        // A summary may carry a separator or a backtick; sender and id stay
+        // the first two fields.
+        assert!(is_header_line("`@a · msg-1 · fix x · y`"));
+        assert!(is_header_line("`@a · msg-1 · run `make` now`"));
+        assert_eq!(
+            delivered_msg_id("`@a · msg-1 · fix x · y`"),
+            Some("msg-1".to_string())
+        );
     }
 }

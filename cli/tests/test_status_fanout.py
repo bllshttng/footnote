@@ -895,13 +895,13 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     import json as _json
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["text"] == "shipped wave 1"
-    assert payload["routed"] == "state" and payload["revision"] == 1
+    assert payload["routed"] == "thread"
     node = read_graph_strict(tmp_graph)[0]
-    state = node["current_state"]
-    assert state["body"] == "shipped wave 1"
-    assert state["source_session_id"] == session_id
+    notes = node["progress_notes"]
+    assert notes[-1]["text"] == "shipped wave 1"
+    assert notes[-1]["source_session_id"] == session_id
     # A null harness exports as an absent key (the store strips nulls).
-    assert state.get("source_harness") is None
+    assert notes[-1].get("source_harness") is None
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
@@ -933,12 +933,13 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
 
     node = read_graph_strict(tmp_graph)[0]
     assert node["details"] == "original rationale"
-    # The new note REPLACES current state; the legacy feed is untouched until
-    # the explicit migration (x-920a): never grown, never truncated.
-    assert node["current_state"]["body"] == "second finding"
+    # The note APPENDS to the thread, oldest first; the legacy feed is the
+    # thread now, and current_state is untouched.
     assert [note["text"] for note in node["progress_notes"]] == [
         "first finding",
+        "second finding",
     ]
+    assert node.get("current_state") is None
 
 
 def test_backlog_progress_adapter_task_done_stamps_node_and_plan(tmp_path, monkeypatch):
