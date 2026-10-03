@@ -4,7 +4,7 @@ This is the iMac run, the one that decides (Amendments 6, 7 and 10). The arm64 p
 
 ## Setup
 
-- 10 replay tasks from this repo's own merged PRs (Amendment 3), 3 attempts per task per lane, a 45-minute budget per attempt, one attempt at a time.
+- The bank holds 10 replay tasks from this repo's own merged PRs (Amendment 3). Each lane gets 3 attempts per task. Each attempt has a 45-minute budget, and one runs at a time.
 - Lanes run through `fno doctor evals run --lane --cohort --repeat 3` with this branch's CLI and fno-agents. The claude lane asks for `glm-5.3-flash[1m]` with an 800,000-token compact window (Amendment 10). Host harness versions: Claude Code 2.1.286, opencode 1.18.33.
 - The scores come from `evals/harness-fit/run/score_run1.py` over the eval history. It applies the preregistered stall, rate-limit, identity and exclusion rules.
 - pi and zcode are `unavailable` on every attempt. The headless substrate has no pi lane on this branch, and the iMac has no ZCode.app.
@@ -61,7 +61,7 @@ Paired over the 10 tasks, opencode's accepted rate minus claude's is +3.3 points
 
 - Amendment 11 load rule: two opencode attempts on replay-x-861c ran while the 5-minute load passed 16. They were set aside and the top-up ran them again. No row in the table ran above that line.
 - One claude attempt never started: its worker exited 143 before any work. It reads `unavailable` and the top-up refilled its slot.
-- Set aside earlier: 29 never-started claude attempts from the 11:51Z installer incident, and one claude attempt on the 200,000-token window (Amendments 10 and 11). The rows are in the run workspace under `logs/aborted-start-4` and `logs/pre-amendment-10`.
+- Set aside earlier: 29 claude attempts that never started in the 11:51Z installer incident. Also one claude attempt on the 200,000-token window (Amendments 10 and 11). The rows are in the run workspace under `logs/aborted-start-4` and `logs/pre-amendment-10`.
 
 ## Pilot: the arm64 Mac (not comparable, fires no rule)
 
