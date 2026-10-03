@@ -721,7 +721,7 @@ def tick() -> None:
                 load_per_core = os.getloadavg()[0] / (os.cpu_count() or 1)
             except (AttributeError, OSError):
                 load_per_core = None
-            if load_per_core is not None and ceiling_box["v"] >= 480:
+            if load_per_core is not None and ceiling_box["v"] is not None and ceiling_box["v"] >= 480:
                 grant_queue_timeout_s, phase_caps["merge"] = _merge_budget_for_load(
                     load_per_core, _MERGE_FLOOR_S + 15.0
                 )

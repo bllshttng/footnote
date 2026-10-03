@@ -825,11 +825,12 @@ def _run_merge_tick_with_counts(monkeypatch, counts, *, queue_call=None, load_pe
     monkeypatch.setattr(
         prcli, "_emit_tick_row", lambda arm, **data: rows.append((arm, data)))
     if queue_call is None:
-        queue_call = lambda *_a, **_kw: {
-            "candidates": 1, "verdicts": {"granted": 1}, "elapsed_ms": 0,
-            "queue": [{"node_id": "x-planted", "pr": 88, "repo_slug": "owner/repo",
-                       "cwd": str(Path.cwd()), "grant": {"source": "config"}}],
-        }
+        def queue_call(*_args, **_kwargs):
+            return {
+                "candidates": 1, "verdicts": {"granted": 1}, "elapsed_ms": 0,
+                "queue": [{"node_id": "x-planted", "pr": 88, "repo_slug": "owner/repo",
+                           "cwd": str(Path.cwd()), "grant": {"source": "config"}}],
+            }
     monkeypatch.setattr("fno.rust_binary.verb_call", queue_call)
 
     def drain(queue, **_kw):
