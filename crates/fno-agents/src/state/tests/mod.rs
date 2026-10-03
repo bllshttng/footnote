@@ -2005,28 +2005,66 @@ fn the_same_unknown_status_stays_fatal_at_our_own_schema() {
 }
 
 #[test]
-fn update_registry_refuses_to_write_over_a_newer_schema() {
-    // The write block is what makes reading forward safe here.
+fn update_registry_respects_writer_floor_and_preserves_unknown_fields() {
+    // An additive future schema is writable when this build meets its floor.
     let dir = tmpdir("version-write-guard");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
-    // Derived from the constant so a bump cannot make "newer" mean "ours".
     let newer_version = REGISTRY_SCHEMA_VERSION + 1;
-    let newer = format!(r#"{{"schema_version":{newer_version},"agents":[]}}"#);
-    std::fs::write(&path, &newer).unwrap();
-
-    match update_registry(&path, |reg| reg.entries.clear()) {
-        Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-            assert_eq!(found, newer_version);
-            assert_eq!(max, REGISTRY_SCHEMA_VERSION);
-        }
-        other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
-    }
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        newer,
-        "the refused write must leave the newer file byte-identical"
+    let additive = format!(
+        r#"{{"schema_version":{newer_version},"min_writer_version":{},"writer_rev":"writer-ahead","future_top":"kept","agents":[{{"name":"worker","cwd":"/x","log_path":"/l","harness":"claude","status":"live","created_at":"2026-01-01T00:00:00Z","future_row":"kept"}}]}}"#,
+        REGISTRY_SCHEMA_VERSION
     );
+    std::fs::write(&path, additive).unwrap();
+
+    assert!(
+        update_registry(&path, |reg| reg.entries[0].status = AgentStatus::Idle).is_ok(),
+        "an additive schema ahead of this writer's floor must remain writable"
+    );
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["schema_version"], newer_version);
+    assert_eq!(written["min_writer_version"], REGISTRY_SCHEMA_VERSION);
+    assert_eq!(written["writer_rev"], env!("FNO_AGENTS_GIT_REV"));
+    assert_eq!(written["future_top"], "kept");
+    assert_eq!(written["agents"][0]["future_row"], "kept");
+    assert_eq!(written["agents"][0]["status"], "idle");
+
+    let breaking = format!(
+        r#"{{"schema_version":{},"min_writer_version":{},"writer_rev":"future-writer","agents":[]}}"#,
+        newer_version + 1,
+        REGISTRY_SCHEMA_VERSION + 1
+    );
+    std::fs::write(&path, &breaking).unwrap();
+    let error = update_registry(&path, |_| ()).unwrap_err();
+    match &error {
+        StateError::WriterTooOld {
+            min_writer,
+            understood,
+            writer_rev,
+            reader_rev,
+            ..
+        } => {
+            assert_eq!(*min_writer, REGISTRY_SCHEMA_VERSION + 1);
+            assert_eq!(*understood, REGISTRY_SCHEMA_VERSION);
+            assert_eq!(writer_rev.as_deref(), Some("future-writer"));
+            assert_eq!(reader_rev, env!("FNO_AGENTS_GIT_REV"));
+        }
+        other => panic!("expected WriterTooOld, got {other:?}"),
+    }
+    assert!(error.to_string().contains("fno doctor update"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), breaking);
+
+    let incomplete = format!(
+        r#"{{"schema_version":{newer_version},"min_writer_version":{},"writer_rev":"writer-ahead","agents":[{{"name":"future","cwd":"/x","log_path":"/l","harness":"claude","status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},{{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude","status":"live","created_at":"2026-01-01T00:00:00Z"}}]}}"#,
+        REGISTRY_SCHEMA_VERSION
+    );
+    std::fs::write(&path, &incomplete).unwrap();
+    assert!(matches!(
+        update_registry(&path, |_| ()),
+        Err(StateError::WriterTooOld { .. })
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), incomplete);
     std::fs::remove_dir_all(&dir).ok();
 }
 
