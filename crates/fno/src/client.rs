@@ -4003,7 +4003,14 @@ impl View {
     /// button and keeps the gesture.
     fn density_button_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
         let tw = panel_w.saturating_sub(1); // last column is the divider
-        (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
+        let bell = bell::button_range(self, tw);
+        let end = if bell.is_empty() {
+            tw
+        } else {
+            bell.start.saturating_sub(1)
+        };
+        let start = end.checked_sub(DENSITY_BTN_W)?;
+        (tw >= DENSITY_BTN_W + 6 && start >= bell::top_row_words_end(self)).then_some(start..end)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both

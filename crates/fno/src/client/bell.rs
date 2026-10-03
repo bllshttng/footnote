@@ -111,19 +111,22 @@ pub(crate) fn button_label(view: &View) -> String {
 
 pub(crate) fn button_range(view: &View, text_w: usize) -> std::ops::Range<usize> {
     let width = unicode_width::UnicodeWidthStr::width(button_label(view).as_str());
-    let words_end = view
-        .top_row_spans()
-        .iter()
-        .map(|(start, span, _)| *start + *span)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(2);
+    let words_end = top_row_words_end(view);
     let start = text_w.saturating_sub(width);
     if start < words_end {
         text_w..text_w
     } else {
         start..text_w
     }
+}
+
+pub(super) fn top_row_words_end(view: &View) -> usize {
+    view.top_row_spans()
+        .iter()
+        .map(|(start, span, _)| *start + *span)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(2)
 }
 
 pub(super) fn button_at(view: &View, row: u16, col: u16) -> bool {

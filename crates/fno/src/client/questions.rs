@@ -825,6 +825,13 @@ impl View {
         self.question_detail = Detail::open(fold, Some(id));
     }
 
+    #[cfg(test)]
+    pub(super) fn open_questions_list(&mut self) {
+        let empty = crate::needs_overlay::QuestionsFold::default();
+        let fold = self.questions_fold.as_ref().unwrap_or(&empty);
+        self.question_detail = Detail::open(fold, None);
+    }
+
     pub(super) fn list_selector(&self) -> Option<usize> {
         self.selector
     }
@@ -1145,7 +1152,7 @@ mod tests {
             item("q-c", false),
             done,
         ]));
-        v.open_detail_on("q-a");
+        v.open_questions_list();
         detail_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
         assert!(v.question_archive.is_none(), "one X archives nothing");
         assert_eq!(
@@ -1206,7 +1213,7 @@ mod tests {
         let items = vec![item("q-a", true), item("q-b", true)];
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(items));
-        v.open_detail_on("q-a");
+        v.open_questions_list();
         detail_keys(&mut v, b"\t", &mut Vec::new()).await.unwrap();
         assert!(!v.question_detail.as_ref().unwrap().focus);
         detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
@@ -1219,7 +1226,7 @@ mod tests {
 
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-a", true)]));
-        v.open_detail_on("q-a");
+        v.open_questions_list();
         detail_keys(&mut v, b"\x1b", &mut Vec::new()).await.unwrap();
         // The lone Esc rides the carry until the next chunk proves it bare.
         detail_keys(&mut v, b"", &mut Vec::new()).await.unwrap();

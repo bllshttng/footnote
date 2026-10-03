@@ -11646,21 +11646,25 @@ fn density_button_preserves_the_top_header_rollup() {
         "and the button is there too: {:?}",
         lines[0]
     );
+    assert!(
+        lines[0].contains("🔔"),
+        "bell remains visible: {:?}",
+        lines[0]
+    );
 }
 
 #[test]
-fn density_button_glyph_sits_one_column_off_the_divider() {
-    // AC4-UI (x-2e86): the glyph leads the button and the divider-adjacent
-    // cell is a plain (non-inverse) pad, so the glyph reads one column in
-    // from the border. The pad costs the header band NOTHING (range.start is
-    // unchanged), which is why the tight-slim rollup test still holds.
+fn density_button_glyph_sits_before_the_bell() {
+    // The density button keeps its plain pad and a gap before the bell, so
+    // neither top-row control covers the other.
     let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
     let pw = v.panel_w() as usize;
     let range = v.density_button_range(pw).unwrap();
+    let bell = bell::button_range(&v, pw.saturating_sub(1));
     let frame = v.compose();
     // Row 0, so the cell index is the column.
     let glyph_cell = &frame.cells[range.start];
-    let pad_cell = &frame.cells[range.end - 1]; // the cell before the divider
+    let pad_cell = &frame.cells[range.end - 1]; // the cell before the gap
     assert_eq!(
         glyph_cell.c,
         density_glyph(v.density),
@@ -11671,17 +11675,18 @@ fn density_button_glyph_sits_one_column_off_the_divider() {
         cell_flags::INVERSE,
         "glyph cell is the button"
     );
-    assert_eq!(pad_cell.c, ' ', "the divider-adjacent cell is a pad");
+    assert_eq!(pad_cell.c, ' ', "the cell before the gap is the pad");
     assert_eq!(
         pad_cell.flags, 0,
         "the pad is plain, giving real breathing room"
     );
-    // The divider itself is the very next column.
     assert_eq!(
-        range.end,
-        pw - 1,
-        "the button ends right before the divider"
+        range.end.saturating_add(1),
+        bell.start,
+        "one-column gap before bell"
     );
+    // The divider remains after the bell.
+    assert_eq!(bell.end, pw - 1, "the bell ends right before the divider");
 }
 
 pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
