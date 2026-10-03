@@ -651,6 +651,13 @@ pub(crate) fn pr_binding_verdicts<'a>(
     out
 }
 
+impl PrVerdict {
+    /// The row's html_url, for heal records that carry it forward.
+    pub(crate) fn pr_url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+}
+
 /// The board's reading of [`pr_binding_verdicts`]: (bound node rows,
 /// warnings). A branch or sibling ambiguity stays silent here; a list-order
 /// guess is the wrong-node bind, and the board has always skipped them.

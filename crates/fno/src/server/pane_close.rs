@@ -21,6 +21,17 @@ enum CloseCause {
     Operator,
 }
 
+impl CloseCause {
+    /// The schema's cause word for the close, shared by the pane_closed
+    /// row and the portal_closed row the same path emits.
+    fn word(self) -> &'static str {
+        match self {
+            CloseCause::ViewerDied => "viewer_died",
+            CloseCause::Operator => "operator",
+        }
+    }
+}
+
 /// The `pane_closed` journal row, pure so tests can assert the
 /// envelope. Cause is the enum's word, never the free text alone; identity
 /// fields ride null when no registry row binds the pane.
@@ -225,7 +236,7 @@ impl Core {
                     portal.row_key
                 ));
             }
-            self.portals.remove(&idx);
+            self.journal_portal_take(idx, cause.word());
         }
         self.emit_pane_closed(
             pid,
@@ -387,5 +398,17 @@ mod tests {
         assert_eq!(stop["type"], "server_stopped");
         assert_eq!(stop["data"]["cause"], "shutdown");
         assert_eq!(stop["data"]["panes"], 3);
+        // The portal rows ride the same envelope contract: one open row
+        // with the seat, one close row with the door's cause word.
+        let opened = crate::server::portal_journal::portal_opened_row("main", 3, "candor", 42);
+        assert_eq!(opened["type"], "portal_opened");
+        assert_eq!(opened["data"]["portal"], 3);
+        assert_eq!(opened["data"]["row_key"], "candor");
+        assert_eq!(opened["data"]["seat"], 42);
+        let closed =
+            crate::server::portal_journal::portal_closed_row("main", 3, "candor", "retune");
+        assert_eq!(closed["type"], "portal_closed");
+        assert_eq!(closed["data"]["cause"], "retune");
+        assert_eq!(closed["data"]["row_key"], "candor");
     }
 }

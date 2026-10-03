@@ -95,6 +95,14 @@ fn ac1_one_current_state_priors_in_history() {
         assert_eq!(rec["prior_revision"], json!(i as u64 + 1));
         assert_eq!(rec["original"]["body"], json!(format!("state body {i}")));
     }
+    // One journal per store, not per spelling: the db twin of the same
+    // graph resolves the same journal file (a reader holding the
+    // db spelling saw zero records while writers journaled under the
+    // anchor).
+    let db_spelling = graph.with_extension("db");
+    let (_, db_total) =
+        fno_agents::backlog::note_history::read(&db_spelling, Some("t-1"), 0, 500).unwrap();
+    assert_eq!(db_total, 99, "the db spelling reads the anchor's journal");
 }
 
 /// A raw mutation through the shared seam (what any unrelated writer does).
@@ -230,7 +238,10 @@ fn ac4_history_failure_preserves_state() {
     write_graph(&graph, &[fixture_node("c-1", "d")]);
     node_state::replace_state(&graph, &ws(&graph, "c-1", "v1")).unwrap();
     node_state::replace_state(&graph, &ws(&graph, "c-1", "v2")).unwrap();
-    let hist_dir = dir.path().join("graph.json.history");
+    let hist_dir = fno_agents::backlog::note_history::history_path(&graph)
+        .parent()
+        .unwrap()
+        .to_path_buf();
     std::fs::remove_file(hist_dir.join("notes.jsonl")).unwrap();
     std::fs::create_dir_all(hist_dir.join("notes.jsonl")).unwrap();
     let err = node_state::replace_state(&graph, &ws(&graph, "c-1", "v3"))

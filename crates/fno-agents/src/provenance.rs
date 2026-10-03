@@ -406,6 +406,7 @@ pub(crate) struct BusRow {
 /// (or the `FNO_BUS_DIR` override, the one path bus readers share). An
 /// unreadable or absent bus is an empty index: the join then matches nothing
 /// and every row falls through to the text rules, which is today's behavior.
+#[derive(Clone)]
 pub(crate) struct BusIndex {
     rows: Vec<BusRow>,
 }
@@ -544,6 +545,13 @@ pub(crate) trait TranscriptSource {
     /// parser returns `None`, and its report fields read null, never 0.
     fn activity(&self, _raw: &str) -> Option<crate::session_activity::Activity> {
         None
+    }
+
+    /// Whether this source's token counts are one running total (a codex
+    /// token_count row replaces the previous total) instead of a per-pass
+    /// sum a rollup merges additively.
+    fn tokens_cumulative(&self) -> bool {
+        false
     }
 }
 
@@ -869,6 +877,10 @@ impl TranscriptSource for CodexSource {
 
     fn activity(&self, raw: &str) -> Option<crate::session_activity::Activity> {
         Some(crate::session_activity::codex_activity(raw))
+    }
+
+    fn tokens_cumulative(&self) -> bool {
+        true
     }
 }
 

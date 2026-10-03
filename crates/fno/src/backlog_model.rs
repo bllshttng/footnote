@@ -423,6 +423,17 @@ pub struct Note {
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_ref: Option<String>,
+    /// Who wrote it, for an agent row: the worker name, the model
+    /// it ran, and the node it was working. The session id is the row's
+    /// `source_session_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
 }
 
 /// One node's whole answer.
@@ -1349,15 +1360,26 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
             }
         }
     }
-    // Notes: progress_notes newest first, EXCEPT comment-thread rows (kind
-    // comment or reply), which read oldest first - a thread reads top to
-    // bottom. Non-thread rows keep their block after the thread.
+    // Notes: progress_notes newest first, EXCEPT thread rows (kind
+    // comment, reply, or one of the note kinds), which read oldest
+    // first - a thread reads top to bottom. Non-thread rows keep their
+    // block after the thread.
     let rows: Vec<Value> = e
         .get("progress_notes")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let is_thread = |n: &Note| matches!(n.kind.as_deref(), Some("comment") | Some("reply"));
+    let is_thread = |n: &Note| {
+        matches!(
+            n.kind.as_deref(),
+            Some("comment")
+                | Some("reply")
+                | Some("progress")
+                | Some("finding")
+                | Some("ruling")
+                | Some("collision")
+        )
+    };
     let mut threads: Vec<Note> = Vec::new();
     let mut plain: Vec<Note> = Vec::new();
     for n in rows.iter().map(|n| Note {
@@ -1380,6 +1402,19 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
         state: n.get("state").and_then(Value::as_str).map(str::to_string),
         state_ref: n
             .get("state_ref")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        agent_name: n
+            .get("agent_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model: n.get("model").and_then(Value::as_str).map(str::to_string),
+        working_node: n
+            .get("working_node")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_session_id: n
+            .get("source_session_id")
             .and_then(Value::as_str)
             .map(str::to_string),
     }) {
