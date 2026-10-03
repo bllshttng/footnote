@@ -1373,9 +1373,128 @@ fn api_comment_thread_write_and_reply_state_rules() {
         )
         .unwrap_err();
         assert!(
-            bad_kind.0.contains("must be comment or reply"),
+            bad_kind.0.contains("must be comment, reply"),
             "{}",
             bad_kind.0
         );
+
+        // a note-kind row is a feed record - identity on the row,
+        // no ask state, and no reply threading.
+        let note = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "routed the FAIL at /tmp/report".into(),
+                kind: Some("progress".into()),
+                author: Some("agent".into()),
+                session_id: Some("sess-1".into()),
+                harness: Some("claude".into()),
+                agent_name: Some("t-note-glm".into()),
+                model: Some("glm-5.3-flash".into()),
+                working_node: Some("ab-two".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(note.success);
+        let thread = comments(store, "ab-one", &Page::default()).unwrap();
+        let last = thread.nodes.last().unwrap();
+        assert_eq!(last.kind.as_deref(), Some("progress"));
+        assert!(last.extras.get("state").is_none(), "no ask state");
+        assert!(last.extras.get("comment_id").is_some(), "pointer minted");
+        assert_eq!(
+            last.extras.get("agent_name").and_then(Value::as_str),
+            Some("t-note-glm")
+        );
+        assert_eq!(
+            last.extras.get("model").and_then(Value::as_str),
+            Some("glm-5.3-flash")
+        );
+        assert_eq!(
+            last.extras.get("working_node").and_then(Value::as_str),
+            Some("ab-two")
+        );
+        assert_eq!(last.source_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(last.source_harness.as_deref(), Some("claude"));
+
+        let threaded_note = comment_create(
+            store,
+            "ab-one",
+            CommentCreateInput {
+                body: "not a reply".into(),
+                kind: Some("finding".into()),
+                reply_to: Some("c-000000".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            threaded_note.0.contains("a note row is a feed record"),
+            "{}",
+            threaded_note.0
+        );
+    }
+}
+
+/// the first note append carries the node's note journal into the
+/// thread once - every record a progress row keyed by its journal content
+/// hash, the marker stamped in the same mutation, a retry adding nothing.
+#[test]
+fn api_note_append_migrates_the_journal_into_the_thread_once() {
+    let (_pin, _d1, _d2, store, _second) = store_pair();
+    for store in [&store] {
+        crate::backlog::note_history::append(
+            &store.graph,
+            "ab-one",
+            crate::backlog::note_history::REASON_STATE_REPLACED,
+            Some(3),
+            None,
+            &json!({"revision": 3, "body": "prior state", "ts": "2026-10-02T10:00:00+00:00"}),
+            Some("sess-old"),
+            Some("codex"),
+        )
+        .unwrap();
+        let note = |body: &str| {
+            comment_create(
+                store,
+                "ab-one",
+                CommentCreateInput {
+                    body: body.into(),
+                    kind: Some("progress".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        note("first appended note");
+        let thread = comments(store, "ab-one", &Page::default()).unwrap();
+        let migrated: Vec<_> = thread
+            .nodes
+            .iter()
+            .filter(|c| c.kind.as_deref() == Some("progress") && c.extras.get("migrated").is_some())
+            .collect();
+        assert_eq!(migrated.len(), 1, "one journal record, one migrated row");
+        assert_eq!(
+            migrated[0].body.as_deref(),
+            Some("prior state"),
+            "the journal body verbatim"
+        );
+        assert_eq!(migrated[0].source_session_id.as_deref(), Some("sess-old"));
+        assert_eq!(migrated[0].source_harness.as_deref(), Some("codex"));
+        let rows = read_rows(store).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| crate::graph_store::entry_id(r) == Some("ab-one"))
+            .unwrap();
+        assert!(row.get("thread_migrated_at").is_some(), "marker stamped");
+        // A second append migrates nothing new.
+        note("second appended note");
+        let thread = comments(store, "ab-one", &Page::default()).unwrap();
+        let migrated: Vec<_> = thread
+            .nodes
+            .iter()
+            .filter(|c| c.extras.get("migrated").is_some())
+            .collect();
+        assert_eq!(migrated.len(), 1, "the migration ran once");
     }
 }

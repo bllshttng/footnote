@@ -385,16 +385,11 @@ fn open_index(db: &Path) -> Result<Connection, String> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("index dir: {e}"))?;
     }
-    // First contact serializes on the store lock (backlog::open's pattern):
-    // two processes creating the db race the journal_mode pragma.
-    let _creation_lock = if db.exists() {
-        None
-    } else {
-        Some(
-            crate::graph_store::BoundedLock::acquire(db, std::time::Duration::from_secs(10))
-                .map_err(|e| e.to_string())?,
-        )
-    };
+    // Connection::open creates the file before WAL setup completes, so
+    // db.exists() cannot tell whether another process still owns bootstrap.
+    let _index_lock =
+        crate::graph_store::BoundedLock::acquire(db, std::time::Duration::from_secs(10))
+            .map_err(|e| e.to_string())?;
     let conn = Connection::open(db).map_err(|e| format!("index open {}: {e}", db.display()))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("index busy_timeout: {e}"))?;

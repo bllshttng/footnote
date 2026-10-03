@@ -983,7 +983,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
         # cannot orphan the child.
         try:
             res = run(
-                [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
+                [*_subprocess_util.fno_cmd(), "backlog", "reconcile",
                  "--pr-number", str(pr_number), "--repo", repo, "--json"],
                 cwd=cwd or os.getcwd(),
                 timeout=POST_MERGE_RECONCILE_TIMEOUT_S,

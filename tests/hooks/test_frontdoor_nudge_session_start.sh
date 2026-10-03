@@ -144,8 +144,9 @@ pass "wedged mux socket -> bounded at the cap (${ELAPSED}s) and silent"
 
 # --- Installer cases: a fake plugin root with a stub installer ----------------
 PLUG="$WORK/plug"
-mkdir -p "$PLUG/hooks" "$PLUG/scripts/lib" "$PLUG/.claude-plugin"
+mkdir -p "$PLUG/hooks" "$PLUG/hooks/lib" "$PLUG/scripts/lib" "$PLUG/.claude-plugin"
 cp "$HOOK" "$PLUG/hooks/"
+cp "$REPO_ROOT_REAL/hooks/lib/fno-bin.sh" "$PLUG/hooks/lib/"
 cp "$REPO_ROOT_REAL/scripts/lib/with-timeout.sh" "$PLUG/scripts/lib/"
 cp "$REPO_ROOT_REAL/scripts/lib/hook-budget.sh" "$PLUG/scripts/lib/"
 printf '{\n  "name": "fno",\n  "version": "9.9.9"\n}\n' >"$PLUG/.claude-plugin/plugin.json"

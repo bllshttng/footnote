@@ -365,7 +365,11 @@ impl Core {
                 if let Some(id) = row.attach_id.clone() {
                     self.attached.insert(id, pane);
                 }
-                self.portals.insert(
+                // The close half of an occupied-slot retune: the map entry
+                // the tune replaces must leave the map in the journal too,
+                // or the open below reads as a fresh birth with no death.
+                self.journal_portal_take(slot, "retune");
+                self.journal_portal_open(
                     slot,
                     Portal {
                         row_key: key.clone(),
@@ -409,7 +413,7 @@ impl Core {
         if let Some(id) = row.attach_id.clone() {
             self.attached.insert(id, pane);
         }
-        self.portals.insert(
+        self.journal_portal_open(
             slot,
             Portal {
                 row_key: key.clone(),

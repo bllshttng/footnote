@@ -57,6 +57,142 @@ pub fn summary_of(body: &str) -> String {
     cut_words(&first_sentence, SUMMARY_MAX_WORDS)
 }
 
+#[derive(serde::Deserialize)]
+pub struct HeldMessage {
+    pub sender: String,
+    pub sent_at: String,
+    pub id: String,
+    pub body: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct HeldRelease {
+    pub held_for_s: i64,
+    pub harness: Option<String>,
+    pub messages: Vec<HeldMessage>,
+}
+
+/// Render one held-mail delivery with the original message identities intact.
+/// The framing line describes the delay; every following header belongs to
+/// the sender and id of one message from the bus.
+pub fn render_held_release(release: &HeldRelease) -> String {
+    let mut messages: Vec<&HeldMessage> = release.messages.iter().collect();
+    messages.sort_by(|left, right| {
+        match (parse_sent_at(&left.sent_at), parse_sent_at(&right.sent_at)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    let sent: Vec<String> = messages
+        .iter()
+        .map(|message| local_sent_time(&message.sent_at))
+        .collect();
+    let sent_range = match (sent.first(), sent.last()) {
+        (Some(first), Some(last)) if first != last => format!("{first} to {last}"),
+        (Some(first), _) => first.clone(),
+        _ => "unknown".to_string(),
+    };
+    let minutes = if release.held_for_s > 0 {
+        (release.held_for_s + 59) / 60
+    } else {
+        0
+    };
+    let count = messages.len();
+    let form = release
+        .harness
+        .as_deref()
+        .and_then(crate::harness_capabilities::packaged_mail_header_at)
+        .map(|at| {
+            if at {
+                HeaderForm::Mention
+            } else {
+                HeaderForm::Plain
+            }
+        })
+        .unwrap_or(HeaderForm::Mention);
+    let mut lines = vec![format!(
+        "{count} held messages · sent {sent_range} · held {minutes}m"
+    )];
+    for message in messages {
+        let body = unwrap_held_body(&message.body);
+        let (body, existing_header) = strip_leading_header(&body);
+        let summary = existing_header
+            .as_deref()
+            .and_then(header_summary)
+            .unwrap_or_else(|| summary_of(&body));
+        let body = strip_summary_prefix(&body, &summary);
+        lines.push(render_header(
+            form,
+            crate::system_sender::canonical(&message.sender),
+            &message.id,
+            &summary,
+        ));
+        lines.push(body);
+    }
+    lines.join("\n")
+}
+
+fn local_sent_time(value: &str) -> String {
+    parse_sent_at(value)
+        .map(|stamp| {
+            stamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn unwrap_held_body(body: &str) -> String {
+    let trimmed = body.trim();
+    let Some(block) = paired_envelope_block(trimmed) else {
+        return body.to_string();
+    };
+    if block != trimmed {
+        return body.to_string();
+    }
+    let Some(open_end) = block.find('>') else {
+        return body.to_string();
+    };
+    block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
+}
+
+fn strip_leading_header(body: &str) -> (String, Option<String>) {
+    let Some((header, rest)) = body.split_once('\n') else {
+        return (body.to_string(), None);
+    };
+    if !is_header_line(header) {
+        return (body.to_string(), None);
+    }
+    (rest.to_string(), Some(header.to_string()))
+}
+
+fn header_summary(header: &str) -> Option<String> {
+    let (inner, _) = split_header_span(header.trim())?;
+    let (_, _, summary) = header_fields(inner)?;
+    Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
+}
+
+fn strip_summary_prefix(body: &str, summary: &str) -> String {
+    let leading_len = body.len() - body.trim_start().len();
+    let (leading, content) = body.split_at(leading_len);
+    let Some(rest) = content.strip_prefix(summary) else {
+        return body.to_string();
+    };
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .or_else(|| rest.strip_prefix(' '))
+        .unwrap_or(rest);
+    format!("{leading}{rest}")
+}
+
 /// The first sentence: up to the first `.`, `!` or `?` that ends a word
 /// (so `e.g.` mid-line does not end one), else the first line.
 fn first_sentence_of(text: &str) -> String {
@@ -179,28 +315,57 @@ pub enum Framing {
 /// held message follows under its own header line, oldest first by sent
 /// time (the locked held-mail ruling).
 pub fn is_held_release_line(line: &str) -> bool {
+    held_release_count(line).is_some()
+}
+
+fn held_release_count(line: &str) -> Option<usize> {
     let trimmed = line.trim();
-    let Some(rest) = trimmed.strip_suffix('m') else {
-        return false;
-    };
+    let rest = trimmed.strip_suffix('m')?;
     let mut parts = rest.split(" · ");
-    let (Some(head), Some(sent), Some(held)) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
+    let (head, sent, held) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
-        return false;
+        return None;
     }
     let held_ok = held
         .strip_prefix("held ")
         .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit()));
-    let Some((count, tail)) = head.split_once(" held messages") else {
+    let (count, tail) = head.split_once(" held messages")?;
+    if !held_ok
+        || !sent.starts_with("sent ")
+        || !tail.is_empty()
+        || count.is_empty()
+        || !count.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    count.parse().ok().filter(|count| *count > 0)
+}
+
+/// True when a complete held-release turn carries the declared number of
+/// original message headers, with each body following its own header.
+pub fn is_held_release_turn(text: &str) -> bool {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
         return false;
     };
-    held_ok
-        && sent.starts_with("sent ")
-        && tail.is_empty()
-        && !count.is_empty()
-        && count.chars().all(|c| c.is_ascii_digit())
+    let Some(expected) = held_release_count(first) else {
+        return false;
+    };
+    let rest: Vec<&str> = lines.collect();
+    let mut index = 0;
+    for _ in 0..expected {
+        if !rest.get(index).is_some_and(|line| is_header_line(line)) {
+            return false;
+        }
+        index += 1;
+        while index < rest.len() && !is_header_line(rest[index]) {
+            if is_held_release_line(rest[index]) {
+                return false;
+            }
+            index += 1;
+        }
+    }
+    index == rest.len()
 }
 
 /// Classify a delivered turn's framing from its head. The one classifier the

@@ -116,38 +116,6 @@ def test_second_epic_advance_reports_held(iso, monkeypatch):
     assert ran == []
 
 
-def test_second_reconcile_reports_held(iso, monkeypatch):
-    """The SessionStart/merge/groom arms all fire this verb; a second full
-    sweep while one runs stands down with the held receipt."""
-    acquire_claim(
-        reconcile_flight_key(node=None, pr_number=None), "a-sweep", ttl_ms=600_000
-    )
-
-    ran = []
-    monkeypatch.setattr(
-        "fno.graph.cli._reconcile_once", lambda **k: ran.append(k)
-    )
-
-    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["held"] is True
-    assert ran == []
-
-
-def test_refusal_fires_even_while_the_scope_is_held(iso, monkeypatch):
-    """A bad invocation is refused before the gate: `--node` + `--pr-number`
-    must still exit 2 while another sweep holds the scope."""
-    acquire_claim(
-        reconcile_flight_key(node=None, pr_number=None), "a-sweep", ttl_ms=600_000
-    )
-    result = runner.invoke(
-        app, ["backlog", "reconcile", "--node", "ab-2222aaaa", "--pr-number", "7"]
-    )
-    assert result.exit_code == 2
-    assert "held" not in result.output
-
-
 # ---------------------------------------------------------------------------
 # AC2: the work still completes - a held tick never drops it
 # ---------------------------------------------------------------------------
@@ -308,19 +276,6 @@ def test_pr_scoped_reconcile_does_not_queue_behind_a_full_sweep(iso):
     pr.release()
 
 
-def test_dry_run_reconcile_is_never_gated(iso, monkeypatch):
-    """--dry-run mutates nothing, so it stays readable while a real sweep
-    runs: the operator inspects exactly when the graph is busiest."""
-    acquire_claim(
-        reconcile_flight_key(node=None, pr_number=None), "a-sweep", ttl_ms=600_000
-    )
-    ran = []
-    monkeypatch.setattr("fno.graph.cli._reconcile_once", lambda **k: ran.append(k))
-    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
-    assert result.exit_code == 0, result.output
-    assert ran, "a dry run must bypass the gate entirely"
-
-
 # ---------------------------------------------------------------------------
 # Held-stop: --stop is a control action and never queues behind the drain
 # ---------------------------------------------------------------------------
@@ -358,7 +313,7 @@ def _short_sock_dir() -> Path:
 # but never replies - the AC1-HP blocking read, in ~15 lines.
 _CHILD_BLOCK_ON_SOCKET = """
 import socket, sys
-from fno.backlog.single_flight import reconcile_gate
+from fno.backlog.single_flight import _flight_scope, reconcile_flight_key
 
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(sys.argv[1])
@@ -370,7 +325,9 @@ conn, _ = srv.accept()
 def once():
     conn.recv(1)  # the silent-socket read: blocks forever
 
-reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+with _flight_scope(reconcile_flight_key(node=None, pr_number=None), "reconcile", "backlog reconcile", False, None) as ok:
+    if ok:
+        once()
 """
 
 # The same blocker as a SESSION LEADER with its own sleep child: the budget
@@ -382,7 +339,7 @@ os.setsid()
 sleeper = subprocess.Popen(["sleep", "98766"])
 with open(sys.argv[2], "w") as fh:
     fh.write(str(sleeper.pid))
-from fno.backlog.single_flight import reconcile_gate
+from fno.backlog.single_flight import _flight_scope, reconcile_flight_key
 
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(sys.argv[1])
@@ -394,7 +351,9 @@ conn, _ = srv.accept()
 def once():
     conn.recv(1)
 
-reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+with _flight_scope(reconcile_flight_key(node=None, pr_number=None), "reconcile", "backlog reconcile", False, None) as ok:
+    if ok:
+        once()
 """
 
 # Spawns the blocker with FNO_DIE_WITH_PARENT naming ITSELF, then lives until
@@ -424,7 +383,7 @@ time.sleep(120)
 # The holder's own once() spawns a worker: the grandchild must inherit nothing.
 _CHILD_HOLDER_SPAWNS_GRANDCHILD = """
 import os, subprocess, sys
-from fno.backlog.single_flight import reconcile_gate
+from fno.backlog.single_flight import _flight_scope, reconcile_flight_key
 
 def once():
     subprocess.run(
@@ -435,32 +394,38 @@ def once():
     )
     open(sys.argv[2], "w").write("done")
 
-reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+with _flight_scope(reconcile_flight_key(node=None, pr_number=None), "reconcile", "backlog reconcile", False, None) as ok:
+    if ok:
+        once()
 """
 
 # A holder that finishes on its own a few seconds in; its "sock" slot carries
 # the done-file path (the child's argv[1] is whatever the caller passes).
 _CHILD_SLEEP_THEN_FINISH = """
 import sys, time
-from fno.backlog.single_flight import reconcile_gate
+from fno.backlog.single_flight import _flight_scope, reconcile_flight_key
 
 def once():
     time.sleep(4)
     open(sys.argv[1], "w").write("finished")
 
-reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+with _flight_scope(reconcile_flight_key(node=None, pr_number=None), "reconcile", "backlog reconcile", False, None) as ok:
+    if ok:
+        once()
 """
 
 # A bound holder whose named parent is ALREADY gone at arm time (ppid 1).
 _CHILD_ORPHANED_BEFORE_ARM = """
 import os, sys, time
 os.getppid = lambda: 1
-from fno.backlog.single_flight import reconcile_gate
+from fno.backlog.single_flight import _flight_scope, reconcile_flight_key
 
 def once():
     time.sleep(3)  # the watchdog's first tick must land while the work runs
 
-reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+with _flight_scope(reconcile_flight_key(node=None, pr_number=None), "reconcile", "backlog reconcile", False, None) as ok:
+    if ok:
+        once()
 """
 
 

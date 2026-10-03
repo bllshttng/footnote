@@ -405,6 +405,11 @@ dual_owner_kinds = {
     # stop check); the Python side carries it in schema.yaml for the
     # validator and `doctor event find`, the way pr_watch_unparked above does.
     "decision_span",
+    # session_satisfied + human_touch: the reconcile post-close emits ported
+    # to drift_emit.rs while the Python emitters that share the kinds still
+    # run (the retro sweep and the merge-close paths).
+    "session_satisfied",
+    "human_touch",
     # agent_revived: the Rust adopt path's journal_agent_revived is the only
     # writer (the adopt that restores a reap receipt's identity); the Python
     # side carries it in schema.yaml for the validator and `doctor event
