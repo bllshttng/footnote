@@ -118,8 +118,10 @@ def layout(left, frame, cols):
                 l = lefts[top + i] or LEAD
                 free = cols - width(l) - aw - 3
                 label = cut(labels[i], free) if free > 3 else ""
-                right = (label + " " if label else "") + a.ljust(aw)
-                out.append(l + " " * (cols - width(l) - width(right)) + color + right + "\x1b[0m")
+                # Only the buddy wears its rarity color; its words use the terminal's own text color.
+                words = label + " " if label else ""
+                pad = cols - width(l) - width(words) - aw
+                out.append(l + " " * pad + words + color + a.ljust(aw) + "\x1b[0m")
             return out
 
     return face_row(left, frame, cols)
@@ -137,7 +139,8 @@ def face_row(left, frame, cols):
         free = cols - width(l) - 2
         if free >= width(frame.get("face", "")) + 1:
             right = cut(face, free)
-            lefts[i] = l + " " * (cols - width(l) - width(right)) + color + right + "\x1b[0m"
+            head = cut(f"{frame.get('face', '')} {frame.get('name', '')}", free)
+            lefts[i] = l + " " * (cols - width(l) - width(right)) + color + head + "\x1b[0m" + right[len(head):]
             return lefts if lefts[-1] else lefts[:-1]
     return left
 
