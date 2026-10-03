@@ -80,19 +80,19 @@ def pid_dies_with_session(harness: Optional[str]) -> bool:
 def _session_identity(from_pid: Optional[int]) -> tuple[Optional[int], Optional[str]]:
     """One session-pid read, cached per ``from_pid``. The stamp pair
     (`FNO_SESSION_PID` / `FNO_SESSION_HARNESS`) is applied Rust-side on the
-    exec, with the rules the verb's docstring states.
-
-    The native ``fno-agents`` front answers first - the same resolver as one
-    ~10 ms exec, where the Python ``fno`` front pays an interpreter spawn no
-    Stop-hook-budget identity caller can afford - and the Python front stays
-    as the fallback. Any failure to read degrades to ``(None, None)``, the
-    uncapturable answer; a valid answer from one front is final, since both
-    fronts resolve the same walk.
+    exec. The native front answers first - one ~10 ms exec, where the Python
+    front pays an interpreter spawn no Stop-hook-budget identity caller can
+    afford - and a valid answer from either front is final.
     """
-    for cmd in (
-        ["fno-agents", "claim", "session-pid", "--json"],
+    from fno.rust_binary import resolve_binary
+
+    # The rust_binary door locates the binary: pydoor bars a literal exec.
+    native = resolve_binary()
+    fronts = [
+        *([[str(native), "claim", "session-pid", "--json"]] if native else []),
         ["fno", "agents", "claim", "session-pid", "--json"],
-    ):
+    ]
+    for cmd in fronts:
         if from_pid is not None:
             cmd += ["--from-pid", str(from_pid)]
         try:

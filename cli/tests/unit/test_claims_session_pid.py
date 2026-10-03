@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -43,17 +44,21 @@ def _reply(payload=None, rc=0, stdout=None):
 
 def test_verb_answer_fills_both_halves():
     """One JSON read answers pid and harness together (AC6). The native
-    front is the first exec; the Python front is its fallback."""
+    front is the first exec, located through the rust_binary door; the
+    Python front is its fallback."""
     with patch.object(
         session_pid.subprocess,
         "run",
         return_value=_reply({"session_pid": 20, "harness": "claude"}),
-    ) as run:
+    ) as run, patch(
+        "fno.rust_binary.resolve_binary",
+        return_value=Path("/usr/local/bin/fno-agents"),
+    ):
         assert resolve_session_pid(from_pid=10) == 20
         assert resolve_session_harness(from_pid=10) == "claude"
     (call,) = run.call_args_list
     assert call.args[0] == [
-        "fno-agents",
+        "/usr/local/bin/fno-agents",
         "claim",
         "session-pid",
         "--json",
