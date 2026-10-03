@@ -1389,6 +1389,11 @@ pub(crate) fn with_recovery_lock<T>(
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let lock = recovery_lock_path(path);
+    // create_dir (not _all) inside the mutex loop fails forever when the
+    // claims dir itself is missing - a force-release of a never-acquired key
+    // then burned the whole wait answering "mutex unavailable" for what is
+    // just a fresh store. The parent is the claims dir; make it exist.
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("/")));
     let token = acquire_dir_mutex(&lock, RECOVERY_LOCK_MAX_WAIT, true)
         .ok_or_else(|| format!("claim recovery mutex unavailable for {}", path.display()))?;
     let result = operation();

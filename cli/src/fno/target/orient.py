@@ -159,12 +159,11 @@ def _claim_state(claim_key: str) -> Optional[str]:
     -- the caller must NOT treat it as confirmed-dead."""
     try:
         from fno.claims.core import claim_status
-        from fno.claims.io import claims_root_for
 
-        # node:/dispatch:/... keys live at the GLOBAL claims root, not the
-        # per-repo default; route there (the same helper `fno agents claim status` uses)
-        # or a node claim always reads `free` from a worktree checkout.
-        state = claim_status(claim_key, root=claims_root_for(claim_key)).get("state")
+        # node:/dispatch:/... keys live at the GLOBAL claims root, and the
+        # native leg routes them there, so a bare read answers from the store
+        # the claim was written to, not a per-repo default.
+        state = claim_status(claim_key).get("state")
         return str(state or "") or None
     except Exception:  # noqa: BLE001 - unreadable claim -> None (not confirmed dead)
         return None

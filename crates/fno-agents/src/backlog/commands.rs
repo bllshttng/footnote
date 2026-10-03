@@ -86,7 +86,7 @@ pub const GROUPS: &[Group] = &[
     Group {
         name: "note",
         purpose: "Record progress or a blocking finding",
-        actions: &[("state", "note")],
+        actions: &[("comment", "comment"), ("state", "note")],
     },
     Group {
         name: "move",

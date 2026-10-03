@@ -13,7 +13,7 @@ from fno.config import writer
 from fno.claims import Claim, acquire_claim, claim_status
 from fno.claims import optout_lease
 from fno.claims.core import reap_dead_claims
-from fno.claims.io import claim_path, claims_root_for
+from fno.claims.io import claim_path, global_claims_root
 
 
 def test_unbacked_self_review_opt_out_reverts_to_default(
@@ -43,10 +43,7 @@ def test_opt_out_write_acquires_global_claim_and_reports_lease(tmp_path, monkeyp
 
     assert result.lease["holder"] == "session-a"
     assert result.lease["expires_at"] > result.lease["acquired_at"]
-    status = claim_status(
-        "config-optout:review.self_review_required",
-        root=claims_root_for("config-optout:review.self_review_required"),
-    )
+    status = claim_status("config-optout:review.self_review_required")
     assert status["state"] == "live"
     assert status["holder"] == "session-a"
     assert (tmp_path / "config.toml").read_text(encoding="utf-8").strip()
@@ -91,7 +88,6 @@ def test_mid_batch_refusal_releases_the_lease_acquired_earlier(
     acquire_claim(
         "config-optout:review.optional_apps",
         "session-b",
-        root=claims_root_for("config-optout:review.optional_apps"),
     )
     monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
 
@@ -103,10 +99,7 @@ def test_mid_batch_refusal_releases_the_lease_acquired_earlier(
             ]
         )
 
-    status = claim_status(
-        "config-optout:review.self_review_required",
-        root=claims_root_for("config-optout:review.self_review_required"),
-    )
+    status = claim_status("config-optout:review.self_review_required")
     assert status["state"] == "free"
     assert not (tmp_path / "settings.yaml").exists()
 
@@ -119,10 +112,7 @@ def test_owner_reset_releases_the_opt_out_claim(tmp_path, monkeypatch):
 
     optout_lease.set_config_value("review.self_review_required", "true")
 
-    status = claim_status(
-        "config-optout:review.self_review_required",
-        root=claims_root_for("config-optout:review.self_review_required"),
-    )
+    status = claim_status("config-optout:review.self_review_required")
     assert status["state"] == "free"
     assert "self_review_required = true" in (
         tmp_path / "config.toml"
@@ -140,7 +130,6 @@ def test_explicit_empty_optional_apps_requires_a_live_claim(tmp_path, monkeypatc
     acquire_claim(
         "config-optout:review.optional_apps",
         "session-a",
-        root=claims_root_for("config-optout:review.optional_apps"),
     )
     honored = settings_from_files([config])
     assert honored.review.optional_apps == []
@@ -195,7 +184,7 @@ def test_reaper_restores_the_recorded_prior_value(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
     key = "config-optout:review.self_review_required"
-    root = claims_root_for(key)
+    root = global_claims_root()
     claim = Claim(
         schema_version=2,
         key=key,
@@ -268,10 +257,7 @@ def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monke
     monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
     optout_lease.set_config_value("review.self_review_required", "false")
 
-    path = claim_path(
-        "config-optout:review.self_review_required",
-        root=claims_root_for("config-optout:review.self_review_required"),
-    )
+    path = claim_path("config-optout:review.self_review_required")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     raw.update(
         {
@@ -293,17 +279,13 @@ def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monke
 
 def test_config_optout_claims_route_to_the_global_root(tmp_path, monkeypatch):
     # The Rust gates (loopcheck/finalize) resolve config-optout claims at the
-    # global root; a Python writer landing anywhere else would mint a lease
-    # the merge lane can never see. Pin the Python routing to the same root.
-    from fno.claims.io import _GLOBAL_ID_PREFIXES, global_claims_root
+    # global root, and the routing list lives in the Rust leg (its golden:
+    # crates/fno-agents/tests/claims_root_parity.rs). Only the ENV contract
+    # stays Python-visible: $FNO_CLAIMS_ROOT moves the global root itself.
+    from fno.claims.io import global_claims_root as gcr
 
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
-
-    assert "config-optout" in _GLOBAL_ID_PREFIXES
-    assert (
-        claims_root_for("config-optout:review.self_review_required")
-        == global_claims_root()
-    )
+    assert gcr() == tmp_path / "global"
 
 
 def test_scope_change_takeover_restores_the_new_file_not_the_old(
@@ -322,7 +304,7 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
     optout_lease.set_config_value("review.self_review_required", "false", scope="global")
 
     key = "config-optout:review.self_review_required"
-    path = claim_path(key, root=claims_root_for(key))
+    path = claim_path(key, root=global_claims_root())
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     raw.update(
         {
@@ -354,7 +336,7 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
 
     optout_sink: list = []
     summary = reap_dead_claims(
-        roots=[claims_root_for(key)], apply=True, optout_sink=optout_sink
+        roots=[global_claims_root()], apply=True, optout_sink=optout_sink
     )
     from fno.claims.optout_lease import restore_reaped_optouts
 

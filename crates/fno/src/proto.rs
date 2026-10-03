@@ -366,7 +366,12 @@ fn default_true() -> bool {
 /// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
 /// v102: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
 /// `session_tokens`), both optional; floor stays 58.
-/// v103: AgentRow gains the optional daemon-served `compaction_count`; floor stays 58.
+/// v103: `AgentRow` gains the optional daemon-served `compaction_count`;
+/// `PanePlacement.human` is removed as admission inverts: the
+/// default is admit and only the agent-spawn door opts into the machine
+/// gate, so no per-call-site human ask exists to carry. Serde reads an old
+/// peer's field as an unknown-key ignore; a new field's `#[serde(default)]`
+/// keeps old peers reading new placements. Floor stays 58.
 pub const PROTO_VERSION: u32 = 103;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -4273,7 +4278,6 @@ mod tests {
             max_panes: None,
             thread_pane: false,
             fit: false,
-            human: false,
         };
         for msg in [
             ClientMsg::Control {

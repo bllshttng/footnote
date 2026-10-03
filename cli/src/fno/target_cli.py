@@ -3151,16 +3151,15 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
 def _read_node_claim(node_id: str) -> Optional[dict]:
     """``claim_status`` dict for ``node:<id>``, or None (free / unreadable).
 
-    node: claims live under $HOME, not the default root - ``claims_root_for``
-    routes there; a bare ``claim_status(key)`` would read the wrong tree as free.
+    The native leg routes node: keys to the global claims root, so a bare
+    ``claim_status(key)`` reads the store the claim was written to.
     Read-only and never raises: any probe failure degrades to None.
     """
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     key = f"node:{node_id}"
     try:
-        return claim_status(key, root=claims_root_for(key))
+        return claim_status(key)
     except Exception:
         return None
 
@@ -3323,7 +3322,6 @@ def _reacquire_node_claim(
         ClaimHeldByOther,
         acquire_claim,
     )
-    from fno.claims.io import claims_root_for
     from fno.claims.session_pid import resolve_session_pid
 
     key = f"node:{node_id}"
@@ -3355,7 +3353,6 @@ def _reacquire_node_claim(
             pid=pid,
             pid_unavailable=pid is None,
             reason="target start successor re-acquire",
-            root=claims_root_for(key),
         )
     except ClaimHeldByOther as exc:
         _print_foreign_holder_park(
