@@ -169,8 +169,7 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
 
 #[test]
 fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
-    // Line 1 owns node and PR; line 2 owns model, lead, activity and age;
-    // line 3 owns context, compactions, cost and status.
+    // Three lines: identity; model, lead, activity and age; context, compactions and cost. The status glyph stays on line 1.
     let mut agents = king_and_worker();
     agents[1].context_used_pct = Some(26);
     agents[1].compaction_count = Some(3);
@@ -200,7 +199,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
             .all(|cell| cell.bg == v.theme.sel)
     );
     assert!(text.contains("x-4310"), "{text:?}");
-    assert!(text.contains("Work") && !text.contains(" up "), "{text:?}");
+    assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
     let head = text.lines().next().unwrap_or_default();
     assert!(
         head.contains("node · PR") && !head.contains("last msg"),
@@ -220,7 +219,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▃▄ 26% · 3c · $0.42 · Work"),
+        text.contains("▂▃▃▄ 26% · 3c · $0.42"),
         "the compact sparkline line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("$0.42"), "{text:?}");

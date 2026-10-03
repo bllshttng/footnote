@@ -453,10 +453,7 @@ impl View {
                 DisplayRow::CardDetail(a) => {
                     Some((self.card_detail_text(a, now, text_w), cell_flags::DIM))
                 }
-                DisplayRow::CardMetrics(a) => Some((
-                    card_line::metrics(a, status_word(agent_lattice_state(a))),
-                    0,
-                )),
+                DisplayRow::CardMetrics(a) => Some((card_line::metrics(a), 0)),
                 DisplayRow::Agent(a) if density == Density::Slim => {
                     // Small mode (q-334c5e9d option 1): one line per live
                     // agent - the animated glyph, then the slug, clipped to
