@@ -13,9 +13,9 @@
 //! the CLI install that already succeeded, so the verb always exits 0.
 
 use std::ffi::OsString;
-use std::io::Stdio;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use serde_json::Value;
 
@@ -146,7 +146,7 @@ fn id_starts_fno(row: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn claude_wire(home: &Path, run: Run) -> Outcome {
+pub fn claude_wire(home: &Path, run: Run) -> Outcome {
     // The skills-dir fallback drop loads as fno@skills-dir; detect it by the
     // plugin manifest it lands.
     let dest = home.join(".claude").join("skills").join("fno");
@@ -351,26 +351,31 @@ fn pi_wire(agents: &Path, src: Option<&str>, run: Run) -> Outcome {
 // --- agy --------------------------------------------------------------------
 
 /// The three plugin-shipped agy adapters (Stop adapter, crown inject, king
-/// guard), one per line, empty when this CLI-only install carries none. The
-/// Stop adapter is load-bearing: without it the wiring degrades to manual.
+/// guard), one per line, "-" when this CLI-only install carries none (a bare
+/// empty line would not survive the trimmed capture). The Stop adapter is
+/// load-bearing: without it the wiring degrades to manual.
 const AGY_PATHS_PY: &str = r#"from fno.setup.integration import (
     _agy_adapter_path,
     _agy_crown_adapter_path,
     _agy_guard_adapter_path,
 )
 for p in (_agy_adapter_path(), _agy_crown_adapter_path(), _agy_guard_adapter_path()):
-    print(p if p is not None else "")"#;
+    print(p if p is not None else "-")"#;
 
 pub fn parse_agy_paths(out: &str) -> Option<[String; 3]> {
     let lines: Vec<&str> = out.lines().collect();
     if lines.len() < 3 {
         return None;
     }
-    Some([
-        lines[0].trim().to_string(),
-        lines[1].trim().to_string(),
-        lines[2].trim().to_string(),
-    ])
+    let one = |l: &str| {
+        let t = l.trim();
+        if t == "-" {
+            String::new()
+        } else {
+            t.to_string()
+        }
+    };
+    Some([one(lines[0]), one(lines[1]), one(lines[2])])
 }
 
 fn agy_wire(agents: &Path, paths: Option<[String; 3]>, home: &Path, run: Run) -> Outcome {
@@ -487,12 +492,18 @@ pub fn run() -> i32 {
         .unwrap_or(false);
     let mut lines: Vec<String> = Vec::new();
     let mut skipped: Vec<&str> = Vec::new();
+    // An unset HOME would resolve the claude/agy config paths against the
+    // working directory; refuse those two rather than wire into the CWD.
+    let home_missing = home.as_os_str().is_empty();
+    let no_home =
+        || Outcome::Failed("HOME is not set; cannot resolve the harness config dir".into());
     for h in HARNESS_LIST {
         if !on_path(h.name) {
             skipped.push(h.label);
             continue;
         }
         let outcome = match h.name {
+            "claude" if home_missing => no_home(),
             "claude" => claude_wire(&home, &real_run),
             "gemini" => gemini_wire(&real_run),
             "codex" => codex_wire(),
@@ -516,7 +527,9 @@ pub fn run() -> i32 {
                 }
             }
             _ => {
-                if !agents_ok {
+                if home_missing {
+                    no_home()
+                } else if !agents_ok {
                     Outcome::Failed(
                         "the fno-agents binary is missing; run `fno doctor update`".into(),
                     )

@@ -142,3 +142,11 @@ fn agy_paths_parse_three_lines_or_refuse() {
     assert_eq!(parse_agy_paths(""), None);
     assert_eq!(parse_agy_paths("only\ntwo"), None);
 }
+
+#[test]
+fn agy_absent_adapters_come_back_empty_not_missing() {
+    assert_eq!(
+        parse_agy_paths("adapter.sh\n-\n-"),
+        Some(["adapter.sh".to_string(), String::new(), String::new()])
+    );
+}
