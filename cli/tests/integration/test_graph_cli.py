@@ -1338,7 +1338,7 @@ def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph, monkey
     assert not node.get("progress_notes")
 
 
-def test_note_with_an_unmeasured_claim_replaces_state_and_warns(tmp_graph, monkeypatch):
+def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph, monkeypatch):
     """AC19-HP: the note verb advises, never refuses a body."""
     node_id = _note_node()
     monkeypatch.setattr(
@@ -1356,11 +1356,12 @@ def test_note_with_an_unmeasured_claim_replaces_state_and_warns(tmp_graph, monke
     assert "unmeasured code fact" in r.stderr, r.stderr
     assert "--read" in r.stderr, r.stderr
     node = json.loads(_native_get(node_id))
-    assert node["current_state"]["body"] == "the drain loop is 167 lines"
+    notes = node["progress_notes"]
+    assert notes[-1]["text"] == "the drain loop is 167 lines"
 
 
 def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypatch):
-    """AC20-HP: executed reads land beside the state body."""
+    """AC20-HP: executed reads land beside the note they measure."""
     node_id = _note_node()
     monkeypatch.setattr(
         "fno.rust_binary.verb_call",
@@ -1385,9 +1386,9 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypat
 
     assert r.exit_code == 0, r.output
     assert "unmeasured" not in r.stderr, r.stderr
-    assert json.loads(r.stdout)["routed"] == "state"
+    assert json.loads(r.stdout)["routed"] == "thread"
     node = json.loads(_native_get(node_id))
-    reads = node["current_state"]["reads"]
+    reads = node["progress_notes"][-1]["reads"]
     assert reads[0]["cmd"] == "echo measured"
     assert reads[0]["exit"] == 0
 
