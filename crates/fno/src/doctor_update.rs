@@ -357,24 +357,27 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// One native `fno-agents source-pin` invocation; None = cannot answer.
-fn source_pin_call(sub: &str, extra: &[String], input: Option<&str>) -> Option<Value> {
+fn source_pin_call(sub: &str, extra: &[String], input: Option<&str>) -> Result<Value, String> {
     let mut args = vec!["source-pin".to_string(), sub.to_string()];
     args.extend(extra.iter().cloned());
-    let Ok((code, out, err)) =
-        run_bounded(&fno_agents_bin(), &args, Duration::from_secs(30), input)
-    else {
-        return None;
-    };
+    let (code, out, err) = run_bounded(&fno_agents_bin(), &args, Duration::from_secs(30), input)?;
     if code != 0 {
         let head: String = err.trim().chars().take(200).collect();
-        eprintln!("fno-agents source-pin {sub} failed: {head}");
-        return None;
+        if head.is_empty() {
+            return Err(format!(
+                "fno-agents source-pin {sub} exited {code} with no stderr"
+            ));
+        }
+        return Err(head);
     }
-    let data: Value = serde_json::from_str(out.trim()).ok()?;
+    let data: Value = serde_json::from_str(out.trim())
+        .map_err(|e| format!("fno-agents source-pin {sub} reply is not JSON: {e}"))?;
     if data.is_object() {
-        Some(data)
+        Ok(data)
     } else {
-        None
+        Err(format!(
+            "fno-agents source-pin {sub} reply is not an object"
+        ))
     }
 }
 
@@ -431,7 +434,9 @@ fn last_update_event() -> Option<Value> {
 }
 
 /// One native resolution: path, eligibility evidence, allow/refuse, warning.
-fn resolve_source_pin(override_path: Option<&Path>) -> Option<Value> {
+/// The Err carries the machine cause (missing binary, timeout, exit, malformed
+/// reply) so no caller prints "failed" without a reason.
+fn resolve_source_pin(override_path: Option<&Path>) -> Result<Value, String> {
     let mut extra: Vec<String> = Vec::new();
     if let Some(o) = override_path {
         extra.push("--override".into());
@@ -463,7 +468,8 @@ fn resolve_source_pin(override_path: Option<&Path>) -> Option<Value> {
 /// resolved checkout regardless of the update gate; the update enforces the
 /// refusal itself.
 fn discover_source(override_path: Option<&Path>) -> Result<PathBuf, String> {
-    let pin = resolve_source_pin(override_path).ok_or(SOURCE_PIN_UNAVAILABLE.to_string())?;
+    let pin = resolve_source_pin(override_path)
+        .map_err(|e| format!("{SOURCE_PIN_UNAVAILABLE} (cause: {e})"))?;
     match pin
         .get("path")
         .and_then(Value::as_str)
@@ -492,8 +498,10 @@ fn record_source_pin(pin: &Value) -> Result<(), String> {
         companion_file().to_string_lossy().into_owned(),
     ];
     match source_pin_call("record", &extra, Some(&body)) {
-        Some(_) => Ok(()),
-        None => Err("source-pin record failed; the previous pin stands".into()),
+        Ok(_) => Ok(()),
+        Err(cause) => Err(format!(
+            "source-pin record failed; the previous pin stands ({cause})"
+        )),
     }
 }
 
@@ -1487,9 +1495,13 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         eprintln!("{GUARD_MSG}");
         return 1;
     }
-    let Some(pin) = resolve_source_pin(flags.source.as_deref()) else {
-        eprintln!("{SOURCE_PIN_UNAVAILABLE}");
-        return 1;
+    let pin = match resolve_source_pin(flags.source.as_deref()) {
+        Ok(pin) => pin,
+        Err(cause) => {
+            eprintln!("{SOURCE_PIN_UNAVAILABLE}");
+            eprintln!("cause: {cause}");
+            return 1;
+        }
     };
     if pin.get("decision").and_then(Value::as_str) == Some("refuse") {
         eprintln!(
@@ -1909,7 +1921,13 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     if resolved_source.is_none() {
         degraded.push("source checkout not resolvable".into());
     }
-    let pin = resolve_source_pin(source);
+    let pin = match resolve_source_pin(source) {
+        Ok(pin) => Some(pin),
+        Err(cause) => {
+            degraded.push(format!("source pin unresolved ({cause})"));
+            None
+        }
+    };
     let gate_refused = pin.as_ref().is_some_and(|p| {
         p.get("path").and_then(Value::as_str).is_some()
             && p.get("decision").and_then(Value::as_str) == Some("refuse")

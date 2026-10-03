@@ -10,7 +10,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import click
 import typer
 
 plugin_app = typer.Typer(help="Install the footnote plugin into a harness (from the filtered stage)")
@@ -39,7 +38,10 @@ def _binary() -> Path:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def install(
-    ctx: click.Context,
+    # typer.Context, never click.Context: typer 0.26+ vendors its own click,
+    # so the standalone click.Context annotation is an unsupported parameter
+    # type and building this command raises RuntimeError.
+    ctx: typer.Context,
     harness: str = typer.Argument("", help="claude | codex | opencode | agy"),
 ) -> None:
     """Install the footnote plugin from the filtered stage (no build output)."""

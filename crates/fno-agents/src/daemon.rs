@@ -4450,7 +4450,7 @@ where
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {
-                    for (key, value) in crate::model_price::served_context_cost_keys(e) {
+                    for (key, value) in crate::model_price::served_session_metrics_keys(e) {
                         object.insert(key, value);
                     }
                     // No `pid_alive` injection here: this row's `status` is

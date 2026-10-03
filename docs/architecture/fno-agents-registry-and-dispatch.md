@@ -53,8 +53,6 @@ The registry on disk is one JSON file at `state_dir() / "agents" / "registry.jso
 }
 ```
 
-`config.paths.agents_registry_path` in `config.toml` overrides the default location for users with non-standard `state_dir` setups.
-
 ### Three optional session-id fields
 
 `AgentEntry` carries one optional session-id field per provider (`claude_short_id`, `codex_session_id`, `gemini_session_id`). Exactly one is set per entry, dictated by the `provider` field. This is a flat shape rather than a discriminated union — the simpler shape JSON-serializes cleanly and the provider field already communicates which session-id namespace applies. (The type-design analyzer flagged the union as deferred work; the flat shape has held across every provider added since.)

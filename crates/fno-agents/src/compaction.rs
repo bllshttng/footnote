@@ -132,15 +132,13 @@ fn epoch_to_rfc3339(epoch: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// One JSONL transcript scan. Returns the FIRST `"subtype":"compact_boundary"`
-/// entry whose timestamp is strictly newer than `after_epoch`, mirroring the
-/// end marker the claude CLI itself writes (`type:"system"` with
-/// `compactMetadata`, measured 2026-09-08).
+/// One JSONL transcript scan. Returns the FIRST Claude `compact_boundary` or
+/// Codex `compacted` entry newer than `after_epoch`.
 fn first_boundary_after(transcript: &Path, after_epoch: i64) -> Result<Option<String>, String> {
     let raw =
         std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
     for line in raw.lines() {
-        if !line.contains("compact_boundary") {
+        if !line.contains("compact_boundary") && !line.contains("compacted") {
             continue;
         }
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -259,7 +257,7 @@ fn visit_boundaries(transcript: &Path, mut visit: impl FnMut(i64, &str)) -> Resu
         std::fs::File::open(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|e| format!("transcript unreadable: {e}"))?;
-        if !line.contains("compact_boundary") {
+        if !line.contains("compact_boundary") && !line.contains("compacted") {
             continue;
         }
         let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -287,9 +285,9 @@ fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
 }
 
 /// Count the compactions a transcript records at or after `since_epoch`.
-/// The Claude CLI writes `compact_boundary` itself, so this counts what a
-/// hook-fed journal row can miss. An empty or unparseable `since` counts every
-/// boundary, the same conservative direction `in_tenure` takes.
+/// Claude writes `compact_boundary` and Codex writes `compacted`; this counts
+/// transcript truth even when the hook-fed journal missed a row. An empty or
+/// unparseable `since` counts every boundary, the same direction `in_tenure` takes.
 pub fn count_boundaries_since(transcript: &Path, since_epoch: Option<i64>) -> Result<u64, String> {
     let mut count = 0;
     visit_boundaries(transcript, |epoch, _| {
@@ -476,6 +474,13 @@ mod tests {
             3
         );
         assert_eq!(count_boundaries_since(&transcript, None).unwrap(), 4);
+
+        // Codex records the same event as `type: compacted`.
+        write_file(
+            &transcript,
+            r#"{"type":"compacted","timestamp":"2026-09-12T00:00:00Z"}"#,
+        );
+        assert_eq!(count_boundaries_since(&transcript, None).unwrap(), 1);
     }
 
     #[test]

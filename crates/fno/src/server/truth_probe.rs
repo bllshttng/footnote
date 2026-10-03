@@ -80,6 +80,7 @@ pub(crate) fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
             .map(|f| f as u64);
         let cost_cents = row.get("session_cost_cents").and_then(|v| v.as_u64());
         let tokens = row.get("session_tokens").and_then(|v| v.as_u64());
+        let compaction_count = row.get("compaction_count").and_then(|v| v.as_u64());
         map.insert(
             key,
             TruthReading {
@@ -87,6 +88,7 @@ pub(crate) fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
                 age_s,
                 cost_cents,
                 tokens,
+                compaction_count,
             },
         );
     }
@@ -105,6 +107,7 @@ pub(crate) struct TruthReading {
     pub(crate) age_s: Option<u64>,
     pub(crate) cost_cents: Option<u64>,
     pub(crate) tokens: Option<u64>,
+    pub(crate) compaction_count: Option<u64>,
 }
 
 impl TruthReading {

@@ -9,6 +9,7 @@ suite-wide `_neutral_host_harness` fixture.
 
 import json
 import subprocess
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -31,7 +32,10 @@ def _fresh_cache():
 
 def test_both_halves_come_from_one_cached_read():
     run = mock.MagicMock(return_value=_run_returning({"session_pid": 4242, "harness": "claude"}))
-    with mock.patch.object(subprocess, "run", run):
+    with mock.patch.object(subprocess, "run", run), mock.patch(
+        "fno.rust_binary.resolve_binary",
+        return_value=Path("/usr/local/bin/fno-agents"),
+    ):
         first = session_pid._session_identity(100)
         second = session_pid._session_identity(100)
     assert first == (4242, "claude")
@@ -39,8 +43,7 @@ def test_both_halves_come_from_one_cached_read():
     # AC6: one exec total, whatever the call order.
     assert run.call_count == 1
     assert run.call_args.args[0] == [
-        "fno",
-        "agents",
+        "/usr/local/bin/fno-agents",
         "claim",
         "session-pid",
         "--json",

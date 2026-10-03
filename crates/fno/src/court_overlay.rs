@@ -46,10 +46,59 @@ const SHELLOUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `--force`, which is how a guard becomes a formality.
 pub const CACHE_TTL: Duration = Duration::from_secs(15);
 
-/// The minimized block is exactly three glance lines: load, cpu, census.
+/// The minimized block is exactly four glance lines: cpu, limit, memory, census.
 /// The client reserves this many sideline rows for it, so the height the
 /// layout subtracts and the height the painter draws cannot drift.
-pub const MINIMIZED_ROWS: usize = 3;
+pub const MINIMIZED_ROWS: usize = 4;
+
+/// Readings each sparkline keeps: twelve folds at the TTL is three minutes.
+const HISTORY: usize = 12;
+
+/// The simple glance's second line: where the agents stand against the
+/// limit that decides whether another worker starts.
+fn simple_limit_line(court: &Court) -> String {
+    match (
+        court.arm_num("cpu admission", "share_low"),
+        court.arm_num("cpu admission", "ceiling"),
+    ) {
+        (Some(low), Some(ceiling)) if low > ceiling => format!(
+            "  agents    over their {:.0}% limit, so new workers wait",
+            ceiling * 100.0
+        ),
+        (Some(_), Some(ceiling)) => {
+            format!("  agents    under their {:.0}% limit", ceiling * 100.0)
+        }
+        _ => "  agents    limit unknown".to_string(),
+    }
+}
+
+/// A history as one bar per fold, on a fixed 0-100% scale so a flat low
+/// line never stretches into a full-height graph.
+fn spark(history: &[f64]) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    history
+        .iter()
+        .map(|b| BARS[(b.clamp(0.0, 1.0) * 7.0).round() as usize])
+        .collect()
+}
+
+/// The glance's team line: leads first, then the workers by how recently
+/// each one did something. A lead count that failed to read is left out,
+/// never shown as zero.
+fn census_line(court: &Court, ages: &[Option<u64>]) -> String {
+    let mut parts = Vec::new();
+    if let Some(kings) = court.census.kings {
+        parts.push(format!("{kings} leads"));
+    }
+    if !ages.is_empty() {
+        parts.push(census_split(ages).render());
+    }
+    if parts.is_empty() {
+        "  team      no workers held".to_string()
+    } else {
+        format!("  team      {}", parts.join(" · "))
+    }
+}
 
 /// The census block: kings are a ROW count, tests is a PROCESS count. `None`
 /// is a read that failed, and it renders as `unknown` rather than as a zero:
@@ -251,14 +300,28 @@ pub struct Panel {
     retry_at: Option<Instant>,
     degraded: bool,
     inflight: bool,
+    /// `config.mux.load_readout = "detailed"`: the raw numbers. Off (the
+    /// default) is plain words.
+    detailed: bool,
+    /// Whole-machine busy fraction per landed fold, oldest first.
+    busy_history: Vec<f64>,
+    /// Memory used fraction per landed fold, oldest first.
+    mem_history: Vec<f64>,
 }
 
 impl Panel {
+    pub fn with_detail(detailed: bool) -> Self {
+        Self {
+            detailed,
+            ..Self::default()
+        }
+    }
+
     pub fn is_expanded(&self) -> bool {
         self.expanded
     }
 
-    /// Expand in place, or collapse back to the three-line glance. A pure
+    /// Expand in place, or collapse back to the four-line glance. A pure
     /// render toggle: the cached reading survives, so no expand pays the
     /// slow fold again.
     pub fn toggle(&mut self) {
@@ -312,6 +375,19 @@ impl Panel {
         self.inflight = false;
         match result {
             Some(court) => {
+                let busy = court.arm_num("whole-machine cpu", "busy_fraction");
+                let used = court.arm_num("memory", "free_fraction").map(|f| 1.0 - f);
+                for (history, value) in [
+                    (&mut self.busy_history, busy),
+                    (&mut self.mem_history, used),
+                ] {
+                    if let Some(v) = value {
+                        history.push(v);
+                        if history.len() > HISTORY {
+                            history.remove(0);
+                        }
+                    }
+                }
                 self.fold = Some(court);
                 self.degraded = false;
                 self.retry_at = None;
@@ -324,8 +400,8 @@ impl Panel {
         }
     }
 
-    /// The minimized block: exactly three lines, painted at the bottom of
-    /// the sideline on every frame. Load, cpu, census - the glance answers.
+    /// The minimized block: exactly four lines, painted at the bottom of
+    /// the sideline on every frame. Cpu, limit, memory, census.
     /// Every number carries its unit or its comparand here too; the expanded
     /// view adds the detail.
     pub fn minimized_lines(&self, ages: &[Option<u64>]) -> Vec<String> {
@@ -335,8 +411,16 @@ impl Panel {
             } else {
                 "  court     reading the machine...".to_string()
             };
-            return vec![first, String::new(), String::new()];
+            return vec![first, String::new(), String::new(), String::new()];
         };
+        if !self.detailed {
+            return vec![
+                self.simple_cpu_line(court),
+                simple_limit_line(court),
+                self.memory_line(court),
+                census_line(court, ages),
+            ];
+        }
         let load_line = match (
             court.arm_num("cpu admission", "share_low"),
             court.arm_num("cpu admission", "capacity_cores"),
@@ -374,20 +458,63 @@ impl Panel {
             court.arm_num("whole-machine cpu", "capacity_cores"),
         ) {
             (Some(busy), Some(cores)) => {
-                format!("  cpu       {:.0}% busy of {cores:.0} cores", busy * 100.0)
+                format!(
+                    "  cpu       {} {:.0}% busy of {cores:.0} cores",
+                    self.spark(),
+                    busy * 100.0
+                )
             }
             _ => "  cpu       unknown".to_string(),
         };
-        let census_line = if ages.is_empty() {
-            "  workers   no roster rows held".to_string()
-        } else {
-            format!(
-                "  workers   {} ({} rows)",
-                census_split(ages).render(),
-                ages.len()
-            )
-        };
-        vec![load_line, cpu_line, census_line]
+        vec![
+            load_line,
+            cpu_line,
+            self.memory_line(court),
+            census_line(court, ages),
+        ]
+    }
+
+    /// The simple glance's first line: the whole machine, then how much of
+    /// it is ours, so both numbers read on one base. The agents' share is a
+    /// slice of the busy total, never a second total beside it.
+    fn simple_cpu_line(&self, court: &Court) -> String {
+        let busy = court.arm_num("whole-machine cpu", "busy_fraction");
+        let agents = court.arm_num("cpu admission", "share_low");
+        match (busy, agents) {
+            (Some(busy), Some(agents)) => {
+                // Split the ROUNDED numbers so the printed parts add up.
+                let (busy, agents) = ((busy * 100.0).round(), (agents * 100.0).round());
+                format!(
+                    "  CPU       {} {busy:.0}% busy: agents {agents:.0}%, everything else {:.0}%",
+                    self.spark(),
+                    (busy - agents).max(0.0)
+                )
+            }
+            (Some(busy), None) => format!("  CPU       {} {:.0}% busy", self.spark(), busy * 100.0),
+            (None, Some(agents)) => format!("  CPU       agents {:.0}%", agents * 100.0),
+            (None, None) => "  CPU       unknown".to_string(),
+        }
+    }
+
+    /// Memory in use with its graph: one line in both views, since a full
+    /// machine swaps long before its CPU line looks alarming.
+    fn memory_line(&self, court: &Court) -> String {
+        match (
+            court.arm_num("memory", "free_fraction"),
+            court.arm_num("memory", "available_gb"),
+        ) {
+            (Some(free), Some(gb)) => format!(
+                "  memory    {} {:.0}% used, {gb:.1} GB free",
+                spark(&self.mem_history),
+                (1.0 - free) * 100.0
+            ),
+            (None, Some(gb)) => format!("  memory    {gb:.1} GB free"),
+            _ => "  memory    unknown".to_string(),
+        }
+    }
+
+    fn spark(&self) -> String {
+        spark(&self.busy_history)
     }
 
     /// The expanded block: the full reading, in place. Three rules this
@@ -473,7 +600,8 @@ impl Panel {
                     String::new()
                 };
                 lines.push(format!(
-                    "  {label:<8} {:.0}% busy of {cores:.0} cores{saturated}",
+                    "  {label:<8} {} {:.0}% busy of {cores:.0} cores{saturated}",
+                    self.spark(),
                     busy * 100.0,
                     label = "cpu"
                 ));
@@ -877,24 +1005,39 @@ mod tests {
     fn glance_rows() {
         let lines = opened(live()).minimized_lines(&AC6_AGES);
 
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(
-            lines[0].contains("58% of 12 cores against 50%"),
-            "{lines:?}"
+        assert_eq!(lines.len(), MINIMIZED_ROWS, "{lines:?}");
+        // The default glance is plain words, with the CPU graph.
+        assert_eq!(
+            lines[0],
+            "  CPU       ▇ 80% busy: agents 58%, everything else 22%"
         );
-        assert!(lines[0].contains("1.2x"), "{lines:?}");
-        assert!(lines[1].contains("80% busy of 12 cores"), "{lines:?}");
-        assert!(
-            lines[2].contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age"),
-            "{lines:?}"
+        assert_eq!(
+            lines[1],
+            "  agents    over their 50% limit, so new workers wait"
         );
-        assert!(lines[2].contains("(7 rows)"), "{lines:?}");
+        assert_eq!(lines[2], "  memory    ▄ 37% used, 64.9 GB free");
+
+        let mut panel = Panel::with_detail(true);
+        assert!(panel.take_want());
+        panel.apply(Some(live()));
+        panel.apply(Some(live()));
+        let detail = panel.minimized_lines(&AC6_AGES);
+        assert!(
+            detail[0].contains("58% of 12 cores against 50%"),
+            "{detail:?}"
+        );
+        assert!(detail[0].contains("1.2x"), "{detail:?}");
+        assert!(detail[1].contains("▇▇ 80% busy of 12 cores"), "{detail:?}");
+        assert_eq!(
+            lines[3],
+            "  team      5 leads · 2 working · 2 idle · 1 stale · 1 dead · 1 unknown age"
+        );
 
         let panel = Panel::default();
 
         let lines = panel.minimized_lines(&[]);
 
-        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines.len(), MINIMIZED_ROWS, "{lines:?}");
         assert!(lines[0].contains("reading the machine"), "{lines:?}");
         assert!(
             !lines[0].contains('0'),

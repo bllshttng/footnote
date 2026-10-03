@@ -86,6 +86,7 @@
       "session_cost_cents",
       "session_tokens",
       "session_cost_measured_at",
+      "compaction_count",
       "mail_unread",
       "harness_title",
       "liveness",
@@ -109,6 +110,7 @@
     "session_cost_cents": "The RUNNING session cost the reconcile sweep measured from the transcript, in integer cents, priced through the models.dev catalog (`crates/fno-agents/src/model_price.rs`). The card prefixes `~`: on a subscription it is an API-equivalent estimate. Null when no sweep has measured the session, or any token kind with a nonzero count found no catalog rate - an absent reading, never a zero.",
     "session_tokens": "The raw token sum behind `session_cost_cents` (every kind: input, output, cache read, cache write). Rendered instead of a dollar figure when the session is unpriced, so a missing rate still shows size. Null before the first measurement.",
     "session_cost_measured_at": "The sweep stamp `session_cost_cents` was measured at; the age a reader computes from it is part of the fact. Null with a null cost, never a blank beside a word.",
+    "compaction_count": "The number of compaction boundaries in the session transcript. Null when the session identity or transcript is unavailable or unreadable; an available transcript with no boundaries reports zero.",
     "pr": "The primary PR of the row's `node`, read once per list call from the backlog graph. Null when `pr_basis` names why.",
     "pr_basis": "Why `pr` reads the way it does: `node` (read off the node), `no-node` (the row works no node), `no-pr` (the node has no PR, or the graph does not hold the node), `graph-unreadable` (the graph read failed; the list still renders)."
   },
