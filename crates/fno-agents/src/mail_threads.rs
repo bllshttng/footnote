@@ -409,9 +409,7 @@ fn run_journal_reply(args: &[String]) -> i32 {
         eprintln!("mail-threads journal-reply: stdin: {error}");
         return 1;
     }
-    let home = AgentsHome::from_env();
-    let dot_fno = home.root().parent().unwrap_or_else(|| home.root());
-    let bus = dot_fno.join("bus").join("messages.jsonl");
+    let bus = journal_bus_path();
     match journal_reply_at(&bus, to, to_session, parent, thread, &body) {
         Ok(id) => {
             println!("{id}");
@@ -422,6 +420,12 @@ fn run_journal_reply(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn journal_bus_path() -> std::path::PathBuf {
+    let home = AgentsHome::from_env();
+    let dot_fno = home.root().parent().unwrap_or_else(|| home.root());
+    crate::intel::bus_log_path(dot_fno)
 }
 
 fn journal_reply_at(
@@ -825,8 +829,16 @@ mod tests {
         std::fs::create_dir_all(&agents_root).unwrap();
         let prior_state = std::env::var_os("FNO_STATE_DIR");
         let prior_agents = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_bus_dir = std::env::var_os("FNO_BUS_DIR");
         std::env::set_var("FNO_STATE_DIR", &state_root);
         std::env::set_var(crate::paths::HOME_ENV, &agents_root);
+        let custom_bus = state.join("custom-bus");
+        std::env::set_var("FNO_BUS_DIR", &custom_bus);
+        assert_eq!(
+            journal_bus_path(),
+            custom_bus.join("messages.jsonl"),
+            "journal replies follow the configured live bus"
+        );
         let bus = state_root.join("bus").join("messages.jsonl");
         let parent = json!({
             "v": 1, "id": "fmail-aaaaaaaaaaaa", "ts": "2026-10-02T11:00:00Z",
@@ -893,6 +905,11 @@ mod tests {
             std::env::set_var(crate::paths::HOME_ENV, value);
         } else {
             std::env::remove_var(crate::paths::HOME_ENV);
+        }
+        if let Some(value) = prior_bus_dir {
+            std::env::set_var("FNO_BUS_DIR", value);
+        } else {
+            std::env::remove_var("FNO_BUS_DIR");
         }
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&state);

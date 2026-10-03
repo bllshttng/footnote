@@ -169,6 +169,48 @@ async fn messages_reply_board_contracts() {
     super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
         .await
         .unwrap();
+    view.notice = None;
+    view.layout.agents = vec![crate::proto::AgentRow {
+        name: "first".into(),
+        harness_session_id: Some("session-uuid".into()),
+        pane_id: Some(7),
+        ..Default::default()
+    }];
+    view.layout.panes = vec![(
+        7,
+        crate::tree::Rect {
+            x: 0,
+            y: 0,
+            rows: 1,
+            cols: 1,
+        },
+    )];
+    super::super::messages_reply::open(
+        &mut view,
+        json!({
+            "id":"m1", "thread":"chat-a1", "from":"candor", "from_key":"s-c",
+            "to_key":"s1", "summary":"Ship it."
+        }),
+    );
+    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
+        .await
+        .unwrap();
+    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
+        .await
+        .unwrap();
+    super::super::messages_reply::keys(&mut view, b"\x15", &mut writer)
+        .await
+        .unwrap();
+    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
+        .await
+        .unwrap();
+    assert!(
+        view.notice.is_none(),
+        "fno_id resolves through the participant name"
+    );
+    super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
+        .await
+        .unwrap();
     super::mouse(
         &mut view,
         crate::mouse::MouseReport {

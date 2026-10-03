@@ -139,7 +139,8 @@ fn endpoint_pane(view: &View, target: &Endpoint) -> Option<u64> {
         .iter()
         .find(|a| {
             !a.exited
-                && a.harness_session_id.as_deref() == Some(target.session.as_str())
+                && (a.harness_session_id.as_deref() == Some(target.session.as_str())
+                    || a.name == target.name)
                 && a.pane_id
                     .is_some_and(|id| view.layout.panes.iter().any(|(p, _)| *p == id))
         })
