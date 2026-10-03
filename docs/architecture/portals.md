@@ -32,7 +32,7 @@ When a channel ends, the portal stays and says so. A viewer whose process exits 
 
 The same mint serves a restore-held slot. The seat comes back parked on its channel until a reach or a focus fills it. `[mux.restore] policy = resume` still fills held portals at startup, because that setting is the operator's ask. A parked portal whose row never returns stays a readable screen naming the row.
 
-An open and a close are both journaled: a portal entering the map writes one `portal_opened` row and leaving it writes one `portal_closed` row carrying the door's cause word, so the journal alone answers which door opened a portal and what took it. A retune is a closed-and-open pair on the same index. The peek mail composer's draft is fno state too. Typed text is persisted per target row and restored when a portal on that row reopens. Only an Esc or a send deletes it.
+An open and a close are both journaled: a portal entering the map writes one `portal_opened` row and leaving it writes one `portal_closed` row carrying the door's cause word, so the journal alone answers which door opened a portal and what took it. A retune is a closed-and-open pair on the same index. The peek mail composer's draft is fno state too. Typed text is persisted per target row. A portal reopen on that row restores the text. Only an Esc or a send deletes it.
 
 A fill must prove it is the same session. The portal slot records the row's full session id at capture. A key that resolves under a different id now is a different thread wearing a familiar label. The fill refuses, keeps the seat held, and names both ids.
 
