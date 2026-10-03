@@ -95,9 +95,9 @@ pub struct QuestionAsker {
 
 /// One open or answered operator question, mirroring the projection item
 /// `fno-agents needs --items --json` prints. This is what the overlay and the
-/// sideline's questions block render and answer. All fields but `id` are
+/// notifications panel render and answer. All fields but `id` are
 /// optional or defaulted, so a projection field added later never breaks an
-/// older client.
+/// older client. The settled bit folds node-closed questions into Answered.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct QuestionItem {
     #[serde(default)]

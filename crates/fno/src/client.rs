@@ -950,9 +950,9 @@ struct View {
     questions_fold: Option<crate::needs_overlay::QuestionsFold>,
     questions_degraded: bool,
     questions_degraded_reason: Option<String>,
-    /// Full question details and their persisted list/detail split.
+    /// The full question view's list/detail split.
     question_detail: Option<questions::Detail>,
-    questions_block: questions::BlockPrefs,
+    questions_split: u8,
     question_esc: Vec<u8>,
     /// Latest questions fold and its single-flight refresh while visible.
     questions_kick_at: Option<Instant>,
@@ -1984,7 +1984,7 @@ impl View {
             questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
-            questions_block: questions::BlockPrefs::load(),
+            questions_split: view_store::load_questions_split(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -6551,8 +6551,6 @@ enum ChromeHit {
     /// Open the questions detail overlay on one block row. Carries the id,
     /// not the index: a fold between click and open must not retarget it.
     OpenQuestionDetail(String),
-    /// Open the questions view on the list (the `+N more` row's click).
-    OpenQuestionsList,
     /// A card's node tap: the plan in Obsidian, else the node details pane.
     OpenNode(String),
     OpenPr(String),
@@ -9471,7 +9469,6 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => feed_detail::open_into(view, item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
-        ChromeHit::OpenQuestionsList => view.open_questions_list(),
         ChromeHit::OpenNode(id) => node_link::open(view, id).await,
         ChromeHit::OpenPr(url) => update_menu::open_pr(view, url).await,
     }
