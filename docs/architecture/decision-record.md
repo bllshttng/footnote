@@ -151,7 +151,7 @@ The graph projection stamps that mark at write time under the lock. The index is
 
 ## Traced decisions
 
-Every cross-rung ask is one traced decision: the worker ask, the lead's route (answer-self versus escalate, with the class), the question, the answer, and the correction all link by id. One hop is one `decision_span` row in the project journal; hops that already have a natural id (the question row, the decision row) carry the same `trace` envelope instead of a second row. The envelope is `{trace_id, span_id, parent_span_id?, actor_session?, actor_kind, comms, recipient_session?, recipient_kind?}`. `actor_kind` is `lead` when the session holds a live crown, `worker` for any other resolved session, `user` for an attended terminal with no session identity, `sweep` for daemon or scheduler work. The class enum is `public-surface`, `irreversible`, `money-security`, `law-change`, `gate-override`, `none`. The spans:
+Every cross-rung ask is one traced decision. The ask, the lead's route (answer-self versus escalate, with the class), the question, the answer, and the correction all link by id. One hop is one `decision_span` row in the project journal. Hops that already have a natural id (the question row, the decision row) carry the same `trace` envelope instead of a second row. The envelope is `{trace_id, span_id, parent_span_id?, actor_session?, actor_kind, comms, recipient_session?, recipient_kind?}`. When the session holds a live crown, `actor_kind` is `lead`, and any other resolved session is `worker`. An attended terminal with no session identity is `user`, and daemon or scheduler work is `sweep`. The class enum is `public-surface`, `irreversible`, `money-security`, `law-change`, `gate-override`, `none`. The spans:
 
 | Span | Row | Emitted by |
 |---|---|---|
@@ -165,7 +165,7 @@ One query reads the whole decision path for a node (read-only, immutable open, s
 
     sqlite3 "file:<events.db>?mode=ro&immutable=1" "select ts,type,json_extract(data,'$.trace.span_id'),json_extract(data,'$.trace.parent_span_id') from events where json_extract(data,'$.trace.trace_id')='<node>' order by ts"
 
-The plan's eval query: the route span and the question row come back in parent order (AC12). The schema entry (`decision_span`) and the Python `validate` gate the enums; x-63be's rule table acts on these rows at the Stop boundary.
+The route span and the question row come back in parent order. The schema entry (`decision_span`) and the Python `validate` gate the enums. The Stop-boundary rule table acts on these rows.
 
 ## Backfill
 
