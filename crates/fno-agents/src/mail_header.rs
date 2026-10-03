@@ -129,7 +129,7 @@ pub fn render_held_release(release: &HeldRelease) -> String {
             &message.id,
             &summary,
         ));
-        lines.push(body.to_string());
+        lines.push(body);
     }
     lines.join("\n")
 }
@@ -150,7 +150,7 @@ fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
 }
 
 fn unwrap_held_body(body: &str) -> String {
-    let trimmed = body.trim_matches('\n');
+    let trimmed = body.trim();
     let Some(block) = paired_envelope_block(trimmed) else {
         return body.to_string();
     };
@@ -179,15 +179,18 @@ fn header_summary(header: &str) -> Option<String> {
     Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
 }
 
-fn strip_summary_prefix(body: &str, summary: &str) -> &str {
-    let body = body.trim_start();
-    let Some(rest) = body.strip_prefix(summary) else {
-        return body;
+fn strip_summary_prefix(body: &str, summary: &str) -> String {
+    let leading_len = body.len() - body.trim_start().len();
+    let (leading, content) = body.split_at(leading_len);
+    let Some(rest) = content.strip_prefix(summary) else {
+        return body.to_string();
     };
-    rest.strip_prefix("\r\n")
+    let rest = rest
+        .strip_prefix("\r\n")
         .or_else(|| rest.strip_prefix('\n'))
         .or_else(|| rest.strip_prefix(' '))
-        .unwrap_or(rest)
+        .unwrap_or(rest);
+    format!("{leading}{rest}")
 }
 
 /// The first sentence: up to the first `.`, `!` or `?` that ends a word
