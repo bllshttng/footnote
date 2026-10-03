@@ -7,7 +7,7 @@ description: Report session provenance, work completed, and where agent sessions
 
 The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (the fold's `operator` class, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail. It counts tokens, lines, tool errors, languages, response time, hours, and overlapping sessions. It samples idle substantive sessions and computes per-category metrics from the facets. No model runs there. This skill is the judgment layer: you read the fold's sampled rows, judge each sampled session, cluster the summaries into categories, and write the narrative.
 
-The one rule the whole report stands on: **user turns only**. Relay, harness, keepalive, and unknown turns are other agents and machinery talking, or turns no witness can name. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
+The one rule the whole report stands on: **user turns only**. Relay, harness, keepalive, and unknown turns are other agents and machinery talking, or turns no witness can name. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore. The order of evidence is **events before transcripts**: judge friction from the fold's `events` block and `tool_errors` first (hook_blocked, spawn_refused, help_emitted, stop-hook wakes), then read the witnessed turns to fill the gaps the events leave.
 
 The fold names its populations, and the report keeps them apart. Every number says whether it rests on `scanned` sessions or on `judged` ones. No line blends the two.
 
@@ -46,23 +46,30 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
    Friction categories (keep to this set so downstream scorers can key on it): `misunderstood_instruction`, `repeated_correction`, `wrong_assumption`, `missing_context`, `workflow_friction`, `tool_failure`.
 
-3. Cluster the sampled sessions' summary lines into 3 to 8 categories that answer the question. Each category carries a name, a one-line description, and at most 5 optional subcategories. Every judged session goes into exactly one category. Use `Other` for a session that fits none. Write `~/.fno/intel/runs/<date>-<question key>.json`, mode 0600, in this schema:
+3. Cluster the sampled sessions' summary lines into 3 to 8 categories that answer the question. Each category carries a name, a one-line description, and at most 5 optional subcategories. Every judged session goes into exactly one category. Use `Other` for a session that fit none. Write `~/.fno/intel/runs/<date>-<question key>.json`, mode 0600, in this schema:
 
    ```json
    {"schema": 1, "question": "<text>", "question_key": "<8 hex>",
     "categories": [{"name": "...", "description": "...", "sessions": ["<id>", "..."],
-      "subcategories": [{"name": "...", "description": "...", "sessions": ["<id>"]}]}]}
+      "subcategories": [{"name": "...", "description": "...", "sessions": ["<id>"]}]}],
+    "suggestions": [{"friction": "<category>", "cause": "one line naming the mechanism",
+      "example_sessions": ["<judged session id>", "..."],
+      "evidence": "one line citing the number",
+      "events": ["<event type proven by the fold's events block>", "..."],
+      "fix": {"kind": "law|hook|config|node", "target": "one line naming where",
+              "text": "the copy-ready artifact"},
+      "node": "x-...", "metric": "friction:<word>|tool_errors|interruptions|unanswered|undelivered|unjudged"}]}
    ```
 
-   If that run file exists and its question key and session set match this sample, reuse it.
+   After clustering, write one suggestion per material friction. The suggestion is the self-improvement loop: per friction, name the cause in one line, name every judged session that exhibited it clearly (the example sessions' facet friction must equal the suggestion's `friction`), cite the evidence number, and list the event types that prove it (each must exist in the fold's `events` block; the post-process stamps their counts). Name the fix as one of four kinds - a law (`fno law` text), a hook row (the multi-CLI hook config), a config key, or a node - with the fix `text` written copy-ready, so a reader pastes it and it works. Before filing, check each suggestion against the active laws (`fno inbox law list`): a suggestion whose fix text or cause contradicts an active law is dropped, and the report names the law id in its Suggestions section. The 2026-10-02 /insights report suggested a preflight full-suite gate and rebase-before-review; both contradict active laws, and both would have shipped as regressions. Every surviving suggestion carries an open backlog node: file one with `fno backlog idea "<fix>" --details "<cause + evidence>"` before writing the run file, or match an open node that already carries the fix. The scored metric is one of the closed set above, always a count where lower is better; pick the friction count (`friction:<word>`) unless a fold-wide count (tool errors, interruptions, unanswered, undelivered, unjudged) is the truer measure. If that run file exists and its question key and session set match this sample, reuse it.
 
-4. Metrics: the post-process reads the run file and the saved fold JSON. It reads no transcript. It prints the fold JSON with a categories block:
+4. Metrics: the post-process reads the run file and the saved fold JSON. It reads no transcript. It prints the fold JSON with a categories block, the run file's suggestions validated against the judged facets and the graph's open nodes with their metric baselines stamped into a `suggestions` block:
 
    ```bash
    fno-agents intel --categories <run file> --fold <saved fold JSON> > <vault>/fno/intel/<date>-<question key>.json
    ```
 
-   On exit 2, fix the run file from the named reason and run it once more. If it fails again, keep the saved fold JSON as the report's `fold:` file and write the Categories section as `not written: <stderr line>`.
+   On exit 2, fix the run file from the named reason and run it once more. If it fails again, keep the saved fold JSON as the report's `fold:` file and write the Categories and Suggestions sections as `not written: <stderr line>`. On the next run over the same question, find the prior report's saved JSON (the newest file matching `<question key>` before this run's date) and pass it: `--score-prior <prior json>`. The post-process reads the prior report's stamped suggestions and adds a `scorecard` block printing `moved`, `unchanged`, `worse`, or `unmeasured` per metric. Quote it in the report's Scorecard section; a first run writes the section as `not written: first run, no prior report`.
 
 5. Write the report: `<vault>/fno/intel/<date>-<question key>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md). Every number comes from the JSON named in the frontmatter `fold:` field.
 
@@ -90,6 +97,7 @@ Judgment runs on this session's own model. No profile, no spawned reviewer, no P
 
 ## Known Limitations and Deferred Work
 
+- Mail turns currently classify as user turns, so operator-turn counts carry noise until the classifier fix lands. Do not trust an operator-turn count as a satisfaction measure on its own; judge witnessed turns against the events block and the relay facets.
 - User is witnessed, not inferred. When a person presses Enter in a pane or portal, the mux writes an `operator_submit` row. The fold binds turns to those rows. A turn outside the witness reads `unknown`, never `operator`. Uncovered paths: a bare terminal, the desktop apps, and claude.ai jobs. That typing never passes the mux. A hand-started harness in a shell pane writes `resolution: unresolved`, and nothing joins it. A submit queued past the 30s bind window also reads unknown. The `witness.unwitnessed_sessions` receipt counts sessions typed outside the witness.
 - The relay delivered-check is a substring read: a bus body that appears verbatim in the transcript through some other channel reads as delivered even if the mail never landed in this session's turn flow.
 - Opencode sessions are folded now. Their `operator` class is the same witness join as claude's (the fold binds opencode turns to `operator_submit` rows by `harness_session`). Subagent child sessions carry a `parent_id` and are excluded. When no store is readable, `skipped.opencode` names the reason.
