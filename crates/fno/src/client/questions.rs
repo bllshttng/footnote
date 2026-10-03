@@ -1,12 +1,8 @@
-//! The questions block and the full questions view, split out of
-//! `client.rs` because that file is over the line budget and shrink-only.
-//! The block sits above the court block in the sideline: one key toggles it,
-//! a key pair resizes it, and answered questions hide behind one dim count
-//! line. The full view reuses the backlog board's framed list and detail
-//! panes and its markdown renderer (`backlog_panes`/`backlog_md`), and
-//! answers in place through [`crate::needs_overlay::answer`]. A child module
-//! of `client`, so `View`'s private fields stay reachable without widening
-//! them.
+//! The full questions detail view, split out of `client.rs` because that file
+//! is over the line budget and shrink-only. It reuses the backlog board's
+//! framed list and detail panes and markdown renderer (`backlog_panes` /
+//! `backlog_md`), and answers through [`crate::needs_overlay::answer`].
+//! A child module of `client`, so `View`'s private fields stay local.
 
 use super::*;
 
@@ -112,7 +108,7 @@ pub(super) fn open_items(
     let mut open: Vec<_> = fold
         .items
         .iter()
-        .filter(|q| q.state == "open")
+        .filter(|q| q.state == "open" && !q.settled)
         .cloned()
         .collect();
     open.sort_by_key(|q| !q.ready);
@@ -128,7 +124,9 @@ fn block_items(
     let mut items: Vec<_> = fold
         .items
         .iter()
-        .filter(|q| q.state == "open" || (show_done && q.state == "answered"))
+        .filter(|q| {
+            (q.state == "open" && !q.settled) || (show_done && (q.state == "answered" || q.settled))
+        })
         .cloned()
         .collect();
     items.sort_by_key(|q| (q.state != "open", !q.ready));
@@ -637,7 +635,7 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
 /// A list title's role by state, the sideline block's rule in theme tokens:
 /// open and ready reads bright, open and not ready plain, answered muted.
 fn title_role(q: &crate::needs_overlay::QuestionItem) -> backlog_style::BRole {
-    match (q.state == "open", q.ready) {
+    match (q.state == "open" && !q.settled, q.ready) {
         (true, true) => backlog_style::BRole::Head,
         (true, false) => backlog_style::BRole::Body,
         (false, _) => backlog_style::BRole::Meta,
@@ -702,7 +700,7 @@ pub(super) fn draw_detail(
             &q.title
         };
         let mark = if i == d.idx { "\u{25b8}" } else { " " };
-        let done = q.state != "open";
+        let done = q.state != "open" || q.settled;
         let mut title_line = backlog_style::BLine::of(&[
             backlog_style::BSeg {
                 text: format!("{mark} "),
@@ -720,7 +718,7 @@ pub(super) fn draw_detail(
         let asker = q.asker.as_ref().map(|a| a.handle.as_str()).unwrap_or("?");
         let mut meta = format!(
             "  {asker} \u{2192} {node} {} {age}",
-            q.state,
+            if q.settled { "answered" } else { &q.state },
             age = age_short(&q.created_at, now)
         );
         if !q.ready && !done {
@@ -961,6 +959,10 @@ pub(super) fn kick_action(
         tokio::spawn(async move {
             let _ = tx.send(crate::needs_overlay::archive(ids).await);
         });
+    } else if std::mem::take(&mut view.question_clear_settled) {
+        tokio::spawn(async move {
+            let _ = tx.send(crate::needs_overlay::clear_settled().await);
+        });
     }
 }
 
@@ -1181,7 +1183,7 @@ enum Submit {
 /// through the pick with any notes composed in.
 fn submit(d: &mut Detail) -> Submit {
     let item = d.item().clone();
-    if item.state != "open" {
+    if item.state != "open" || item.settled {
         return Submit::Notice("this question is answered - read only");
     }
     if item.kind == "pin" {
@@ -1285,6 +1287,7 @@ impl View {
         match result {
             Ok(receipt) => {
                 self.needs_want = true;
+                self.questions_kick_at = None;
                 self.set_notice(format!("needs: {receipt}"));
                 self.question_detail = None;
             }

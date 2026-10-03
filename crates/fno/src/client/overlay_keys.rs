@@ -106,6 +106,10 @@ pub(super) async fn route(
     if view.question_detail.is_some() {
         return Some(questions::detail_keys(view, bytes, sock_w).await);
     }
+    if view.bell.open {
+        bell::keys(view, bytes);
+        return Some(Ok(StdinFlow::Continue));
+    }
     if view.answers.is_some() {
         return Some(answer_keys(view, bytes, sock_w).await);
     }

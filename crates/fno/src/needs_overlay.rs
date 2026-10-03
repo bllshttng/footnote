@@ -125,6 +125,8 @@ pub struct QuestionItem {
     #[serde(default)]
     pub state: String,
     #[serde(default)]
+    pub settled: bool,
+    #[serde(default)]
     pub options: Vec<QuestionOption>,
     #[serde(default)]
     pub blocked_because: Option<String>,
@@ -457,6 +459,25 @@ pub async fn archive(ids: Vec<String>) -> Result<String, String> {
         Err((stdout, msg)) => match archived(&stdout) {
             0 => Err(msg),
             n => Ok(format!("archived {n}; {msg}")),
+        },
+    }
+}
+
+/// Close every still-open question whose node or blocked node has finished.
+/// The daemon-side fold owns the graph read and writes `node-closed` rows;
+/// this client only reports its receipt.
+pub async fn clear_settled() -> Result<String, String> {
+    let result = |stdout: &str| {
+        serde_json::from_str::<serde_json::Value>(stdout)
+            .ok()
+            .and_then(|v| v.get("cleared")?.as_array().map(|rows| rows.len()))
+            .unwrap_or(0)
+    };
+    match run_door(vec!["needs".into(), "--clear-settled".into()]).await {
+        Ok(stdout) => Ok(format!("cleared {} settled questions", result(&stdout))),
+        Err((stdout, error)) => match result(&stdout) {
+            0 => Err(error),
+            n => Ok(format!("cleared {n} settled questions; {error}")),
         },
     }
 }

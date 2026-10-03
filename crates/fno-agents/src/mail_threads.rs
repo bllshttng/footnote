@@ -184,6 +184,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                     v.get("body").and_then(Value::as_str).unwrap_or(""),
                 ),
                 "body": v.get("body").and_then(Value::as_str).unwrap_or(""),
+                "expires": v.get("expires").and_then(Value::as_str),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
                 "delivery": v.get("delivery").and_then(Value::as_str),
                 "system": system_row,

@@ -569,6 +569,11 @@ pub(super) async fn mouse_pre_pass(
             if rep.row == 0 {
                 // The strip row: only its words act (R15); the rest of the
                 // row is dead.
+                if bell::button_range(view, view.panel_w().saturating_sub(1) as usize)
+                    .contains(&(rep.col as usize))
+                {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
                 for (start, w, v) in view.top_row_spans() {
                     if (rep.col as usize) >= start && (rep.col as usize) < start + w {
                         apply_hit(view, ChromeHit::TopRow(v), sock_w).await?;
