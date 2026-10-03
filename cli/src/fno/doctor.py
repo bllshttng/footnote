@@ -473,37 +473,24 @@ def _installed_pkg_dir() -> Optional[Path]:
 
 
 def _live_tool_env_processes() -> list[str]:
-    """ps argv lines of live processes running from the installed fno tool env.
-
-    The uv tool env root is three parents above the package dir
-    (``<tool>/fno/lib/pythonX.Y/site-packages`` -> ``<tool>/fno``). A process
-    "runs from" the env when its argv names a path under that root, and the
+    """ps argv lines of live processes running from the installed fno tool env
+    (``<tool>/fno``, three parents above the package dir). The stale verdict's
     proposed repair replaces that env in place - the 2026-10-02 study clobber
-    (gap audit blockers 1/3), so the stale verdict names them. Unfamiliar
-    layout, unreadable process table, or an empty env reads [] (skip).
+    (gap audit blockers 1/3) - so the verdict names them first. Unfamiliar
+    layout or an unreadable process table reads [] (skip).
     """
     pkg = _installed_pkg_dir()
     if pkg is None or len(pkg.parents) < 3 or pkg.parents[2].name != "fno":
         return []
     try:
-        out = subprocess.run(
-            ["ps", "-axo", "pid=,args="],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        ).stdout
+        out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=False, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return []
-    root, me = str(pkg.parents[2]), os.getpid()
+    root, me = str(pkg.parents[2]), f"{os.getpid()} "
     return [
         s
         for line in out.splitlines()
-        if (s := line.strip())
-        and root in s
-        and not s.startswith(f"{me} ")
-        and " awk -" not in s
-        and " ps -" not in s
+        if (s := line.strip()) and root in s and not s.startswith(me) and " awk -" not in s and " ps -" not in s
     ]
 
 
