@@ -478,7 +478,10 @@ def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
     seen = {}
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
     monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
-    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [_msg("m", "w", "b")])
+    monkeypatch.setattr(
+        "fno.bus.cursor.scan_unread",
+        lambda *a, **k: [_msg("fmail-000000000001", "w", "b")],
+    )
     monkeypatch.setattr("fno.bus.cursor.advance_cursor", lambda *a, **k: True)
     monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
 
@@ -516,7 +519,7 @@ def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
         seen["from_name"] = from_name
         return True
 
-    messages = [_msg("m1", "peer", "line one\nline two\nline three")]
+    messages = [_msg("fmail-000000000002", "peer", "line one\nline two\nline three")]
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
     monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
     monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: messages)
@@ -639,7 +642,10 @@ def test_a_release_with_no_registry_row_names_that_as_the_miss(monkeypatch):
     """`inject-missed` alone cannot separate a dead lane from an absent row."""
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
     monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: None)
-    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [_msg("m", "w", "b")])
+    monkeypatch.setattr(
+        "fno.bus.cursor.scan_unread",
+        lambda *a, **k: [_msg("fmail-000000000003", "w", "b")],
+    )
     advanced = []
     monkeypatch.setattr(
         "fno.bus.cursor.advance_cursor", lambda name, mid: advanced.append(mid)
@@ -680,7 +686,9 @@ def test_release_by_the_clock_key_still_drains_the_canonical_mailbox(monkeypatch
     )
     monkeypatch.setattr(
         "fno.bus.cursor.scan_unread",
-        lambda name, **k: [_msg("m1", "w", "b")] if name == "0198a3f2" else [],
+        lambda name, **k: [_msg("fmail-000000000004", "w", "b")]
+        if name == "0198a3f2"
+        else [],
     )
 
     result = hold_mod.release(session_identity_key(sid), held_for_s=10)
