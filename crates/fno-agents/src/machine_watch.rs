@@ -112,20 +112,6 @@ pub fn decide(
         };
         return ("runaway".into(), reason);
     }
-    if let Some(issues) = sample
-        .mux_issues
-        .as_ref()
-        .and_then(|value| value.as_array())
-        .filter(|issues| !issues.is_empty())
-    {
-        // A mux finding is its own incident, not resource pressure: it
-        // pages through its own verdict and never feeds the hot streak the
-        // runaway brake escalates from.
-        return (
-            "mux".into(),
-            format!("mux owner/socket issue: {} finding(s)", issues.len()),
-        );
-    }
     // Load is a queue, not work: macOS load counts short-lived process
     // churn, so only confirmed CPU busy makes a verdict hot.
     let busy_hot = sample.busy_fraction.is_some_and(|value| value > busy_band);
@@ -138,6 +124,22 @@ pub fn decide(
     } else {
         "unreadable"
     };
+    if verdict != "hot" {
+        if let Some(issues) = sample
+            .mux_issues
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .filter(|issues| !issues.is_empty())
+        {
+            // A mux finding is its own incident, not resource pressure: it
+            // pages through its own verdict, never feeds the hot streak the
+            // runaway brake escalates from, and never masks a hot reading.
+            return (
+                "mux".into(),
+                format!("mux owner/socket issue: {} finding(s)", issues.len()),
+            );
+        }
+    }
     let busy = busy_text(sample);
     let cores = sample
         .cores
@@ -332,6 +334,7 @@ pub fn tick_machine_watch_with_thresholds(
         }
         "mux" => {
             state.calm_streak = 0;
+            state.hot_streak = 0;
             emit_notice(state, sample, &reason, now, HOT_TITLE, "mux", &mut notify)
         }
         _ => WatchOutcome {
@@ -950,6 +953,47 @@ mod tests {
         }
         assert_eq!(mux_notices, 2, "mux pages through the notice throttle");
         assert_eq!(mux_brakes, 0, "a mux finding never arms the brake");
+
+        // Saturation outranks the mux page: a hot reading with a mux
+        // finding stays hot, so the brake clock keeps running.
+        let mut hot_and_muxed = sample(Some(0.95), Some(150.0));
+        hot_and_muxed.mux_issues = Some(serde_json::json!([{ "kind": "duplicate-server" }]));
+        let (verdict, _) = decide(&hot_and_muxed, 0.9, 10.0, None);
+        assert_eq!(verdict, "hot");
+
+        // hot -> mux -> hot: the mux tick resets the streak, so the
+        // isolated hot sample debounces instead of notifying on one reading.
+        let mut seq_state = MachineWatchState::default();
+        let seq_start = Instant::now();
+        let mut seq_notifies = 0;
+        let mut last_skip = String::new();
+        let mux_sample = || {
+            let mut s = sample(Some(0.4), Some(150.0));
+            s.load_1m = Some(96.0);
+            s.mux_issues = Some(serde_json::json!([{ "kind": "duplicate-server" }]));
+            s
+        };
+        for elapsed in [0, 300, 600] {
+            let sample_at = if elapsed == 300 {
+                mux_sample()
+            } else {
+                sample(Some(0.95), Some(1.0))
+            };
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut seq_state,
+                Ok(&sample_at),
+                |_, _| {
+                    seq_notifies += 1;
+                    true
+                },
+                seq_start + Duration::from_secs(elapsed),
+                |_, _| {},
+                Thresholds::default(),
+            );
+            last_skip = outcome.skip_reason.unwrap_or_default();
+        }
+        assert_eq!(seq_notifies, 1, "only the mux tick pages");
+        assert_eq!(last_skip, "debouncing", "the isolated hot sample debounces");
 
         // Churn walk: sustained load with idle busy never brakes. The
         // 2026-10-03 shape: 8 jobs per core waiting, about 5 of 12 cores
