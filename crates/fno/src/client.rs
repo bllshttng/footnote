@@ -2579,20 +2579,6 @@ impl View {
         self.move_pick = Some(MovePick::new(src, squads));
     }
 
-    /// Clear the read-only peek overlay and its escape carry. Called by
-    /// every modal `open_*` helper so a mouse-driven overlay open (the mouse
-    /// pre-pass runs before overlay routing) never leaves peek rendering on top.
-    fn clear_peek(&mut self) {
-        self.peek = None;
-        self.peek_esc.clear();
-        // The reply input lives inside peek; closing peek drops the memory
-        // copy only. The persisted draft survives an overlay open, so a
-        // modal over the composer cannot take the typed text - the bug this
-        // node closes. Only an Esc or a send deletes the file.
-        self.peek_input = None;
-        self.peek_input_esc.clear();
-    }
-
     /// Open the which-key keybinds modal (prefix+?, US3). Clears peek like
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {

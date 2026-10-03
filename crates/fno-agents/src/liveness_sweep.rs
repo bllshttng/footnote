@@ -764,8 +764,8 @@ pub(crate) struct AppliedTransition {
     pub(crate) row: String,
     pub(crate) harness: Option<String>,
     pub(crate) harness_session: Option<String>,
-    pub(crate) from: String,
-    pub(crate) to: String,
+    pub(crate) from: &'static str,
+    pub(crate) to: &'static str,
     pub(crate) cause: &'static str,
 }
 
