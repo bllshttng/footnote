@@ -65,11 +65,9 @@ WT_PATH = Path(__file__).resolve().parent
 def test_key_is_branch_scoped_and_repo_local():
     key = _review_hold.review_hold_key("feature/x-a089")
     assert key == "review:branch:feature/x-a089"
-    # A repo-local key: the global-id prefixes route to $HOME, and a review
-    # hold must live beside the repo whose merge it guards.
-    from fno.claims.io import claims_root_for
-
-    assert claims_root_for(key) is None
+    # A repo-local key (not a global-id prefix; the native routing list lives
+    # in crates/fno-agents/src/claims_root.rs): a review hold must live beside
+    # the repo whose merge it guards.
 
 
 def test_pr_worktree_resolution_from_canonical_subdir_uses_the_pr_branch(tmp_path: Path, monkeypatch):

@@ -101,16 +101,16 @@ _ROSTER_CROSSCHECK_TIMEOUT_S = 10.0
 
 
 def _node_aware_root(key: str):
-    """Resolve the claims root for a key (delegates to the shared helper).
+    """Resolve the claims root for a key: the native leg's routing read.
 
     Global-id kinds (``node:``/``dispatch:``/``reconcile:``/``session:``) route to
     the global ``~/.fno/claims`` so operator commands work without the env var
-; repo-local keys keep the cwd/env default. See
-    :func:`fno.claims.io.claims_root_for` for the single source of truth.
+; repo-local keys keep the cwd/env default. The prefix list lives once, in
+    crates/fno-agents/src/claims_root.rs.
     """
-    from .io import claims_root_for
+    from .core import native_claims_root
 
-    return claims_root_for(key)
+    return native_claims_root(key)
 
 
 @cli.command()
@@ -1232,15 +1232,15 @@ def list_cmd(
     prefix happened to fall to, silently missing the other store (measured:
     574 lockfiles in a root a bare `list` could never reach).
     A colon-less or unrecognized --prefix cannot tell which root its keys
-    live in (:func:`fno.claims.io.claims_root_for` returns None for
-    exactly that case), so narrowing to a single guessed root would
+    live in (the native read returns None for exactly that case), so
+    narrowing to a single guessed root would
     silently reintroduce the same miss; only an explicit --root narrows.
     """
     if root is not None:
         roots: list[Optional[Path]] = [root]
     else:
-        # _node_aware_root("") already resolves to None via claims_root_for's
-        # own colon check, so no separate `if prefix` branch is needed here.
+        # _node_aware_root("") already resolves to None (no colon, no route),
+        # so no separate `if prefix` branch is needed here.
         roots = [_claims_io.global_claims_root(), _node_aware_root(prefix)]
 
     deduped_roots = _claims_io.dedup_claims_roots(roots)
