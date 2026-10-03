@@ -9,7 +9,6 @@ import os
 import re
 import subprocess
 import sys
-import textwrap
 import time
 import unicodedata
 
@@ -39,6 +38,27 @@ def cut(s, n):
             return out[:-1] + "…" if out else ""
         out, w = out + c, w + cw
     return out
+
+
+def wrap(text, n):
+    """Greedy word wrap by terminal cells, so full-width text stays inside the bubble."""
+    lines, line = [], ""
+    for word in text.split():
+        while width(word) > n:
+            if line:
+                lines.append(line)
+                line = ""
+            head = cut(word, n + 1)[:-1]  # the longest prefix that fits n cells
+            lines.append(head)
+            word = word[len(head):]
+        if line and width(line) + 1 + width(word) > n:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    if line:
+        lines.append(line)
+    return lines
 
 
 def inner_rows(stdin, data):
@@ -101,13 +121,13 @@ def layout(left, frame, cols):
     # Speech wraps beside the body like the original bubble, bottom-aligned; the fleet line sits beside the name row.
     labels = [""] * len(art)
     labels[-1] = fleet
-    lines = textwrap.wrap(frame.get("speech") or "", BUBBLE_W)
     room = len(art) - 1
+    lines = wrap(frame.get("speech") or "", BUBBLE_W)
     if len(lines) > room:
-        lines = lines[: room - 1] + [" ".join(lines[room - 1 :])] if room else []
+        lines = lines[: room - 1] + [cut(" ".join(lines[room - 1 :]), BUBBLE_W)] if room else []
     bw = max([width(line) for line in lines] + [0])
     for i, line in enumerate(lines):
-        labels[room - len(lines) + i] = line.ljust(bw)
+        labels[room - len(lines) + i] = line + " " * (bw - width(line))
 
     for rows in range(max(len(left), len(art), MIN_ROWS), MAX_ROWS + 1):
         lefts = left + [""] * (rows - len(left))
