@@ -19,7 +19,7 @@ use std::process::Stdio;
 
 use serde_json::Value;
 
-use crate::process_admission::{std_command, std_spawn_for_human};
+use crate::process_admission::{std_command, std_spawn};
 
 /// The marketplace / repo the integrations install from. Mirrors
 /// _MARKETPLACE / _REPO_URL in cli/src/fno/setup/integration.py.
@@ -78,7 +78,7 @@ fn real_run(argv: &[&str]) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let out = std_spawn_for_human(&mut cmd)
+    let out = std_spawn(&mut cmd)
         .and_then(|child| child.wait_with_output())
         .map_err(|e| format!("{}: {e}", argv[0]))?;
     if out.status.success() {
@@ -106,10 +106,7 @@ fn py_eval(code: &str) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let out = std_spawn_for_human(&mut cmd)
-        .ok()?
-        .wait_with_output()
-        .ok()?;
+    let out = std_spawn(&mut cmd).ok()?.wait_with_output().ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
