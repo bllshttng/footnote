@@ -120,23 +120,28 @@ def cmd_note(
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the state receipt as JSON."),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
-    kind: Optional[str] = typer.Option(
-        None, "--kind",
-        help="The feed kind: progress (default), finding, ruling, collision.",
-    ),
 ) -> None:
     """Append a note to the node's thread (one feed, oldest first).
 
     A note is a comment row in the node's thread, stamped with this
-    session's identity, never a replacement of current_state. Read the
-    feed with `fno backlog note comment <id> --list`; the newest row is
-    the live reading. Nobody bound refuses BEFORE the write: exit 3. No
-    send confirmed: exit 4. ``--quiet`` writes anyway.
+    session's identity, never a replacement of current_state. ``--kind``
+    names the feed kind (progress, finding, ruling, collision; default
+    progress). Read the feed with `fno backlog note comment <id>
+    --list`; the newest row is the live reading. Nobody bound refuses
+    BEFORE the write: exit 3. No send confirmed: exit 4. ``--quiet``
+    writes anyway.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
     extra = list(ctx.args)
+    # --kind (the feed kind) rides the passthrough: the Python flag surface
+    # is shrink-only (the registry ratchet), so the flag is read out of
+    # extra rather than declared as an option parameter.
+    kind = None
+    if "--kind" in extra:
+        at = extra.index("--kind")
+        kind = extra[at + 1] if at + 1 < len(extra) else None
     graph_path = graph_cli._graph_path()
     if not task_id or "--blocking" in extra or "--resolve" in extra:
         from fno.rust_binary import resolve_binary
