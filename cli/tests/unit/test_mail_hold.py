@@ -533,8 +533,8 @@ def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
     assert seen["from_name"] == "fno-mail-hold"
 
 
-def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path):
-    """The live injector refuses an unframed digest that contains peer tags."""
+def test_release_delivers_held_release_frame_without_synthetic_sender(monkeypatch, tmp_path):
+    """The held-release frame keeps its real per-message headers."""
     from fno.bus.cursor import scan_unread
     from fno.bus.log import Envelope, append
 
@@ -572,8 +572,8 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
     monkeypatch.setattr("fno.agents.events.emit", lambda *_a, **_kw: None)
 
     original = Envelope.new(
-        id="held-fno-mail",
-        thread="held-fno-mail",
+        id="fmail-123456789abc",
+        thread="fmail-123456789abc",
         from_="worker",
         to=HANDLE,
         kind="send",
@@ -590,6 +590,8 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
 
     def fake_render(payload):
         rendered.append(payload)
+        if payload["mode"] == "held-release":
+            return payload["body"]
         return (
             f'<fno_mail from="{payload["from"]}" '
             f'harness="{payload["harness"]}">'
@@ -601,15 +603,17 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
 
     def fake_inject(_recipient, text, *, reason_out=None, **_kwargs):
         injected.append(text)
-        paired = (
-            text.lstrip().startswith("<fno_mail ")
-            and text.count("<fno_mail") == 1
-            and text.count("</fno_mail>") == 1
-            and text.rstrip().endswith("</fno_mail>")
+        is_release = (
+            text.startswith("1 held messages · sent ")
+            and (
+                "`@worker · fmail-123456789abc · the held report`" in text
+                or "`worker · fmail-123456789abc · the held report`" in text
+            )
+            and "<fno_mail" not in text
         )
-        if not paired and reason_out is not None:
-            reason_out.append("unframed-fno-mail")
-        return paired
+        if not is_release and reason_out is not None:
+            reason_out.append("invalid-held-release-frame")
+        return is_release
 
     monkeypatch.setattr(dispatch, "_mail_inject_claude", fake_inject)
 
@@ -618,11 +622,16 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
     assert result["outcome"] == "delivered", result
     assert result["miss_reason"] is None
     assert len(rendered) == 1
+    assert rendered[0]["mode"] == "held-release"
     assert "the held report" in rendered[0]["body"]
     assert "<fno_mail" not in rendered[0]["body"]
     assert len(injected) == 1
-    assert injected[0].count("<fno_mail") == 1
-    assert injected[0].count("</fno_mail>") == 1
+    assert injected[0].startswith("1 held messages · sent ")
+    assert (
+        "`@worker · fmail-123456789abc · the held report`" in injected[0]
+        or "`worker · fmail-123456789abc · the held report`" in injected[0]
+    )
+    assert "<fno_mail" not in injected[0]
     assert scan_unread(HANDLE) == []
 
 

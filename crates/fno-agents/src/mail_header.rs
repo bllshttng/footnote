@@ -315,28 +315,57 @@ pub enum Framing {
 /// held message follows under its own header line, oldest first by sent
 /// time (the locked held-mail ruling).
 pub fn is_held_release_line(line: &str) -> bool {
+    held_release_count(line).is_some()
+}
+
+fn held_release_count(line: &str) -> Option<usize> {
     let trimmed = line.trim();
-    let Some(rest) = trimmed.strip_suffix('m') else {
-        return false;
-    };
+    let rest = trimmed.strip_suffix('m')?;
     let mut parts = rest.split(" · ");
-    let (Some(head), Some(sent), Some(held)) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
+    let (head, sent, held) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
-        return false;
+        return None;
     }
     let held_ok = held
         .strip_prefix("held ")
         .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_digit()));
-    let Some((count, tail)) = head.split_once(" held messages") else {
+    let (count, tail) = head.split_once(" held messages")?;
+    if !held_ok
+        || !sent.starts_with("sent ")
+        || !tail.is_empty()
+        || count.is_empty()
+        || !count.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    count.parse().ok().filter(|count| *count > 0)
+}
+
+/// True when a complete held-release turn carries the declared number of
+/// original message headers, with each body following its own header.
+pub fn is_held_release_turn(text: &str) -> bool {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
         return false;
     };
-    held_ok
-        && sent.starts_with("sent ")
-        && tail.is_empty()
-        && !count.is_empty()
-        && count.chars().all(|c| c.is_ascii_digit())
+    let Some(expected) = held_release_count(first) else {
+        return false;
+    };
+    let rest: Vec<&str> = lines.collect();
+    let mut index = 0;
+    for _ in 0..expected {
+        if !rest.get(index).is_some_and(|line| is_header_line(line)) {
+            return false;
+        }
+        index += 1;
+        while index < rest.len() && !is_header_line(rest[index]) {
+            if is_held_release_line(rest[index]) {
+                return false;
+            }
+            index += 1;
+        }
+    }
+    index == rest.len()
 }
 
 /// Classify a delivered turn's framing from its head. The one classifier the
