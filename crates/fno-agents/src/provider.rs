@@ -544,7 +544,7 @@ pub(crate) fn plugin_root() -> Option<PathBuf> {
         // session-start hook and the install verb write
         // ~/.fno/install/plugin-root, so a $HOME anchor read a file that
         // never existed (2026-10-02 gap audit 6).
-        Err(_) => crate::paths::dirs_home().join(".fno"),
+        _ => crate::paths::dirs_home().join(".fno"),
     };
     pointer = crate::state_layout::place(&pointer, "plugin-root");
     let text = std::fs::read_to_string(pointer).ok()?;

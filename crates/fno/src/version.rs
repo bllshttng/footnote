@@ -57,7 +57,10 @@ pub fn print_version(json_out: bool) {
         // set-but-unusable FNO_PY says so here, matching the refusal every
         // forwarded verb would hit.
         match crate::bootstrap::env_override_python() {
-            Err(e) => println!("python-cli: unusable ({e}); forwarded verbs will refuse"),
+            Err(e) => println!(
+                "python-cli: unusable ({}); forwarded verbs will refuse",
+                e.msg
+            ),
             Ok(None) => match crate::bootstrap::resolved_python_script() {
                 Some(py) => println!("python-cli: {}", py.display()),
                 None => println!("python-cli: unresolved (no sibling, no uv tool dir)"),
