@@ -71,14 +71,11 @@ pub(crate) fn bind_pr_rows(
         if let Some(our) = &our_repo {
             for (number, url) in node_pr_refs(&entries[index]) {
                 let Some(existing_repo) = repo_slug_from_url(url.as_deref()) else {
-                    return PrRowBindResult::refused(
-                        claimed_ids,
-                        format!(
-                            "{nid} already carries a PR #{number} ref with no \
-                             resolvable repo; this PR is {our} - refusing an \
-                             unverifiable cross-repo claim"
-                        ),
-                    );
+                    return PrRowBindResult::refused(format!(
+                        "{nid} already carries a PR #{number} ref with no \
+                         resolvable repo; this PR is {our} - refusing an \
+                         unverifiable cross-repo claim"
+                    ));
                 };
                 if !existing_repo.eq_ignore_ascii_case(our) {
                     return PrRowBindResult::refused(format!(
