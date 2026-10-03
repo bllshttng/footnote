@@ -351,8 +351,8 @@ question and ask again: only the user may record that retraction.";
 
     let parsed = crate::escalation::parse(&req.question);
     // A mistyped class would land as an unroutable hop, so it refuses the
-    // way the reversible field does (x-2de0 encounter 1): exit 2, the six
-    // values named, nothing written.
+    // way the reversible field does: exit 2, the six values named, nothing
+    // written.
     let asked_class = parsed.class.trim();
     if !asked_class.is_empty() && !crate::decision_trace::DECISION_CLASSES.contains(&asked_class) {
         answer.lines.push(format!(

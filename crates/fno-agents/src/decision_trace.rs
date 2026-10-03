@@ -129,7 +129,7 @@ pub fn emit_span_to(
 /// Args for `fno-agents mail-record`, the one-shot chokepoint leaf
 /// `fno agents mail send/reply` calls binary-direct. It writes the same
 /// `mail_origin_classified` row the Python body wrote, then records the
-/// ask/route spans the traced-decision envelope needs (AC3/AC4, plan x-98cf).
+/// ask/route spans the traced-decision envelope needs.
 pub struct MailRecordArgs {
     origin: String,
     lane: String,
@@ -368,7 +368,7 @@ mod tests {
             sender: Some("w-1a2b3c4d".into()),
             target_session: Some("lead-9f8e7d6c".to_string()),
             reply_to: Some("m-1".to_string()),
-            node: Some("x-98cf".into()),
+            node: Some("x-node1".into()),
         };
         // reply_to names a bus row that does not exist, so the route leg
         // skips: one ask span, no route.
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(ask_data["span_kind"], "ask");
         let ask_key = ask_data["ask_key"].as_str().unwrap().to_string();
         assert_eq!(ask_key.len(), 12);
-        assert_eq!(ask_data["trace"]["trace_id"], "x-98cf");
+        assert_eq!(ask_data["trace"]["trace_id"], "x-node1");
         assert_eq!(ask_data["trace"]["actor_session"], "w-1a2b3c4d");
         // The origin row lands in the lifecycle store beside the journal's.
         let origin_rows = crate::event_store::query_events(
