@@ -2167,7 +2167,7 @@ event_types:
   - name: agent_spawned
     retention: durable
     description: "A new PTY-managed agent worker process was spawned."
-    sources: [daemon]
+    sources: [daemon, python, agents]
     data:
       required: []
       properties:
@@ -2243,7 +2243,7 @@ event_types:
 
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: []
       properties:
@@ -2392,7 +2392,7 @@ event_types:
   - name: merge_cleanup_requested
     retention: durable
     description: "A confirmed merged PR requested guarded worktree pruning and session-row removal."
-    sources: [python, daemon]
+    sources: [python, daemon, agents]
     data:
       required: [request_id, repo, pr, branch, worktree, node_ids]
       properties:
@@ -2418,7 +2418,7 @@ event_types:
   - name: merge_cleanup_skipped
     retention: durable
     description: "A merged PR produced no cleanup request; the reason names which precondition was unmet. The merge mint is the only emitter; the rows ride the daemon's journal, so the Rust known-kind table carries the name for acceptance without emitting."
-    sources: [python, daemon]
+    sources: [python, daemon, agents]
     data:
       required: [repo, pr, reason]
       properties:
@@ -2550,7 +2550,7 @@ event_types:
 
   - name: agent_inconsistent
     description: "Agent state is inconsistent (missing state.json, unexpected status, etc.)."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: []
       properties:
@@ -2564,7 +2564,7 @@ event_types:
 
   - name: agent_ask_done
     description: "An fno-agents ask RPC completed; agent replied."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: []
       properties:
@@ -2889,7 +2889,7 @@ event_types:
 
   - name: agent_crown_vacated
     description: "A crown left its holder. The dead-crown sweep emits it with cause holder_dead when a manifest-only crown's holder session is proven dead: evidence carries the death receipt, inheritor names the live crown one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale crown fields cleared in the same registry write. The attended `fno agents king done` emits the same kind with its own cause. The sweep grants no crown; territory falls back to its project by construction."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [scope, cause]
       properties:
@@ -3249,7 +3249,7 @@ event_types:
   - name: agent_spawn_accepted
     retention: durable
     description: "The spawn coordinator accepted a validated spawn request and allocated its spawn_id; recorded BEFORE any backend launch. An accepted record is not a live worker: the birth settles with agent_spawned or agent_spawn_failed, correlated by spawn_id."
-    sources: [daemon]
+    sources: [daemon, python, agents]
     data:
       required: [spawn_id, name]
       properties:
@@ -3271,7 +3271,7 @@ event_types:
 
   - name: agent_spawn_failed
     description: "The agent worker process could not be launched (binary not found, exec error, etc.)."
-    sources: [daemon]
+    sources: [daemon, python, agents]
     data:
       required: []
       properties:
@@ -3396,7 +3396,7 @@ event_types:
 
   - name: agent_stop_error
     description: "An error occurred while stopping an agent (e.g. registry write failure after SIGTERM)."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: []
       properties:
@@ -3407,7 +3407,7 @@ event_types:
 
   - name: agent_stop_refused
     description: "A stop request left the agent running because the interrupt never settled."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: []
       properties:
@@ -3526,7 +3526,7 @@ event_types:
 
   - name: reconcile_done
     description: "The reconcile sweep completed."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: []
       properties:
@@ -4820,7 +4820,7 @@ event_types:
 
   - name: node_failed
     description: "Synthesized when a dispatched session exits without a TerminationReason event: either immediately by the per-unit watchdog, or when dead-row GC reaps a convention-named target/reconcile worker that never terminated. Group-2 walk and dispatcher policy count both toward the same consecutive-failure streak."
-    sources: [loop, daemon]
+    sources: [loop, daemon, agents]
     data:
       required: [session_id, unit_id, iteration, exit_code]
       properties:
@@ -5337,7 +5337,7 @@ event_types:
 
   - name: dispatch_claim_observed
     description: "Emitted at the shared target-dispatch claim seam after the family-2 claim classifier and truth-status probe agree on what occupies the node. Stale/suspect observations are also printed and notified so a successor is never minted or blocked silently."
-    sources: [backlog]
+    sources: [backlog, agents]
     data:
       required: [node_id, claim_verdict, holder, truth_status, action]
       properties:
@@ -5574,7 +5574,7 @@ event_types:
 
   - name: pr_watch_dispatched
     description: "PR-state watcher handed one PR off successfully: 'review' fires the headless /fno:ship pr check skill; 'merge' routes the post-merge ritual (warm inject or a direct `fno do pr ritual` run -- NOT a headless claude skill). Per-merge attribution lives in post_merge_dispatch_receipt."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [kind, pr]
       properties:
@@ -5643,7 +5643,7 @@ event_types:
 
   - name: merge_grant_execution
     description: "One attributable attempt by the PR watcher to execute a durable dispatch grant on an OPEN PR: reserved under the per-PR lock before the canonical merge core runs, then executed, held, or failed from the core's verdict. Held and failed rows carry the merge core's printed reason."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [phase, actor, pr]
       properties:
@@ -5679,7 +5679,7 @@ event_types:
 
   - name: pr_watch_skipped
     description: "PR-state watcher skipped a candidate PR this tick without firing (no local checkout, or a live node/walker claim owns it)."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [pr, reason]
       properties:
@@ -5692,7 +5692,7 @@ event_types:
 
   - name: pr_watch_dispatch_failed
     description: "A headless claude skill fired by the PR-state watcher returned an error (rc != 0, is_error:true, or non-JSON stdout). The PR will be retried on the next tick."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [pr, retries]
       properties:
@@ -5705,7 +5705,7 @@ event_types:
 
   - name: pr_watch_parked
     description: "PR-state watcher stopped polling a PR because it was closed, exceeded max age, or exhausted retries."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [pr, reason]
       properties:
@@ -5749,7 +5749,7 @@ event_types:
 
   - name: pr_watch_tick
     description: "Heartbeat and positive sweep receipt emitted at the end of every successful PR-state watcher poll interval, including quiet ticks with no actionable PRs."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [open_prs, acted, swept_count, swept, dropped_count, dropped]
       properties:
@@ -5802,7 +5802,7 @@ event_types:
 
   - name: pr_watch_sweep_chunk
     description: "Bounded exact identities for an oversized pr_watch_tick receipt. All chunks precede the summary carrying the same receipt_id."
-    sources: [daemon]
+    sources: [daemon, agents]
     data:
       required: [receipt_id, chunk_index, chunk_count, item_count, items]
       properties:
@@ -7545,7 +7545,316 @@ event_types:
           type: integer
           description: "What remained of the fire's aggregate budget when the drain started. Near zero means the pre-drain reads had already spent the fire."
     consumers: [operator]
+  # The agents family's legacy flat-kind telemetry, envelope-mapped by
+  # fno.agents.events.emit with the channel identity (source agents). These
+  # kinds predate their schema entries; the entries carry no required data
+  # so every historical shape lands, and the data stays open.
+  - name: agent_ask_started
+    description: "An fno-agents ask RPC started."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_ask_failed
+    description: "An fno-agents ask RPC failed before a reply."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_send_started
+    description: "An fno-agents send RPC started."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_send_done
+    description: "An fno-agents send RPC completed."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_send_failed
+    description: "An fno-agents send RPC failed."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_mail_drained
+    description: "An agent's held mail queue was drained."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: mail_hold_released
+    description: "A mail hold on an agent was released."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_registered
+    description: "A session registered with the agents family."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_restamp_failed
+    description: "A session restamp attempt failed."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: harness_identity_resolved
+    description: "A session's harness identity resolved."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: sender_provenance_unknown
+    description: "A row's sender provenance could not be resolved."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_routed
+    description: "A relay routed a message to its destination lane."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_deliver_failed
+    description: "A relay failed to deliver a message."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_session_id_uncaptured
+    description: "An agent's session id could not be captured."
+    sources: [daemon, agents]
+    data:
+      required: []
 
+  - name: agent_court_reowned
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_stopped_status_write_failed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: crown_manifest_arm_failed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: king_woken
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: model_vendor_mismatch
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: pr_watch_cleanup_failed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_capture_degraded
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_cursor_resync
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_daemon_already_running
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_daemon_error
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_daemon_started
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_daemon_stopped
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_dropped
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: relay_ttl_exhausted
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_cwd_heal_failed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_pane_rebound
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_pane_rebound_failed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: provider_rate_limited
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_register_failed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_id_recorded
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_ask_streaming_cancelled
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_ask_streaming_chunk
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_ask_streaming_completed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_ask_streaming_started
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_crown_reclaimed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_crowned
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: agent_relay_stopped
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: dirty_ownerless_worktree
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: done_ahead_of_main
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: king_spawned_successor
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: king_wake_refused
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: mcp_channel_demoted_to_socket
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: mcp_channel_envelope_drift
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: mcp_channel_unreachable
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: mcp_server_unreachable
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: model_substituted
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: mux_ref_cleared
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: open_pr_ownerless
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: pi_session_create_unconfirmed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_cwd_healed
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_id_record_refused
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_id_restamped
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: session_transition_already_applied
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, python, agents]
+    data:
+      required: []
+  - name: session_transition_classified
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, python, agents]
+    data:
+      required: []
+  - name: session_transition_deferred
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, python, agents]
+    data:
+      required: []
+  - name: started_free_claim
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: streaming_via_polling
+    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    sources: [daemon, agents]
+    data:
+      required: []
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
