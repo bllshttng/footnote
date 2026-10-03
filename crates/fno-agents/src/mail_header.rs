@@ -114,7 +114,7 @@ fn split_header_span(trimmed: &str) -> Option<(&str, &str)> {
     while let Some(rel) = rest[from..].find('`') {
         let close = from + rel;
         let tail = &rest[close + 1..];
-        if tail.is_empty() || tail.starts_with(" \u{23ce} ") {
+        if tail.is_empty() || tail.starts_with(crate::mail_inject::NEWLINE_GLYPH) {
             return Some((&rest[..close], tail));
         }
         from = close + 1;
