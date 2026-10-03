@@ -68,6 +68,7 @@ pub struct HeldMessage {
 #[derive(serde::Deserialize)]
 pub struct HeldRelease {
     pub held_for_s: i64,
+    pub harness: Option<String>,
     pub messages: Vec<HeldMessage>,
 }
 
@@ -99,6 +100,18 @@ pub fn render_held_release(release: &HeldRelease) -> String {
         0
     };
     let count = messages.len();
+    let form = release
+        .harness
+        .as_deref()
+        .and_then(crate::harness_capabilities::packaged_mail_header_at)
+        .map(|at| {
+            if at {
+                HeaderForm::Mention
+            } else {
+                HeaderForm::Plain
+            }
+        })
+        .unwrap_or(HeaderForm::Mention);
     let mut lines = vec![format!(
         "{count} held messages · sent {sent_range} · held {minutes}m"
     )];
@@ -111,8 +124,8 @@ pub fn render_held_release(release: &HeldRelease) -> String {
             .unwrap_or_else(|| summary_of(&body));
         let body = strip_summary_prefix(&body, &summary);
         lines.push(render_header(
-            HeaderForm::Mention,
-            &message.sender,
+            form,
+            crate::system_sender::canonical(&message.sender),
             &message.id,
             &summary,
         ));

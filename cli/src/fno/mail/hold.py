@@ -514,7 +514,7 @@ def dedupe(messages: list) -> list[tuple[object, int, list[str]]]:
     return out
 
 
-def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
+def render_digest(handle: str, survivors: list, held_for_s: int, harness: str | None = None) -> str:
     """Render held mail through the Rust header and release formatter."""
     from fno import rust_binary
     binary = rust_binary.resolve_installed_binary()
@@ -529,7 +529,7 @@ def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
     ]
     proc = subprocess.run(
         [str(binary), "mail-hold", "--render-digest"],
-        input=json.dumps({"held_for_s": held_for_s, "messages": messages}),
+        input=json.dumps({"held_for_s": held_for_s, "harness": harness, "messages": messages}),
         capture_output=True,
         text=True,
         timeout=10,
@@ -628,7 +628,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             miss_reason.append("no-registry-row")
         else:
             try:
-                digest = render_digest(handle, messages, held_for_s)
+                digest = render_digest(handle, messages, held_for_s, getattr(entry, "harness", None))
                 framed = wrap_fno_mail(
                     digest,
                     from_="fno-mail-hold",
