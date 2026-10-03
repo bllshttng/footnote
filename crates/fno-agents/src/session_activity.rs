@@ -90,9 +90,21 @@ fn extension_of(path: &str) -> Option<String> {
 /// languages key (`fn facet_keys(view: &mut view, bytes: &[u8]) {` was one
 /// such key in the 2026-09-28 fold). A key must look like an extension:
 /// 1 to 12 characters of `[a-z0-9]`.
+/// A `file_path` a model sent is not always a path: fragments of code and
+/// prose carry dots too, and everything after the last dot became a
+/// languages key (`fn facet_keys(view: &mut view, bytes: &[u8]) {` was one
+/// such key in the 2026-09-28 fold). A key must look like an extension:
+/// 1 to 12 characters of `[a-z0-9]`.
 fn note_extension(extensions: &mut BTreeMap<String, u64>, path: &str) {
     if let Some(ext) = extension_of(path) {
-        *extensions.entry(ext).or_insert(0) += 1;
+        let shaped = !ext.is_empty()
+            && ext.len() <= 12
+            && ext
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        if shaped {
+            *extensions.entry(ext).or_insert(0) += 1;
+        }
     }
 }
 
@@ -483,14 +495,19 @@ mod tests {
                 {"old_string": "x\ny", "new_string": "x\nz"}]}});
         let write = json!({"type": "tool_use", "name": "Write",
                            "input": {"file_path": "a/b.RS", "content": "one\ntwo\nthree"}});
+        let fragment = json!({"type": "tool_use", "name": "Write",
+                              "input": {"file_path": "y.rs (x)", "content": "body"}});
         let raw = claude_lines(
             &[json!({"type": "assistant", "message": {"role": "assistant",
-                    "content": [edit("x.rs"), multiedit, write]}})],
+                    "content": [edit("x.rs"), multiedit, write, fragment]}})],
         );
         let act = claude_activity(&raw);
         assert_eq!(act.lines_added, 6);
         assert_eq!(act.lines_removed, 3);
         assert_eq!(act.extensions.get("rs"), Some(&3));
+        // A junk-suffixed path is not an extension key.
+        assert!(act.extensions.get("rs (x)").is_none());
+        assert_eq!(act.extensions.len(), 1);
     }
 
     #[test]
@@ -511,11 +528,13 @@ mod tests {
         let raw = claude_lines(
             &[json!({"type": "assistant", "message": {"role": "assistant",
             "content": [json!({"type": "tool_use", "name": "Write",
-                "input": {"file_path": "Makefile", "content": "all:\n\ttrue"}})]}})],
+                "input": {"file_path": "Makefile", "content": "all:\n\ttrue"}}),
+            json!({"type": "tool_use", "name": "Write",
+                "input": {"file_path": "let x = y.rs;", "content": "body"}})]}})],
         );
         let act = claude_activity(&raw);
         assert!(act.extensions.is_empty());
-        assert_eq!(act.lines_added, 2);
+        assert_eq!(act.lines_added, 3);
     }
 
     #[test]
