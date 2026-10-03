@@ -47,19 +47,21 @@ def test_rule_seven_and_budget_share_one_count():
     body = "Ship the fix. See `cli/src/fno/mail/budget.py` and --flag now."
     # Rule 7 reports the same number in its own violation detail.
     long_body = " ".join([body] * 40)
-    violations = style.check(long_body, surface="mail")
-    seven = [v for v in violations if v.rule == 7]
+    err, receipt = rust_binary.style_receipt(long_body, "mail")
+    assert not err
+    seven = [v for v in receipt["violations"] if v["rule"] == 7]
     assert seven, "rule 7 must fire on a body over the cap"
-    assert str(style.word_count(long_body)) in seven[0].detail
+    assert str(receipt["word_count"]) in seven[0]["detail"]
 
 
 def test_masking_holds_for_the_budget():
     # A pasted log masks to near nothing; the cap covers prose, not a dump.
-    assert style.word_count("```\n" + "\n".join(str(i) for i in range(200)) + "\n```") == 0
+    assert rust_binary.style_word_count("```\n" + "\n".join(str(i) for i in range(200)) + "\n```") == 0
 
 
 def test_identifier_masking_preserves_snake_case():
-    assert style._mask_inline("foo_bar foo_bar_baz") == "x x"
+    # An underscore identifier masks to one token: two identifiers, two words.
+    assert rust_binary.style_word_count("foo_bar foo_bar_baz") == 2
 
 
 # --- AC1-HP: an ordinary pair window does not exist -------------------------
@@ -500,5 +502,5 @@ def _clean_body(n_words: int) -> str:
         " ".join(words[i : i + 5]) + "." for i in range(0, n_words, 5)
     ]
     text = " ".join(sentences)
-    assert style.word_count(text) == n_words
+    assert rust_binary.style_word_count(text) == n_words
     return text

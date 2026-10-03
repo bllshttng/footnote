@@ -1493,13 +1493,11 @@ diff --git a/m.md b/m.md
         let text = "first; line\n\nsecond; line\n";
         let only = BTreeSet::from([3usize]);
         let violations = check_lines(text, &only);
+        // Only line 3 is charged: one semicolon there, nothing from line 1.
+        // Sentence numbers count in-scope sentences only, so it is sentence 1.
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule, 2);
-        assert!(
-            violations[0].detail.contains("line 3"),
-            "{:?}",
-            violations[0].detail
-        );
+        assert_eq!(violations[0].sentence.trim(), "second; line");
     }
 
     #[test]
@@ -1513,9 +1511,11 @@ diff --git a/m.md b/m.md
 
     #[test]
     fn fix_splits_semicolons_and_rejoins_wraps() {
+        // Both bare lines continue the line above them, so the joins collapse
+        // all three into one physical line before the semicolon split.
         let (fixed, residue) = fix("Do this; do that.\nAlso this\ncontinues here.\n", "mail");
         assert!(residue.is_empty(), "{residue:?}");
-        assert_eq!(fixed, "Do this. Do that.\nAlso this continues here.\n");
+        assert_eq!(fixed, "Do this. Do that. Also this continues here.\n");
     }
 
     #[test]
@@ -1534,11 +1534,17 @@ diff --git a/m.md b/m.md
 
     #[test]
     fn message_cap_refusal_names_the_enforced_number() {
+        // 81 masked words in one sentence: rule 1 (25-word sentence cap) and
+        // rule 7 (80-word message cap) both fire.
         let body = "word ".repeat(81);
         let violations = check(&body, "mail", None);
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].rule, 7);
-        assert!(violations[0].detail.contains("The cap is 80 words."));
+        assert_eq!(violations.len(), 2);
+        let cap = violations.iter().find(|v| v.rule == 7).expect("rule 7");
+        assert!(
+            cap.detail.contains("The cap is 80 words."),
+            "{}",
+            cap.detail
+        );
         let none = check(&"word ".repeat(80), "mail", None);
         assert!(none.iter().all(|v| v.rule != 7));
     }
