@@ -380,7 +380,7 @@ def test_withdraw_does_not_advance_the_recipient_cursor(env):
 
 def test_withdraw_does_not_delete_the_line(env):
     """Append-only is an invariant of the log, not an implementation detail:
-    `mail view` is the audit projection of the source of record, and a
+    `mail show` is the audit projection of the source of record, and a
     withdrawal that erased history would make it lie."""
     from fno.bus.log import iter_messages
 

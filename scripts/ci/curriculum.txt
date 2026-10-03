@@ -94,7 +94,7 @@ mail reply
 mail unread
 mail ack
 mail list
-mail view
+mail show
 mail status
 mail drain
 # Track D, a different product (L15)

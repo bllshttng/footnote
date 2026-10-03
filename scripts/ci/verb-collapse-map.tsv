@@ -79,7 +79,7 @@ agents mail status	T1	agents mail status	9
 agents mail team	T1	agents mail team	0
 agents mail triage	T1	agents mail triage	8
 agents mail unread	T1	agents mail unread	16
-agents mail view	T1	agents mail view	2
+agents mail show	T1	agents mail show	2
 agents mail withdraw	T1	agents mail withdraw	2
 agents mcp send	T1	agents mcp send	10
 agents name	T1	agents name	5
@@ -444,7 +444,7 @@ mail status	T1	mail status	9
 mail team	T1	mail team	0
 mail triage	T1	mail triage	8
 mail unread	T1	mail unread	16
-mail view	T1	mail view	2
+mail show	T1	mail show	2
 mail withdraw	T1	mail withdraw	2
 mcp send	KEEP	mcp send	10	single-leaf group
 notify	KEEP	notify	18	single-leaf group
