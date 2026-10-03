@@ -7470,7 +7470,7 @@ fn tab_badge_rows() {
     assert_eq!(
         view.sideline_offset(),
         0,
-        "a top focus needs no scroll: visible={} painted={} idx_of_100={} term={:?} chrome={} court={}",
+        "a top focus needs no scroll: visible={} painted={} idx_of_100={:?} term={:?} chrome={} court={}",
         view.sideline_visible_rows(),
         view.painted_rows().len(),
         view.display_rows()
