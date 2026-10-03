@@ -1,9 +1,9 @@
 //! Permanent node-prose history journal (wave 1).
 //!
-//! One append-only JSONL journal derived from the canonical graph path: the
-//! sibling directory `<graph-file-name>.history/notes feed keyed to the graph file, not to
-//! any session or event stream. Lifetime registered in
-//! `docs/state-root-inventory.md`.
+//! One append-only JSONL journal anchored to the store's canonical
+//! placement (see `history_path`): one journal per store, not per graph
+//! path spelling, and not keyed to any session or event stream. Lifetime
+//! registered in `docs/state-root-inventory.md`.
 
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
@@ -69,15 +69,22 @@ pub fn record_body(original: &Value) -> &str {
         .unwrap_or("")
 }
 
-/// The one path function serving writers and readers: `<graph>.history/notes.jsonl`
-/// next to the graph file. Derived from the graph path, never a home-directory
-/// literal.
+/// The one path function serving writers and readers. Anchored to the
+/// store's canonical placement, never to the raw graph argument: callers
+/// hold different spellings of one store (the anchor `graph.json`, the db
+/// twin `graph.db`, a legacy root), and the store layer converges them all
+/// through `database_path`. Deriving the journal from the raw spelling
+/// forked the corpus - writers journaling under the anchor while a reader
+/// held `graph.db` saw zero records - so the journal resolves through the
+/// same placement the store does, spelled back as the anchor.
 pub fn history_path(graph: &Path) -> PathBuf {
-    let file_name = graph
+    let store = crate::backlog::database_path(graph);
+    let anchor = store.with_extension("json");
+    let file_name = anchor
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "graph.json".to_string());
-    graph
+    anchor
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!("{file_name}.history"))
