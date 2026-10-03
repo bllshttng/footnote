@@ -58,7 +58,7 @@ fn bootstrap_status(command: &mut Command) -> std::io::Result<std::process::Exit
 /// expected condition (no network, foreign package, exec failure).
 #[derive(Debug)]
 struct BootErr {
-    msg: String,
+    pub(crate) msg: String,
     code: i32,
     /// True when re-running the probe cannot change the answer. Only the
     /// identity refusal sets it: there the probe SUCCEEDED and read a real
@@ -162,6 +162,18 @@ pub fn forward_agents(args: &[OsString], label: &str) -> ! {
 }
 
 fn run(args: &[OsString]) -> BootResult<()> {
+    // Explicit override first, ABOVE the sentinel: an operator naming the
+    // Python CLI is asking for THAT env, and the cached sentinel must not
+    // outrank the request. The sibling rule losing to the sentinel is exactly
+    // how a branch checkout got wedged to the shared uv tool dir (2026-10-02
+    // gap audit 9); an explicit answer losing to it would be the same trap one
+    // level up. Same name the fno-agents side resolves `fno_py` from, so one
+    // var means one thing across both binaries.
+    match env_override_python() {
+        Ok(Some(real)) => return Err(exec_real(&real, args)),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
     // Fast path: a recorded sentinel from a prior successful provision. No uv
     // call, no network - the common case after first run (AC4-HP). The sentinel
     // also records the mtime of the binary at the moment we verified it: an
@@ -1096,12 +1108,65 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
     )
 }
 
+/// The explicit Python-CLI override, `FNO_PY` - the same var the fno-agents
+/// side resolves `fno_py` from. Set and executable answers the path; set and
+/// unusable is a refusal, never a silent fall-through: the operator named
+/// THIS env, and forwarding anywhere else would quietly run the install they
+/// are trying to bypass.
+fn env_override_python() -> BootResult<Option<PathBuf>> {
+    let raw = match env::var_os("FNO_PY") {
+        None => return Ok(None),
+        Some(raw) => raw,
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    // A path is not guaranteed UTF-8, and var() would answer Err there - the
+    // silent fall-through the refusal contract exists to prevent. Refuse on
+    // the lossy form instead.
+    let val = raw.to_string_lossy().into_owned();
+    let path = PathBuf::from(&raw);
+    if is_executable(&path) {
+        Ok(Some(path))
+    } else {
+        Err(BootErr::new(
+            2,
+            format!("FNO_PY is set to `{val}`, which is not an executable file; fix or unset it"),
+        ))
+    }
+}
+
+/// The override's state for surfaces that cannot carry [`BootErr`]: what the
+/// operator named via `FNO_PY`, and whether that naming is usable.
+pub(crate) enum PythonOverride {
+    Unset,
+    Active(PathBuf),
+    Unusable(String),
+}
+
+/// Flat read of [`env_override_python`] for the version surface.
+pub(crate) fn python_override_state() -> PythonOverride {
+    match env_override_python() {
+        Ok(Some(path)) => PythonOverride::Active(path),
+        Ok(None) => PythonOverride::Unset,
+        Err(e) => PythonOverride::Unusable(e.msg),
+    }
+}
+
 /// The Python script this front door would exec, resolved by THIS door's own
 /// resolver - not a guessed uv environment. `fno version --json` reports it so
 /// update/doctor verify the deployment the user actually executes. Mirrors the
-/// forwarding priority in [`run`]: the packaged sibling wins when one exists,
-/// and the uv tool dir answers otherwise.
+/// forwarding priority in [`run`]: the `FNO_PY` override wins first, then the
+/// packaged sibling, and the uv tool dir answers otherwise.
 pub fn resolved_python_script() -> Option<PathBuf> {
+    match env_override_python() {
+        Ok(Some(overridden)) => return Some(overridden),
+        // A set-but-unusable override answers unresolved, never the fallback:
+        // forwarding refuses in this state, so the legs below would name a
+        // script nothing will ever exec.
+        Err(_) => return None,
+        Ok(None) => {}
+    }
     env::current_exe()
         .ok()
         .and_then(|exe| resolve_via_sibling(&exe).map(|(sibling, _)| sibling))
@@ -1769,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_helpers_bypass_admission_before_config() {
+    fn bootstrap_helpers_rows() {
         let previous_mode = std::env::var_os("FNO_PROCESS_ADMISSION");
         let previous_max = std::env::var_os("FNO_PROCESS_ADMISSION_MAX");
         std::env::set_var("FNO_PROCESS_ADMISSION", "on");
@@ -1777,10 +1842,49 @@ mod tests {
 
         let mut command = bootstrap_command("true");
         let status = bootstrap_status(&mut command).expect("bootstrap command should run");
+        assert!(status.success());
 
+        // The FNO_PY override rows ride this env test: unset/empty forwards
+        // normally, an executable answers, a set-but-unusable value refuses
+        // naming the var, and resolved_python_script prefers the override.
+        let previous_py = std::env::var_os("FNO_PY");
+        let exe = std::env::temp_dir().join("fno-py-override-test");
+        let _ = fs::remove_file(&exe);
+        fs::write(&exe, "#!/bin/sh\nexit 0\n").expect("write stub");
+        let mut perm = fs::metadata(&exe).expect("stat stub").permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&exe, perm).expect("chmod stub");
+
+        std::env::remove_var("FNO_PY");
+        assert!(matches!(env_override_python(), Ok(None)));
+
+        std::env::set_var("FNO_PY", &exe);
+        assert!(
+            matches!(&env_override_python(), Ok(Some(p)) if p == &exe),
+            "an executable override answers its own path"
+        );
+        assert_eq!(
+            resolved_python_script().as_deref(),
+            Some(exe.as_path()),
+            "the override outranks the sibling and uv legs"
+        );
+
+        let missing = exe.with_extension("absent");
+        std::env::set_var("FNO_PY", &missing);
+        let err = env_override_python().unwrap_err();
+        assert!(err.msg.contains("FNO_PY"), "{}", err.msg);
+        assert_eq!(err.code, 2);
+
+        std::env::set_var("FNO_PY", "");
+        assert!(
+            matches!(env_override_python(), Ok(None)),
+            "empty falls through"
+        );
+
+        restore_test_env("FNO_PY", previous_py);
         restore_test_env("FNO_PROCESS_ADMISSION", previous_mode);
         restore_test_env("FNO_PROCESS_ADMISSION_MAX", previous_max);
-        assert!(status.success());
+        let _ = fs::remove_file(&exe);
     }
 
     fn restore_test_env(name: &str, previous: Option<OsString>) {

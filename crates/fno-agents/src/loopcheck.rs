@@ -198,7 +198,8 @@ use gh_read::is_no_pr_stderr;
 use gh_read::{
     attestation_in_scope, git_head_branch, git_head_sha, graphql_exhausted_reason, head_is_shipped,
     internal_gh_adapter, pr_head_oid, probe_graphql_quota, read_pr_head_oid, read_pr_view,
-    refusal_is_secondary, stderr_smells_rate_limit, stderr_tail, GraphqlQuota,
+    refusal_is_secondary, stderr_is_unauthenticated, stderr_smells_rate_limit, stderr_tail,
+    GraphqlQuota,
 };
 pub(crate) use gh_read::{coverage_adapter, is_graphql_read};
 use intent::{detect_intent, extract_last_assistant_message, Intent};
@@ -1919,6 +1920,48 @@ pub(crate) fn decide_with_payload(
             Err(read_err) => {
                 let failed_read = read_err.read.clone();
                 let failed_stderr = read_err.stderr_tail.clone();
+                // An unauthenticated gh cannot recover inside the loop - no
+                // fire logs in - so the block-and-retry below would re-wake
+                // the session on every stop until a cap, each wake failing
+                // identically. Park as HeldOnQuestion instead: the operator
+                // answers (logs in), a later run ships. The termination event
+                // is what the cross-session loop runtime reads to stop
+                // re-dispatching the exited session; the JSON termination
+                // reason is what the stop hook treats as terminal.
+                if stderr_is_unauthenticated(&failed_stderr) {
+                    let reason = format!(
+                        "gh is not authenticated: the loop's PR read '{failed_read}' cannot \
+                         succeed until the login lands, so the run is parked instead of \
+                         re-waking on every stop. Run `gh auth login` (and `gh auth setup-git` \
+                         if pushes fail), then `/target --resume`."
+                    );
+                    emit(
+                        "loop_check_gh_error",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "read": failed_read,
+                            "outcome": read_err.outcome(),
+                            "stderr_tail": failed_stderr,
+                            "parked": true
+                        }),
+                    );
+                    term_row("HeldOnQuestion", &reason);
+                    fire_row(
+                        "allow",
+                        if intent == Intent::Promise {
+                            "promise"
+                        } else {
+                            "none"
+                        },
+                        true,
+                        serde_json::json!({
+                            "pr_state": "unknown",
+                            "ci": "unknown",
+                            "reviewed": false
+                        }),
+                    );
+                    return terminal("allow", Some(TerminationReason::HeldOnQuestion), &reason);
+                }
                 // US4 (locked decision 6, REVERSES the wedge's behavior): a
                 // gh-errored done() read NEVER terminates NoProgress, even
                 // with the backstop tripped - a healthy session must not be

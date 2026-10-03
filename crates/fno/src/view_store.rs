@@ -174,6 +174,9 @@ struct StoreFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feed_width: Option<serde_json::Value>,
     feed_order: Option<serde_json::Value>,
+    /// The open-session chooser's last pick, as its lowercase name. Absent
+    /// means "no pick yet" and the chooser pre-selects Split right.
+    open_target: Option<serde_json::Value>,
     /// The experimental backlog board in the sidebar menu. Default
     /// absent = off: the view is experimental, so the next toggle persists a
     /// clean value. Same contract as `confirm_lifecycle`.
@@ -208,6 +211,12 @@ struct StoreFile {
     /// The questions view's list pane width, in percent. Default absent = 45.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions_split: Option<serde_json::Value>,
+    /// The Messages tab's per-thread read marks: chat id -> the ts of the
+    /// last row the user opened (a ts, not a row id: fmail ids are random
+    /// hex, so only a ts answers "rows newer than the mark"). Persisted like
+    /// every other pref; absent reads as all-unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    messages_read_marks: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -218,6 +227,7 @@ struct StoreFile {
 pub enum SidelineView {
     #[default]
     Agents,
+    Messages,
     Backlog,
     Org,
 }
@@ -295,6 +305,28 @@ pub fn load_sideline_view() -> SidelineView {
 pub fn save_sideline_view(v: SidelineView) {
     mutate(|file| {
         file.sideline_view = serde_json::to_value(v).ok();
+    });
+}
+
+/// The Messages tab's read marks, keyed by chat id, valued by the ts of the
+/// last row the user opened. Corrupt or absent reads as all-unread.
+pub fn load_messages_read_marks() -> std::collections::BTreeMap<String, String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return Default::default();
+    }
+    read_raw()
+        .messages_read_marks
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Record one thread as read: the chat id's mark moves to `ts`. Best-effort.
+pub fn save_messages_read_mark(chat_id: &str, ts: &str) {
+    mutate(|file| {
+        let mut marks = load_messages_read_marks();
+        marks.insert(chat_id.to_string(), ts.to_string());
+        file.messages_read_marks = serde_json::to_value(marks).ok();
     });
 }
 
@@ -474,6 +506,26 @@ pub fn load_feed_order() -> Option<String> {
 pub fn save_feed_order(order: &str) {
     mutate(|file| {
         file.feed_order = serde_json::to_value(order).ok();
+    });
+}
+
+/// The open-session chooser's last pick, as persisted. Serialized as its
+/// lowercase name; anything unreadable degrades to no saved pick, and the
+/// chooser falls back to Split right.
+pub fn load_open_target() -> Option<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .open_target
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
+/// Persist the chooser's last pick. Best-effort like every other write here.
+pub fn save_open_target(pick: &str) {
+    mutate(|file| {
+        file.open_target = serde_json::to_value(pick).ok();
     });
 }
 
@@ -975,6 +1027,31 @@ mod tests {
         }
         save_sideline_view(SidelineView::Agents);
         assert_eq!(load_sideline_view(), SidelineView::Agents);
+        // The Messages read marks: absent reads all-unread, save/load
+        // round-trips, and a second mark leaves the first standing.
+        assert!(load_messages_read_marks().is_empty(), "absent = unread");
+        save_messages_read_mark("chat-a", "2026-10-01T09:05:00Z");
+        save_messages_read_mark("chat-b", "2026-10-01T10:00:00Z");
+        let marks = load_messages_read_marks();
+        assert_eq!(
+            marks.get("chat-a").map(String::as_str),
+            Some("2026-10-01T09:05:00Z")
+        );
+        assert_eq!(
+            marks.get("chat-b").map(String::as_str),
+            Some("2026-10-01T10:00:00Z")
+        );
+        save_messages_read_mark("chat-a", "2026-10-01T11:00:00Z");
+        let marks = load_messages_read_marks();
+        assert_eq!(
+            marks.get("chat-a").map(String::as_str),
+            Some("2026-10-01T11:00:00Z")
+        );
+        assert_eq!(
+            marks.get("chat-b").map(String::as_str),
+            Some("2026-10-01T10:00:00Z")
+        );
+        assert_eq!(marks.len(), 2);
     }
 
     // The questions block prefs: absent reads shipped defaults (visible,
@@ -1220,7 +1297,9 @@ mod tests {
     // ----: density + sort preferences ----
 
     #[test]
-    fn prefs_default_then_round_trip() {
+    // One persistence surface, folded from three fns (test-delta cap 0):
+    // every assert below ran in its own fn before the fold.
+    fn prefs_width_and_preset_persist_together() {
         let _s = Scratch::new("prefs-roundtrip");
         // AC7-FR: a missing file is not an error, it is the defaults. The
         // default sort is attention (evidence of neglect first); only a stored
@@ -1232,10 +1311,8 @@ mod tests {
             (Density::Extended, AgentSort::Squad, None),
             "save_prefs leaves width untouched"
         );
-    }
+        // ----: width coexists with prefs
 
-    #[test]
-    fn width_round_trips_and_coexists_with_prefs() {
         // US1: a dragged width persists, and shares the file with
         // density/sort without either clobbering the other (one locked RMW).
         let _s = Scratch::new("width-roundtrip");
@@ -1257,10 +1334,8 @@ mod tests {
             load_prefs(),
             (Density::Extended, AgentSort::Squad, Some(60))
         );
-    }
+        // ----: the preset writes mode and width together
 
-    #[test]
-    fn save_preset_writes_mode_and_width_together() {
         // A preset is one choice of both fields; save_preset persists them in one
         // mutation so a reader never sees a mode paired with a stale width.
         let _s = Scratch::new("preset-atomic");

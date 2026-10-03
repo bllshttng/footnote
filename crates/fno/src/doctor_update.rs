@@ -357,24 +357,27 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// One native `fno-agents source-pin` invocation; None = cannot answer.
-fn source_pin_call(sub: &str, extra: &[String], input: Option<&str>) -> Option<Value> {
+fn source_pin_call(sub: &str, extra: &[String], input: Option<&str>) -> Result<Value, String> {
     let mut args = vec!["source-pin".to_string(), sub.to_string()];
     args.extend(extra.iter().cloned());
-    let Ok((code, out, err)) =
-        run_bounded(&fno_agents_bin(), &args, Duration::from_secs(30), input)
-    else {
-        return None;
-    };
+    let (code, out, err) = run_bounded(&fno_agents_bin(), &args, Duration::from_secs(30), input)?;
     if code != 0 {
         let head: String = err.trim().chars().take(200).collect();
-        eprintln!("fno-agents source-pin {sub} failed: {head}");
-        return None;
+        if head.is_empty() {
+            return Err(format!(
+                "fno-agents source-pin {sub} exited {code} with no stderr"
+            ));
+        }
+        return Err(head);
     }
-    let data: Value = serde_json::from_str(out.trim()).ok()?;
+    let data: Value = serde_json::from_str(out.trim())
+        .map_err(|e| format!("fno-agents source-pin {sub} reply is not JSON: {e}"))?;
     if data.is_object() {
-        Some(data)
+        Ok(data)
     } else {
-        None
+        Err(format!(
+            "fno-agents source-pin {sub} reply is not an object"
+        ))
     }
 }
 
@@ -431,7 +434,9 @@ fn last_update_event() -> Option<Value> {
 }
 
 /// One native resolution: path, eligibility evidence, allow/refuse, warning.
-fn resolve_source_pin(override_path: Option<&Path>) -> Option<Value> {
+/// The Err carries the machine cause (missing binary, timeout, exit, malformed
+/// reply) so no caller prints "failed" without a reason.
+fn resolve_source_pin(override_path: Option<&Path>) -> Result<Value, String> {
     let mut extra: Vec<String> = Vec::new();
     if let Some(o) = override_path {
         extra.push("--override".into());
@@ -463,7 +468,8 @@ fn resolve_source_pin(override_path: Option<&Path>) -> Option<Value> {
 /// resolved checkout regardless of the update gate; the update enforces the
 /// refusal itself.
 fn discover_source(override_path: Option<&Path>) -> Result<PathBuf, String> {
-    let pin = resolve_source_pin(override_path).ok_or(SOURCE_PIN_UNAVAILABLE.to_string())?;
+    let pin = resolve_source_pin(override_path)
+        .map_err(|e| format!("{SOURCE_PIN_UNAVAILABLE} (cause: {e})"))?;
     match pin
         .get("path")
         .and_then(Value::as_str)
@@ -492,8 +498,10 @@ fn record_source_pin(pin: &Value) -> Result<(), String> {
         companion_file().to_string_lossy().into_owned(),
     ];
     match source_pin_call("record", &extra, Some(&body)) {
-        Some(_) => Ok(()),
-        None => Err("source-pin record failed; the previous pin stands".into()),
+        Ok(_) => Ok(()),
+        Err(cause) => Err(format!(
+            "source-pin record failed; the previous pin stands ({cause})"
+        )),
     }
 }
 
@@ -1487,9 +1495,13 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         eprintln!("{GUARD_MSG}");
         return 1;
     }
-    let Some(pin) = resolve_source_pin(flags.source.as_deref()) else {
-        eprintln!("{SOURCE_PIN_UNAVAILABLE}");
-        return 1;
+    let pin = match resolve_source_pin(flags.source.as_deref()) {
+        Ok(pin) => pin,
+        Err(cause) => {
+            eprintln!("{SOURCE_PIN_UNAVAILABLE}");
+            eprintln!("cause: {cause}");
+            return 1;
+        }
     };
     if pin.get("decision").and_then(Value::as_str) == Some("refuse") {
         eprintln!(
@@ -1539,6 +1551,18 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
 
     // Machine-global mutations start here (cargo bins, the uv/pip env), so
     // this is where the machine-scoped guard belongs.
+    // Before replacing the tool env in place, name anything still running
+    // from it (2026-10-02 gap audit, blockers 1 and 3): the repair is the
+    // same move that replaced a live study's CLI unnoticed. Advisory - the
+    // update proceeds, the naming is the fix.
+    let live_env = live_tool_env_processes();
+    if !live_env.is_empty() {
+        eprintln!(
+            "fno doctor update: {} live process(es) run from the tool env, e.g. {}. This update replaces that env in place; stop them first if the run matters.",
+            live_env.len(),
+            live_env[0]
+        );
+    }
     if let Err(code) = acquire_update_claim(rev.as_deref()) {
         return code;
     }
@@ -1667,6 +1691,40 @@ fn which_uv() -> Option<PathBuf> {
 
 fn which_pip() -> Option<PathBuf> {
     on_path(if cfg!(windows) { "pip.exe" } else { "pip" })
+}
+
+/// Live processes whose argv names a path inside the uv fno tool env. The
+/// update replaces that env in place, so `run` names anything still running
+/// from it before the claim: a session-start installer once replaced a live
+/// study's CLI this way unnoticed (2026-10-02 gap audit, blockers 1 and 3).
+/// Over-catching is safe: the line is advisory. Empty when uv, the env, or
+/// the process table is unreadable.
+fn live_tool_env_processes() -> Vec<String> {
+    let Some(uv) = which_uv() else {
+        return Vec::new();
+    };
+    let Ok((0, out, _)) = run_captured(&uv, &["tool".into(), "dir".into()], None) else {
+        return Vec::new();
+    };
+    let dir = out.trim();
+    if dir.is_empty() {
+        // An unreadable tool dir would leave the needle bare "fno", which
+        // matches every fno argv on the machine - refuse to scan instead.
+        return Vec::new();
+    }
+    let needle = PathBuf::from(dir).join("fno").to_string_lossy().to_string();
+    let ps = PathBuf::from("ps");
+    let Ok((0, ps_out, _)) = run_captured(&ps, &["-axo".into(), "pid=,args=".into()], None) else {
+        return Vec::new();
+    };
+    let me = format!("{} ", std::process::id());
+    ps_out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains(&needle))
+        .filter(|l| !l.starts_with(&me) && !l.contains(" awk -") && !l.contains(" ps -"))
+        .map(String::from)
+        .collect()
 }
 
 /// `fno doctor update --check`: readiness as JSON on stdout, exit 0. The
@@ -1909,7 +1967,13 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     if resolved_source.is_none() {
         degraded.push("source checkout not resolvable".into());
     }
-    let pin = resolve_source_pin(source);
+    let pin = match resolve_source_pin(source) {
+        Ok(pin) => Some(pin),
+        Err(cause) => {
+            degraded.push(format!("source pin unresolved ({cause})"));
+            None
+        }
+    };
     let gate_refused = pin.as_ref().is_some_and(|p| {
         p.get("path").and_then(Value::as_str).is_some()
             && p.get("decision").and_then(Value::as_str) == Some("refuse")

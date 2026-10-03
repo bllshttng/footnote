@@ -1338,7 +1338,7 @@ def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph, monkey
     assert not node.get("progress_notes")
 
 
-def test_note_with_an_unmeasured_claim_replaces_state_and_warns(tmp_graph, monkeypatch):
+def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph, monkeypatch):
     """AC19-HP: the note verb advises, never refuses a body."""
     node_id = _note_node()
     monkeypatch.setattr(
@@ -1356,11 +1356,12 @@ def test_note_with_an_unmeasured_claim_replaces_state_and_warns(tmp_graph, monke
     assert "unmeasured code fact" in r.stderr, r.stderr
     assert "--read" in r.stderr, r.stderr
     node = json.loads(_native_get(node_id))
-    assert node["current_state"]["body"] == "the drain loop is 167 lines"
+    notes = node["progress_notes"]
+    assert notes[-1]["text"] == "the drain loop is 167 lines"
 
 
 def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypatch):
-    """AC20-HP: executed reads land beside the state body."""
+    """AC20-HP: executed reads land beside the note they measure."""
     node_id = _note_node()
     monkeypatch.setattr(
         "fno.rust_binary.verb_call",
@@ -1385,9 +1386,9 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypat
 
     assert r.exit_code == 0, r.output
     assert "unmeasured" not in r.stderr, r.stderr
-    assert json.loads(r.stdout)["routed"] == "state"
+    assert json.loads(r.stdout)["routed"] == "thread"
     node = json.loads(_native_get(node_id))
-    reads = node["current_state"]["reads"]
+    reads = node["progress_notes"][-1]["reads"]
     assert reads[0]["cmd"] == "echo measured"
     assert reads[0]["exit"] == 0
 
@@ -1997,89 +1998,6 @@ def test_ready_excludes_stale_and_dead_ancestor(tmp_graph):
     assert "ab-live0" in ids
     assert "ab-stale0" not in ids      # stale-quarantined
     assert "ab-deadch" not in ids      # dead-ancestor
-
-def test_reconcile_close_applies_the_ledger_rollup(tmp_graph, tmp_path, monkeypatch):
-    """The MAINSTREAM close: a session lands its PR open, `done` exits 5 awaiting
-    merge, and reconcile closes it at the merge. Without the rollup here,
-    session_id / cost / points are never recorded on the normal path at all."""
-    ledger = tmp_path / "ledger.json"
-    ledger.write_text(json.dumps({"entries": [{
-        "plan_path": "recon.md", "cost_usd": 2.0, "points": 3,
-        "sessions": ["sess-recon"], "completed": "2026-01-02T00:00:00Z",
-    }]}) + "\n")
-    import fno.graph._constants as gc
-    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
-    # Reconcile is the detached SessionStart sweep, so a live ambient session
-    # here belongs to whoever started it, NOT to this node's work. The close
-    # must attribute to the ledger, never leak this value onto the node.
-    monkeypatch.setenv("CLAUDECODE_SESSION_ID", "ambient-reconcile-runner")
-
-    entries = [
-        {"id": "ab-recon001", "title": "Merged out of band", "status": "in_review",
-         "project": "p", "domain": "code", "plan_path": "recon.md",
-         "pr_number": 777, "pr_url": "https://github.com/o/r/pull/777",
-         "blocked_by": []},
-    ]
-    _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-
-    from fno.graph import _reconcile as rec
-    monkeypatch.setattr(
-        rec, "query_pr_merge_state",
-        lambda n, **kw: rec.PrMergeState(
-            number=777, state="MERGED",
-            url="https://github.com/o/r/pull/777",
-            merged_at="2026-01-02T00:00:00Z",
-        ),
-    )
-
-    r = _invoke("backlog", "reconcile", "--node", "ab-recon001")
-    assert r.exit_code == 0, r.stdout + r.stderr
-    node = _by_id(tmp_graph)["ab-recon001"]
-    assert node["completed_at"]
-    assert node["session_id"] == "sess-recon"  # ledger, not "ambient-reconcile-runner"
-    assert node["points"] == 3
-    assert node["cost_usd"] == 2.0
-
-
-def test_reconcile_rollup_preserves_an_existing_cost(tmp_graph, tmp_path, monkeypatch):
-    """A prior cost stamp (fno backlog cost / a loop writer) timestamps its rows
-    at recording time while the ledger row carries the completion time, so
-    _apply_rollup would read the same run as distinct and double-count. Cost is
-    fill-only here, matching cmd_done."""
-    ledger = tmp_path / "ledger.json"
-    ledger.write_text(json.dumps({"entries": [{
-        "plan_path": "recon.md", "cost_usd": 2.0, "points": 3,
-        "sessions": ["sess-recon"], "completed": "2026-01-02T00:00:00Z",
-    }]}) + "\n")
-    import fno.graph._constants as gc
-    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
-    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
-
-    entries = [
-        {"id": "ab-recon002", "title": "Pre-costed", "status": "in_review",
-         "project": "p", "domain": "code", "plan_path": "recon.md",
-         "pr_number": 778, "pr_url": "https://github.com/o/r/pull/778",
-         "cost_usd": 9.99, "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],
-         "blocked_by": []},
-    ]
-    _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
-
-    from fno.graph import _reconcile as rec
-    monkeypatch.setattr(
-        rec, "query_pr_merge_state",
-        lambda n, **kw: rec.PrMergeState(
-            number=778, state="MERGED",
-            url="https://github.com/o/r/pull/778", merged_at="2026-01-02T00:00:00Z",
-        ),
-    )
-
-    r = _invoke("backlog", "reconcile", "--node", "ab-recon002")
-    assert r.exit_code == 0, r.stdout + r.stderr
-    node = _by_id(tmp_graph)["ab-recon002"]
-    assert node["cost_usd"] == 9.99  # prior stamp preserved, not 11.99
-    assert node["cost_sessions"] == [{"session_id": "pre", "cost_usd": 9.99}]
-    assert node["points"] == 3  # non-cost rollup still applied
-
 
 class _GetFakeTracker(_SnapshotFakeTracker):
     """Extends the snapshot fake: read() answers the open sentinels too."""

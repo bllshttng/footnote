@@ -73,11 +73,13 @@ mod grid_reconcile;
 mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
+mod open_link;
 mod pane_close;
 mod pane_identity;
 mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
+mod portal_journal;
 mod portal_reach;
 mod restore_route_gate;
 mod resume_argv;
@@ -9133,27 +9135,6 @@ impl Core {
         }
     }
 
-    /// Ship a clicked URL to the client that clicked it, mirroring
-    /// [`Self::send_copy`]: only the requesting client, over the reliable
-    /// channel. Re-checks the scheme allowlist so a future caller cannot reach
-    /// the client's opener with an unvetted URL - `link_at` already filters, and
-    /// this is the second lock on the same door.
-    fn send_open_link(&mut self, client_id: u64, url: String) {
-        if !crate::link::is_openable(&url) {
-            return;
-        }
-        let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
-            return;
-        };
-        if c.reliable_tx.try_send(ServerMsg::OpenLink { url }).is_err() {
-            eprintln!(
-                "fno mux: client {client_id} reliable channel wedged on OpenLink; dropping it"
-            );
-            self.clients.retain(|c| c.id != client_id);
-            self.push_layout(true);
-        }
-    }
-
     /// (v56, hover affordance) One link-span lookup for the requesting client
     /// only: resolve the link under pane-local `(row, col)` and reply with its
     /// visible cells. The guards mirror the click path's ownership rule: the
@@ -10467,19 +10448,17 @@ impl Core {
                     // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
                     // and resurfaces watch-only (external-lifecycle - viewport moved, nothing killed).
                     self.reap_pane(focus);
-                    // An explicit open-here onto a portal seat
-                    // repurposed its geometry for an ordinary attach: that
-                    // portal no longer describes what the pane shows. Drop it
-                    // so a later reach opens fresh instead of trusting an
-                    // entry that names the wrong row. Only the portal
-                    // seated on THIS pane is dropped; the rest are untouched.
+                    // An explicit open-here onto a portal seat repurposed
+                    // its geometry for an ordinary attach: the portal no
+                    // longer describes what the pane shows. Drop it so a
+                    // later reach opens fresh; the rest are untouched.
                     if let Some(idx) = self
                         .portals
                         .iter()
                         .find(|(_, portal)| portal.seat == focus)
                         .map(|(idx, _)| *idx)
                     {
-                        self.portals.remove(&idx);
+                        self.journal_portal_take(idx, "displaced");
                     }
                     // Persist B as a member of the viewed squad so it survives a
                     // restart pane-hosted (US2); the take-over already succeeded.

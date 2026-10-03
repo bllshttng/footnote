@@ -3,7 +3,7 @@
 Mail drains at exactly two moments in this codebase, SessionStart and
 UserPromptSubmit, and both need the operator to type. This test exercises the
 third trigger end to end: a REAL detached `fno agents mail hold-release` process wakes
-on its own clock, clears the flag, dedupes, and emits its marker. No prompt, no
+on its own clock, preserves each held message, and emits its marker. No prompt, no
 injected text, no user-shaped input anywhere in the run.
 
 The assertion is the POSITIVE marker on the release. Nothing here asserts that
@@ -149,7 +149,7 @@ def test_a_held_message_lands_after_expiry_with_no_operator_input(state, tmp_pat
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert result["handle"] == HANDLE
     assert result["held_count"] == 3, "the release must see everything held"
-    assert result["deduped_count"] == 1, "the two identical bodies collapse to one"
+    assert result["deduped_count"] == 0, "every held message remains a separate entry"
     # The transport is the only thing this environment cannot exercise: there is
     # no daemon socket to inject through, so the outcome is the honest miss. The
     # delivered branch and its cursor advance are asserted in

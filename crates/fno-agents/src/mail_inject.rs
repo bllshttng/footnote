@@ -552,7 +552,7 @@ fn emit(delivered: bool, reason: &str) -> i32 {
 /// The glyph every newline in a mail delivery is typed as (C17, crown ruling
 /// d-9187ccf6): one constant, so the user can change the glyph on one line.
 /// Space-padded so the surrounding words survive the flattening.
-const NEWLINE_GLYPH: &str = " ⏎ ";
+pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 /// Flatten a mail body to ONE typable line (C17: mail is a delivery, never a
 /// paste). Every newline run (`\r\n`, `\n`, `\r`) becomes [`NEWLINE_GLYPH`], a

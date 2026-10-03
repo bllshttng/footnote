@@ -63,6 +63,11 @@ def patched(monkeypatch):
     from fno.agents import retirement
 
     monkeypatch.setattr(retirement, "verdicts", lambda rows, entries=None: {})
+    # The claim join reads the operator's real claims dir and shells the CLI
+    # for the PR; blanked so every test here stays hermetic.
+    import fno.agents.top as top
+
+    monkeypatch.setattr(top, "_session_node_map", lambda: {})
     return state
 
 
@@ -153,6 +158,92 @@ def test_foreign_row_progress_joins_registry_through_session_id(
         ],
     )
     assert row["progress"] == "advancing"
+
+
+def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
+    """x-54ba: the session's own claim answers before any name-keyed join.
+
+    A revived claude-store-only session (reaped row, adopt minted a fresh one)
+    holds a live ``node:<id>`` claim whose holder names its full session id.
+    The row renders that node and the node's PR, with the basis naming the
+    claim - never the null an unresolvable name produced."""
+    import fno.agents.top as top
+
+    monkeypatch.setattr(
+        top,
+        "_session_node_map",
+        lambda: {
+            "979e1acc-e240-4af5-9998-0a74ec6c0683": {
+                "node": "x-4dc0", "pr": 2965, "pr_basis": "node", "basis": "claim",
+            },
+            "full-session-uuid": {
+                "node": "x-06f7", "pr": None, "pr_basis": "no-pr", "basis": "claim",
+            },
+            "released-session-uuid": {
+                "node": "x-4dc0", "pr": None, "pr_basis": "no-pr", "basis": "graph",
+            },
+        },
+    )
+    (row,) = _rows(
+        patched,
+        [
+            _worker(
+                source="claude",
+                name="979e1acc",
+                session_id="979e1acc-e240-4af5-9998-0a74ec6c0683",
+            )
+        ],
+    )
+    assert row["node"] == "x-4dc0"
+    assert row["node_basis"] == "claim"
+    assert row["pr"] == 2965
+    assert row["pr_basis"] == "node"
+
+    # A claim with no PR yet still names the node (pr_basis no-pr).
+    (alone,) = _rows(
+        patched,
+        [_worker(source="claude", name="0a4aad70", session_id="full-session-uuid")],
+    )
+    assert alone["node"] == "x-06f7"
+    assert alone["pr"] is None
+    assert alone["pr_basis"] == "no-pr"
+
+    # The graph's sessions[] row answers when the claim is gone.
+    (from_graph,) = _rows(
+        patched,
+        [_worker(source="claude", name="0a4aad70", session_id="released-session-uuid")],
+    )
+    assert from_graph["node"] == "x-4dc0"
+    assert from_graph["node_basis"] == "graph"
+
+
+def test_session_node_map_parses_the_binary_answer(tmp_path, monkeypatch):
+    """The thin reader parses the binary's JSON shape and answers {} on a
+    missing binary - the join degrades, it never fails the render."""
+
+    from fno.agents.top import _session_node_map
+
+    fake = tmp_path / "fake-fno-agents"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo \'{"979e1acc-e240-4af5-9998-0a74ec6c0683": '
+        '{"node": "x-4dc0", "pr": 2965, "basis": "claim"}}\'\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: fake
+    )
+    assert _session_node_map() == {
+        "979e1acc-e240-4af5-9998-0a74ec6c0683": {
+            "node": "x-4dc0", "pr": 2965, "basis": "claim",
+        }
+    }
+
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: None
+    )
+    assert _session_node_map() == {}
 
 
 def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):

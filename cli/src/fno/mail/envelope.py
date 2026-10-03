@@ -82,10 +82,10 @@ def _render_in_rust(payload: dict) -> str:
     if result.returncode:
         raise ForgedEnvelopeError(result.stderr.strip())
     rendered = result.stdout.removesuffix("\n")
-    # A render must OPEN with its attribution (the header line, or the legacy
-    # tag on a version-skewed binary); paste is the byte transport below, so
-    # fail the send rather than type an unattributed body.
-    if not (rendered.startswith("<fno_mail") or rendered.startswith("`")):
+    # A render must open with attribution. Held releases use a validated frame
+    # whose following per-message headers preserve each original sender.
+    held_release = payload.get("mode") == "held-release"
+    if not (held_release or rendered.startswith("<fno_mail") or rendered.startswith("`")):
         raise ForgedEnvelopeError(
             f"mail-envelope render produced no envelope ({rendered[:80]!r}); "
             "refusing to deliver a body without its attribution frame."
@@ -149,8 +149,10 @@ def wrap_fno_mail(
     origin: Optional[str] = None,
     to_session: Optional[str] = None,
     harness: Optional[str] = None,
+    held_release: bool = False,
 ) -> str:
-    """Wrap body in the Rust envelope; session ids key live identity lookups."""
+    """Render a normal envelope or pass through a validated held-release turn."""
     payload = locals().copy()
-    payload["mode"], payload["from"] = "wrap", payload.pop("from_")
+    mode = "held-release" if payload.pop("held_release") else "wrap"
+    payload["mode"], payload["from"] = mode, payload.pop("from_")
     return _render_in_rust(payload)

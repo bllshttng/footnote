@@ -340,28 +340,15 @@ def test_tidy_lapsed_clears_a_timed_hold_but_never_a_permanent_policy(monkeypatc
     assert cleared == [(HANDLE, None)]
 
 
-# --- Task 4: dedupe ---------------------------------------------------------
+# --- Release rendering -----------------------------------------------------
 
 
-def test_five_identical_bodies_render_once_and_still_carry_all_five_ids():
+def test_five_identical_held_messages_keep_their_own_headers():
     messages = [_msg(f"msg-{i}", "worker", "same report") for i in range(5)]
-    survivors = hold_mod.dedupe(messages)
-
-    assert len(survivors) == 1
-    _representative, count, ids = survivors[0]
-    assert count == 5
-    assert ids == [f"msg-{i}" for i in range(5)]
-
-    digest = hold_mod.render_digest(HANDLE, survivors, held_for_s=600)
-    assert "(x5 identical, deduped)" in digest
-    assert digest.count("same report") == 1
-
-
-def test_same_body_from_two_senders_is_not_deduped():
-    survivors = hold_mod.dedupe(
-        [_msg("a", "one", "ping"), _msg("b", "two", "ping")]
-    )
-    assert len(survivors) == 2
+    digest = hold_mod.render_digest(messages, held_for_s=600)
+    assert digest.count("`@worker · msg-") == 5
+    assert digest.count("same report") == 5
+    assert "(x5 identical, deduped)" not in digest
 
 
 # --- Task 3: the release ----------------------------------------------------
@@ -399,23 +386,30 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
 
     assert result["outcome"] == "delivered"
     assert result["held_count"] == 3
-    assert result["deduped_count"] == 2
+    assert result["deduped_count"] == 0
     assert advanced == ["msg-0", "msg-1", "msg-2"]
-    assert emitted == [
-        (
-            "mail_hold_released",
-            {
-                "handle": HANDLE,
-                "clock": "no expiry",
-                "held_count": 3,
-                "deduped_count": 2,
-                "held_for_s": 300,
-                "outcome": "delivered",
-                "miss_reason": None,
-                "policy_cleared": True,
-            },
-        )
+    assert [
+        (kind, data.get("msg_id") if kind == "agent_mail_drained" else None)
+        for kind, data in emitted
+    ] == [
+        ("agent_mail_drained", "msg-0"),
+        ("agent_mail_drained", "msg-1"),
+        ("agent_mail_drained", "msg-2"),
+        ("mail_hold_released", None),
     ]
+    assert emitted[-1] == (
+        "mail_hold_released",
+        {
+            "handle": HANDLE,
+            "clock": "no expiry",
+            "held_count": 3,
+            "deduped_count": 0,
+            "held_for_s": 300,
+            "outcome": "delivered",
+            "miss_reason": None,
+            "policy_cleared": True,
+        },
+    )
 
 
 def test_release_fires_its_marker_even_when_nothing_was_held(monkeypatch):
@@ -491,7 +485,10 @@ def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
     seen = {}
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
     monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
-    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [_msg("m", "w", "b")])
+    monkeypatch.setattr(
+        "fno.bus.cursor.scan_unread",
+        lambda *a, **k: [_msg("fmail-000000000001", "w", "b")],
+    )
     monkeypatch.setattr("fno.bus.cursor.advance_cursor", lambda *a, **k: True)
     monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
 
@@ -529,7 +526,7 @@ def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
         seen["from_name"] = from_name
         return True
 
-    messages = [_msg("m1", "peer", "line one\nline two\nline three")]
+    messages = [_msg("fmail-000000000002", "peer", "line one\nline two\nline three")]
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
     monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
     monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: messages)
@@ -546,8 +543,8 @@ def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
     assert seen["from_name"] == "fno-mail-hold"
 
 
-def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path):
-    """The live injector refuses an unframed digest that contains peer tags."""
+def test_release_delivers_held_release_frame_without_synthetic_sender(monkeypatch, tmp_path):
+    """The held-release frame keeps its real per-message headers."""
     from fno.bus.cursor import scan_unread
     from fno.bus.log import Envelope, append
 
@@ -585,13 +582,13 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
     monkeypatch.setattr("fno.agents.events.emit", lambda *_a, **_kw: None)
 
     original = Envelope.new(
-        id="held-fno-mail",
-        thread="held-fno-mail",
+        id="fmail-123456789abc",
+        thread="fmail-123456789abc",
         from_="worker",
         to=HANDLE,
         kind="send",
         body=(
-            '<fno_mail from="worker-session" harness="codex">'
+            '<fno_mail from="worker-session" harness="codex" id="fmail-123456789abc">'
             "the held report"
             "</fno_mail>"
         ),
@@ -603,6 +600,8 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
 
     def fake_render(payload):
         rendered.append(payload)
+        if payload["mode"] == "held-release":
+            return payload["body"]
         return (
             f'<fno_mail from="{payload["from"]}" '
             f'harness="{payload["harness"]}">'
@@ -614,28 +613,35 @@ def test_release_delivers_tagged_held_mail_in_one_envelope(monkeypatch, tmp_path
 
     def fake_inject(_recipient, text, *, reason_out=None, **_kwargs):
         injected.append(text)
-        paired = (
-            text.lstrip().startswith("<fno_mail ")
-            and text.count("<fno_mail") == 1
-            and text.count("</fno_mail>") == 1
-            and text.rstrip().endswith("</fno_mail>")
+        is_release = (
+            text.startswith("1 held messages · sent ")
+            and (
+                "`@worker · fmail-123456789abc · the held report`" in text
+                or "`worker · fmail-123456789abc · the held report`" in text
+            )
+            and "<fno_mail" not in text
         )
-        if not paired and reason_out is not None:
-            reason_out.append("unframed-fno-mail")
-        return paired
+        if not is_release and reason_out is not None:
+            reason_out.append("invalid-held-release-frame")
+        return is_release
 
     monkeypatch.setattr(dispatch, "_mail_inject_claude", fake_inject)
 
     result = hold_mod.release(HANDLE, held_for_s=60)
 
-    assert result["outcome"] == "delivered", result
+    assert result["outcome"] == "delivered", result.get("miss_reason")
     assert result["miss_reason"] is None
     assert len(rendered) == 1
+    assert rendered[0]["mode"] == "held-release"
     assert "the held report" in rendered[0]["body"]
     assert "<fno_mail" not in rendered[0]["body"]
     assert len(injected) == 1
-    assert injected[0].count("<fno_mail") == 1
-    assert injected[0].count("</fno_mail>") == 1
+    assert injected[0].startswith("1 held messages · sent ")
+    assert (
+        "`@worker · fmail-123456789abc · the held report`" in injected[0]
+        or "`worker · fmail-123456789abc · the held report`" in injected[0]
+    )
+    assert "<fno_mail" not in injected[0]
     assert scan_unread(HANDLE) == []
 
 
@@ -643,7 +649,10 @@ def test_a_release_with_no_registry_row_names_that_as_the_miss(monkeypatch):
     """`inject-missed` alone cannot separate a dead lane from an absent row."""
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
     monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: None)
-    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [_msg("m", "w", "b")])
+    monkeypatch.setattr(
+        "fno.bus.cursor.scan_unread",
+        lambda *a, **k: [_msg("fmail-000000000003", "w", "b")],
+    )
     advanced = []
     monkeypatch.setattr(
         "fno.bus.cursor.advance_cursor", lambda name, mid: advanced.append(mid)
@@ -684,14 +693,16 @@ def test_release_by_the_clock_key_still_drains_the_canonical_mailbox(monkeypatch
     )
     monkeypatch.setattr(
         "fno.bus.cursor.scan_unread",
-        lambda name, **k: [_msg("m1", "w", "b")] if name == "0198a3f2" else [],
+        lambda name, **k: [_msg("fmail-000000000004", "w", "b")]
+        if name == "0198a3f2"
+        else [],
     )
 
     result = hold_mod.release(session_identity_key(sid), held_for_s=10)
 
     assert result["outcome"] == "delivered"
     assert result["held_count"] == 1
-    assert advanced == ["m1"]
+    assert advanced == ["fmail-000000000004"]
 
 
 # --- Task 5: the bounce -----------------------------------------------------

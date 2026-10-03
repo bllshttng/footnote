@@ -516,17 +516,16 @@ rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
 ( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
 echo "$DEAD" > "$LOCKDIR/pid"
 # The winner must still HOLD when the contender makes its next decision: a
-# sweep that finishes and tears down inside the contender's retry budget lets
-# the second sweep legitimately acquire a FREE path, which reads as
-# proceeded=2 while mutual exclusion never broke. Slowing the acquirer's
-# fetch past the contender's whole decision window pins the interleaving the
-# case exists to test.
+# sweep that finishes inside the contender's retry budget lets the second
+# sweep acquire a free path, which reads as proceeded=2 without breaking
+# mutual exclusion. Slow the guaranteed post-acquire inventory; this empty
+# sandbox has no worktree candidate and may never fetch.
 RACESTUB=$(mktemp -d -t race-stub.XXXXXX)
 REALGIT="$(command -v git)"
 cat > "$RACESTUB/git" <<EOF
 #!/usr/bin/env bash
-if [[ "\$1" == "-C" && "\$3" == "fetch" ]]; then
-    sleep 1
+if [[ "\$1" == "worktree" && "\$2" == "list" ]]; then
+    sleep 2
 fi
 exec "$REALGIT" "\$@"
 EOF

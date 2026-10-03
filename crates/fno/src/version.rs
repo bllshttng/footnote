@@ -51,6 +51,25 @@ pub fn print_version(json_out: bool) {
         let short = if rev.len() >= 12 { &rev[..12] } else { rev };
         let suffix = if dirty { "-dirty" } else { "" };
         println!("fno {pkg} ({short}{suffix}, {profile})");
+        // Name the resolved Python CLI so a user (or a study shim) can see
+        // WHICH install this door actually forwards to - the question the
+        // cached-sentinel resolution made unanswerable (gap audit 9). A
+        // set-but-unusable FNO_PY says so here, matching the refusal every
+        // forwarded verb would hit.
+        match crate::bootstrap::python_override_state() {
+            crate::bootstrap::PythonOverride::Unusable(msg) => {
+                println!("python-cli: unusable ({msg}); forwarded verbs will refuse")
+            }
+            crate::bootstrap::PythonOverride::Unset => {
+                match crate::bootstrap::resolved_python_script() {
+                    Some(py) => println!("python-cli: {}", py.display()),
+                    None => println!("python-cli: unresolved (no sibling, no uv tool dir)"),
+                }
+            }
+            crate::bootstrap::PythonOverride::Active(py) => {
+                println!("python-cli: {} (FNO_PY)", py.display());
+            }
+        }
     }
 }
 

@@ -285,7 +285,7 @@ def test_backlog_help_advertises_only_the_menu():
 
 @pytest.mark.parametrize(
     "verb",
-    ["decompose", "intake", "undefer", "reconcile", "maintain", "roadmap", "supersede"],
+    ["decompose", "intake", "undefer", "maintain", "roadmap", "supersede"],
 )
 def test_hidden_backlog_verbs_stay_invocable(verb):
     """AC2-ERR: a hidden backlog verb still runs its own --help (exit 0)."""

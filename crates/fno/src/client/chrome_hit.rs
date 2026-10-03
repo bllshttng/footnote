@@ -25,6 +25,31 @@ impl View {
                 None => {}
             }
         }
+        // The sideline's strip row (`Agents  Messages`, R15): the words
+        // switch the view, the density button rides the same row, and the
+        // rest of the row inside the sideline's columns is dead strip.
+        // Checked before the Agents-only guard so every view's strip
+        // answers. A click right of the divider falls through to the tab
+        // strip, which shares this row.
+        let top = self.sideline_top();
+        let pw = self.sideline_paint_w();
+        if row as usize + 1 == top && pw > 0 && (col as usize) < pw.saturating_sub(1) {
+            for (start, w, view) in self.top_row_spans() {
+                if (col as usize) >= start && (col as usize) < start + w {
+                    return Some(ChromeHit::TopRow(view));
+                }
+            }
+            // The density button stays pinned to the strip row, where it
+            // costs no display row; full-screen does not paint it.
+            if !self.sideline_full {
+                if let Some(range) = self.density_button_range(panel_w as usize) {
+                    if range.contains(&(col as usize)) {
+                        return Some(ChromeHit::CycleDensity);
+                    }
+                }
+            }
+            return None;
+        }
         // Tab strip (row 0, scoped to the content columns since US1): it
         // begins at `panel_w`, walking the same spans the renderer paints (with
         // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
@@ -64,7 +89,6 @@ impl View {
         }
         // Full-screen sideline paints below the strip; invert the same
         // offset the painter used.
-        let top = self.sideline_top();
         if (row as usize) < top {
             return None;
         }
@@ -73,19 +97,6 @@ impl View {
         // not the sideline row drawn underneath it (codex P2).
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
-        }
-        // The density button rides the sideline's top painted row, over
-        // whatever display row is scrolled to it. It is chrome pinned to the
-        // first PAINTED row, not a property of that row, so the check is on
-        // the painted row and must precede the display-row resolution below.
-        if row == top as u16 && !self.sideline_full {
-            // In full-screen the button is not painted, so a hit there would
-            // cycle a density the screen does not show.
-            if let Some(range) = self.density_button_range(panel_w as usize) {
-                if range.contains(&(col as usize)) {
-                    return Some(ChromeHit::CycleDensity);
-                }
-            }
         }
         // Display row i is painted at `i - offset` (draw_sideline, since
         // the sideline owns the top painted row), so invert with the paint
@@ -107,6 +118,9 @@ impl View {
         if let Some(id) = self.card_node_hit(i, col) {
             return Some(ChromeHit::OpenNode(id));
         }
+        if let Some(url) = self.card_pr_hit(i, col) {
+            return Some(ChromeHit::OpenPr(url));
+        }
         self.row_action(i)
     }
 
@@ -120,11 +134,28 @@ impl View {
         let DisplayRow::Agent(a) = rows.get(i)? else {
             return None;
         };
-        let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rect = self.worker_column_rects(text_w as u16)[2];
-        let span = card_line::meter_node(a, rect.width as usize).node?;
-        let at = (col as usize).checked_sub(rect.x as usize)?;
-        span.contains(&at).then(|| a.node.clone()).flatten()
+        let span = card_line::node_span(a, self.sideline_paint_w().checked_sub(1)?)?;
+        span.contains(&(col as usize))
+            .then(|| a.node.clone())
+            .flatten()
+    }
+
+    fn card_pr_hit(&self, i: usize, col: u16) -> Option<String> {
+        if self.sideline_layout != sideline_color::SidelineLayout::Card {
+            return None;
+        }
+        let rows = self.painted_rows();
+        let DisplayRow::Agent(a) = rows.get(i)? else {
+            return None;
+        };
+        let span = card_line::pr_span(a, self.sideline_paint_w().checked_sub(1)?)?;
+        if !span.contains(&(col as usize)) {
+            return None;
+        }
+        Some(format!(
+            "https://github.com/bllshttng/footnote/pull/{}",
+            a.pr?
+        ))
     }
 
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {

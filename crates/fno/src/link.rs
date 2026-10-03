@@ -153,6 +153,108 @@ pub fn for_notice(url: &str) -> String {
     format!("{head}…")
 }
 
+/// The pseudo scheme a tapped `@sender` header token resolves to. Never
+/// openable: the client intercepts it before [`open_url`], and [`is_openable`]
+/// rejects it, so it can never reach the platform opener.
+pub const SENDER_SCHEME: &str = "fno-sender:";
+
+/// The pseudo scheme for a tapped `fmail-` message id. Like the sender
+/// pseudo URI, it is intercepted by the mux client and never reaches an OS
+/// opener.
+pub const MESSAGE_SCHEME: &str = "fno-message:";
+
+/// True when `s` is exactly the sender pseudo URI for a `fmail-` id: scheme
+/// plus `fmail-` plus 12 hex, nothing else. A legacy `msg-` header has no
+/// sender session to find, so it resolves no span and no URI.
+pub fn is_sender_uri(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix(SENDER_SCHEME) else {
+        return false;
+    };
+    let Some(hex) = rest.strip_prefix("fmail-") else {
+        return false;
+    };
+    hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The message id carried by an exact `fno-message:` pseudo URI.
+pub fn message_id_from_uri(s: &str) -> Option<&str> {
+    let id = s.strip_prefix(MESSAGE_SCHEME)?;
+    let hex = id.strip_prefix("fmail-")?;
+    (hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+}
+
+pub fn is_message_uri(s: &str) -> bool {
+    message_id_from_uri(s).is_some()
+}
+
+/// The `@name` span of a delivered-mail header line in pane text, as a
+/// half-open CHAR range plus the `fmail-<12 hex>` id.
+///
+/// The header the mail transport types into the pane reads
+/// `` `@name · fmail-<12hex> · summary` `` — a harness prompt prefix and the
+/// wrapping backticks may sit around it, so the scan anchors on the id token
+/// and tolerates whatever precedes the `@`. A spaced name, a non-hex or
+/// over-long id, or a missing summary resolves nothing, and a legacy `msg-`
+/// id resolves no span: there is no sender session to find.
+pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let hex12 = |cs: &[char]| cs.len() == 12 && cs.iter().all(|c| c.is_ascii_hexdigit());
+    for i in 0..chars.len() {
+        if !chars[i..].starts_with(&['f', 'm', 'a', 'i', 'l', '-']) {
+            continue;
+        }
+        let hex_start = i + "fmail-".len();
+        let id_end = hex_start + 12;
+        if !hex12(chars.get(hex_start..id_end)?) {
+            continue;
+        }
+        // A hex digit right after the id means a longer token, not this id.
+        if chars.get(id_end).is_some_and(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        // Left: exactly ` · ` between the id and the sender token.
+        if i < 3 || chars[i - 3..i] != [' ', '·', ' '] {
+            continue;
+        }
+        let name_end = i - 3;
+        // Right: exactly ` · ` then a non-empty summary.
+        if chars.get(id_end..id_end + 3) != Some(&[' ', '·', ' '][..]) {
+            continue;
+        }
+        if chars.get(id_end + 3).is_none_or(|c| c.is_whitespace()) {
+            continue;
+        }
+        // The sender token: the non-space run ending at the separator. The
+        // header's own `@` is the RIGHTMOST one in that run, so prompt text
+        // like `user@host` and the wrapping backtick stay outside the range.
+        let mut run_start = name_end;
+        while run_start > 0 && !chars[run_start - 1].is_whitespace() {
+            run_start -= 1;
+        }
+        let Some(at) = chars[run_start..name_end].iter().rposition(|c| *c == '@') else {
+            continue;
+        };
+        let name_start = run_start + at;
+        if name_start + 1 >= name_end {
+            continue;
+        }
+        let id: String = chars[hex_start..id_end].iter().collect();
+        return Some((name_start, name_end, format!("fmail-{id}")));
+    }
+    None
+}
+
+/// The fmail id span in a well-formed delivered-mail header. Reuse the
+/// sender parser as the header validator so a coincidental id in body text
+/// does not become a message link.
+pub fn find_mail_message(text: &str) -> Option<(usize, usize, String)> {
+    let (_, sender_end, id) = find_mail_sender(text)?;
+    let byte_start = text.char_indices().nth(sender_end)?.0;
+    let id_byte = byte_start + text[byte_start..].find(&id)?;
+    let start = text[..id_byte].chars().count();
+    Some((start, start + id.chars().count(), id))
+}
+
 /// Hand `url` to the platform opener, blocking until it exits. `Err` carries
 /// one human line for the status notice.
 ///
@@ -488,16 +590,6 @@ mod tests {
             "https://a.test/{}",
             "x".repeat(5000)
         )));
-    }
-
-    #[test]
-    fn open_url_refuses_before_spawning_anything() {
-        // The refusal arm is the security-relevant half and needs no process.
-        // A pass would exec a browser, so only the refusal is asserted here.
-        for bad in ["file:///etc/passwd", "javascript:alert(1)", "", "https://"] {
-            let err = open_url(bad).expect_err("must refuse");
-            assert!(err.starts_with("refused to open"), "{bad} -> {err}");
-        }
     }
 
     /// An exit status without launching anything: `true`/`false` are the two

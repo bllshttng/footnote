@@ -428,11 +428,7 @@ fn no_overlay_cuts_text_with_an_ellipsis() {
     );
 }
 
-/// The guard: no ROW cuts its text with an ellipsis. The sideline renders in
-/// both layouts and all three densities at 50, 80, 120 and 200 columns with
-/// long names, tails and cwd bases; a pane border and the backlog board
-/// render at the same widths with long fields. Every rendered line holds no
-/// `…` (ruling d-36438ea4).
+/// Only card message previews use ellipsis; every other row field keeps the no-marker clipping rule (d-36438ea4).
 #[test]
 fn no_row_cuts_text_with_an_ellipsis() {
     use super::tests::{agent_row, named_meta, shot_view};
@@ -460,7 +456,7 @@ fn no_row_cuts_text_with_an_ellipsis() {
             let text = crate::vt::frame_text(&v.compose());
             for line in text.lines() {
                 assert!(
-                    !line.contains('\u{2026}'),
+                    !line.contains('\u{2026}') || line.contains(" tok · …"),
                     "{density:?} cut a row at {cols} columns: {line:?}"
                 );
             }

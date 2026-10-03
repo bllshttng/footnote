@@ -182,16 +182,19 @@ pub(crate) struct SessionCost {
     pub(crate) measured_at: String,
 }
 
-/// The incremental fold for one transcript: a byte offset (each sweep reads
-/// only the appended bytes), the seen claude message ids (transcripts repeat
-/// one API message across several rows), per-model token sums, and the codex
-/// cumulative total (each `token_count` row restates the session total).
+/// The incremental fold for one transcript: a byte offset, compaction
+/// boundaries, seen Claude message ids, per-model token sums, and the codex
+/// cumulative total. The served count is absent until a read succeeds.
 #[derive(Default)]
 pub(crate) struct RunningCost {
     offset: u64,
     seen_ids: HashSet<String>,
     per_model: HashMap<String, Tokens>,
     codex_total: Option<Tokens>,
+    compaction_count: u64,
+    compaction_readable: bool,
+    compaction_parse_error: bool,
+    last_measured_at: Option<String>,
 }
 
 impl RunningCost {
@@ -207,20 +210,24 @@ impl RunningCost {
     /// tail stays for the next call.
     pub(crate) fn absorb(&mut self, path: &Path) {
         let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+            self.compaction_readable = false;
             return;
         };
         if len < self.offset {
             *self = Self::new();
         }
         let Ok(file) = std::fs::File::open(path) else {
+            self.compaction_readable = false;
             return;
         };
         let mut reader = std::io::BufReader::new(file);
         if reader.seek(SeekFrom::Start(self.offset)).is_err() {
+            self.compaction_readable = false;
             return;
         }
         let mut line = Vec::new();
         let mut consumed = 0u64;
+        let mut read_ok = true;
         loop {
             line.clear();
             match reader.read_until(b'\n', &mut line) {
@@ -232,18 +239,28 @@ impl RunningCost {
                     consumed += n as u64;
                     if let Ok(text) = std::str::from_utf8(&line) {
                         self.row_line(text.trim_end_matches('\n'));
+                    } else {
+                        self.compaction_parse_error = true;
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    read_ok = false;
+                    break;
+                }
             }
         }
         self.offset += consumed;
+        self.compaction_readable = read_ok && !self.compaction_parse_error;
     }
 
     fn row_line(&mut self, line: &str) {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+            self.compaction_parse_error = true;
             return;
         };
+        if crate::compaction::boundary_ts(&row).is_some() {
+            self.compaction_count += 1;
+        }
         if let Some(total) = crate::session_activity::codex_token_total(&row) {
             self.codex_total = Some(total);
             return;
@@ -335,14 +352,14 @@ impl RunningCost {
 }
 
 /// The daemon-side store: fold state per harness session plus the last
-/// reading the sweep served. Keyed by `harness_session_id` (law d-e952ed19):
-/// a harness fact served beside the row, never written to the registry.
+/// running-cost reading. Keyed by `harness_session_id` (law d-e952ed19):
+/// session facts are served beside the row, never written to the registry.
 static FOLDS: OnceLock<Mutex<HashMap<String, (RunningCost, Option<SessionCost>)>>> =
     OnceLock::new();
 
-/// Sweep-time measurement: absorb the transcript's new bytes, reprice, and
-/// remember the reading under the session id. `now` is the sweep's stamp, so
-/// the served triple always carries the measurement time beside the word.
+/// Sweep-time measurement: absorb new transcript bytes, update the boundary
+/// count, reprice when a catalog exists, and remember both under the session id.
+/// `now` stamps only the served cost reading.
 /// The fold is taken OUT of the map while it absorbs: the read and the price
 /// run lock-free, because the agents-list path serves from the same mutex
 /// and must not stall behind a large transcript read. Entries the sweeps
@@ -355,11 +372,8 @@ pub(crate) fn measure_session_cost(
     route: Option<&str>,
     now: &str,
 ) {
-    let Some(book) = price_book(state) else {
-        return;
-    };
     let cell = FOLDS.get_or_init(|| Mutex::new(HashMap::new()));
-    let (mut fold, _) = {
+    let (mut fold, last_cost) = {
         let Ok(mut folds) = cell.lock() else {
             return;
         };
@@ -368,18 +382,55 @@ pub(crate) fn measure_session_cost(
             .unwrap_or_else(|| (RunningCost::new(), None))
     };
     fold.absorb(transcript);
+    if fold.compaction_readable {
+        fold.last_measured_at = Some(now.to_string());
+    }
+    let Some(book) = price_book(state) else {
+        if let Ok(mut folds) = cell.lock() {
+            folds.insert(sid.to_string(), (fold, last_cost));
+            prune_session_folds(&mut folds, now);
+        }
+        return;
+    };
     let mut cost = fold.session(&book, codex_model, route);
     cost.measured_at = now.to_string();
     if let Ok(mut folds) = cell.lock() {
-        if let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(now) {
-            let cutoff = stamp - chrono::Duration::hours(24);
-            folds.retain(|_, (_, last)| {
-                last.as_ref()
-                    .and_then(|c| chrono::DateTime::parse_from_rfc3339(&c.measured_at).ok())
-                    .is_some_and(|m| m > cutoff)
-            });
-        }
         folds.insert(sid.to_string(), (fold, Some(cost)));
+        prune_session_folds(&mut folds, now);
+    }
+}
+
+fn prune_session_folds(folds: &mut HashMap<String, (RunningCost, Option<SessionCost>)>, now: &str) {
+    let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(now) else {
+        return;
+    };
+    let cutoff = stamp - chrono::Duration::hours(24);
+    folds.retain(|_, (fold, cost)| {
+        let last_compaction = fold
+            .last_measured_at
+            .as_deref()
+            .and_then(|measured| chrono::DateTime::parse_from_rfc3339(measured).ok());
+        let last_cost = cost
+            .as_ref()
+            .and_then(|cost| chrono::DateTime::parse_from_rfc3339(&cost.measured_at).ok());
+        last_compaction
+            .into_iter()
+            .chain(last_cost)
+            .max()
+            .is_some_and(|measured| measured > cutoff)
+    });
+}
+
+/// Keep the compaction reading unknown when this sweep cannot resolve its
+/// transcript, without discarding the independently measured running cost.
+pub(crate) fn mark_session_transcript_unavailable(sid: &str, now: &str) {
+    let cell = FOLDS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut folds) = cell.lock() {
+        if let Some((mut fold, cost)) = folds.remove(sid) {
+            fold.compaction_readable = false;
+            folds.insert(sid.to_string(), (fold, cost));
+        }
+        prune_session_folds(&mut folds, now);
     }
 }
 
@@ -399,11 +450,17 @@ pub(crate) fn served_session_cost(sid: Option<&str>) -> (Option<u64>, Option<u64
     }
 }
 
-/// The seven served keys an agents-list row folds in: the four stored
-/// context fields (moved here from daemon.rs's inline json!) plus the three
-/// running-cost fields from the sweep's measurement. One helper so daemon.rs
-/// (shrink-only) stays net zero.
-pub(crate) fn served_context_cost_keys(
+pub(crate) fn served_compaction_count(sid: Option<&str>) -> Option<u64> {
+    let sid = sid.filter(|sid| !sid.is_empty())?;
+    let cell = FOLDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let folds = cell.lock().ok()?;
+    let (fold, _) = folds.get(sid)?;
+    fold.compaction_readable.then_some(fold.compaction_count)
+}
+
+/// Session metrics served beside the four stored context fields and running
+/// cost. One helper keeps daemon.rs (shrink-only) net zero.
+pub(crate) fn served_session_metrics_keys(
     e: &RegistryEntry,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut keys = serde_json::Map::new();
@@ -429,6 +486,11 @@ pub(crate) fn served_context_cost_keys(
     keys.insert(
         "session_cost_measured_at".into(),
         serde_json::json!(measured_at),
+    );
+    let compaction_count = served_compaction_count(e.harness_session_id.as_deref());
+    keys.insert(
+        "compaction_count".into(),
+        serde_json::json!(compaction_count),
     );
     keys
 }
@@ -640,7 +702,12 @@ mod tests {
         let dir = tmpdir("served");
         fixture_book(&dir);
         let path = dir.join("t.jsonl");
-        std::fs::write(&path, claude_transcript()).unwrap();
+        let mut transcript = claude_transcript();
+        transcript.push_str(
+            r#"{"type":"system","subtype":"compact_boundary","timestamp":"2026-10-02T00:00:00Z"}"#,
+        );
+        transcript.push('\n');
+        std::fs::write(&path, &transcript).unwrap();
         measure_session_cost(
             &dir,
             "sess-cost-1",
@@ -652,10 +719,11 @@ mod tests {
         let mut e = RegistryEntry::default();
         e.harness_session_id = Some("sess-cost-1".into());
         e.context_used_pct = Some(48);
-        let keys = served_context_cost_keys(&e);
-        assert_eq!(keys.len(), 7);
+        let keys = served_session_metrics_keys(&e);
+        assert_eq!(keys.len(), 8);
         assert_eq!(keys["context_used_pct"], serde_json::json!(48));
         assert_eq!(keys["session_tokens"], serde_json::json!(154_000));
+        assert_eq!(keys["compaction_count"], serde_json::json!(1));
         assert_eq!(
             keys["session_cost_measured_at"],
             serde_json::json!("2026-10-02T00:00:00Z")
@@ -667,9 +735,82 @@ mod tests {
             serde_json::json!(expected.round() as u64)
         );
 
-        let absent = served_context_cost_keys(&RegistryEntry::default());
+        let absent = served_session_metrics_keys(&RegistryEntry::default());
         assert_eq!(absent["session_cost_cents"], serde_json::json!(null));
         assert_eq!(absent["session_cost_measured_at"], serde_json::json!(null));
+        assert_eq!(absent["compaction_count"], serde_json::json!(null));
+
+        let mut unresolved = RegistryEntry::default();
+        unresolved.harness = Some("pi".into());
+        unresolved.harness_session_id = Some("session-without-transcript".into());
+        let unresolved = served_session_metrics_keys(&unresolved);
+        assert_eq!(
+            unresolved["compaction_count"],
+            serde_json::json!(null),
+            "an identity without a supported transcript stays unknown"
+        );
+
+        let no_catalog = tmpdir("no-catalog");
+        measure_session_cost(
+            &no_catalog,
+            "sess-no-catalog",
+            &path,
+            None,
+            None,
+            "2026-10-02T00:01:00Z",
+        );
+        assert_eq!(
+            served_compaction_count(Some("sess-no-catalog")),
+            Some(1),
+            "transcript boundaries are measured without a price catalog"
+        );
+
+        let mut stale_fold = RunningCost::new();
+        stale_fold.compaction_count = 1;
+        stale_fold.compaction_readable = true;
+        stale_fold.last_measured_at = Some("2026-10-01T00:00:00Z".into());
+        let mut current_fold = RunningCost::new();
+        current_fold.compaction_readable = true;
+        current_fold.last_measured_at = Some("2026-10-02T00:00:00Z".into());
+        let mut folds = HashMap::from([
+            ("stale".into(), (stale_fold, None)),
+            ("current".into(), (current_fold, None)),
+        ]);
+        prune_session_folds(&mut folds, "2026-10-02T00:00:01Z");
+        assert_eq!(
+            folds.keys().map(String::as_str).collect::<HashSet<_>>(),
+            HashSet::from(["current"]),
+            "count-only folds expire after 24 hours"
+        );
+
+        mark_session_transcript_unavailable("sess-cost-1", "2026-10-02T00:02:00Z");
+        assert_eq!(
+            served_compaction_count(Some("sess-cost-1")),
+            None,
+            "an unavailable transcript does not keep a stale count"
+        );
+
+        let damaged_path = dir.join("damaged.jsonl");
+        let damaged = transcript.clone() + "not-json\n";
+        std::fs::write(&damaged_path, damaged).unwrap();
+        measure_session_cost(
+            &dir,
+            "sess-damaged",
+            &damaged_path,
+            None,
+            None,
+            "2026-10-02T00:03:00Z",
+        );
+        assert_eq!(
+            served_compaction_count(Some("sess-damaged")),
+            None,
+            "malformed transcript rows stay unknown instead of reading zero"
+        );
+        assert_eq!(
+            served_session_cost(Some("sess-damaged")).0,
+            keys["session_cost_cents"].as_u64(),
+            "a malformed transcript does not evict the independent cost reading"
+        );
     }
 
     #[test]

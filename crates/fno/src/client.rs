@@ -35,17 +35,19 @@ use tokio::sync::mpsc;
 use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
+mod open_chooser;
 mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
 mod wire_version;
+use open_chooser::{open_for_session, resolve_sender};
 use row_menu::execute_row_menu_action;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
-use row_menu::{build_row_menu, build_tab_menu};
+use row_menu::{build_row_menu, build_section_menu, build_tab_menu};
 
 // Pickers, the launch moment and the snapshot action live in their own
 // modules: client.rs is shrink-only under the file-budget gate.
@@ -1051,6 +1053,7 @@ struct View {
     server_proto: Option<u32>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
+    messages_board: Option<messages_view::MessagesBoard>,
     org_board: Option<org_board::OrgBoard>,
     org_generation: u64,
     sideline_view: crate::view_store::SidelineView,
@@ -1420,7 +1423,7 @@ struct SearchView {
 /// stored here - they are recomputed from the live layout each keypress (the
 /// same per-key re-read discipline as the selector/search), so a layout push
 /// under an open navigator is reflected at once.
-struct NavView {
+pub(crate) struct NavView {
     /// Incremental text filter (substring, case-insensitive) over row match
     /// keys: label + pane id + node id + slug + workspace.
     query: String,
@@ -1436,7 +1439,7 @@ struct NavView {
 /// underneath); Esc drops back into it. The row is re-read from the live
 /// `display_rows()` per frame (navigator-style), so only the index, the request
 /// seq, and the fetched body live here - never a stale row snapshot.
-struct PeekView {
+pub(crate) struct PeekView {
     /// A `display_rows()` index, always kept on a `DisplayRow::Agent` row.
     cursor: usize,
     /// The seq of the last `PeekAgent` sent; a `PeekBody` with any other seq is
@@ -1514,6 +1517,11 @@ enum MenuTarget {
     /// re-resolves it against the live layout, so a tab that closed between
     /// open and pick is a Notice, never a redirected action.
     Tab(TabId),
+    /// The shared open-session chooser's row (`open_chooser.rs`). Identified
+    /// and resolved exactly like [`MenuTarget::Agent`]; the difference is
+    /// the bookkeeping: an executed pick persists as the chooser's next
+    /// pre-selection.
+    OpenSession(AgentIdent),
 }
 
 /// The disambiguating identity of an agent row, captured when a row menu opens.
@@ -1632,6 +1640,11 @@ enum MenuAction {
     /// sideline `P` opens (open portals plus a new-portal row), so a
     /// right-click offers a portal choice where it offers placement.
     PortalPicker,
+    /// Attach a paneless LIVE thread that carries no attach id as a NEW
+    /// portal view: `Some(dir)` splits a fresh portal `dir`-ward of the
+    /// active tab, `None` opens a standalone new-portal seat. Chooser-only:
+    /// built by `open_chooser::build_open_chooser`, never the row menu.
+    PortalAt(Option<Dir>),
 }
 
 impl MenuAction {
@@ -1692,53 +1705,6 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
         label: label.into(),
         hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
-    }
-}
-
-/// The section-header context menu. A workspace section (`squad`
-/// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
-/// added only when `dead > 0`; its label count is both what it advertises AND
-/// what the commit runs, so the two can never disagree. The caller guarantees
-/// at least one of {renamable, `dead > 0`} holds, so the menu is never empty.
-fn build_section_menu(
-    key: SectionKey,
-    label: String,
-    squad: Option<u64>,
-    dead: usize,
-    anchor: Anchor,
-) -> RowMenu {
-    let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
-    let mut actions: Vec<MenuAction> = Vec::new();
-    if squad.is_some() {
-        let entry = |glyph: &str, label: &str| PopupRow::Entry {
-            glyph: glyph.into(),
-            label: label.into(),
-            hint: String::new(),
-            enabled: true,
-        };
-        rows.push(entry_acc("✎", "Rename", "rename-workspace"));
-        actions.push(MenuAction::Rename);
-        rows.push(entry("▲", "Move up"));
-        actions.push(MenuAction::MoveSquad(-1));
-        rows.push(entry("▼", "Move down"));
-        actions.push(MenuAction::MoveSquad(1));
-        rows.push(PopupRow::Rule);
-        rows.push(entry("✕", "Remove workspace"));
-        actions.push(MenuAction::RemoveSquad);
-    }
-    if dead > 0 {
-        rows.push(PopupRow::Entry {
-            glyph: "✕".into(),
-            label: format!("Clear dead ({dead})"),
-            hint: String::new(),
-            enabled: true,
-        });
-        actions.push(MenuAction::ClearDead);
-    }
-    RowMenu {
-        popup: Popup::new(rows, anchor),
-        target: MenuTarget::Section { key, label, squad },
-        actions,
     }
 }
 
@@ -1844,6 +1810,10 @@ mod node_detail;
 pub(crate) use node_detail::wrap_line;
 mod editor;
 mod keys_settings;
+mod messages_detail;
+mod overlay_lines;
+pub(crate) use overlay_lines::{humanize_age, nav_overlay_lines, peek_overlay_lines};
+mod messages_view;
 mod org_board;
 mod org_detail;
 mod org_graph;
@@ -1879,6 +1849,8 @@ use input_folds::{
     fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys,
     fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
+
+mod composer_draft;
 
 use mail_input::peek_input_keys;
 use update_menu::{build_sideline_menu, build_update_modal, UpdateProbe};
@@ -2058,6 +2030,7 @@ impl View {
             backlog: Vec::new(),
             server_proto: None,
             backlog_board: None,
+            messages_board: None,
             org_board: None,
             org_generation: 0,
             sideline_view: crate::view_store::load_sideline_view(),
@@ -2610,17 +2583,6 @@ impl View {
         self.portal_pick = None;
         self.clear_peek();
         self.move_pick = Some(MovePick::new(src, squads));
-    }
-
-    /// Clear the read-only peek overlay and its escape carry. Called by
-    /// every modal `open_*` helper so a mouse-driven overlay open (the mouse
-    /// pre-pass runs before overlay routing) never leaves peek rendering on top.
-    fn clear_peek(&mut self) {
-        self.peek = None;
-        self.peek_esc.clear();
-        // The reply input lives inside peek; closing peek drops it too.
-        self.peek_input = None;
-        self.peek_input_esc.clear();
     }
 
     /// Open the which-key keybinds modal (prefix+?, US3). Clears peek like
@@ -3721,6 +3683,7 @@ impl View {
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank
             | DisplayRow::CardDetail(..)
+            | DisplayRow::CardMetrics(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -4097,6 +4060,7 @@ impl View {
             // Agent row painted above it. Inert for the selector, clickable
             // here - the same split a Header has.
             DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
+            DisplayRow::CardMetrics(..) => self.row_action(i.checked_sub(2)?),
             // Inert rows (spacer, table column header) resolve to no action.
             DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay.
@@ -5272,6 +5236,14 @@ impl View {
             );
         } else if self.org_board.is_some() && self.board_full {
             org_board::paint(self, &mut cells, rows, cols, cols, rows);
+        } else if self.messages_board.is_some() {
+            // Messages is a full-surface view: the strip row is the
+            // sideline's, so the board paints from row 1.
+            self.paint_top_row(&mut cells, cols, cols);
+            messages_view::paint(self, &mut cells, rows, cols, cols, rows);
+            if let Some(d) = self.messages_board.as_ref().and_then(|b| b.detail.as_ref()) {
+                draw_popup_overlay(&mut cells, rows, cols, &d.popup, self.term, &self.theme);
+            }
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -5293,6 +5265,7 @@ impl View {
             && self.backlog_board.is_none()
             && !(self.org_board.is_some()
                 && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
+            && self.messages_board.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -5408,32 +5381,6 @@ impl View {
             }
             None => bottom,
         }
-    }
-
-    /// The display-row index the confirm's target CURRENTLY occupies,
-    /// matched by the identity carried in the [`ConfirmAction`] (squad id, agent
-    /// name, or external/dismiss attach_id, or a card node) - never a captured
-    /// numeric index. A global confirm (reap / clear-dead) has no row, and a
-    /// target that vanished returns `None`; both fall back to the bottom row.
-    fn confirm_target_index(&self, action: &ConfirmAction) -> Option<usize> {
-        self.display_rows()
-            .iter()
-            .position(|r| match (&action.action, r) {
-                (ConfirmKind::RemoveSquad { squad, .. }, DisplayRow::Sel(s)) => {
-                    s.tab.is_none() && s.squad == *squad
-                }
-                (
-                    ConfirmKind::StopAgent { name, .. } | ConfirmKind::RemoveAgent { name, .. },
-                    DisplayRow::Agent(a),
-                ) => a.name == *name,
-                (
-                    ConfirmKind::StopExternal { attach_id, .. }
-                    | ConfirmKind::RemoveExternal { attach_id, .. }
-                    | ConfirmKind::DismissMember { attach_id, .. },
-                    DisplayRow::Agent(a),
-                ) => a.attach_id.as_deref() == Some(attach_id.as_str()),
-                _ => false,
-            })
     }
 
     fn confirm_text(&self, action: &ConfirmAction) -> String {
@@ -6246,18 +6193,10 @@ enum DisplayRow<'a> {
     /// The `+` create-workspace affordance, a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
-    /// (US3) A one-line spacer between workspace groups and before the
-    /// trailing sections. Inert: every painted line stays one display row
-    /// (the single-enumeration invariant), so scroll, hover, and hit-test
-    /// index math are untouched.
+    /// An inert one-line separator retained in card mode.
     Blank,
-    /// Line 2 of a card-mode card (the dims under `[sideline] layout =
-    /// "card"`): harness/model, parent-or-role, message, with the lifetime
-    /// and age right-aligned in a DIM legacy row. Inert - every painted
-    /// line stays one display row (the single-enumeration invariant) - and
-    /// a click on it acts on the `Agent` row above it via
-    /// [`View::row_action`]'s index shift.
     CardDetail(&'a AgentRow),
+    CardMetrics(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6383,6 +6322,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Blank
             | DisplayRow::CardDetail(..)
+            | DisplayRow::CardMetrics(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
@@ -6578,6 +6518,9 @@ enum TabHit {
 #[derive(Debug, Clone)]
 enum ChromeHit {
     Cmds(Vec<Command>),
+    /// The strip row's view word (`Agents  Messages`, R15): switch the
+    /// sideline to that view.
+    TopRow(crate::view_store::SidelineView),
     /// Owned, not `&'static`: an in-flight card's notice carries the
     /// server-computed `where_hint` (v18), which is per-card data.
     Notice(String),
@@ -6611,6 +6554,7 @@ enum ChromeHit {
     OpenQuestionsList,
     /// A card's node tap: the plan in Obsidian, else the node details pane.
     OpenNode(String),
+    OpenPr(String),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -6977,7 +6921,7 @@ const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 /// One row of the navigator's flat catalog. Fully owned (no layout
 /// borrow) so goto can mutate the view after the catalog is built; recomputed
 /// per keypress, never cached.
-struct NavRow {
+pub(crate) struct NavRow {
     /// The displayed label (e.g. `nairobi › build` or `nairobi › claude#3`).
     /// Rendering only - the text filter matches [`NavRow::match_key`].
     label: String,
@@ -7268,7 +7212,6 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
 
 /// The navigator overlay content width: labels truncate to it and pad
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
-const NAV_OVERLAY_W: usize = 54;
 
 // The icon lattice itself lives in `crate::lattice`; these re-exports keep
 // every `use super::*` renderer and test reading the same paths as before.
@@ -7440,62 +7383,9 @@ fn nav_glyph(s: PaneState) -> char {
     lattice_glyph(pane_to_lattice(s)).0
 }
 
-/// Build the navigator overlay lines: a top `find › <query>  [chip]`
-/// line, then one line per FILTERED row with a leading state glyph and the
-/// cursor row marked `▸`. A row that matched an identity token invisible in
-/// its label appends that token as a `·<token>` suffix, so a hit
-/// always shows WHY it hit - a row that appears arbitrary reads as a bug. An
-/// empty result renders a single `no matches` line (the key handler BELs).
-/// `rows` is pre-filtered; `cursor` is pre-clamped.
-fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
-    let chip = match nav.state_filter {
-        None => "all",
-        Some(PaneState::Blocked) => "blocked",
-        Some(PaneState::Working) => "working",
-        Some(PaneState::DoneUnseen) => "done",
-        Some(PaneState::Unmeasured) => "unmeasured",
-        Some(PaneState::Idle) => "idle",
-        Some(PaneState::Empty) => "empty",
-    };
-    let mut lines = vec![pad_to(
-        &format!(" find › {}   [{chip}]", nav.query),
-        NAV_OVERLAY_W,
-    )];
-    if rows.is_empty() {
-        lines.push(pad_to("   no matches", NAV_OVERLAY_W));
-        return lines;
-    }
-    let q = nav.query.to_lowercase();
-    for (i, r) in rows.iter().enumerate() {
-        let marker = if i == nav.cursor { '▸' } else { ' ' };
-        // The reason token: a match-key token that contains the query while
-        // the label does not. A query that hits the visible label appends
-        // nothing (AC4-UI: the row renders exactly as before).
-        let label_lower = r.label.to_lowercase();
-        let label = if q.is_empty() || label_lower.contains(&q) {
-            r.label.clone()
-        } else {
-            match r
-                .match_key
-                .split(' ')
-                .find(|t| t.contains(&q) && !label_lower.contains(t))
-            {
-                Some(token) => format!("{} ·{token}", r.label),
-                None => r.label.clone(),
-            }
-        };
-        lines.push(pad_to(
-            &format!(" {marker} {} {}", nav_glyph(r.state), label),
-            NAV_OVERLAY_W,
-        ));
-    }
-    lines
-}
-
 /// The peek overlay content width: wider than the navigator/answer
 /// overlays because it renders transcript lines, clamped to the terminal by
 /// `draw_lines_overlay`.
-const PEEK_OVERLAY_W: usize = 72;
 
 /// (US9) Minimum gap between transcript auto-refreshes while peek is open:
 /// a Layout push arriving sooner than this since the last fetch for the same row
@@ -7516,146 +7406,6 @@ pub(crate) fn humanize_ago(secs: u64) -> String {
     } else {
         format!("{}d", secs / 86_400)
     }
-}
-
-/// The table's last-activity cell: the same buckets as [`humanize_ago`],
-/// right-justified to a fixed width of 4 so the column never reflows when a
-/// value rolls from `59m` to `1h`. An absent reading renders EMPTY, like the
-/// tail cell - the table never fabricates a placeholder value, and `0s` would
-/// be a fabricated one. (`fno agents list` prints `?` for the same absence;
-/// that lane's rows are one line each, where a blank reads as a bug.)
-fn humanize_age(secs: Option<u64>) -> String {
-    let body = match secs {
-        None => String::new(),
-        Some(s) if s < 60 => format!("{s}s"),
-        Some(s) if s < 3600 => format!("{}m", s / 60),
-        Some(s) if s < 86_400 => format!("{}h", s / 3600),
-        // Capped at 999d (review finding: an uncapped day count breaks the
-        // fixed-width-4 invariant once a row is silent for 1000+ days). A row
-        // that old is a display curiosity, not a case worth a 5th column.
-        Some(s) => format!("{}d", (s / 86_400).min(999)),
-    };
-    format!("{body:>4}")
-}
-
-/// Build the read-only peek overlay lines: a header (badge glyph + name
-/// + full wrapped status sentence), the answerable block when the row is
-/// blocked (prompt + numbered options, reused verbatim), a divider, then the
-/// transcript body (" loading…" until it arrives, "no activity yet" for an empty
-/// one, error/timeout text rendered verbatim as body lines) and a footer hint.
-/// `agent` is the LIVE row re-read per frame; `None` means it vanished between
-/// key and frame (a transient single frame - the key handler re-anchors/closes).
-fn peek_overlay_lines(
-    agent: Option<&AgentRow>,
-    peek: &PeekView,
-    reply: Option<&str>,
-    now_secs: u64,
-) -> Vec<String> {
-    let Some(a) = agent else {
-        return vec![pad_to(" peek · row gone", PEEK_OVERLAY_W)];
-    };
-    // Sanitize every external-sourced line (transcript body, scraped reason)
-    // before it becomes overlay cells (codex review): `fno agents peek` reads
-    // raw on-disk transcript text that can carry ANSI escapes / C0 controls, and
-    // the peek path does NOT VT-parse (unlike pane output), so an unstripped
-    // ESC/CR would reach the operator's terminal. Tabs become spaces; every
-    // other control char is dropped (a residual bracket-code is harmless text).
-    fn sanitize_peek_line(s: &str) -> String {
-        s.chars()
-            .map(|c| if c == '\t' { ' ' } else { c })
-            .filter(|c| !c.is_control())
-            .collect()
-    }
-    // the peek header reuses the sideline row's lattice state.
-    // `agent_lattice_state` is both exit- and seen-aware (it routes the non-exit
-    // case through `pane_state`), so the peek, the row, and the rollups agree
-    // and no call site re-derives the precedence.
-    let glyph = lattice_glyph(agent_lattice_state(a)).0;
-    // The account glyph rides the peek header next to the name, same
-    // vocabulary as the selector row.
-    let mut header = match a.account.as_deref() {
-        Some(acct) => format!(" {glyph} {}  @{acct}", a.name),
-        None => format!(" {glyph} {}", a.name),
-    };
-    // Additive header labels, each present only when its data exists (no
-    // placeholder dashes): `changed Ns ago` (a future stamp / clock skew clamps
-    // to `0s` via saturating_sub) and `PR #N`.
-    if let Some(updated) = a.updated_at {
-        header.push_str(&format!(
-            " · changed {} ago",
-            humanize_ago(now_secs.saturating_sub(updated))
-        ));
-    }
-    if let Some(pr) = a.pr {
-        header.push_str(&format!(" · PR #{pr}"));
-    }
-    if a.started_at.is_some() {
-        header.push_str(&format!(
-            " · up {}",
-            row_meter::up_cell(a.started_at, now_secs)
-        ));
-    }
-    let mut lines = vec![pad_to(&header, PEEK_OVERLAY_W)];
-    if let Some(reason) = a.reason.as_deref().filter(|s| !s.is_empty()) {
-        let mut wrapped = Vec::new();
-        wrap_line(
-            &sanitize_peek_line(reason),
-            PEEK_OVERLAY_W - 3,
-            &mut wrapped,
-        );
-        for wl in wrapped {
-            lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
-        }
-    }
-    // answerable block: prompt + numbered options, mirroring the needs-me
-    // overlay's body so a blocked peek reads identically. Digit answers (US3)
-    // act on exactly these options.
-    if let Some(ans) = &a.answerable {
-        lines.push(pad_to("", PEEK_OVERLAY_W));
-        if !ans.prompt.is_empty() {
-            lines.push(pad_to(
-                &format!("   {}", ans.prompt.replace('\n', " ")),
-                PEEK_OVERLAY_W,
-            ));
-        }
-        for o in &ans.options {
-            lines.push(pad_to(
-                &format!("     {}. {}", o.idx, o.label),
-                PEEK_OVERLAY_W,
-            ));
-        }
-    }
-    lines.push(pad_to("", PEEK_OVERLAY_W)); // divider before the transcript
-    match &peek.body {
-        None => lines.push(pad_to("   loading…", PEEK_OVERLAY_W)),
-        Some(body) if body.is_empty() => lines.push(pad_to("   no activity yet", PEEK_OVERLAY_W)),
-        Some(body) => {
-            for l in body {
-                lines.push(pad_to(
-                    &format!(" {}", sanitize_peek_line(l)),
-                    PEEK_OVERLAY_W,
-                ));
-            }
-        }
-    }
-    // The reply input (`m`) replaces the footer while open; else the
-    // footer swaps by row state (attach is a dead end on an exited row - the bug
-    // US6 closes - so it becomes `r respawn`; `m reply` shows in both).
-    match reply {
-        Some(buf) => lines.push(pad_to(
-            &format!(" reply: {buf}_ (⏎ send · esc cancel)"),
-            PEEK_OVERLAY_W,
-        )),
-        None => lines.push(pad_to(
-            if a.exited {
-                " j/k peek · m reply · r respawn · esc back"
-            } else {
-                " j/k peek · digit answers · m reply · ⏎ attach · esc back"
-            },
-            PEEK_OVERLAY_W,
-        )),
-    }
-    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -7703,6 +7453,7 @@ async fn attach_and_run(
         },
     );
     org_board::restore(&mut view);
+    messages_view::restore(&mut view);
     // Latch the focus-follows-mouse off-switch once; a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
@@ -7855,6 +7606,10 @@ async fn attach_and_run(
     let (link_tx, mut link_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<(), String>)>();
 
+    // Resolve sender taps off-loop; the CLI can cold-start.
+    let (sender_tx, mut sender_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+
     // the needs-me event-fold leg runs off the UI loop and reports back
     // here, tagged with the generation token it was kicked under, so a slow
     // `fno-agents needs` never blocks the overlay and a result landing after the
@@ -7874,6 +7629,11 @@ async fn attach_and_run(
     let (board_tx, mut board_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
     let (org_tx, mut org_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, org_detail::OrgMsg)>();
+    let (messages_tx, mut messages_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        u64,
+        Result<serde_json::Value, String>,
+        Result<crate::org_model::OrgTree, String>,
+    )>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -8008,6 +7768,7 @@ async fn attach_and_run(
         // the backlog board's probe/gather kick, the same single-flight.
         backlog_board::maybe_kick(&mut view, &board_tx);
         org_board::maybe_kick(&mut view, &org_tx);
+        messages_view::maybe_kick(&mut view, &messages_tx);
         // a queued board write verb runs off the UI loop too.
         if let Some(action) = view
             .backlog_board
@@ -8322,15 +8083,29 @@ async fn attach_and_run(
                     });
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
-                    // the server resolved a clicked URL (OSC 8 or
-                    // linkified text) and vetted its scheme; `open_url` vets it
-                    // again before exec. Off-loop for the same reason Copy is -
-                    // a cold browser launch must not stall the render loop.
-                    let tx = link_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let outcome = crate::link::open_url(&url);
-                        let _ = tx.send((url, outcome));
-                    });
+                    // External URL opens run off-loop; a cold browser must not stall rendering.
+                    if let Some(id) = crate::link::message_id_from_uri(&url) {
+                        messages_view::open_message(&mut view, id.to_string());
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    } else if crate::link::is_sender_uri(&url) {
+                        // Resolve the sender session, then open its chooser row.
+                        let tx = sender_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let id = url
+                                .trim_start_matches(crate::link::SENDER_SCHEME)
+                                .to_string();
+                            let resolved = resolve_sender(&id);
+                            let _ = tx.send((id, resolved));
+                        });
+                    } else {
+                        let tx = link_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let outcome = crate::link::open_url(&url);
+                            let _ = tx.send((url, outcome));
+                        });
+                    }
                 }
                 Ok(ServerMsg::LinkHover {
                     pane_id,
@@ -8503,6 +8278,14 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some((id, resolved)) = sender_rx.recv() => {
+                // the fmail id resolved (or not); open the shared
+                // open-session chooser on the owning row, or say why not.
+                open_for_session(&mut view, &id, resolved);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some((gen, result)) = yard_rx.recv() => {
                 // the identity fold landed; same merge discipline as
                 // the needs fold - gen-guarded, degraded-loud on None, never
@@ -8609,6 +8392,12 @@ async fn attach_and_run(
             }
             Some((gen, msg)) = org_rx.recv() => {
                 org_detail::apply(&mut view, gen, msg);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some((gen, mail, tree)) = messages_rx.recv() => {
+                messages_view::apply_gather(&mut view, gen, mail, tree);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -9621,6 +9410,22 @@ async fn apply_hit(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
     match hit {
+        ChromeHit::TopRow(v) => match v {
+            crate::view_store::SidelineView::Agents => {
+                view.messages_board = None;
+                view.org_board = None;
+                view.backlog_board = None;
+                backlog_board::set_sideline_view(view, crate::view_store::SidelineView::Agents);
+            }
+            crate::view_store::SidelineView::Messages => messages_view::open(view),
+            crate::view_store::SidelineView::Backlog if view.experimental_backlog => {
+                backlog_board::open_pref_gated(view)
+            }
+            crate::view_store::SidelineView::Backlog => {
+                view.set_notice("the backlog view is off (menu toggle)".into())
+            }
+            crate::view_store::SidelineView::Org => org_board::open(view),
+        },
         ChromeHit::Cmds(cmds) => {
             for cmd in cmds {
                 view.note_command_sent(&cmd);
@@ -9659,6 +9464,7 @@ async fn apply_hit(
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
         ChromeHit::OpenNode(id) => node_link::open(view, id).await,
+        ChromeHit::OpenPr(url) => update_menu::open_pr(view, url).await,
     }
     Ok(())
 }
@@ -10405,7 +10211,7 @@ async fn peek_keys(
                 // peek_input_keys.
                 match view.display_rows().get(cursor) {
                     Some(DisplayRow::Agent(a)) => {
-                        view.peek_input = Some((a.name.clone(), String::new()));
+                        view.peek_input = Some((a.name.clone(), composer_draft::load(&a.name)));
                         view.peek_input_esc.clear();
                         break;
                     }
@@ -11218,6 +11024,9 @@ mod court_block;
 mod glyph_legend;
 
 mod card_line;
+
+#[path = "client/confirm_anchor.rs"]
+mod confirm_anchor;
 mod node_link;
 mod row_meter;
 #[path = "client/sideline.rs"]
