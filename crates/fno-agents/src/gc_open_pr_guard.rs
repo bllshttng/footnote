@@ -90,6 +90,38 @@ pub fn open_pr_verdict(
     }
 }
 
+/// Does the fno graph hold an OPEN PR on any node this row's session names?
+/// The liveness sweeps' busy read: a worker whose node carries a
+/// recorded `pr_number` with no recorded merge is waiting on a CI run or a
+/// merge, and its transcript silence is the watching protocol, not idle
+/// death. Read from the graph rows (the row-verdict path), never from
+/// transcript quiet time; an unrecorded `merge_status` holds, because the
+/// ship stamp can lag the open PR.
+pub fn row_has_open_pr(graph: &GraphRead, e: &state::RegistryEntry) -> bool {
+    let sid = e
+        .harness_session_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if sid.is_empty() {
+        return false;
+    }
+    graph
+        .index
+        .get(&crate::graph_store::work_state_key(sid))
+        .is_some_and(|nodes| {
+            nodes.iter().any(|(node, _)| {
+                graph.pr_number.get(node).copied().flatten().is_some()
+                    && graph
+                        .pr_state
+                        .get(node)
+                        .and_then(|(m, _, _)| m.clone())
+                        .as_deref()
+                        != Some("merged")
+            })
+        })
+}
+
 /// The node's recorded primary PR when the graph does not say merged:
 /// `None` leaves the guard and the alert silent for that node.
 fn recorded_open_pr(graph: &GraphRead, node: &str) -> Option<u64> {

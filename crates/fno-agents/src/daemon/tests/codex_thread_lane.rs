@@ -24,6 +24,7 @@ fn reconcile_leaves_a_hosted_codex_thread_untouched() {
         || false,
         |_| true,
         |_| false,
+        |_| false,
         |_| true,               // thread_hosted: the daemon map names this row
         |_| false,              // rollout_exists (irrelevant while hosted)
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
@@ -47,6 +48,10 @@ fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
         // pid that provably ended. Resumable still, but the served word is
         // the measured one.
         thread_entry("t-pid-dead", AgentStatus::Live, Some("/tmp/r.jsonl".into())),
+        // the same quiet evidence behind an open PR. The hold reads
+        // the graph rows, so a thread waiting on CI or a merge settles
+        // nothing and keeps its seat.
+        thread_entry("t-pr-wait", AgentStatus::Live, Some("/tmp/r.jsonl".into())),
     ];
     let (changes, _) = plan_reconcile(
         &entries,
@@ -54,8 +59,9 @@ fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
         || false,
         |_| true,
         |_| false,
-        |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
-        |_| true,  // the rollout file exists: the durable object survives
+        |e| e.name == "t-pr-wait", // the open-PR hold, read from the graph rows
+        |_| false,                 // not hosted: the actor is gone (daemon restart, resume failed)
+        |_| true,                  // the rollout file exists: the durable object survives
         |e| {
             if e.name == "t-pid-dead" {
                 RowLiveness::Dead
@@ -84,21 +90,31 @@ fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
         Some("dead"),
         "a POSITIVE death proof serves the dead word"
     );
+    assert_eq!(
+        changes[2].new_status, None,
+        "a thread whose node has an open PR keeps its seat through silence"
+    );
 }
 
 #[test]
 fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
-    let entries = vec![thread_entry("t-gone", AgentStatus::Live, None)];
+    let entries = vec![
+        thread_entry("t-gone", AgentStatus::Live, None),
+        // the same silence behind an open PR. The hold outranks the
+        // no-rollout exit: a thread waiting on CI or a merge keeps its seat.
+        thread_entry("t-pr-gone", AgentStatus::Live, None),
+    ];
     let (changes, _) = plan_reconcile(
         &entries,
         |_| Ok(false),
         || false,
         |_| true,
         |_| false,
-        |_| false,                // not hosted
-        |_| false,                // no rollout: the thread never got far enough to persist
-        |_| RowLiveness::Unknown, // no freshness signal: nothing to prove life
-        true,                     // roster readable: the flip needs a successful roster read
+        |e| e.name == "t-pr-gone", // the open-PR hold, read from the graph rows
+        |_| false,                 // not hosted
+        |_| false,                 // no rollout: the thread never got far enough to persist
+        |_| RowLiveness::Unknown,  // no freshness signal: nothing to prove life
+        true,                      // roster readable: the flip needs a successful roster read
     );
     assert_eq!(
         changes[0].new_status,
@@ -108,6 +124,10 @@ fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
     assert_eq!(
         changes[0].new_liveness, None,
         "absence of a rollout is not a measured death: the word is unmeasured"
+    );
+    assert_eq!(
+        changes[1].new_status, None,
+        "the hold outranks the no-rollout exit for a PR-busy thread"
     );
 }
 
@@ -132,6 +152,7 @@ fn a_measured_alive_rollout_keeps_a_live_row_and_heals_an_orphaned_one() {
         |_| Ok(false),
         || false,
         |_| true,
+        |_| false,
         |_| false,
         |_| false, // not hosted: the actor entry is gone
         |_| true,  // the rollout exists and is fresh

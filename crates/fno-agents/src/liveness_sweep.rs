@@ -227,12 +227,13 @@ pub(crate) struct ReconcileOutcome {
 /// `liveness` is the shared reader, injected like `probe` so the
 /// ladder is deterministically stageable in tests.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn plan_reconcile<P, D, L, B, H, R, V>(
+pub(crate) fn plan_reconcile<P, D, L, B, W, H, R, V>(
     entries: &[RegistryEntry],
     mut probe: P,
     mut budget_exhausted: D,
     mut pid_live: L,
     mut bg_live: B,
+    mut pr_hold: W,
     mut thread_hosted: H,
     mut rollout_exists: R,
     mut liveness: V,
@@ -243,6 +244,7 @@ where
     D: FnMut() -> bool,
     L: FnMut(&RegistryEntry) -> bool,
     B: FnMut(&RegistryEntry) -> bool,
+    W: FnMut(&RegistryEntry) -> bool,
     H: FnMut(&RegistryEntry) -> bool,
     R: FnMut(&RegistryEntry) -> bool,
     V: FnMut(&RegistryEntry) -> RowLiveness,
@@ -271,9 +273,22 @@ where
             let hosted = thread_hosted(entry);
             let measured = liveness(entry);
             let alive = hosted || measured == RowLiveness::Alive;
+            // a row whose node still carries an open PR is waiting on
+            // a CI run or a merge; its quiet rollout is the watching posture,
+            // never idle death. The flip would strand the PR and free the
+            // lane a duplicate spawn takes, so silence settles nothing here,
+            // and a row stamped Orphaned under an earlier sweep recovers.
+            let held = pr_hold(entry);
             let new_status = if hosted {
                 None
             } else if measured == RowLiveness::Alive {
+                if entry.status == AgentStatus::Orphaned {
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Live)
+                } else {
+                    None
+                }
+            } else if held {
                 if entry.status == AgentStatus::Orphaned {
                     out.updated.push(entry.name.clone());
                     Some(AgentStatus::Live)
@@ -333,7 +348,18 @@ where
             // healthy row, so the served word kept a stale stored value
             // standing forever (measured: 0 of 35 claude rows read alive).
             let measured = liveness(entry);
-            let new_status = if is_non_terminal(entry.status) && !bg_live(entry) {
+            // the same PR-busy hold the codex-thread arm takes. A
+            // worker watching a named PR or merge idles by protocol - zero
+            // turns while its watcher polls - so neither roster absence nor
+            // a quiet ladder may settle it. A row stamped Orphaned under an
+            // earlier sweep recovers its seat, which the spawn gate counts.
+            let held = pr_hold(entry);
+            let new_status = if held && entry.status == AgentStatus::Orphaned {
+                out.updated.push(entry.name.clone());
+                Some(AgentStatus::Live)
+            } else if held {
+                None
+            } else if is_non_terminal(entry.status) && !bg_live(entry) {
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Exited)
             } else if matches!(
@@ -841,6 +867,131 @@ mod tests {
         e
     }
 
+    /// A claude `--substrate bg` thread row: harness claude, a recorded job
+    /// short id, no pid, no pane - the exact `is_one_shot_ask` shape.
+    fn bg_thread(name: &str) -> RegistryEntry {
+        let mut e = state::RegistryEntry::default();
+        e.name = name.to_string();
+        e.harness = Some("claude".into());
+        e.short_id = "shortjob1".to_string();
+        e
+    }
+
+    /// A finished one-shot `ask` row (codex shellout shape: empty short id).
+    fn ask_row(name: &str, status: AgentStatus) -> RegistryEntry {
+        let mut e = state::RegistryEntry::default();
+        e.name = name.to_string();
+        e.codex_session_id = Some("resume-uuid".into());
+        e.status = status;
+        e
+    }
+
+    #[test]
+    fn reconcile_one_shot_ask_settles_to_exited_even_when_reachable() {
+        // A finished `ask` row settles to Exited regardless of whether its
+        // provider session file still exists. The probe here returns
+        // Ok(true) (reachable == session file present == "resumable"); the
+        // ask branch must ignore it and settle to Exited by process-liveness
+        // alone. If the probe were (wrongly) consulted for status, this Live
+        // row would stay Live.
+        let entries = vec![ask_row("codex-ask", AgentStatus::Live)];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true), // reachable: session file exists -> resumable, NOT running
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true, // roster readable: the flip needs a successful roster read
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a finished ask settles to exited even when its session file is reachable"
+        );
+        assert_eq!(out.updated, vec!["codex-ask".to_string()]);
+        assert!(out.orphans.is_empty(), "an ask is exited, never orphaned");
+        // The row's resumable session id is untouched by the status settle
+        // (status == liveness; session_id == resumability, separate).
+        assert_eq!(entries[0].codex_session_id.as_deref(), Some("resume-uuid"));
+    }
+
+    #[test]
+    fn reconcile_one_shot_ask_already_terminal_is_untouched() {
+        // An ask already Exited must not be re-flagged as updated (idempotent).
+        let entries = vec![ask_row("done-ask", AgentStatus::Exited)];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true, // roster readable: the flip needs a successful roster read
+        );
+        assert_eq!(changes[0].new_status, None);
+        assert!(out.updated.is_empty());
+    }
+
+    #[test]
+    fn a_worker_waiting_on_its_open_pr_is_not_reaped_by_silence() {
+        // A worker whose node carries an open PR is waiting on a CI run or a
+        // merge, and its silence is the watching protocol: zero turns while
+        // its watcher polls. Two hours idle with a pending check settles
+        // nothing; the flip would strand the PR and free the lane the
+        // duplicate spawn takes. A row stamped Orphaned under an earlier
+        // sweep recovers its seat, which the spawn gate counts again.
+        let waiter = bg_thread("ci-waiter");
+        let mut stamped = bg_thread("ci-stamped");
+        stamped.status = AgentStatus::Orphaned;
+        let merged = bg_thread("shipped");
+        let entries = vec![waiter, stamped, merged];
+        assert!(
+            entries.iter().all(|e| e.is_one_shot_ask()),
+            "the hold rides the bg-thread lane, or this test proves nothing"
+        );
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,               // roster absent: the watchers ended their turns
+            |e| e.name != "shipped", // the open-PR hold, read from the graph rows
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown, // 2h idle: the ladder answers Unknown
+            true,                     // roster readable
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "an open-PR row is never settled by roster absence or a quiet ladder"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Live),
+            "a row orphaned while PR-busy recovers its seat"
+        );
+        assert_eq!(
+            changes[2].new_status,
+            Some(AgentStatus::Exited),
+            "the sibling whose PR is recorded merged takes today's path"
+        );
+        assert_eq!(out.orphans, Vec::<String>::new());
+        assert!(
+            changes[0]
+                .new_status
+                .map(|s| crate::spawn_gate::status_is_liveish(&s))
+                .unwrap_or(true),
+            "the held row's settled status stays liveish: no spawn takes its lane"
+        );
+    }
+
     #[test]
     fn served_word_follows_the_pid_on_pane_rows() {
         let mut pids = |e: &RegistryEntry| e.pid == Some(4242);
@@ -1047,6 +1198,7 @@ mod tests {
             |_| false,
             |_| false,
             |_| false,
+            |_| false,
             |_| RowLiveness::Unknown,
             true,
         )
@@ -1098,6 +1250,7 @@ mod tests {
             |_| Ok(false),
             || false,
             |e: &RegistryEntry| e.pid == Some(4242),
+            |_| false,
             |_| false,
             |_| false,
             |_| false,
@@ -1178,6 +1331,7 @@ mod tests {
             |_| false,
             |_| false,
             |_| false,
+            |_| false,
             |_| RowLiveness::Alive,
             true,
         );
@@ -1227,6 +1381,7 @@ mod tests {
             },
             || false,
             |e| e.name == "live-pane" || e.name == "interactive-live",
+            |_| false,
             |_| false,
             |_| false,
             |_| false,
