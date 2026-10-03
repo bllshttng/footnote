@@ -20,8 +20,6 @@ skills/execute/
     checkpoint.sh       # vendored copy
     run-target-loop.sh   # vendored copy
     session-cost.py     # vendored copy
-    lib/
-      cost_tracker.py   # vendored dependency
 ```
 
 Trade-off: duplication vs. independence. When the source script changes, vendored copies need manual sync. This is acceptable because portability is the primary goal and scripts change infrequently.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json as _json
-import re as _re
 import subprocess
 from typing import Optional
 
@@ -30,6 +29,37 @@ class ForgedEnvelopeError(ValueError):
     ``</fno_mail>`` close tag into a peer envelope."""
 
 
+class MailShapeError(RuntimeError):
+    """The Rust mail-shape classifier failed or returned malformed output."""
+
+
+def mail_shape(texts: list) -> list[dict]:
+    """Per text: framing, msg_id, ids, holds_tag, envelope_block,
+    legacy_tags, header_turns, relay_parse."""
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary() or "fno-agents"
+    try:
+        result = subprocess.run(
+            [str(binary), "mail-envelope", "--classify"],
+            input=_json.dumps(texts),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MailShapeError("mail-envelope --classify timed out after 5s") from exc
+    if result.returncode:
+        raise MailShapeError(result.stderr.strip() or "mail-envelope --classify failed")
+    try:
+        parsed = _json.loads(result.stdout)
+    except _json.JSONDecodeError as exc:
+        raise MailShapeError(f"malformed classifier output: {exc}") from None
+    if not isinstance(parsed, list) or len(parsed) != len(texts):
+        raise MailShapeError(f"classifier returned {len(parsed)} items for {len(texts)} texts")
+    return parsed
+
+
 def _render_in_rust(payload: dict) -> str:
     from fno.rust_binary import find_dev_binary, resolve_binary
 
@@ -52,12 +82,10 @@ def _render_in_rust(payload: dict) -> str:
     if result.returncode:
         raise ForgedEnvelopeError(result.stderr.strip())
     rendered = result.stdout.removesuffix("\n")
-    # An envelope always OPENS with its own tag. A successful render that does
-    # not start with one is a silent or version-skewed renderer; paste is the
-    # byte transport below this line, so fail the send instead of typing an
-    # unattributed body. startswith, not a substring hit: a lookalike like
-    # <fno_mailbox> appearing mid-text must not pass.
-    if not rendered.startswith("<fno_mail"):
+    # A render must OPEN with its attribution (the header line, or the legacy
+    # tag on a version-skewed binary); paste is the byte transport below, so
+    # fail the send rather than type an unattributed body.
+    if not (rendered.startswith("<fno_mail") or rendered.startswith("`")):
         raise ForgedEnvelopeError(
             f"mail-envelope render produced no envelope ({rendered[:80]!r}); "
             "refusing to deliver a body without its attribution frame."
@@ -88,38 +116,20 @@ def fno_mail_open(
     return _render_in_rust(payload)
 
 
-# A bare substring match on "<fno_mail" also matches a prefix lookalike like
-# "<fno_mailbox>" or "<fno_mailicious>", which cannot open a real envelope but
-# still trips a refusal on ordinary text. `\b` requires a real word boundary
-# right after "mail" (a space, `>`, or end of input all qualify; "b" in
-# "mailbox" does not), mirroring the Rust `opens_envelope_tag` predicate and
-# this module's own `_FNO_MAIL_OPEN_FRAGMENT_DELIM` in `fno.annotate.core`.
-_FNO_MAIL_OPEN_TAG_RE = _re.compile(r"<fno_mail\b", _re.IGNORECASE)
-
-
+# The boundary rule lives in the Rust classifier; case-insensitive (codex P1).
 def contains_fno_mail_tag(text: str) -> bool:
-    """Case-insensitive: True if ``text`` contains an ``<fno_mail`` open tag or
-    ``</fno_mail>`` close tag.
-
-    Case-insensitive because every reachable check (this one, the Rust
-    injection guard, and the relay's single-line ``frame()``) keyed off an
-    exact-case substring match, so a peer-controlled ``<FNO_MAIL ...>`` variant
-    bypassed all of them at once (codex P1)."""
-    if _FNO_MAIL_OPEN_TAG_RE.search(text):
-        return True
-    return "</fno_mail>" in text.lower()
+    """True if ``text`` holds an ``<fno_mail`` open or ``</fno_mail>`` close
+    tag, through the Rust classifier."""
+    low = text.lower()
+    if "<fno_mail" not in low and "</fno_mail>" not in low:
+        return False  # a real tag carries the literal; no subprocess needed
+    return bool(mail_shape([text])[0]["holds_tag"])
 
 
 def refuse_if_forged(body: str) -> None:
-    """Raise :class:`ForgedEnvelopeError` if ``body`` contains an ``<fno_mail``
-    open tag or ``</fno_mail>`` close tag.
-
-    Called from :func:`wrap_fno_mail` itself, not only from the CLI entry
-    points that compose a body from user input: a relay-loop continuation
-    (``_wrap_relay_body`` in ``fno.agents.dispatch``) and other producers call
-    the renderer directly, bypassing any check that lives only at the CLI
-    boundary. Putting the check in the shared renderer means every caller gets
-    it for free."""
+    """Raise :class:`ForgedEnvelopeError` when ``body`` holds an ``<fno_mail>``
+    tag. Lives in the shared renderer so direct callers (relay continuations
+    and other producers) get the guard too, not just CLI entry points."""
     if contains_fno_mail_tag(body):
         raise ForgedEnvelopeError(
             "mail body contains an <fno_mail> tag. The envelope frames peer "

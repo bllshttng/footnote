@@ -1,6 +1,6 @@
 ---
 name: target
-description: "Use when: build this feature, get it done end-to-end, or execute a plan from idea to PR."
+description: Take a feature or existing plan through implementation, review, and a green pull request.
 argument-hint: "[S|small|M|medium|L|large] [agent|fork] [beastmode|beast] [clean] [adversarial] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
 metadata:
   internal: true

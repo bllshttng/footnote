@@ -45,7 +45,7 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
 use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
-pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
+pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
 mod list_rows;
 use self::list_rows::{
@@ -4274,13 +4274,11 @@ where
                     .as_deref()
                     .map(|s| Value::String(s.to_string()))
                     .unwrap_or(Value::Null);
-                // Only Claude's short transport key is a mailbox address;
-                // other harnesses need their full session identity.
-                let address: Value = e
-                    .harness_session_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Value::String(canonical_handle(s)))
+                // ADDRESS is the row's fno handle (codex rows; others keep
+                // the harness head), and Claude's transport key is the
+                // last-resort fallback.
+                let address: Value = list_rows::row_address(e)
+                    .map(Value::String)
                     .or_else(|| {
                         if e.harness_name() == "claude" {
                             e.transport_short().map(|s| Value::String(s.to_string()))
@@ -4353,10 +4351,6 @@ where
                         e.liveness_measured_at.as_deref(),
                     ),
                     "liveness_measured_at": e.liveness_measured_at,
-                    "context_used_pct": e.context_used_pct,
-                    "context_used_tokens": e.context_used_tokens,
-                    "context_window_tokens": e.context_window_tokens,
-                    "context_measured_at": e.context_measured_at,
                     "mail_unread": e.mail_unread,
                     // The harness's own title for the session, served
                     // from the probe's fresh reading; a probe that ANSWERED
@@ -4456,6 +4450,9 @@ where
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {
+                    for (key, value) in crate::model_price::served_context_cost_keys(e) {
+                        object.insert(key, value);
+                    }
                     // No `pid_alive` injection here: this row's `status` is
                     // `rendered_status`, which `rendered_status_from_truth`
                     // draws from a closed set of live/orphaned/unknown, so the
@@ -5373,7 +5370,7 @@ async fn handle_rm_with(
     // next `fno agents rm`.
     let mut provably_gone = claude_agents
         .as_ref()
-        .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
+        .is_some_and(|snapshot| row_death_reason(&entry, snapshot).is_some())
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     // Law d-81c6da7e: remove needs no prior stop. rm owns the one exception's
@@ -5395,7 +5392,7 @@ async fn handle_rm_with(
         if let Some(short) = short {
             let _ = off_executor(|| claude_stop(&short));
             let snapshot = off_executor(read_claude_agents);
-            provably_gone = crate::gc_sweep::claude_death_reason(&entry, &snapshot).is_some()
+            provably_gone = row_death_reason(&entry, &snapshot).is_some()
                 || claude_row_provably_absent(Some(&snapshot), harness_row_id.as_deref());
             claude_agents = Some(snapshot);
         }

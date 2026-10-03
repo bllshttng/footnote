@@ -249,6 +249,7 @@ pub mod machine_sample;
 pub mod machine_watch;
 pub mod mail_control_drain;
 pub mod mail_envelope;
+pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
 pub mod main_ci;
@@ -267,6 +268,7 @@ pub mod merge_reap;
 mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod model_family;
+pub mod model_price;
 pub mod naming;
 pub mod needs;
 pub mod node_branch;
@@ -418,6 +420,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod surface_check;
 pub mod sync_canonical;
+pub mod system_sender;
 pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
@@ -428,12 +431,14 @@ pub mod tick_ledger;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
+pub mod update_journal;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
 pub mod watch_expiry;
+pub mod wave;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1469,6 +1474,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // One row per daemon retire tick that held rows: every held id
     // with its reason, detail and age, so the fleet reads one event stream.
     "retire_holds",
+    // The retirement sweep held a row fno's verdict keeps live while the
+    // vendor roster reads it finished: the recorded disagreement, never
+    // an override.
+    "row_liveness_drift",
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
     "graph_write_gate",

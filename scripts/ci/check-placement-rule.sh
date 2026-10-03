@@ -292,7 +292,6 @@ cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py
 cli/src/fno/cost/_register.py
 cli/src/fno/cost/_session_cost.py
-cli/src/fno/cost/cost_tracker.py
 cli/src/fno/context_audit.py
 cli/src/fno/doctor.py
 cli/src/fno/graph/cli.py
@@ -398,7 +397,6 @@ scripts/lint/no-invalid-events.sh
 scripts/metrics/port-order.sh
 scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py
-scripts/diagnostics/token-diagnose.py
 scripts/rename/rename-to-fno.sh
 scripts/setup/archive-worktree.sh
 scripts/setup/setup-worktree.sh

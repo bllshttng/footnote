@@ -1,6 +1,6 @@
 ---
 name: growth-designer
-description: Design role subagent for growth-studio. Produces rendered mocks with accessibility evidence (alt text and a contrast note), not source files alone. Holds no tool that can publish.
+description: Create accessible campaign mockups with alt text and contrast evidence.
 pack: growth-studio
 role: design
 tools: ["Read", "Write", "Glob", "Grep"]

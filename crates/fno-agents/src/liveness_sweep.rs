@@ -49,15 +49,17 @@ impl BgRoster {
         }
     }
 
-    /// Serve a claude background row the state `claude agents --json --all`
-    /// lists for its job: a running job reads alive; a done, stopped,
-    /// failed or unlisted job reads dead. So a row after a reboot reads
-    /// Stop, never the unmeasured `?`. A spawning row, and every row when
-    /// the listing is unread or partial, keep the sweep's own word.
+    /// Serve a claude background row its liveness word, fno-first (the
+    /// provenance ruling: fno's rows decide, the vendor is a check).
+    /// `row_verdict` decides: a decided row keeps fno's word and the listing
+    /// only confirms it, an Unknown row takes the listing's word when the
+    /// listing is readable, and an Unknown row under an unread listing -
+    /// like a job the vendor no longer lists - keeps the sweep's own word.
+    /// So a fresh inside-leg report holds a row alive no vendor omission can
+    /// flip, while a rebooted row whose vendor word reads done still reads
+    /// dead, never the unmeasured `?`.
     pub(crate) fn serve_listing(&self, entries: &[RegistryEntry], changes: &mut [ReconcileChange]) {
-        if !self.listing.is_known() || !self.listing.warning_text().is_empty() {
-            return;
-        }
+        let readable = self.listing.is_known() && self.listing.warning_text().is_empty();
         for change in changes.iter_mut() {
             let Some(e) = entries.iter().find(|e| e.name == change.name) else {
                 continue;
@@ -68,16 +70,21 @@ impl BgRoster {
             {
                 continue;
             }
-            let job: String = match e.harness_session_id.as_deref() {
-                Some(sid) if sid.len() >= 8 => sid.chars().take(8).collect(),
-                _ => e.short_id.clone(),
+            let listing_word: Option<&str> = if readable {
+                let job: String = match e.harness_session_id.as_deref() {
+                    Some(sid) if sid.len() >= 8 => sid.chars().take(8).collect(),
+                    _ => e.short_id.clone(),
+                };
+                self.listing.find(&job).and_then(|row| row.state.as_deref())
+            } else {
+                None
             };
-            let running = self
-                .listing
-                .find(&job)
-                .and_then(|row| row.state.as_deref())
-                .is_some_and(|state| !crate::claude_roster::is_terminal_roster_state(state));
-            change.new_liveness = Some(if running { "alive" } else { "dead" });
+            match crate::row_verdict::reconcile(&crate::row_verdict::fno_verdict(e), listing_word) {
+                crate::row_verdict::RowVerdict::Live(_) => change.new_liveness = Some("alive"),
+                crate::row_verdict::RowVerdict::Finished(_) => change.new_liveness = Some("dead"),
+                // Undecided: the sweep's own word stands.
+                crate::row_verdict::RowVerdict::Unknown(_) => {}
+            }
         }
     }
 
@@ -697,6 +704,21 @@ pub(crate) fn persist_reconcile_changes(
                 .harness_session_id
                 .as_deref()
                 .and_then(|sid| transcripts.find(sid, entry.harness_name()));
+            // The running session cost: absorb the transcript's appended
+            // bytes and remember the reading under the session id (law
+            // d-e952ed19), never in the registry.
+            if let (Some(sid), Some(path)) =
+                (entry.harness_session_id.as_deref(), transcript.as_deref())
+            {
+                crate::model_price::measure_session_cost(
+                    &crate::model_price::state_dir(),
+                    sid,
+                    path,
+                    entry.model.as_deref(),
+                    entry.provider.as_deref(),
+                    now,
+                );
+            }
             measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())
         })
         .collect();
@@ -1515,16 +1537,15 @@ mod tests {
 
     #[test]
     fn a_claude_row_serves_the_state_the_claude_listing_reports() {
-        // After a reboot every row reads unmeasured. The listing decides:
-        // a running job reads alive, a stopped or unlisted job reads dead.
+        // fno rows decide; the listing is a check. An Unknown row takes
+        // the readable listing word; an unlisted job under a READABLE
+        // listing keeps the sweep own word (vendor silence is not death).
         use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
         let row = |name: &str, sid: &str| {
-            let mut e = state::RegistryEntry::default();
+            let mut e = crate::state::RegistryEntry::default();
             e.name = name.into();
             e.harness = Some("claude".into());
             e.harness_session_id = Some(sid.into());
-            // A full uuid in short_id (a register-path row) still keys by
-            // the session id's first eight.
             e.short_id = sid.into();
             e.status = AgentStatus::Orphaned;
             e
@@ -1552,10 +1573,33 @@ mod tests {
         };
         witness.serve_listing(&entries, &mut changes);
         let words: Vec<_> = changes.iter().map(|c| c.new_liveness).collect();
-        assert_eq!(words, vec![Some("alive"), Some("dead"), Some("dead")]);
+        assert_eq!(words, vec![Some("alive"), Some("dead"), Some("unmeasured")]);
 
-        // An unread listing leaves the sweep's own word standing.
-        let mut changes = vec![change("quill")];
+        // AC7: a fresh Working inside-leg report holds a row alive even when
+        // the readable listing omits the job entirely - vendor silence
+        // cannot flip a decided row.
+        let mut fresh = row("fresh", "abcdef12-0000-0000-0000-000000000000");
+        fresh.inside_leg = Some(crate::state::InsideLegReport {
+            state: crate::state::InsideLegState::Working,
+            seq: 1,
+            reason: None,
+            received_at: crate::daemon::now_rfc3339_like(),
+            ttl_ms: Some(90_000),
+            posture: None,
+        });
+        let mut changes = vec![change("fresh")];
+        witness.serve_listing(std::slice::from_ref(&fresh), &mut changes);
+        assert_eq!(changes[0].new_liveness, Some("alive"));
+
+        // AC8: an Unknown row and a listing that says done reads dead - the
+        // rebooted row path, never the unmeasured question mark.
+        let mut changes = vec![change("warden")];
+        witness.serve_listing(&entries, &mut changes);
+        assert_eq!(changes[0].new_liveness, Some("dead"));
+
+        // An unread listing: a decided row stays decided, and an Unknown row
+        // keeps the sweep own word.
+        let mut changes = vec![change("quill"), change("gone")];
         let blind = BgRoster {
             roster: None,
             readable: false,
@@ -1563,5 +1607,6 @@ mod tests {
         };
         blind.serve_listing(&entries, &mut changes);
         assert_eq!(changes[0].new_liveness, Some("unmeasured"));
+        assert_eq!(changes[1].new_liveness, Some("unmeasured"));
     }
 }

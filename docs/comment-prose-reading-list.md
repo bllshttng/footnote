@@ -409,7 +409,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.25x | 20 | 16 | `cli/src/fno/agents/whoami.py:274` | `find_held_node` |
 | 1.25x | 5 | 4 | `cli/src/fno/bundle/cli.py:99` | `_default` |
 | 1.25x | 10 | 8 | `cli/src/fno/claims/core.py:597` | `_atomic_replace` |
-| 1.25x | 5 | 4 | `cli/src/fno/cost/cost_tracker.py:248` | `estimate_cache_miss_cost` |
 | 1.25x | 15 | 12 | `cli/src/fno/graph/render_html.py:42` | `_load_obsidian_vault` |
 | 1.25x | 15 | 12 | `cli/src/fno/graph/store.py:173` | `plan_path_owner_conflict` |
 | 1.25x | 10 | 8 | `cli/src/fno/observer/cli.py:879` | `replay` |

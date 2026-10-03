@@ -1,4 +1,34 @@
-import { type Companion, type StatName, peakStat } from './companion'
+import { type Bones, type Companion, STAT_NAMES, type StatName, peakStat } from './companion'
+
+function dumpStat(c: Bones): StatName {
+  return STAT_NAMES.reduce((a, b) => (c.stats[b] < c.stats[a] ? b : a))
+}
+
+// The original hatch recipe: a model writes the name's personality from the bones and four random words.
+const VIBE_WORDS = [
+  'thunder', 'biscuit', 'void', 'accordion', 'moss', 'velvet', 'rust', 'pickle', 'crumb', 'whisper',
+  'gravy', 'frost', 'ember', 'soup', 'marble', 'thorn', 'honey', 'static', 'copper', 'dusk', 'sprocket',
+  'quartz', 'soot', 'plum', 'flint', 'oyster', 'loom', 'anvil', 'cork', 'bloom', 'pebble', 'vapor',
+]
+
+export function personalityPrompt(c: Bones & { name: string }, seed: string): string {
+  let h = 0
+  for (const ch of seed) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0
+  const vibes = [0, 1, 2, 3].map(i => VIBE_WORDS[(h >>> (i * 5)) % VIBE_WORDS.length])
+  return [
+    `Write the personality of ${c.name}, a small ${c.species} that lives beside a developer's terminal and comments on their code and choices.`,
+    `Rarity: ${c.rarity}${c.shiny ? ' (shiny)' : ''}. Stats: ${STAT_NAMES.map(s => `${s} ${c.stats[s]}`).join(', ')}.`,
+    `Inspiration words: ${vibes.join(', ')}.`,
+    'Make it distinct and specific: quirks, what it loves, what annoys it. Let the stats show.',
+    'Reply with 2-3 sentences, under 300 characters, nothing else.',
+  ].join('\n')
+}
+
+export function cleanPersonality(raw: string): string | null {
+  const text = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ')
+  if (text.length < 20) return null
+  return text.length > 300 ? text.slice(0, 297) + '...' : text
+}
 
 export function systemPrompt(c: Companion): string {
   const s = c.stats
@@ -47,6 +77,13 @@ You are EXACTLY ${s.DEBUGGING} debugging, ${s.PATIENCE} patience, ${s.CHAOS} cha
 Rules:
 - One punchy sentence. Under 100 characters. No quotes, no emoji.
 - Reference the actual file, error, feature, or decision you just saw.
+- When the developer chose something in their prompt (an approach, a fix, a shortcut), judge THAT choice. Doubt it, back it, or roast it as your stats decide.
+- When the developer says your name, ${c.name}, they are talking to you. Answer them directly, in character.
+- Lean into your highest stat, ${peakStat(c)}. Your lowest, ${dumpStat(c)}, is your blind spot.
+- You may open with one small physical action in *asterisks* that fits a ${c.species}.
+- Good: "*adjusts hat* that error handler has no finally block"
+- Good: "*blinks slowly* you renamed it but not the three references"
+- Good: "*head tilts* are you sure that regex handles unicode?"
 - Lowercase. minimal punctuation.
 - You CAN be helpful if your stats support it. High debugging? Call out real bugs. High wisdom? Note architectural concerns. Low debugging? React to vibes instead.
 - ALWAYS in character. Never clinical. Never neutral. Never a status bar.
