@@ -388,21 +388,28 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
     assert result["held_count"] == 3
     assert result["deduped_count"] == 0
     assert advanced == ["msg-0", "msg-1", "msg-2"]
-    assert emitted == [
-        (
-            "mail_hold_released",
-            {
-                "handle": HANDLE,
-                "clock": "no expiry",
-                "held_count": 3,
-                "deduped_count": 0,
-                "held_for_s": 300,
-                "outcome": "delivered",
-                "miss_reason": None,
-                "policy_cleared": True,
-            },
-        )
+    assert [
+        (kind, data.get("msg_id") if kind == "agent_mail_drained" else None)
+        for kind, data in emitted
+    ] == [
+        ("agent_mail_drained", "msg-0"),
+        ("agent_mail_drained", "msg-1"),
+        ("agent_mail_drained", "msg-2"),
+        ("mail_hold_released", None),
     ]
+    assert emitted[-1] == (
+        "mail_hold_released",
+        {
+            "handle": HANDLE,
+            "clock": "no expiry",
+            "held_count": 3,
+            "deduped_count": 0,
+            "held_for_s": 300,
+            "outcome": "delivered",
+            "miss_reason": None,
+            "policy_cleared": True,
+        },
+    )
 
 
 def test_release_fires_its_marker_even_when_nothing_was_held(monkeypatch):
@@ -622,7 +629,7 @@ def test_release_delivers_held_release_frame_without_synthetic_sender(monkeypatc
 
     result = hold_mod.release(HANDLE, held_for_s=60)
 
-    assert result["outcome"] == "delivered", result
+    assert result["outcome"] == "delivered", result.get("miss_reason")
     assert result["miss_reason"] is None
     assert len(rendered) == 1
     assert rendered[0]["mode"] == "held-release"
@@ -695,7 +702,7 @@ def test_release_by_the_clock_key_still_drains_the_canonical_mailbox(monkeypatch
 
     assert result["outcome"] == "delivered"
     assert result["held_count"] == 1
-    assert advanced == ["m1"]
+    assert advanced == ["fmail-000000000004"]
 
 
 # --- Task 5: the bounce -----------------------------------------------------
