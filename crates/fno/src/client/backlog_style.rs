@@ -304,6 +304,45 @@ pub(crate) fn paint_panel(
     }
 }
 
+/// [`paint_panel`] at a column offset: the Messages tab's three columns
+/// paint one panel each into disjoint column ranges of the same buffer.
+pub(crate) fn paint_panel_at(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    x0: usize,
+    top: usize,
+    text_w: usize,
+    area_h: usize,
+    lines: &[BLine],
+    follow: Option<usize>,
+    theme: &Theme,
+) {
+    let area_h = area_h.min(rows.saturating_sub(top));
+    if area_h == 0 || text_w == 0 || lines.is_empty() {
+        return;
+    }
+    let start = match follow {
+        Some(f) if lines.len() > area_h => f.saturating_sub(area_h - 1).min(lines.len() - area_h),
+        _ => 0,
+    };
+    let visible = lines.len().min(area_h);
+    for (i, line) in lines[start..start + visible].iter().enumerate() {
+        let r = top + i;
+        let roles: Vec<Role> = line.roles.iter().map(|&br| role_of(br)).collect();
+        paint_bline(cells, rows, cols, r, x0, text_w, line, &roles, theme);
+        if line.band && r < rows {
+            let (fg, bg, flags) = band_style(theme);
+            for c in x0..(x0 + text_w).min(cols) {
+                let cell = &mut cells[r * cols + c];
+                cell.fg = fg;
+                cell.bg = bg;
+                cell.flags = flags;
+            }
+        }
+    }
+}
+
 /// Paint one BLine's chars by display column, then plain-pad the tail with
 /// default cells so stale pane content never bleeds through.
 fn paint_bline(
