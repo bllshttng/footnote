@@ -66,11 +66,8 @@ pub fn print_version(json_out: bool) {
                     None => println!("python-cli: unresolved (no sibling, no uv tool dir)"),
                 }
             }
-            crate::bootstrap::PythonOverride::Active(_) => {
-                let line = crate::bootstrap::resolved_python_script()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                println!("python-cli: {line} (FNO_PY)");
+            crate::bootstrap::PythonOverride::Active(py) => {
+                println!("python-cli: {} (FNO_PY)", py.display());
             }
         }
     }
