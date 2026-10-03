@@ -517,25 +517,16 @@ def dedupe(messages: list) -> list[tuple[object, int, list[str]]]:
 def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
     """Render held mail through the Rust header and release formatter."""
     from fno import rust_binary
-
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
         raise RuntimeError("fno-agents is required to render held-mail delivery")
-    messages = []
-    for item in survivors:
-        if isinstance(item, tuple):
-            message, _count, ids = item
-        else:
-            message, ids = item, [getattr(item, "id", "")]
-        for message_id in ids:
-            messages.append(
-                {
-                    "sender": getattr(message, "from_", "?") or "?",
-                    "sent_at": getattr(message, "ts", "") or "",
-                    "id": message_id or "?",
-                    "body": getattr(message, "body", "") or "",
-                }
-            )
+    messages = [
+        {"sender": getattr(message, "from_", "?") or "?", "sent_at": getattr(message, "ts", "") or "",
+         "id": message_id or "?", "body": getattr(message, "body", "") or ""}
+        for item in survivors
+        for message, ids in ((item[0], item[2]) if isinstance(item, tuple) else (item, [getattr(item, "id", "")]))
+        for message_id in ids
+    ]
     proc = subprocess.run(
         [str(binary), "mail-hold", "--render-digest"],
         input=json.dumps({"held_for_s": held_for_s, "messages": messages}),
