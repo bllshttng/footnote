@@ -63,11 +63,12 @@ fn a_closed_stdout_pipe_neither_loses_the_note_nor_fails_the_verb() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
+    let notes = rows[0]["progress_notes"].as_array().expect("thread rows");
     assert!(
-        rows[0][fno_agents::backlog::node_state::STATE_KEY]["body"]
+        notes.iter().any(|n| n["text"]
             .as_str()
-            .unwrap()
-            .contains("the ruling that must survive"),
+            .unwrap_or("")
+            .contains("the ruling that must survive")),
         "note lost, graph now: {rows:?}"
     );
 }
