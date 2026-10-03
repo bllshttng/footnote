@@ -682,7 +682,7 @@ def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
     written: list[str] = []
 
-    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, replace=False):
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, kind=None):
         written.append(node_id)
         return 0, _stubbed_receipt(node_id)
 
@@ -724,7 +724,7 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
     monkeypatch.setattr(
         note_bridge,
         "_write_state",
-        lambda node_id, text, *, quiet, session_id, graph_path, reads=None, replace=False: (
+        lambda node_id, text, *, quiet, session_id, graph_path, reads=None, kind=None: (
             0,
             _stubbed_receipt(node_id),
         ),
@@ -782,7 +782,7 @@ def _run_note_quiet(monkeypatch, node_id: str, live_rows: list[dict]):
     monkeypatch.setattr(
         note_bridge,
         "_write_state",
-        lambda nid, text, *, quiet, session_id, graph_path, reads=None, replace=False: (
+        lambda nid, text, *, quiet, session_id, graph_path, reads=None, kind=None: (
             0,
             _stubbed_receipt(nid),
         ),
@@ -841,7 +841,7 @@ def test_an_unknown_node_refuses_before_the_append(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: graph)
     written: list[str] = []
 
-    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, replace=False):
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, kind=None):
         written.append(node_id)
         return 0, _stubbed_receipt(node_id)
 
@@ -929,7 +929,7 @@ def test_the_bridge_prints_the_native_line_verbatim(monkeypatch) -> None:
     monkeypatch.setattr(
         note_bridge,
         "_write_state",
-        lambda node_id, text, *, quiet, session_id, graph_path, reads=None, replace=False: (
+        lambda node_id, text, *, quiet, session_id, graph_path, reads=None, kind=None: (
             0,
             {
                 "status": "ok",
@@ -967,7 +967,7 @@ def test_a_receipt_with_no_line_still_exits_zero(monkeypatch) -> None:
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
     written: list[str] = []
 
-    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, replace=False):
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, kind=None):
         written.append(node_id)
         return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
 

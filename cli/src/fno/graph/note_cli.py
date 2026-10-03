@@ -1,7 +1,8 @@
 """``fno backlog note``: the Rust note action's public bridge.
 
-The native action owns state policy, history routing, and the budget; this
-bridge keeps the recipient walk, evidence checks, identity, and transport.
+The native action owns the note feed (x-fb4f: every note appends a comment
+row to the node's thread, stamped with the writer's identity); this bridge
+keeps the recipient walk, evidence checks, identity, and transport.
 """
 from __future__ import annotations
 
@@ -106,8 +107,8 @@ def warn_if_note_is_long(text, *, stream=None):
 @cli.command("note", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def cmd_note(
     ctx: typer.Context,
-    task_id: Optional[str] = typer.Argument(None, help="Node id (or slug) whose current state the note replaces."),
-    text: Optional[str] = typer.Argument(None, help="The note body (replaces current state)."),
+    task_id: Optional[str] = typer.Argument(None, help="Node id (or slug) the note appends to."),
+    text: Optional[str] = typer.Argument(None, help="The note body (appended to the node's thread)."),
     body_file: Optional[Path] = typer.Option(
         None,
         "--body-file",
@@ -119,23 +120,23 @@ def cmd_note(
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the state receipt as JSON."),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
+    kind: Optional[str] = typer.Option(
+        None, "--kind",
+        help="The feed kind: progress (default), finding, ruling, collision.",
+    ),
 ) -> None:
-    """Record progress on a node by REPLACING its current state.
+    """Append a note to the node's thread (one feed, oldest first).
 
-    The prior state lands in permanent history. Read it with
-    `fno backlog notes history <id>`. A state another session wrote refuses
-    unless --replace (exit 3, the append recipe is in the refusal). Nobody
-    bound refuses BEFORE the write: exit 3. No send confirmed: exit 4.
-    ``--quiet`` writes anyway; it never bypasses the cross-session guard.
+    A note is a comment row in the node's thread, stamped with this
+    session's identity, never a replacement of current_state. Read the
+    feed with `fno backlog note comment <id> --list`; the newest row is
+    the live reading. Nobody bound refuses BEFORE the write: exit 3. No
+    send confirmed: exit 4. ``--quiet`` writes anyway.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
     extra = list(ctx.args)
-    # --replace (the cross-session door) rides the passthrough: the Python
-    # flag surface is shrink-only, so the flag is read out of extra rather
-    # than declared as an option parameter.
-    replace = "--replace" in extra
     graph_path = graph_cli._graph_path()
     if not task_id or "--blocking" in extra or "--resolve" in extra:
         from fno.rust_binary import resolve_binary
@@ -206,12 +207,11 @@ def cmd_note(
         session_id=session_id,
         graph_path=graph_path,
         reads=read_rows,
-        replace=replace,
+        kind=kind,
     )
     if code != 0:
-        # 1 = budget refusal, 3 = a refusal that wrote nothing (the
-        # cross-session guard, or a stale revision); the child printed the
-        # reason on stderr.
+        # 3 = a refusal that wrote nothing (an unknown --kind); the child
+        # printed the reason on stderr.
         raise typer.Exit(code=code)
 
     if claims:
@@ -223,8 +223,8 @@ def cmd_note(
     shown = json.dumps(receipt, separators=(",", ":")) if json_output else receipt.get("line", "")
     _echo_receipt(shown)
     warn_if_note_is_long(text)
-    # Terminal-routed notes delivered too: the write went to history, but the
-    # bound readers are still the people to tell.
+    # Terminal-routed notes delivered too: the write went to the thread, but
+    # the bound readers are still the people to tell.
     if not isinstance(readers, NoteReaders):
         return
     raise typer.Exit(code=deliver(readers, text, json_output=json_output))
@@ -302,7 +302,7 @@ def _write_state(
     session_id: Optional[str],
     graph_path,
     reads=None,
-    replace: bool = False,
+    kind: Optional[str] = None,
 ) -> "tuple[int, Optional[dict]]":
     """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
     receipt is parsed from the child's stdout when the exit is 0."""
@@ -318,10 +318,10 @@ def _write_state(
         argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
     if session_id:
         argv.extend(["--self-session", session_id])
+    if kind:
+        argv.extend(["--kind", kind])
     if quiet:
         argv.append("--quiet")
-    if replace:
-        argv.append("--replace")
     proc = subprocess.run(argv, input=text, text=True, check=False, capture_output=True)
     if proc.returncode != 0:
         import sys
