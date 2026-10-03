@@ -74,7 +74,7 @@ The pilot's opencode and terminus-2 arms ran no trial.
 
 ## Appendix: every timeout, with its load
 
-`1302` marks a timeout with a rate-limit error in the agent log; those are excluded. The rest are graded failures.
+`1302` marks a timeout with a rate-limit error in the agent log. Those are excluded. The rest are graded failures.
 
 | Arm | Task | 1302 | Highest 1-minute load |
 |---|---|---|---|
