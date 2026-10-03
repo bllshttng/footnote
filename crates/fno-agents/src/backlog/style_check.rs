@@ -786,7 +786,8 @@ fn apply_fixes(text: &str, violations: &[Violation]) -> String {
     // path) with no offset map back to raw text, so its semicolons stay in the
     // residue rather than risk a split inside the span. The mask runs on the
     // whole text: fence state spans lines.
-    let masked_lines: Vec<&str> = mask(&joined).split('\n').collect();
+    let masked = mask(&joined);
+    let masked_lines: Vec<&str> = masked.split('\n').collect();
     joined
         .split('\n')
         .zip(masked_lines)
@@ -874,9 +875,9 @@ fn pinned_diff_argv(tail: &[&str]) -> Vec<String> {
         "diff",
     ]
     .iter()
-    .map(String::from)
+    .map(|s| s.to_string())
     .collect();
-    argv.extend(tail.iter().map(String::from));
+    argv.extend(tail.iter().map(|s| s.to_string()));
     argv
 }
 
@@ -989,12 +990,12 @@ fn repo_scope(
     let mut out = Vec::new();
     for p in paths {
         let full = resolve_lenient(p);
-        let rel = full
-            .strip_prefix(&root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"));
-        let Some(rel) = rel else {
-            eprintln!("style: --files path is outside the repository: {p}");
-            return Err(2);
+        let rel = match full.strip_prefix(&root) {
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => {
+                eprintln!("style: --files path is outside the repository: {p}");
+                return Err(2);
+            }
         };
         // Absence from the working tree is still a legitimate scope when the
         // branch deleted or renamed the file; absent at the base too means the
@@ -1062,7 +1063,8 @@ fn style_added_lines(
     } else {
         repo_scope(files, &repo, diff_base)?
     };
-    let mut name_only_tail: Vec<&str> = vec!["--name-only", &format!("{diff_base}...HEAD"), "--"];
+    let range = format!("{diff_base}...HEAD");
+    let mut name_only_tail: Vec<&str> = vec!["--name-only", &range, "--"];
     name_only_tail.extend(scope.iter().map(String::as_str));
     let (diff_files, _) = run_git(
         &pinned_diff_argv(&name_only_tail),
@@ -1155,7 +1157,8 @@ fn git_added_line_nums(
     repo: &std::path::Path,
     old_rel: Option<&str>,
 ) -> Result<BTreeSet<usize>, i32> {
-    let mut tail: Vec<&str> = vec!["-U0", &format!("{diff_base}...HEAD"), "--", rel];
+    let range = format!("{diff_base}...HEAD");
+    let mut tail: Vec<&str> = vec!["-U0", &range, "--", rel];
     if let Some(old) = old_rel {
         tail.push(old);
     }
