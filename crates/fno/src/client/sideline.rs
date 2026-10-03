@@ -366,6 +366,19 @@ impl View {
             self.sideline_state.set(st);
         }
         crate::ratatui_blit::blit(&buf, cells, cols);
+        let mut card_index = if card {
+            display[..off.min(display.len())]
+                .iter()
+                .filter(|row| matches!(row, DisplayRow::Agent(_)))
+                .count()
+        } else {
+            0
+        };
+        let mut card_tint = matches!(
+            display.get(off),
+            Some(DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..))
+        ) && card_index > 0
+            && (card_index - 1) % 2 == 1;
         // Per-row overlays the widget cannot express: the full-width rows
         // (bands, sublines, the idle fold, the footer, the empty state - see
         // the catch-all in `sideline_table_row`), the active-squad caret
@@ -383,6 +396,10 @@ impl View {
                 DisplayRow::Sel(row)
                     if row.tab.is_none() && row.squad == self.layout.active_squad
             );
+            if card && matches!(drow, DisplayRow::Agent(_)) {
+                card_tint = card_index % 2 == 1;
+                card_index += 1;
+            }
             let band_w = if r == 0 { btn_reserved } else { text_w };
             let legacy = match drow {
                 DisplayRow::Sel(row) => {
@@ -495,11 +512,15 @@ impl View {
                     }
                 }
             }
-            if card {
-                if self.card_tinted(&display, i, drow) {
-                    for cell in &mut cells[r * cols..r * cols + text_w] {
-                        cell.bg = self.theme.sel;
-                    }
+            if card
+                && card_tint
+                && matches!(
+                    drow,
+                    DisplayRow::Agent(_) | DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)
+                )
+            {
+                for cell in &mut cells[r * cols..r * cols + text_w] {
+                    cell.bg = self.theme.sel;
                 }
             }
             if mark_caret && text_w >= 1 {
@@ -992,25 +1013,6 @@ impl View {
                 cell.flags = 0;
             }
         }
-    }
-
-    fn card_tinted(&self, display: &[DisplayRow<'_>], i: usize, row: &DisplayRow<'_>) -> bool {
-        if !matches!(
-            row,
-            DisplayRow::Agent(_) | DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)
-        ) {
-            return false;
-        }
-        let before = display[..i]
-            .iter()
-            .filter(|r| matches!(r, DisplayRow::Agent(_)))
-            .count();
-        let index = if matches!(row, DisplayRow::Agent(_)) {
-            before
-        } else {
-            before.saturating_sub(1)
-        };
-        index % 2 == 1
     }
 
     /// Line 2 keeps model and lead left, with age and activity at the right.
