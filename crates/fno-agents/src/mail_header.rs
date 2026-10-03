@@ -619,13 +619,10 @@ mod tests {
         assert_eq!(turns[0]["sender"], "candor");
         assert_eq!(turns[1]["sender"], "quill");
         assert!(header_turns("prose\nno headers here").is_empty());
-    }
 
-    #[test]
-    fn the_one_line_delivered_form_still_reads_header() {
-        // The transcript renders the turn on ONE physical line: the header,
-        // then " ⏎ ", then the body. The shape test anchors the closing
-        // backtick, never the line's end.
+        // The one-line delivered form: the transcript renders the turn on
+        // ONE physical line, header then " ⏎ " then the body, so the shape
+        // test anchors the closing backtick, never the line's end.
         let one_line = "`@vellum · fmail-14c3d88e2db5 · New node filed under your shelf.` ⏎ New node filed under your shelf. The refusal named the guard.";
         assert!(is_header_line(one_line));
         assert_eq!(classify(one_line), Framing::Header);
