@@ -1,5 +1,6 @@
 """x-cec8: the harness-name set is platform-layer data, and importing the
 platform layer no longer drags the runtime in at import time."""
+
 from __future__ import annotations
 
 import os
@@ -99,6 +100,27 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts(monkeypatch):
     monkeypatch.setattr(hn, "call_binary_json", lambda *a, **k: (None, {"known": ("alpha",)}))
     monkeypatch.setattr(hn, "_ROSTER", None, raising=False)
     assert hn.known_providers() == ("alpha",)
+
+    # The agents CLI consumes this exported name, not known_providers() directly.
+    # Resolve it in a fresh process so package import/cache state cannot mask the
+    # old-binary payload used by the reported mail-by-name failure.
+    repo_src = Path(__file__).resolve().parents[3] / "cli" / "src"
+    env = dict(os.environ, PYTHONPATH=str(repo_src))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import fno.harness_names as hn; "
+            "hn.call_binary_json = lambda *a, **k: (None, {'known': ['alpha']}); "
+            "from fno.agents.harnesses import READABLE_PROVIDERS; "
+            "print(READABLE_PROVIDERS)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "('alpha',)"
 
     monkeypatch.setattr(
         hn, "call_binary_json", lambda *a, **k: ("fno-agents binary not found", None)
