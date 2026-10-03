@@ -9,13 +9,10 @@ use crate::client::{
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 
-// (x-0719) The nav filter/overlay test run lives in its own module; this
-// file is shrink-only under the file-budget gate.
+// x-0719: the nav family lives in its own module.
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
 
-// The confirm anchor identity tiers and the ambiguous-name refusal live in
-// their own module under the file-budget gate.
 #[path = "client/tests/confirm_anchor_tests.rs"]
 mod confirm_anchor_tests;
 
