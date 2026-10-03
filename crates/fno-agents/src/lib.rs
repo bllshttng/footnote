@@ -1248,8 +1248,9 @@ mod tests {
             }
         }
 
-        // The allowed files: production binary repair (install_verify), three
-        // production dir modes (paths, fleet_incident, chats), two dir-mode
+        // The allowed files: production binary repair (install_verify), four
+        // production dir modes (paths, fleet_incident, chats, the
+        // session-state pin dir), two dir-mode
         // restores in tests (claims, operator_turns); the bin test target
         // cannot see a cfg(test) lib fn (client_tests); and the plan writer's
         // production mode-preserve on its atomic plan-file replace
@@ -1258,6 +1259,7 @@ mod tests {
             ("install_verify.rs", 1),
             ("paths.rs", 1),
             ("org_board/claims.rs", 1),
+            ("hook/session_state.rs", 1),
             ("operator_turns.rs", 1),
             ("client_tests.rs", 2),
             ("plan_doc/codec.rs", 1),
