@@ -1621,12 +1621,43 @@ fn auto_continue(record: &MergeDriftRecord, post_entries: &[Value], stderr_log: 
     let outcome = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-    if let Err(e) = outcome {
-        stderr_log.push(format!(
-            "warning: auto-continue advance after closing {} failed: {e}",
-            record.node_id
-        ));
+        .spawn();
+    let mut child = match outcome {
+        Ok(child) => child,
+        Err(e) => {
+            stderr_log.push(format!(
+                "warning: auto-continue advance after closing {} failed: {e}",
+                record.node_id
+            ));
+            return;
+        }
+    };
+    // A bounded child: the leg is best-effort and one wedged advance (a gh
+    // outage) must not stall the sweep's post-close loop behind it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    stderr_log.push(format!(
+                        "warning: auto-continue advance after closing {} exceeded 300s; killed",
+                        record.node_id
+                    ));
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                stderr_log.push(format!(
+                    "warning: auto-continue advance after closing {} failed: {e}",
+                    record.node_id
+                ));
+                return;
+            }
+        }
     }
 }
 
