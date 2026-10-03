@@ -10508,7 +10508,9 @@ fn wheel_rows() {
     // so it must not count as a scroll slot - otherwise follow-cursor scroll
     // parks the last row under the status bar.
     let mut v = two_pane_view();
-    v.term = ((MIN_ROWS_FOR_STATUS as usize).max(10) as u16, 100);
+    // Tall enough that the chrome toggle cannot cross the pinned-footer
+    // threshold: the only delta under test is the chrome row itself.
+    v.term = ((MIN_ROWS_FOR_STATUS as usize).max(14) as u16, 100);
     // Clear every chrome trigger, then toggle only status_on so the branch
     // under test is the bottom-chrome subtraction, nothing else.
     v.confirm = None;
