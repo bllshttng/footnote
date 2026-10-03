@@ -451,6 +451,7 @@ pub(crate) fn build_row(
     let mut operator_turns: Vec<String> = Vec::new();
     let mut gaps: Vec<u64> = Vec::new();
     for d in &entry.operator_direct {
+        *counters.entry("operator").or_insert(0) += 1;
         operator_turns.push(d.ts.clone());
         if let Some(ms) = d.ms {
             gaps.extend(gap_s(ms, d.prev_assistant_ms));
