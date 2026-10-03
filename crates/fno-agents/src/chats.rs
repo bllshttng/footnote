@@ -1775,15 +1775,21 @@ mod tests {
             panic!("expected a message record");
         };
         let list = show_list_at(&chats, &q(Some("sess-a"), false)).unwrap();
-        assert!(list.contains("fmail-444444444444"));
         assert!(
-            !list.contains("fmail-666666666666"),
+            list.contains("sess-f"),
+            "the caller's own sends list: {list}"
+        );
+        assert!(
+            !list.contains("sess-y"),
             "another pair's mail stays out of the caller's listing"
         );
         let mut q_all = q(Some("sess-z"), false);
         q_all.all = true;
         let list_all = show_list_at(&chats, &q_all).unwrap();
-        assert!(list_all.contains("fmail-666666666666"));
+        assert!(
+            list_all.contains("sess-y"),
+            "--all lifts the scope: {list_all}"
+        );
         let _ = std::fs::remove_dir_all(&root);
 
         // --- migration + index: import once, cutover refuses, lost index
