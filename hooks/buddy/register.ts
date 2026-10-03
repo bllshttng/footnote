@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, STAT_NAMES, embody, hatch, restore } from './companion'
+import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, embody, hatch, restore } from './companion'
 import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
 import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityPrompt, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
@@ -500,7 +500,7 @@ export function register(on: On) {
     const now = await $.clock.now()
     drawnAt = paneDrawnAt = now
     const { Box, Text, Button } = $.ui.resolve(e)
-    const color = RARITY_COLORS[buddy.rarity]
+    const color = RARITY_THEME[buddy.rarity]
     const words = talking(now)
     return Box({
       flexDirection: 'column',
@@ -531,7 +531,7 @@ export function register(on: On) {
     const { Box, Text } = $.ui.resolve(e)
     const words = talking(now)
     const face = (now - pettedAt < PET_MS ? '♥ ' : '') + renderFace(buddy)
-    const ours = Text({ color: RARITY_COLORS[buddy.rarity], children: [words ? `${face} ${buddy.name}: ${words}` : `${face} ${buddy.name}`] })
+    const ours = Text({ children: [Text({ color: RARITY_THEME[buddy.rarity], children: [`${face} ${buddy.name}`] }), ...(words ? [`: ${words}`] : [])] })
     const theirs = await next(e)
     return theirs ? Box({ flexDirection: 'column', children: [ours, theirs] }) : ours
   })
