@@ -65,15 +65,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
         "correction is reopen, a verb the native binary serves after the "
         "python leg retired",
     ),
-    # reconcile closes nodes off merged PRs, so it reaches the same terminal
-    # state `done` does and is corrected by the same native reopen.
-    Pair(
-        "backlog",
-        "reconcile",
-        None,
-        "correction is reopen, a verb the native binary serves after the "
-        "python leg retired",
-    ),
     Pair("backlog", "archive", "unarchive"),
     # An edit path would make the record deniable, which is the property the
     # demand signal exists to prevent. A later correction is a progress note.
@@ -127,7 +118,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
-        "ready", "reconcile", "reconcile-findings", "requeue", "retro",
+        "ready", "reconcile-findings", "requeue", "retro",
         "relatedness", "remove", "render-views", "reprioritize", "retract", "roadmap",
         "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede",

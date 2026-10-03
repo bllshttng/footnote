@@ -1700,8 +1700,10 @@ event_types:
     # 'backlog' added: cli/src/fno/graph/_reconcile.py's
     # emit_session_satisfied_for_record stamps envelope source "backlog" for
     # the post-merge reconcile path (trigger=pr_merge), a real live producer
-    # the earlier declaration missed.
-    sources: [target, megawalk, fno-loop, hook, backlog]
+    # the earlier declaration missed. 'daemon' added: the native twin
+    # (crates/fno-agents/src/backlog/drift_emit.rs) stamps it from the
+    # scheduled reconcile context.
+    sources: [target, megawalk, fno-loop, hook, backlog, daemon]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:

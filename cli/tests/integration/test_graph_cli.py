@@ -1998,6 +1998,19 @@ def test_ready_excludes_stale_and_dead_ancestor(tmp_graph):
     assert "ab-stale0" not in ids      # stale-quarantined
     assert "ab-deadch" not in ids      # dead-ancestor
 
+class _GetFakeTracker(_SnapshotFakeTracker):
+    """Extends the snapshot fake: read() answers the open sentinels too."""
+
+    def read(self, id):
+        if id == "EXT-1":
+            T, S = self._TrackerCandidate, self._TrackerState
+            return T(id=id, title="Free work", state=S.open, blocked_by=["EXT-done"])
+        if id == "EXT-2":
+            T, S = self._TrackerCandidate, self._TrackerState
+            return T(id=id, title="Waiting", state=S.open)
+        return super().read(id)
+
+
 def test_get_external_reads_tracker_and_sidecar_sentinels(
     tmp_graph, tmp_path, monkeypatch
 ):
