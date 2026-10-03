@@ -364,8 +364,9 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
 
     err, receipt = rust_binary.style_receipt(body, "mail", load_settings().style.word_cap.mail)
     # A door failure refuses like a violation: the gate never silently vanishes.
-    if err or (not receipt.get("exception") and receipt.get("violations")):
-        if receipt.get("violations"):
+    # receipt is None on a door error, so every read below guards on it first.
+    if err or (receipt and not receipt.get("exception") and receipt.get("violations")):
+        if receipt and receipt.get("violations"):
             _emit_style_refusal(receipt["violations"])
         print(err or receipt.get("report") or "", file=sys.stderr)
         raise typer.Exit(code=1)

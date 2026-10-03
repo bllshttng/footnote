@@ -940,8 +940,9 @@ fn numstat_added(raw: &str) -> std::collections::BTreeMap<String, usize> {
 }
 
 /// Lexically resolve a caller path to an absolute form (Python Path.resolve
-/// with strict=False: symlinks resolved when the file exists, absolute and
-/// normalized otherwise).
+/// with strict=False: symlinks resolved as far as the path exists, absolute
+/// and normalized otherwise). A missing FINAL component (a file the branch
+/// renamed away) still resolves its symlinked parents.
 fn resolve_lenient(p: &str) -> PathBuf {
     let path = std::path::Path::new(p);
     if let Ok(canon) = path.canonicalize() {
@@ -954,6 +955,26 @@ fn resolve_lenient(p: &str) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
+    // Canonicalize the deepest existing ancestor, then re-attach the tail.
+    let mut prefix = abs.clone();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !prefix.as_os_str().is_empty() {
+        if let Ok(canon) = prefix.canonicalize() {
+            let mut out = canon;
+            for part in tail.into_iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        let last = prefix.file_name().map(|n| n.to_os_string());
+        match last {
+            Some(name) => {
+                prefix.pop();
+                tail.push(name);
+            }
+            None => break,
+        }
+    }
     let mut out = PathBuf::new();
     for comp in abs.components() {
         match comp {
