@@ -17,6 +17,8 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
 MIN_ROWS, MAX_ROWS = 3, 6
 # Under this many columns the original buddy showed a one-line face.
 NARROW = 100
+# The original speech bubble held about 30 columns of text.
+BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
@@ -36,6 +38,27 @@ def cut(s, n):
             return out[:-1] + "…" if out else ""
         out, w = out + c, w + cw
     return out
+
+
+def wrap(text, n):
+    """Greedy word wrap by terminal cells, so full-width text stays inside the bubble."""
+    lines, line = [], ""
+    for word in text.split():
+        while width(word) > n:
+            if line:
+                lines.append(line)
+                line = ""
+            head = cut(word, n + 1)[:-1]  # the longest prefix that fits n cells
+            lines.append(head)
+            word = word[len(head):]
+        if line and width(line) + 1 + width(word) > n:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    if line:
+        lines.append(line)
+    return lines
 
 
 def inner_rows(stdin, data):
@@ -95,11 +118,16 @@ def layout(left, frame, cols):
     # Like the original: the full sprite with its name row below, at 100 columns or more.
     aw = max([width(a) for a in art] + [len(name)])
     art.append(name.center(aw).rstrip())
-    # Speech sits beside the body, the fleet line beside the name row.
+    # Speech wraps beside the body like the original bubble, bottom-aligned; the fleet line sits beside the name row.
     labels = [""] * len(art)
     labels[-1] = fleet
-    if len(art) > 1:
-        labels[-2] = frame.get("speech") or ""
+    room = len(art) - 1
+    lines = wrap(frame.get("speech") or "", BUBBLE_W)
+    if len(lines) > room:
+        lines = lines[: room - 1] + [cut(" ".join(lines[room - 1 :]), BUBBLE_W)] if room else []
+    bw = max([width(line) for line in lines] + [0])
+    for i, line in enumerate(lines):
+        labels[room - len(lines) + i] = line + " " * (bw - width(line))
 
     for rows in range(max(len(left), len(art), MIN_ROWS), MAX_ROWS + 1):
         lefts = left + [""] * (rows - len(left))
@@ -110,8 +138,10 @@ def layout(left, frame, cols):
                 l = lefts[top + i] or LEAD
                 free = cols - width(l) - aw - 3
                 label = cut(labels[i], free) if free > 3 else ""
-                right = (label + " " if label else "") + a.ljust(aw)
-                out.append(l + " " * (cols - width(l) - width(right)) + color + right + "\x1b[0m")
+                # Only the buddy wears its rarity color; its words use the terminal's own text color.
+                words = label + " " if label else ""
+                pad = cols - width(l) - width(words) - aw
+                out.append(l + " " * pad + words + color + a.ljust(aw) + "\x1b[0m")
             return out
 
     return face_row(left, frame, cols)
@@ -129,7 +159,8 @@ def face_row(left, frame, cols):
         free = cols - width(l) - 2
         if free >= width(frame.get("face", "")) + 1:
             right = cut(face, free)
-            lefts[i] = l + " " * (cols - width(l) - width(right)) + color + right + "\x1b[0m"
+            head = cut(f"{frame.get('face', '')} {frame.get('name', '')}", free)
+            lefts[i] = l + " " * (cols - width(l) - width(right)) + color + head + "\x1b[0m" + right[len(head):]
             return lefts if lefts[-1] else lefts[:-1]
     return left
 

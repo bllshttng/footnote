@@ -47,7 +47,7 @@ function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), 
   on('fs.read', ($: any, e: any) => {
     if (e.path === '/home/u/.claude.json') return { value: config }
     if (files.has(e.path)) return { value: files.get(e.path) }
-    if (e.path.endsWith('/hooks/buddy/statusline.py')) return { value: '# wrapper' }
+    if (e.path.endsWith('/hooks/statusline.py')) return { value: '# wrapper' }
     throw new Error('ENOENT')
   })
   on('fs.write', ($: any, e: any) => {

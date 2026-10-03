@@ -156,7 +156,8 @@ const MARKETPLACE_REL: &str = ".claude-plugin/marketplace.json";
 /// pointed at the stage root (`source: "./"`), so `claude plugin install
 /// fno@footnote` resolves in place and never clones a GitHub ref: the public
 /// pins (`stable`, `nightly`) are release-side refs a dev machine cannot rely
-/// on. The repo file stays verbatim. Anything that would leave the fno entry
+/// on. The buddy entry points at `./plugins/buddy` the same way. The repo file
+/// stays verbatim. Anything that would leave the fno entry
 /// unserved is Err: a verbatim copy would silently resurrect the clone trap.
 fn staged_marketplace_bytes(source_bytes: &str) -> Result<String, String> {
     let mut manifest: Value =
@@ -176,6 +177,8 @@ fn staged_marketplace_bytes(source_bytes: &str) -> Result<String, String> {
             }
             entry["source"] = json!("./");
             rewritten = true;
+        } else if entry.get("name").and_then(Value::as_str) == Some("buddy") && entry.is_object() {
+            entry["source"] = json!("./plugins/buddy");
         }
     }
     if !rewritten {

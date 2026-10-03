@@ -43,6 +43,10 @@ export const RARITY_STARS: Record<Rarity, string> = {
 export const RARITY_COLORS: Record<Rarity, string> = {
   common: 'gray', uncommon: 'green', rare: 'cyan', epic: 'magenta', legendary: 'yellow',
 }
+// The original's theme keys: Claude Code draws them in the user's theme. The status line has only ANSI, so it keeps the names above.
+export const RARITY_THEME: Record<Rarity, string> = {
+  common: 'inactive', uncommon: 'success', rare: 'permission', epic: 'autoAccept', legendary: 'warning',
+}
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0
