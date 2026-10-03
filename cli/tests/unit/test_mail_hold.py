@@ -588,7 +588,7 @@ def test_release_delivers_held_release_frame_without_synthetic_sender(monkeypatc
         to=HANDLE,
         kind="send",
         body=(
-            '<fno_mail from="worker-session" harness="codex">'
+            '<fno_mail from="worker-session" harness="codex" id="fmail-123456789abc">'
             "the held report"
             "</fno_mail>"
         ),
