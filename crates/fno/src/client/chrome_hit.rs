@@ -138,8 +138,13 @@ impl View {
             return None;
         };
         let span = card_line::pr_span(a, self.sideline_paint_w().checked_sub(1)?)?;
-        span.contains(&(col as usize))
-            .then(|| format!("https://github.com/bllshttng/footnote/pull/{}", a.pr?))
+        if !span.contains(&(col as usize)) {
+            return None;
+        }
+        Some(format!(
+            "https://github.com/bllshttng/footnote/pull/{}",
+            a.pr?
+        ))
     }
 
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
