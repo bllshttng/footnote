@@ -2,6 +2,8 @@ use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
+#[path = "client/tests/density_button_tests.rs"]
+mod density_button_tests;
 use crate::client::{
     input_folds::MAX_ESC_CARRY,
     keys_modal::{build_keys_modal, keys_modal_keys, keys_modal_mouse},
@@ -11595,98 +11597,6 @@ fn resort_scrolls_the_selection_back_into_view() {
         v.sideline_offset(),
         v.sideline_offset() + visible
     );
-}
-
-// The density button is a real click target, routed to the SAME mutation the
-// keybind runs, and it never becomes the only way in.
-#[test]
-fn density_button_click_routes_to_the_cycle() {
-    let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-    let range = v.density_button_range(v.panel_w() as usize).unwrap();
-    assert!(matches!(
-        v.chrome_hit(0, range.start as u16 + 1),
-        Some(ChromeHit::CycleDensity)
-    ));
-    // One row down is an ordinary sideline row again - the button is chrome
-    // pinned to row 0, not a column.
-    assert!(!matches!(
-        v.chrome_hit(1, range.start as u16 + 1),
-        Some(ChromeHit::CycleDensity)
-    ));
-    // Keybind parity (Locked 5): the gesture exists without the mouse.
-    assert_eq!(
-        crate::keys::resolve_chord(b'B'),
-        crate::keys::Event::CycleDensity
-    );
-    assert_eq!(
-        crate::keys::resolve_chord(b'o'),
-        crate::keys::Event::ToggleAgentSort
-    );
-}
-
-// The button must not eat the header rollup it sits beside (the regression
-// the reserve-don't-overlay approach exists to prevent).
-#[test]
-fn density_button_preserves_the_top_header_rollup() {
-    let mut v = wide_view(vec![agent_row("b", 5, Some(AgentBadge::Blocked), false)]);
-    v.density = Density::Regular;
-    // The button rides the strip row (line 0); the header rollup it must not
-    // eat paints on line 1.
-    let lines: Vec<String> = frame_text(&v.compose())
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert!(
-        lines[1].contains('▲'),
-        "rollup survives beside the button: {:?}",
-        lines[1]
-    );
-    assert!(
-        lines[0].contains(density_glyph(Density::Regular)),
-        "and the button is there too: {:?}",
-        lines[0]
-    );
-    assert!(
-        lines[0].contains("🔔"),
-        "bell remains visible: {:?}",
-        lines[0]
-    );
-}
-
-#[test]
-fn density_button_glyph_sits_before_the_bell() {
-    // The density button keeps its plain pad and a gap before the bell, so
-    // neither top-row control covers the other.
-    let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-    let pw = v.panel_w() as usize;
-    let range = v.density_button_range(pw).unwrap();
-    let bell = bell::button_range(&v, pw.saturating_sub(1));
-    let frame = v.compose();
-    // Row 0, so the cell index is the column.
-    let glyph_cell = &frame.cells[range.start];
-    let pad_cell = &frame.cells[range.end - 1]; // the cell before the gap
-    assert_eq!(
-        glyph_cell.c,
-        density_glyph(v.density),
-        "glyph leads the button"
-    );
-    assert_eq!(
-        glyph_cell.flags,
-        cell_flags::INVERSE,
-        "glyph cell is the button"
-    );
-    assert_eq!(pad_cell.c, ' ', "the cell before the gap is the pad");
-    assert_eq!(
-        pad_cell.flags, 0,
-        "the pad is plain, giving real breathing room"
-    );
-    assert_eq!(
-        range.end.saturating_add(1),
-        bell.start,
-        "one-column gap before bell"
-    );
-    // The divider remains after the bell.
-    assert_eq!(bell.end, pw - 1, "the bell ends right before the divider");
 }
 
 pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
