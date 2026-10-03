@@ -1967,7 +1967,8 @@ def _claude_harness_session_states(session_ids: list[str]) -> dict[str, str]:
         cmd = [*_subprocess_util.fno_py_cmd(), "agents", "truth", "--handles", ",".join(ids), "--json"]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return {
-            str(k): str(v.get("reachability") or v["state"]) for k, v in json.loads(proc.stdout).items()
+            str(k): ("unreachable" if v.get("reachability") == "unreachable" else str(v["state"]))
+            for k, v in json.loads(proc.stdout).items()
             if isinstance(v, dict) and v.get("state") not in (None, "", "unknown")}
     except (OSError, subprocess.SubprocessError, TypeError, ValueError, KeyError):
         return {}

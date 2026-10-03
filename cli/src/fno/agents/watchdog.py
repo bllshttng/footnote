@@ -1407,6 +1407,9 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         out.append(Row(
             row_id=sid, name=str(getattr(entry, "name", None) or sid),
             state=state, node=node, cwd=cwd, agent="claude",
+            pid=getattr(entry, "pid", None), pid_start_time=getattr(entry, "pid_start_time", None),
+            mux=getattr(entry, "mux", None),
+            stopped_at=(getattr(entry, "stop", None) or {}).get("at"),
         ))
     from fno.agents.spawn_gate import LIVE_STATUSES
 
