@@ -280,8 +280,14 @@ pub(super) fn hit(view: &View, row: u16, col: u16) -> Option<ChromeHit> {
     }
     let width = PANEL_W.min(view.term.1 as usize);
     let x0 = view.term.1 as usize - width;
-    if col as usize <= x0 || row == 0 || row as usize >= view.term.0 as usize - 1 {
+    if (col as usize) < x0 || row as usize >= view.term.0 as usize {
         return None;
+    }
+    if row == 0 || row as usize == view.term.0.saturating_sub(1) as usize {
+        return Some(ChromeHit::Bell(Hit::Focus));
+    }
+    if col as usize == x0 {
+        return Some(ChromeHit::Bell(Hit::Focus));
     }
     let all = rows(view);
     let visible = (view.term.0 as usize).saturating_sub(2);
