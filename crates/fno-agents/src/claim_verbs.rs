@@ -42,6 +42,12 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
     }
+    if op == "acquire" {
+        // Wave 1 of the leaf port: the operator surface (and the rebind its
+        // --handover-from drives) lives in claim_cli; goldens are the
+        // contract.
+        return crate::claim_cli::acquire::run(&args[1..]);
+    }
     if op == "lane-acquire" {
         return crate::claim_lanes_cli::run_lane_acquire(&args[1..]);
     }
@@ -143,47 +149,8 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
 
     match op {
-        "acquire" => {
-            let Some(holder) = holder else {
-                eprintln!("fno-agents: claim acquire requires --holder");
-                return 2;
-            };
-            let outcome = if key.starts_with("task:") {
-                let witness = |record: &crate::claims::ClaimRecord| {
-                    let (witness, _drain) = default_session_witness();
-                    witness(record)
-                };
-                let witness: crate::claims::SessionWitness<'_> = &witness;
-                crate::claims::acquire_with_session_witness(&key, &holder, opts, Some(witness))
-            } else {
-                crate::claims::acquire(&key, &holder, opts)
-            };
-            match outcome {
-                crate::claims::AcquireOutcome::Acquired(record) => {
-                    let mut payload = serde_json::to_value(&record)
-                        .unwrap_or_else(|_| Value::Object(Default::default()));
-                    if let Value::Object(map) = &mut payload {
-                        map.insert("outcome".into(), Value::String("acquired".into()));
-                    }
-                    println!("{payload}");
-                    0
-                }
-                crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "held_by_other", "holder": holder,
-                            "pid": pid, "host": host,
-                        })
-                    );
-                    1
-                }
-                crate::claims::AcquireOutcome::Error(error) => {
-                    eprintln!("fno-agents: claim acquire failed: {error}");
-                    2
-                }
-            }
-        }
+        // "acquire" dispatches to claim_cli::acquire above; the operator
+        // leaf owns the surface since the wave-1 port.
         "release" => {
             let Some(holder) = holder else {
                 eprintln!("fno-agents: claim release requires --holder");

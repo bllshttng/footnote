@@ -84,6 +84,7 @@ pub mod cargo_build_dirs;
 pub mod census;
 pub mod chats;
 pub mod check_supersession;
+pub mod claim_cli;
 pub mod claim_lanes_cli;
 pub mod claim_queue;
 pub mod claim_store;
