@@ -153,7 +153,18 @@ fn absent_node_still_reports_absence_at_the_unchanged_code() {
 fn ac5_positional_stdin_and_file_bodies_all_append_to_the_thread() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    write_graph(&graph, &[fixture("t-1", "ready")]);
+    // l-row is a legacy minimal row (no slug/type/status): the store parks
+    // it raw in the carry. The reader serves it with defaults applied, so
+    // a note appends to its thread through the same upgrade instead of
+    // refusing. Seeded beside t-1: a second write_graph call would run the
+    // publish read-back against a non-empty store and refuse.
+    write_graph(
+        &graph,
+        &[
+            fixture("t-1", "ready"),
+            json!({"id": "l-row", "title": "legacy"}),
+        ],
+    );
     let g = graph_arg(&graph);
     // stdin
     let code = note(
@@ -226,10 +237,8 @@ fn ac5_positional_stdin_and_file_bodies_all_append_to_the_thread() {
         .unwrap()
         .clone();
     assert_eq!(row["progress_notes"].as_array().unwrap().len(), 3);
-    // A legacy minimal row (no slug/type/status) parks raw in the carry.
-    // The reader serves it with defaults applied, so a note appends to its
-    // thread through the same upgrade instead of refusing.
-    write_graph(&graph, &[json!({"id": "l-row", "title": "legacy"})]);
+    // The legacy row's own leg: a note appends to its thread through the
+    // upgrade, never a refusal.
     let code = note(
         &graph,
         &[
