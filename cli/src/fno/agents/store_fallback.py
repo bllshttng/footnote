@@ -27,8 +27,8 @@ Three rules keep it from guessing:
   and would refuse canonical->worktree traffic), then refuse. An out-of-project
   hit is refused with the candidate named, copying the ambiguity posture; an
   explicit ``cross_project`` flag overrides it, and a full session id needs
-  no flag. The confinement lives here and
-  batch callers must route verified hits
+  no flag (it is globally unique). The confinement lives here and batch
+  callers must route verified hits
   through :func:`confine_store_hits`; ``resume`` does not adopt store hits (it
   matches loaded registry entries via ``resolve_agent_in``), so it is uncovered
   by design.
@@ -382,8 +382,7 @@ def confine_store_hits(
     never silently adopted and woken. A full session id waives the flag: it is
     globally unique. Returns ``hits`` unchanged when confinement does not
     apply -- ``cross_project`` set, a full-id token, or the scope is itself
-    not a known project. Raises :class:`AgentResolutionError`
-    (``ambiguous=True``) on the refuse.
+    not a known project. Raises :class:`AgentResolutionError` on the refuse.
     """
     from fno.harness_identity import harness_of_session_id
 

@@ -1845,16 +1845,10 @@ def _claude_create_path(
                 king_unarmed_reason = str(exc)
         if revive:
             # One row per session id: the revival replaces its own row, or the
-            # adopted row reached through the resumed uuid.
+            # adopted row reached through the resumed uuid (never None here).
             return [
                 entry
-                if (
-                    e.name == name
-                    or (
-                        resume_session_id
-                        and getattr(e, "harness_session_id", None) == resume_session_id
-                    )
-                )
+                if e.name == name or e.harness_session_id == resume_session_id
                 else e
                 for e in entries
             ]
@@ -2281,28 +2275,15 @@ def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[st
 
 
 def _revival_answer(name: str, harness: str, resume_session_id: str) -> Optional[dict]:
-    """One ``fno-agents revival-check`` answer; ``None`` when the runtime is
-    unavailable, so the spawn keeps today's collision posture."""
-    import json
-    import subprocess
+    """One ``fno-agents revival-check`` answer; ``None`` keeps the collision posture."""
+    from fno.rust_binary import call_binary_json
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        return None
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [str(binary), "revival-check", "--name", name, "--harness", harness,
-             "--resume", resume_session_id],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        return json.loads(proc.stdout) if proc.returncode == 0 else None
-    except Exception:  # noqa: BLE001 - fail toward the collision posture
-        return None
+    answer, parsed = call_binary_json(
+        "revival-check",
+        ["--name", name, "--harness", harness, "--resume", resume_session_id],
+        timeout=30,
+    )
+    return parsed if answer is None and isinstance(parsed, dict) else None
 
 
 def dispatch_spawn(
@@ -2627,28 +2608,21 @@ def dispatch_spawn(
                     exit_code=12,
                 )
 
-            # Revive-in-place (Fix 3): a --resume spawn whose target uuid
-            # matches an EXITED claude row is a revival, not a collision - the
-            # row is updated in place below instead of refused. Every other
+            # Revive-in-place: a --resume spawn whose target uuid matches an
+            # EXITED claude row is a revival, not a collision; every other
             # same-name case stays fail-closed (live row, uuid mismatch, no
             # --resume).
             existing = next((e for e in entries if e.name == name), None)
             revive = False
             if resume_session_id:
-                # One Rust answer: by name, then by the resumed uuid itself -
-                # an adopted short-id-named row revives under --name too. The
+                # One Rust answer: by name, then by the resumed uuid; the
                 # writer-claim gate stays the fail-closed backstop.
                 answer = _revival_answer(name, harness, resume_session_id)
                 if answer is not None and answer.get("revive"):
                     revive = True
                     if answer.get("by") == "session":
                         existing = next(
-                            (
-                                e
-                                for e in entries
-                                if getattr(e, "harness_session_id", None)
-                                == resume_session_id
-                            ),
+                            (e for e in entries if e.harness_session_id == resume_session_id),
                             None,
                         )
             if existing is not None and not revive:

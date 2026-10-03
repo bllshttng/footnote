@@ -35,9 +35,11 @@ pub fn run_sessions_map(_home: &AgentsHome) -> i32 {
                     continue;
                 };
                 out.entry(sid.to_ascii_lowercase()).or_insert_with(|| {
+                    let pr = row.get("pr_number").and_then(Value::as_i64);
                     json!({
                         "node": node,
-                        "pr": row.get("pr_number").and_then(Value::as_i64),
+                        "pr": pr,
+                        "pr_basis": if pr.is_some() { "node" } else { "no-pr" },
                         "basis": "graph",
                     })
                 });
@@ -70,11 +72,13 @@ pub fn run_sessions_map(_home: &AgentsHome) -> i32 {
             else {
                 continue;
             };
+            let pr = node_pr.get(&node.to_ascii_lowercase()).copied().flatten();
             out.insert(
                 sid.to_ascii_lowercase(),
                 json!({
                     "node": node,
-                    "pr": node_pr.get(&node.to_ascii_lowercase()).copied().flatten(),
+                    "pr": pr,
+                    "pr_basis": if pr.is_some() { "node" } else { "no-pr" },
                     "basis": "claim",
                 }),
             );

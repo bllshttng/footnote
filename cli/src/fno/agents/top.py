@@ -151,30 +151,11 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
 
 
 def _session_node_map() -> dict[str, dict]:
-    """session id -> {node, pr, basis} from ONE fno-agents read; a failed
-    read answers {} (top is a debug view, never a failure surface)."""
-    import json
-    import subprocess
+    """session id -> {node, pr, pr_basis, basis}; a failed read answers {}."""
+    from fno.rust_binary import call_binary_json
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        return {}
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [str(binary), "sessions-map"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except Exception:  # noqa: BLE001 — best-effort, the join is optional
-        return {}
-    try:
-        raw = json.loads(proc.stdout) if proc.returncode == 0 else {}
-    except Exception:  # noqa: BLE001 — always parse-guarded
-        return {}
+    error, parsed = call_binary_json("sessions-map", timeout=30)
+    raw = parsed if error is None and isinstance(parsed, dict) else {}
     return {sid: v for sid, v in raw.items() if isinstance(v, dict)}
 
 
@@ -289,8 +270,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         if joined:
             node: Optional[str] = joined["node"]
             node_basis: Optional[str] = joined["basis"]
-            pr: Optional[int] = joined.get("pr")
-            pr_basis: Optional[str] = "node" if pr is not None else "no-pr"
+            pr, pr_basis = joined.get("pr"), joined.get("pr_basis")
         else:
             node = v.node if v else None
             node_basis = v.node_basis if v else None
@@ -326,17 +306,11 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "reach": row_truth.reach if row_truth else None,
                 "reach_basis": row_truth.reach_basis if row_truth else None,
                 # has this worker's node already shipped. The session's own
-                # claim answers FIRST (a revived or registry-less session
-                # still renders its work order); the graph's sessions[] row
-                # is the middle source, and the retirement verdict's
-                # name-keyed join is the last fallback. Null node is a real
-                # answer (no claim, no graph row, unresolvable name), never
-                # a miss.
+                # claim answers first, the graph row is the middle source,
+                # the retirement verdict's name-keyed join the last fallback.
+                # pr names the node's primary PR when the join found one.
                 "node": node,
                 "node_basis": node_basis,
-                # The node's primary PR when the node came from the claim
-                # (the graph row rode the same read); None elsewhere - the
-                # list view owns the node-keyed PR wording.
                 "pr": pr,
                 "pr_basis": pr_basis,
                 "retire": v.retire if v else False,
