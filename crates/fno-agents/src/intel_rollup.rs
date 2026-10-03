@@ -748,10 +748,11 @@ mod tests {
         let joined = |ls: &[String]| ls.iter().map(|l| format!("{l}\n")).collect::<String>();
         let (half, rest) = (&lines[..3], &lines[3..]);
         let path = dir.join("s1.jsonl");
-        // The bus row's body lands in the second half verbatim, inside an
-        // assistant row's file path, so no user turn reclassifies; its id
-        // never appears. Raw, body-only delivery.
-        let bus = bus_with_body_delivery(&dir, "x.rs");
+        // The bus row's body is the Edit row's file path, which lands in
+        // the second half verbatim; no user turn carries it, so nothing
+        // reclassifies, and the row's id never appears. Raw, body-only
+        // delivery.
+        let bus = bus_with_body_delivery(&dir, "a/b.rs");
         std::fs::write(&path, joined(half)).unwrap();
         let src = source(&dir);
         let mut store = RollupStore::open(dir.join("rollups.json"));
