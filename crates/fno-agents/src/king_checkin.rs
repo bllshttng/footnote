@@ -2468,17 +2468,26 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             .and_then(|c| crate::king_termination::parse_king_manifest(&c))
             .map(|m| m.queue)
             .unwrap_or_default();
+    // One route walk per distinct difficulty: the queue holds a handful of
+    // nodes across three difficulties, so memoize for the beat.
+    let memo = std::cell::RefCell::new(std::collections::HashMap::<String, Option<String>>::new());
     let planned = |difficulty: &str| -> Option<String> {
+        if let Some(hit) = memo.borrow().get(difficulty) {
+            return hit.clone();
+        }
         let payload = json!({
             "rung_base": "agents.profiles.target",
             "node": {"difficulty": difficulty},
         });
         let filled = crate::route_gather::fill(&payload, &ctx.cwd);
         let out = crate::route_slot::resolve_slot_payload(&filled);
-        let candidate = out.get("candidate")?;
-        let harness = candidate.get("harness")?.as_str()?;
-        let model = candidate.get("model")?.as_str()?;
-        Some(format!("{harness}/{model}"))
+        let resolved = out
+            .get("candidate")
+            .and_then(|c| c.get("harness")?.as_str().zip(c.get("model")?.as_str()))
+            .map(|(h, m)| format!("{h}/{m}"));
+        memo.borrow_mut()
+            .insert(difficulty.to_string(), resolved.clone());
+        resolved
     };
     let lineup = crate::king_checkin_lineup::LineupSources {
         queue: &manifest_queue,
@@ -3024,15 +3033,15 @@ mod tests {
         // registry's harness/model, then the queue with its planned model and
         // an `on deck` status, skipping a queued id that is already seated.
         let court = json!({"active_nodes": 1, "total_nodes": 2, "rows": [
-            {"id": "x-aa11", "status": "in_progress", "worker": "w1", "pr_number": 7,
+            {"id": "x-aaaa", "status": "in_progress", "worker": "w1", "pr_number": 7,
              "session": "s1"},
         ]});
         let readings = sample_readings(board7(), court, cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let graph = vec![
-            json!({"id": "x-aa11", "title": "Seated | node", "difficulty": "medium",
+            json!({"id": "x-aaaa", "title": "Seated | node", "difficulty": "medium",
                    "pr_number": 7}),
-            json!({"id": "x-bb22", "title": "Queued node", "difficulty": "low",
+            json!({"id": "x-bbbb", "title": "Queued node", "difficulty": "low",
                    "pr_number": null}),
         ];
         let registry = crate::state::Registry {
@@ -3040,13 +3049,13 @@ mod tests {
                 name: "w1".into(),
                 harness: Some("claude".into()),
                 model: Some("opus".into()),
-                node: Some("x-aa11".into()),
+                node: Some("x-aaaa".into()),
                 ..Default::default()
             }],
             ..Default::default()
         };
         let planned = |d: &str| (d == "low").then(|| "codex/gpt-luna".to_string());
-        let queue = ["x-bb22".to_string(), "x-aa11".to_string()];
+        let queue = ["x-bbbb".to_string(), "x-aaaa".to_string()];
         let lines = render_lines_with(
             "x-bbbb",
             &readings,
@@ -3070,11 +3079,11 @@ mod tests {
         assert_eq!(lines[start + 2], "|---|---|---|---|---|---|");
         assert_eq!(
             lines[start + 3],
-            "| x-aa11 | Seated \\| node | medium | 7 | claude/opus | in_progress |"
+            "| x-aaaa | Seated \\| node | medium | 7 | claude/opus | in_progress |"
         );
         assert_eq!(
             lines[start + 4],
-            "| x-bb22 | Queued node | low | - | codex/gpt-luna | on deck |"
+            "| x-bbbb | Queued node | low | - | codex/gpt-luna | on deck |"
         );
 
         // AC2-ERR: a failed graph read names the cause and prints no table.
@@ -3096,7 +3105,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l == "READER FAILED lineup: the graph read returned 0 nodes"));
-        assert!(!lines.iter().any(|l| l.starts_with("| x-aa11")));
+        assert!(!lines.iter().any(|l| l.starts_with("| x-aaaa")));
 
         // A failed registry read names its own cause; the table still prints.
         let lines = render_lines_with(
@@ -3117,7 +3126,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l == "READER FAILED lineup: registry unreadable (x)"));
-        assert!(lines.iter().any(|l| l.starts_with("| x-aa11 | Seated")));
+        assert!(lines.iter().any(|l| l.starts_with("| x-aaaa | Seated")));
     }
 
     /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned

@@ -67,7 +67,7 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "queue" => {
                 out.queue = raw
                     .split(',')
-                    .map(str::trim)
+                    .map(|id| id.trim().trim_matches('"'))
                     .filter(|id| !id.is_empty())
                     .map(String::from)
                     .collect();
@@ -616,10 +616,16 @@ mod tests {
         assert!(manifest.harness_session_id.is_none());
 
         let manifest =
-            parse_king_manifest("---\nfno_id: k\nqueue: x-aa11, x-bb22\n---\n").expect("parses");
+            parse_king_manifest("---\nfno_id: k\nqueue: x-aaaa, x-bbbb\n---\n").expect("parses");
         assert_eq!(
             manifest.queue,
-            vec!["x-aa11".to_string(), "x-bb22".to_string()]
+            vec!["x-aaaa".to_string(), "x-bbbb".to_string()]
+        );
+        let manifest =
+            parse_king_manifest("---\nfno_id: k\nqueue: \"x-aaaa,x-bbbb\"\n---\n").expect("parses");
+        assert_eq!(
+            manifest.queue,
+            vec!["x-aaaa".to_string(), "x-bbbb".to_string()]
         );
         let manifest = parse_king_manifest("---\nfno_id: k\nqueue: , ,\n---\n").expect("parses");
         assert!(manifest.queue.is_empty());
