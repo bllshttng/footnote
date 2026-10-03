@@ -12,7 +12,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-HOOK="$REPO_ROOT/hooks/agy-crown-inject.sh"
+HOOK="$REPO_ROOT/hooks/agy-team-inject.sh"
 
 [[ -f "$HOOK" ]] || { echo "FAIL: hook not found at $HOOK" >&2; exit 1; }
 
@@ -21,7 +21,7 @@ FAIL=0
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 
-TMP="$(mktemp -d -t agy-crown-inject-XXXXXX)"
+TMP="$(mktemp -d -t agy-team-inject-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 RENDER='<fno_mail id="msg-abc123" kind="announce" from="op" subject="test-hold" expires="2026-10-02T00:00:00Z">All clear: the test hold is lifted.</fno_mail>'

@@ -29,7 +29,7 @@ TMP="$(mktemp -d -t lead-reinject-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Stub `fno` answering `agents registry-json` from a per-case fixture file, and
-# `agents lead faq list --scope X` from a second fixture keyed by scope, so no
+# `agents king faq list --scope X` from a second fixture keyed by scope, so no
 # real registry, daemon, or FAQ store is involved. $LEAD_REG_FIXTURE and
 # $LEAD_FAQ_FIXTURE select the payloads; the FAQ fixture is empty (no output)
 # unless a test overwrites it.
@@ -45,7 +45,7 @@ if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
     exit 127
   fi
   cat "$LEAD_REG_FIXTURE"
-elif [ "$1" = "agents" ] && [ "$2" = "lead" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
+elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
   cat "$LEAD_FAQ_FIXTURE" 2>/dev/null || true
 elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
   cat "$LEAD_HANDOFF_PATH_FIXTURE" 2>/dev/null || true

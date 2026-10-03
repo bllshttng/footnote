@@ -1959,12 +1959,12 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
     };
     let hooks = home.join(".gemini").join("config").join("hooks.json");
     let adapter = stage.join("hooks").join("footnote-agy-target-stop-hook.sh");
-    let crown = stage.join("hooks").join("agy-crown-inject.sh");
+    let team_inject = stage.join("hooks").join("agy-team-inject.sh");
     let guard = stage.join("hooks").join("agy-king-guard.sh");
     let s = crate::agy_hooks::status(
         &hooks,
         adapter.is_file().then_some(adapter.as_path()),
-        crown.is_file().then_some(crown.as_path()),
+        team_inject.is_file().then_some(team_inject.as_path()),
         guard.is_file().then_some(guard.as_path()),
     );
     Ok(format!("agy plugin imported; {}", s.summary()))
