@@ -87,7 +87,7 @@ mod tests {
     fn answered_clear_records_one_decision_and_receipts_before_delivery() {
         let tmp = tempfile::tempdir().unwrap();
         let req = request(&tmp, "q-open", Some("ship it"));
-        seed_question(&req, &ask("q-open", "which lane?", None, None));
+        seed_question(&req, &ask("q-open", "which lane?", None, Some("x-1")));
 
         let result = run_clear(&req);
 
@@ -120,6 +120,14 @@ mod tests {
                 .count(),
             1
         );
+        // AC10: the answer row IS the span: parented at the question,
+        // traced to the question's node.
+        let decision_row = project
+            .iter()
+            .find(|r| r["type"] == "operator_decision")
+            .expect("a decision row landed");
+        assert_eq!(decision_row["data"]["trace"]["parent_span_id"], "q-open");
+        assert_eq!(decision_row["data"]["trace"]["trace_id"], "x-1");
         assert_eq!(index.len(), 1);
         assert_eq!(index[0]["data"]["question_id"], "q-open");
         let decisions = graph_decisions(&req);
@@ -704,6 +712,7 @@ mod tests {
     }
 }
 use crate::backlog::api::{self, Store};
+use crate::decision_trace::{actor_kind, Trace};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -1289,7 +1298,31 @@ fn make_decision(
     let mut decision = Map::new();
     let mut id_bytes = [0u8; 4];
     getrandom::fill(&mut id_bytes).expect("OS CSPRNG unavailable");
-    decision.insert("decision_id".into(), json!(format!("d-{}", hex(&id_bytes))));
+    let did = format!("d-{}", hex(&id_bytes));
+    decision.insert("decision_id".into(), json!(&did));
+    // The answer span: the decision row IS the span, span_id = decision_id,
+    // parented at the question it answers, traced to the question's node.
+    decision.insert(
+        "trace".into(),
+        serde_json::to_value(&Trace {
+            trace_id: node.unwrap_or("none").to_string(),
+            span_id: did,
+            parent_span_id: Some(qid.to_string()),
+            actor_session: req
+                .provenance
+                .get("decided_by")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            actor_kind: actor_kind(
+                req.provenance.get("decided_by").and_then(Value::as_str),
+                "question",
+            ),
+            comms: "question",
+            recipient_session: None,
+            recipient_kind: Some("user"),
+        })
+        .unwrap_or_default(),
+    );
     decision.insert("decision".into(), json!(decision_text));
     decision.insert("subject".into(), json!(subject));
     decision.insert("question_id".into(), json!(qid));
