@@ -453,7 +453,10 @@ impl View {
                 DisplayRow::CardDetail(a) => {
                     Some((self.card_detail_text(a, now, text_w), cell_flags::DIM))
                 }
-                DisplayRow::CardMetrics(a) => Some((card_line::metrics(a), 0)),
+                DisplayRow::CardMetrics(a) => Some((
+                    card_line::metrics(a, row_message_text(a).as_deref(), text_w),
+                    0,
+                )),
                 DisplayRow::Agent(a) if density == Density::Slim => {
                     // Small mode (q-334c5e9d option 1): one line per live
                     // agent - the animated glyph, then the slug, clipped to
@@ -580,7 +583,7 @@ impl View {
             let row_stamp = self.row_stamp_for(drow);
             paint_row_stamp(cells, r, cols, text_w, row_stamp);
             if card {
-                self.paint_card_identity(cells, r, cols, text_w, drow, highlit);
+                self.paint_card_identity(cells, r, cols, text_w, drow);
             }
         }
         // The density button, painted LAST over the sideline's top row.
@@ -968,7 +971,6 @@ impl View {
         cols: usize,
         text_w: usize,
         drow: &DisplayRow<'_>,
-        highlit: bool,
     ) {
         let DisplayRow::Agent(agent) = drow else {
             return;
@@ -988,11 +990,8 @@ impl View {
         if let (Some(node), Some(span)) = (agent.node.as_deref(), spans.node) {
             for (cell, ch) in line[span].iter_mut().zip(node.chars()) {
                 cell.c = ch;
-                cell.flags = if highlit {
-                    cell_flags::BOLD
-                } else {
-                    cell_flags::INVERSE | cell_flags::BOLD
-                };
+                cell.fg = status_fg;
+                cell.flags = cell_flags::BOLD;
             }
         }
         if let Some(span) = spans.separator {
@@ -1006,30 +1005,35 @@ impl View {
                 .zip(format!("#{}", agent.pr.unwrap()).chars())
             {
                 cell.c = ch;
-                cell.fg = status_fg;
+                cell.fg = self.theme.brand;
                 cell.flags = 0;
             }
         }
     }
 
-    /// Line 2 keeps model and lead left, with age and activity at the right.
+    /// Line 2 keeps model and lead left, with created and activity ages right.
     pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
         let mut segments: Vec<String> = Vec::new();
-        if let Some(h) = card_line::harness_model(a) {
-            segments.push(h);
+        if let Some(model) = card_line::model_label(a) {
+            segments.push(model);
         }
         if let Some(k) = self.king_label(a) {
             segments.push(k);
         }
         let left = segments.join(" \u{b7} ");
-        let age = row_age(a, now);
-        let activity = row_message_text(a).filter(|s| !s.is_empty());
-        let tail = activity
-            .filter(|s| crate::chrome::str_cols(s) + crate::chrome::str_cols(&age) + 2 <= text_w)
-            .map_or_else(|| age.clone(), |s| format!("{age}  {s}"));
+        let created = a
+            .started_at
+            .map(|_| row_meter::up_cell(a.started_at, now))
+            .unwrap_or_else(|| "–".into());
+        let activity = if a.last_activity_age_s.is_some() || a.updated_at.is_some() {
+            row_age(a, now)
+        } else {
+            "–".into()
+        };
+        let tail = format!("{created} · {activity}");
         let tail_w = crate::chrome::str_cols(&tail).min(text_w);
         let head_w = text_w.saturating_sub(tail_w);
-        let head = crate::chrome::clip(&left, head_w);
+        let head = crate::chrome::fit_ellipsis(&left, head_w);
         let pad = " ".repeat(head_w.saturating_sub(crate::chrome::str_cols(&head)));
         format!("{head}{pad}{tail}")
     }

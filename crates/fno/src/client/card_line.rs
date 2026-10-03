@@ -42,12 +42,8 @@ pub(super) struct IdentitySpans {
     pub pr: Option<Range<usize>>,
 }
 
-pub(super) fn metrics(a: &AgentRow) -> String {
-    let spark = if a.context_used_pct.is_some() {
-        "▂▃▃▄"
-    } else {
-        "????"
-    };
+pub(super) fn metrics(a: &AgentRow, message: Option<&str>, width: usize) -> String {
+    let spark = super::row_meter::ctx_sparkline(a.context_used_pct);
     let pct = a
         .context_used_pct
         .map_or_else(|| "?".into(), |n| format!("{n}%"));
@@ -55,7 +51,21 @@ pub(super) fn metrics(a: &AgentRow) -> String {
         .compaction_count
         .map_or_else(|| "?c".into(), |n| format!("{n}c"));
     let cost = super::row_meter::cost_cell(a.session_cost_cents);
-    format!("{spark} {pct} · {count} · {cost}")
+    let tokens = super::row_meter::token_cell(a.session_tokens);
+    let prefix = format!("{spark} {pct} · {count} · {cost} · {tokens}");
+    let Some(message) = message.filter(|s| !s.is_empty()) else {
+        return crate::chrome::fit_ellipsis(&prefix, width);
+    };
+    let separator = " · ";
+    let room = width.saturating_sub(crate::chrome::str_cols(&prefix));
+    let separator_w = crate::chrome::str_cols(separator);
+    if room <= separator_w {
+        return crate::chrome::fit_ellipsis(&prefix, width);
+    }
+    format!(
+        "{prefix}{separator}{}",
+        crate::chrome::fit_ellipsis(message, room - separator_w)
+    )
 }
 
 /// The card's short model: no `[1m]` window tag, and a `claude-` id names
@@ -68,19 +78,22 @@ fn short_model(model: &str) -> &str {
     }
 }
 
-/// Line 2's lead: `claude/opus`, `codex/gpt-6.1-sol`, or whichever half is
-/// known.
-pub(super) fn harness_model(a: &AgentRow) -> Option<String> {
-    let model = a
-        .model
+/// Line 2's model, shortened to the name users recognize.
+pub(super) fn model_label(a: &AgentRow) -> Option<String> {
+    a.model
         .as_deref()
         .map(short_model)
-        .filter(|m| !m.is_empty());
-    match (a.harness.as_deref(), model) {
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+}
+
+/// The board's model badge includes the harness; card line 2 keeps just the
+/// model label so the lead name or role remains visible.
+pub(super) fn harness_model(a: &AgentRow) -> Option<String> {
+    match (a.harness.as_deref(), model_label(a)) {
         (Some(h), Some(m)) => Some(format!("{h}/{m}")),
         (Some(h), None) => Some(h.to_string()),
-        (None, Some(m)) => Some(m.to_string()),
-        (None, None) => None,
+        (None, model) => model,
     }
 }
 

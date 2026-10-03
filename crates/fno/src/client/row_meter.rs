@@ -33,6 +33,17 @@ pub(super) fn ctx_cell(pct: Option<u8>) -> String {
     ctx_meter_text(pct, 3)
 }
 
+/// A four-cell context sparkline whose ramp shifts with the measured load.
+pub(super) fn ctx_sparkline(pct: Option<u8>) -> &'static str {
+    match pct.map(|p| p.min(100)) {
+        None => "????",
+        Some(0..=12) => "▁▁▂▂",
+        Some(13..=32) => "▂▃▄▅",
+        Some(33..=65) => "▃▄▅▆",
+        Some(_) => "▄▅▆▇",
+    }
+}
+
 /// The card's context meter, padded to [`CTX_BAR_W`] so the cost and node
 /// after it line up card to card. The bar itself is [`CTX_BAR_CELLS`] wide.
 pub(super) const CTX_BAR_W: usize = 13;
@@ -51,12 +62,29 @@ pub(super) fn cost_cell(cents: Option<u64>) -> String {
         || "?".into(),
         |c| {
             if c >= 100_000 {
-                format!("${:.1}k", c as f64 / 100_000.0)
+                format!("~${:.1}k", c as f64 / 100_000.0)
+            } else if c % 100 == 0 {
+                format!("~${}", c / 100)
             } else {
-                format!("${}.{:02}", c / 100, c % 100)
+                format!("~${}.{:02}", c / 100, c % 100)
             }
         },
     )
+}
+
+pub(super) fn token_cell(tokens: Option<u64>) -> String {
+    let Some(tokens) = tokens else {
+        return "? tok".into();
+    };
+    let digits = tokens.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    format!("{grouped} tok")
 }
 
 /// The name column's width at a panel text width: the fixed cells and a
@@ -102,15 +130,21 @@ impl View {
 
 #[cfg(test)]
 mod tests {
-    use super::cost_cell;
-    use super::name_w;
+    use super::{cost_cell, ctx_sparkline, name_w, token_cell};
     #[test]
     fn cost_is_dollars_or_unknown() {
-        assert_eq!(cost_cell(Some(42)), "$0.42");
-        assert_eq!(cost_cell(Some(4497)), "$44.97");
-        assert_eq!(cost_cell(Some(120_000)), "$1.2k");
-        assert_eq!(cost_cell(Some(0)), "$0.00");
+        assert_eq!(cost_cell(Some(42)), "~$0.42");
+        assert_eq!(cost_cell(Some(4497)), "~$44.97");
+        assert_eq!(cost_cell(Some(13_400)), "~$134");
+        assert_eq!(cost_cell(Some(120_000)), "~$1.2k");
+        assert_eq!(cost_cell(Some(0)), "~$0");
         assert_eq!(cost_cell(None), "?");
+        assert_eq!(token_cell(Some(12_345)), "12,345 tok");
+        assert_eq!(token_cell(None), "? tok");
+        assert_eq!(ctx_sparkline(Some(10)), "▁▁▂▂");
+        assert_eq!(ctx_sparkline(Some(16)), "▂▃▄▅");
+        assert_eq!(ctx_sparkline(Some(49)), "▃▄▅▆");
+        assert_eq!(ctx_sparkline(None), "????");
     }
 
     // The unit test the plan names: 50, 80, 120, 200 and 320 columns, both
