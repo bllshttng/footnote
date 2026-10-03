@@ -545,6 +545,13 @@ pub(crate) trait TranscriptSource {
     fn activity(&self, _raw: &str) -> Option<crate::session_activity::Activity> {
         None
     }
+
+    /// Whether this source's token counts are one running total (a codex
+    /// token_count row replaces the previous total) instead of a per-pass
+    /// sum a rollup merges additively.
+    fn tokens_cumulative(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn within_window(mtime: u64, days: u64, now: u64) -> bool {
@@ -869,6 +876,10 @@ impl TranscriptSource for CodexSource {
 
     fn activity(&self, raw: &str) -> Option<crate::session_activity::Activity> {
         Some(crate::session_activity::codex_activity(raw))
+    }
+
+    fn tokens_cumulative(&self) -> bool {
+        true
     }
 }
 

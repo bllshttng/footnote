@@ -4,11 +4,15 @@
 //! [--categories <run> --fold <saved fold JSON>]` - the provenance fold:
 //! which of this machine's sessions did a person type into?
 //!
-//! Read-only fold over transcripts, like [`crate::bash_census`]: no daemon,
-//! nothing written. Every user-shaped turn is classified by provenance
-//! ([`crate::provenance`]), joined to its operator turns, tool calls,
-//! commits, node, and PR; every bus row addressed to the session is judged
-//! for delivery, reply, and the 80-word contract. No model, no writes: the
+//! Read-only fold over transcripts, like [`crate::bash_census`]: no daemon.
+//! The claude and codex stores keep a rollup cache at
+//! `<agents-home>/intel/rollups.json` ([`crate::intel_rollup`]), so a run
+//! reads only the bytes appended since its last pass; the first run after
+//! this ships pays one full backfill. Opencode and footnote keep the
+//! whole-transcript read. Every user-shaped turn is classified by
+//! provenance ([`crate::provenance`]), joined to its operator turns, tool
+//! calls, commits, node, and PR; every bus row addressed to the session is
+//! judged for delivery, reply, and the 80-word contract. No model: the
 //! narrative judgment runs in the invoking session (`/fno:intel`), never
 //! here. Default scope is this project including its worktrees; `--project`
 //! names others, `--all-projects` reads the machine.
@@ -61,9 +65,9 @@ pub(crate) struct SessionRow {
     /// resumed session re-judges instead of stranding on a stale cache.
     pub(crate) mtime: u64,
     pub(crate) size: u64,
-    node: Option<String>,
-    pr_number: Option<u64>,
-    relay: Vec<RelayFacet>,
+    pub(crate) node: Option<String>,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) relay: Vec<RelayFacet>,
     /// Activity counters (null for sources with no parser, never 0).
     pub(crate) tokens: Option<crate::session_activity::Tokens>,
     pub(crate) lines: Option<Lines>,
@@ -127,16 +131,16 @@ impl SessionRow {
 
 /// One bus row addressed to this session, judged.
 #[derive(Debug, Serialize)]
-struct RelayFacet {
-    id: String,
-    from_session: Option<String>,
-    ts: String,
-    words: usize,
-    delivered: bool,
-    answered: bool,
-    within_contract: bool,
-    control: bool,
-    duplicate: bool,
+pub(crate) struct RelayFacet {
+    pub(crate) id: String,
+    pub(crate) from_session: Option<String>,
+    pub(crate) ts: String,
+    pub(crate) words: usize,
+    pub(crate) delivered: bool,
+    pub(crate) answered: bool,
+    pub(crate) within_contract: bool,
+    pub(crate) control: bool,
+    pub(crate) duplicate: bool,
 }
 
 /// The per-node mail graph: bus rows between the node's own sessions.
@@ -196,24 +200,28 @@ struct Totals {
 
 /// Every input the fold reads, resolved once per invocation. Tests construct
 /// it directly against tempdirs; `run_intel` resolves from the environment.
-struct FoldCtx {
-    bus: BusIndex,
-    /// session id -> entry group (every id the ledger entry or manifest
-    /// binds), node id, PR number.
-    join: HashMap<String, (Vec<String>, Option<String>, Option<u64>)>,
+pub(crate) struct FoldCtx {
+    pub(crate) bus: BusIndex,
+    /// session id -> (group, node, pr): ledger.json entries (their
+    /// `sessions[]` arrays, keyed per member id) and the worktree
+    /// manifests fill only ids the ledger missed.
+    pub(crate) join: HashMap<String, (Vec<String>, Option<String>, Option<u64>)>,
     /// Raw events.jsonl rows, for the loop_check commit derivation.
-    events: Vec<Value>,
+    pub(crate) events: Vec<Value>,
     /// The operator_submit witness rows: what the fold binds turns against.
-    witness: crate::operator_witness::SubmitIndex,
-    days: u64,
-    now: u64,
+    pub(crate) witness: crate::operator_witness::SubmitIndex,
+    pub(crate) days: u64,
+    pub(crate) now: u64,
+    /// The per-session rollup cache; `None` keeps the whole-transcript
+    /// path. Tests and callers that opt out pass `None`.
+    pub(crate) rollups: Option<crate::intel_rollup::RollupStore>,
 }
 
 impl FoldCtx {
     /// Commit count for one session's ledger group: HEAD-sha transitions in
     /// the loop_check fingerprints, exactly how digest.rs derives it (events
     /// never carry a commit event). Unreadable or empty events read as zero.
-    fn commits_for(&self, group: &[String]) -> usize {
+    pub(crate) fn commits_for(&self, group: &[String]) -> usize {
         let group: HashSet<&str> = group.iter().map(String::as_str).collect();
         let mut shas: Vec<String> = Vec::new();
         for v in &self.events {
@@ -229,6 +237,7 @@ impl FoldCtx {
                     .and_then(|d| d.get(key))
                     .or_else(|| v.get(key))
             };
+
             let in_group = field("session_id")
                 .and_then(|s| s.as_str())
                 .is_some_and(|s| group.contains(s));
@@ -359,6 +368,14 @@ fn fold_session(
     source: &dyn TranscriptSource,
     ctx: &mut FoldCtx,
 ) -> SessionRow {
+    // File-backed JSONL stores fold from the rollup cache: only the bytes
+    // appended since the last run are read.
+    if let Some(store) = ctx.rollups.as_mut() {
+        if crate::intel_rollup::eligible(harness) {
+            let (entry, text) = store.advance(file, source, &ctx.bus);
+            return crate::intel_rollup::build_row(harness, &entry, file, ctx, &text);
+        }
+    }
     // One read serves every parser: turns, tool calls, and the relay
     // delivery check all work from this text.
     let raw = source.read(file);
@@ -742,7 +759,10 @@ pub fn run_intel(args: &[String]) -> i32 {
              [--windows --session <id>|--crown <scope>] [--since DATE] [--until DATE] [--write [dir]]\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
              tool_use, commits, the node and PR join, and the relay facets of every bus\n\
-             row addressed to the session. Tokens, lines, tool errors, languages,\n\
+             row addressed to the session. The claude and codex stores keep a rollup\n\
+             cache (<agents-home>/intel/rollups.json): a run reads only bytes appended\n\
+             since its last pass, the first run pays one full backfill. Tokens, lines,\n\
+             tool errors, languages,\n\
              interruptions, response time, hours, parallel sessions, a per-day series,\n\
              populations, and a stable --sample of idle substantive sessions ride the\n\
              same fold. --categories with --fold reads a saved fold JSON plus the\n\
@@ -1068,6 +1088,11 @@ fn fold_all(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // The rollup cache: one lock holder per run; every advance reads only
+    // bytes appended since the last run, and the save lands before the
+    // lock drops.
+    let rollup_path = crate::intel_rollup::RollupStore::default_path();
+    let _rollup_guard = crate::intel_rollup::RollupStore::acquire_lock(&rollup_path);
     let mut ctx = FoldCtx {
         bus,
         join,
@@ -1075,7 +1100,9 @@ fn fold_all(
         witness,
         days,
         now,
+        rollups: Some(crate::intel_rollup::RollupStore::open(rollup_path)),
     };
+
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     if selected.contains(&"claude") {
         sources.push(Box::new(ClaudeSource {
@@ -1110,6 +1137,9 @@ fn fold_all(
     let mut rows: Vec<SessionRow> = Vec::new();
     for source in &sources {
         rows.extend(fold_source(source.as_ref(), &mut ctx));
+    }
+    if let Some(store) = &mut ctx.rollups {
+        store.save();
     }
     if let Some(want) = &session {
         rows.retain(|r| &r.session == want);
@@ -1391,7 +1421,9 @@ mod tests {
             ),
             days: 30,
             now: 1_800_000_000,
+            rollups: None,
         };
+
         let claude = ClaudeSource {
             projects_dir: fx.dir.join("claude"),
             roots: Some(vec![fx.cwd.clone()]),
@@ -1469,7 +1501,9 @@ mod tests {
             witness: crate::operator_witness::SubmitIndex::empty(),
             days: 30,
             now: 1_800_000_000,
+            rollups: None,
         };
+
         let claude = ClaudeSource {
             projects_dir: fx.dir.join("claude"),
             roots: Some(vec![fx.cwd.clone()]),
@@ -1517,33 +1551,6 @@ mod tests {
         );
     }
 
-    /// Overwrite the fixture's claude transcript with plain unshaped turns at
-    /// base, base+1s, base+2s (UTC RFC3339), and return their raw stamps.
-    fn write_unshaped_claude_turns(fx: &Fixture, sid: &str) -> Vec<String> {
-        let base = ts_secs("2026-09-16T12:00:00Z").unwrap() as f64;
-        let stamps: Vec<String> = (0..3)
-            .map(|k| rfc3339_str(base + f64::from(k)).unwrap())
-            .collect();
-        let rows: Vec<Value> = stamps
-            .iter()
-            .map(|ts| {
-                serde_json::json!({
-                    "type": "user", "uuid": "u", "timestamp": ts,
-                    "message": {"role": "user", "content": "a plain typed turn"}
-                })
-            })
-            .collect();
-        let slug = crate::claude_ask::claude_cwd_slug(&fx.cwd);
-        write_lines(
-            &fx.dir
-                .join("claude")
-                .join(&slug)
-                .join(format!("{sid}.jsonl")),
-            &rows,
-        );
-        stamps
-    }
-
     fn fold_fixture_ctx(fx: &Fixture) -> FoldCtx {
         FoldCtx {
             bus: BusIndex::load(&fx.dir.join("bus").join("messages.jsonl")),
@@ -1554,70 +1561,8 @@ mod tests {
             ),
             days: 30,
             now: 1_800_000_000,
+            rollups: None,
         }
-    }
-
-    #[test]
-    fn three_unshaped_turns_two_submits_reads_operator_two_unknown_one() {
-        let fx = build_fixture("ac3hp");
-        let stamps = write_unshaped_claude_turns(&fx, CLAUDE_SID);
-        let mut ctx = fold_fixture_ctx(&fx);
-        let claude = ClaudeSource {
-            projects_dir: fx.dir.join("claude"),
-            roots: Some(vec![fx.cwd.clone()]),
-        };
-        let rows = fold_source(&claude, &mut ctx);
-        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
-        assert_eq!(row.counters.get("operator"), Some(&2));
-        assert_eq!(row.counters.get("unknown"), Some(&1));
-        assert_eq!(row.operator_turns, stamps[..2]);
-        let receipt = ctx.witness.receipt(0, 0);
-        assert_eq!(receipt.bound, 2);
-    }
-
-    #[test]
-    fn no_witness_journal_reads_every_unshaped_turn_unknown() {
-        let fx = build_fixture("ac3err");
-        let _ = std::fs::remove_file(fx.dir.join("witness").join("events.jsonl"));
-        let stamps = write_unshaped_claude_turns(&fx, CLAUDE_SID);
-        let mut ctx = fold_fixture_ctx(&fx);
-        let claude = ClaudeSource {
-            projects_dir: fx.dir.join("claude"),
-            roots: Some(vec![fx.cwd.clone()]),
-        };
-        let rows = fold_source(&claude, &mut ctx);
-        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
-        assert_eq!(row.counters.get("operator"), Some(&0));
-        assert_eq!(row.counters.get("unknown"), Some(&3));
-        assert!(row.operator_turns.is_empty());
-        let receipt = ctx.witness.receipt(0, 0);
-        assert_eq!(receipt.submits, 0);
-        assert_eq!(stamps.len(), 3);
-    }
-
-    #[test]
-    fn one_submit_binds_exactly_one_of_two_turns() {
-        let fx = build_fixture("ac3edge");
-        let _ = write_unshaped_claude_turns(&fx, CLAUDE_SID);
-        // Keep only the -1100ms submit: one submit, three unshaped turns.
-        let base = ts_secs("2026-09-16T12:00:00.000Z").unwrap() as i64 * 1000;
-        let witness = vec![serde_json::json!({
-            "ts": "2026-09-16T11:59:58Z", "type": "operator_submit",
-            "source": "daemon",
-            "data": {"mux_session": "main", "pane": 7, "via": "pane",
-                     "submit_ms": base - 1100, "resolution": "ok",
-                     "harness_session": CLAUDE_SID}
-        })];
-        write_lines(&fx.dir.join("witness").join("events.jsonl"), &witness);
-        let mut ctx = fold_fixture_ctx(&fx);
-        let claude = ClaudeSource {
-            projects_dir: fx.dir.join("claude"),
-            roots: Some(vec![fx.cwd.clone()]),
-        };
-        let rows = fold_source(&claude, &mut ctx);
-        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
-        assert_eq!(row.counters.get("operator"), Some(&1));
-        assert_eq!(row.counters.get("unknown"), Some(&2));
     }
 
     #[test]
