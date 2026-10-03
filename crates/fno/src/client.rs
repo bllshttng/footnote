@@ -1845,6 +1845,8 @@ use input_folds::{
     fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
 
+mod composer_draft;
+
 use mail_input::peek_input_keys;
 use update_menu::{build_sideline_menu, build_update_modal, UpdateProbe};
 
@@ -2583,7 +2585,10 @@ impl View {
     fn clear_peek(&mut self) {
         self.peek = None;
         self.peek_esc.clear();
-        // The reply input lives inside peek; closing peek drops it too.
+        // The reply input lives inside peek; closing peek drops the memory
+        // copy only. The persisted draft survives an overlay open, so a
+        // modal over the composer cannot take the typed text - the bug this
+        // node closes. Only an Esc or a send deletes the file.
         self.peek_input = None;
         self.peek_input_esc.clear();
     }
@@ -10395,7 +10400,7 @@ async fn peek_keys(
                 // peek_input_keys.
                 match view.display_rows().get(cursor) {
                     Some(DisplayRow::Agent(a)) => {
-                        view.peek_input = Some((a.name.clone(), String::new()));
+                        view.peek_input = Some((a.name.clone(), composer_draft::load(&a.name)));
                         view.peek_input_esc.clear();
                         break;
                     }

@@ -30,7 +30,12 @@ pub(super) async fn peek_input_keys(
         match key {
             SearchKey::Esc => {
                 // Drop half-typed text; peek stays open underneath (AC parity
-                // with rename Esc).
+                // with rename Esc). Esc is the DELIBERATE end: the persisted
+                // draft is deleted with the memory copy, while an overlay
+                // open over the composer (clear_peek) keeps the file.
+                if let Some((name, _)) = view.peek_input.as_ref() {
+                    super::composer_draft::delete(name);
+                }
                 view.peek_input = None;
                 view.peek_input_esc.clear();
                 break;
@@ -49,6 +54,7 @@ pub(super) async fn peek_input_keys(
                             let _ = raw_out(b"\x07");
                         }
                         Some((name, text)) => {
+                            super::composer_draft::delete(&name);
                             view.peek_input = None;
                             view.peek_input_esc.clear();
                             write_msg(
@@ -83,6 +89,12 @@ pub(super) async fn peek_input_keys(
                 }
                 _ => {}
             },
+        }
+        // The buffer changed (pop, clear, or push): persist it so a portal
+        // close or a client death cannot take the typed text. The Esc and
+        // send arms above break before this line, so only real edits land.
+        if let Some((name, buf)) = view.peek_input.as_ref() {
+            super::composer_draft::save(name, buf);
         }
     }
     Ok(StdinFlow::Continue)
