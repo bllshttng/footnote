@@ -114,13 +114,16 @@ async fn messages_reply_board_contracts() {
     // default, quote or wrapped-row regression can misroute a human reply;
     // existing fixture coverage owns projection only, so these assertions extend
     // that owner. It uses the real View/wire and needs no production seam.
-    b.sel_thread = Some("chat-a1".into());
-    b.col = Col::Thread;
-    b.cursors[2] = 0;
-    super::keys(&mut view, b"j", &mut tokio::io::sink())
+    b.col = Col::Partners;
+    b.cursors[1] = 1;
+    super::keys(&mut view, b"\r", &mut tokio::io::sink())
         .await
         .unwrap();
-    assert_eq!(view.messages_board.as_ref().unwrap().cursors[2], 1);
+    assert_eq!(
+        view.messages_board.as_ref().unwrap().cursors[2],
+        1,
+        "opening a long thread shows the newest message"
+    );
     super::keys(&mut view, b"k", &mut tokio::io::sink())
         .await
         .unwrap();

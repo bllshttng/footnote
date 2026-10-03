@@ -23,7 +23,6 @@ enum Mode {
 }
 
 pub(super) struct ReplyState {
-    thread: String,
     message: String,
     sender: Endpoint,
     receiver: Endpoint,
@@ -94,14 +93,8 @@ pub(super) fn open(view: &mut View, row: Value) {
         session: receiver_key,
     };
     let message = text(&row, "id").to_string();
-    let thread = if text(&row, "thread").is_empty() {
-        board.sel_thread.clone().unwrap_or_default()
-    } else {
-        text(&row, "thread").to_string()
-    };
     if let Some(board) = view.messages_board.as_mut() {
         board.reply = Some(ReplyState {
-            thread,
             message,
             summary: text(&row, "summary").to_string(),
             mode: Mode::Choose(choice_popup(&receiver.name, &sender.name)),
@@ -241,18 +234,15 @@ pub(super) async fn keys(
                         write_msg(sock, &ClientMsg::Input(input))
                             .await
                             .map_err(|e| format!("reply input failed: {e}"))?;
-                        let (to, sid, msg, thread, sent) = (
+                        let (to, sid, msg, sent) = (
                             target.name.clone(),
                             target.session.clone(),
                             state.message.clone(),
-                            state.thread.clone(),
                             body.clone(),
                         );
                         let notice_tx = view.reply_notice_tx.clone();
                         tokio::spawn(async move {
-                            if let Err(reason) =
-                                journal_reply(&to, &sid, &msg, &thread, &sent).await
-                            {
+                            if let Err(reason) = journal_reply(&to, &sid, &msg, &sent).await {
                                 if let Some(tx) = notice_tx {
                                     let _ = tx.send(format!("reply journal failed: {reason}"));
                                 }
@@ -287,13 +277,7 @@ pub(super) async fn keys(
     Ok(StdinFlow::Continue)
 }
 
-async fn journal_reply(
-    to: &str,
-    sid: &str,
-    msg: &str,
-    thread: &str,
-    body: &str,
-) -> Result<(), String> {
+async fn journal_reply(to: &str, sid: &str, msg: &str, body: &str) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new("fno-agents")
         .args([
@@ -305,8 +289,6 @@ async fn journal_reply(
             sid,
             "--in-reply-to",
             msg,
-            "--thread",
-            thread,
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())

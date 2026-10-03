@@ -382,7 +382,7 @@ pub fn run_mail_threads(args: &[String]) -> i32 {
         "details" => run_details(&args[1..]),
         "journal-reply" => run_journal_reply(&args[1..]),
         _ => {
-            eprintln!("usage: fno-agents mail-threads [--format json | details --session <id> | journal-reply --to <name> --to-session <id> --in-reply-to <msg-id> --thread <thread-id>]");
+            eprintln!("usage: fno-agents mail-threads [--format json | details --session <id> | journal-reply --to <name> --to-session <id> --in-reply-to <msg-id>]");
             2
         }
     }
@@ -395,13 +395,10 @@ fn run_journal_reply(args: &[String]) -> i32 {
             .and_then(|index| args.get(index + 1))
             .map(String::as_str)
     };
-    let (Some(to), Some(to_session), Some(parent), Some(thread)) = (
-        value("--to"),
-        value("--to-session"),
-        value("--in-reply-to"),
-        value("--thread"),
-    ) else {
-        eprintln!("mail-threads journal-reply: --to, --to-session, --in-reply-to and --thread are required");
+    let (Some(to), Some(to_session), Some(parent)) =
+        (value("--to"), value("--to-session"), value("--in-reply-to"))
+    else {
+        eprintln!("mail-threads journal-reply: --to, --to-session and --in-reply-to are required");
         return 2;
     };
     let mut body = String::new();
@@ -410,7 +407,7 @@ fn run_journal_reply(args: &[String]) -> i32 {
         return 1;
     }
     let bus = journal_bus_path();
-    match journal_reply_at(&bus, to, to_session, parent, thread, &body) {
+    match journal_reply_at(&bus, to, to_session, parent, &body) {
         Ok(id) => {
             println!("{id}");
             0
@@ -433,14 +430,14 @@ fn journal_reply_at(
     to: &str,
     to_session: &str,
     parent: &str,
-    thread: &str,
     body: &str,
 ) -> Result<String, String> {
-    let parent_row = crate::announce::read_bus_segments(bus)
-        .into_iter()
-        .find(|row| row.get("id").and_then(Value::as_str) == Some(parent))
-        .ok_or_else(|| format!("parent message {parent:?} is not on the bus"))?;
-    let chat = find_chat_for_message(&crate::chats::chats_dir(), parent)?;
+    let (chat, parent_row) = find_chat_for_message(&crate::chats::chats_dir(), parent)?;
+    let thread = parent_row
+        .get("thread")
+        .and_then(Value::as_str)
+        .filter(|thread| !thread.is_empty())
+        .unwrap_or(parent);
     let id = crate::announce::new_msg_id();
     let reply = json!({
         "v": 1,
@@ -449,12 +446,11 @@ fn journal_reply_at(
         "thread": thread,
         "from": "user",
         "to": to,
-        "to_session": to_session,
         "kind": "send",
         "to_kind": "session",
         "delivery": "typed",
         "in_reply_to": parent,
-        "meta": {"lane": "mux-reply"},
+        "meta": {"lane": "mux-reply", "to_session": to_session},
         "word_count": body.split_whitespace().count(),
         "body": body,
     });
@@ -468,7 +464,7 @@ fn journal_reply_at(
     Ok(id)
 }
 
-fn find_chat_for_message(chats: &Path, id: &str) -> Result<std::path::PathBuf, String> {
+fn find_chat_for_message(chats: &Path, id: &str) -> Result<(std::path::PathBuf, Value), String> {
     let entries = std::fs::read_dir(chats)
         .map_err(|error| format!("read chats {}: {error}", chats.display()))?;
     for entry in entries.flatten() {
@@ -477,14 +473,13 @@ fn find_chat_for_message(chats: &Path, id: &str) -> Result<std::path::PathBuf, S
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
-        if text.lines().any(|line| {
-            serde_json::from_str::<Value>(line)
-                .ok()
-                .and_then(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
-                .as_deref()
-                == Some(id)
-        }) {
-            return Ok(path);
+        for line in text.lines() {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if row.get("id").and_then(Value::as_str) == Some(id) {
+                return Ok((path, row));
+            }
         }
     }
     Err(format!("parent message {id:?} has no chat projection"))
@@ -839,30 +834,31 @@ mod tests {
             custom_bus.join("messages.jsonl"),
             "journal replies follow the configured live bus"
         );
-        let bus = state_root.join("bus").join("messages.jsonl");
+        let bus = custom_bus.join("messages.jsonl");
+        // The chat projection can outlive rotated bus segments; a reply keeps
+        // the parent's original thread and uses the canonical meta address.
         let parent = json!({
             "v": 1, "id": "fmail-aaaaaaaaaaaa", "ts": "2026-10-02T11:00:00Z",
-            "thread": "fmail-aaaaaaaaaaaa", "from": "s-sender", "to": "receiver",
+            "type": "message", "chat_id": "chat-aaaaaaaaaaaaaaaa",
+            "thread": "fmail-root-thread", "from": "s-sender", "to": "receiver",
             "kind": "send", "body": "parent message",
         });
-        crate::announce::append_line(&bus, &parent).unwrap();
-        let before = std::fs::read_to_string(&bus).unwrap();
+        let chats = crate::chats::chats_dir();
+        write_chat(&chats, "chat-aaaaaaaaaaaaaaaa", &[parent.clone()]);
         assert!(journal_reply_at(
             &bus,
             "receiver",
             "s-receiver",
             "fmail-ffffffffffff",
-            "fmail-aaaaaaaaaaaa",
             "re: cannot append",
         )
         .is_err());
-        assert_eq!(std::fs::read_to_string(&bus).unwrap(), before);
+        assert!(!bus.exists(), "unknown parent leaves the bus unchanged");
 
         let id = journal_reply_at(
             &bus,
             "receiver",
             "s-receiver",
-            "fmail-aaaaaaaaaaaa",
             "fmail-aaaaaaaaaaaa",
             "re: user reply",
         )
@@ -874,11 +870,12 @@ mod tests {
             .unwrap();
         assert_eq!(reply["from"], "user");
         assert_eq!(reply["to"], "receiver");
-        assert_eq!(reply["to_session"], "s-receiver");
+        assert_eq!(reply["meta"]["to_session"], "s-receiver");
         assert_eq!(reply["kind"], "send");
         assert_eq!(reply["to_kind"], "session");
         assert_eq!(reply["delivery"], "typed");
         assert_eq!(reply["in_reply_to"], "fmail-aaaaaaaaaaaa");
+        assert_eq!(reply["thread"], "fmail-root-thread");
         assert_eq!(reply["meta"]["lane"], "mux-reply");
         assert_eq!(reply["word_count"], 3);
         assert_eq!(reply["body"], "re: user reply");

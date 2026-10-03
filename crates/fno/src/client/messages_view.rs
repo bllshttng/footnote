@@ -824,7 +824,7 @@ async fn act(
             match row {
                 TreeRow::Channel(scope) => {
                     b.sel_thread = Some(format!("channel:{scope}"));
-                    b.cursors[2] = 0;
+                    b.cursors[2] = b.conversation_rows().len().saturating_sub(1);
                     b.col = Col::Thread;
                 }
                 TreeRow::Lead { key, scope, .. } => {
@@ -868,13 +868,13 @@ async fn act(
             match row {
                 PartnerRow::System { .. } => {
                     b.sel_thread = Some(format!("system:{agent}"));
-                    b.cursors[2] = 0;
+                    b.cursors[2] = b.conversation_rows().len().saturating_sub(1);
                     b.col = Col::Thread;
                 }
                 PartnerRow::Thread { chat_id, ts, .. } => {
                     crate::view_store::save_messages_read_mark(chat_id, ts);
                     b.sel_thread = Some(chat_id.clone());
-                    b.cursors[2] = 0;
+                    b.cursors[2] = b.conversation_rows().len().saturating_sub(1);
                     b.col = Col::Thread;
                 }
             }
