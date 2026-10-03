@@ -10521,11 +10521,22 @@ fn wheel_rows() {
         v.bottom_row_is_chrome(),
         "status bar occupies the bottom row"
     );
-    // (x-cd67 US1) The sideline owns row 0: subtract only the chrome bottom
-    // row, then the always-visible court block's reservation (x-aeab).
+    // (x-cd67 US1) The bottom chrome row is not a scroll slot: turning the
+    // status bar on costs exactly one visible row (the strip row and the
+    // court block's reservation are counted by their own pins).
+    let without = {
+        v.status_on = false;
+        let n = v.sideline_visible_rows();
+        v.status_on = true;
+        n
+    };
+    assert!(
+        v.bottom_row_is_chrome(),
+        "status bar occupies the bottom row"
+    );
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize - 1 - v.court_block_rows(),
+        without - 1,
         "chrome bottom row is not a scroll slot"
     );
     v.status_on = false;
@@ -10535,7 +10546,7 @@ fn wheel_rows() {
     );
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize - v.court_block_rows(),
+        without,
         "with no chrome the full height minus the block is usable"
     );
 }

@@ -848,7 +848,7 @@ fn composed_bands_hold_contrast_on_dark_and_light_frames() {
         chosen_cells.push(frame.cells[row * cols + text_w - 1]);
     }
     for display_i in [king_i, king_detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         hover_cells.push(frame.cells[row * cols]);
         hover_cells.push(frame.cells[row * cols + text_w - 1]);
     }
