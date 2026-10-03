@@ -229,6 +229,50 @@ fn follow_up_recipe(node: &str) -> String {
     format!("fno do target start \"{node} <follow-up scope, one sentence>\"")
 }
 
+fn remaining_delivery(source: &Value, expected: i64, merged: i64, state: &str) -> Option<Receipt> {
+    if !is_delivered(source)
+        || state != "MERGED"
+        || expected < 2
+        || merged < 1
+        || merged >= expected
+    {
+        return None;
+    }
+    let id = id_of(source);
+    let mut r = receipt("continue", "remaining_deliveries", Some(&id));
+    r.pr = source.get("pr_number").and_then(Value::as_i64);
+    r.message = format!(
+        "target binding: CONTINUE: node {id} has {merged} confirmed merged ships of \
+         {expected} promised. Bind the remaining delivery to this node and preserve its plan."
+    );
+    Some(r)
+}
+
+fn continuation(source: &Value, cwd: &Path) -> Option<Receipt> {
+    let plan = str_field(source, "plan_path")?;
+    let path = cwd.join(plan.split('#').next()?);
+    let text = std::fs::read_to_string(path).ok()?;
+    let frontmatter = crate::plan_doc::codec::parse_frontmatter(&text).ok()?;
+    let expected = match frontmatter.fields.get("expected_url_count")? {
+        crate::plan_doc::codec::Value::Scalar(s) => s.trim().parse::<i64>().ok()?,
+        _ => return None,
+    };
+    if expected < 2 {
+        return None;
+    }
+    let pr = source.get("pr_number").and_then(Value::as_i64)?;
+    let fact = read_pr(cwd, pr, str_field(source, "pr_url"))?;
+    if fact.state != "MERGED" {
+        return None;
+    }
+    let refs = super::merge_evidence::node_pr_refs(source);
+    let (merged, failure) = super::promise::count_merged_refs(&refs, expected, cwd.to_str());
+    if failure.is_some() {
+        return None;
+    }
+    remaining_delivery(source, expected, merged, &fact.state)
+}
+
 pub fn prepare(req: &Request, cwd: &Path) -> Receipt {
     let rows = match crate::graph_store::read_rows_strict(&super::settings::graph_path()) {
         Ok(rows) => rows,
@@ -255,6 +299,9 @@ pub fn prepare(req: &Request, cwd: &Path) -> Receipt {
     let id = id_of(source);
     if !is_delivered(source) {
         return receipt("continue", "not_delivered", Some(&id));
+    }
+    if let Some(r) = continuation(source, cwd) {
+        return r;
     }
     let pr = source.get("pr_number").and_then(Value::as_i64);
     let pr_label = pr.map(|n| format!(" #{n}")).unwrap_or_default();
@@ -630,6 +677,24 @@ mod tests {
         assert!(!adoption_proven(Some(&merged), Some("feature/a")));
         assert!(!adoption_proven(None, Some("feature/a")));
         assert!(!adoption_proven(Some(&open), None));
+
+        // A merged ship leaves the same node bindable until its promise is met.
+        let continuing = row("x-aaaa", json!({"pr_number": 8}));
+        let r = remaining_delivery(&continuing, 9, 8, "MERGED").unwrap();
+        assert_eq!(r.verdict, "continue");
+        assert_eq!(r.effective_node.as_deref(), Some("x-aaaa"));
+        assert!(remaining_delivery(&continuing, 9, 9, "MERGED").is_none());
+        assert!(remaining_delivery(&continuing, 9, 10, "MERGED").is_none());
+        assert!(remaining_delivery(&continuing, 9, 8, "OPEN").is_none());
+        assert!(remaining_delivery(&continuing, 9, 0, "MERGED").is_none());
+        assert!(remaining_delivery(&continuing, 1, 1, "MERGED").is_none());
+        assert!(remaining_delivery(
+            &row("x-aaaa", json!({"pr_number": 8, "completed_at": "t"})),
+            9,
+            8,
+            "MERGED"
+        )
+        .is_none());
 
         // Retry dedupe: same parent, source and normalized scope; a set-aside
         // child or a different scope stays distinct.

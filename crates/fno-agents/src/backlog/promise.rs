@@ -377,7 +377,7 @@ fn promise_refusal_c(node_id: &str, plan_display: &str, expected: i64, merged: i
 /// the ceiling: once enough ships are confirmed, the remaining refs cannot
 /// change the verdict. An unreachable ref is reported separately from a
 /// genuinely unmerged one.
-fn count_merged_refs(
+pub(crate) fn count_merged_refs(
     refs: &[(i64, Option<String>)],
     ceiling: i64,
     cwd: Option<&str>,
