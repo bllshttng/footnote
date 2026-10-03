@@ -116,12 +116,12 @@ pub(crate) struct RollupStore {
 }
 
 impl RollupStore {
-    /// The production cache path: beside the fleet cursor cache.
-    pub(crate) fn default_path() -> PathBuf {
-        crate::paths::AgentsHome::from_env()
-            .root()
-            .join("intel")
-            .join("rollups.json")
+    /// The production cache path: beside the fleet cursor cache. `None`
+    /// when no agents home is declared (tests run the fold with no
+    /// rollup cache at all).
+    pub(crate) fn default_path() -> Option<PathBuf> {
+        crate::paths::AgentsHome::from_env_opt()
+            .map(|home| home.root().join("intel").join("rollups.json"))
     }
 
     pub(crate) fn acquire_lock(path: &Path) -> FileLock {

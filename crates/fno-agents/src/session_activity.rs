@@ -502,10 +502,11 @@ mod tests {
                     "content": [edit("x.rs"), multiedit, write, fragment]}})],
         );
         let act = claude_activity(&raw);
-        assert_eq!(act.lines_added, 6);
+        // The fragment's body line still counts as a line; it never
+        // counts as a language.
+        assert_eq!(act.lines_added, 7);
         assert_eq!(act.lines_removed, 3);
         assert_eq!(act.extensions.get("rs"), Some(&3));
-        // A junk-suffixed path is not an extension key.
         assert!(act.extensions.get("rs (x)").is_none());
         assert_eq!(act.extensions.len(), 1);
     }

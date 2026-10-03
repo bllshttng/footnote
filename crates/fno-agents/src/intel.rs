@@ -1090,9 +1090,11 @@ fn fold_all(
         .unwrap_or(0);
     // The rollup cache: one lock holder per run; every advance reads only
     // bytes appended since the last run, and the save lands before the
-    // lock drops.
+    // lock drops. No agents home, no cache (the fold then reads whole).
     let rollup_path = crate::intel_rollup::RollupStore::default_path();
-    let _rollup_guard = crate::intel_rollup::RollupStore::acquire_lock(&rollup_path);
+    let _rollup_guard = rollup_path
+        .as_deref()
+        .map(crate::intel_rollup::RollupStore::acquire_lock);
     let mut ctx = FoldCtx {
         bus,
         join,
@@ -1100,7 +1102,7 @@ fn fold_all(
         witness,
         days,
         now,
-        rollups: Some(crate::intel_rollup::RollupStore::open(rollup_path)),
+        rollups: rollup_path.map(crate::intel_rollup::RollupStore::open),
     };
 
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
