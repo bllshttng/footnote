@@ -19,13 +19,14 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
+use crate::adopt_identity::{AdoptError, AdoptSource};
 pub(crate) use crate::agents_event::append_agents_event;
 use crate::claude_ask::{liveness_probe, ClaudeHome};
 use crate::claude_resume::claude_resume_argv;
 use crate::lifecycle_child::heal_token;
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
-use crate::manifest_lookup::{find_manifest_for_session, ManifestIdentity};
+use crate::manifest_lookup::ManifestIdentity;
 use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments};
 use crate::paths::AgentsHome;
 use crate::resume_route::ResumeRoute;
@@ -1266,7 +1267,7 @@ pub(crate) fn resolve_entry_with_heal_scoped(
 /// Collision-safe 8-char handle from a session id (the final-eight convention),
 /// falling back to the whole trimmed id when shorter. The row's `short_id`, so
 /// `peek`/`ask`/`resume` resolve the adopted orphan.
-fn derived_short_id(session_id: &str) -> String {
+pub(crate) fn derived_short_id(session_id: &str) -> String {
     crate::identity::canonical_handle(session_id.trim())
 }
 
@@ -1276,7 +1277,10 @@ fn derived_short_id(session_id: &str) -> String {
 /// also records the full uuid for its dead-arm `claude --resume`. `status: Idle`,
 /// no pid, default `exec` host_mode: a registered-but-not-driven row the GC
 /// keeps (non-terminal, no confirmed-dead pid -> `gc_action` Keep).
-fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
+pub(crate) fn mint_synthesized_entry(
+    id: &ManifestIdentity,
+    now: &str,
+) -> crate::state::RegistryEntry {
     use crate::state::{Lineage, RegistryEntry};
     let harness = if !id.harness.is_empty() {
         id.harness.clone()
@@ -1417,99 +1421,6 @@ pub(crate) fn upsert_synthesized_row(
             None => reg.entries.push(entry),
         }
     })
-}
-
-/// Where an adoption's evidence came from (the receipt line).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AdoptSource {
-    Registry,
-    Manifest,
-    HarnessStore,
-}
-
-impl AdoptSource {
-    fn label(self) -> &'static str {
-        match self {
-            AdoptSource::Registry => "registry",
-            AdoptSource::Manifest => "target manifest",
-            AdoptSource::HarnessStore => "harness store",
-        }
-    }
-}
-
-/// Why an adoption did not complete.
-#[derive(Debug)]
-enum AdoptError {
-    /// No evidence in any source.
-    NoEvidence,
-    /// A registry read/write or harness-store consultation failed.
-    Io(String),
-}
-
-fn persist_manifest_identity(
-    id: &ManifestIdentity,
-    home: &AgentsHome,
-) -> Result<Value, AdoptError> {
-    let mut entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
-    entry.last_message_at = crate::claude_adopt::transcript_stamp(id.canonical_session_id());
-    // same missing-model closure as the roster adopt - the claude
-    // transcript states the model; the provider comes only from the
-    // route-settings match and otherwise records None.
-    if let Some(model) = crate::claude_adopt::transcript_model(id.canonical_session_id()) {
-        entry.provider = crate::claude_adopt::provider_from_route_settings(Some(&model));
-        entry.model = Some(model);
-        entry.model_basis = Some("verified".to_string());
-    }
-    upsert_synthesized_row(&home.registry_json(), entry.clone())
-        .map_err(|error| AdoptError::Io(error.to_string()))?;
-    serde_json::to_value(&entry).map_err(|error| AdoptError::Io(error.to_string()))
-}
-
-/// Resolve `session_id` to one registry row, minting one if needed, through the
-/// plan precedence: an existing registry row; a `.fno/target-state.md` whose
-/// session id matches; then the harness session stores (the heal-token shellout,
-/// which adopts best-effort). Identity only. Returns the row (as JSON), any
-/// `fno_id` carried, and the source.
-fn synthesize_and_adopt(
-    session_id: &str,
-    home: &AgentsHome,
-    cross_project: bool,
-) -> Result<(Value, Option<String>, AdoptSource), AdoptError> {
-    let registry_path = home.registry_json();
-    let entries = read_registry_entries(&registry_path).map_err(AdoptError::Io)?;
-    // 1. Already registered (name / full id / short resolution, no store heal yet).
-    if let Ok(e) = find_agent_entry(&entries, session_id) {
-        let fno_id = e
-            .get("fno_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        return Ok((e.clone(), fno_id, AdoptSource::Registry));
-    }
-    // 2. Target manifest.
-    if let Ok(Some(id)) = find_manifest_for_session(session_id) {
-        // The manifest run id is not the row's id: the registry write mints
-        // the row its own, so no fno_id evidence rides the receipt.
-        let value = persist_manifest_identity(&id, home)?;
-        return Ok((value, None, AdoptSource::Manifest));
-    }
-    // 3. Harness session stores (heal-token adopts best-effort and writes the row).
-    match heal_token(session_id, &registry_path, cross_project, None) {
-        Ok(Some(row)) => Ok((row, None, AdoptSource::HarnessStore)),
-        Ok(None) => Err(AdoptError::NoEvidence),
-        Err(msg) => Err(AdoptError::Io(msg)),
-    }
-}
-
-/// Manifest-only adoption used as the `resume` fallback: `resolve_entry_with_heal`
-/// already consulted the registry + harness stores, so this is just the manifest
-/// path. Returns the minted row (already upserted), `None` when no manifest
-/// matches, or the actual registry/serialization failure.
-fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Value>, AdoptError> {
-    let Ok(Some(id)) = find_manifest_for_session(session_id) else {
-        return Ok(None);
-    };
-    persist_manifest_identity(&id, home).map(Some)
 }
 
 /// The shared liveness reader's answer. One stable vocabulary for
@@ -1864,7 +1775,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             // `fno agents resume <session-id>` revives a /target orphan. A plain
             // name keeps today's refusal (AC7-HP: byte-identical for name args).
             let adopted = if is_session_shaped(&name) {
-                adopt_from_manifest(&name, home)
+                crate::adopt_identity::adopt_from_manifest(&name, home)
             } else {
                 Ok(None)
             };
@@ -1874,7 +1785,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                 // `Err(Io)` -- `NoEvidence` is `synthesize_and_adopt`'s
                 // variant, unreachable through this call, kept here only for
                 // exhaustiveness over `AdoptError`.
-                Ok(None) | Err(AdoptError::NoEvidence) => {
+                Ok(None) | Err(crate::adopt_identity::AdoptError::NoEvidence) => {
                     // A retired session keeps its resume tokens even though
                     // its registry row is gone: consult the receipts store
                     // before refusing.
@@ -1892,7 +1803,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                     );
                     return 13;
                 }
-                Err(AdoptError::Io(message)) => {
+                Err(crate::adopt_identity::AdoptError::Io(message)) => {
                     eprintln!("fno agents resume: manifest adoption failed: {message}");
                     return 13;
                 }
@@ -2558,7 +2469,7 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
 
-    match synthesize_and_adopt(&session_id, home, cross_project) {
+    match crate::adopt_identity::synthesize_and_adopt(&session_id, home, cross_project) {
         Ok((row, fno_id, source)) => {
             let name = row.get("name").and_then(Value::as_str).unwrap_or("");
             let short = row.get("short_id").and_then(Value::as_str).unwrap_or("");
@@ -3531,7 +3442,7 @@ mod tests {
         })
         .unwrap();
 
-        let result = persist_manifest_identity(
+        let result = crate::adopt_identity::persist_manifest_identity(
             &ManifestIdentity {
                 harness: "codex".into(),
                 harness_session_id: "01a0152f-45fd-78f0-b109-78f8dffdeeca".into(),
@@ -4577,7 +4488,8 @@ mod tests {
         upsert_synthesized_row(&home.registry_json(), seeded).unwrap();
         upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t2")).unwrap();
         let (row, fno_id, source) =
-            synthesize_and_adopt("thread-seed-1234", &home, false).expect("seeded row resolves");
+            crate::adopt_identity::synthesize_and_adopt("thread-seed-1234", &home, false)
+                .expect("seeded row resolves");
         assert_eq!(source, AdoptSource::Registry);
         assert_eq!(
             row.get("harness_session_id").and_then(Value::as_str),
@@ -4609,7 +4521,11 @@ mod tests {
         let home = AgentsHome::from_env();
         // A full session id absent from the registry, from every worktree manifest
         // (cwd is a bare tempdir), and from the harness stores. No row is written.
-        let res = synthesize_and_adopt("deadbeef-1111-2222-3333-444455556666", &home, false);
+        let res = crate::adopt_identity::synthesize_and_adopt(
+            "deadbeef-1111-2222-3333-444455556666",
+            &home,
+            false,
+        );
         assert!(
             matches!(res, Err(AdoptError::NoEvidence) | Err(AdoptError::Io(_))),
             "miss must refuse, not mint; got {res:?}"

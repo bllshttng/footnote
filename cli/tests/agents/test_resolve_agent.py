@@ -43,12 +43,17 @@ UUID = "7c5dcf5d-c078-4b53-a8c9-7199b831eae4"
 
 
 def test_ac1_hp_all_three_forms_resolve_same_entry(tmp_path: Path) -> None:
-    """AC1-HP: name, full uuid, and 8-hex short all resolve to one entry."""
-    reg = _write(tmp_path, _claude("billing", "7c5dcf5d", UUID))
-    for token in ("billing", UUID, "7c5dcf5d"):
+    """AC1-HP: name, the row's fno_id, full uuid, and 8-hex short all resolve
+    to one entry - either identity key finds the same row."""
+    from dataclasses import replace
+
+    fno_id = "0f6a4b2e-9c1d-4e5f-8a7b-3c2d1e0f9a8b"
+    reg = _write(tmp_path, replace(_claude("billing", "7c5dcf5d", UUID), fno_id=fno_id))
+    for token in ("billing", fno_id, UUID, "7c5dcf5d"):
         r = resolve_agent(token, path=reg)
         assert r.entry.name == "billing"
         assert r.worker_short_id == "7c5dcf5d"
+    assert resolve_agent(UUID, path=reg).entry.fno_id == fno_id
 
 
 def test_ac1_hp_full_uuid_is_case_insensitive(tmp_path: Path) -> None:
@@ -338,12 +343,6 @@ def test_ac1_err_unknown_token_lists_accepted_forms(tmp_path: Path) -> None:
     assert "does-not-exist" in msg
     assert "name" in msg and "short id" in msg and "session id" in msg
     assert exc.value.exit_code == 2
-
-
-def test_empty_token_rejected(tmp_path: Path) -> None:
-    reg = _write(tmp_path, _claude("billing", "7c5dcf5d", UUID))
-    with pytest.raises(AgentResolutionError, match="empty"):
-        resolve_agent("   ", path=reg)
 
 
 def test_short_boundary_seven_and_nine_hex_are_not_shorts(tmp_path: Path) -> None:

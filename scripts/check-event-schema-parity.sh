@@ -410,6 +410,11 @@ dual_owner_kinds = {
     # run (the retro sweep and the merge-close paths).
     "session_satisfied",
     "human_touch",
+    # agent_revived: the Rust adopt path's journal_agent_revived is the only
+    # writer (the adopt that restores a reap receipt's identity); the Python
+    # side carries it in schema.yaml for the validator and `doctor event
+    # find`, the way pr_watch_unparked above does.
+    "agent_revived",
 }
 collisions -= dual_owner_kinds
 if collisions:

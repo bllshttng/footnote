@@ -49,6 +49,7 @@ pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
 pub(crate) mod adopt_carry;
+pub(crate) mod adopt_identity;
 mod agent_lock;
 pub mod agents_config;
 pub(crate) mod agents_event;
@@ -357,6 +358,7 @@ pub mod resume_wake;
 pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod revival_check;
 pub mod revive_proof;
 pub mod rm_receipt;
 pub mod rm_tombstone;
@@ -383,6 +385,7 @@ pub(crate) mod served_liveness;
 pub mod session_activity;
 pub mod session_backfill;
 pub mod session_cost;
+pub mod session_join;
 pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
@@ -1419,6 +1422,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // A launch the spawn gate or the dispatch door refused before any
     // worker existed; the feed projects it so a refused launch shows.
     "agent_spawn_refused",
+    // A reaped session came back (client-emitted): one event per revive
+    // naming the verb, the actor session, the prior name and the session id.
+    "agent_revived",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
