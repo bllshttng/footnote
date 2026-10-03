@@ -867,12 +867,16 @@ pub(crate) fn stamp_suggestions(
                 .ok_or_else(|| format!("{label}: event {ev} is not in the fold's events block"))?;
             event_counts.insert(ev.clone(), json!(count));
         }
+        // Events carry no project or session selector: whatever the fold's
+        // scope, the counts are machine-global, so the stamp names it.
+        let events_scope = doc["events_scope"].as_str().unwrap_or("machine-global");
         out.push(json!({
             "friction": s.friction,
             "cause": s.cause,
             "example_sessions": s.example_sessions,
             "evidence": s.evidence,
             "events": event_counts,
+            "events_scope": events_scope,
             "fix": {"kind": s.fix.kind, "target": s.fix.target, "text": s.fix.text},
             "node": s.node,
             "node_state": node_state,
@@ -883,31 +887,54 @@ pub(crate) fn stamp_suggestions(
     Ok(out)
 }
 
+/// Whether the prior report describes the same population as the current
+/// document: same window, scope, sample request, and question. A changed
+/// period, project set, sample size, or question makes the raw counts
+/// incomparable, and every verdict would lie.
+pub(crate) fn populations_comparable(prior: &Value, doc: &Value) -> bool {
+    prior["days"].as_u64() == doc["days"].as_u64()
+        && prior["scope"] == doc["scope"]
+        && prior["sample"]["requested"] == doc["sample"]["requested"]
+        && prior["categories"]["question_key"] == doc["categories"]["question_key"]
+}
+
 /// The next run's verdicts over the prior report's stamped suggestions:
 /// per suggestion, the prior baseline against the current value of the
-/// same metric. Counts read lower is better.
+/// same metric. Counts read lower is better. An incompatible prior
+/// population (scope, period, sample, or question changed) reads
+/// unmeasured, never moved.
 pub(crate) fn scorecard(prior: &Value, doc: &Value) -> Vec<Value> {
     let Some(sugs) = prior.get("suggestions").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
+    let comparable = populations_comparable(prior, doc);
     sugs.iter()
         .map(|s| {
             let metric = s["metric"].as_str().unwrap_or("");
-            let current = resolve_metric(metric, doc);
+            let current = if comparable {
+                resolve_metric(metric, doc)
+            } else {
+                None
+            };
             let verdict = match (s["baseline"].as_u64(), current) {
                 (Some(p), Some(c)) if c < p => "moved",
                 (Some(p), Some(c)) if c > p => "worse",
                 (Some(_), Some(_)) => "unchanged",
                 _ => "unmeasured",
             };
-            json!({
+            let mut row = json!({
                 "friction": s["friction"],
                 "node": s["node"],
                 "metric": s["metric"],
                 "prior": s["baseline"],
                 "current": current,
                 "verdict": verdict,
-            })
+            });
+            if !comparable {
+                row["reason"] =
+                    json!("prior report population differs (scope, period, sample, or question)");
+            }
+            row
         })
         .collect()
 }
@@ -1450,6 +1477,7 @@ mod tests {
         assert_eq!(stamped[0]["metric"], "friction:tool_failure");
         assert_eq!(stamped[0]["example_sessions"][0], "s1");
         assert_eq!(stamped[0]["events"]["hook_blocked"], 12);
+        assert_eq!(stamped[0]["events_scope"], "machine-global");
 
         // No example named at all.
         let run: Run = serde_json::from_str(
@@ -1470,8 +1498,14 @@ mod tests {
 
         // Example session not judged.
         let run: Run = serde_json::from_str(
-            &build(suggestion("tool_failure", "ghost", "law", "x-open1", "friction:tool_failure"))
-                .to_string(),
+            &build(suggestion(
+                "tool_failure",
+                "ghost",
+                "law",
+                "x-open1",
+                "friction:tool_failure",
+            ))
+            .to_string(),
         )
         .unwrap();
         let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
@@ -1486,8 +1520,14 @@ mod tests {
         let facets_wrong: HashMap<String, Facet> =
             [("s1".to_string(), wrong)].into_iter().collect();
         let run: Run = serde_json::from_str(
-            &build(suggestion("tool_failure", "s1", "law", "x-open1", "friction:tool_failure"))
-                .to_string(),
+            &build(suggestion(
+                "tool_failure",
+                "s1",
+                "law",
+                "x-open1",
+                "friction:tool_failure",
+            ))
+            .to_string(),
         )
         .unwrap();
         let err = stamp_suggestions(&run, &facets_wrong, &statuses, &None, &doc).unwrap_err();
@@ -1498,8 +1538,14 @@ mod tests {
 
         // Unfiled node.
         let run: Run = serde_json::from_str(
-            &build(suggestion("tool_failure", "s1", "hook", "x-none", "friction:tool_failure"))
-                .to_string(),
+            &build(suggestion(
+                "tool_failure",
+                "s1",
+                "hook",
+                "x-none",
+                "friction:tool_failure",
+            ))
+            .to_string(),
         )
         .unwrap();
         let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
@@ -1511,8 +1557,14 @@ mod tests {
             ("x-gone", "is superseded, not open"),
         ] {
             let run: Run = serde_json::from_str(
-                &build(suggestion("tool_failure", "s1", "config", node, "unanswered"))
-                    .to_string(),
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "config",
+                    node,
+                    "unanswered",
+                ))
+                .to_string(),
             )
             .unwrap();
             let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
@@ -1521,7 +1573,14 @@ mod tests {
 
         // Unknown fix kind.
         let run: Run = serde_json::from_str(
-            &build(suggestion("tool_failure", "s1", "vibe", "x-open1", "unanswered")).to_string(),
+            &build(suggestion(
+                "tool_failure",
+                "s1",
+                "vibe",
+                "x-open1",
+                "unanswered",
+            ))
+            .to_string(),
         )
         .unwrap();
         let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
@@ -1529,12 +1588,21 @@ mod tests {
 
         // Unresolvable metric.
         let run: Run = serde_json::from_str(
-            &build(suggestion("tool_failure", "s1", "law", "x-open1", "no_such_metric"))
-                .to_string(),
+            &build(suggestion(
+                "tool_failure",
+                "s1",
+                "law",
+                "x-open1",
+                "no_such_metric",
+            ))
+            .to_string(),
         )
         .unwrap();
         let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(err.contains("no_such_metric does not resolve"), "err: {err}");
+        assert!(
+            err.contains("no_such_metric does not resolve"),
+            "err: {err}"
+        );
 
         // Event citation absent from the fold's events block.
         let run: Run = serde_json::from_str(
@@ -1591,6 +1659,32 @@ mod tests {
         assert!(verdicts[3]["current"].is_null());
         let empty = scorecard(&json!({}), &doc1);
         assert!(empty.is_empty());
+
+        // A prior report over a different population (period, scope,
+        // sample, or question) reads unmeasured, never moved.
+        let mut prior2 = json!({
+            "suggestions": prior["suggestions"].clone(),
+            "days": 60,
+            "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
+            "sample": {"requested": 50},
+            "categories": {"question_key": "ab12cd34"},
+        });
+        let doc2 = json!({
+            "days": 30,
+            "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
+            "sample": {"requested": 50},
+            "categories": {"question_key": "ab12cd34"},
+            "activity": {"tool_errors": {}, "interruptions": 5},
+            "totals": {"unanswered": 11, "undelivered": 3},
+            "events": {"hook_blocked": 12},
+            "items": [],
+        });
+        let guarded = scorecard(&prior2, &doc2);
+        assert_eq!(guarded[0]["verdict"], "unmeasured");
+        assert!(guarded[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("population differs"));
     }
 
     #[test]

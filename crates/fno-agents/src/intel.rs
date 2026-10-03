@@ -174,6 +174,10 @@ struct Report {
     witness: crate::operator_witness::WitnessReceipt,
     /// Dated event rows in the window, by type: the evidence citations.
     events: BTreeMap<String, u64>,
+    /// Whether the counts above are machine-global or came from a scoped
+    /// fold: events carry no project/session selector of their own, so a
+    /// scoped fold reports machine-global numbers under an explicit name.
+    events_scope: String,
     /// Populations, activity totals, and the series the report and the
     /// renderer read. Every number names its population.
     populations: Value,
@@ -681,7 +685,11 @@ fn print_report(report: &Report) {
             .take(6)
             .map(|(k, v)| format!("{k} {v}"))
             .collect();
-        println!("  events (dated rows in window): {}", top.join(", "));
+        println!(
+            "  events (dated rows in window, {}): {}",
+            report.events_scope,
+            top.join(", ")
+        );
     }
     if !report.nodes.is_empty() {
         println!("  node mail graph:");
@@ -757,7 +765,8 @@ pub fn run_intel(args: &[String]) -> i32 {
              row addressed to the session. Tokens, lines, tool errors, languages,\n\
              interruptions, response time, hours, parallel sessions, a per-day series,\n\
              an events block counting dated journal rows in the window by type\n\
-             (hook_blocked, spawn_refused, help_emitted, loop_check, operator_submit),\n\
+             (agent_spawn_refused, blocked, loop_check, operator_submit) with an\n\
+             events_scope name, machine-global or project-scoped fold,\n\
              populations, and a stable --sample of idle substantive sessions ride the\n\
              same fold. --categories with --fold reads a saved fold JSON plus the\n\
              skill's run file and prints it with per-category metrics, the run\n\
@@ -1186,6 +1195,13 @@ fn fold_all(
         },
         now,
     );
+    // Events carry no project or session selector, so the counts are
+    // machine-global no matter the fold's roots; a scoped fold names that.
+    let events_scope = if roots.is_none() {
+        "machine-global".to_string()
+    } else {
+        "project-scoped fold; counts are machine-global".to_string()
+    };
     let (eligible, sampled_n) = crate::intel_insights::mark_sampled(&mut rows, sample);
     let populations =
         crate::intel_insights::populations(transcripts, &dropped, &rows, eligible, sampled_n);
@@ -1234,6 +1250,7 @@ fn fold_all(
         totals,
         witness,
         events,
+        events_scope,
         populations,
         activity,
         hours,
