@@ -386,7 +386,7 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
     for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
             .iter()
             .enumerate()
@@ -449,7 +449,7 @@ fn chosen_card_paints_accent_across_both_lines() {
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
     for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
             .iter()
             .enumerate()
@@ -477,7 +477,7 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
     for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, band_bg, "the band wins on hover");
         }
@@ -506,7 +506,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
     for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, v.theme.sel, "the band is the sel surface");
             assert_ne!(cell.fg, v.theme.needs_you, "no signal fills a banded row");
@@ -526,8 +526,8 @@ fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
     let offset = v.sideline_offset();
     let cols = frame.cols as usize;
     let width = v.sideline_paint_w() - 1;
-    let agent_row = agent_i - offset;
-    let detail_row = detail_i - offset;
+    let agent_row = agent_i - offset + 1; // the strip row owns row 0
+    let detail_row = detail_i - offset + 1;
     let agent_cells = &frame.cells[agent_row * cols..agent_row * cols + width];
     let detail_cells = &frame.cells[detail_row * cols..detail_row * cols + width];
     let pr_end = agent_cells
@@ -768,7 +768,7 @@ fn composed_bands_hold_contrast_on_dark_and_light_frames() {
     let mut chosen_cells: Vec<crate::proto::Cell> = Vec::new();
     let mut hover_cells: Vec<crate::proto::Cell> = Vec::new();
     for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         chosen_cells.push(frame.cells[row * cols]);
         chosen_cells.push(frame.cells[row * cols + text_w - 1]);
     }

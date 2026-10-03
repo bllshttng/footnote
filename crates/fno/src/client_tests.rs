@@ -2025,148 +2025,35 @@ fn chrome_hit_rows() {
         "click resolves through the scroll offset"
     );
 
-    let hosted = AgentRow {
-        spawned_by_name: None,
-        lineage_reason: None,
-        harness: None,
-        model: None,
-        route: None,
-        reach: Reach::Locate,
-        spawned_by_session: None,
-        lineage_kind: None,
-        harness_session_id: None,
-        squad: Some(1),
-        name: "worker".into(),
-        pane_id: Some(10),
-        portal: None,
-        badge: Some(AgentBadge::Working),
-        reason: None,
-        exited: false,
-        dnd: false,
-        unmeasured: false,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        seen: false,
-        cwd_base: None,
-        tombstone: false,
-        subline: None,
-        tab: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        pr_session_short: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: false,
-        no_pane_reason: None,
-        pane_activity: None,
-        ..Default::default()
-    };
+    let mut hosted = focus_agent(10);
+    hosted.badge = Some(AgentBadge::Working);
     // A watch-only bg row with a claude jobId: a click reaches the
     // dedicated thread pane (x-07c2); a row with no attach id reaches
     // BY NAME (Follow/Locate tiers).
-    let bg_attach = AgentRow {
-        spawned_by_name: None,
-        lineage_reason: None,
-        harness: None,
-        model: None,
-        route: None,
-        reach: Reach::Drive,
-        spawned_by_session: None,
-        lineage_kind: None,
-        harness_session_id: None,
-        squad: None,
-        name: "bg-claude".into(),
-        pane_id: None,
-        portal: None,
-        badge: None,
-        reason: None,
-        exited: false,
-        dnd: false,
-        unmeasured: false,
-        answerable: None,
-        attach_id: Some("c19cd2c3".into()),
-        external: false,
-        seen: false,
-        cwd_base: None,
-        tombstone: false,
-        subline: None,
-        tab: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        pr_session_short: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: false,
-        no_pane_reason: None,
-        pane_activity: None,
-        ..Default::default()
-    };
+    let mut bg_attach = focus_agent(0);
+    bg_attach.reach = Reach::Drive;
+    bg_attach.squad = None;
+    bg_attach.name = "bg-claude".into();
+    bg_attach.pane_id = None;
+    bg_attach.attach_id = Some("c19cd2c3".into());
     // A watch-only row with no attach target: its reach opens the
     // dedicated pane by name (Follow tails it, Locate explains it).
-    let bg_plain = AgentRow {
-        spawned_by_name: None,
-        lineage_reason: None,
-        harness: None,
-        model: None,
-        route: None,
-        reach: Reach::Follow,
-        spawned_by_session: None,
-        lineage_kind: None,
-        harness_session_id: None,
-        squad: None,
-        name: "bg-other".into(),
-        pane_id: None,
-        portal: None,
-        badge: None,
-        reason: None,
-        exited: false,
-        dnd: false,
-        unmeasured: false,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        seen: false,
-        cwd_base: None,
-        tombstone: false,
-        subline: None,
-        tab: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        pr_session_short: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: false,
-        no_pane_reason: None,
-        pane_activity: None,
-        ..Default::default()
-    };
+    let mut bg_plain = focus_agent(0);
+    bg_plain.reach = Reach::Follow;
+    bg_plain.squad = None;
+    bg_plain.name = "bg-other".into();
+    bg_plain.pane_id = None;
     let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
                                  // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
-                                 // (sideline owns row 0, terminal row == display index) + Blank spacers:
-                                 // squad 1 (0), "worker" (1), Blank (2), squad 2 (3), Blank footer spacer
-                                 // (4), "+ new workspace" footer (5), Blank (6), "~ elsewhere" header (7),
-                                 // orphan "bg-claude" (8), orphan "bg-other" (9).
-    assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::FocusPane(10)]);
+                                 // + the strip row (R15, display i paints at terminal i + 1) + Blank
+                                 // spacers: squad 1 (terminal 1), "worker" (2), Blank (3), squad 2 (4),
+                                 // footer spacer (5), "+ new workspace" (6), Blank (7), "~ elsewhere"
+                                 // (8), orphan "bg-claude" (9), orphan "bg-other" (10).
+    assert_eq!(cmds(view.chrome_hit(2, 4)), vec![Command::FocusPane(10)]);
     // (x-07c2) Both watch-only rows now REACH the dedicated thread pane:
     // the attachable one by attach id, the other by name.
-    for (row, want_id) in [(8usize, "c19cd2c3"), (9, "bg-other")] {
+    for (row, want_id) in [(9usize, "c19cd2c3"), (10, "bg-other")] {
         let row = row.try_into().unwrap();
         match view.chrome_hit(row, 4) {
             Some(ChromeHit::Cmds(c)) => assert!(
@@ -2187,57 +2074,21 @@ fn chrome_hit_rows() {
     // stays `row_is_inert` (the selector cursor still skips it) - clickable
     // is not selectable.
     assert!(matches!(
-        view.chrome_hit(7, 4),
+        view.chrome_hit(8, 4),
         Some(ChromeHit::CycleSection(SectionKey::Elsewhere))
     ));
     // The "+ new workspace" footer opens the create overlay.
-    assert!(matches!(view.chrome_hit(5, 4), Some(ChromeHit::OpenCreate)));
+    assert!(matches!(view.chrome_hit(6, 4), Some(ChromeHit::OpenCreate)));
 
     // Enough agents that display_rows() reaches the last terminal row.
     // (x-c5ee) Working, not idle: attention rows are never folded by the
     // top-K cap, so all 40 render and the list still reaches the bottom.
     let agents: Vec<AgentRow> = (0..40)
         .map(|i| AgentRow {
-            spawned_by_name: None,
-            lineage_reason: None,
-            harness: None,
-            model: None,
-            route: None,
-            reach: Reach::Locate,
-            spawned_by_session: None,
-            lineage_kind: None,
-            harness_session_id: None,
-            squad: Some(1),
             name: format!("a{i}"),
             pane_id: Some(100 + i),
-            portal: None,
             badge: Some(AgentBadge::Working),
-            reason: None,
-            exited: false,
-            dnd: false,
-            unmeasured: false,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            seen: false,
-            cwd_base: None,
-            tombstone: false,
-            subline: None,
-            tab: None,
-            account: None,
-            updated_at: None,
-            pr: None,
-            pr_session_short: None,
-            tail: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
-            basis: None,
-            last_activity_age_s: None,
-            resumable: false,
-            no_pane_reason: None,
-            pane_activity: None,
-            ..Default::default()
+            ..focus_agent(0)
         })
         .collect();
     let view = view_with_agents(agents);
@@ -7611,7 +7462,7 @@ fn tab_badge_rows() {
     // sideline scrolls the least it takes to reveal the focused-row band; a
     // top-row focus needs no scroll.
     let mut view = two_pane_view();
-    view.term = (6, 100); // a short panel: fewer visible rows than total
+    view.term = (7, 100); // a short panel: fewer visible rows than total
     let panes = view.layout.panes.clone();
     let agents: Vec<AgentRow> = (0..8)
         .map(|i| AgentRow {
@@ -15419,3 +15270,30 @@ mod lineage_paint_tests;
 
 #[path = "client_tests/composer_fullscreen_tests.rs"]
 mod composer_fullscreen_tests;
+
+#[test]
+fn zz_scroll_probe() {
+    let mut v = two_pane_view();
+    let total = v.display_rows().len();
+    eprintln!(
+        "PROBE total={total} term={:?} visible={} painted={} chrome={} court={} q={} off={}",
+        v.term,
+        v.sideline_visible_rows(),
+        v.painted_rows().len(),
+        v.bottom_row_is_chrome(),
+        v.court_block_rows(),
+        v.questions_block_rows(),
+        v.sideline_offset()
+    );
+    v.term = ((total - 1) as u16, 100);
+    eprintln!(
+        "PROBE2 term={:?} visible={} chrome={}",
+        v.term,
+        v.sideline_visible_rows(),
+        v.bottom_row_is_chrome()
+    );
+    v.selector = None;
+    v.set_sideline_offset(0);
+    v.scroll_sideline(true);
+    eprintln!("PROBE3 offset={}", v.sideline_offset());
+}

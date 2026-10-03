@@ -259,12 +259,14 @@ impl View {
         panel_w: usize,
     ) {
         let text_w = panel_w - 1; // last column is the divider
-                                  // The strip row owns row 0 in every view; content starts at row 1.
-        self.paint_top_row(cells, cols, text_w);
-        // The backlog view: the board's own render inside THIS column, no
-        // second border, the cursor row wearing the sideline band. The
-        // divider paints as in the agents view, then the agent path stops.
+                                  // The backlog view: the board's own render inside THIS column, no
+                                  // second border, the cursor row wearing the sideline band. The
+                                  // divider paints as in the agents view, then the agent path stops.
         if self.sideline_view != crate::view_store::SidelineView::Agents {
+            // The strip row owns row 0 (R15) unless a board claims it: the
+            // Org board paints rows 1 and below, the docked backlog board
+            // frames its filter bar at row 0 and wins.
+            self.paint_top_row(cells, cols, text_w);
             if self.sideline_view == crate::view_store::SidelineView::Org {
                 if !self.board_full {
                     org_board::paint(
@@ -372,13 +374,12 @@ impl View {
         let btn_reserved = self
             .density_button_range(panel_w)
             .map_or(text_w, |range| range.start);
-        // The buffer starts BELOW the strip row: a blit over row 0 would
-        // erase the strip words this fn painted first.
-        let area = RtRect::new(0, 1, text_w as u16, rows.saturating_sub(1) as u16);
+        let area = RtRect::new(0, 0, text_w as u16, rows as u16);
         let mut buf = RtBuffer::empty(area);
         // The widget area is the top slice of the column; the dock paints
-        // into the same Buffer below it, before the one blit.
-        let table_area = RtRect::new(0, 0, text_w as u16, table_h as u16);
+        // into the same Buffer below it, before the one blit. The strip row
+        // is painted AFTER this blit (it owns row 0, which the blit wipes).
+        let table_area = RtRect::new(0, 1, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
         let mut st = self
@@ -416,6 +417,9 @@ impl View {
             self.sideline_state.set(st);
         }
         crate::ratatui_blit::blit(&buf, cells, cols);
+        // The strip row owns row 0 (R15), so its words go down after the
+        // one blit that would otherwise erase them.
+        self.paint_top_row(cells, cols, text_w);
         // Per-row overlays the widget cannot express: the full-width rows
         // (bands, sublines, the idle fold, the footer, the empty state - see
         // the catch-all in `sideline_table_row`), the active-squad caret

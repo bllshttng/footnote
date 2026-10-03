@@ -1150,6 +1150,9 @@ impl View {
 /// (the off case notices, like every other entry) and opens the board;
 /// the agents leg closes it and drops the full flag.
 pub(crate) fn cycle_sideline_view(view: &mut View) {
+    // A cycle leaves every board behind, the Messages board included: an
+    // open one owns the whole surface and would hijack input off its view.
+    view.messages_board = None;
     match view.sideline_view {
         crate::view_store::SidelineView::Backlog => {
             super::org_board::open(view);
