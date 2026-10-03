@@ -2899,7 +2899,14 @@ pub fn is_valid_registry_label(name: &str) -> bool {
 /// A row counts as removed only when NO surviving row shares any of its
 /// identity tokens (session id, short id, name): a rename or a session-id
 /// backfill mutates one token while the row itself stays.
-fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[RegistryEntry]) {
+/// Pub(crate): the spawn-axes `removal_accounting` op serves the same fn to
+/// the Python write primitive, so one accounting owns both doors.
+/// Returns the number of rows the write dropped.
+pub(crate) fn account_for_removed_rows(
+    path: &Path,
+    before: &[RegistryEntry],
+    after: &[RegistryEntry],
+) -> usize {
     let after_sids: std::collections::BTreeSet<&str> = after
         .iter()
         .filter_map(|e| e.harness_session_id.as_deref().filter(|s| !s.is_empty()))
@@ -2936,10 +2943,10 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
         })
         .collect();
     if removed.is_empty() {
-        return;
+        return 0;
     }
     let Some(home_dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return;
+        return 0;
     };
     let home = crate::paths::AgentsHome::at(home_dir);
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
@@ -2973,6 +2980,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
             "lost": lost,
         }),
     );
+    removed.len()
 }
 
 /// The command line that named this write, bounded: argv0's basename plus up

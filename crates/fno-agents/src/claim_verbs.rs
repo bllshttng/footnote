@@ -869,6 +869,7 @@ pub(crate) fn session_witness_primed_for<'a>(
             .into_iter()
             .filter(|(session, group)| {
                 registry_session_live(registry, session).is_none()
+                    && !row_verdict_live(registry, session)
                     && group.iter().any(|rec| may_consult_transcript(rec))
             })
             .map(|(session, _)| session)
@@ -1007,6 +1008,10 @@ struct SessionRegistryIndex {
     /// session id. No pid requirement: 33 of 33 thread rows carry pid None,
     /// and the served pair is the only liveness evidence they carry.
     served: std::collections::HashMap<String, (Option<String>, Option<String>)>,
+    /// The full row per session id, so the liveness readers can ask the
+    /// row_verdict door (`row_verdict::fno_verdict`) whose inside-leg and
+    /// terminal-status rungs read evidence the served word misses.
+    rows: std::collections::HashMap<String, crate::state::RegistryEntry>,
 }
 
 fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistryIndex>>) {
@@ -1017,6 +1022,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     let mut by_session = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
     let mut served = std::collections::HashMap::new();
+    let mut rows = std::collections::HashMap::new();
     let path = crate::paths::AgentsHome::from_env().registry_json();
     let registry = crate::state::load_registry(&path);
     let known = registry.is_ok();
@@ -1032,6 +1038,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
                 sid.to_string(),
                 (e.liveness.clone(), e.liveness_measured_at.clone()),
             );
+            rows.insert(sid.to_string(), e.clone());
             // The registry's own name contract (state.rs row_for_token): a
             // name OR any prior alias resolves the row. A handover holder
             // carries the name from mint time, so a worker renamed inside its
@@ -1051,6 +1058,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
         by_session,
         by_name,
         served,
+        rows,
     });
 }
 
@@ -1076,6 +1084,23 @@ fn registry_session_live(registry: &SessionRegistryIndex, session: &str) -> Opti
         .map(|_| REGISTRY_SERVED_LIVE)
 }
 
+/// Witness basis for a session the row_verdict door answers live.
+const ROW_VERDICT_LIVE: &str = "row-verdict-live";
+
+/// The row_verdict door's live answer for one session: the inside-leg rung
+/// and the terminal-status rung read evidence the served word misses - the
+/// specimen is a pidless claude bg holder whose fresh working report
+/// kept arriving while its lapsed claim was reaped for want of a pid.
+/// Absent and Unknown answer false: the door decides liveness, never death.
+fn row_verdict_live(registry: &SessionRegistryIndex, session: &str) -> bool {
+    registry.rows.get(session).is_some_and(|entry| {
+        matches!(
+            crate::row_verdict::fno_verdict(entry),
+            crate::row_verdict::RowVerdict::Live(_)
+        )
+    })
+}
+
 /// The uncached resolution: registry row first, then transcript.
 fn session_liveness_answer_uncached(
     session: &str,
@@ -1091,6 +1116,19 @@ fn session_liveness_answer_uncached(
     };
     if let Some(basis) = registry_live {
         return crate::claims::SessionLiveness::Live(basis);
+    }
+    // The row verdict door before the transcript walk: a fresh inside-leg
+    // report or a live pid on the row holds the claim where the served word
+    // went stale (the reap this closes). Unknown and Finished fall through - the
+    // door decides liveness, never death, and the transcript still answers.
+    {
+        let borrowed = index.borrow();
+        let registry = borrowed
+            .as_ref()
+            .expect("session registry index initialized");
+        if row_verdict_live(registry, session) {
+            return crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE);
+        }
     }
     // The row is missing or its pid is stale (a resume leaves rows behind) -
     // the transcript still answers. Reachability is the liveness reading;
@@ -1749,6 +1787,7 @@ mod tests {
         let s_live = format!("xa45c-live-{uniq}");
         let s_wire1 = format!("xa45c-wire-{uniq}");
         let s_worker = format!("xa45c-worker-{uniq}");
+        let s_leg = format!("xa45c-leg-{uniq}");
         with_registry(
             serde_json::json!([
                 {
@@ -1767,6 +1806,22 @@ mod tests {
                     "created_at": "2026-09-12T00:00:00Z",
                     "harness_session_id": s_worker,
                 },
+                {
+                    // The incident shape: a pidless thread row whose fresh
+                    // inside-leg report is the only live evidence. The
+                    // row_verdict rung answers it without the transcript.
+                    "name": "w-leg",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-12T00:00:00Z",
+                    "harness_session_id": s_leg,
+                    "inside_leg": {
+                        "state": "working",
+                        "seq": 1,
+                        "received_at": crate::daemon::now_rfc3339_like(),
+                        "ttl_ms": 90_000u64,
+                    },
+                },
             ]),
             || {
                 let old_path = std::env::var("PATH").unwrap_or_default();
@@ -1781,6 +1836,7 @@ mod tests {
                     witness_rec("holder-a", &s_live),
                     witness_rec("holder-b", &s_wire1),
                     witness_rec("spawn-handover:w-thread", "s-elsewhere"),
+                    witness_rec("holder-leg", &s_leg),
                 ];
                 let (witness, _drain) = session_witness_primed_for(&records);
                 // The verdicts agree with the lazy path: registry-live off
@@ -1791,7 +1847,16 @@ mod tests {
                         crate::claims::basis::REGISTRY_SESSION_LIVE
                     )
                 ));
-                for rec in records.iter().skip(1) {
+                // The row-verdict rung: a fresh inside-leg report on a
+                // pidless row answers Live without the transcript wire
+                // (the reap is held instead of starving).
+                assert!(matches!(
+                    witness(&records[3]),
+                    crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE)
+                ));
+                // The two WIRE sessions only: the fourth record is the
+                // row-verdict-live session, asserted above.
+                for rec in records.iter().skip(1).take(2) {
                     assert!(matches!(
                         witness(rec),
                         crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
@@ -1819,6 +1884,10 @@ mod tests {
                 assert!(
                     !logged.contains(s_live.as_str()),
                     "the registry-live session stays off the wire: {logged:?}"
+                );
+                assert!(
+                    !logged.contains(s_leg.as_str()),
+                    "the row-verdict-live session stays off the wire: {logged:?}"
                 );
             },
         );
@@ -2152,6 +2221,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             served: std::collections::HashMap::new(),
+            rows: std::collections::HashMap::new(),
         }));
         let gate = witness_rec("spawn-gate:36244:w-gate", "s-king");
         let (holder_session, dispatched_by) = holder_session_fields(&gate, &index);
