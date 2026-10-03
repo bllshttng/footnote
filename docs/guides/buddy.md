@@ -30,7 +30,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 The buddy has three places. It uses the first place that is available.
 
-1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge. The status area grows to 4-6 rows.
+1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words show to its left. Below 100 columns it shows a one-line face, as the original did. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
 2. **A narrow pane on the right.** Type `/buddy pane` to put the buddy here. The sprite stands at the bottom, and its words are above it. Claude Code shows this pane only in the fullscreen layout, at 110 columns or more. If you never typed `/buddy statusline`, the buddy opens this pane by itself at 144 columns or more.
 3. **One line above the prompt.** If the first two places are not available, the buddy shows a one-line face above the prompt.
 
