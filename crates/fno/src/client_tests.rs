@@ -12,7 +12,6 @@ use chrome_hit_helpers::{chrome_hit_label, cmds};
 // x-0719: the nav family lives in its own module.
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
-
 #[path = "client/tests/confirm_anchor_tests.rs"]
 mod confirm_anchor_tests;
 
