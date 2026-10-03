@@ -2,7 +2,7 @@
 
 One markdown report per run: `<vault>/fno/intel/<date>-<question key>.md`. The section skeleton is Claude's `/insights` narrative adapted, plus the two sections Claude cannot write (relay, corrections). Numbers come from the saved fold JSON named in the frontmatter `fold:` field. Judgments come from the facets of the sampled sessions only. Populations never blend. Fold counters, Usage over time, and Activity speak for the `scanned` population. The Executive summary, Categories, and the facet sections speak for the `judged` one.
 
-The fold JSON fields the report and the renderer read are: `populations`, `activity`, `hours`, `response_time`, `parallel`, `daily`, `daily_undated`, `sample`, `categories`. The `daily` entries carry `{date, harness, sessions, operator_turns, tool_use, output_tokens}`, with dates in the fold's local time.
+The fold JSON fields the report and the renderer read are: `populations`, `scorecard`, `suggestions`, `activity`, `hours`, `response_time`, `parallel`, `daily`, `daily_undated`, `sample`, `categories`, `events`, `events_scope`. The `daily` entries carry `{date, harness, sessions, operator_turns, tool_use, output_tokens}`, with dates in the fold's local time.
 
 ```markdown
 ---
@@ -21,6 +21,9 @@ populations: {scanned: <n>, substantive: <n>, sampled: <n>, judged: <n>}
 ## Executive summary
 - <finding that answers the question> (<share_pct>% of <judged> judged sessions) [#1](#s-<8 hex>) [#2](#s-<8 hex>)
 (3 to 6 lines. Every share is a category or subcategory share_pct.)
+
+## Scorecard
+One line per prior suggestion, from the JSON's `scorecard.verdicts[]`: `<node> <metric> prior <n>, current <n>: <verdict>`. Verdicts: `moved` (the count fell), `unchanged`, `worse` (it rose), `unmeasured`. A first run writes `not written: first run, no prior report`.
 
 ## Categories
 ### <category name> (<share_pct>%, <sessions> sessions)
@@ -54,6 +57,9 @@ Judged from operator turns only.
 ## Friction
 Frustrated and mixed sessions, grouped by friction category, one line each
 with the session and node named. The category is the facet's `friction` field.
+
+## Suggestions
+One bullet per stamped suggestion from the JSON's `suggestions[]`, ranked by its `baseline` (largest first). Each bullet names friction, cause, example sessions, evidence, the event citations with the fold's counts and their `events_scope` name, the copy-ready fix (kind, target, text), and the node: `- <friction> (<n> judged sessions): <cause>. Examples s-<8 hex>, s-<8 hex>. Evidence: <evidence>. Events (<events_scope>): <type> <count>, <type> <count>. Fix (<kind>): <copy-ready text> at <target>. Node <node>`. A suggestion dropped at write time for contradicting an active law is one line here, naming the law id: `dropped: <fix text> contradicts law <id>`.
 
 ## Relay
 The mail graph, no model: rows the fold's `nodes[]` carries - per node,

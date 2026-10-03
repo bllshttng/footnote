@@ -580,7 +580,6 @@ def emit_merge_cleanup_skipped(
 # ---------------------------------------------------------------------
 
 # MCP channel lifecycle.
-KIND_MCP_CHANNEL_REGISTERED = "mcp_channel_registered"
 KIND_MCP_CHANNEL_UNREACHABLE = "mcp_channel_unreachable"
 KIND_MCP_CHANNEL_DEMOTED_TO_SOCKET = "mcp_channel_demoted_to_socket"
 KIND_MCP_CHANNEL_ENVELOPE_DRIFT = "mcp_channel_envelope_drift"

@@ -672,8 +672,7 @@ STATE_FILES: tuple[StateFile, ...] = (
         filename="registry.json",
         resolver="fno.paths.agents_registry_path",
         root_class="OPERATOR",
-        selector="config.paths.agents_registry_path, else FNO_AGENTS_HOME, "
-        "else config.state_dir (Rust runtime home)",
+        selector="FNO_AGENTS_HOME, else config.state_dir (Rust runtime home)",
         owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/paths.rs"),
     ),
     StateFile(
@@ -1418,10 +1417,6 @@ def hook_logs_dir() -> Path:
 
 def agents_registry_path() -> Path:
     """Return the path to the agents registry JSON file."""
-    settings = _settings()
-    override = settings.paths.agents_registry_path
-    if override is not None:
-        return _guard_state_path(_resolve(override))
     if os.environ.get("FNO_AGENTS_HOME"):
         # Same rule as Rust AgentsHome::from_env: a declared home wins, so a
         # caller that seeded its own home never writes the live registry

@@ -390,6 +390,9 @@ pub struct SessionView {
     pub action: String,
     /// The dim reason when the action is `none`.
     pub reason: Option<String>,
+    /// The shell line that reaches this session: attach a live row, resume a
+    /// registry row that is not live, adopt a session the registry lacks.
+    pub command: Option<String>,
 }
 
 /// A PR bound to a node.
@@ -406,6 +409,20 @@ pub struct Note {
     pub ts: Option<String>,
     pub text: String,
     pub kind: Option<String>,
+    /// The comment-thread vocabulary, flattened onto comment and reply
+    /// rows: who wrote it, the minted thread id a reply names, the reply
+    /// link, and the ask state (open, accepted, done, declined) with its
+    /// landing link or reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_ref: Option<String>,
 }
 
 /// One node's whole answer.
@@ -1248,6 +1265,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
     let str_field =
         |k: &str| -> Option<String> { e.get(k).and_then(Value::as_str).map(str::to_string) };
     // Sessions joined to the roster: the model carries the answer.
+    let node_cwd = str_field("cwd");
     let sessions = node_sessions(inp, &node_id)
         .iter()
         .map(|s| {
@@ -1257,10 +1275,27 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
                     .iter()
                     .find(|a| a.harness_session_id.as_deref() == Some(sid))
             });
-            let (action, reason) = match session_action(joined) {
+            let act = session_action(joined);
+            let (action, reason) = match &act {
                 SessionAction::Attach => ("attach", None),
                 SessionAction::Resume => ("resume", None),
-                SessionAction::Dim(why) => ("none", Some(why)),
+                SessionAction::Dim(why) => ("none", Some(why.clone())),
+            };
+            let command = match &act {
+                SessionAction::Attach => joined.map(|a| format!("fno agents attach {}", a.name)),
+                SessionAction::Resume => sid.map(|sid| {
+                    let mut cmd = format!("fno agents resume {sid} --cross-project");
+                    if let Some(cwd) = node_cwd.as_deref().filter(|c| !c.is_empty()) {
+                        cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
+                    }
+                    cmd
+                }),
+                // A session the registry lacks: adopt is the reach that
+                // heals the row from the harness stores.
+                SessionAction::Dim(_) if joined.is_none() => {
+                    sid.map(|sid| format!("fno agents adopt {sid} --cross-project"))
+                }
+                SessionAction::Dim(_) => None,
             };
             let model = s
                 .get("observed_model")
@@ -1284,6 +1319,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
                 agent: joined.map(|a| a.name.clone()),
                 action: action.to_string(),
                 reason,
+                command,
             }
         })
         .collect();
@@ -1313,29 +1349,58 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
             }
         }
     }
-    // Notes: progress_notes newest first.
-    let mut notes: Vec<Note> = e
+    // Notes: progress_notes newest first, EXCEPT comment-thread rows (kind
+    // comment or reply), which read oldest first - a thread reads top to
+    // bottom. Non-thread rows keep their block after the thread.
+    let rows: Vec<Value> = e
         .get("progress_notes")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|n| Note {
-                    ts: n.get("ts").and_then(Value::as_str).map(str::to_string),
-                    text: n
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    kind: n.get("kind").and_then(Value::as_str).map(str::to_string),
-                })
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
-    notes.sort_by(|a, b| {
+    let is_thread = |n: &Note| matches!(n.kind.as_deref(), Some("comment") | Some("reply"));
+    let mut threads: Vec<Note> = Vec::new();
+    let mut plain: Vec<Note> = Vec::new();
+    for n in rows.iter().map(|n| Note {
+        ts: n.get("ts").and_then(Value::as_str).map(str::to_string),
+        text: n
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        kind: n.get("kind").and_then(Value::as_str).map(str::to_string),
+        author: n.get("author").and_then(Value::as_str).map(str::to_string),
+        comment_id: n
+            .get("comment_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reply_to: n
+            .get("reply_to")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        state: n.get("state").and_then(Value::as_str).map(str::to_string),
+        state_ref: n
+            .get("state_ref")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }) {
+        if is_thread(&n) {
+            threads.push(n);
+        } else {
+            plain.push(n);
+        }
+    }
+    threads.sort_by(|a, b| {
+        a.ts.as_deref()
+            .unwrap_or("")
+            .cmp(b.ts.as_deref().unwrap_or(""))
+    });
+    plain.sort_by(|a, b| {
         b.ts.as_deref()
             .unwrap_or("")
             .cmp(a.ts.as_deref().unwrap_or(""))
     });
+    let mut notes = threads;
+    notes.extend(plain);
     let decisions = e
         .get("decisions")
         .cloned()
@@ -1579,6 +1644,12 @@ pub(crate) fn session_action(a: Option<&AgentRow>) -> SessionAction {
     SessionAction::Dim("not resumable".into())
 }
 
+/// POSIX single-quote a path for the resume line, so a cwd with spaces or
+/// quotes survives the shell. Mirrors the one-liner in mux_cli.rs, which
+/// stays unwidened (over the 5,000-line budget).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
 /// The node's king: the crowned row with the narrowest territory naming the
 /// node, its parent epic, or its project - a scope naming the node beats one
 /// naming the parent, which beats the project; roster order breaks ties.

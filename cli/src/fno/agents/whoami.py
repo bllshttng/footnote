@@ -25,7 +25,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Callable, Optional
 
-from fno.agents.registry import AgentEntry
+from fno.agents.registry import AgentEntry, TERMINAL_STATUSES
 from fno.harness_identity import harness_from_env
 
 # Exit code for "ran fine, but you are not a registered mesh agent". Distinct
@@ -74,10 +74,16 @@ def _nonempty(value: Optional[str]) -> Optional[str]:
 
 
 def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]:
-    for entry in registry:
-        if entry.name == name or name in (getattr(entry, "aliases", None) or []):
-            return entry
-    return None
+    """Name-or-alias row lookup with the mail_envelope refusal shape: terminal
+    rows never answer, and a name matching more than one live row resolves to
+    ``None`` rather than a first-match guess (tier 1 still answers name-only)."""
+    matches = [
+        entry
+        for entry in registry
+        if entry.status not in TERMINAL_STATUSES
+        and (entry.name == name or name in (getattr(entry, "aliases", None) or []))
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _row_harness(entry: AgentEntry) -> str:

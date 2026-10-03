@@ -1766,8 +1766,7 @@ def test_deliver_live_mcp_channel_id_is_the_recipient_fallback(
     """No former MCP recipient is stranded by the lane retirement: a live row
     whose plain short_id was cleared (x-3dac) and which carries no
     harness_session_id still resolves a control.sock recipient via its
-    mcp_channel_id -- which is the original roster-resolvable short_id, minted 1:1
-    by register_mcp_channel."""
+    mcp_channel_id -- which is the original roster-resolvable short_id."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry

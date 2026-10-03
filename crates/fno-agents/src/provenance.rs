@@ -933,6 +933,12 @@ mod tests {
         assert_eq!(classify("   "), Err("no_user_text"));
         // Header-framed and held-release turns read injected too.
         assert_eq!(classify("`@folio · msg-1 · hi`\nthe body"), Err("fno_mail"));
+        // The transcript's one-line delivered form (header, " ⏎ ", body)
+        // reads injected too.
+        assert_eq!(
+            classify("`@folio · fmail-abc123def456 · hi` ⏎ the body"),
+            Err("fno_mail")
+        );
         assert_eq!(
             classify("2 held messages · sent 17:24 to 18:23 · held 9m\n`@a · msg-1 · hi`"),
             Err("fno_mail")

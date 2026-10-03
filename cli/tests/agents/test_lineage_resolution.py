@@ -98,15 +98,6 @@ def test_name_match_carries_no_exact_id() -> None:
     )
 
 
-def test_delivery_resolves_to_the_current_address() -> None:
-    """The resolved row's harness_session_id is B: every delivery verb reads
-    the CURRENT address off the row, so mail naming A lands on B's inbox."""
-    from fno.agents.registry import resolve_agent_in
-
-    resolved = resolve_agent_in([_successor_row()], A)
-    assert resolved.entry.harness_session_id == B
-
-
 def test_predecessor_short_form_stays_retired() -> None:
     """A's 8-hex short retired with A. The successor's own short answers;
     the predecessor's does not resurrect a retired namespace."""

@@ -5,7 +5,9 @@ import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
 import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityPrompt, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
-const BUBBLE_MS = 12_000
+const BUBBLE_MS = 30_000
+// After this long with nothing said, the buddy says a canned line (no model call).
+const IDLE_TALK_MS = 90_000
 const PET_MS = 2_500
 const MIN_TURN_MS = 5_000
 const REACT_GAP_MS = 10_000
@@ -391,6 +393,10 @@ export function register(on: On) {
       tick += 1
       if (!buddy || muted) return
       const at = await $.clock.now()
+      if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS) {
+        turns += 1
+        say(quickLine(buddy, turns), at)
+      }
       if (tick % 4 === 0) {
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)

@@ -11,7 +11,10 @@ fn board_inputs() -> backlog_model::Inputs {
     inp.backend = "graph".into();
     inp.order = vec!["x-1".into(), "x-2".into(), "x-3".into()];
     inp.rows = vec![
-        json!({"id": "x-1", "status": "ready", "priority": "p1", "title": "First card", "project": "fno"}),
+        json!({"id": "x-1", "status": "ready", "priority": "p1", "title": "First card", "project": "fno",
+               "cwd": "/tmp/x519f", "sessions": [
+                   {"phase": "execute", "harness": "claude",
+                    "session_id": "4d4ea752-1063-4515-8366-b9946ed8f64d"}]}),
         json!({"id": "x-2", "status": "in_progress", "priority": "p2", "title": "mux card", "project": "fno"}),
         json!({"id": "x-3", "status": "ready", "priority": "p2", "title": "Other project", "project": "other"}),
     ];
@@ -351,6 +354,13 @@ fn sideline_toggle_rows() {
     });
     assert!(matches!(
         v.sideline_view,
+        crate::view_store::SidelineView::Messages
+    ));
+    rt.block_on(async {
+        cycle_sideline_view(&mut v);
+    });
+    assert!(matches!(
+        v.sideline_view,
         crate::view_store::SidelineView::Backlog
     ));
     assert!(v.backlog_board.is_some(), "backlog view opens the board");
@@ -397,6 +407,7 @@ fn sideline_toggle_rows() {
                 agent: Some("worker".into()),
                 action: "attach".into(),
                 reason: None,
+                command: Some("fno agents attach worker".into()),
             },
             agent,
         })
@@ -790,8 +801,8 @@ async fn compose_rows() {
         "detail pane paints: {text}"
     );
     assert!(
-        text.contains("e/p/s/S edit"),
-        "hint carries the edit keys: {text}"
+        !text.contains("e/p/s/S edit") && text.contains("c comment (detail)"),
+        "hint carries the comment key and no edit keys: {text}"
     );
     // One esc chip on the full board (the filter bar's, top right); a tap
     // returns it to the docked column, and a tap on the column's chip,
@@ -994,15 +1005,41 @@ fn ux_shot_rows() {
 // tests. Removed under the shrink-only test cap: the two variants guarded
 // no contract of their own.
 
-// ----: D6 proof - every edit key works from the board AND the detail ----
-
-/// The edit keys both surfaces accept: key, the input kind or write it
-/// must queue.
-fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
+#[test]
+fn comment_key_opens_input_and_dead_edit_keys() {
+    // c opens the comment input from the detail pane; the seven dead edit
+    // keys open nothing from either surface.
     let mut v = key_view(board_with(board_inputs()));
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
-    if from_detail {
+    if let Some(b) = v.backlog_board.as_mut() {
+        b.detail = Some(node_detail::NodeDetailOverlay {
+            node_id: "x-1".into(),
+            trail: vec![],
+            sel: 0,
+            scroll: 0,
+        });
+    }
+    if let Some(b) = v.backlog_board.as_mut() {
+        focus_card(b, Some("x-1"));
+    }
+    rt.block_on(async {
+        node_detail::detail_keys(&mut v, b"c", &mut sock)
+            .await
+            .expect("c folds");
+    });
+    assert_eq!(
+        v.backlog_board
+            .as_ref()
+            .expect("board")
+            .input
+            .as_ref()
+            .map(|(k, _)| *k),
+        Some(BoardInputKind::Comment),
+        "c from the detail opens the comment input"
+    );
+    for key in [b'e', b'p', b's', b'S', b'D', b'N', b'E'] {
+        let mut v = key_view(board_with(board_inputs()));
         if let Some(b) = v.backlog_board.as_mut() {
             b.detail = Some(node_detail::NodeDetailOverlay {
                 node_id: "x-1".into(),
@@ -1011,105 +1048,63 @@ fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
                 scroll: 0,
             });
         }
-    }
-    if let Some(b) = v.backlog_board.as_mut() {
-        focus_card(b, Some("x-1"));
-    }
-    {
-        let b = v.backlog_board.as_ref().expect("board");
-        edit_target(b).expect("a target card");
-    }
-    rt.block_on(async {
-        if from_detail {
-            node_detail::detail_keys(&mut v, key, &mut sock)
-                .await
-                .expect("key folds");
-        } else {
-            board_keys(&mut v, key, &mut sock).await.expect("key folds");
+        if let Some(b) = v.backlog_board.as_mut() {
+            focus_card(b, Some("x-1"));
         }
-    });
-    let b = v.backlog_board.as_ref().expect("board open");
-    assert_eq!(
-        b.input.as_ref().map(|(k, _)| *k),
-        Some(kind),
-        "key {key:?} from detail={from_detail} opens its input"
-    );
-}
-
-#[test]
-fn edit_key_rows() {
-    edit_key_opens_input(b"e", BoardInputKind::Title, false);
-    edit_key_opens_input(b"D", BoardInputKind::Append, false);
-    edit_key_opens_input(b"N", BoardInputKind::Note, false);
-
-    edit_key_opens_input(b"e", BoardInputKind::Title, true);
-    edit_key_opens_input(b"D", BoardInputKind::Append, true);
-    edit_key_opens_input(b"N", BoardInputKind::Note, true);
-}
-
-// p/s/S open their pickers from both surfaces; the target follows the
-// detail's node when it is open.
-#[test]
-fn board_picker_rows() {
-    for (key, from_detail) in [
-        (b'p', false),
-        (b's', false),
-        (b'S', false),
-        (b'p', true),
-        (b's', true),
-        (b'S', true),
-    ] {
-        let mut v = key_view(board_with(board_inputs()));
         let mut sock: Vec<u8> = Vec::new();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        if from_detail {
-            if let Some(b) = v.backlog_board.as_mut() {
-                b.detail = Some(node_detail::NodeDetailOverlay {
-                    node_id: "x-1".into(),
-                    trail: vec![],
-                    sel: 0,
-                    scroll: 0,
-                });
-            }
-        }
         rt.block_on(async {
-            board_keys(&mut v, &[key], &mut sock)
-                .await
-                .expect("key folds");
+            let _ = node_detail::detail_keys(&mut v, &[key], &mut sock).await;
+            let _ = board_keys(&mut v, &[key], &mut sock).await;
         });
-        let b = v.backlog_board.as_ref().expect("board open");
+        let b = v.backlog_board.as_ref().expect("board");
         assert!(
-            b.pick.is_some(),
-            "{key} from detail={from_detail} opens the picker"
+            b.input.is_none(),
+            "dead key {key} opens nothing: {:?}",
+            b.input
         );
     }
+}
 
-    let mut v = key_view(board_with(board_inputs()));
-    let mut sock: Vec<u8> = Vec::new();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        board_keys(&mut v, b"c", &mut sock).await.expect("c folds");
-    });
-    assert!(
-        v.backlog_board.as_ref().expect("board").colpick.is_some(),
-        "c opens the picker"
-    );
-    // Enter on the focus column hides it; the cursor clamps to the new
-    // last shown column.
-    rt.block_on(async {
-        colpick_keys(&mut v, b"\r");
-    });
-    let b = v.backlog_board.as_ref().expect("board");
-    assert_eq!(b.layout.columns.len(), 5, "a column was hidden");
-    assert!(b.col < b.layout.columns.len(), "cursor clamped");
-    // Widen past the clamp; 75 holds.
-    for _ in 0..10 {
-        rt.block_on(async {
-            colpick_keys(&mut v, b"+");
-        });
+#[test]
+fn comment_thread_renders_in_order_with_marks() {
+    let mut inp = board_inputs();
+    if let Some(r) = inp.rows.get_mut(0) {
+        r["progress_notes"] = json!([
+            {"ts": "2026-10-02T10:00:00+00:00", "text": "rename the flag", "kind": "comment",
+             "author": "user", "comment_id": "c-abc123", "state": "done", "state_ref": "PR 2951"},
+            {"ts": "2026-10-02T10:01:00+00:00", "text": "landed", "kind": "reply",
+             "reply_to": "c-abc123", "author": "agent"},
+        ]);
     }
-    let b = v.backlog_board.as_ref().expect("board");
-    assert_eq!(b.layout.focus_pct, 75, "focus clamps at 75");
+    let mut v = key_view(board_with(inp));
+    focus_card(&mut v.backlog_board.as_mut().expect("board"), Some("x-1"));
+    open_detail(&mut v);
+    let b = v.backlog_board.as_ref().expect("detail opened");
+    let (lines, _) = node_detail::pane_lines(b, "x-1", Some(0), 120);
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    let joined = texts.join("\n");
+    assert!(
+        joined.contains("comments (2, 0 open)"),
+        "the thread header counts rows and open asks: {joined}"
+    );
+    let ask = texts
+        .iter()
+        .position(|t| t.contains("rename the flag"))
+        .expect("the ask row");
+    let reply = texts
+        .iter()
+        .position(|t| t.contains("landed"))
+        .expect("the reply row");
+    assert!(ask < reply, "the comment reads before its reply");
+    assert!(
+        texts[ask].contains("\u{2713} user"),
+        "the done mark and author paint"
+    );
+    assert!(
+        texts[reply].starts_with("  ") && texts[reply].contains("agent"),
+        "the reply indents under its head"
+    );
 }
 
 // The `c` column picker: opening, hiding the focus column, and the focus
@@ -1146,6 +1141,35 @@ fn detail_field_labels_go_dim_and_values_stay_normal() {
         &field.roles[..=colon]
     );
     assert_eq!(field.roles[colon + 2], BRole::Body, "value stays normal");
+    let sid = "4d4ea752-1063-4515-8366-b9946ed8f64d";
+    let adopt = format!("$ fno agents adopt {sid} --cross-project");
+    assert!(
+        lines.iter().any(|l| l.trim() == sid),
+        "the session row shows the full id"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with(&adopt)),
+        "the session row shows the adopt command"
+    );
+    let nv = crate::backlog_model::node(b.inputs.as_ref().expect("inputs"), "x-1")
+        .expect("the fixture node resolves");
+    assert_eq!(
+        node_detail::copy_target(&nv, "x-1", 0, false).as_deref(),
+        Some(sid)
+    );
+    assert_eq!(
+        node_detail::copy_target(&nv, "x-1", 0, true).as_deref(),
+        Some(&adopt[2..])
+    );
+    // A link row copies the linked id and carries no command (AC4-EDGE).
+    let mut linked = board_inputs();
+    linked.rows[0]["blocked_by"] = json!(["x-2"]);
+    let nv2 = crate::backlog_model::node(&linked, "x-1").expect("the linked node resolves");
+    assert_eq!(
+        node_detail::copy_target(&nv2, "x-1", 0, false).as_deref(),
+        Some("x-2")
+    );
+    assert_eq!(node_detail::copy_target(&nv2, "x-1", 0, true), None);
 }
 
 // AC4-HP: Space on value rows builds a multi-select set; the board keeps

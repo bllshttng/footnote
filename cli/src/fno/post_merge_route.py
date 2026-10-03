@@ -598,7 +598,6 @@ def dispatch_post_merge_ritual(
         return PostMergeDispatchResult("already-dispatched", pr_number, detail="marker-exists")
 
     from fno import claims
-    from fno.claims.io import claims_root_for
 
     def _persist_marker() -> None:
         try:
@@ -611,9 +610,7 @@ def dispatch_post_merge_ritual(
     # verb is already running for this PR. Read via the GLOBAL claims root.
     ritual_key = f"reconcile:pr-{pr_number}"
     try:
-        ritual_state = claims.claim_status(
-            ritual_key, root=claims_root_for(ritual_key)
-        ).get("state")
+        ritual_state = claims.claim_status(ritual_key).get("state")
     except Exception:  # noqa: BLE001 - the guard must never break dispatch
         ritual_state = None
     if ritual_state == "live":

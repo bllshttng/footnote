@@ -84,7 +84,6 @@ cli/src/fno/agents/
 ├── harnesses/claude.py    # +MCPChannelSendError, +ask_followup_via_mcp,
 │                          #  +mcp_channel_reachable (tri-state).
 ├── dispatch.py            # +route-selection in _followup helper
-│                          # +register_mcp_channel write verb
 │                          # +reconcile MCP probe slot
 ├── registry.py            # AgentEntry gains optional mcp_channel_id field.
 └── events.py              # MCP channel KIND_* constants block.
@@ -111,7 +110,7 @@ The smoke script (`cli/scripts/smoke/validate-mcp-channel.sh`, gated behind `MCP
 
 ## mcp_channel_id
 
-`mcp_channel_id` is populated from the agent's `claude_short_id` (1:1 mapping) so the sidecar routes by claude's native session id without an id-translation layer. The field type (`Optional[str]`) permits swapping to a server-generated UUIDv4 without a registry-schema bump (a one-line change in `register_mcp_channel`).
+`mcp_channel_id` is populated from the agent's `claude_short_id` (1:1 mapping) so the sidecar routes by claude's native session id without an id-translation layer. The field type (`Optional[str]`) permits swapping to a server-generated UUIDv4 without a registry-schema bump.
 
 ## Operational notes
 

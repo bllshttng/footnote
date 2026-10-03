@@ -176,6 +176,12 @@ struct Report {
     totals: Totals,
     /// The operator_submit witness receipt: what the mux saw and bound.
     witness: crate::operator_witness::WitnessReceipt,
+    /// Dated event rows in the window, by type: the evidence citations.
+    events: BTreeMap<String, u64>,
+    /// Whether the counts above are machine-global or came from a scoped
+    /// fold: events carry no project/session selector of their own, so a
+    /// scoped fold reports machine-global numbers under an explicit name.
+    events_scope: String,
     /// Populations, activity totals, and the series the report and the
     /// renderer read. Every number names its population.
     populations: Value,
@@ -688,6 +694,20 @@ fn print_report(report: &Report) {
     if report.witness.submits == 0 {
         println!("  witness: no operator_submit rows in window; unshaped turns read unknown");
     }
+    if !report.events.is_empty() {
+        let mut pairs: Vec<(&String, &u64)> = report.events.iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let top: Vec<String> = pairs
+            .iter()
+            .take(6)
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect();
+        println!(
+            "  events (dated rows in window, {}): {}",
+            report.events_scope,
+            top.join(", ")
+        );
+    }
     if !report.nodes.is_empty() {
         println!("  node mail graph:");
         for n in &report.nodes {
@@ -754,7 +774,7 @@ pub fn run_intel(args: &[String]) -> i32 {
             "fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]\n\
              [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]\n\
              [--project NAME]... [--all-projects] [--sample N|all]\n\
-             [--categories <run> --fold <saved fold JSON>] [--render <report.md>]\n\
+             [--categories <run> --fold <saved fold JSON> [--score-prior <prior fold JSON>]] [--render <report.md>]\n\
              [--readers <secs>] [--every-ms N] (CPU-seconds per process class over a window)\n\
              [--windows --session <id>|--crown <scope>] [--since DATE] [--until DATE] [--write [dir]]\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
@@ -764,9 +784,17 @@ pub fn run_intel(args: &[String]) -> i32 {
              since its last pass, the first run pays one full backfill. Tokens, lines,\n\
              tool errors, languages,\n\
              interruptions, response time, hours, parallel sessions, a per-day series,\n\
+             an events block counting dated journal rows in the window by type\n\
+             (agent_spawn_refused, blocked, loop_check, operator_submit) with an\n\
+             events_scope name, machine-global or project-scoped fold,\n\
              populations, and a stable --sample of idle substantive sessions ride the\n\
              same fold. --categories with --fold reads a saved fold JSON plus the\n\
-             skill's run file and prints it with per-category metrics; it reads no\n\
+             skill's run file and prints it with per-category metrics, the run\n\
+             file's suggestions validated against the judged facets and the\n\
+             graph's open nodes with their metric baselines stamped, and, with\n\
+             --score-prior <prior fold JSON>, a scorecard block that reads the\n\
+             prior report's suggestions and prints moved, unchanged, worse, or\n\
+             unmeasured per metric (counts read lower is better); it reads no\n\
              transcript. Default window 30 days (--period 1m); the period words map to\n\
              --days 14, 30, 60, 90 and 0 (--days 0 means every transcript, and --days\n\
              beside --period is refused). --render <report.md> reads the report and the\n\
@@ -790,6 +818,7 @@ pub fn run_intel(args: &[String]) -> i32 {
     let mut sample = crate::intel_insights::SampleRequest::None;
     let mut categories: Option<String> = None;
     let mut fold_file: Option<String> = None;
+    let mut score_prior: Option<String> = None;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut i = 0;
     while i < args.len() {
@@ -920,6 +949,16 @@ pub fn run_intel(args: &[String]) -> i32 {
                     }
                 }
             }
+            "--score-prior" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => score_prior = Some(v.clone()),
+                    None => {
+                        eprintln!("fno-agents intel: --score-prior needs <prior fold JSON>");
+                        return 2;
+                    }
+                }
+            }
             "--json" | "-J" => json = true,
             "--all-projects" => all_projects = true,
             other => {
@@ -937,6 +976,12 @@ pub fn run_intel(args: &[String]) -> i32 {
         eprintln!("fno-agents intel: --days and --period are exclusive");
         return 2;
     }
+    if score_prior.is_some() && (categories.is_none() || fold_file.is_none()) {
+        eprintln!(
+            "fno-agents intel: --score-prior needs --categories <run> --fold <saved fold JSON>"
+        );
+        return 2;
+    }
 
     let home = AgentsHome::from_env();
     let fno_dir = home
@@ -950,7 +995,12 @@ pub fn run_intel(args: &[String]) -> i32 {
             return 2;
         };
         let facets_dir = fno_dir.join("intel").join("facets");
-        return crate::intel_insights::run_categories(run_path, fold_path, &facets_dir);
+        return crate::intel_insights::run_categories(
+            run_path,
+            fold_path,
+            &facets_dir,
+            score_prior.as_deref(),
+        );
     }
     let selected = selected_harnesses(&harness_spec);
     let roots = if all_projects {
@@ -1168,6 +1218,22 @@ fn fold_all(
         .filter(|r| !ctx.witness.has_session(&r.session))
         .count();
     let witness = ctx.witness.receipt(window_start_ms, unwitnessed_sessions);
+    let events = events_counts(
+        events_journal,
+        if days == 0 {
+            0
+        } else {
+            now.saturating_sub(days.saturating_mul(86_400))
+        },
+        now,
+    );
+    // Events carry no project or session selector, so the counts are
+    // machine-global no matter the fold's roots; a scoped fold names that.
+    let events_scope = if roots.is_none() {
+        "machine-global".to_string()
+    } else {
+        "project-scoped fold; counts are machine-global".to_string()
+    };
     let (eligible, sampled_n) = crate::intel_insights::mark_sampled(&mut rows, sample);
     let populations =
         crate::intel_insights::populations(transcripts, &dropped, &rows, eligible, sampled_n);
@@ -1215,6 +1281,8 @@ fn fold_all(
         skipped,
         totals,
         witness,
+        events,
+        events_scope,
         populations,
         activity,
         hours,
@@ -1231,6 +1299,44 @@ fn read_events(path: &Path) -> Vec<Value> {
     raw.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect()
+}
+
+/// Dated event rows in the window, by type: the evidence block suggestions
+/// cite. Streams the whole journal one line at a time: the count needs
+/// every type, never the retained rows (the journal is tens of MB). A row
+/// with no parsable stamp lands in no count.
+fn events_counts(journal: &Path, window_start_s: u64, now: u64) -> BTreeMap<String, u64> {
+    let raw = crate::event_store::journal_text(journal, &[]);
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let kind = v
+            .get("type")
+            .and_then(|t| t.as_str())
+            .or_else(|| v.get("kind").and_then(|k| k.as_str()));
+        let Some(kind) = kind.filter(|k| !k.is_empty()) else {
+            continue;
+        };
+        let ts = v
+            .get("ts")
+            .and_then(|t| t.as_str())
+            .and_then(ts_secs)
+            .or_else(|| {
+                v.get("data")
+                    .and_then(|d| d.get("ts"))
+                    .and_then(|t| t.as_str())
+                    .and_then(ts_secs)
+            });
+        let Some(ts) = ts else {
+            continue;
+        };
+        if ts >= window_start_s && ts <= now {
+            *counts.entry(kind.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn totals_of(rows: &[SessionRow]) -> Totals {
@@ -1444,7 +1550,22 @@ mod tests {
 
     #[test]
     fn the_fixture_folds_two_sessions_one_per_harness_with_every_counter() {
-        let (_fx, rows) = fold_fixture();
+        let (fx, rows) = fold_fixture();
+        // The events block counts dated journal rows in the window only:
+        // the fixture journal holds two loop_check rows on 2026-09-16.
+        let journal = fx.dir.join("events.jsonl");
+        let counts = events_counts(
+            &journal,
+            ts_secs("2026-09-16T00:00:00Z").unwrap(),
+            ts_secs("2026-09-17T00:00:00Z").unwrap(),
+        );
+        assert_eq!(counts.get("loop_check"), Some(&2));
+        let outside = events_counts(
+            &journal,
+            ts_secs("2026-09-01T00:00:00Z").unwrap(),
+            ts_secs("2026-09-02T00:00:00Z").unwrap(),
+        );
+        assert!(outside.is_empty(), "rows outside the window count none");
         assert_eq!(rows.len(), 2, "one claude + one codex row");
         let claude = rows.iter().find(|r| r.harness == "claude").unwrap();
         let codex = rows.iter().find(|r| r.harness == "codex").unwrap();
@@ -1608,6 +1729,12 @@ mod tests {
         assert_eq!(run_intel(&["--sample".into(), "0".into()]), 2);
         assert_eq!(run_intel(&["--sample".into(), "abc".into()]), 2);
         assert_eq!(run_intel(&["--sample".into()]), 2);
+        // --score-prior needs its argument and needs --categories/--fold.
+        assert_eq!(run_intel(&["--score-prior".into()]), 2);
+        assert_eq!(
+            run_intel(&["--score-prior".into(), "/tmp/none-prior.json".into()]),
+            2
+        );
         assert_eq!(
             run_intel(&["--categories".into(), "/tmp/none-run.json".into()]),
             2

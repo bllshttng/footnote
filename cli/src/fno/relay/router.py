@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from fno.agents.registry import TERMINAL_STATUSES
 from fno.relay import registry as _registry
 from fno.relay.registry import RegistryEntry
 
@@ -92,7 +93,17 @@ def resolve(
         if not sid:
             raise Unroutable(f"relay_unroutable{{node:{addr.value}}}")
     else:  # name
-        sid = next((s for s, e in idx.items() if e.name == addr.value), None)
+        # The mail_envelope shape: terminal rows never answer a name, and a
+        # name matching more than one live row is refused - first-match of a
+        # duplicate could route mail to the wrong session.
+        matches = [
+            s
+            for s, e in idx.items()
+            if e.name == addr.value and e.status not in TERMINAL_STATUSES
+        ]
+        if len(matches) > 1:
+            raise Unroutable(f"relay_ambiguous{{{addr.value}}}")
+        sid = matches[0] if matches else None
         if not sid:
             raise Unroutable(f"relay_unroutable{{{addr.value}}}")
 

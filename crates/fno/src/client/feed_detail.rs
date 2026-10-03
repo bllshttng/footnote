@@ -149,6 +149,17 @@ pub(crate) fn modal(view: &View, item: FeedItem) -> FeedDetailModal {
     }
 }
 
+/// The one label-and-value row builder both modals share: a value the
+/// source lacks prints nothing (the ruling that retired NOT RECORDED).
+pub(crate) fn info_row(label: &str, value: Option<String>, rows: &mut Vec<PopupRow>) {
+    if let Some(v) = value.filter(|v| !v.is_empty()) {
+        rows.push(PopupRow::Info {
+            label: label.to_string(),
+            value: v,
+        });
+    }
+}
+
 /// The modal's parts against one roster reading: the framed popup, the
 /// per-target actions, and the per-target copyable values. Free of `View`
 /// so the tests can build it from plain rows.
@@ -170,17 +181,9 @@ pub(crate) fn build(
     )));
     rows.push(PopupRow::Rule);
 
-    // One inert field row. Absent prints nothing - the ruling that retired
-    // NOT RECORDED - so the modal's height says what the source holds.
-    let info = |label: &str, value: Option<String>, rows: &mut Vec<PopupRow>| {
-        if let Some(v) = value.filter(|v| !v.is_empty()) {
-            rows.push(PopupRow::Info {
-                label: label.to_string(),
-                value: v,
-            });
-        }
-    };
-
+    // One inert field row per call below; the builder is shared with the
+    // Messages details modal so the two cannot drift.
+    let info = super::feed_detail::info_row;
     info("harness", item.harness.clone(), &mut rows);
     info("timestamp", Some(local_ts(&item.ts)), &mut rows);
     info("model", item.model.clone(), &mut rows);
@@ -437,14 +440,11 @@ pub(crate) fn plan_node(item: &FeedItem) -> Option<&str> {
 /// `y` on the modal: the selected value, whole, to the clipboard - local
 /// tool first, OSC 52 to the outer terminal as fallback. The display clips
 /// a long value; the copy never does.
-pub(crate) fn copy_selected(view: &mut View) {
-    let Some(m) = view.feed_detail.as_ref() else {
-        return;
-    };
-    let Some(value) = m.values.get(m.popup.sel) else {
-        return;
-    };
-    let value = value.clone();
+/// Deliver one value to the clipboard and say what happened: local tool
+/// first, OSC 52 to the outer terminal as fallback. The display clips a
+/// long value; the copy never does. Shared by the feed modal and the
+/// backlog detail's y/Y.
+pub(crate) fn copy_value(view: &mut View, value: String) {
     let outcome = crate::clipboard::deliver(&value, raw_out);
     let note = match outcome {
         crate::clipboard::CopyOutcome::Local(_) => format!("copied {value}"),
@@ -457,6 +457,17 @@ pub(crate) fn copy_selected(view: &mut View) {
         crate::clipboard::CopyOutcome::Failed => "copy failed".to_string(),
     };
     view.set_notice(note);
+}
+
+pub(crate) fn copy_selected(view: &mut View) {
+    let Some(m) = view.feed_detail.as_ref() else {
+        return;
+    };
+    let Some(value) = m.values.get(m.popup.sel) else {
+        return;
+    };
+    let value = value.clone();
+    copy_value(view, value);
 }
 
 /// The popup's flat target under a screen cell, `None` off a target. The

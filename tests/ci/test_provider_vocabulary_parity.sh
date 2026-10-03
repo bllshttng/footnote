@@ -18,13 +18,14 @@ write_match() {
     'provider: Some("anthropic".to_string()),' \
     '#[cfg(test)]' > "$tmp/claude.rs"
   # claude_adopt.rs keeps the manifest line reader only; the gate reads it
-  # for existence. The adopt-path contract lives on the client_verbs mint.
+  # for existence. The mint lives on client_verbs; the route-settings match
+  # lives in the adopt-identity module, so the fixtures mirror the split.
   printf '%s\n' 'pub fn manifest_field' > "$tmp/adopt.rs"
+  printf '%s\n' 'provider_from_route_settings(Some(&model))' > "$tmp/adopt-identity.rs"
   printf '%s\n' \
     'fn mint_synthesized_entry(' \
     'provider: None,' \
-    'enum AdoptError' \
-    'provider_from_route_settings(Some(&model))' > "$tmp/client.rs"
+    'enum AdoptError' > "$tmp/client.rs"
   printf '%s\n' \
     'fn dispatch_create(' \
     'provider: Some("openai".to_string()),' \
@@ -45,6 +46,7 @@ check() {
     --claude-rust "$tmp/claude.rs" \
     --adopt-rust "$tmp/adopt.rs" \
     --client-rust "$tmp/client.rs" \
+    --adopt-identity-rust "$tmp/adopt-identity.rs" \
     --codex-rust "$tmp/codex.rs" \
     --rust-gate "$tmp/rust-gate.rs" \
     --overlay-rust "$tmp/overlay.rs" \
@@ -91,13 +93,12 @@ fi
 
 # The adopt mint must stamp NO provider: a vendor literal there is the retired
 # wrong-bill guess (adoption observed no route; the provider comes from the
-# route-settings match the fixture carries below the enum marker).
+# route-settings match living in the adopt-identity fixture).
 write_match
 printf '%s\n' \
   'fn mint_synthesized_entry(' \
   'provider: Some("anthropic".into()),' \
-  'enum AdoptError' \
-  'provider_from_route_settings(Some(&model))' > "$tmp/client.rs"
+  'enum AdoptError' > "$tmp/client.rs"
 if check >/dev/null 2>&1; then
   echo "FAIL: adopt vendor literal accepted" >&2
   exit 1
@@ -108,10 +109,7 @@ fi
 # The route-match lookup is the only provider source adopt may use; a mint
 # with no provider and no lookup would record none forever.
 write_match
-printf '%s\n' \
-  'fn mint_synthesized_entry(' \
-  'provider: None,' \
-  'enum AdoptError' > "$tmp/client.rs"
+printf '%s\n' 'pub(crate) fn persist_manifest_identity(' > "$tmp/adopt-identity.rs"
 if check >/dev/null 2>&1; then
   echo "FAIL: adopt without a route-settings lookup accepted" >&2
   exit 1

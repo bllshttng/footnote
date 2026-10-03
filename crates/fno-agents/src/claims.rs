@@ -1389,6 +1389,11 @@ pub(crate) fn with_recovery_lock<T>(
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let lock = recovery_lock_path(path);
+    // create_dir (not _all) inside the mutex loop fails forever when the
+    // claims dir itself is missing - a force-release of a never-acquired key
+    // then burned the whole wait answering "mutex unavailable" for what is
+    // just a fresh store. The parent is the claims dir; make it exist.
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("/")));
     let token = acquire_dir_mutex(&lock, RECOVERY_LOCK_MAX_WAIT, true)
         .ok_or_else(|| format!("claim recovery mutex unavailable for {}", path.display()))?;
     let result = operation();
@@ -1642,6 +1647,20 @@ pub enum CanonicalDisposition {
     Invalid,
     NameOnly,
     Complete,
+}
+
+/// True when this invocation reads as the user's own typed turn: no ambient
+/// agent identity is set and stdin is a terminal. The rev-2 ruling
+/// (d-79e0186b): a row the user creates sticks around, so their adopt or
+/// revive stamps `origin operator` - the origin the gc keeps - while an
+/// agent-driven adopt stays fleet work the sweep may reap.
+pub(crate) fn adopter_is_operator() -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    let (_, _, disposition) = canonical_identity_from(|key| std::env::var(key).ok());
+    disposition == CanonicalDisposition::Absent
 }
 
 pub(crate) fn canonical_identity_from(

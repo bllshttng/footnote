@@ -705,7 +705,6 @@ K3	cli/tests/agents/test_provenance_read_failure.py	py	7
 K3	cli/tests/agents/test_read_truth_status.py	py	1
 K3	cli/tests/agents/test_reconcile_batched.py	py	7
 K3	cli/tests/agents/test_refusal_remedy_verbs.py	py	2
-K3	cli/tests/agents/test_register_mcp_channel.py	py	10
 K3	cli/tests/agents/test_register_session.py	py	58
 K3	cli/tests/agents/test_registry.py	py	92
 K3	cli/tests/agents/test_resolve_agent.py	py	31

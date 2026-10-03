@@ -78,11 +78,19 @@ fn changed_lines(old: &str, new: &str) -> (u64, u64) {
     ((n.len() - shared) as u64, (o.len() - shared) as u64)
 }
 
+/// A countable language key: a non-empty ASCII-alphanumeric extension with
+/// at least one letter. `Path::extension` alone admits code fragments and
+/// version digits from tool arguments that are not paths (`md\``, `html~`,
+/// `0`, whole function bodies).
 fn extension_of(path: &str) -> Option<String> {
-    std::path::Path::new(path)
+    let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
+        .map(|e| e.to_ascii_lowercase())?;
+    let plausible = !ext.is_empty()
+        && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        && ext.bytes().any(|b| b.is_ascii_alphabetic());
+    plausible.then_some(ext)
 }
 
 /// A `file_path` a model sent is not always a path: fragments of code and
@@ -526,16 +534,29 @@ mod tests {
 
     #[test]
     fn a_path_with_no_extension_counts_nothing() {
-        let raw = claude_lines(
-            &[json!({"type": "assistant", "message": {"role": "assistant",
-            "content": [json!({"type": "tool_use", "name": "Write",
-                "input": {"file_path": "Makefile", "content": "all:\n\ttrue"}}),
-            json!({"type": "tool_use", "name": "Write",
-                "input": {"file_path": "let x = y.rs;", "content": "body"}})]}})],
-        );
-        let act = claude_activity(&raw);
-        assert!(act.extensions.is_empty());
-        assert_eq!(act.lines_added, 3);
+        // No extension, and every non-extension tail: code fragments, backup
+        // and version tails, and empty tails read no language key.
+        for path in [
+            "Makefile",
+            "backup.html~",
+            "release.2",
+            "trailing.md`",
+            "file.",
+            "fn facet_keys(view: &mut view, bytes: &[u8]) {",
+            "cre \\\nn  function stoppoll() {",
+        ] {
+            let raw = claude_lines(
+                &[json!({"type": "assistant", "message": {"role": "assistant",
+                "content": [json!({"type": "tool_use", "name": "Write",
+                    "input": {"file_path": path, "content": "x"}})]}})],
+            );
+            let act = claude_activity(&raw);
+            assert!(
+                act.extensions.is_empty(),
+                "path {path:?} counted {:?}",
+                act.extensions
+            );
+        }
     }
 
     #[test]

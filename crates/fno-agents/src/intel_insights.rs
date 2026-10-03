@@ -463,6 +463,41 @@ pub(crate) struct Run {
     #[allow(dead_code)]
     question_key: String,
     categories: Vec<RunCategory>,
+    #[serde(default)]
+    suggestions: Vec<SuggestionIn>,
+}
+
+/// One proposed fix: what the friction is, where it showed, and the open
+/// node carrying the fix. The post-process validates it and stamps the
+/// scored metric's baseline; the next run's `--score-prior` reads that back.
+#[derive(Deserialize, Debug)]
+pub(crate) struct SuggestionIn {
+    pub(crate) friction: String,
+    pub(crate) cause: String,
+    pub(crate) example_sessions: Vec<String>,
+    #[serde(default)]
+    pub(crate) evidence: String,
+    /// Event types that prove the friction (hook_blocked, spawn_refused,
+    /// help_emitted, ...). Each must exist in the fold's events block; the
+    /// stamped copy carries that block's counts.
+    #[serde(default)]
+    pub(crate) events: Vec<String>,
+    pub(crate) fix: FixIn,
+    /// The open backlog node the fix is filed or matched to.
+    pub(crate) node: String,
+    /// The scored metric: `friction:<word>`, `tool_errors`, `interruptions`,
+    /// `unanswered`, `undelivered`, or `unjudged`. Counts: lower is better.
+    pub(crate) metric: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct FixIn {
+    /// law | hook | config | node
+    pub(crate) kind: String,
+    pub(crate) target: String,
+    /// The copy-ready artifact: the law text, the hook row, the config
+    /// line, or the node title with its one-line ask.
+    pub(crate) text: String,
 }
 
 #[derive(Deserialize)]
@@ -704,23 +739,204 @@ pub(crate) fn category_metrics(
     items
 }
 
-/// Merge state for the post-process: node id -> merged. A read error leaves
-/// the map empty and names itself in the output's `merge_state`.
-pub(crate) fn merged_nodes() -> (HashMap<String, bool>, Option<String>) {
+/// Merge state and status for the post-process: node id -> merged, node id
+/// -> status. A read error leaves both maps empty and names itself in the
+/// returned error.
+pub(crate) fn graph_maps() -> (
+    HashMap<String, bool>,
+    HashMap<String, String>,
+    Option<String>,
+) {
     match crate::graph_store::read_rows(&crate::graph_get::default_graph_path()) {
         Ok(rows) => {
-            let mut map = HashMap::new();
+            let mut merged = HashMap::new();
+            let mut statuses = HashMap::new();
             for row in rows {
                 let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let merged = row.get("merge_status").and_then(|v| v.as_str()) == Some("merged");
-                if !id.is_empty() {
-                    map.insert(id.to_string(), merged);
+                if id.is_empty() {
+                    continue;
+                }
+                merged.insert(
+                    id.to_string(),
+                    row.get("merge_status").and_then(|v| v.as_str()) == Some("merged"),
+                );
+                if let Some(status) = row.get("status").and_then(|v| v.as_str()) {
+                    statuses.insert(id.to_string(), status.to_string());
                 }
             }
-            (map, None)
+            (merged, statuses, None)
         }
-        Err(err) => (HashMap::new(), Some(format!("unavailable: {err}"))),
+        Err(err) => (
+            HashMap::new(),
+            HashMap::new(),
+            Some(format!("unavailable: {err}")),
+        ),
     }
+}
+
+/// Resolve one metric name against the post-processed fold document.
+/// Closed namespace; every name is a count where lower is better.
+pub(crate) fn resolve_metric(name: &str, doc: &Value) -> Option<u64> {
+    if let Some(word) = name.strip_prefix("friction:") {
+        return doc["categories"]["items"].as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|it| it["metrics"]["friction"][word].as_u64())
+                .sum()
+        });
+    }
+    match name {
+        "tool_errors" => doc["activity"]["tool_errors"]
+            .as_object()
+            .map(|m| m.values().filter_map(|v| v.as_u64()).sum()),
+        "interruptions" => doc["activity"]["interruptions"].as_u64(),
+        "unanswered" => doc["totals"]["unanswered"].as_u64(),
+        "undelivered" => doc["totals"]["undelivered"].as_u64(),
+        "unjudged" => doc["categories"]["unjudged"]
+            .as_array()
+            .map(|a| a.len() as u64),
+        _ => None,
+    }
+}
+
+/// Validate the run file's suggestions against the judged facets and the
+/// graph's open nodes, and stamp each with its metric baseline. The refusal
+/// names the suggestion, the session, the fix kind, or the node. A graph
+/// read error skips the node checks and names itself in `node_state`.
+pub(crate) fn stamp_suggestions(
+    run: &Run,
+    facets: &HashMap<String, Facet>,
+    statuses: &HashMap<String, String>,
+    status_err: &Option<String>,
+    doc: &Value,
+) -> Result<Vec<Value>, String> {
+    const FIX_KINDS: [&str; 4] = ["law", "hook", "config", "node"];
+    const CLOSED: [&str; 2] = ["done", "superseded"];
+    let mut out = Vec::new();
+    for (i, s) in run.suggestions.iter().enumerate() {
+        let label = format!("suggestion {} ({})", i + 1, s.friction);
+        if s.example_sessions.is_empty() {
+            return Err(format!("{label}: no example session named"));
+        }
+        for example in &s.example_sessions {
+            let facet = facets
+                .get(example)
+                .ok_or_else(|| format!("{label}: example session {example} is not judged"))?;
+            if facet.friction != s.friction {
+                return Err(format!(
+                    "{label}: example session {example} is judged {}, not {}",
+                    facet.friction, s.friction
+                ));
+            }
+        }
+        if !FIX_KINDS.contains(&s.fix.kind.as_str()) {
+            return Err(format!(
+                "{label}: fix kind {} (known: law, hook, config, node)",
+                s.fix.kind
+            ));
+        }
+        let node_state = match status_err {
+            Some(err) => err.clone(),
+            None => match statuses.get(&s.node) {
+                None => {
+                    return Err(format!(
+                        "{label}: node {} is not in the graph; file it (fno backlog idea) or name an open node",
+                        s.node
+                    ))
+                }
+                Some(status) if CLOSED.contains(&status.as_str()) => {
+                    return Err(format!(
+                        "{label}: node {} is {}, not open; file or match an open node",
+                        s.node, status
+                    ))
+                }
+                Some(status) => status.clone(),
+            },
+        };
+        let Some(baseline) = resolve_metric(&s.metric, doc) else {
+            return Err(format!(
+                "{label}: metric {} does not resolve (known: friction:<word>, tool_errors, interruptions, unanswered, undelivered, unjudged)",
+                s.metric
+            ));
+        };
+        let mut event_counts = serde_json::Map::new();
+        for ev in &s.events {
+            let count = doc["events"]
+                .get(ev)
+                .and_then(|c| c.as_u64())
+                .ok_or_else(|| format!("{label}: event {ev} is not in the fold's events block"))?;
+            event_counts.insert(ev.clone(), json!(count));
+        }
+        // Events carry no project or session selector: whatever the fold's
+        // scope, the counts are machine-global, so the stamp names it.
+        let events_scope = doc["events_scope"].as_str().unwrap_or("machine-global");
+        out.push(json!({
+            "friction": s.friction,
+            "cause": s.cause,
+            "example_sessions": s.example_sessions,
+            "evidence": s.evidence,
+            "events": event_counts,
+            "events_scope": events_scope,
+            "fix": {"kind": s.fix.kind, "target": s.fix.target, "text": s.fix.text},
+            "node": s.node,
+            "node_state": node_state,
+            "metric": s.metric,
+            "baseline": baseline,
+        }));
+    }
+    Ok(out)
+}
+
+/// Whether the prior report describes the same population as the current
+/// document: same window, scope, sample request, and question. A changed
+/// period, project set, sample size, or question makes the raw counts
+/// incomparable, and every verdict would lie.
+pub(crate) fn populations_comparable(prior: &Value, doc: &Value) -> bool {
+    prior["days"].as_u64() == doc["days"].as_u64()
+        && prior["scope"] == doc["scope"]
+        && prior["sample"]["requested"] == doc["sample"]["requested"]
+        && prior["categories"]["question_key"] == doc["categories"]["question_key"]
+}
+
+/// The next run's verdicts over the prior report's stamped suggestions:
+/// per suggestion, the prior baseline against the current value of the
+/// same metric. Counts read lower is better. An incompatible prior
+/// population (scope, period, sample, or question changed) reads
+/// unmeasured, never moved.
+pub(crate) fn scorecard(prior: &Value, doc: &Value) -> Vec<Value> {
+    let Some(sugs) = prior.get("suggestions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let comparable = populations_comparable(prior, doc);
+    sugs.iter()
+        .map(|s| {
+            let metric = s["metric"].as_str().unwrap_or("");
+            let current = if comparable {
+                resolve_metric(metric, doc)
+            } else {
+                None
+            };
+            let verdict = match (s["baseline"].as_u64(), current) {
+                (Some(p), Some(c)) if c < p => "moved",
+                (Some(p), Some(c)) if c > p => "worse",
+                (Some(_), Some(_)) => "unchanged",
+                _ => "unmeasured",
+            };
+            let mut row = json!({
+                "friction": s["friction"],
+                "node": s["node"],
+                "metric": s["metric"],
+                "prior": s["baseline"],
+                "current": current,
+                "verdict": verdict,
+            });
+            if !comparable {
+                row["reason"] =
+                    json!("prior report population differs (scope, period, sample, or question)");
+            }
+            row
+        })
+        .collect()
 }
 
 /// The categories block the post-process appends to the saved fold JSON.
@@ -745,9 +961,16 @@ pub(crate) fn categories_block(
 
 /// The `--categories <run> --fold <saved fold JSON>` post-process: reads no
 /// transcript, prints the input fold JSON unchanged with a `categories`
-/// block added and `populations.judged` set. Refusals exit 2 and name the
+/// block added, the run file's suggestions validated and baseline-stamped,
+/// and `populations.judged` set. `--score-prior` adds a `scorecard` block
+/// over the prior report's suggestions. Refusals exit 2 and name the
 /// session id or field.
-pub(crate) fn run_categories(run_path: &str, fold_path: &str, facets_dir: &std::path::Path) -> i32 {
+pub(crate) fn run_categories(
+    run_path: &str,
+    fold_path: &str,
+    facets_dir: &std::path::Path,
+    score_prior: Option<&str>,
+) -> i32 {
     let raw = match std::fs::read_to_string(fold_path) {
         Ok(raw) => raw,
         Err(err) => {
@@ -762,7 +985,7 @@ pub(crate) fn run_categories(run_path: &str, fold_path: &str, facets_dir: &std::
             return 2;
         }
     };
-    if !doc.get("sample").is_some_and(|s| s.is_object()) {
+    if !doc.get("sample").is_some_and(|f| f.is_object()) {
         eprintln!("fno-agents intel: --fold {fold_path} was folded without --sample");
         return 2;
     }
@@ -783,14 +1006,48 @@ pub(crate) fn run_categories(run_path: &str, fold_path: &str, facets_dir: &std::
             return 2;
         }
     };
-    let (merged, merge_err) = merged_nodes();
+    let (merged, statuses, graph_err) = graph_maps();
     let items = category_metrics(&run, &sampled, &facets, &merged);
     let judged = facets.len();
-    doc["categories"] = categories_block(&run.question_key, judged, unjudged, items, merge_err);
+    doc["categories"] = categories_block(
+        &run.question_key,
+        judged,
+        unjudged,
+        items,
+        graph_err.clone(),
+    );
     doc["populations"]["judged"] = json!(judged);
+    // Baselines resolve against the fully stamped document, so the
+    // suggestions block lands after categories and before the scorecard
+    // resolves the same names against it.
+    let stamped = match stamp_suggestions(&run, &facets, &statuses, &graph_err, &doc) {
+        Ok(stamped) => stamped,
+        Err(reason) => {
+            eprintln!("fno-agents intel: --categories {run_path}: {reason}");
+            return 2;
+        }
+    };
+    doc["suggestions"] = json!(stamped);
+    if let Some(prior_path) = score_prior {
+        let prior_raw = match std::fs::read_to_string(prior_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                eprintln!("fno-agents intel: --score-prior {prior_path}: unreadable: {err}");
+                return 2;
+            }
+        };
+        let prior: Value = match serde_json::from_str(&prior_raw) {
+            Ok(prior) => prior,
+            Err(err) => {
+                eprintln!("fno-agents intel: --score-prior {prior_path}: invalid JSON: {err}");
+                return 2;
+            }
+        };
+        doc["scorecard"] = json!({"prior": prior_path, "verdicts": scorecard(&prior, &doc)});
+    }
     // The judgment summary: every aggregate the report and the renderer
-    // read, minus the per-session bulk. The raw rows live only in the
-    // transient fold file; this file is the durable artifact.
+    // read, minus the per-session bulk. The raw rows stay in the sidecar
+    // (.fold.json) beside the report.
     if let Some(obj) = doc.as_object_mut() {
         obj.remove("sessions");
         obj.remove("nodes");
@@ -1147,8 +1404,45 @@ mod tests {
             .to_string()
     }
 
+    fn suggestion(friction: &str, example: &str, kind: &str, node: &str, metric: &str) -> Value {
+        json!({
+            "friction": friction,
+            "cause": "the mail lane never surfaced the row",
+            "example_sessions": [example],
+            "evidence": "4559 unanswered bus rows",
+            "events": ["hook_blocked"],
+            "fix": {"kind": kind, "target": "mail lane", "text": "surface unanswered count in the relay digest"},
+            "node": node,
+            "metric": metric,
+        })
+    }
+
+    fn out_doc(friction_counts: u64) -> Value {
+        json!({
+            "activity": {"tool_errors": {"hook_blocked": 7}, "interruptions": 5},
+            "totals": {"unanswered": 11, "undelivered": 3},
+            "events": {"hook_blocked": 12},
+            "categories": {
+                "judged": 4,
+                "unjudged": [],
+                "items": [{"metrics": {"friction": {"tool_failure": friction_counts}}}],
+            },
+        })
+    }
+
+    fn stamp_ok(run: Value, statuses: HashMap<String, String>, doc: &Value) -> Vec<Value> {
+        let run: Run = serde_json::from_str(&run.to_string()).unwrap();
+        let facet: Facet = serde_json::from_str(
+            &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "tool_failure"})
+                .to_string(),
+        )
+        .unwrap();
+        let facets: HashMap<String, Facet> = [("s1".to_string(), facet)].into_iter().collect();
+        stamp_suggestions(&run, &facets, &statuses, &None, doc).unwrap()
+    }
+
     #[test]
-    fn the_run_file_refusals_name_the_fault() {
+    fn the_run_file_and_suggestion_refusals_name_the_fault() {
         // AC15-ERR, AC16-ERR
         let dir = std::env::temp_dir().join(format!("fno-ins-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1195,6 +1489,260 @@ mod tests {
         let err = load_run(&schema2, &facet_map).unwrap_err();
         assert!(err.contains("unsupported schema 2"));
         let _ = std::fs::remove_dir_all(&dir);
+        // The suggestion stage: validation refusals, stamping, graph
+        // tolerance, and the scorecard verdicts, at net-zero declarations.
+        {
+            let statuses: HashMap<String, String> = [
+                ("x-open1".to_string(), "ready".to_string()),
+                ("x-done9".to_string(), "done".to_string()),
+                ("x-gone".to_string(), "superseded".to_string()),
+            ]
+            .into_iter()
+            .collect();
+            let doc = out_doc(3);
+            let build = |s: Value| {
+                json!({
+                    "schema": 1, "question": "q", "question_key": "ab12cd34",
+                    "categories": [{"name": "C", "sessions": ["s1"]}],
+                    "suggestions": [s],
+                })
+            };
+            let facet: Facet = serde_json::from_str(
+                &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "tool_failure"})
+                    .to_string(),
+            )
+            .unwrap();
+            let facets: HashMap<String, Facet> = [("s1".to_string(), facet)].into_iter().collect();
+
+            // Happy path: a valid suggestion stamps baseline, node state, and
+            // the cited event counts.
+            let run = json!({
+                "schema": 1, "question": "q", "question_key": "ab12cd34",
+                "categories": [{"name": "C", "sessions": ["s1"]}],
+                "suggestions": [suggestion("tool_failure", "s1", "law", "x-open1", "friction:tool_failure")],
+            });
+            let stamped = stamp_ok(run, statuses.clone(), &doc);
+            assert_eq!(stamped.len(), 1);
+            assert_eq!(stamped[0]["baseline"], 3);
+            assert_eq!(stamped[0]["node_state"], "ready");
+            assert_eq!(stamped[0]["fix"]["kind"], "law");
+            assert_eq!(
+                stamped[0]["fix"]["text"],
+                "surface unanswered count in the relay digest"
+            );
+            assert_eq!(stamped[0]["metric"], "friction:tool_failure");
+            assert_eq!(stamped[0]["example_sessions"][0], "s1");
+            assert_eq!(stamped[0]["events"]["hook_blocked"], 12);
+            assert_eq!(stamped[0]["events_scope"], "machine-global");
+
+            // No example named at all.
+            let run: Run = serde_json::from_str(
+                &json!({
+                    "schema": 1, "question": "q", "question_key": "ab12cd34",
+                    "categories": [{"name": "C", "sessions": ["s1"]}],
+                    "suggestions": [{
+                        "friction": "tool_failure", "cause": "c",
+                        "example_sessions": [], "fix": {"kind": "law", "target": "t", "text": "x"},
+                        "node": "x-open1", "metric": "interruptions",
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("no example session named"), "err: {err}");
+
+            // Example session not judged.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "ghost",
+                    "law",
+                    "x-open1",
+                    "friction:tool_failure",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("ghost is not judged"), "err: {err}");
+
+            // Example judged with a different friction word.
+            let wrong: Facet = serde_json::from_str(
+                &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "missing_context"})
+                    .to_string(),
+            )
+            .unwrap();
+            let facets_wrong: HashMap<String, Facet> =
+                [("s1".to_string(), wrong)].into_iter().collect();
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "law",
+                    "x-open1",
+                    "friction:tool_failure",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets_wrong, &statuses, &None, &doc).unwrap_err();
+            assert!(
+                err.contains("s1 is judged missing_context, not tool_failure"),
+                "err: {err}"
+            );
+
+            // Unfiled node.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "hook",
+                    "x-none",
+                    "friction:tool_failure",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("x-none is not in the graph"), "err: {err}");
+
+            // Closed nodes refuse; open ones pass.
+            for (node, want) in [
+                ("x-done9", "is done, not open"),
+                ("x-gone", "is superseded, not open"),
+            ] {
+                let run: Run = serde_json::from_str(
+                    &build(suggestion(
+                        "tool_failure",
+                        "s1",
+                        "config",
+                        node,
+                        "unanswered",
+                    ))
+                    .to_string(),
+                )
+                .unwrap();
+                let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+                assert!(err.contains(want), "err: {err}");
+            }
+
+            // Unknown fix kind.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "vibe",
+                    "x-open1",
+                    "unanswered",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("fix kind vibe"), "err: {err}");
+
+            // Unresolvable metric.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "law",
+                    "x-open1",
+                    "no_such_metric",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(
+                err.contains("no_such_metric does not resolve"),
+                "err: {err}"
+            );
+
+            // Event citation absent from the fold's events block.
+            let run: Run = serde_json::from_str(
+                &json!({
+                    "schema": 1, "question": "q", "question_key": "ab12cd34",
+                    "categories": [{"name": "C", "sessions": ["s1"]}],
+                    "suggestions": [{
+                        "friction": "tool_failure", "cause": "c",
+                        "example_sessions": ["s1"], "events": ["no_such_event"],
+                        "fix": {"kind": "law", "target": "t", "text": "x"},
+                        "node": "x-open1", "metric": "interruptions",
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(
+                err.contains("no_such_event is not in the fold's events block"),
+                "err: {err}"
+            );
+
+            // Graph read failed: node checks skip, the error names itself.
+            let run = json!({
+                "schema": 1, "question": "q", "question_key": "ab12cd34",
+                "categories": [{"name": "C", "sessions": ["s1"]}],
+                "suggestions": [suggestion("tool_failure", "s1", "law", "x-open1", "interruptions")],
+            });
+            let run: Run = serde_json::from_str(&run.to_string()).unwrap();
+            let statuses2: HashMap<String, String> = HashMap::new();
+            let graph_err = "unavailable: graph read failed".to_string();
+            let stamped =
+                stamp_suggestions(&run, &facets, &statuses2, &Some(graph_err), &out_doc(3))
+                    .unwrap();
+            assert_eq!(stamped[0]["node_state"], "unavailable: graph read failed");
+            assert_eq!(stamped[0]["baseline"], 5);
+
+            // Scorecard: prior baselines against the current document.
+            let prior = json!({"suggestions": [
+                {"friction": "tool_failure", "node": "x-a", "metric": "friction:tool_failure", "baseline": 3},
+                {"friction": "tool_failure", "node": "x-b", "metric": "unanswered", "baseline": 3},
+                {"friction": "tool_failure", "node": "x-c", "metric": "interruptions", "baseline": 5},
+                {"friction": "tool_failure", "node": "x-d", "metric": "nonexistent", "baseline": 1},
+            ]});
+            let doc1 = out_doc(1);
+            let verdicts = scorecard(&prior, &doc1);
+            assert_eq!(verdicts.len(), 4);
+            assert_eq!(verdicts[0]["verdict"], "moved");
+            assert_eq!(verdicts[0]["current"], 1);
+            assert_eq!(verdicts[1]["verdict"], "worse");
+            assert_eq!(verdicts[1]["current"], 11);
+            assert_eq!(verdicts[2]["verdict"], "unchanged");
+            assert_eq!(verdicts[2]["current"], 5);
+            assert_eq!(verdicts[3]["verdict"], "unmeasured");
+            assert!(verdicts[3]["current"].is_null());
+            let empty = scorecard(&json!({}), &doc1);
+            assert!(empty.is_empty());
+
+            // A prior report over a different population (period, scope,
+            // sample, or question) reads unmeasured, never moved.
+            let prior2 = json!({
+                "suggestions": prior["suggestions"].clone(),
+                "days": 60,
+                "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
+                "sample": {"requested": 50},
+                "categories": {"question_key": "ab12cd34"},
+            });
+            let doc2 = json!({
+                "days": 30,
+                "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
+                "sample": {"requested": 50},
+                "categories": {"question_key": "ab12cd34"},
+                "activity": {"tool_errors": {}, "interruptions": 5},
+                "totals": {"unanswered": 11, "undelivered": 3},
+                "events": {"hook_blocked": 12},
+                "items": [],
+            });
+            let guarded = scorecard(&prior2, &doc2);
+            assert_eq!(guarded[0]["verdict"], "unmeasured");
+            assert!(guarded[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("population differs"));
+        }
     }
 
     #[test]

@@ -400,6 +400,16 @@ dual_owner_kinds = {
     # the king-wake, session-register, and stale-escalate Python arms still
     # emit their own asks until they port.
     "operator_question",
+    # decision_span: the Rust decision_trace emitters are the only writers
+    # (the mail-record leaf, the question intake, the decide door, the king
+    # stop check); the Python side carries it in schema.yaml for the
+    # validator and `doctor event find`, the way pr_watch_unparked above does.
+    "decision_span",
+    # agent_revived: the Rust adopt path's journal_agent_revived is the only
+    # writer (the adopt that restores a reap receipt's identity); the Python
+    # side carries it in schema.yaml for the validator and `doctor event
+    # find`, the way pr_watch_unparked above does.
+    "agent_revived",
 }
 collisions -= dual_owner_kinds
 if collisions:

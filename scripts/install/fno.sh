@@ -36,6 +36,9 @@
 #   FNO_NO_MODIFY_PATH set to any non-empty value to skip the `uv tool update-shell`
 #                      profile edit and print a manual PATH hint instead (for people
 #                      who manage their own dotfiles)
+#   FNO_NO_WIRE        set to any non-empty value to skip the plugin wiring step
+#                      (every agent CLI on PATH gets the fno plugin otherwise;
+#                      `fno config setup wizard` still chooses by hand)
 set -eu
 
 # --- output helpers --------------------------------------------------------
@@ -413,6 +416,26 @@ shim_sweep() {
 	return 1
 }
 
+# --- plugin auto-wire (detect-and-wire) -------------------------------------
+# The CLI just verified; hand the plugin wiring to the front door's
+# detect-and-wire verb: every agent CLI on PATH gets the fno plugin without
+# asking, and the verb names every outcome (installed, kept, manual, failed)
+# so nothing is silent. The wizard stays for anyone who wants to choose.
+# FNO_NO_WIRE skips the step for people who manage their own harness configs.
+# Best-effort: the verb exits 0 and names every outcome, and even a hard
+# refusal (an older front door that still forwards this unknown verb to the
+# Python CLI, which errors) is non-fatal - the CLI is already installed.
+wire_harnesses() {
+	[ -n "${FNO_NO_WIRE:-}" ] && return 0
+	_mux="$(dirname "$FNO_REAL")/fno"
+	[ -x "$_mux" ] || _mux="$FNO_TOOL_BIN/fno"
+	[ -x "$_mux" ] || return 0
+	say "wiring the fno plugin into detected agent CLIs (set FNO_NO_WIRE to skip this)..."
+	if ! "$_mux" config setup auto-wire >&2; then
+		say "plugin wiring did not finish; run 'fno config setup wizard' to wire by hand."
+	fi
+}
+
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
 # make a later `fno`/`fno-py` call resolvable rather than a bare 127 (AC3-UI).
@@ -430,6 +453,7 @@ report_success() {
 	# binary instead of the one just verified here (codex P2).
 	case ":${PATH:-}:" in
 		*":$FNO_TOOL_BIN:"*)
+			wire_harnesses
 			say "done. run 'fno --help' for the CLI."
 			return 0
 			;;
@@ -444,6 +468,7 @@ report_success() {
 		say "installed, but $FNO_TOOL_BIN is not on your PATH yet (FNO_NO_MODIFY_PATH set)."
 		say "add it for this and future shells, e.g.:"
 		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
+		wire_harnesses
 		say "done. run 'fno-py --help' once $FNO_TOOL_BIN is on PATH."
 		return 0
 	fi
@@ -461,6 +486,7 @@ report_success() {
 		say "add it for this and future shells, e.g.:"
 		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
 	fi
+	wire_harnesses
 	say "done. run 'fno --help' to get started."
 }
 

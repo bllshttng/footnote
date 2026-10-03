@@ -64,7 +64,6 @@ def test_cmd_spawn_refuses_a_defaulted_thread_before_dispatch(tmp_path, monkeypa
 
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: tmp_path)
     monkeypatch.setattr(mux_spawn, "resolve_provenance", lambda n, s, p: {})
     monkeypatch.setattr("fno.agents.harness_map.thread_seatable", lambda h: True)
 

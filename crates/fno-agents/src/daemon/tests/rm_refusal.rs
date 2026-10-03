@@ -713,7 +713,10 @@ async fn rm_refusal_on_a_claude_row_without_a_row_id_names_no_stop_and_no_force(
     let mut row = ask_row("idless-live", Some("2020-01-01T00:00:00Z"));
     row.harness = Some("claude".into());
     row.harness_session_id = None;
-    row.pid = Some(4242);
+    // A pid that answers kill(0): the door probes the recorded pid, so a
+    // dead number would prove the row fno-Finished and skip the refusal
+    // this test names.
+    row.pid = Some(std::process::id());
     row.pid_start_time = Some(123456);
     row.status = AgentStatus::Live;
     state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();

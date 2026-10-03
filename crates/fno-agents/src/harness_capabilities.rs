@@ -221,6 +221,22 @@ pub struct HookJob {
     pub via: Vec<String>,
     #[serde(default)]
     pub reason: String,
+    /// The event wiring for a supported job that native hook events feed
+    /// (session_state): which event reports which state word, and the
+    /// harness's blocked event ("none" = the harness exposes no
+    /// permission-prompt event, so the screen backstop keeps the row).
+    /// Absent on audit-only jobs and unwired rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiring: Option<HookWiring>,
+}
+
+/// One wired job's event map: the harness's own event name -> the state
+/// word it reports, plus the harness's blocked event.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HookWiring {
+    pub events: BTreeMap<String, String>,
+    pub blocked: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -674,6 +690,13 @@ impl HarnessContract {
                 "unknown harness {harness:?} in capability contract"
             ))
         })
+    }
+
+    /// One harness row's declaration for one fno hook job (`session_state`,
+    /// ...). `None` = the row does not declare the job (a load failure under
+    /// validate_row's every-row-declares-every-job rule).
+    pub fn hook_job(&self, harness: &str, job: &str) -> Option<&HookJob> {
+        self.harness.get(harness)?.hooks.get(job)
     }
 
     pub fn render_session_argv(
@@ -1757,6 +1780,7 @@ mod tests {
                 state: "missing".into(),
                 via: vec![],
                 reason: "probe: a wired row cannot go back to missing".into(),
+                wiring: None,
             },
         );
         let err = validate_row("claude", &probe).expect_err("missing on a wired row refuses");
