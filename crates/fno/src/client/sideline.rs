@@ -372,11 +372,13 @@ impl View {
         let btn_reserved = self
             .density_button_range(panel_w)
             .map_or(text_w, |range| range.start);
-        let area = RtRect::new(0, 0, text_w as u16, rows as u16);
+        // The buffer starts BELOW the strip row: a blit over row 0 would
+        // erase the strip words this fn painted first.
+        let area = RtRect::new(0, 1, text_w as u16, rows.saturating_sub(1) as u16);
         let mut buf = RtBuffer::empty(area);
         // The widget area is the top slice of the column; the dock paints
         // into the same Buffer below it, before the one blit.
-        let table_area = RtRect::new(0, 1, text_w as u16, table_h as u16);
+        let table_area = RtRect::new(0, 0, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
         let mut st = self

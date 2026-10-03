@@ -47,7 +47,7 @@ fn card_highlight_snapshot(view: &View, frame: &Frame, agent_i: usize, detail_i:
     [agent_i, detail_i]
         .into_iter()
         .map(|display_i| {
-            let row = display_i - offset;
+            let row = display_i - offset + 1; // the strip row owns row 0
             frame.cells[row * cols..row * cols + text_w]
                 .iter()
                 .map(|cell| if cell.bg != Color::Default { '#' } else { '.' })
@@ -64,7 +64,7 @@ fn card_pair_cells(view: &View, frame: &Frame, agent_i: usize, detail_i: usize) 
     [agent_i, detail_i]
         .into_iter()
         .flat_map(|display_i| {
-            let row = display_i - offset;
+            let row = display_i - offset + 1; // the strip row owns row 0
             frame.cells[row * cols..row * cols + text_w].iter().cloned()
         })
         .collect()
@@ -189,7 +189,7 @@ fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_l
     let text = frame_text(&frame);
     assert!(text.contains("██▏      26%  x-4310"), "{text:?}");
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
-    let head = text.lines().next().unwrap_or_default();
+    let head = text.lines().nth(1).unwrap_or_default(); // under the strip row
     assert!(
         head.contains("ctx \u{b7} node") && !head.contains("last msg"),
         "the card head names the card's own cells: {head:?}"
@@ -285,7 +285,7 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     v.sideline_width = 80;
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let line = row_text(&frame, row, v.sideline_paint_w() - 1);
     let col = line.find("x-4310").expect("node painted") as u16 + 2;
     assert!(
@@ -562,7 +562,7 @@ fn regular_card_snapshot_shows_a_pr_when_it_fits() {
     v.term = (30, 140);
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
 
@@ -583,7 +583,7 @@ fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
     v.term = (30, 140);
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
     let cols = frame.cols as usize;
@@ -848,7 +848,7 @@ fn unhighlighted_rows_read_on_a_light_terminal() {
     let frame = v.compose();
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
-    let row = detail_i - v.sideline_offset();
+    let row = detail_i - v.sideline_offset() + 1; // the strip row owns row 0
     let cells = &frame.cells[row * cols..row * cols + text_w];
     let painted = cells.iter().filter(|c| c.c != ' ').count();
     assert!(painted > 0, "detail row has text");

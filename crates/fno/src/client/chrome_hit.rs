@@ -26,15 +26,25 @@ impl View {
             }
         }
         // The sideline's strip row (`Agents  Messages`, R15): the words
-        // switch the view; the rest of the row is dead strip. Checked
-        // before the Agents-only guard so every view's strip answers.
+        // switch the view, the density button rides the same row, and the
+        // rest of the row inside the sideline's columns is dead strip.
+        // Checked before the Agents-only guard so every view's strip
+        // answers. A click right of the divider falls through to the tab
+        // strip, which shares this row.
         let top = self.sideline_top();
-        if row as usize + 1 == top {
-            let pw = self.sideline_paint_w();
-            if pw > 0 && (col as usize) < pw.saturating_sub(1) {
-                for (start, w, view) in self.top_row_spans() {
-                    if (col as usize) >= start && (col as usize) < start + w {
-                        return Some(ChromeHit::TopRow(view));
+        let pw = self.sideline_paint_w();
+        if row as usize + 1 == top && pw > 0 && (col as usize) < pw.saturating_sub(1) {
+            for (start, w, view) in self.top_row_spans() {
+                if (col as usize) >= start && (col as usize) < start + w {
+                    return Some(ChromeHit::TopRow(view));
+                }
+            }
+            // The density button stays pinned to the strip row, where it
+            // costs no display row; full-screen does not paint it.
+            if !self.sideline_full {
+                if let Some(range) = self.density_button_range(panel_w as usize) {
+                    if range.contains(&(col as usize)) {
+                        return Some(ChromeHit::CycleDensity);
                     }
                 }
             }
@@ -87,19 +97,6 @@ impl View {
         // not the sideline row drawn underneath it (codex P2).
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
-        }
-        // The density button rides the sideline's top painted row, over
-        // whatever display row is scrolled to it. It is chrome pinned to the
-        // first PAINTED row, not a property of that row, so the check is on
-        // the painted row and must precede the display-row resolution below.
-        if row == top as u16 && !self.sideline_full {
-            // In full-screen the button is not painted, so a hit there would
-            // cycle a density the screen does not show.
-            if let Some(range) = self.density_button_range(panel_w as usize) {
-                if range.contains(&(col as usize)) {
-                    return Some(ChromeHit::CycleDensity);
-                }
-            }
         }
         // Display row i is painted at `i - offset` (draw_sideline, since
         // the sideline owns the top painted row), so invert with the paint

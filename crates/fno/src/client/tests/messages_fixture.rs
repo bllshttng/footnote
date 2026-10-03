@@ -21,7 +21,9 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
             agents: vec![lead, worker("first", "s1", "x-1")],
             ..Default::default()
         },
-        fold: Ok(json!({})),
+        fold: Ok(
+            json!({"scope_nodes":{"team":{"status":"ok","nodes":[{"id":"x-1"}]}},"owned_scopes":{"x-1":"team"}}),
+        ),
         measured_at: board_now(),
     };
     let tree = crate::org_model::derive(&inputs, board_now());

@@ -197,7 +197,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                         if standing(&v, now) {
                             announcements.push(row);
                         }
-                    } else {
+                    } else if standing(&v, now) {
                         if let Some(obj) = row.as_object_mut() {
                             obj.insert("scope".into(), json!(scope));
                         }
