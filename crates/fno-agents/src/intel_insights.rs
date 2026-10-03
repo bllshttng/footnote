@@ -1435,260 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn the_suggestion_stage_validates_stamps_and_scores() {
-        let statuses: HashMap<String, String> = [
-            ("x-open1".to_string(), "ready".to_string()),
-            ("x-done9".to_string(), "done".to_string()),
-            ("x-gone".to_string(), "superseded".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        let doc = out_doc(3);
-        let build = |s: Value| {
-            json!({
-                "schema": 1, "question": "q", "question_key": "ab12cd34",
-                "categories": [{"name": "C", "sessions": ["s1"]}],
-                "suggestions": [s],
-            })
-        };
-        let facet: Facet = serde_json::from_str(
-            &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "tool_failure"})
-                .to_string(),
-        )
-        .unwrap();
-        let facets: HashMap<String, Facet> = [("s1".to_string(), facet)].into_iter().collect();
-
-        // Happy path: a valid suggestion stamps baseline, node state, and
-        // the cited event counts.
-        let run = json!({
-            "schema": 1, "question": "q", "question_key": "ab12cd34",
-            "categories": [{"name": "C", "sessions": ["s1"]}],
-            "suggestions": [suggestion("tool_failure", "s1", "law", "x-open1", "friction:tool_failure")],
-        });
-        let stamped = stamp_ok(run, statuses.clone(), &doc);
-        assert_eq!(stamped.len(), 1);
-        assert_eq!(stamped[0]["baseline"], 3);
-        assert_eq!(stamped[0]["node_state"], "ready");
-        assert_eq!(stamped[0]["fix"]["kind"], "law");
-        assert_eq!(
-            stamped[0]["fix"]["text"],
-            "surface unanswered count in the relay digest"
-        );
-        assert_eq!(stamped[0]["metric"], "friction:tool_failure");
-        assert_eq!(stamped[0]["example_sessions"][0], "s1");
-        assert_eq!(stamped[0]["events"]["hook_blocked"], 12);
-        assert_eq!(stamped[0]["events_scope"], "machine-global");
-
-        // No example named at all.
-        let run: Run = serde_json::from_str(
-            &json!({
-                "schema": 1, "question": "q", "question_key": "ab12cd34",
-                "categories": [{"name": "C", "sessions": ["s1"]}],
-                "suggestions": [{
-                    "friction": "tool_failure", "cause": "c",
-                    "example_sessions": [], "fix": {"kind": "law", "target": "t", "text": "x"},
-                    "node": "x-open1", "metric": "interruptions",
-                }],
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(err.contains("no example session named"), "err: {err}");
-
-        // Example session not judged.
-        let run: Run = serde_json::from_str(
-            &build(suggestion(
-                "tool_failure",
-                "ghost",
-                "law",
-                "x-open1",
-                "friction:tool_failure",
-            ))
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(err.contains("ghost is not judged"), "err: {err}");
-
-        // Example judged with a different friction word.
-        let wrong: Facet = serde_json::from_str(
-            &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "missing_context"})
-                .to_string(),
-        )
-        .unwrap();
-        let facets_wrong: HashMap<String, Facet> =
-            [("s1".to_string(), wrong)].into_iter().collect();
-        let run: Run = serde_json::from_str(
-            &build(suggestion(
-                "tool_failure",
-                "s1",
-                "law",
-                "x-open1",
-                "friction:tool_failure",
-            ))
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets_wrong, &statuses, &None, &doc).unwrap_err();
-        assert!(
-            err.contains("s1 is judged missing_context, not tool_failure"),
-            "err: {err}"
-        );
-
-        // Unfiled node.
-        let run: Run = serde_json::from_str(
-            &build(suggestion(
-                "tool_failure",
-                "s1",
-                "hook",
-                "x-none",
-                "friction:tool_failure",
-            ))
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(err.contains("x-none is not in the graph"), "err: {err}");
-
-        // Closed nodes refuse; open ones pass.
-        for (node, want) in [
-            ("x-done9", "is done, not open"),
-            ("x-gone", "is superseded, not open"),
-        ] {
-            let run: Run = serde_json::from_str(
-                &build(suggestion(
-                    "tool_failure",
-                    "s1",
-                    "config",
-                    node,
-                    "unanswered",
-                ))
-                .to_string(),
-            )
-            .unwrap();
-            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-            assert!(err.contains(want), "err: {err}");
-        }
-
-        // Unknown fix kind.
-        let run: Run = serde_json::from_str(
-            &build(suggestion(
-                "tool_failure",
-                "s1",
-                "vibe",
-                "x-open1",
-                "unanswered",
-            ))
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(err.contains("fix kind vibe"), "err: {err}");
-
-        // Unresolvable metric.
-        let run: Run = serde_json::from_str(
-            &build(suggestion(
-                "tool_failure",
-                "s1",
-                "law",
-                "x-open1",
-                "no_such_metric",
-            ))
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(
-            err.contains("no_such_metric does not resolve"),
-            "err: {err}"
-        );
-
-        // Event citation absent from the fold's events block.
-        let run: Run = serde_json::from_str(
-            &json!({
-                "schema": 1, "question": "q", "question_key": "ab12cd34",
-                "categories": [{"name": "C", "sessions": ["s1"]}],
-                "suggestions": [{
-                    "friction": "tool_failure", "cause": "c",
-                    "example_sessions": ["s1"], "events": ["no_such_event"],
-                    "fix": {"kind": "law", "target": "t", "text": "x"},
-                    "node": "x-open1", "metric": "interruptions",
-                }],
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
-        assert!(
-            err.contains("no_such_event is not in the fold's events block"),
-            "err: {err}"
-        );
-
-        // Graph read failed: node checks skip, the error names itself.
-        let run = json!({
-            "schema": 1, "question": "q", "question_key": "ab12cd34",
-            "categories": [{"name": "C", "sessions": ["s1"]}],
-            "suggestions": [suggestion("tool_failure", "s1", "law", "x-open1", "interruptions")],
-        });
-        let run: Run = serde_json::from_str(&run.to_string()).unwrap();
-        let statuses2: HashMap<String, String> = HashMap::new();
-        let graph_err = "unavailable: graph read failed".to_string();
-        let stamped =
-            stamp_suggestions(&run, &facets, &statuses2, &Some(graph_err), &out_doc(3)).unwrap();
-        assert_eq!(stamped[0]["node_state"], "unavailable: graph read failed");
-        assert_eq!(stamped[0]["baseline"], 5);
-
-        // Scorecard: prior baselines against the current document.
-        let prior = json!({"suggestions": [
-            {"friction": "tool_failure", "node": "x-a", "metric": "friction:tool_failure", "baseline": 3},
-            {"friction": "tool_failure", "node": "x-b", "metric": "unanswered", "baseline": 3},
-            {"friction": "tool_failure", "node": "x-c", "metric": "interruptions", "baseline": 5},
-            {"friction": "tool_failure", "node": "x-d", "metric": "nonexistent", "baseline": 1},
-        ]});
-        let doc1 = out_doc(1);
-        let verdicts = scorecard(&prior, &doc1);
-        assert_eq!(verdicts.len(), 4);
-        assert_eq!(verdicts[0]["verdict"], "moved");
-        assert_eq!(verdicts[0]["current"], 1);
-        assert_eq!(verdicts[1]["verdict"], "worse");
-        assert_eq!(verdicts[1]["current"], 11);
-        assert_eq!(verdicts[2]["verdict"], "unchanged");
-        assert_eq!(verdicts[2]["current"], 5);
-        assert_eq!(verdicts[3]["verdict"], "unmeasured");
-        assert!(verdicts[3]["current"].is_null());
-        let empty = scorecard(&json!({}), &doc1);
-        assert!(empty.is_empty());
-
-        // A prior report over a different population (period, scope,
-        // sample, or question) reads unmeasured, never moved.
-        let mut prior2 = json!({
-            "suggestions": prior["suggestions"].clone(),
-            "days": 60,
-            "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
-            "sample": {"requested": 50},
-            "categories": {"question_key": "ab12cd34"},
-        });
-        let doc2 = json!({
-            "days": 30,
-            "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
-            "sample": {"requested": 50},
-            "categories": {"question_key": "ab12cd34"},
-            "activity": {"tool_errors": {}, "interruptions": 5},
-            "totals": {"unanswered": 11, "undelivered": 3},
-            "events": {"hook_blocked": 12},
-            "items": [],
-        });
-        let guarded = scorecard(&prior2, &doc2);
-        assert_eq!(guarded[0]["verdict"], "unmeasured");
-        assert!(guarded[0]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("population differs"));
-    }
-
-    #[test]
-    fn the_run_file_refusals_name_the_fault() {
+    fn the_run_file_and_suggestion_refusals_name_the_fault() {
         // AC15-ERR, AC16-ERR
         let dir = std::env::temp_dir().join(format!("fno-ins-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1735,6 +1482,260 @@ mod tests {
         let err = load_run(&schema2, &facet_map).unwrap_err();
         assert!(err.contains("unsupported schema 2"));
         let _ = std::fs::remove_dir_all(&dir);
+        // The suggestion stage: validation refusals, stamping, graph
+        // tolerance, and the scorecard verdicts, at net-zero declarations.
+        {
+            let statuses: HashMap<String, String> = [
+                ("x-open1".to_string(), "ready".to_string()),
+                ("x-done9".to_string(), "done".to_string()),
+                ("x-gone".to_string(), "superseded".to_string()),
+            ]
+            .into_iter()
+            .collect();
+            let doc = out_doc(3);
+            let build = |s: Value| {
+                json!({
+                    "schema": 1, "question": "q", "question_key": "ab12cd34",
+                    "categories": [{"name": "C", "sessions": ["s1"]}],
+                    "suggestions": [s],
+                })
+            };
+            let facet: Facet = serde_json::from_str(
+                &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "tool_failure"})
+                    .to_string(),
+            )
+            .unwrap();
+            let facets: HashMap<String, Facet> = [("s1".to_string(), facet)].into_iter().collect();
+
+            // Happy path: a valid suggestion stamps baseline, node state, and
+            // the cited event counts.
+            let run = json!({
+                "schema": 1, "question": "q", "question_key": "ab12cd34",
+                "categories": [{"name": "C", "sessions": ["s1"]}],
+                "suggestions": [suggestion("tool_failure", "s1", "law", "x-open1", "friction:tool_failure")],
+            });
+            let stamped = stamp_ok(run, statuses.clone(), &doc);
+            assert_eq!(stamped.len(), 1);
+            assert_eq!(stamped[0]["baseline"], 3);
+            assert_eq!(stamped[0]["node_state"], "ready");
+            assert_eq!(stamped[0]["fix"]["kind"], "law");
+            assert_eq!(
+                stamped[0]["fix"]["text"],
+                "surface unanswered count in the relay digest"
+            );
+            assert_eq!(stamped[0]["metric"], "friction:tool_failure");
+            assert_eq!(stamped[0]["example_sessions"][0], "s1");
+            assert_eq!(stamped[0]["events"]["hook_blocked"], 12);
+            assert_eq!(stamped[0]["events_scope"], "machine-global");
+
+            // No example named at all.
+            let run: Run = serde_json::from_str(
+                &json!({
+                    "schema": 1, "question": "q", "question_key": "ab12cd34",
+                    "categories": [{"name": "C", "sessions": ["s1"]}],
+                    "suggestions": [{
+                        "friction": "tool_failure", "cause": "c",
+                        "example_sessions": [], "fix": {"kind": "law", "target": "t", "text": "x"},
+                        "node": "x-open1", "metric": "interruptions",
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("no example session named"), "err: {err}");
+
+            // Example session not judged.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "ghost",
+                    "law",
+                    "x-open1",
+                    "friction:tool_failure",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("ghost is not judged"), "err: {err}");
+
+            // Example judged with a different friction word.
+            let wrong: Facet = serde_json::from_str(
+                &json!({"key": {"session": "s1", "mtime": 1, "size": 2}, "friction": "missing_context"})
+                    .to_string(),
+            )
+            .unwrap();
+            let facets_wrong: HashMap<String, Facet> =
+                [("s1".to_string(), wrong)].into_iter().collect();
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "law",
+                    "x-open1",
+                    "friction:tool_failure",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets_wrong, &statuses, &None, &doc).unwrap_err();
+            assert!(
+                err.contains("s1 is judged missing_context, not tool_failure"),
+                "err: {err}"
+            );
+
+            // Unfiled node.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "hook",
+                    "x-none",
+                    "friction:tool_failure",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("x-none is not in the graph"), "err: {err}");
+
+            // Closed nodes refuse; open ones pass.
+            for (node, want) in [
+                ("x-done9", "is done, not open"),
+                ("x-gone", "is superseded, not open"),
+            ] {
+                let run: Run = serde_json::from_str(
+                    &build(suggestion(
+                        "tool_failure",
+                        "s1",
+                        "config",
+                        node,
+                        "unanswered",
+                    ))
+                    .to_string(),
+                )
+                .unwrap();
+                let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+                assert!(err.contains(want), "err: {err}");
+            }
+
+            // Unknown fix kind.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "vibe",
+                    "x-open1",
+                    "unanswered",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(err.contains("fix kind vibe"), "err: {err}");
+
+            // Unresolvable metric.
+            let run: Run = serde_json::from_str(
+                &build(suggestion(
+                    "tool_failure",
+                    "s1",
+                    "law",
+                    "x-open1",
+                    "no_such_metric",
+                ))
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(
+                err.contains("no_such_metric does not resolve"),
+                "err: {err}"
+            );
+
+            // Event citation absent from the fold's events block.
+            let run: Run = serde_json::from_str(
+                &json!({
+                    "schema": 1, "question": "q", "question_key": "ab12cd34",
+                    "categories": [{"name": "C", "sessions": ["s1"]}],
+                    "suggestions": [{
+                        "friction": "tool_failure", "cause": "c",
+                        "example_sessions": ["s1"], "events": ["no_such_event"],
+                        "fix": {"kind": "law", "target": "t", "text": "x"},
+                        "node": "x-open1", "metric": "interruptions",
+                    }],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let err = stamp_suggestions(&run, &facets, &statuses, &None, &doc).unwrap_err();
+            assert!(
+                err.contains("no_such_event is not in the fold's events block"),
+                "err: {err}"
+            );
+
+            // Graph read failed: node checks skip, the error names itself.
+            let run = json!({
+                "schema": 1, "question": "q", "question_key": "ab12cd34",
+                "categories": [{"name": "C", "sessions": ["s1"]}],
+                "suggestions": [suggestion("tool_failure", "s1", "law", "x-open1", "interruptions")],
+            });
+            let run: Run = serde_json::from_str(&run.to_string()).unwrap();
+            let statuses2: HashMap<String, String> = HashMap::new();
+            let graph_err = "unavailable: graph read failed".to_string();
+            let stamped =
+                stamp_suggestions(&run, &facets, &statuses2, &Some(graph_err), &out_doc(3))
+                    .unwrap();
+            assert_eq!(stamped[0]["node_state"], "unavailable: graph read failed");
+            assert_eq!(stamped[0]["baseline"], 5);
+
+            // Scorecard: prior baselines against the current document.
+            let prior = json!({"suggestions": [
+                {"friction": "tool_failure", "node": "x-a", "metric": "friction:tool_failure", "baseline": 3},
+                {"friction": "tool_failure", "node": "x-b", "metric": "unanswered", "baseline": 3},
+                {"friction": "tool_failure", "node": "x-c", "metric": "interruptions", "baseline": 5},
+                {"friction": "tool_failure", "node": "x-d", "metric": "nonexistent", "baseline": 1},
+            ]});
+            let doc1 = out_doc(1);
+            let verdicts = scorecard(&prior, &doc1);
+            assert_eq!(verdicts.len(), 4);
+            assert_eq!(verdicts[0]["verdict"], "moved");
+            assert_eq!(verdicts[0]["current"], 1);
+            assert_eq!(verdicts[1]["verdict"], "worse");
+            assert_eq!(verdicts[1]["current"], 11);
+            assert_eq!(verdicts[2]["verdict"], "unchanged");
+            assert_eq!(verdicts[2]["current"], 5);
+            assert_eq!(verdicts[3]["verdict"], "unmeasured");
+            assert!(verdicts[3]["current"].is_null());
+            let empty = scorecard(&json!({}), &doc1);
+            assert!(empty.is_empty());
+
+            // A prior report over a different population (period, scope,
+            // sample, or question) reads unmeasured, never moved.
+            let prior2 = json!({
+                "suggestions": prior["suggestions"].clone(),
+                "days": 60,
+                "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
+                "sample": {"requested": 50},
+                "categories": {"question_key": "ab12cd34"},
+            });
+            let doc2 = json!({
+                "days": 30,
+                "scope": {"harnesses": ["claude"], "all_projects": false, "projects": [], "roots": []},
+                "sample": {"requested": 50},
+                "categories": {"question_key": "ab12cd34"},
+                "activity": {"tool_errors": {}, "interruptions": 5},
+                "totals": {"unanswered": 11, "undelivered": 3},
+                "events": {"hook_blocked": 12},
+                "items": [],
+            });
+            let guarded = scorecard(&prior2, &doc2);
+            assert_eq!(guarded[0]["verdict"], "unmeasured");
+            assert!(guarded[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("population differs"));
+        }
     }
 
     #[test]
