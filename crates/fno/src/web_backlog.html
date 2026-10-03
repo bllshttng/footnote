@@ -1721,7 +1721,6 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     if (lastAct && lastAct.id === card.id && lastAct.text) note.textContent = lastAct.text;
     g.appendChild(note);
     const unavail = (feature) => (view.unavailable || []).find((u) => u.feature === feature);
-    const fieldUn = unavail("field edits");
     const moveUn = unavail("card moves");
     const busy = card.claimed || card.live;
     const rowFor = (label) => {
@@ -1742,59 +1741,8 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       why.textContent = reason;
       group.appendChild(why);
     };
-    const addSelect = (label, field, value, options, un) => {
-      const [row, labelEl] = rowFor(label);
-      const sel = document.createElement("select");
-      sel.className = "ainput";
-      const blank = document.createElement("option");
-      blank.value = "";
-      blank.textContent = "";
-      sel.appendChild(blank);
-      for (const o of options) {
-        const o0 = document.createElement("option");
-        o0.value = o;
-        o0.textContent = o;
-        sel.appendChild(o0);
-      }
-      sel.value = value || "";
-      if (sel.value !== (value || "")) {
-        const cur = document.createElement("option");
-        cur.value = value;
-        cur.textContent = value;
-        sel.appendChild(cur);
-        sel.value = value;
-      }
-      sel.addEventListener("change", () => {
-        if (!sel.value) return;
-        act({ act: "field", id: card.id, field: field, value: sel.value });
-      });
-      if (un) {
-        sel.disabled = true;
-        labelEl.title = un.reason;
-        addWhy(g, un.reason);
-      }
-      g.appendChild(row);
-    };
-    // Title: input + save.
-    const [trow, tlabel] = rowFor("title");
-    const tinput = document.createElement("input");
-    tinput.className = "ainput";
-    tinput.value = card.title || "";
-    const tsave = document.createElement("button");
-    tsave.textContent = "save";
-    tsave.setAttribute("data-act", "1");
-    tsave.addEventListener("click", () => act({ act: "field", id: card.id, field: "title", value: tinput.value }));
-    if (fieldUn) {
-      tinput.disabled = true;
-      tsave.disabled = true;
-      tlabel.title = fieldUn.reason;
-      addWhy(g, fieldUn.reason);
-    }
-    trow.append(tinput, tsave);
-    g.appendChild(trow);
-    addSelect("priority", "priority", card.priority, ["p0", "p1", "p2", "p3"], fieldUn);
-    addSelect("size", "size", card.size, ["S", "M", "L"], fieldUn);
-    addSelect("status", "status", card.status, ["idea", "design", "ready", "deferred", "done"], fieldUn);
+    // Fields are agentic: agents set them (ruling d-395103da), the browser
+    // only reads. The thread below is the user's channel.
     // Rank and launches.
     const [lrow, llabel] = rowFor("rank");
     for (const word of ["top", "bottom"]) {
@@ -2045,26 +1993,34 @@ function laneKeyOf(card, lanesBy, parents, byId) {
         pg.appendChild(row);
       }
     }
-    const notes = view.notes || [];
-    if (notes.length) {
+    // The comment thread, read-only: comments oldest first with the ask
+    // state as a mark, replies indented under their heads. Plain progress
+    // notes do not render here.
+    const thread = (view.notes || []).filter(
+      (n) => n.kind === "comment" || n.kind === "reply"
+    );
+    if (thread.length) {
+      thread.sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+      const open = thread.filter((n) => n.state === "open").length;
       const ng = document.createElement("div");
       ng.className = "pgroup";
       const nh = document.createElement("h3");
-      nh.textContent = "notes";
+      nh.textContent = "comments (" + thread.length + ", " + open + " open)";
       ng.appendChild(nh);
       panelBody.appendChild(ng);
-      for (const n of notes) {
+      const mark = (n) =>
+        n.state === "open" ? "\u25cb" : n.state === "accepted" ? "\u25d0"
+        : n.state === "done" ? "\u2713" : n.state === "declined" ? "\u2717" : " ";
+      for (const n of thread) {
         const row = document.createElement("div");
         row.className = "noteline";
-        if (n.ts) {
-          const ts = document.createElement("span");
-          ts.className = "nts";
-          ts.textContent = n.ts + " ";
-          row.appendChild(ts);
-        }
-        const tx = document.createElement("span");
-        tx.textContent = n.text;
-        row.appendChild(tx);
+        if (n.kind === "reply") row.style.paddingLeft = "1.5em";
+        const parts = [];
+        parts.push(mark(n) + " " + (n.author || "?"));
+        if (n.ts) parts.push(n.ts.slice(11, 16));
+        let tx = parts.join(" \u00b7 ") + "  " + (n.text || "");
+        if (n.state_ref) tx += " \u00b7 " + n.state_ref;
+        row.textContent = tx;
         ng.appendChild(row);
       }
     }
