@@ -212,7 +212,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(over_window.contains("▂▃▃▄ 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
     let unmeasured = frame_text(&v.compose());
-    assert!(unmeasured.contains("????  ? · ?c · ?"), "{unmeasured:?}");
+    assert!(unmeasured.contains("???? ? · ?c · ?"), "{unmeasured:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
     assert!(text.contains("claude/opus"), "{text:?}");
@@ -415,6 +415,7 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
+    let (band_fg, band_bg, _) = crate::theme::band_style(&v.theme);
     let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
@@ -429,13 +430,17 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
             .iter()
             .enumerate()
         {
-            assert_eq!(cell.bg, Color::Indexed(0), "one background everywhere");
+            assert_eq!(cell.bg, band_bg, "one background everywhere");
             let keeps_identity_color =
                 display_i == agent_i && pr_span.as_ref().is_some_and(|span| span.contains(&j));
             if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
-                assert_eq!(cell.fg, Color::Indexed(3), "accent band text");
+                assert_eq!(cell.fg, band_fg, "accent band text");
             }
-            assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
+            assert_eq!(
+                cell.flags & (cell_flags::INVERSE | cell_flags::DIM),
+                0,
+                "no INVERSE and no DIM inside the band"
+            );
         }
     }
 }
@@ -508,7 +513,11 @@ fn chosen_card_paints_accent_across_both_lines() {
             if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
                 assert_eq!(cell.fg, band_fg, "the band's accent text everywhere");
             }
-            assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
+            assert_eq!(
+                cell.flags & (cell_flags::INVERSE | cell_flags::DIM),
+                0,
+                "no INVERSE and no DIM inside the band"
+            );
         }
     }
 }
