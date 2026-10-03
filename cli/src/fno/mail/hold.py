@@ -485,7 +485,11 @@ def render_digest(
     """Render held mail through the Rust header and release formatter."""
     from fno.rust_binary import find_dev_binary, resolve_binary
 
-    binary = find_dev_binary() or resolve_binary() or "fno-agents"
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise RuntimeError(
+            "fno-agents binary not found; run `fno doctor update` or set FNO_AGENTS_BIN"
+        )
     payload = {
         "held_for_s": held_for_s,
         "harness": harness,
