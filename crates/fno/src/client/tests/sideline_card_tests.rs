@@ -220,7 +220,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▃▄ 26% · 3c · $0.42 · Working"),
+        text.contains("▂▃▃▄ 26% · 3c · $0.42 · Work"),
         "the compact sparkline line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("$0.42"), "{text:?}");
