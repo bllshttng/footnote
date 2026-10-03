@@ -2683,6 +2683,11 @@ mod tests {
         // this real stage: the pointer lands at <state>/install/plugin-root.
         let previous_root = std::env::var_os("FNO_RECLAIM_STATE_ROOT");
         let previous_home = std::env::var_os("FNO_HOME");
+        // The fixture stage carries only the marketplace manifest, and the
+        // prime ignores a stage without the plugin manifest - make it a real
+        // plugin root first.
+        fs::create_dir_all(stage.join(".claude-plugin")).unwrap();
+        fs::write(stage.join(".claude-plugin").join("plugin.json"), b"{}").unwrap();
         std::env::remove_var("FNO_HOME");
         std::env::set_var("FNO_RECLAIM_STATE_ROOT", &base);
         prime_plugin_root_pointer(&stage);
