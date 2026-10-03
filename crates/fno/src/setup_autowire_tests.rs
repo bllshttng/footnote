@@ -18,7 +18,10 @@ fn auto_wire_pure_contracts_hold() {
     assert_eq!(classify(&os(&["config", "setup", "auto-wire"])), Some(()));
     assert_eq!(classify(&os(&["config", "setup"])), None);
     assert_eq!(classify(&os(&["config", "setup", "wizard"])), None);
-    assert_eq!(classify(&os(&["config", "setup", "auto-wire", "--json"])), None);
+    assert_eq!(
+        classify(&os(&["config", "setup", "auto-wire", "--json"])),
+        None
+    );
     assert_eq!(classify(&os(&["mux", "ls"])), None);
     assert_eq!(classify(&os(&["config", "get"])), None);
 
@@ -39,12 +42,17 @@ fn auto_wire_pure_contracts_hold() {
         "  Codex CLI: already installed (fno@footnote 0.4.0; start a new Codex session)"
     );
     assert_eq!(
-        outcome_line("Antigravity CLI", &Outcome::Manual("adapter ships in the plugin".into())),
+        outcome_line(
+            "Antigravity CLI",
+            &Outcome::Manual("adapter ships in the plugin".into())
+        ),
         "  Antigravity CLI: needs a manual finish - adapter ships in the plugin"
     );
 
     // claude plugin-list rows decide installed; garbage reads as absent.
-    assert!(claude_list_has_fno(r#"[{"id": "fno@footnote"}, {"id": "x@y"}]"#));
+    assert!(claude_list_has_fno(
+        r#"[{"id": "fno@footnote"}, {"id": "x@y"}]"#
+    ));
     assert!(claude_list_has_fno(r#"[{"id": "fno@skills-dir"}]"#));
     assert!(!claude_list_has_fno(r#"[{"id": "x@footnote"}]"#));
     assert!(!claude_list_has_fno("not json"));
@@ -62,7 +70,9 @@ fn auto_wire_pure_contracts_hold() {
         }),
         Outcome::Already("skills-dir".into())
     );
-    // A refused marketplace falls back to the skills-dir clone.
+    // A refused marketplace falls back to the skills-dir clone. Drop the
+    // manifest first: the block above planted it, and it short-circuits.
+    std::fs::remove_dir_all(&dest).ok();
     let run = |argv: &[&str]| {
         if argv.contains(&"clone") {
             Ok(String::new())
