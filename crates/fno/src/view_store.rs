@@ -174,6 +174,9 @@ struct StoreFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feed_width: Option<serde_json::Value>,
     feed_order: Option<serde_json::Value>,
+    /// The open-session chooser's last pick, as its lowercase name. Absent
+    /// means "no pick yet" and the chooser pre-selects Split right.
+    open_target: Option<serde_json::Value>,
     /// The experimental backlog board in the sidebar menu. Default
     /// absent = off: the view is experimental, so the next toggle persists a
     /// clean value. Same contract as `confirm_lifecycle`.
@@ -474,6 +477,26 @@ pub fn load_feed_order() -> Option<String> {
 pub fn save_feed_order(order: &str) {
     mutate(|file| {
         file.feed_order = serde_json::to_value(order).ok();
+    });
+}
+
+/// The open-session chooser's last pick, as persisted. Serialized as its
+/// lowercase name; anything unreadable degrades to no saved pick, and the
+/// chooser falls back to Split right.
+pub fn load_open_target() -> Option<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .open_target
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
+/// Persist the chooser's last pick. Best-effort like every other write here.
+pub fn save_open_target(pick: &str) {
+    mutate(|file| {
+        file.open_target = serde_json::to_value(pick).ok();
     });
 }
 
