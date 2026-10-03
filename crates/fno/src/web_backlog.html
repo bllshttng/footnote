@@ -89,7 +89,7 @@ button, select, input { font: inherit; }
 .card.blocked { border-color: var(--red); }
 .more { color: var(--overlay1); font-size: 11px; padding: 2px 9px; }
 .empty { color: var(--overlay1); padding: 10px 2px; }
-#panel { position: fixed; top: var(--fno-nav-h, 0px); right: 0; bottom: 0; width: min(480px, 46vw); background: var(--mantle); border-left: 1px solid var(--surface1); overflow-y: auto; padding: 10px 14px 24px; z-index: 500; }
+#panel { position: fixed; top: var(--fno-nav-h, 0px); right: 0; bottom: 0; width: min(480px, 46vw); background: var(--mantle); border-left: 1px solid var(--surface1); overflow-y: auto; padding: 10px 14px 24px; z-index: 500; container-type: inline-size; container-name: panel; }
 #panelgrip { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
 #panel[hidden] { display: none; }
 #panelhead { display: flex; justify-content: flex-end; margin-bottom: 4px; }
@@ -120,7 +120,7 @@ button, select, input { font: inherit; }
 .sess td { padding: 3px 6px 3px 0; vertical-align: top; }
 .sess td.dim { color: var(--overlay1); }
 .sess .sid { color: var(--subtext0); }
-@media (max-width: 720px) {
+@container panel (max-width: 700px) {
   .sess thead { display: none; }
   .sess tr { display: block; border: 1px solid var(--surface1); margin: 0 0 8px; padding: 4px 6px; }
   .sess td { display: flex; gap: 6px; justify-content: space-between; align-items: baseline; padding: 1px 0; }
