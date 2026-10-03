@@ -1392,6 +1392,10 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // Reconcile's post-close emits (the Python twins declared both in
+    // events/schema.yaml; session_satisfied carries data.source "pr_merge").
+    "session_satisfied",
+    "human_touch",
     // The pr-watch sweep flipped an open fno-bound draft PR back to ready
     // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
     "pr_watch_draft_flip",

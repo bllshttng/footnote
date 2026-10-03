@@ -318,8 +318,8 @@ mod tests {
     #[test]
     fn an_already_bound_or_done_claim_binds_nothing() {
         let mut entries = vec![
-            node(json!({"pr_number": 7})),
-            node(json!({"completed_at": "2026-10-01T00:00:00Z"})),
+            node(json!({"pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"})),
+            node(json!({"id": "x-bbbb", "completed_at": "2026-10-01T00:00:00Z"})),
         ];
         let claimed = vec!["x-aaaa".to_string(), "x-bbbb".to_string()];
         let result = bind_pr_rows(&mut entries, &claimed, 7, None, Some("o/r"), false);
@@ -331,7 +331,10 @@ mod tests {
 
     #[test]
     fn a_released_claim_line_skips_the_bind() {
-        let mut entries = vec![node(json!({"id": "x-aaaa", "released_from": "x-bbbb"}))];
+        let mut entries = vec![
+            node(json!({"id": "x-aaaa", "released_from": "x-bbbb"})),
+            node(json!({"id": "x-bbbb"})),
+        ];
         let claimed = vec!["x-aaaa".to_string(), "x-bbbb".to_string()];
         let result = bind_pr_rows(&mut entries, &claimed, 7, None, Some("o/r"), false);
         assert_eq!(result.outcome, "bound");

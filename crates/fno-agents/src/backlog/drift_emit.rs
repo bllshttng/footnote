@@ -547,6 +547,22 @@ mod tests {
         path
     }
 
+    /// The store is the acknowledgement boundary: read the envelopes back
+    /// from `events.db` beside the journal, not the legacy file.
+    fn store_text(journal: &std::path::Path) -> String {
+        let store = crate::event_store::open_read(&crate::event_store::store_path(journal))
+            .expect("store open");
+        let mut stmt = store
+            .prepare("SELECT line FROM events ORDER BY ts_ms")
+            .expect("stmt");
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        rows.join("\n")
+    }
+
     #[test]
     fn a_live_session_with_a_matching_pr_gets_the_satisfied_event() {
         let dir = std::env::temp_dir().join(format!("fno-de-live-{}", std::process::id()));
@@ -554,8 +570,8 @@ mod tests {
         let wt = state.parent().unwrap().parent().unwrap();
         let events =
             emit_session_satisfied_for_record(&record(wt.to_str()), "reconcile_detected_merge");
-        let events = events.expect("emitted");
-        let text = std::fs::read_to_string(&events).expect("read");
+        let journal = events.expect("emitted");
+        let text = store_text(&journal);
         assert!(text.contains("session_satisfied"), "{text}");
         assert!(text.contains("sess-abc123"), "{text}");
         assert!(text.contains("gate_state_hash"), "{text}");
@@ -586,7 +602,7 @@ mod tests {
         let wt = dir.join("wt");
         std::fs::create_dir_all(wt.join(".fno")).expect("mkdir");
         let events = emit_human_touch_for_record(&record(wt.to_str())).expect("emitted");
-        let text = std::fs::read_to_string(&events).expect("read");
+        let text = store_text(&events);
         assert!(text.contains("human_touch"), "{text}");
         assert!(text.contains("x-aaaa"), "{text}");
         std::fs::remove_dir_all(&dir).ok();

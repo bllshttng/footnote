@@ -19,11 +19,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional
 
 import typer
 
-from fno.control_plane import emit_tick, scheduler_from_env
 from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
 # the external-backend verb classification: the sets live beside the data
@@ -5309,11 +5308,7 @@ def _echo_freed(freed: list, owner_id: str) -> None:
 # close guards, release twins, and self-heal that share its liveness predicate).
 from fno.graph.strand import (  # noqa: E402
     _release_contained_children,
-    _reparent_live_children,
-    _reparent_receipt,
-    _strandable_orphan_ids,
     _stranded_next_receipts,
-    _sweep_reparent_stranded_orphans,
 )
 
 # In graph/selection_evidence.py: the occupancy one `backlog next` selection
@@ -5325,14 +5320,6 @@ from fno.graph.selection_evidence import (  # noqa: E402
 )
 
 # In graph/_closures.py: this file is over the source budget.
-from fno.graph._closures import (  # noqa: E402
-    _cascade_close_contained,
-    _strandable_contained_ids,
-    _strandable_epic_ids,
-    _sweep_close_done_epics,
-    _sweep_close_stranded_contained,
-    _sweep_stamp_carried_sessions,
-)
 
 
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:

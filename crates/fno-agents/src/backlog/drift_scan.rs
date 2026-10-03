@@ -721,6 +721,7 @@ pub(crate) fn scan_merge_drift(
                     first_error = Some(format!(
                         "PR #{number}: no repo context (pr_url unparseable and cwd unset); refusing to query to avoid a wrong-repo match"
                     ));
+                    first_error_kind = Some("repository_context".to_string());
                 }
                 continue;
             }

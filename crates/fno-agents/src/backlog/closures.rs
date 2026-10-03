@@ -346,7 +346,7 @@ mod tests {
         let mut entries = vec![
             seed("x-mission", None as Option<&str>),
             seed("x-epic", Some("x-mission")),
-            done("x-cccc"),
+            json!({"id": "x-cccc", "parent": "x-epic", "status": "done", "completed_at": "2026-10-01T00:00:00Z"}),
         ];
         let closed = sweep_close_done_epics(&mut entries);
         assert_eq!(closed, vec!["x-epic".to_string(), "x-mission".to_string()]);
@@ -423,16 +423,17 @@ mod tests {
     #[test]
     fn the_orphan_sweep_moves_kids_to_the_nearest_live_ancestor() {
         let mut entries = vec![
-            done("x-dddd"),
+            seed("x-eeee", None as Option<&str>),
+            json!({"id": "x-dddd", "parent": "x-eeee", "status": "done", "completed_at": "2026-10-01T00:00:00Z"}),
             seed("x-cccc", Some("x-dddd")),
-            seed("x-eeee", Some("x-dddd")),
         ];
         let moved = sweep_reparent_stranded_orphans(&mut entries);
         assert_eq!(
             moved,
             vec![("x-cccc".to_string(), Some("x-eeee".to_string()))]
         );
-        assert_eq!(entries[1]["parent"], "x-eeee");
+        assert_eq!(entries[2]["parent"], "x-eeee");
+        assert!(sweep_reparent_stranded_orphans(&mut entries).is_empty());
     }
 
     #[test]

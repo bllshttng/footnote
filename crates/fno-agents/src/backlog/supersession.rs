@@ -248,8 +248,12 @@ mod tests {
             pred("x-other", &["src/gone.rs"], false),
             json!({"id": "x-plain"}),
         ];
+        // The empty file set leaves every surface uncovered: x-other is
+        // reported unverified (Python parity), x-done stays skipped.
         let receipts = verify_pending_supersessions(&mut entries, "x-succ", &[], 1, None, true);
-        assert!(receipts.is_empty(), "{receipts:?}");
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(receipts[0]["kind"], "supersession_unverified");
+        assert_eq!(receipts[0]["predecessor"], "x-other");
         assert!(entries[1]["supersession"].get("verified_at").is_none());
     }
 
