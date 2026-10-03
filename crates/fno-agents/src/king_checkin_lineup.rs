@@ -94,7 +94,7 @@ pub(crate) fn lineup_rows(
             "title": graph.and_then(|g| g.get("title")),
             "difficulty": graph.and_then(|g| g.get("difficulty")),
             "pr": graph.and_then(|g| g.get("pr_number")),
-            "model": difficulty.and_then(planned),
+            "model": difficulty.and_then(&planned),
             "status": "on deck",
         }));
     }

@@ -3043,6 +3043,7 @@ mod tests {
                 node: Some("x-aa11".into()),
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let planned = |d: &str| (d == "low").then(|| "codex/gpt-luna".to_string());
         let queue = ["x-bb22".to_string(), "x-aa11".to_string()];
@@ -3066,12 +3067,13 @@ mod tests {
             lines[start + 1],
             "| node | title | difficulty | PR | harness/model | status |"
         );
+        assert_eq!(lines[start + 2], "|---|---|---|---|---|---|");
         assert_eq!(
-            lines[start + 2],
+            lines[start + 3],
             "| x-aa11 | Seated \\| node | medium | 7 | claude/opus | in_progress |"
         );
         assert_eq!(
-            lines[start + 3],
+            lines[start + 4],
             "| x-bb22 | Queued node | low | - | codex/gpt-luna | on deck |"
         );
 
