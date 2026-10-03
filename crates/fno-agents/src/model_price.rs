@@ -255,6 +255,7 @@ impl RunningCost {
 
     fn row_line(&mut self, line: &str) {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+            self.compaction_parse_error = true;
             return;
         };
         if crate::compaction::boundary_ts(&row).is_some() {
@@ -779,6 +780,24 @@ mod tests {
             served_compaction_count(Some("sess-cost-1")),
             None,
             "an unavailable transcript does not keep a stale count"
+        );
+
+        let damaged_path = dir.join("damaged.jsonl");
+        let damaged =
+            r#"{"type":"compacted","timestamp":"2026-10-02T00:03:00Z""#.to_string() + "\n";
+        std::fs::write(&damaged_path, damaged).unwrap();
+        measure_session_cost(
+            &dir,
+            "sess-damaged",
+            &damaged_path,
+            None,
+            None,
+            "2026-10-02T00:03:00Z",
+        );
+        assert_eq!(
+            served_compaction_count(Some("sess-damaged")),
+            None,
+            "malformed transcript rows stay unknown instead of reading zero"
         );
     }
 
