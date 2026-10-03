@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 import time
 import unicodedata
 
@@ -17,6 +18,8 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
 MIN_ROWS, MAX_ROWS = 3, 6
 # Under this many columns the original buddy showed a one-line face.
 NARROW = 100
+# The original speech bubble held about 30 columns of text.
+BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
@@ -95,11 +98,16 @@ def layout(left, frame, cols):
     # Like the original: the full sprite with its name row below, at 100 columns or more.
     aw = max([width(a) for a in art] + [len(name)])
     art.append(name.center(aw).rstrip())
-    # Speech sits beside the body, the fleet line beside the name row.
+    # Speech wraps beside the body like the original bubble, bottom-aligned; the fleet line sits beside the name row.
     labels = [""] * len(art)
     labels[-1] = fleet
-    if len(art) > 1:
-        labels[-2] = frame.get("speech") or ""
+    lines = textwrap.wrap(frame.get("speech") or "", BUBBLE_W)
+    room = len(art) - 1
+    if len(lines) > room:
+        lines = lines[: room - 1] + [" ".join(lines[room - 1 :])] if room else []
+    bw = max([width(line) for line in lines] + [0])
+    for i, line in enumerate(lines):
+        labels[room - len(lines) + i] = line.ljust(bw)
 
     for rows in range(max(len(left), len(art), MIN_ROWS), MAX_ROWS + 1):
         lefts = left + [""] * (rows - len(left))
