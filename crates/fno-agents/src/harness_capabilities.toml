@@ -1844,7 +1844,7 @@ via = ["hooks/agy-king-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/
 
 [harness.agy.hooks.lead_reinject]
 state = "impossible"
-reason = "agy exposes no compaction event (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop); the crown line lands at invocationNum 0 in hooks/agy-crown-inject.sh"
+reason = "agy exposes no compaction event (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop); the crown line lands at invocationNum 0 in hooks/agy-team-inject.sh"
 
 [harness.opencode.hooks.lead_guard]
 state = "supported"
