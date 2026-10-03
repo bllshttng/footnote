@@ -1026,7 +1026,7 @@ impl View {
             .map(|_| row_meter::up_cell(a.started_at, now))
             .unwrap_or_else(|| "–".into());
         let activity = if a.last_activity_age_s.is_some() || a.updated_at.is_some() {
-            row_age(a, now)
+            row_age(a, now).trim().to_string()
         } else {
             "–".into()
         };

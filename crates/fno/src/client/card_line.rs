@@ -54,13 +54,13 @@ pub(super) fn metrics(a: &AgentRow, message: Option<&str>, width: usize) -> Stri
     let tokens = super::row_meter::token_cell(a.session_tokens);
     let prefix = format!("{spark} {pct} · {count} · {cost} · {tokens}");
     let Some(message) = message.filter(|s| !s.is_empty()) else {
-        return crate::chrome::fit_ellipsis(&prefix, width);
+        return crate::chrome::clip(&prefix, width);
     };
     let separator = " · ";
     let room = width.saturating_sub(crate::chrome::str_cols(&prefix));
     let separator_w = crate::chrome::str_cols(separator);
     if room <= separator_w {
-        return crate::chrome::fit_ellipsis(&prefix, width);
+        return crate::chrome::clip(&prefix, width);
     }
     format!(
         "{prefix}{separator}{}",

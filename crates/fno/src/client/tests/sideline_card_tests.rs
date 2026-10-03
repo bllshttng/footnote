@@ -593,7 +593,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
 }
 
 #[test]
-fn card_pr_and_age_activity_keep_distinct_right_side_fields() {
+fn card_pr_and_created_activity_ages_keep_right_side_fields() {
     let mut agents = king_and_worker();
     agents[1].last_activity_age_s = Some(42);
     let mut v = card_view(agents);
@@ -613,23 +613,19 @@ fn card_pr_and_age_activity_keep_distinct_right_side_fields() {
         .rposition(|run| [run[0].c, run[1].c, run[2].c] == ['#', '4', '2'])
         .expect("PR is visible")
         + 2;
-    let age_at = detail_cells
+    detail_cells
         .windows(3)
         .position(|run| [run[0].c, run[1].c, run[2].c] == ['4', '2', 's'])
         .expect("age is visible");
 
     assert_eq!(pr_end, width - 1, "PR is flush with the panel edge");
-    assert!(age_at < width - 6, "age precedes the activity summary");
     let pr_tail = agent_cells[width - 6..]
         .iter()
         .map(|cell| cell.c)
         .collect::<String>();
     let detail = detail_cells.iter().map(|cell| cell.c).collect::<String>();
     assert_eq!(pr_tail, "   #42");
-    assert!(
-        detail.contains("42s") && detail.ends_with("message"),
-        "{detail:?}"
-    );
+    assert!(detail.ends_with("– · 42s"), "{detail:?}");
 }
 
 #[test]
