@@ -611,6 +611,7 @@ for a king ruling inside its own scope; omit the flag to resolve it from this se
     }
     // The origin floor binds before the provenance resolution, so the event
     // records the gated value (the same order Python applies).
+    let caller_session = id.agent();
     let origin = enforce_origin_floor(door.origin.as_deref(), id);
     let provenance = match resolve_decider_lanes(
         id,
@@ -790,8 +791,8 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             trace_id: subject.clone(),
             span_id: new_span_id(),
             parent_span_id: Some(ask.to_string()),
-            actor_session: provenance.decided_by.clone(),
-            actor_kind: crate::decision_trace::actor_kind(provenance.decided_by.as_deref(), "mail"),
+            actor_session: caller_session.clone(),
+            actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
             comms: "mail",
             recipient_session: None,
             recipient_kind: None,
@@ -817,8 +818,8 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             trace_id: subject.clone(),
             span_id: new_span_id(),
             parent_span_id: Some(t.to_string()),
-            actor_session: provenance.decided_by.clone(),
-            actor_kind: crate::decision_trace::actor_kind(provenance.decided_by.as_deref(), "mail"),
+            actor_session: caller_session.clone(),
+            actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
             comms: "mail",
             recipient_session: None,
             recipient_kind: None,
@@ -833,8 +834,8 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             trace_id: subject.clone(),
             span_id: decision_id.clone(),
             parent_span_id: route_span_id.or_else(|| overturns.map(str::to_string)),
-            actor_session: provenance.decided_by.clone(),
-            actor_kind: crate::decision_trace::actor_kind(provenance.decided_by.as_deref(), "mail"),
+            actor_session: caller_session.clone(),
+            actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
             comms: "mail",
             recipient_session: None,
             recipient_kind: None,
@@ -848,6 +849,13 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     // Durability first: the project journal. A failed write here records
     // nothing anywhere (the Python generic handler's exit 1).
     if let Err(e) = crate::event_store::append_envelope(&journal, &envelope.to_string(), None) {
+        eprintln!("decide: failed to record: {e}");
+        return 1;
+    }
+    // Recall second: the machine-wide decision index. The event id names the
+    // recovery, because re-running would mint a second id for one ruling.
+    let index_path = decisions_jsonl_path();
+    if let Err(e) = crate::event_store::append_envelope(&index_path, &envelope.to_string(), None) {
         eprintln!(
             "decide: recorded {decision_id} to the project journal, but the \
 recall store write failed: {e}. Run `fno backlog decide-reindex` to recover it. \
