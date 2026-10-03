@@ -8,7 +8,7 @@ use super::View;
 use crate::proto::{cell_flags, Cell, Color};
 
 impl View {
-    /// Rows the court block owns at the bottom of the sideline: three when
+    /// Rows the court block owns at the bottom of the sideline: four when
     /// minimized, the expanded reading's height when expanded, and ZERO when
     /// the terminal cannot hold it beside at least one sideline row - the
     /// block yields, the rows never do. Zero too when the sideline shows the

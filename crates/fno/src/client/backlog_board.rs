@@ -126,7 +126,6 @@ pub(crate) struct BoardView {
     pub(crate) input: Option<(BoardInputKind, String)>,
     input_esc: Vec<u8>,
     /// A p/s/S field picker, when open.
-    pub(crate) pick: Option<PickState>,
     /// `f` facet picker: cursor per level (facet, then value).
     pub(crate) facet: Option<FacetPick>,
     /// The column layout (which columns, order, focus width), D4.
@@ -256,12 +255,9 @@ pub(crate) struct ColPick {
 pub(crate) enum BoardInputKind {
     /// The `/` find filter.
     Find,
-    /// The `e` title editor (pre-filled with the current title).
-    Title,
-    /// The `D` details-append text.
-    Append,
-    /// The `N` note text.
-    Note,
+    /// The `c` comment text: the user's ask on the target node, posted
+    /// through `fno backlog note comment ... --author user`.
+    Comment,
 }
 
 /// The board's queued write verb.
@@ -269,36 +265,6 @@ pub(crate) enum BoardInputKind {
 pub(crate) enum WriteAction {
     /// Run these argv (plus optional stdin) through the bounded shell-out.
     Args(Vec<String>, Option<String>),
-    /// The `D` append: read the CURRENT details off the store first so a
-    /// concurrent edit is never overwritten by the gathered copy.
-    Append { id: String, text: String },
-}
-
-/// The p/s/S field picker's kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PickKind {
-    Priority,
-    Size,
-    Status,
-}
-
-impl PickKind {
-    /// The picker's rows (label, write value); [`crate::backlog_write`]'s
-    /// lists, so both boards offer the same values the verb accepts.
-    pub(crate) fn values(self) -> &'static [&'static str] {
-        match self {
-            PickKind::Priority => crate::backlog_write::PRIORITIES,
-            PickKind::Size => crate::backlog_write::SIZES,
-            PickKind::Status => crate::backlog_write::STATUSES,
-        }
-    }
-}
-
-/// An open p/s/S picker: kind + cursor.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PickState {
-    pub(crate) kind: PickKind,
-    pub(crate) sel: usize,
 }
 
 /// The `f` facet picker's open state: the facet list first, then that
@@ -334,7 +300,6 @@ impl BoardView {
             force: false,
             input: None,
             input_esc: Vec::new(),
-            pick: None,
             facet: None,
             layout: crate::view_store::load_board_layout(),
             colpick: None,
@@ -1123,8 +1088,6 @@ impl View {
             // too, so it must paint over it, and its Esc must land here.
             let m = board_keys_popup();
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
-        } else if let Some(m) = pick_popup(b) {
-            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if let Some(m) = facet_popup(b) {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if let Some(m) = colpick_popup(b) {
@@ -1274,10 +1237,6 @@ pub(crate) async fn board_keys(
         input_keys(view, bytes);
         return Ok(StdinFlow::Continue);
     }
-    if b.pick.is_some() {
-        pick_keys(view, bytes);
-        return Ok(StdinFlow::Continue);
-    }
     if b.facet.is_some() {
         facet_keys(view, bytes);
         return Ok(StdinFlow::Continue);
@@ -1327,13 +1286,6 @@ pub(crate) async fn board_keys(
             ModalKey::Byte(b'b') => dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => ask_the_king(view, sock_w).await?,
-            ModalKey::Byte(b'e') => edit_title(view)?,
-            ModalKey::Byte(b'p') => edit_priority(view)?,
-            ModalKey::Byte(b's') => edit_size(view)?,
-            ModalKey::Byte(b'S') => edit_status(view)?,
-            ModalKey::Byte(b'D') => append_details(view)?,
-            ModalKey::Byte(b'N') => add_note(view)?,
-            ModalKey::Byte(b'E') => edit_description(view).await?,
             ModalKey::Byte(b'c') => open_colpick(view),
             ModalKey::Byte(b'?') => open_keys_overlay(view),
             ModalKey::Byte(b'\t') => toggle_view(view),
@@ -1608,49 +1560,37 @@ fn input_commit(view: &mut View) {
                 Err(msg) => view.set_notice(msg),
             }
         }
-        BoardInputKind::Title => {
+        BoardInputKind::Comment => {
             if text.is_empty() {
-                view.set_notice("title: nothing to set".into());
+                view.set_notice("comment: nothing to post".into());
                 return;
             }
             let Some(id) = edit_target(b) else {
                 return;
             };
-            let args = match crate::backlog_write::field_argv(
-                &id,
-                crate::backlog_write::Field::Title,
-                &text,
-                "the mux backlog view",
-            ) {
-                Ok(args) => args,
-                Err(e) => {
-                    view.set_notice(e);
-                    return;
-                }
-            };
+            let args: Vec<String> = vec![
+                "backlog".into(),
+                "note".into(),
+                "comment".into(),
+                id,
+                text,
+                "--author".into(),
+                "user".into(),
+            ];
             queue_write(b, WriteAction::Args(args, None));
         }
-        BoardInputKind::Append => {
-            if text.is_empty() {
-                view.set_notice("details: nothing to append".into());
-                return;
-            }
-            let Some(id) = edit_target(b) else {
-                return;
-            };
-            queue_write(b, WriteAction::Append { id, text });
-        }
-        BoardInputKind::Note => {
-            if text.is_empty() {
-                view.set_notice("note: nothing to add".into());
-                return;
-            }
-            let Some(id) = edit_target(b) else {
-                return;
-            };
-            let args: Vec<String> = vec!["backlog".into(), "note".into(), id, text];
-            queue_write(b, WriteAction::Args(args, None));
-        }
+    }
+}
+
+/// `c` from the details pane (or the board): open the comment input on
+/// the target node. The composer for the user's ask; posting is the
+/// Enter submit, through `fno backlog note comment ... --author user`.
+pub(crate) fn begin_comment(view: &mut View) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    if edit_target(b).is_some() {
+        b.input = Some((BoardInputKind::Comment, String::new()));
     }
 }
 
@@ -1682,93 +1622,6 @@ fn gated(b: &BoardView, feature: &str) -> Option<String> {
 }
 
 /// `e`: the title editor, pre-filled with the current title.
-pub(crate) fn edit_title(view: &mut View) -> Result<(), String> {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    if let Some(reason) = gated(b, unavailable_features::FIELD_EDITS) {
-        view.set_notice(reason);
-        return Ok(());
-    }
-    let Some(id) = edit_target(b) else {
-        return Ok(());
-    };
-    let title = card_title(b, &id);
-    b.input = Some((BoardInputKind::Title, title));
-    Ok(())
-}
-
-/// The target card's current title prefill (the title editor's starting
-/// text). Empty when the read no longer shows the card.
-fn card_title(b: &BoardView, id: &str) -> String {
-    find_card(b, id)
-        .map(|c| c.title.clone())
-        .unwrap_or_default()
-}
-
-/// `p`: the priority picker (p0-p3).
-pub(crate) fn edit_priority(view: &mut View) -> Result<(), String> {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    if gated(b, unavailable_features::FIELD_EDITS).is_none() && edit_target(b).is_some() {
-        b.pick = Some(PickState {
-            kind: PickKind::Priority,
-            sel: 0,
-        });
-    }
-    Ok(())
-}
-
-/// `s`: the size picker (S, M, L).
-pub(crate) fn edit_size(view: &mut View) -> Result<(), String> {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    if gated(b, unavailable_features::FIELD_EDITS).is_none() && edit_target(b).is_some() {
-        b.pick = Some(PickState {
-            kind: PickKind::Size,
-            sel: 0,
-        });
-    }
-    Ok(())
-}
-
-/// `S`: the status picker (idea, design, ready, deferred, done). A
-/// deferred move carries the reason the patch door requires.
-pub(crate) fn edit_status(view: &mut View) -> Result<(), String> {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    if let Some(reason) = gated(b, unavailable_features::FIELD_EDITS) {
-        view.set_notice(reason);
-        return Ok(());
-    }
-    if edit_target(b).is_some() {
-        b.pick = Some(PickState {
-            kind: PickKind::Status,
-            sel: 0,
-        });
-    }
-    Ok(())
-}
-
-/// `D`: append one paragraph to the node's details. The text is typed
-/// now; the fresh store read happens inside the write task.
-pub(crate) fn append_details(view: &mut View) -> Result<(), String> {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    if let Some(reason) = gated(b, unavailable_features::FIELD_EDITS) {
-        view.set_notice(reason);
-        return Ok(());
-    }
-    if edit_target(b).is_some() {
-        b.input = Some((BoardInputKind::Append, String::new()));
-    }
-    Ok(())
-}
-
 /// `T`/`K`/`J`: card moves through `fno backlog rank --operator`. `K`/`J`
 /// anchor on the nearest card above/below in the same cell with the same
 /// parent (the verb's own rank scope, the closest pick the view can
@@ -1924,7 +1777,13 @@ pub(crate) async fn ask_the_king(
             view.set_notice(format!("no king rules {id}, its epic or its project"));
             return Ok(());
         };
-        (id.clone(), king, card_title(b, &id))
+        (
+            id.clone(),
+            king,
+            find_card(b, &id)
+                .map(|c| c.title.clone())
+                .unwrap_or_default(),
+        )
     };
     let mut text = format!("operator asks: please run /fno:blueprint subagent {id} for {id}");
     let cut: String = title.chars().take(80).collect();
@@ -2295,93 +2154,6 @@ fn facet_toggle(view: &mut View) {
     toggle_value(b, pick.facet, vsel);
 }
 
-/// The p/s/S picker's popup for the compose pass.
-pub(crate) fn pick_popup(b: &BoardView) -> Option<Popup> {
-    let pick = b.pick?;
-    let values = pick.kind.values();
-    let mut rows: Vec<PopupRow> = vec![PopupRow::Header("pick".into()), PopupRow::Rule];
-    for v in values {
-        rows.push(PopupRow::Entry {
-            glyph: " ".into(),
-            label: (*v).into(),
-            hint: String::new(),
-            enabled: true,
-        });
-    }
-    let mut popup = Popup::new(rows, Anchor::Center)
-        .title("backlog edit")
-        .footer("enter set · esc close");
-    popup.sel = pick.sel.min(values.len() - 1);
-    Some(popup)
-}
-
-/// The p/s/S picker's keys: Up/Down move the cursor, Enter commits, Esc
-/// closes.
-fn pick_keys(view: &mut View, bytes: &[u8]) {
-    let toks = {
-        let b = view.backlog_board.as_mut().expect("pick open");
-        let mut esc = std::mem::take(&mut b.board_esc);
-        let toks = fold_modal_keys(&mut esc, bytes);
-        b.board_esc = esc;
-        toks
-    };
-    for tok in toks {
-        let Some(b) = view.backlog_board.as_mut() else {
-            break;
-        };
-        if b.pick.is_none() {
-            break;
-        }
-        match tok {
-            ModalKey::Esc => b.pick = None,
-            ModalKey::Up => {
-                if let Some(p) = b.pick.as_mut() {
-                    p.sel = p.sel.saturating_sub(1);
-                }
-            }
-            ModalKey::Down => {
-                if let Some(p) = b.pick.as_mut() {
-                    p.sel = (p.sel + 1).min(p.kind.values().len() - 1);
-                }
-            }
-            ModalKey::Enter => pick_commit(view),
-            _ => {}
-        }
-    }
-}
-
-/// Enter on the p/s/S picker: queue the `fno backlog update` write for
-/// the run loop. A deferred status move carries the reason the patch door
-/// requires.
-fn pick_commit(view: &mut View) {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return;
-    };
-    let Some(p) = b.pick.take() else {
-        return;
-    };
-    let Some(id) = edit_target(b) else {
-        return;
-    };
-    let value = p.kind.values().get(p.sel).copied().unwrap_or("");
-    if value.is_empty() {
-        return;
-    }
-    let field = match p.kind {
-        PickKind::Priority => crate::backlog_write::Field::Priority,
-        PickKind::Size => crate::backlog_write::Field::Size,
-        PickKind::Status => crate::backlog_write::Field::Status,
-    };
-    match crate::backlog_write::field_argv(&id, field, value, "the mux backlog view") {
-        Ok(args) => {
-            if !queue_write(b, WriteAction::Args(args, None)) {
-                view.set_notice("a write is already queued".into());
-            }
-        }
-        Err(e) => view.set_notice(e),
-    }
-}
-
 /// Enter on a board card: open the drill-down for the cursor's card,
 /// held inside the board (a re-open of the SAME node keeps the trail).
 pub(crate) fn open_detail(view: &mut View) {
@@ -2615,10 +2387,8 @@ fn board_keys_popup() -> Popup {
         pick_row("/ find - f filter - r re-read"),
         pick_row("Tab list/kanban - space toggle (in f)"),
         pick_row("enter node detail - F full screen"),
-        PopupRow::Header("edit".into()),
-        PopupRow::Rule,
-        pick_row("e title - p priority - s size - S status"),
-        pick_row("D append details - N note - E edit description in $EDITOR"),
+        pick_row("y copy id - Y copy session command (in detail)"),
+        pick_row("c comment on the detail's node"),
         PopupRow::Header("layout".into()),
         PopupRow::Rule,
         pick_row("c columns (show, order, focus width)"),
@@ -2630,88 +2400,4 @@ fn board_keys_popup() -> Popup {
     Popup::new(rows, Anchor::Center)
         .title("backlog keys")
         .footer("esc close")
-}
-
-/// `N`: a note on the target node through `fno backlog note`.
-pub(crate) fn add_note(view: &mut View) -> Result<(), String> {
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    if let Some(reason) = gated(b, unavailable_features::FIELD_EDITS) {
-        view.set_notice(reason);
-        return Ok(());
-    }
-    if edit_target(b).is_some() {
-        b.input = Some((BoardInputKind::Note, String::new()));
-    }
-    Ok(())
-}
-
-/// `E`: the full description in $EDITOR. Suspends the mux around the child
-/// (cooked mode, the primary screen), reads the result back, and queues
-/// the write only when the text actually changed.
-pub(crate) async fn edit_description(view: &mut View) -> Result<(), String> {
-    let Some(id) = view.backlog_board.as_ref().and_then(|b| edit_target(b)) else {
-        return Ok(());
-    };
-    if let Some(reason) = gated(
-        view.backlog_board.as_ref().expect("board open"),
-        unavailable_features::FIELD_EDITS,
-    ) {
-        view.set_notice(reason);
-        return Ok(());
-    }
-    let graph = crate::backlog_view::graph_path();
-    let id_for_read = id.clone();
-    let text = tokio::task::spawn_blocking(move || {
-        crate::store_client::node(&graph, &id_for_read)
-            .ok()
-            .flatten()
-            .and_then(|n| {
-                n.get("details")
-                    .and_then(|d| d.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
-    let text_before = text.clone();
-    let Some(edited) = tokio::task::spawn_blocking(move || run_editor(&text))
-        .await
-        .ok()
-        .flatten()
-    else {
-        view.set_notice("editor: cancelled".into());
-        return Ok(());
-    };
-    if edited.is_empty() || edited == text_before {
-        view.set_notice("description: unchanged, nothing written".into());
-        return Ok(());
-    }
-    let Some(b) = view.backlog_board.as_mut() else {
-        return Ok(());
-    };
-    let args: Vec<String> = vec![
-        "backlog".into(),
-        "update".into(),
-        id,
-        "--details-file".into(),
-        "-".into(),
-    ];
-    queue_write(b, WriteAction::Args(args, Some(edited)));
-    Ok(())
-}
-
-/// Suspend the mux, run $EDITOR on `text`, restore the mux, return the
-/// edited text. `None` when the editor failed or exited non-zero.
-fn run_editor(text: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join("fno-board-edit");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("details-{}.md", std::process::id()));
-    std::fs::write(&path, text).ok()?;
-    let ok = super::editor::edit_file_suspended(&path);
-    let edited = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    edited.filter(|_| ok)
 }

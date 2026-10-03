@@ -1,0 +1,20 @@
+# key<TAB>routing captured from fno.claims.io.claims_root_for before deletion
+# routing: global = the global claims root, none = the cwd/space default
+build:x-golden	global
+config-optout:x-golden	global
+dispatch:x-golden	global
+flight:x-golden	global
+gate:x-golden	global
+groom:x-golden	global
+node:x-golden	global
+reconcile:x-golden	global
+session:x-golden	global
+test:x-golden	global
+update:x-golden	global
+worker:x-golden	global
+colonless-key	none
+node	none
+walker:/some/repo	none
+unknown:x-abcd	none
+fleet:m-123	none
+	none

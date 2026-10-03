@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from fno.claims.cli import cli
 from fno.claims.core import ForceReleaseOutcome, acquire_claim, force_release_claim
-from fno.claims.io import claim_path
+from fno.claims.io import claim_path, claims_dir
 
 runner = CliRunner()
 
@@ -22,18 +22,20 @@ runner = CliRunner()
 def _two_default_roots(tmp_path, monkeypatch):
     """Global root and space root both redirected under tmp.
 
-    global_claims_root is patched (not $FNO_CLAIMS_ROOT) because the env
-    override also captures claims_dir(None), which would collapse the space
-    root into the global one and leave nothing "other" to find.
+    Both legs must see the same roots, and the native leg only reads env
+    (a Python path-symbol patch is invisible across the seam): HOME carries
+    the global root and FNO_SPACES_DIR the space base. FNO_CLAIMS_ROOT stays
+    unset - it would collapse claims_dir(None) into the global root and leave
+    nothing "other" to find.
     """
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
-    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "global")
-    monkeypatch.setattr("fno.paths.space_dir", lambda *_a, **_k: tmp_path / "space")
+    monkeypatch.setenv("HOME", str(tmp_path / "global"))
+    monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
 
 
 class TestForceReleaseReportsWhatItFound:
     def test_AC4_HP_existing_file_is_archived_and_named(self, tmp_path):
-        space_root = tmp_path / "space"
+        space_root = claims_dir(None).parent
         acquire_claim("walker:x", "walker:x", root=None)
         resolved = claim_path("walker:x", root=None)
         assert resolved.parent == space_root / "claims"
@@ -76,7 +78,7 @@ class TestForceReleaseReportsWhatItFound:
         # file is handwritten: the refusal path checks existence, never
         # parses, and the byte-identity assertion needs the raw bytes.
         global_root = tmp_path / "global"
-        space_claims = tmp_path / "space" / "claims"
+        space_claims = claims_dir(None)
         space_claims.mkdir(parents=True)
         stray = space_claims / "session%3Aabc.lock"
         stray.write_bytes(b"holder: target-session:someone\n")

@@ -833,7 +833,8 @@ mod tests {
                 "cwd": "/Users/someone/secret", "session_id": "ses-leak",
                 "details": "secret details",
                 "notes": [{"text": "secret note"}],
-                "sessions": [{"session_id": "ses-leak"}],
+                "sessions": [{"phase": "execute",
+                              "session_id": "9b1c2d3e-0000-4000-8000-00000000leak"}],
                 "blocked_by": ["x-2"],
                 "plan_path": "/Users/someone/internal/fno/plans/pub.md",
             }),
@@ -855,12 +856,21 @@ mod tests {
         assert_eq!(ids, vec!["x-1"]);
 
         let inputs = inputs_from_rows(&selected);
+        let (private, _) = render_one(&inputs, None, None, None, false).unwrap();
+        assert!(
+            private
+                .contains("fno agents adopt 9b1c2d3e-0000-4000-8000-00000000leak --cross-project"),
+            "the private page carries the recovery command"
+        );
         let (page, count) = render_one(&inputs, None, None, None, true).unwrap();
         assert_eq!(count, 1);
         assert!(page.contains("Public thing"), "{page}");
         for secret in [
             "/Users/someone/secret",
             "ses-leak",
+            "9b1c2d3e",
+            "fno agents",
+            "--cross-project",
             "secret details",
             "secret note",
             "Linked private",

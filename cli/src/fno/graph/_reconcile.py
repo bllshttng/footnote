@@ -969,6 +969,20 @@ def resolve_promise_evidence(
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
 
+    # An Execution Strategy that declares waves promises one ship per wave
+    # (the multi-wave stamp bug: wave 1's merge closed a 3-wave node).
+    if expected is None:
+        m = re.search(r"^## +Execution Strategy\b.*?$(.*?)(?=^## +|\Z)", _body, re.M | re.S)
+        if m is not None:
+            try:
+                from fno.plan.brief import parse_execution_strategy
+
+                waves = parse_execution_strategy(m.group(1)).get("waves")
+            except Exception:  # noqa: BLE001 - unread skips the gate, never blocks
+                waves = None
+            if isinstance(waves, list) and len(waves) >= 2:
+                expected = len(waves)
+
     # Condition E: an open prove-it FAIL on this node's own plan
     # artifacts is claimed work whose outcome did not hold; it needs no
     # declaration. A done node is never reopened; a failed reader is a warning.
@@ -1144,7 +1158,7 @@ def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: i
     return (
         f"Refused: {node_id} promised {expected} ships; only {merged} merged.\n"
         f"  plan: {plan_display}\n"
-        f"  expected_url_count: {expected}    merged refs: {merged}\n"
+        f"  promised ships: {expected}    merged refs: {merged}\n"
         f"\n"
         f"  Two legal exits:\n"
         f"    ship the rest, then close; or\n"

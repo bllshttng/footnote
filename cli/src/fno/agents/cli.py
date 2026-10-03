@@ -145,11 +145,16 @@ def _reclaim_if_provably_dead(
         force_release_claim,
         sweep_verdict,
     )
-    from fno.claims.io import claim_path, claims_root_for, read_claim_file
+    from fno.agents.lock import _pid_is_alive
+    from fno.claims.core import native_claims_root
+    from fno.claims.io import claim_path, read_claim_file
     from fno.claims.verdict import claim_verdicts
     from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
-    path = claim_path(key, root=claims_root_for(key))
+    try:
+        path = claim_path(key, root=native_claims_root(key))
+    except Exception:  # noqa: BLE001 - an unmeasurable store clears nothing
+        return None, "unreadable"
     # Take the SAME per-key recovery mutex the reaper holds while it re-verifies
     # and archives, and re-read INSIDE it. Reading, deciding, and releasing
     # outside the lock is a TOCTOU window: force_release_claim drops a claim
@@ -166,7 +171,7 @@ def _reclaim_if_provably_dead(
             claim = read_claim_file(path)
         except Exception:  # noqa: BLE001 - unreadable is unproven
             return None, "unreadable"
-        native = claim_verdicts([key], root=claims_root_for(key)).get(key)
+        native = claim_verdicts([key]).get(key)
         if native is None:
             return None, "unreadable"
         if key.startswith("dispatch:"):
@@ -186,8 +191,20 @@ def _reclaim_if_provably_dead(
             # `foreign-reservation` there would print force-release advice
             # against a reservation somebody is actively launching under.
             if native.get("state") == "live":
-                return None, _HOLDER_ALIVE
-            if native.get("bucket") == "offhost":
+                if (
+                    native.get("session_basis") != "registry-served-live"
+                    or _pid_is_alive(claim.pid)
+                ):
+                    return None, _HOLDER_ALIVE
+                # A registry-served live verdict names the DISPATCHER's session
+                # (the subprocess stamps its caller's session id), which
+                # outlives the holder by design. Only the spawn-cli shape may
+                # clear on the holder pid: an advance:<pid> reservation stays
+                # the only barrier its booting worker has, and its pid is dead
+                # by design too.
+                if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
+                    return None, "foreign-reservation"
+            elif native.get("bucket") == "offhost":
                 return None, "offhost"
             if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
                 return None, "foreign-reservation"
@@ -208,7 +225,6 @@ def _reclaim_if_provably_dead(
             force_release_claim(
                 key=key,
                 reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
-                root=claims_root_for(key),
                 holding_recovery_lock=True,
             )
         except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
@@ -302,13 +318,12 @@ def _spawn_guard_decision(
     """
     from fno.claims.cli import _parse_ttl
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, claim_status
-    from fno.claims.io import claims_root_for
 
     node_key = f"node:{node_id}"
     res_key = f"dispatch:{node_id}"
 
     try:
-        info = claim_status(node_key, root=claims_root_for(node_key))
+        info = claim_status(node_key)
     except Exception as exc:  # pragma: no cover - claim_status never raises today
         return {
             "verdict": "error",
@@ -441,7 +456,7 @@ def _spawn_guard_decision(
             # render as a wedge with force-release advice against a claim that
             # is now genuinely held.
             try:
-                current = claim_status(node_key, root=claims_root_for(node_key)).get("state")
+                current = claim_status(node_key).get("state")
             except Exception:  # noqa: BLE001 - an unreadable probe keeps the first reading
                 current = state
             wedged = current == "suspect" and not in_launch_window
@@ -524,7 +539,6 @@ def _spawn_guard_decision(
             holder,
             reason=f"bg-dispatch reservation for {node_id}",
             ttl_ms=_parse_ttl(ttl),
-            root=claims_root_for(res_key),
         )
 
     try:
@@ -595,7 +609,7 @@ def _spawn_guard_decision(
     # exact holder is observable on disk. A peer that won a visibility-lagged
     # race launches; this caller returns the durable duplicate receipt.
     try:
-        post = claim_status(res_key, root=claims_root_for(res_key))
+        post = claim_status(res_key)
     except Exception:  # pragma: no cover - claim_status never raises today
         post = {}
     if post.get("holder") != holder:
@@ -631,7 +645,6 @@ def _spawn_guard_decision(
                 handover_holder,
                 reason=f"spawn handover window for {node_id}",
                 ttl_ms=_parse_ttl(HANDOVER_TTL),
-                root=claims_root_for(node_key),
             )
         except CLAIM_UNAVAILABLE as exc:
             # SOMEBODY ELSE HOLDS THE NODE, and that is not a hiccup. The
@@ -714,14 +727,13 @@ def _release_dispatch_claims(*claims) -> None:
     failed to free instead of reporting the same nothing as success.
     """
     from fno.claims.core import release_claim
-    from fno.claims.io import claims_root_for
 
     for pair in claims:
         if pair is None:
             continue
         key, holder = pair
         try:
-            release_claim(key, holder, root=claims_root_for(key))
+            release_claim(key, holder)
         except Exception as exc:  # noqa: BLE001 - must not mask the real error
             print(
                 f"WARNING: could not release {key} held by {holder} ({exc}); "

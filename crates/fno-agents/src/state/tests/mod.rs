@@ -2168,9 +2168,9 @@ fn source_root_for_exe_stops_at_a_symlinked_home_too() {
 /// saves a deployed binary: `~/.fno/agents/registry.json` sits inside `$HOME`,
 /// so the store-inside-the-root escape hatch already returns "proceed" with
 /// or without it. The stop is load-bearing only once the registry lives
-/// OUTSIDE home - `FNO_AGENTS_HOME` pointed at `/var/lib/...`, or a
-/// relocated `config.paths.agents_registry_path`. Both are asserted below,
-/// in both directions, so neither reads as passing by accident.
+/// OUTSIDE home - `FNO_AGENTS_HOME` pointed at `/var/lib/...`. It is
+/// asserted below, in both directions, so it does not read as passing by
+/// accident.
 #[test]
 fn a_deployed_binary_under_a_git_managed_home_still_writes() {
     let home = tmpdir("git-managed-home").canonicalize().unwrap();

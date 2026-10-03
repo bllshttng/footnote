@@ -38,11 +38,13 @@ def _write_plan(
     path: Path,
     *,
     waves: int = 0,
+    exec_waves: int = 0,
     close_probes: list[str] | None = None,
     expected_url_count: int | None = None,
 ) -> Path:
     """Write a minimal plan doc. `waves` only adds body headings (flavor); the
-    gate no longer reads them, so a multi-wave plan declaring nothing closes."""
+    gate reads only an explicit `## Execution Strategy` `waves:` list, so a
+    multi-wave plan declaring nothing closes."""
     lines = ["---", "node: x-prom", "status: ready", "created: 2026-08-09T00:00:00+00:00"]
     if close_probes is not None:
         lines.append("close_probes:")
@@ -56,6 +58,21 @@ def _write_plan(
     lines.append("")
     for n in range(1, waves + 1):
         lines.append(f"## Wave {n}{' -' if n % 2 == 0 else ':'} wave {n} title")
+        lines.append("")
+    if exec_waves:
+        wave_list = "\n".join(
+            f"  - wave: {n}\n    name: PR {n}" for n in range(1, exec_waves + 1)
+        )
+        lines.append("## Execution Strategy")
+        lines.append("")
+        lines.append("```yaml")
+        lines.append("execution_mode: sequential")
+        lines.append("waves:")
+        lines.append(wave_list)
+        lines.append("tasks:")
+        lines.append("  - id: '1'")
+        lines.append("    title: the work")
+        lines.append("```")
         lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -184,6 +201,10 @@ def test_no_declaration_closes_clean_even_multi_wave(tmp_path: Path):
 
     plan = _write_plan(tmp_path / "p.md", waves=2)
     assert resolve_promise_evidence({"id": "x-a", "plan_path": str(plan)}).outcome == "ok"
+    # Body headings are flavor, but an Execution Strategy that declares ONE
+    # wave still promises one ship - below the multi-ship floor, so it closes.
+    one = _write_plan(tmp_path / "one.md", exec_waves=1)
+    assert resolve_promise_evidence({"id": "x-a", "plan_path": str(one)}).outcome == "ok"
 
 
 def test_no_plan_path_passes():
@@ -474,6 +495,20 @@ def test_condition_c_shortfall_refuses(tmp_path: Path):
     def merged(n, **kw):
         return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
     v = resolve_promise_evidence(node, query=merged)
+    assert v.outcome == "promise_unmet"
+    assert "promised 3 ships" in (v.reason or "")
+    assert "only 1 merged" in (v.reason or "")
+    # The incident specimen: a 3-wave quick-plan declared no expected_url_count,
+    # so wave 1's merge closed the node while waves 2 and 3 were still in
+    # flight. The Execution Strategy's own waves list is the promise now.
+    wave_plan = _write_plan(tmp_path / "w.md", exec_waves=3)
+    wave_node = {
+        "id": "x-w",
+        "plan_path": str(wave_plan),
+        "pr_number": 42,
+        "pr_url": "https://github.com/o/r/pull/42",
+    }
+    v = resolve_promise_evidence(wave_node, query=merged)
     assert v.outcome == "promise_unmet"
     assert "promised 3 ships" in (v.reason or "")
     assert "only 1 merged" in (v.reason or "")

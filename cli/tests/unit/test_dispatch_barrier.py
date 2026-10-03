@@ -38,13 +38,18 @@ def _last_json(out: str) -> dict:
 
 def _route_to(monkeypatch, root):
     # Route every claim key (node:/dispatch:) to an isolated tmp root so the real
-    # acquire/claim_status machinery runs hermetically. Two doors, deliberately:
-    # the monkeypatch covers callers that import claims_root_for directly, and
-    # FNO_CLAIMS_ROOT (the documented global-root override) covers anything that
+    # acquire/claim_status machinery runs hermetically: FNO_CLAIMS_ROOT (the
+    # documented global-root override) is the one door. It covers anything that
     # resolves through the env at call time, so a module-identity or import-order
     # pathology can never route a CLI acquire to the real shared root.
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: root)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(root))
+    # Scrub this process's harness identity, so a fixture acquire stamps no
+    # session id: the suite seeds dead-pid holders, and a stamp from the LIVE
+    # pytest session lets the classifier's witness leg answer `live` for them.
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_spawn_guard_serializes_two_callers(monkeypatch, tmp_path):
@@ -509,7 +514,6 @@ def _barrier_diag(tmp_path) -> str:
     import os
 
     from fno.claims.io import claim_path
-    from fno.claims.io import claims_root_for as current_resolver
     from fno.claims.io import global_claims_dir
 
     def _seen(label: str, root) -> str:
@@ -529,17 +533,16 @@ def _barrier_diag(tmp_path) -> str:
         except Exception as exc:  # noqa: BLE001
             return f"{label}={path}:PRESENT:<unreadable: {type(exc).__name__}>"
 
-    # The three doors, each answered SEPARATELY. The earlier version printed the
+    # The doors, each answered SEPARATELY. The earlier version printed the
     # roots and stopped, so a failure could not say whether the seeded claim was
     # missing, in another directory, or present and read as free - three causes
     # with one appearance. A path plus its holder separates them in one run.
     return (
-        f"[diag] resolver={current_resolver('node:N')} global={global_claims_dir()} "
+        f"[diag] global={global_claims_dir()} "
         f"env={os.environ.get('FNO_CLAIMS_ROOT')!r} tmp={tmp_path} "
         + " ".join(
             (
                 _seen("seeded", tmp_path),
-                _seen("resolved", current_resolver("node:N")),
                 _seen("default", None),
             )
         )

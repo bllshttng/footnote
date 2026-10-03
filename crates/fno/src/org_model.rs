@@ -239,6 +239,7 @@ fn org_node(inputs: &Inputs, id: &str, fold: &Value, now: u64) -> Result<OrgNode
                 agent: Some(agent.name.clone()),
                 action,
                 reason,
+                command: None,
             },
             agent: Some(agent.clone()),
         });

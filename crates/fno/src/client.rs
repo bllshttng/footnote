@@ -379,14 +379,14 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // An interactive client drops an inherited worker identity: no composer child reads as agent-origin.
+    std::env::remove_var("FNO_AGENT_SELF");
     // Resolve + record the config warning BEFORE any early exit below (the
     // nested-session guard, an invalid session name): a pinned config whose
     // dir diverged must say so on every path, not only the happy attach. The
     // write rides the client log, never stderr - we are pre-alternate-screen,
-    // and any stderr byte lands in the PTY the harness is about to read as
-    // the TUI (the NEVER-stderr rule). The mux dir is ensured first:
-    // on a fresh state root nothing creates it until connect_or_spawn, and an
-    // append to a missing parent silently drops the warning.
+    // and any stderr byte lands in the PTY the harness reads as the TUI. The
+    // mux dir is ensured first because nothing creates it until connect_or_spawn.
     let _ = proto::mux_dir();
     if let Some((w, _remedy)) = proto::pending_config_warning() {
         let _ = proto::ensure_mux_dir();
@@ -1335,72 +1335,8 @@ enum SweepMsg {
     Failed(String),
 }
 
-/// Spawn the meter sampler: one bounded `macmon pipe -s 1` sample per refresh
-/// interval, the one-line reading sent to the UI loop. Exits when the view's
-/// gate flips off, so a toggle-off never leaves a sampler running. Two
-/// overlapping tasks are harmless: the channel is last-send-wins.
-fn spawn_meter_sampler(
-    gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    refresh: u64,
-    meter_tx: tokio::sync::mpsc::UnboundedSender<String>,
-) {
-    tokio::spawn(async move {
-        while gate.load(std::sync::atomic::Ordering::Relaxed) {
-            let text = sample_macmon_line().await;
-            if meter_tx.send(text).is_err() {
-                // The UI loop is gone; nothing left to report to.
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(refresh)).await;
-        }
-    });
-}
-
-/// One bounded `macmon pipe -s 1` sample rendered as a status-row segment.
-/// macmon streams forever, so the timeout is the normal exit; anything that
-/// fails to arrive or parse renders as "sensor unavailable" - a dark sensor
-/// is named, never read as a zero.
-async fn sample_macmon_line() -> String {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(6),
-        tokio::process::Command::new("macmon")
-            .arg("pipe")
-            .arg("-s")
-            .arg("1")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    let parsed = match output {
-        Ok(Ok(out)) => parse_macmon_sample(&out.stdout),
-        _ => None,
-    };
-    parsed.unwrap_or_else(|| "meter: sensor unavailable".into())
-}
-
-fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(raw).ok()?;
-    let line = text.lines().find(|l| l.trim_start().starts_with('{'))?;
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let cpu = value.get("cpu_usage_pct")?.as_f64()?;
-    let mem = value.get("memory")?;
-    let total = mem.get("ram_total")?.as_f64()?;
-    let usage = mem.get("ram_usage")?.as_f64()?;
-    // macmon's measured contract is a 0-1 fraction; no percent spelling to
-    // rescue (the lanes arm pins the same contract).
-    let cpu_pct = cpu * 100.0;
-    let mut line = format!(
-        "cpu {cpu_pct:.0}% mem {:.0}G/{:.0}G",
-        usage / 1e9,
-        total / 1e9
-    );
-    if let Some(w) = value.get("sys_power").and_then(|p| p.as_f64()) {
-        line.push_str(&format!(" {w:.0}W"));
-    }
-    Some(line)
-}
+mod meter;
+use meter::spawn_meter_sampler;
 
 mod confirm;
 
@@ -7771,6 +7707,9 @@ async fn attach_and_run(
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
+    view.court = crate::court_overlay::Panel::with_detail(
+        crate::digest_overlay::load_readout_detailed(Path::new(&cwd)),
+    );
     // The meter's toggle and cadence latch here too; the READING does not -
     // that is the sampler task's job once the toggle is on.
     view.resource_meter_on = crate::digest_overlay::resource_meter_enabled(Path::new(&cwd));
@@ -8081,31 +8020,6 @@ async fn attach_and_run(
                 let notice = match action {
                     backlog_board::WriteAction::Args(args, stdin) => {
                         crate::backlog_write::run_verb(&args, stdin).await.1
-                    }
-                    backlog_board::WriteAction::Append { id, text } => {
-                        let id_for_read = id.clone();
-                        let current = tokio::task::spawn_blocking(move || {
-                            crate::store_client::node(
-                                &crate::backlog_view::graph_path(),
-                                &id_for_read,
-                            )
-                        })
-                        .await
-                        .unwrap_or(Ok(None))
-                        .ok()
-                        .flatten()
-                        .and_then(|n| n.get("details").cloned())
-                        .map(|d| d.to_string())
-                        .unwrap_or_default();
-                        let stdin = format!("{current}\n\n{text}");
-                        let args: Vec<String> = vec![
-                            "backlog".into(),
-                            "update".into(),
-                            id,
-                            "--details-file".into(),
-                            "-".into(),
-                        ];
-                        crate::backlog_write::run_verb(&args, Some(stdin)).await.1
                     }
                 };
                 let _ = tx.send((gen, backlog_board::BoardMsg::VerbDone { notice }));
