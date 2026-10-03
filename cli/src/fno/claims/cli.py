@@ -212,7 +212,11 @@ def _forward_acquire(
     if holder:
         argv.extend(("--holder", holder))
     if lane is not None:
-        argv.extend(("--lane", lane, "--max-lanes", str(max_lanes)))
+        argv.extend(("--lane", lane))
+    # A lone --max-lanes forwards too: the leaf owns the refusal (the cap
+    # flag without its lane mode must exit 2, never be silently dropped).
+    if max_lanes is not None:
+        argv.extend(("--max-lanes", str(max_lanes)))
     if reason:
         argv.extend(("--reason", reason))
     if ttl:

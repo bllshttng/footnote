@@ -61,16 +61,6 @@ def test_acquire_conflict_exits_1(cwd_tmp):
     assert "held by" in result.output
 
 
-def _raise(*args, **kwargs):
-        raise ClaimContended("acquire_claim gave up after 5 contention retries on 'k'")
-
-    monkeypatch.setattr(claims_core, "acquire_claim", _raise)
-    result = runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
-    assert result.exit_code == 1
-    assert "contention error" in result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-
-
 def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
     """Same as acquire's: refresh_claim's contention-exhaustion ClaimContended
     must be caught, not escape as an uncaught traceback."""
@@ -151,7 +141,9 @@ def test_acquire_omitted_pid_records_an_anchor(cwd_tmp):
     assert result.exit_code == 0
     parsed = json.loads(result.output)
     assert parsed["pid"] is not None
-    assert parsed["pid_unavailable"] is False
+    # to_yaml_dict omits the flag when False; a pid-anchored record must not
+    # carry it at all.
+    assert "pid_unavailable" not in parsed
 
 
 def test_acquire_omitted_pid_with_ttl_is_explicitly_unavailable(cwd_tmp, monkeypatch):

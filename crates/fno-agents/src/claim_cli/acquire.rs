@@ -177,20 +177,9 @@ fn run_parsed(a: LeafArgs) -> i32 {
     // An omitted --pid anchors to the durable session (the nearest harness
     // ancestor), degrading to pid-unavailable on a TTL claim when no session
     // is resolvable (cli.py:227-235).
-    let mut pid = a.pid;
-    let mut pid_unavailable = a.pid_unavailable;
-    if pid.is_none() && !pid_unavailable {
-        pid = claims::open_session_pid().map(|p| p as u32);
-        if pid.is_none() && parsed_ttl.is_some() {
-            pid_unavailable = true;
-        }
-    }
-    if pid_unavailable && parsed_ttl.is_none() {
-        eprintln!("validation error: --pid-unavailable requires --ttl");
-        return 2;
-    }
     // --ttl (the operator expression) wins over the hidden --ttl-ms engine
-    // flag; the empty --ttl falls through to it.
+    // flag; the empty --ttl falls through to it. The fold lands before the
+    // pid checks so either spelling counts as "has a TTL".
     let ttl_ms: Option<i64> = match parsed_ttl {
         Some(v) => match ttl_ms_checked(v) {
             Ok(ms) => Some(ms),
@@ -201,6 +190,18 @@ fn run_parsed(a: LeafArgs) -> i32 {
         },
         None => a.ttl_ms_flag,
     };
+    let mut pid = a.pid;
+    let mut pid_unavailable = a.pid_unavailable;
+    if pid.is_none() && !pid_unavailable {
+        pid = claims::open_session_pid().map(|p| p as u32);
+        if pid.is_none() && ttl_ms.is_some() {
+            pid_unavailable = true;
+        }
+    }
+    if pid_unavailable && ttl_ms.is_none() {
+        eprintln!("validation error: --pid-unavailable requires --ttl");
+        return 2;
+    }
     if let Some(expected) = a.handover_from.clone() {
         if pid.is_none() && !pid_unavailable {
             eprintln!(
