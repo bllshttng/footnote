@@ -1,6 +1,6 @@
 # Buddy: a companion beside your status line
 
-Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. The fno plugin ships it as a Claude Code mod. `/buddy` and `/bbb` (bring back buddy) are the same command.
+Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. It is a Claude Code mod in its own plugin, `buddy`, in the footnote marketplace. You do not need fno to use it. `/buddy` and `/bbb` (bring back buddy) are the same command.
 
 It needs Claude Code 2.1.287 or later. That is the first version that loads mods.
 
@@ -12,7 +12,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 ## Start
 
-1. Install the fno plugin. The buddy hatches at the next session start.
+1. Install the plugin: `/plugin install buddy@footnote`. The buddy hatches at the next session start.
 2. Type `/buddy` to see its card.
 3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
 4. If you want the buddy in a side pane, type `/buddy pane`.
@@ -85,8 +85,12 @@ The buddy asks for the `haiku` model through the API client of your session. On 
 ## Storage
 
 - The soul of the buddy (seed, name, personality) and the reroll bank are in the mod store under `~/.claude/plugins/store/`.
-- The status line files are in `state/buddy/` in the fno state folder (`~/.fno/` by default). They are the wrapper, your saved `statusLine`, and one frame file for each session. The wrapper erases a frame file one day after its last write.
+- The status line files are in `state/buddy/` in the fno state folder (`~/.fno/` by default). Without fno, they are in `~/.local/state/buddy/`. They are the wrapper, your saved `statusLine`, and one frame file for each session. The wrapper erases a frame file one day after its last write.
 
 ## Where the code is
 
-The mod is `hooks/buddy/`. The `modules` key of `hooks/hooks.json` names it. `claude plugin test` runs `hooks/buddy/buddy.test.ts`. The repo also has an opencode test file. Run the mod tests from a copy that has only `.claude-plugin/plugin.json`, `hooks/hooks.json`, and `hooks/buddy/`.
+The plugin is `plugins/buddy/` in the footnote repo. `plugins/buddy/hooks/hooks.json` names the mod, `register.ts`. Run its tests with `claude plugin test plugins/buddy`.
+
+## If you used the buddy inside fno
+
+Before this change, the fno plugin loaded the buddy. Now fno does not load it. Install `buddy@footnote` to get it back. The soul and the reroll bank are in the mod store, so the same buddy comes back.

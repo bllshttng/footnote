@@ -38,7 +38,7 @@ let feedSince = 0
 let feedOff = false
 let fleet = ''
 let home = ''
-// The buddy's files live in the fno state folder, never under the Claude config dir.
+// The buddy's files live in the fno state folder, or ~/.local/state/buddy without fno; never under the Claude config dir.
 let stateDir = ''
 let sessionId = ''
 let wrapped = false
@@ -57,7 +57,11 @@ async function load($: EngineInterface, now: number): Promise<void> {
     buddy = embody(saved)
     return
   }
-  let soul = null
+  let soul: Soul | null = await fromFno($)
+  if (soul) {
+    buddy = embody(soul)
+    return
+  }
   try {
     if (home) soul = restore(await $.fs.read(home + '/.claude.json'), now)
   } catch {
@@ -70,6 +74,30 @@ async function load($: EngineInterface, now: number): Promise<void> {
   buddy = embody(soul)
   say(welcome ?? `hi. i'm ${buddy.name}.`, now)
   if (fresh) void givePersonality($)
+}
+
+// The buddy used to load inside the fno plugin, whose store is a different file. Bring its soul,
+// reroll bank, and mute over once, so the same buddy comes back after the move.
+async function fromFno($: EngineInterface): Promise<Soul | null> {
+  if (!home) return null
+  const dir = `${home}/.claude/plugins/store`
+  try {
+    for (const entry of await $.fs.list(dir)) {
+      if (!entry.name.startsWith('fno_') || !entry.name.endsWith('.json')) continue
+      const old = JSON.parse(await $.fs.read(`${dir}/${entry.name}`))
+      if (!old?.soul?.seed) continue
+      await $.store.set('soul', old.soul)
+      if (old.rerolls) await $.store.set('rerolls', old.rerolls)
+      if (old.muted === true) {
+        muted = true
+        await $.store.set('muted', true)
+      }
+      return old.soul as Soul
+    }
+  } catch {
+    // No fno store, or an unreadable one: hatch as usual.
+  }
+  return null
 }
 
 // A new buddy hatches with a placeholder; one model call then writes who it is, as the original did.
@@ -173,18 +201,19 @@ function isOurs(statusLine: any): boolean {
 }
 
 async function resolveStateDir($: EngineInterface): Promise<string> {
+  const fallback = home ? `${home}/.local` : ''
   try {
     const out = await $.process.run(['fno', 'config', 'get', 'state_dir'], { timeoutMs: 10_000 })
     const dir = out.exitCode === 0 ? out.stdout.split('\n')[0]!.trim() : ''
-    return dir.replace(/^~(?=\/|$)/, home).replace(/\/+$/, '')
+    return dir ? dir.replace(/^~(?=\/|$)/, home).replace(/\/+$/, '') : fallback
   } catch {
-    return ''
+    return fallback
   }
 }
 
 // Keeps a copy of the wrapper at a path that survives plugin updates, so statusLine never points into the plugin cache.
 async function installWrapper($: EngineInterface): Promise<void> {
-  const ours = await $.fs.read(`${$.plugin.root}/hooks/buddy/${WRAPPER}`)
+  const ours = await $.fs.read(`${$.plugin.root}/hooks/${WRAPPER}`)
   const target = `${buddyDir()}/${WRAPPER}`
   let theirs = ''
   try {
@@ -196,7 +225,7 @@ async function installWrapper($: EngineInterface): Promise<void> {
 }
 
 async function statuslineOn($: EngineInterface): Promise<string> {
-  if (!stateDir) return 'The status line needs the fno CLI on your PATH (fno config get state_dir).'
+  if (!stateDir) return 'The status line needs HOME to be set.'
   const settings = await readSettings($)
   if (!settings) return `${settingsPath()} does not parse, so I left it alone.`
   const current = settings.statusLine as any
