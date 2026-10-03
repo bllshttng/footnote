@@ -84,7 +84,7 @@ fn run_leg(
     let mut cmd = match leg {
         Leg::Rust => {
             let mut c = Command::new(env!("CARGO_BIN_EXE_fno-agents"));
-            c.args(&argv);
+            c.args(&argv).envs(fno_agents::test_run::self_owner_env());
             c
         }
         Leg::Python => {

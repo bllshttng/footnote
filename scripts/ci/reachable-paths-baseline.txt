@@ -14,26 +14,21 @@ A	--workspace/-s needs a nonblank workspace name	py=cli/src/fno/agents/spawn_def
 A	.agents/context/product.md	py=skills/execute/orchestrator.py;rs=crates/fno-agents/src/blueprint_judge.rs	# CLASSIFY protocol|msg-twin|data
 A	/scripts/ci/preflight.sh	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/src/claims.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data
-A	<!--*style-exception:*(.+?)*-->	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# CLASSIFY protocol|msg-twin|data
 A	[(](?:[yy]/[nn]|+(?:/+)+)[)]*$	py=cli/src/fno/agents/session_truth.py;rs=crates/fno-agents/src/backlog/worked.rs	# CLASSIFY protocol|msg-twin|data
 A	[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}	py=cli/src/fno/graph/_constants.py|hooks/git-protection.py;rs=crates/fno-agents/src/king_board/queues.rs	# CLASSIFY protocol|msg-twin|data
 A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck/block_reason.rs	# CLASSIFY protocol|msg-twin|data
-A	^:?-+:?(?:[ ]*[ ]*:?-+:?)+[ ]*$	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	^[a-za-z][a-za-z0-9+.-]*://	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/pr_link.rs	# CLASSIFY protocol|msg-twin|data
 A	^backgrounded · ([0-9a-f]{8}) ·	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
 A	_fno_machine_mail_lock_timeout	py=cli/src/fno/mail/cli.py;rs=crates/fno-agents/src/machine_mail.rs	# CLASSIFY protocol|msg-twin|data
 A	a crown needs a scope: name an epic or a project	py=cli/src/fno/agents/crown.py;rs=crates/fno-agents/src/court_fold.rs|crates/fno-agents/src/territory.rs	# CLASSIFY protocol|msg-twin|data
 A	a model vendor is only routable at spawn	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# CLASSIFY protocol|msg-twin|data
-A	a quoted word is a mention, not a use.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	accepted forms: name, canonical handle, transport short id, or full session id	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
-A	add a style-exception line with a reason, or pass --style-exception.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 A	agent_session_id_uncaptured	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/removals.rs	# CLASSIFY protocol|msg-twin|data
 A	agents.max_fleet_cpu_share	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/spawn_gate_verb.rs	# CLASSIFY protocol|msg-twin|data
 A	an unsupported submit contract cannot carry a nonzero delay	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
 A	anthropic_default_haiku_model	py=cli/src/fno/route_cli.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
-A	approval: problem x. options y or z. i recommend z because a. your call?	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	auto-closed: all children complete	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	auto-closed: all children complete; own plan deliverables unverified (plan_path set, no pr)	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	auto_merge.require_checks_pass	py=cli/src/fno/config/optouts.py|cli/src/fno/config/registry.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/finalize.rs	# CLASSIFY protocol|msg-twin|data
@@ -138,7 +133,6 @@ A	menu_walk needs ordered model and effort targets	py=cli/src/fno/agents/harness
 A	merge_grant must be a mapping when provided	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
 A	merge_grant.approved must be a boolean	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
 A	merge_grant.{key} must be a non-empty string	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
-A	message blocked by the style rules.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	message must be non-empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
 A	mine: failed: item text must be one non-empty line	py=cli/src/fno/outstanding/mine.py;rs=crates/fno/src/client_tests.rs	# CLASSIFY protocol|msg-twin|data
 A	missing under its existing plan root	py=cli/src/fno/target_cli.py;rs=crates/fno-agents/src/backlog_ready.rs	# CLASSIFY protocol|msg-twin|data
@@ -184,19 +178,8 @@ A	fno config set active_backlog.enabled true	py=cli/src/fno/doctor.py;rs=crates/
 A	nested acquire should have timed out	py=cli/src/fno/plan/locking.py;rs=crates/fno-agents/src/plan_doc/lock.rs	# msg-twin: the plan-doc writer port moved the lock timeout refusal to Rust; both runtimes keep the string
 A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/roadmap_public.py;rs=crates/fno-agents/src/backlog/title_gate.rs|crates/fno/src/backlog_snapshot.rs	# protocol: the public title leak vocabulary; the Rust write-time gate is a port of the render gate's LEAK_PATTERNS so both ends refuse the same class, and the Rust vocabulary test pins the parity
 A	fno_registry_allow_row_loss	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/claude_supervisor.rs|crates/fno-agents/src/registry_guard.rs	# data: the shared-registry write guard row-loss override, read by both runtimes and classified supervisor-wide; no cross-language single source exists
-A	<!--*style-exception:*(.+?)*-->	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	^:?-+:?(?:[ ]*[ ]*:?-+:?)+[ ]*$	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	a quoted word is a mention, not a use.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	add a style-exception line with a reason, or pass --style-exception.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	approval: problem x. options y or z. i recommend z because a. your call?	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
 A	fno_think_spawn_presence	py=cli/src/fno/provenance/spawn_think.py;rs=crates/fno-agents/src/backlog/birth.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	message blocked by the style rules.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
 A	no provable session identity	py=cli/src/fno/claims/self_identity.py;rs=crates/fno-agents/src/backlog/create_cli.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	put findings on the node and link it.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	sentence {shown} has a semicolon. split it into two sentences.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	status: x. why y. done at z.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	this message runs {count} words. the cap is {cap} words.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
-A	this refusal does that with every word it names.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# msg-twin: the style refusal vocabulary the encounter surface ports verbatim; single-source owned by the style-collapse campaign
 A	docs/state-root-inventory.md	py=cli/src/fno/graph/_state_root_inventory.py;rs=crates/fno-agents/src/state_root_drift.rs	# contract: the inventory doc is the wire contract both drift parsers read (the mail-hold shape); the literal names the same file on both legs by design
 A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno/src/agents_history.rs	# protocol: Python ledger writes this persisted sentinel and Rust history reads it
 A	torn final line (mid-write)	py=cli/src/fno/provenance/observed.py;rs=crates/fno-agents/src/backlog/session_cli.rs	# msg-twin: the unreadable-reason code the observed-model reader emits byte-identically from both legs; the Python reader keeps 10+ production callers, so the parity pair is the contract
@@ -264,7 +247,6 @@ A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fn
 A	provider-default(no-difficulty)	py=cli/src/fno/route_resolve.py;rs=crates/fno-agents/src/route_gather.rs	# CLASSIFY protocol|msg-twin|data
 A	provider-runtime-state.json	py=cli/src/fno/paths.py;rs=crates/fno-agents/src/provider_cap.rs|crates/fno-agents/src/route_capacity.rs|crates/fno-agents/src/spawn_gate_lanes.rs	# CLASSIFY protocol|msg-twin|data
 A	provider_outage_reset_grace_seconds	py=cli/src/fno/agents/provider_outage.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
-A	put findings on the node and link it.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	reason must be non-empty for force-release	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_store.rs	# CLASSIFY protocol|msg-twin|data
 A	recompute degraded to unknown: {why}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
 A	recompute produced no row	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
@@ -294,14 +276,12 @@ A	select line from events order by seq	py=cli/src/fno/events/store_client.py;rs=
 A	select seq, payload from outbox order by seq	py=cli/src/fno/approvals/store.py;rs=crates/fno-agents/src/effect_gate.rs	# CLASSIFY protocol|msg-twin|data
 A	selector_entries_scanned	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/next.rs	# CLASSIFY protocol|msg-twin|data
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data
-A	sentence {shown} has a semicolon. split it into two sentences.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	single_flight_join_budget_seconds	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
 A	single_flight_ttl_seconds	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
 A	stale >30d, drained by maintain	py=cli/src/fno/graph/_constants.py;rs=crates/fno-agents/src/backlog/patch.rs	# CLASSIFY protocol|msg-twin|data
 A	stale-quarantine (guard)	py=cli/src/fno/graph/_constants.py|cli/src/fno/graph/maintain.py;rs=crates/fno-agents/src/backlog/patch.rs	# CLASSIFY protocol|msg-twin|data
 A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# CLASSIFY protocol|msg-twin|data
 A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
-A	status: x. why y. done at z.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# CLASSIFY protocol|msg-twin|data
 A	stub-manifest-{node_id}.json	py=cli/src/fno/stub_manifest.py;rs=crates/fno-agents/src/merge_gates.rs	# CLASSIFY protocol|msg-twin|data
 A	supersession_evidence_failures	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/merge_close.rs	# CLASSIFY protocol|msg-twin|data
@@ -312,8 +292,6 @@ A	the child falls back to its account's own default.	py=cli/src/fno/agents/model
 A	the child receives that route's own model instead.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
 A	the rest reader raised an unexpected error; inspect the reader before retrying.	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	the row carries no scope or no crown level	py=cli/src/fno/agents/court.py;rs=crates/fno-agents/src/court_fold.rs	# CLASSIFY protocol|msg-twin|data
-A	this message runs {count} words. the cap is {cap} words.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
-A	this refusal does that with every word it names.	py=cli/src/fno/style.py;rs=crates/fno-agents/src/backlog/style_check.rs	# CLASSIFY protocol|msg-twin|data
 A	torn final line (mid-write)	py=cli/src/fno/provenance/observed.py;rs=crates/fno-agents/src/backlog/session_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	truth-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
 A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno-agents/src/ledger_axes.rs|crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
