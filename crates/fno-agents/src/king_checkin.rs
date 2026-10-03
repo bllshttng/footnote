@@ -1473,6 +1473,26 @@ fn render_lines(
     previous_error: &str,
     change: &str,
 ) -> Vec<String> {
+    render_lines_with(
+        scope,
+        readings,
+        data,
+        previous,
+        previous_error,
+        change,
+        &crate::king_checkin_lineup::LineupSources::empty(),
+    )
+}
+
+fn render_lines_with(
+    scope: &str,
+    readings: &[Reading],
+    data: &Map<String, Value>,
+    previous: &Option<Value>,
+    previous_error: &str,
+    change: &str,
+    lineup: &crate::king_checkin_lineup::LineupSources,
+) -> Vec<String> {
     let by_name = |name: &str| readings.iter().find(|r| r.name == name);
     let failed = |name: &str| readings.iter().find(|r| r.name == name && !r.ok);
     let mut lines: Vec<String> = Vec::new();
@@ -1663,19 +1683,21 @@ fn render_lines(
                 .and_then(|r| r.as_array())
                 .cloned()
                 .unwrap_or_default();
-            for row in rows.iter().take(MAX_COURT_ROWS) {
-                lines.push(format!(
-                    "  {} {} worker {} pr {} session {}",
-                    dash(row.get("id")),
-                    dash(row.get("status")),
-                    dash(row.get("worker")),
-                    dash(row.get("pr_number")),
-                    dash(row.get("session")),
-                ));
-            }
-            let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
-            if hidden > 0 {
-                lines.push(format!("  ... {hidden} more rows cut"));
+            match lineup.graph {
+                Err(cause) => lines.push(format!("READER FAILED lineup: {cause}")),
+                Ok(graph_rows) => {
+                    if let Some(cause) = lineup.registry_error {
+                        lines.push(format!("READER FAILED lineup: {cause}"));
+                    }
+                    let built = crate::king_checkin_lineup::lineup_rows(
+                        &rows,
+                        lineup.queue,
+                        graph_rows,
+                        lineup.registry,
+                        lineup.planned,
+                    );
+                    lines.extend(crate::king_checkin_lineup::render_lineup(&built));
+                }
             }
         }
     }
@@ -2237,13 +2259,30 @@ fn resolve_missing_crown_inputs(
 /// `king-checkin [--scope SCOPE] --events-path PATH [--events-path ...]
 ///              --graph PATH --handoffs-dir PATH [--faqs-dir PATH]
 ///              [--board-state PATH] [--emit-path PATH] [--change TEXT]
-///              [--no-emit] [--json]`
+///              [--queue IDS] [--no-emit] [--json]`
 ///
 /// With no `--scope`, the caller's crown scope, level and board state are
 /// resolved natively from the registry (the retired Python shell's job).
 ///
 /// rc 0 a completed beat, 3 when an asked-for row was not journalled or
 /// stdout could not be written, 2 usage failure.
+///
+/// `--queue IDS` records the on-deck queue on the crown manifest in seat
+/// order (a comma list of node ids); `--queue ""` clears it. This is display
+/// order for the lineup, not board dispatch order, so `fno backlog rank`
+/// stays untouched.
+fn is_node_id(id: &str) -> bool {
+    let Some((prefix, hex)) = id.split_once('-') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && !hex.is_empty()
+        && prefix.chars().all(|c| c.is_ascii_lowercase())
+        && hex
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
 pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut ctx = Ctx {
         scope: String::new(),
@@ -2262,6 +2301,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut crown_name: Option<String> = None;
     let mut theme: Option<String> = None;
     let mut keep_name_from: Option<String> = None;
+    let mut queue_arg: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = |name: &str| args[i] == name && i + 1 < args.len();
@@ -2279,6 +2319,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             i += 2;
         } else if flag("--keep-name-from") {
             keep_name_from = Some(args[i + 1].clone());
+            i += 2;
+        } else if flag("--queue") {
+            queue_arg = Some(args[i + 1].clone());
             i += 2;
         } else if flag("--events-path") {
             ctx.events_paths.push(PathBuf::from(&args[i + 1]));
@@ -2317,7 +2360,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
                  [--events-path ...] --graph PATH --handoffs-dir PATH \
                  [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] \
                  [--change TEXT] [--name NAME] [--theme THEME] \
-                 [--keep-name-from OLD-SCOPE] \
+                 [--keep-name-from OLD-SCOPE] [--queue IDS] \
                  [--no-emit] [--json]"
             );
             return 2;
@@ -2341,6 +2384,30 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     ) {
         eprintln!("king: {msg}");
         return 2;
+    }
+
+    // The queue rides the manifest, so the same beat that records the seat
+    // order prints it. Validate before the write: a bad id leaves the stored
+    // queue untouched.
+    if let Some(raw) = queue_arg {
+        let ids: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(String::from)
+            .collect();
+        if let Some(bad) = ids.iter().find(|id| !is_node_id(id)) {
+            eprintln!("fno-agents king-checkin: --queue: not a node id: {bad}");
+            return 2;
+        }
+        let joined = ids.join(",");
+        let root = crate::paths::space_dir(&ctx.cwd);
+        if let Err(e) =
+            crate::loop_reign::set_manifest_fields(&root, &ctx.scope, &[("queue", &joined)], None)
+        {
+            eprintln!("fno-agents king-checkin: --queue: {e}");
+            return 2;
+        }
     }
 
     let ts = iso_now();
@@ -2390,13 +2457,65 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
-    let mut lines = render_lines(
+    // The lineup's reads ride the beat once: graph rows for title, difficulty
+    // and PR, the registry for a seated row's harness/model, the manifest for
+    // the recorded queue. A failed read is a named line, never a blank column.
+    let (graph_rows, graph_error): (Vec<Value>, Option<String>) =
+        match crate::graph_store::read_rows(&ctx.graph) {
+            Ok(rows) => (rows, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
+    let (registry, registry_error): (Option<crate::state::Registry>, Option<String>) =
+        match crate::state::load_registry(&home.registry_json()) {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+    let manifest_queue: Vec<String> =
+        crate::loop_reign::manifest_path(&crate::paths::space_dir(&ctx.cwd), &ctx.scope)
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|c| crate::king_termination::parse_king_manifest(&c))
+            .map(|m| m.queue)
+            .unwrap_or_default();
+    // One route walk per distinct difficulty: the queue holds a handful of
+    // nodes across three difficulties, so memoize for the beat.
+    let memo = std::cell::RefCell::new(std::collections::HashMap::<String, Option<String>>::new());
+    let planned = |difficulty: &str| -> Option<String> {
+        if let Some(hit) = memo.borrow().get(difficulty) {
+            return hit.clone();
+        }
+        let payload = json!({
+            "rung_base": "agents.profiles.target",
+            "node": {"difficulty": difficulty},
+        });
+        let filled = crate::route_gather::fill(&payload, &ctx.cwd);
+        let out = crate::route_slot::resolve_slot_payload(&filled);
+        let resolved = out
+            .get("candidate")
+            .and_then(|c| c.get("harness")?.as_str().zip(c.get("model")?.as_str()))
+            .map(|(h, m)| format!("{h}/{m}"));
+        memo.borrow_mut()
+            .insert(difficulty.to_string(), resolved.clone());
+        resolved
+    };
+    let lineup = crate::king_checkin_lineup::LineupSources {
+        queue: &manifest_queue,
+        graph: match &graph_error {
+            None => Ok(&graph_rows[..]),
+            Some(e) => Err(e.as_str()),
+        },
+        registry: registry.as_ref(),
+        registry_error: registry_error.as_deref(),
+        planned: &planned,
+    };
+    let mut lines = render_lines_with(
         &ctx.scope,
         &readings,
         &data,
         &previous,
         &previous_error,
         &change,
+        &lineup,
     );
     // The crown line leads: identity first, then the beat's facts. The name
     // comes from the fold's own stamp (court_fold reads the store), so an
@@ -2918,6 +3037,105 @@ mod tests {
         let data = Map::new();
         let change = derive_change(Some(prev.get("data").unwrap()), &data, "");
         assert_eq!(change, "unmeasured: previous row lacks owned_active");
+
+        // AC2-HP: the lineup table seats the court rows first with the
+        // registry's harness/model, then the queue with its planned model and
+        // an `on deck` status, skipping a queued id that is already seated.
+        let court = json!({"active_nodes": 1, "total_nodes": 2, "rows": [
+            {"id": "x-aaaa", "status": "in_progress", "worker": "w1", "pr_number": 7,
+             "session": "s1"},
+        ]});
+        let readings = sample_readings(board7(), court, cap_ok(), workers3());
+        let data = build_data(&readings, "x-bbbb");
+        let graph = vec![
+            json!({"id": "x-aaaa", "title": "Seated | node", "difficulty": "medium",
+                   "pr_number": 7}),
+            json!({"id": "x-bbbb", "title": "Queued node", "difficulty": "low",
+                   "pr_number": null}),
+        ];
+        let registry = crate::state::Registry {
+            entries: vec![crate::state::RegistryEntry {
+                name: "w1".into(),
+                harness: Some("claude".into()),
+                model: Some("opus".into()),
+                node: Some("x-aaaa".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let planned = |d: &str| (d == "low").then(|| "codex/gpt-luna".to_string());
+        let queue = ["x-bbbb".to_string(), "x-aaaa".to_string()];
+        let lines = render_lines_with(
+            "x-bbbb",
+            &readings,
+            &data,
+            &None,
+            "",
+            "no change",
+            &crate::king_checkin_lineup::LineupSources {
+                queue: &queue,
+                graph: Ok(&graph),
+                registry: Some(&registry),
+                registry_error: None,
+                planned: &planned,
+            },
+        );
+        let start = lines.iter().position(|l| l == "lineup:").expect("lineup:");
+        assert_eq!(
+            lines[start + 1],
+            "| node | title | difficulty | PR | harness/model | status |"
+        );
+        assert_eq!(lines[start + 2], "|---|---|---|---|---|---|");
+        assert_eq!(
+            lines[start + 3],
+            "| x-aaaa | Seated \\| node | medium | 7 | claude/opus | in_progress |"
+        );
+        assert_eq!(
+            lines[start + 4],
+            "| x-bbbb | Queued node | low | - | codex/gpt-luna | on deck |"
+        );
+
+        // AC2-ERR: a failed graph read names the cause and prints no table.
+        let lines = render_lines_with(
+            "x-bbbb",
+            &readings,
+            &data,
+            &None,
+            "",
+            "no change",
+            &crate::king_checkin_lineup::LineupSources {
+                queue: &queue,
+                graph: Err("the graph read returned 0 nodes"),
+                registry: None,
+                registry_error: None,
+                planned: &planned,
+            },
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "READER FAILED lineup: the graph read returned 0 nodes"));
+        assert!(!lines.iter().any(|l| l.starts_with("| x-aaaa")));
+
+        // A failed registry read names its own cause; the table still prints.
+        let lines = render_lines_with(
+            "x-bbbb",
+            &readings,
+            &data,
+            &None,
+            "",
+            "no change",
+            &crate::king_checkin_lineup::LineupSources {
+                queue: &queue,
+                graph: Ok(&graph),
+                registry: None,
+                registry_error: Some("registry unreadable (x)"),
+                planned: &planned,
+            },
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "READER FAILED lineup: registry unreadable (x)"));
+        assert!(lines.iter().any(|l| l.starts_with("| x-aaaa | Seated")));
     }
 
     /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned
