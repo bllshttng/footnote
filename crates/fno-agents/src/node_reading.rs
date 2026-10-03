@@ -1,18 +1,44 @@
 //! Which of a node's prose fields is the current answer about that node.
-//! `details` is the original filing and nothing rewrites it; `current_state`
-//! is the bounded live reading `fno backlog note` replaces; `plan_path` names
-//! the document that owns the file list once a plan exists. A reader that
-//! sees only the first of those reaches a confident wrong answer.
+//! `details` is the original filing and nothing rewrites it; since x-fb4f
+//! the newest thread row is the live reading (the feed is the state), with
+//! current_state as the legacy fallback; `plan_path` names the document
+//! that owns the file list once a plan exists. A reader that sees only the
+//! first of those reaches a confident wrong answer.
 
 use serde_json::Value;
 
 pub const READING_KEY: &str = "_reading";
 
+/// The newest thread row carrying prose (any kind), by list position.
+fn newest_thread_row(row: &Value) -> Option<&Value> {
+    row.get("progress_notes")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .filter(|r| {
+                    r.get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| !t.is_empty())
+                })
+                .last()
+        })
+}
+
 /// The one-line precedence marker, or `None` when the row has neither a
-/// current state nor a plan (an ordinary row's bytes are then unchanged).
+/// thread, a current state, nor a plan (an ordinary row's bytes are then
+/// unchanged).
 pub fn reading_for(row: &Value) -> Option<String> {
     let mut clauses: Vec<String> = Vec::new();
-    if let Some(view) = crate::backlog::node_state::read_state(row) {
+    if let Some(newest) = newest_thread_row(row) {
+        clauses.push(format!(
+            "the thread's newest row ({}, {}) is the live reading",
+            newest.get("kind").and_then(Value::as_str).unwrap_or("note"),
+            newest
+                .get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        ));
+    } else if let Some(view) = crate::backlog::node_state::read_state(row) {
         if !view.body.is_empty() {
             clauses.push(format!(
                 "current_state (rev {}, {}) is the live reading",
@@ -106,6 +132,20 @@ mod tests {
             "current_state": {"body": "", "revision": 1, "updated_at": "t"},
         });
         assert_eq!(reading_for(&row), None);
+        // x-fb4f: the thread outranks a stale state - the newest row is the
+        // live reading even when current_state is present and empty.
+        let threaded = json!({
+            "id": "x-aaaa",
+            "current_state": {"body": "stale", "revision": 1, "updated_at": "t"},
+            "progress_notes": [
+                {"ts": "2026-10-02T10:00:00Z", "text": "routed the FAIL", "kind": "progress"},
+            ],
+        });
+        let reading = reading_for(&threaded).expect("threaded row has a reading");
+        assert!(
+            reading.starts_with("the thread's newest row (progress, 2026-10-02T10:00:00Z)"),
+            "the newest row is the live reading: {reading}"
+        );
     }
 
     #[test]
