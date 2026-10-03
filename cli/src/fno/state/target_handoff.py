@@ -268,12 +268,9 @@ def _main(argv: list[str] | None = None) -> int:
     # claims/core.py's documented silent-success path reported a release that
     # never happened - after the irreversible archive step above it.
     from fno.claims.core import release_claim
-    from fno.claims.io import claims_root_for
 
     def release_exact(key: str, holder: str) -> object:
-        return release_claim(
-            key, holder=holder, root=claims_root_for(key), strict=True
-        )
+        return release_claim(key, holder=holder, strict=True)
 
     try:
         receipt = prepare_manifest_and_release(

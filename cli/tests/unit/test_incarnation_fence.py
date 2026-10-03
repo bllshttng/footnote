@@ -12,7 +12,6 @@ from fno.claims.types import Claim, now_ms
 
 def _wire(monkeypatch, status, *, own_pid=None):
     monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: own_pid
     )
@@ -60,7 +59,6 @@ def test_unreadable_claims_fails_closed(monkeypatch):
         raise RuntimeError("unreadable")
 
     monkeypatch.setattr("fno.claims.core.claim_status", boom)
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
     blocked, reason = incarnation_fence_blocks("uuid1")
     assert blocked and "unreadable" in reason
 

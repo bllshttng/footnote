@@ -277,7 +277,7 @@ pub(crate) fn paint(
     let hint = if focus_pane {
         "j/k link · enter open · y copy id · Y copy cmd · PgUp/PgDn scroll · esc board · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
     } else {
-        "hjkl move · [ ] lane · L lanes · Tab list/kanban · / search · f filter · enter details · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
+        "hjkl move · [ ] lane · L lanes · Tab list/kanban · / search · f filter · enter details · c comment (detail) · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
     };
     let [a, b2] = hint_rows(hint, w);
     let hint_lines = [BLine::meta(a), BLine::meta(b2)];
@@ -481,12 +481,17 @@ mod tests {
         assert_eq!(hint_rows("tiny", 40), ["tiny".to_string(), String::new()]);
     }
 
-    // AC13-HP: the ellipsis lands only when two rows still cannot hold it.
+    // AC13-HP: two rows cannot hold the hint, so the tail drops with no
+    // marker (the ROW rule, d-36438ea4). Every painted word is whole.
     #[test]
-    fn hint_ellipsizes_when_two_rows_cannot_hold_it() {
+    fn hint_drops_the_tail_when_two_rows_cannot_hold_it() {
         let long = "word ".repeat(60);
         let [a, b] = hint_rows(long.trim(), 20);
-        assert!(b.ends_with('\u{2026}'), "{b:?}");
+        assert!(!b.contains('\u{2026}'), "{b:?}");
+        assert!(
+            b.split(' ').all(|w| w == "word"),
+            "no partial word survives the cut: {b:?}"
+        );
         assert!(a.chars().count() <= 20);
     }
 
@@ -510,8 +515,8 @@ mod tests {
     }
 }
 
-/// The two-row hint: words wrap onto two rows; row two ends with an
-/// ellipsis only when two rows cannot hold the hint.
+/// The two-row hint: words wrap onto two rows; a word that fits in neither
+/// drops whole, no marker.
 pub(crate) fn hint_rows(text: &str, w: usize) -> [String; 2] {
     if w == 0 {
         return [String::new(), String::new()];
@@ -526,8 +531,6 @@ pub(crate) fn hint_rows(text: &str, w: usize) -> [String; 2] {
                 row = 1;
                 used = 0;
             } else {
-                // Two rows cannot hold the hint: mark the cut.
-                rows[1].push_str(" \u{2026}");
                 break;
             }
         }

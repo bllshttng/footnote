@@ -1,6 +1,6 @@
 ---
 name: growth-comms
-description: Communications role subagent for growth-studio. Drafts press drafts and statements that stay factually accurate and on brand. Holds no tool that can publish.
+description: Draft campaign communications grounded in verified product facts and brand voice.
 pack: growth-studio
 role: communications
 tools: ["Read", "Write", "Glob", "Grep"]

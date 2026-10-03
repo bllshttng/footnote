@@ -217,8 +217,10 @@ RATCHET_NUDGE_BYTES=2000
 
 # Second budget: the `description` of every model-invoked skill and agent. These
 # are context pointers the harness holds on every turn to decide what to fire.
-# Measured 14690 B: 6750 across 22 skills and 7940 across 17 agents, against
-# Matt Pocock's 3114 B across 15 skills.
+# At introduction, measured 14690 B: 6750 across 22 skills and 7940 across 17
+# agents, against Matt Pocock's 3114 B across 15 skills. After the descriptions
+# were shortened, 45 model-invoked skills and agents measured 3438 B
+# (2026-10-02); the live Claude plugin reports about 1390 always-on tokens.
 # The agent half was nearly missed three times. It sat outside the file set
 # entirely; four agents write their description as a YAML block scalar, so a
 # reader that measured the `>` marker scores those at 1 byte instead of ~490;
@@ -226,7 +228,9 @@ RATCHET_NUDGE_BYTES=2000
 # line-based reader scores at 114 B while it really carries 704.
 # Two-sided from the start on the same reasoning as the file ceiling above: a
 # one-sided ceiling is the thing that only ever ratchets up.
-DESCRIPTIONS_CEILING_BYTES=15440
+# Reduced from 15440 to the measured 3438 plus half the 1500-byte band so the
+# ratchet now enforces the plugin context target below 2,000 tokens.
+DESCRIPTIONS_CEILING_BYTES=4188
 DESCRIPTIONS_BAND_BYTES=1500
 QUIET=0
 JSON_MODE=0

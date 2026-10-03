@@ -2289,18 +2289,11 @@ pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
     } else {
         (Vec::new(), None)
     };
-    // The models.dev catalog: read whatever cache exists now and refresh in
-    // the background when stale. The picker never waits on the network; a
-    // failed or missing cache only fills `catalog_error`.
+    // The models.dev catalog: read whatever cache exists now; the stale
+    // check moved to `model_catalog::refresh_if_stale`, which the mux server
+    // also runs hourly so pricing never depends on opening the composer.
     let state = crate::model_catalog::state_dir();
-    let cache = crate::model_catalog::cache_path(&state);
-    let mtime = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
-    if crate::model_catalog::needs_refresh(mtime, std::time::SystemTime::now()) {
-        let spawn_state = state.clone();
-        tokio::spawn(async move {
-            let _ = crate::model_catalog::refresh(&spawn_state).await;
-        });
-    }
+    crate::model_catalog::refresh_if_stale(&state);
     let (catalog, catalog_error) = match crate::model_catalog::load(&state) {
         Ok(catalog) => (Some(catalog), None),
         Err(reason) => (None, Some(reason)),

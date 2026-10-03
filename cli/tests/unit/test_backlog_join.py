@@ -192,7 +192,7 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
     monkeypatch.setattr("fno.graph.api.wire_rows", lambda *_a, **_k: [entry])
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
-    monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     # Plan fixtures are absolute; skip resolve_plan_path's git rev-parse so the
     # recorded spawn calls carry ONLY join's own spawns.
     monkeypatch.setattr(
@@ -347,7 +347,7 @@ def test_missing_holder_worktree_refuses_exit_2(tmp_path, monkeypatch):
             "metadata": {"worktree": str(tmp_path / "gone")},
         },
     )
-    monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         "fno.graph.collision.resolve_plan_path", lambda p: entry_plan
     )

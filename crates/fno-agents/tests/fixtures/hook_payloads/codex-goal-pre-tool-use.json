@@ -1,0 +1,8 @@
+{
+  "session_id": "0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "fno agents mail drain" },
+  "cwd": "/Users/bb16/code/footnote/footnote",
+  "goal_continuation": true
+}

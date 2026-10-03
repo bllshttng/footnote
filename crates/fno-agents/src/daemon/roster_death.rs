@@ -38,6 +38,77 @@ pub(crate) fn claude_row_provably_absent(
     })
 }
 
+/// The one death verdict for a claude row, fno-first (the provenance
+/// ruling: fno's rows decide, the vendor is a check). `row_verdict`'s
+/// `fno_verdict` runs first: a Finished verdict proves death, a Live verdict
+/// holds the row whatever the vendor says, and only a row fno cannot decide
+/// takes positive death evidence off the `claude agents --json --all`
+/// snapshot. `Some(reason)` proves the session finished - the same standard
+/// rm's live gate accepts. A finished claude agent never leaves the roster;
+/// it stays listed with state `done`, so absence can never be the proof
+/// here.
+pub(crate) fn row_death_reason(
+    e: &state::RegistryEntry,
+    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
+) -> Option<String> {
+    row_death_and_drift(e, agents).0
+}
+
+/// The death verdict plus the vendor disagreement a keep decision
+/// suppressed, for the caller's drift event. `Some(drift)` only when fno
+/// holds the row live and the vendor's word reads finished.
+pub(crate) fn row_death_and_drift(
+    e: &state::RegistryEntry,
+    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
+) -> (Option<String>, Option<String>) {
+    if e.harness_name() != "claude" {
+        return (None, None);
+    }
+    match crate::row_verdict::fno_verdict(e) {
+        crate::row_verdict::RowVerdict::Finished(reason) => (Some(reason), None),
+        crate::row_verdict::RowVerdict::Live(_) => {
+            let word = claude_row_id(e)
+                .and_then(|row_id| agents.find(&row_id))
+                .and_then(|row| row.state.as_deref().map(str::to_string));
+            let drift = word.as_deref().and_then(|w| {
+                crate::row_verdict::drift(
+                    &crate::row_verdict::RowVerdict::Live("fno rows"),
+                    Some(w),
+                )
+            });
+            (None, drift)
+        }
+        crate::row_verdict::RowVerdict::Unknown(_) => (vendor_death_witness(e, agents), None),
+    }
+}
+
+/// The vendor's positive death witness for a row fno cannot decide, the
+/// pre-door standard kept as the Unknown rung: a terminal roster state or a
+/// roster pid proven gone.
+fn vendor_death_witness(
+    e: &state::RegistryEntry,
+    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
+) -> Option<String> {
+    let row_id = claude_row_id(e)?;
+    let row = agents.find(&row_id)?;
+    if let Some(state) = row
+        .state
+        .as_deref()
+        .filter(|state| crate::claude_roster::is_terminal_roster_state(state))
+    {
+        return Some(format!("row {row_id} present, state {state}"));
+    }
+    if let Some(pid) = row.pid {
+        // ESRCH or nothing: a failed lookup is not death, so the verdict
+        // needs the existence-specific probe, not start_time's conflated
+        // None (two Nones also prove a persistent failure).
+        if pid_is_gone(pid) {
+            return Some(format!("row {row_id} pid {pid} is gone"));
+        }
+    }
+    None
+}
+
 /// Existence-specific death probe: ESRCH is the one errno that means "no such
 /// process". Every other answer is NOT death - EPERM is a live foreign-uid
 /// process, and any other failure is a broken instrument. A broken instrument

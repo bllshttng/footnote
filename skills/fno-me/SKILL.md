@@ -1,6 +1,6 @@
 ---
 name: fno-me
-description: Join this session to the fno mesh so other sessions can message you
+description: Join this session to the Footnote agent mesh so peers can reach it.
 metadata:
   internal: false
   requires:

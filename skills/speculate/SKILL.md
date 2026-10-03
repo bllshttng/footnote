@@ -1,6 +1,6 @@
 ---
 name: speculate
-description: "Run N parallel variations of the same feature for comparison. Use when: exploring design alternatives, comparing architectures, A/B testing implementations, 'give me 3 takes on this'."
+description: Build parallel versions of a feature to compare implementation approaches.
 argument-hint: "<count> \"<feature>\" [--skill <skill-name>] [--port-start <port>]"
 metadata:
   requires:

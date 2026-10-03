@@ -125,14 +125,17 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
-/// The full installed surface, and the idempotence contract over it: a
-/// second install writes nothing, touches no mtime, and leaves the manifest
-/// byte-identical. Naming agreement leads: opencode_run_tail routes a seed
-/// at --command fno:think; render_verb_seed keeps the /fno: spelling on the
-/// slash surface; the generator names the file fno:think.md. One string,
-/// three renderers; the surface below is named by the same rule.
+/// The full installed surface and the idempotence contract over it, plus
+/// binary targeting: `FNO_OPENCODE_BIN` names the opencode the install
+/// classifies and asks for its root; the binary's `debug paths` config row
+/// chooses the root over the XDG fallback; `OPENCODE_CONFIG_DIR` outranks the
+/// binary; a binary that answers nothing still renders 2.x and names the
+/// version unknown in the receipt. Naming agreement leads: opencode_run_tail
+/// routes a seed at --command fno:think; render_verb_seed keeps the /fno:
+/// spelling on the slash surface; the generator names the file fno:think.md.
+/// One string, three renderers; the surface below is named by the same rule.
 #[test]
-fn install_writes_the_full_surface_and_reinstall_is_a_noop() {
+fn install_targets_the_binary_writes_the_full_surface_and_reinstall_is_a_noop() {
     assert_eq!(opencode_run_tail("/fno:think extra words")[1], "fno:think");
     assert_eq!(render_verb_seed("/fno:think", "opencode"), "/fno:think");
     assert_eq!(command_file_name("think"), "fno:think.md");
@@ -176,6 +179,79 @@ fn install_writes_the_full_surface_and_reinstall_is_a_noop() {
     assert_eq!(receipt.skipped, 8);
     assert_eq!(mtime(&s.conf.join("commands/fno:target.md")), before);
     assert_eq!(read(&manifest_path(&s.conf)), manifest_before);
+    // Drop the env lock: the targeting legs re-scratch, and the lock is
+    // held by the live Scratch until it drops.
+    drop(s);
+    // (a) The binary's debug paths chooses the root; a v2 binary renders
+    // the `permissions` list there and the receipt names the binary, the
+    // root source, and the reported version.
+    {
+        let s = scratch("target-binary");
+        // A space in the root name: the debug-paths parse must carry the
+        // whole rest of the row, not just the next whitespace token.
+        let conf_v2 = s.root.parent().unwrap().join("conf v2");
+        std::fs::create_dir_all(&conf_v2).unwrap();
+        write_file(
+            &s.root.join("agents/allow.md"),
+            "---\ndescription: allowlisted\ntools: [\"Read\", \"Bash\"]\n---\nAllowlisted body\n",
+        );
+        let stub = s.root.parent().unwrap().join("opencode-v2-stub");
+        let row = format!("config {}", conf_v2.display());
+        write_file(
+            &stub,
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'opencode v2.0.19';;\n  debug) if [ \"$2\" = paths ]; then echo 'data   {row}'\necho '{row}'; fi;;\nesac\n"
+            ),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::env::set_var("FNO_OPENCODE_BIN", &stub);
+        std::env::remove_var("OPENCODE_CONFIG_DIR");
+        let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+        assert_eq!(receipt.contract, "2.x");
+        assert_eq!(
+            receipt.opencode_version.as_deref(),
+            Some("opencode v2.0.19")
+        );
+        assert!(receipt.opencode_bin.ends_with("opencode-v2-stub"));
+        assert_eq!(receipt.config_dir, conf_v2.display().to_string());
+        assert_eq!(receipt.config_dir_source, "debug paths");
+        let rendered = read(&conf_v2.join("agents/fno:allow.md"));
+        assert!(
+            rendered.contains("permissions:"),
+            "v2 agent files carry a permissions list: {rendered}"
+        );
+        assert!(conf_v2.join("plugins/footnote.js").is_file());
+        // (c) OPENCODE_CONFIG_DIR outranks the binary's answer.
+        std::env::set_var("OPENCODE_CONFIG_DIR", &s.conf);
+        let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+        assert_eq!(receipt.config_dir, s.conf.display().to_string());
+        assert_eq!(receipt.config_dir_source, "env");
+        std::env::remove_var("FNO_OPENCODE_BIN");
+    }
+    // (b) A binary that answers nothing: 2.x renders, version unknown,
+    // the XDG fallback holds the files.
+    {
+        let s = scratch("target-missing");
+        let conf_fallback = s.root.parent().unwrap().join("conf-fallback");
+        std::fs::create_dir_all(&conf_fallback).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", s.root.parent().unwrap().join("xdg"));
+        std::env::set_var(
+            "FNO_OPENCODE_BIN",
+            s.root.parent().unwrap().join("no-such-opencode"),
+        );
+        std::env::remove_var("OPENCODE_CONFIG_DIR");
+        let receipt = install(Path::new("/nonexistent-repo")).unwrap();
+        assert_eq!(receipt.contract, "2.x");
+        assert_eq!(receipt.opencode_version, None, "version unknown is named");
+        assert_eq!(receipt.config_dir_source, "fallback");
+        assert!(receipt.config_dir.ends_with("xdg/opencode"));
+        std::env::remove_var("FNO_OPENCODE_BIN");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
 }
 
 /// The upgrade contract: a lost verb is removed, a new one written, a lost

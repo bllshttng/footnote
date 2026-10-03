@@ -464,14 +464,13 @@ _RITUAL_TTL_MS = 15 * 60 * 1000
 
 def _arm_ritual_claim(monkeypatch, tmp_path, pr_number, *, pid):
     from fno import claims
-    from fno.claims.io import claims_root_for
 
     global_root = tmp_path / "global"
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(global_root))
     key = f"reconcile:pr-{pr_number}"
     claims.acquire_claim(
         key, f"postmerge:pr-{pr_number}:test", ttl_ms=_RITUAL_TTL_MS,
-        pid=pid, root=claims_root_for(key),
+        pid=pid,
     )
     return global_root
 
@@ -524,13 +523,13 @@ def test_ritual_claim_free_falls_through_to_verb(tmp_path, monkeypatch):
 
 
 def test_ritual_guard_failopen_when_root_resolution_raises(tmp_path, monkeypatch):
-    """claim_status never raises, but claims_root_for can (no HOME). Fail open."""
-    import fno.claims.io as cio
+    """The guard's status read CAN raise (missing fno-agents binary). Fail open."""
+    import fno.claims as claims_pkg
 
     def _boom(_key):
-        raise RuntimeError("no home dir")
+        raise RuntimeError("no claims binary")
 
-    monkeypatch.setattr(cio, "claims_root_for", _boom)
+    monkeypatch.setattr(claims_pkg, "claim_status", _boom)
     verb = _RunVerb()
     res = dispatch_post_merge_ritual(
         404, dedup_key="sha404", auto_run=True, canonical_root=tmp_path, run_verb=verb,

@@ -1,6 +1,6 @@
 ---
 name: conflict-resolver
-description: "Resolve git rebase conflicts during auto-merge. Bias: preserve both sides where compatible. Refuse on migration/secret/lockfile files. One-shot; must stage resolved files and emit JSON summary."
+description: Resolve compatible Git conflicts; refuse migrations, secrets, and lockfiles.
 model: opus
 tools: ["Read", "Edit", "Bash", "Grep", "Glob"]
 ---

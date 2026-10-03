@@ -364,7 +364,14 @@ fn default_true() -> bool {
 /// floor stays 58.
 /// v101: `PanePlacement.human` (serde default) carries the v99 exemption;
 /// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
-pub const PROTO_VERSION: u32 = 101;
+/// v102: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
+/// `session_tokens`), both optional; floor stays 58.
+/// v103: `PanePlacement.human` REMOVED. Admission inverts: the
+/// default is admit and only the agent-spawn door opts into the machine
+/// gate, so no per-call-site human ask exists to carry. Serde reads an old
+/// peer's field as an unknown-key ignore; a new field's `#[serde(default)]`
+/// keeps old peers reading new placements. Floor stays 58.
+pub const PROTO_VERSION: u32 = 103;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1188,6 +1195,15 @@ pub struct AgentRow {
     pub context_tokens: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measured_at: Option<u64>,
+    /// (v102) The daemon-served running session cost, in integer cents, and
+    /// the raw token sum behind it. Priced through the models.dev catalog by
+    /// the reconcile sweep; `None` before the first measurement or when any
+    /// token kind with a nonzero count has no catalog rate (unpriced, never a
+    /// guess). `#[serde(default)]` keeps a v98 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_cost_cents: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4256,7 +4272,6 @@ mod tests {
             max_panes: None,
             thread_pane: false,
             fit: false,
-            human: false,
         };
         for msg in [
             ClientMsg::Control {
@@ -4327,6 +4342,8 @@ mod tests {
         assert_eq!(row.context_used_pct, None);
         assert_eq!(row.context_tokens, None);
         assert_eq!(row.context_measured_at, None);
+        assert_eq!(row.session_cost_cents, None);
+        assert_eq!(row.session_tokens, None);
         assert_eq!(row.started_at, None);
         assert_eq!(row.mail_unread, None);
         assert_eq!(row.node, None);
@@ -4339,6 +4356,8 @@ mod tests {
             "context_used_pct",
             "context_tokens",
             "context_measured_at",
+            "session_cost_cents",
+            "session_tokens",
             "started_at",
             "mail_unread",
             "node",
@@ -4375,7 +4394,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 101);
+        assert_eq!(PROTO_VERSION, 103);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

@@ -116,7 +116,18 @@ fn same_kind(a: &RowVerdict, b: &RowVerdict) -> bool {
 /// other lanes emit. Anything else is undecided, never a verdict.
 fn vendor_verdict(word: &str) -> Option<RowVerdict> {
     const FINISHED: [&str; 6] = ["done", "stopped", "failed", "exited", "completed", "dead"];
-    const LIVE: [&str; 3] = ["working", "running", "idle"];
+    const LIVE: [&str; 10] = [
+        "working",
+        "running",
+        "idle",
+        "busy",
+        "blocked",
+        "needs input",
+        "ready",
+        "live",
+        "spawning",
+        "restarting",
+    ];
     if FINISHED.contains(&word) {
         Some(RowVerdict::Finished(format!("vendor word '{word}'")))
     } else if LIVE.contains(&word) {
@@ -209,6 +220,17 @@ mod tests {
             reconcile(&unknown, Some("working")),
             RowVerdict::Live("vendor")
         );
+        // The other live spellings the lanes emit stay live words.
+        for word in [
+            "busy",
+            "blocked",
+            "needs input",
+            "ready",
+            "live",
+            "spawning",
+        ] {
+            assert_eq!(reconcile(&unknown, Some(word)), RowVerdict::Live("vendor"));
+        }
         assert!(matches!(
             reconcile(&unknown, Some("mystery")),
             RowVerdict::Unknown(_)

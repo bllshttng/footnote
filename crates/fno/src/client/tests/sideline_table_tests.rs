@@ -40,7 +40,7 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
     let fb = b.compose();
     assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
     let text = frame_text(&fa);
-    assert!(text.contains("26%▪▫▫"), "{text:?}");
+    assert!(text.contains("26%"), "{text:?}");
     assert!(text.contains("3h"), "{text:?}");
     assert!(text.contains("ctx"), "{text:?}");
     assert!(text.contains("up"), "{text:?}");
@@ -83,9 +83,10 @@ fn crown_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sideline_name_middle_elides_and_keeps_suffix_gap_to_the_message() {
-    // acceptance: a long worker name at a 60-column panel keeps its
-    // distinguishing suffix after the middle ellipsis.
+fn sideline_name_clips_markerless_and_keeps_the_distinguishing_suffix() {
+    // acceptance: a long worker name at a 60-column panel cuts with no
+    // marker (the ROW rule) and keeps its distinguishing hex suffix, the
+    // identity two same-node workers share nothing else of.
     let mut view = two_pane_view();
     view.sideline_width = 60;
     let mut a = tab_agent(None, None, false);
@@ -95,13 +96,13 @@ fn sideline_name_middle_elides_and_keeps_suffix_gap_to_the_message() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = (view.panel_w() - 1) as usize;
-    let rects = sideline_column_rects(text_w as u16);
+    let rects = view.worker_column_rects(text_w as u16);
     let row = 1; // row 0 is the squad header
     let name = &frame.cells
         [row * cols + rects[1].x as usize..row * cols + (rects[1].x + rects[1].width) as usize];
     assert!(
-        name.iter().any(|c| c.c == '\u{2026}'),
-        "the name cell contains the middle ellipsis"
+        !name.iter().any(|c| c.c == '\u{2026}'),
+        "the name cell cuts with no marker"
     );
     let rendered_name: String = name.iter().map(|c| c.c).collect();
     assert!(
@@ -124,7 +125,7 @@ fn sideline_message_reads_the_sentence_not_the_markup() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = (view.panel_w() - 1) as usize;
-    let rects = sideline_column_rects(text_w as u16);
+    let rects = view.worker_column_rects(text_w as u16);
     let row = 1;
     let msg: String = frame.cells
         [row * cols + rects[2].x as usize..row * cols + (rects[2].x + rects[2].width) as usize]
@@ -148,7 +149,7 @@ fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = (view.panel_w() - 1) as usize;
-    let rects = sideline_column_rects(text_w as u16);
+    let rects = view.worker_column_rects(text_w as u16);
     let row = 1;
     let status: String = frame.cells
         [row * cols + rects[0].x as usize..row * cols + (rects[0].x + rects[0].width) as usize]

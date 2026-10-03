@@ -99,83 +99,11 @@ def global_claims_dir() -> Path:
     return claims_dir(global_claims_root())
 
 
-# Claim prefixes whose identifier is a globally-unique graph node id. Node ids
-# are global (like ~/.fno/graph.json), so EVERY claim keyed on one must
-# coordinate across worktrees/repos via the global root, never a cwd-local dir.
-# - node:<id>      the canonical work-claim
-# - dispatch:<id>  the boot-window bridge token (same id space as node:)
-# - reconcile:<id> the merge-context sentinel (written in the blocker's repo,
-#                  read in the dependent's repo)
-# - session:<uuid> the single-writer guard for a claude session (G1 adopt):
-#                  a session is durable + cross-checkout, so two project checkouts
-#                  must coordinate on the SAME lock or both could drive its
-#                  transcript (codex P1).
-# - update:fno     the machine-global installed tool env one `fno update`
-#                  reinstalls in place; every repo and session on the machine
-#                  executes from that env, so the guard must never be cwd-local.
-# - config-optout:<key> the merge-gating opt-out lease. The Rust gates
-#                  (loopcheck/finalize) resolve this prefix to the global root
-#                  too; a Python write landing anywhere else is a lease the
-#                  merge lane cannot see.
-# - flight:<hash>  the single-flight latch on an identical fno invocation, keyed
-#                  by a DIGEST of the normalized argv: a real roster read names
-#                  25 handles, four times MAX_KEY_LENGTH as raw argv. The
-#                  fan-out it deletes is machine-wide (seven concurrent
-#                  `agents truth` children from five parents in different
-#                  worktrees), so a cwd-local root would dedupe nothing. Rust
-#                  owns the latch; this entry keeps `fno agents claim status`
-#                  reading the same lockfile.
-# - gate:<side>    the machine-wide spawn-gate mutex (spawn_gate.py and the
-#                  Rust twin serialize EVERY spawner on the machine against
-#                  one lock). A cwd-local root would let two checkouts
-#                  serialize against different files and admit double the
-#                  capped-lane load.
-# Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
-# their own scope and are NOT listed here; they keep the cwd/env default.
-_GLOBAL_ID_PREFIXES = frozenset(
-    {
-        "node",
-        "dispatch",
-        "reconcile",
-        "session",
-        "groom",
-        "update",
-        "config-optout",
-        "flight",
-        "gate",
-        # `worker:<name>`, the spawn gate's provider-lane reservation: the gate
-        # mints it under global_claims_root() (gate_claims_root), so a
-        # root-less reader/release resolves the same file the gate wrote.
-        "worker",
-        # `test:suite` and `build:cargo`, the fno-agents test-run admission
-        # claims (Rust-only callers): parity with crates/fno-agents/src/claims.rs.
-        "test",
-        "build",
-    }
-)
-
-
-def claims_root_for(key: str) -> Path | None:
-    """Resolve the claims root for ``key`` by what its identifier refers to.
-
-    A claim keyed on a globally-unique id (``node:``/``dispatch:``/
-    ``reconcile:`` name the same global graph node; ``session:`` names a durable
-    claude session; ``groom:<date>`` names a day of the global graph, so the
-    daily pass dedups across repos) is rooted at the global
-    ($HOME / ``$FNO_CLAIMS_ROOT``) root,
-    so a writer and a reader in different repos/worktrees coordinate on the SAME
-    lock. A claim keyed on a
-    repo-local resource (``walker:<repo_root>``) or any unrecognized / colon-less
-    key returns ``None`` -> the cwd/env default resolved by :func:`claims_dir`.
-
-    This is the single source of truth the dispatch surfaces (``claims.cli``,
-    ``backlog.advance``, ``backlog.reconcile_dispatch``, ``agents.cli``)
-    delegate to, so their routing cannot drift.
-    """
-    # partition (not split) so a colon-less key equal to a prefix (e.g. the bare
-    # token "node") does NOT match -- a global-id key is always "<prefix>:<id>".
-    prefix, colon, _ = key.partition(":")
-    return global_claims_root() if colon and prefix in _GLOBAL_ID_PREFIXES else None
+# Which claims root one claim key routes to is decided by the NATIVE leg only
+# (the global-id prefix list lives once, in
+# crates/fno-agents/src/claims_root.rs; `fno-agents claim root <key>` is the
+# read for Python callers that need the path - `fno.claims.core.native_claims_root`).
+# The Python resolver and its prefix list are deleted (the port-owed dual).
 
 
 def claims_dir(root: Path | None = None) -> Path:
@@ -265,15 +193,6 @@ def list_claim_keys(prefix: str | None = None, root: Path | None = None) -> list
 def claim_path(key: str, root: Path | None = None) -> Path:
     """Return the canonical file path for a claim key."""
     return claims_dir(root) / f"{encode_key(key)}.lock"
-
-
-def node_has_live_claim(key: str, roots: "list[Path | None] | None" = None) -> bool:
-    """Does a claim lockfile for ``key`` exist in any swept root? Shared by
-    the reap mirror-clear and the update write-time warning so both answer
-    the same question the same way."""
-    if roots is None:
-        roots = [claims_root_for(key), None]
-    return any(claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots))
 
 
 def expired_archive_path(key: str, ts_ms: int, root: Path | None = None) -> Path:

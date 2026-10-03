@@ -1617,11 +1617,10 @@ def _answered(value: Any) -> Any:
 
 def _claim_view(node: str) -> dict | _Unreadable:
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     key = f"node:{node}"
     try:
-        return claim_status(key, root=claims_root_for(key))
+        return claim_status(key)
     except Exception as exc:  # noqa: BLE001 - an unreadable claim condemns nothing
         return _Unreadable(f"claims root unreadable ({exc!r})")
 
