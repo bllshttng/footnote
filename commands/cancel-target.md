@@ -11,17 +11,18 @@ Cancels a target pipeline. Behavior depends on whether a state file exists:
 
   The `ready` return is the claim's doing. The cancel terminal releases the run's `node:<id>` claim. That release closes the `execute` row that was pinning the status.
 
-- **Orphan (no manifest):** the session was driven off-ceremony (init skipped) or a prior cancel removed the manifest. Clearing the orphan block requires a genuine human-typed `/fno:target cancel` (the anti-forgery factor the assistant cannot satisfy by invoking this skill itself). The skill writes a session-keyed tombstone so a human's command is honored; the orphan block is bounded (it self-terminates after a few stops and records the bypass) so an unattended loop cannot burn credits indefinitely.
+- **Orphan (no manifest):** the session was driven off-ceremony (init skipped) or a prior cancel removed the manifest. Clearing the orphan block requires a genuine human-typed `/fno:target cancel`. That human input is the anti-forgery factor an assistant cannot satisfy by invoking this skill itself. The skill writes a session-keyed tombstone so a human's command is honored. The orphan block is bounded and records the bypass. It self-terminates after a few stops, so an unattended loop cannot burn credits indefinitely.
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
 STATE_DIR="$REPO_ROOT/.fno"
 # The manifest resolves through the one-owner path verb (state_path.rs):
 # the live manifest sits in the repo's space dir, not at <repo>/.fno/, and
-# only the fallback leg of the verb still names the checkout path. Guessing
+# only the verb's fallback leg still names the checkout path. Guessing
 # <repo>/.fno/target-state.md here sent every worktree session's cancel down
-# the orphan branch.
-MANIFEST="$(fno-agents state path target-state 2>/dev/null || fno do state path target-state 2>/dev/null || echo "$STATE_DIR/target-state.md")"
+# the orphan branch. When fno-agents is absent entirely, the checkout path
+# is the honest guess.
+MANIFEST="$(fno-agents state path target-state 2>/dev/null || echo "$STATE_DIR/target-state.md")"
 SENTINEL="$STATE_DIR/.target-cancelled"
 TOMBSTONE="$STATE_DIR/.target-cancelled-final"
 
