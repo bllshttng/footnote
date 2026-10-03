@@ -42,6 +42,8 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
+
+
 @dataclass(frozen=True)
 class Hold:
     """One session's hold clock. ``clock_kind`` separates idle and wall time."""
@@ -477,7 +479,9 @@ def set_policy(handle: str, policy: Optional[str]) -> bool:
     return True
 
 
-def render_digest(messages: list, held_for_s: int, harness: str | None = None) -> str:
+def render_digest(
+    messages: list, held_for_s: int, harness: str | None = None
+) -> str:
     """Render held mail through the Rust header and release formatter."""
     from fno import rust_binary
 
@@ -590,7 +594,9 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             miss_reason.append("no-registry-row")
         else:
             try:
-                digest = render_digest(messages, held_for_s, getattr(entry, "harness", None))
+                digest = render_digest(
+                    messages, held_for_s, getattr(entry, "harness", None)
+                )
                 framed = wrap_fno_mail(
                     digest,
                     from_="fno-mail-hold",

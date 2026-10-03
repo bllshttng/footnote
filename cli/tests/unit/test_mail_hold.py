@@ -349,6 +349,8 @@ def test_five_identical_held_messages_keep_their_own_headers():
     assert digest.count("`@worker · msg-") == 5
     assert digest.count("same report") == 5
     assert "(x5 identical, deduped)" not in digest
+
+
 # --- Task 3: the release ----------------------------------------------------
 
 
