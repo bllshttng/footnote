@@ -1456,6 +1456,9 @@ pub(crate) fn dash(v: Option<&Value>) -> String {
     }
 }
 
+/// Test-facing shape of the beat renderer with no lineup attached. The beat
+/// itself calls `render_lines_with`.
+#[cfg(test)]
 fn render_lines(
     scope: &str,
     readings: &[Reading],
@@ -2259,21 +2262,11 @@ fn resolve_missing_crown_inputs(
 /// stdout could not be written, 2 usage failure.
 ///
 /// `--queue IDS` records the on-deck queue on the crown manifest in seat
-/// order (a comma list of node ids); `--queue ""` clears it. This is display
-/// order for the lineup, not board dispatch order, so `fno backlog rank`
-/// stays untouched.
-fn is_node_id(id: &str) -> bool {
-    let Some((prefix, hex)) = id.split_once('-') else {
-        return false;
-    };
-    !prefix.is_empty()
-        && !hex.is_empty()
-        && prefix.chars().all(|c| c.is_ascii_lowercase())
-        && hex
-            .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-}
-
+/// order (a comma list of node ids, canonical spellings accepted: dashed,
+/// dashless, bare hex suffix); `--queue ""` clears it. Each id resolves
+/// against the graph and the canonical id is what gets stored, so the lineup
+/// finds the row. This is display order, not board dispatch order, so
+/// `fno backlog rank` stays untouched.
 pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut ctx = Ctx {
         scope: String::new(),
@@ -2377,21 +2370,55 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         return 2;
     }
 
+    // The graph read rides the beat once, before anything else needs it: the
+    // --queue resolver and the lineup both read it.
+    let (graph_rows, graph_error): (Vec<Value>, Option<String>) =
+        match crate::graph_store::read_rows(&ctx.graph) {
+            Ok(rows) => (rows, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
     // The queue rides the manifest, so the same beat that records the seat
-    // order prints it. Validate before the write: a bad id leaves the stored
-    // queue untouched.
+    // order prints it. Ids resolve against the graph and the CANONICAL id is
+    // what gets stored, so a dashless or bare-hex spelling lands as the same
+    // resident the lineup looks up. A bad id, or an unreadable graph, leaves
+    // the stored queue untouched.
     if let Some(raw) = queue_arg {
+        if let Some(cause) = &graph_error {
+            eprintln!("fno-agents king-checkin: --queue: the graph read failed: {cause}");
+            return 2;
+        }
         let ids: Vec<String> = raw
             .split(',')
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(String::from)
             .collect();
-        if let Some(bad) = ids.iter().find(|id| !is_node_id(id)) {
-            eprintln!("fno-agents king-checkin: --queue: not a node id: {bad}");
-            return 2;
+        let canonical = |id: &str| -> Option<String> {
+            let dashless = id.replace('-', "");
+            graph_rows
+                .iter()
+                .map(|row| row.get("id").and_then(Value::as_str).unwrap_or(""))
+                .find(|row_id| {
+                    *row_id == id
+                        || row_id.replace('-', "") == dashless
+                        || row_id
+                            .strip_suffix(id)
+                            .map(|prefix| prefix.ends_with('-'))
+                            .unwrap_or(false)
+                })
+                .map(String::from)
+        };
+        let mut stored: Vec<String> = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match canonical(id) {
+                Some(canonical_id) => stored.push(canonical_id),
+                None => {
+                    eprintln!("fno-agents king-checkin: --queue: no graph node for id: {id}");
+                    return 2;
+                }
+            }
         }
-        let joined = ids.join(",");
+        let joined = stored.join(",");
         let root = crate::paths::space_dir(&ctx.cwd);
         if let Err(e) =
             crate::loop_reign::set_manifest_fields(&root, &ctx.scope, &[("queue", &joined)], None)
@@ -2448,14 +2475,10 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
-    // The lineup's reads ride the beat once: graph rows for title, difficulty
-    // and PR, the registry for a seated row's harness/model, the manifest for
-    // the recorded queue. A failed read is a named line, never a blank column.
-    let (graph_rows, graph_error): (Vec<Value>, Option<String>) =
-        match crate::graph_store::read_rows(&ctx.graph) {
-            Ok(rows) => (rows, None),
-            Err(e) => (Vec::new(), Some(e.to_string())),
-        };
+    // The lineup's remaining reads: the registry for a seated row's
+    // harness/model and the manifest for the recorded queue. The graph read
+    // already happened before the --queue write. A failed read is a named
+    // line, never a blank column.
     let (registry, registry_error): (Option<crate::state::Registry>, Option<String>) =
         match crate::state::load_registry(&home.registry_json()) {
             Ok(r) => (Some(r), None),
@@ -2468,16 +2491,17 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             .and_then(|c| crate::king_termination::parse_king_manifest(&c))
             .map(|m| m.queue)
             .unwrap_or_default();
-    // One route walk per distinct difficulty: the queue holds a handful of
-    // nodes across three difficulties, so memoize for the beat.
+    // One route walk per distinct (difficulty, priority): the queue holds a
+    // handful of nodes and routing keys on both, so memoize for the beat.
     let memo = std::cell::RefCell::new(std::collections::HashMap::<String, Option<String>>::new());
-    let planned = |difficulty: &str| -> Option<String> {
-        if let Some(hit) = memo.borrow().get(difficulty) {
+    let planned = |difficulty: &str, priority: &str| -> Option<String> {
+        let key = format!("{difficulty}|{priority}");
+        if let Some(hit) = memo.borrow().get(&key) {
             return hit.clone();
         }
         let payload = json!({
             "rung_base": "agents.profiles.target",
-            "node": {"difficulty": difficulty},
+            "node": {"difficulty": difficulty, "priority": priority},
         });
         let filled = crate::route_gather::fill(&payload, &ctx.cwd);
         let out = crate::route_slot::resolve_slot_payload(&filled);
@@ -2485,8 +2509,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             .get("candidate")
             .and_then(|c| c.get("harness")?.as_str().zip(c.get("model")?.as_str()))
             .map(|(h, m)| format!("{h}/{m}"));
-        memo.borrow_mut()
-            .insert(difficulty.to_string(), resolved.clone());
+        memo.borrow_mut().insert(key, resolved.clone());
         resolved
     };
     let lineup = crate::king_checkin_lineup::LineupSources {
@@ -3045,16 +3068,28 @@ mod tests {
                    "pr_number": null}),
         ];
         let registry = crate::state::Registry {
-            entries: vec![crate::state::RegistryEntry {
-                name: "w1".into(),
-                harness: Some("claude".into()),
-                model: Some("opus".into()),
-                node: Some("x-aaaa".into()),
-                ..Default::default()
-            }],
+            entries: vec![
+                // A retried node's predecessor row: same node, older worker,
+                // no session. The court row's session must win over it.
+                crate::state::RegistryEntry {
+                    name: "w0".into(),
+                    harness: Some("claude".into()),
+                    model: Some("older".into()),
+                    node: Some("x-aaaa".into()),
+                    ..Default::default()
+                },
+                crate::state::RegistryEntry {
+                    name: "w1".into(),
+                    harness: Some("claude".into()),
+                    model: Some("opus".into()),
+                    node: Some("x-aaaa".into()),
+                    harness_session_id: Some("s1".into()),
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
-        let planned = |d: &str| (d == "low").then(|| "codex/gpt-luna".to_string());
+        let planned = |d: &str, _p: &str| (d == "low").then(|| "codex/gpt-luna".to_string());
         let queue = ["x-bbbb".to_string(), "x-aaaa".to_string()];
         let lines = render_lines_with(
             "x-bbbb",
