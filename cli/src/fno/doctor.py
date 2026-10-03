@@ -474,19 +474,23 @@ def _installed_pkg_dir() -> Optional[Path]:
 
 def _live_tool_env_processes() -> list[str]:
     """ps argv lines of live processes running from the installed fno tool env
-    (``<tool>/fno``, three parents above the package dir). The stale verdict's
+    (the ancestor of the package dir named ``fno``). The stale verdict's
     proposed repair replaces that env in place - the 2026-10-02 study clobber
-    (gap audit blockers 1/3) - so the verdict names them first. Unfamiliar
-    layout or an unreadable process table reads [] (skip).
+    (gap audit blockers 1/3) - so the verdict names them first; an unfamiliar
+    layout or unreadable process table reads [] (skip).
     """
     pkg = _installed_pkg_dir()
-    if pkg is None or len(pkg.parents) < 3 or pkg.parents[2].name != "fno":
+    if pkg is None:
+        return []
+    try:  # the package dir sits at <tool>/fno/lib/*/site-packages/fno
+        env_root = pkg.parents[[p.name for p in pkg.parents].index("fno")]
+    except ValueError:
         return []
     try:
         out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=False, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return []
-    root, me = str(pkg.parents[2]), f"{os.getpid()} "
+    root, me = str(env_root), f"{os.getpid()} "
     return [
         s
         for line in out.splitlines()

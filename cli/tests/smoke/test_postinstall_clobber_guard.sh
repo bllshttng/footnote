@@ -96,11 +96,13 @@ mkdir -p "$NOUV_ENV/lib/python3.11/site-packages/fno-0.4.0.dist-info"
 printf '{"dir": "/somewhere-else/cli", "url": "file:///somewhere-else/cli/"}\n' \
   >"$NOUV_ENV/lib/python3.11/site-packages/fno-0.4.0.dist-info/direct_url.json"
 # A bin dir with the pip stubs but NO uv, so command -v uv fails and the
-# postinstall takes the fno.sh delegation.
+# postinstall takes the fno.sh delegation. UV_TOOL_DIR and XDG_DATA_HOME are
+# unset so the guard's default-location fallback lands on NOUV_ENV regardless
+# of what the calling environment (CI's setup-uv) exported.
 FAKEBIN_NOUV="$WORK/bin-nouv"
 mkdir -p "$FAKEBIN_NOUV"
 for pip in pip pip3; do cp "$FAKEBIN/$pip" "$FAKEBIN_NOUV/$pip"; done
-out="$(HOME="$NOUV_HOME" PATH="$FAKEBIN_NOUV:/usr/bin:/bin" bash "$POSTINSTALL" 2>&1)"
+out="$(env -u UV_TOOL_DIR -u XDG_DATA_HOME HOME="$NOUV_HOME" PATH="$FAKEBIN_NOUV:/usr/bin:/bin" bash "$POSTINSTALL" 2>&1)"
 rc=$?
 grep -q "refusing to reinstall" <<<"$out" || die "delegation path must consult the guard over the default tool dir, got: $out"
 grep -q "uv not found; delegating" <<<"$out" || die "case must run the delegation branch, got: $out"
@@ -117,6 +119,16 @@ rc=$?
 grep -q "refusing to reinstall" <<<"$out" && die "symlinked same-source receipt must not refuse, got: $out"
 grep -q "fake uv: install refused by test stub" <<<"$out" || die "symlinked receipt must reach the install arms, got: $out"
 echo "PASS symlinked same-source receipt -> guard passes"
+
+# --- Case 6: a REMOTE wheel receipt (a nightly GitHub Release install, https
+# url) is not a local source - the guard passes it like a registry install.
+printf '{"url": "https://github.com/bllshttng/footnote/releases/download/nightly/fno-0.4.0.dev1-py3-none-macosx_11_0_arm64.whl"}\n' \
+  >"$ENVDIR/lib/python3.11/site-packages/fno-0.4.0.dist-info/direct_url.json"
+out="$(PATH="$TESTPATH" bash "$POSTINSTALL" 2>&1)"
+rc=$?
+grep -q "refusing to reinstall" <<<"$out" && die "https receipt must not refuse (it is not a local source), got: $out"
+grep -q "fake uv: install refused by test stub" <<<"$out" || die "https receipt must reach the install arms, got: $out"
+echo "PASS https wheel receipt -> guard passes like a registry install"
 
 echo "fails=$fails"
 exit "$fails"

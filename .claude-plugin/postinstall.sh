@@ -240,15 +240,19 @@ tool_env_dir() {
 }
 
 # The direct_url.json uv records for a local-path install, stripped to its
-# path. Empty when there is no env or the install came from a registry - a
-# by-name/registry install is never "a different source".
+# path. Empty when there is no env, or the install came from a registry or a
+# remote URL (https, a nightly GitHub Release wheel) - neither is ever "a
+# different local source", so only file:// receipts leave this function.
 tool_receipt_source() {
   local td f url
   td="$(tool_env_dir)" || return 0
   f="$(find "$td/fno/lib" -path '*.dist-info/direct_url.json' -print -quit 2>/dev/null)"
   [[ -n "$f" ]] || return 0
   url="$(sed -n -E 's/.*"url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$f")"
-  printf '%s\n' "${url%%$'\n'*}"
+  url="${url%%$'\n'*}"
+  case "$url" in
+    file://*) printf '%s\n' "$url" ;;
+  esac
 }
 
 # One ps line per live process whose argv names a path inside the tool env.

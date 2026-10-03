@@ -3079,10 +3079,11 @@ def test_stale_verdict_names_live_tool_env_processes(
 def test_live_tool_env_processes_filters_self_and_scan_lines(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The scanner reads a uv tool layout (site-packages three parents under
-    <tool>/fno), drops its own ps/awk lines and the doctor process itself, and
-    returns [] on any unfamiliar layout."""
-    pkg = tmp_path / "fno" / "lib" / "python3.11" / "site-packages"
+    """The scanner walks from the installed package dir (the real depth:
+    <tool>/fno/lib/pythonX.Y/site-packages/fno) up to the ancestor named fno,
+    drops its own ps/awk lines and the doctor process itself, and returns []
+    on any unfamiliar layout."""
+    pkg = tmp_path / "fno" / "lib" / "python3.11" / "site-packages" / "fno"
     pkg.mkdir(parents=True)
     monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: pkg)
     root = str(tmp_path / "fno")
@@ -3106,8 +3107,8 @@ def test_live_tool_env_processes_filters_self_and_scan_lines(
     live = doctor._live_tool_env_processes()
     assert live == [f"77 {root}/bin/fno-py backlog capture"], live
 
-    # An unfamiliar layout (root not named fno) degrades to empty.
-    other = tmp_path / "elsewhere" / "lib" / "python3.11" / "site-packages"
+    # An unfamiliar layout (no ancestor named fno) degrades to empty.
+    other = tmp_path / "elsewhere" / "lib" / "python3.11" / "site-packages" / "fno"
     other.mkdir(parents=True)
     monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: other)
     assert doctor._live_tool_env_processes() == []
