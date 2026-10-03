@@ -40,4 +40,16 @@ if [[ "$MISSING" -ne 0 ]]; then
   exit 1
 fi
 
+# Presence is not a login: pushes and the target loop's PR reads fail on an
+# unauthenticated gh. A clean runner (and the install-channel smoke) never
+# logs in, so this warns instead of failing; the target loop itself parks
+# with the same instructions when its PR read hits it.
+if gh auth status >/dev/null 2>&1; then
+  echo "[ok] gh auth"
+else
+  echo "[warn] gh is present but not authenticated; pushes and PR reads will fail" >&2
+  echo "  Run: gh auth login" >&2
+  echo "  If pushes still fail afterwards, also run: gh auth setup-git" >&2
+fi
+
 echo "Preflight passed"
