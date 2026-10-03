@@ -1,7 +1,7 @@
 {
   "name": "fno",
   "displayName": "Footnote",
-  "version": "0.4.1",
+  "version": "0.4.1-dev.20261003",
   "description": "Set a target and walk away. Say f[no] to mostly done.",
   "author": {"name": "Jason Noah Choi"},
   "homepage": "https://github.com/bllshttng/footnote#readme",
