@@ -71,6 +71,8 @@ class TestResolveSelf:
         assert result.registered is True
         assert result.name == "ghost-worker"
         assert result.provider is None
+        assert result.short_id is None
+        assert result.exit_code == 0
 
     def test_ambiguous_name_answers_name_only_and_dead_twin_skipped(self):
         # A name two live rows claim enriches from neither (tier 1 still
