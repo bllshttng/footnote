@@ -564,7 +564,7 @@ mod tests {
         use fno::agents_alias::Org;
         assert_eq!(
             decide_role(&os(&["agents", "org", "-J"]), false),
-            Role::AgentsAlias(Org::Forward(os(&["agents", "org", "-J"])))
+            Role::AgentsAlias(Org::Forward(os(&["agents", "court", "-J"])))
         );
         assert_eq!(
             decide_role(
