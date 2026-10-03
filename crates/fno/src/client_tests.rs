@@ -7577,7 +7577,7 @@ fn tab_badge_rows() {
     // sideline scrolls the least it takes to reveal the focused-row band; a
     // top-row focus needs no scroll.
     let mut view = two_pane_view();
-    view.term = (7, 100); // a short panel under the 4-row court glance
+    view.term = (8, 100); // a short panel under the 4-row court glance
     let panes = view.layout.panes.clone();
     let agents: Vec<AgentRow> = (0..8)
         .map(|i| AgentRow {
