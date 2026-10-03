@@ -176,7 +176,7 @@ fn strip_leading_header(body: &str) -> (String, Option<String>) {
 fn header_summary(header: &str) -> Option<String> {
     let (inner, _) = split_header_span(header.trim())?;
     let (_, _, summary) = header_fields(inner)?;
-    Some(cut_words(summary, SUMMARY_MAX_WORDS))
+    Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
 }
 
 fn strip_summary_prefix(body: &str, summary: &str) -> &str {
