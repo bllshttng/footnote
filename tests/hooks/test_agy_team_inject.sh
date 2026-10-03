@@ -102,12 +102,12 @@ RC=$?
   || fail "invocation 0: expected 2 steps, got: $OUT"
 [[ "$(step "$OUT" 0)" == "$RENDER" ]] && pass "invocation 0: announcements first" \
   || fail "invocation 0: first step is not the announcement: $(step "$OUT" 0)"
-[[ "$(step "$OUT" 1)" == "You are the king:"* ]] && pass "invocation 0: crown second" \
+[[ "$(step "$OUT" 1)" == "You are the lead:"* ]] && pass "invocation 0: crown second" \
   || fail "invocation 0: second step is not the crown: $(step "$OUT" 1)"
 
 # 3. Invocation 0 + crown, no fno-agents: the crown still lands alone.
 OUT="$(printf '%s' '{"conversationId":"conv-3","invocationNum":0}' | PATH="$NOAGENTS:/usr/bin:/bin" FNO_AGY_CROWN_SID=conv-3 bash "$HOOK" 2>/dev/null)"
-[[ "$(nsteps "$OUT")" == "1" && "$(step "$OUT" 0)" == "You are the king:"* ]] \
+[[ "$(nsteps "$OUT")" == "1" && "$(step "$OUT" 0)" == "You are the lead:"* ]] \
   && pass "no fno-agents: crown alone still lands" \
   || fail "no fno-agents: expected crown only, got: $OUT"
 
@@ -137,7 +137,7 @@ RC=$?
 
 # 8. Reader failure on invocation 0: the crown still lands alone.
 OUT="$(printf '%s' '{"conversationId":"conv-7","invocationNum":0}' | FNO_AGY_CROWN_SID=conv-7 FNO_AGY_STUB_FAIL=1 run_hook 2>/dev/null)"
-[[ "$(nsteps "$OUT")" == "1" && "$(step "$OUT" 0)" == "You are the king:"* ]] \
+[[ "$(nsteps "$OUT")" == "1" && "$(step "$OUT" 0)" == "You are the lead:"* ]] \
   && pass "reader failure + crown: crown still lands" \
   || fail "reader failure + crown: expected crown only, got: $OUT"
 
