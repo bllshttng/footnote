@@ -35,17 +35,19 @@ use tokio::sync::mpsc;
 use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
+mod open_chooser;
 mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
 mod wire_version;
+use open_chooser::{open_for_session, resolve_sender};
 use row_menu::execute_row_menu_action;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
-use row_menu::{build_row_menu, build_tab_menu};
+use row_menu::{build_row_menu, build_section_menu, build_tab_menu};
 
 // Pickers, the launch moment and the snapshot action live in their own
 // modules: client.rs is shrink-only under the file-budget gate.
@@ -1514,6 +1516,11 @@ enum MenuTarget {
     /// re-resolves it against the live layout, so a tab that closed between
     /// open and pick is a Notice, never a redirected action.
     Tab(TabId),
+    /// The shared open-session chooser's row (`open_chooser.rs`). Identified
+    /// and resolved exactly like [`MenuTarget::Agent`]; the difference is
+    /// the bookkeeping: an executed pick persists as the chooser's next
+    /// pre-selection.
+    OpenSession(AgentIdent),
 }
 
 /// The disambiguating identity of an agent row, captured when a row menu opens.
@@ -1632,6 +1639,11 @@ enum MenuAction {
     /// sideline `P` opens (open portals plus a new-portal row), so a
     /// right-click offers a portal choice where it offers placement.
     PortalPicker,
+    /// Attach a paneless LIVE thread that carries no attach id as a NEW
+    /// portal view: `Some(dir)` splits a fresh portal `dir`-ward of the
+    /// active tab, `None` opens a standalone new-portal seat. Chooser-only:
+    /// built by `open_chooser::build_open_chooser`, never the row menu.
+    PortalAt(Option<Dir>),
 }
 
 impl MenuAction {
@@ -1692,53 +1704,6 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
         label: label.into(),
         hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
-    }
-}
-
-/// The section-header context menu. A workspace section (`squad`
-/// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
-/// added only when `dead > 0`; its label count is both what it advertises AND
-/// what the commit runs, so the two can never disagree. The caller guarantees
-/// at least one of {renamable, `dead > 0`} holds, so the menu is never empty.
-fn build_section_menu(
-    key: SectionKey,
-    label: String,
-    squad: Option<u64>,
-    dead: usize,
-    anchor: Anchor,
-) -> RowMenu {
-    let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
-    let mut actions: Vec<MenuAction> = Vec::new();
-    if squad.is_some() {
-        let entry = |glyph: &str, label: &str| PopupRow::Entry {
-            glyph: glyph.into(),
-            label: label.into(),
-            hint: String::new(),
-            enabled: true,
-        };
-        rows.push(entry_acc("✎", "Rename", "rename-workspace"));
-        actions.push(MenuAction::Rename);
-        rows.push(entry("▲", "Move up"));
-        actions.push(MenuAction::MoveSquad(-1));
-        rows.push(entry("▼", "Move down"));
-        actions.push(MenuAction::MoveSquad(1));
-        rows.push(PopupRow::Rule);
-        rows.push(entry("✕", "Remove workspace"));
-        actions.push(MenuAction::RemoveSquad);
-    }
-    if dead > 0 {
-        rows.push(PopupRow::Entry {
-            glyph: "✕".into(),
-            label: format!("Clear dead ({dead})"),
-            hint: String::new(),
-            enabled: true,
-        });
-        actions.push(MenuAction::ClearDead);
-    }
-    RowMenu {
-        popup: Popup::new(rows, anchor),
-        target: MenuTarget::Section { key, label, squad },
-        actions,
     }
 }
 
@@ -3721,6 +3686,7 @@ impl View {
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank
             | DisplayRow::CardDetail(..)
+            | DisplayRow::CardMetrics(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -4097,6 +4063,7 @@ impl View {
             // Agent row painted above it. Inert for the selector, clickable
             // here - the same split a Header has.
             DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
+            DisplayRow::CardMetrics(..) => self.row_action(i.checked_sub(2)?),
             // Inert rows (spacer, table column header) resolve to no action.
             DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay.
@@ -6246,18 +6213,10 @@ enum DisplayRow<'a> {
     /// The `+` create-workspace affordance, a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
-    /// (US3) A one-line spacer between workspace groups and before the
-    /// trailing sections. Inert: every painted line stays one display row
-    /// (the single-enumeration invariant), so scroll, hover, and hit-test
-    /// index math are untouched.
+    /// An inert one-line separator retained in card mode.
     Blank,
-    /// Line 2 of a card-mode card (the dims under `[sideline] layout =
-    /// "card"`): harness/model, parent-or-role, message, with the lifetime
-    /// and age right-aligned in a DIM legacy row. Inert - every painted
-    /// line stays one display row (the single-enumeration invariant) - and
-    /// a click on it acts on the `Agent` row above it via
-    /// [`View::row_action`]'s index shift.
     CardDetail(&'a AgentRow),
+    CardMetrics(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6383,6 +6342,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Blank
             | DisplayRow::CardDetail(..)
+            | DisplayRow::CardMetrics(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
@@ -6611,6 +6571,7 @@ enum ChromeHit {
     OpenQuestionsList,
     /// A card's node tap: the plan in Obsidian, else the node details pane.
     OpenNode(String),
+    OpenPr(String),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -7855,6 +7816,12 @@ async fn attach_and_run(
     let (link_tx, mut link_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<(), String>)>();
 
+    // the @sender tap of a mail header resolves OFF the UI loop too: `chats
+    // resolve` can cold-start the CLI, so the select loop keeps drawing while
+    // it runs. Reports the fmail id plus whatever resolve made of it.
+    let (sender_tx, mut sender_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+
     // the needs-me event-fold leg runs off the UI loop and reports back
     // here, tagged with the generation token it was kicked under, so a slow
     // `fno-agents needs` never blocks the overlay and a result landing after the
@@ -8326,11 +8293,25 @@ async fn attach_and_run(
                     // linkified text) and vetted its scheme; `open_url` vets it
                     // again before exec. Off-loop for the same reason Copy is -
                     // a cold browser launch must not stall the render loop.
-                    let tx = link_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let outcome = crate::link::open_url(&url);
-                        let _ = tx.send((url, outcome));
-                    });
+                    if crate::link::is_sender_uri(&url) {
+                        // A mail-header @sender tap: resolve the fmail id to
+                        // the sender's session off-loop, then open the shared
+                        // chooser on its row. Never the platform opener.
+                        let tx = sender_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let id = url
+                                .trim_start_matches(crate::link::SENDER_SCHEME)
+                                .to_string();
+                            let resolved = resolve_sender(&id);
+                            let _ = tx.send((id, resolved));
+                        });
+                    } else {
+                        let tx = link_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let outcome = crate::link::open_url(&url);
+                            let _ = tx.send((url, outcome));
+                        });
+                    }
                 }
                 Ok(ServerMsg::LinkHover {
                     pane_id,
@@ -8499,6 +8480,14 @@ async fn attach_and_run(
                     }
                 };
                 view.set_notice(notice);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some((id, resolved)) = sender_rx.recv() => {
+                // the fmail id resolved (or not); open the shared
+                // open-session chooser on the owning row, or say why not.
+                open_for_session(&mut view, &id, resolved);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -9659,6 +9648,7 @@ async fn apply_hit(
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
         ChromeHit::OpenQuestionsList => view.open_questions_list(),
         ChromeHit::OpenNode(id) => node_link::open(view, id).await,
+        ChromeHit::OpenPr(url) => update_menu::open_pr(view, url).await,
     }
     Ok(())
 }

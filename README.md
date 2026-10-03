@@ -18,7 +18,7 @@ Start with the CLI:
 curl -fsSL fno.sh | sh
 ```
 
-When `uv` is missing the script installs it first. The install lands the `fno` CLI with its bundled binaries and adds the tool bin to your PATH. Then wire the plugin into your harness with `fno config setup wizard`, or add the plugin by hand below.
+When `uv` is missing the script installs it first. The install lands the `fno` CLI with its bundled binaries and adds the tool bin to your PATH. It then wires the plugin into every agent CLI it detects: `claude`, `codex`, `opencode`, `pi`, `agy`, `gemini`. Each harness prints one summary line. Set `FNO_NO_WIRE=1` to skip this step. `fno config setup wizard` wires a harness by hand. The per-harness commands below do it manually. The plugin-only install routes pick up their CLI on the next session.
 
 Claude Code:
 
