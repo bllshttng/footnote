@@ -1126,12 +1126,24 @@ pub fn comment_create(
             }
             // The writer's identity: typed session/harness, plus
             // the extras the thread renders. Absent fields stay absent - an
-            // honest unknown beats a wrong label.
+            // honest unknown beats a wrong label. The model resolves here
+            // when the caller did not name one: the session registry's
+            // observation rides the row this mutation already loaded.
+            let model = input
+                .model
+                .clone()
+                .or_else(|| session_observed_model(&parsed, input.session_id.as_deref()))
+                .or_else(|| {
+                    std::env::var("FNO_ROUTE_MODEL")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                });
+            if let Some(model) = &model {
+                extras.insert("model".into(), Value::String(model.clone()));
+            }
             if let Some(name) = &input.agent_name {
                 extras.insert("agent_name".into(), Value::String(name.clone()));
-            }
-            if let Some(model) = &input.model {
-                extras.insert("model".into(), Value::String(model.clone()));
             }
             if let Some(working) = &input.working_node {
                 extras.insert("working_node".into(), Value::String(working.clone()));
@@ -1205,6 +1217,22 @@ fn mint_unique_comment_id(comments: &[Comment]) -> String {
             return minted;
         }
     }
+}
+
+/// The observed model the row's sessions carry for this session id. Only a
+/// concrete observed name counts.
+fn session_observed_model(parsed: &Node, session_id: Option<&str>) -> Option<String> {
+    let sid = session_id?;
+    for s in parsed.sessions.as_deref()? {
+        if s.session_id != sid {
+            continue;
+        }
+        let om = s.observed_model.as_ref()?;
+        if om.get("kind").and_then(Value::as_str) == Some("observed") {
+            return om.get("model").and_then(Value::as_str).map(str::to_string);
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

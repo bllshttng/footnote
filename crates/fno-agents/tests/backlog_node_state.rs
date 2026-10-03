@@ -96,7 +96,7 @@ fn ac1_one_current_state_priors_in_history() {
         assert_eq!(rec["original"]["body"], json!(format!("state body {i}")));
     }
     // One journal per store, not per spelling: the db twin of the same
-    // graph resolves the same journal file (x-fb4f: a reader holding the
+    // graph resolves the same journal file (a reader holding the
     // db spelling saw zero records while writers journaled under the
     // anchor).
     let db_spelling = graph.with_extension("db");

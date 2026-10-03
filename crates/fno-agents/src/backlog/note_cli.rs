@@ -620,17 +620,12 @@ pub fn run_comment(args: &[String]) -> i32 {
     }
     let kind = if reply.is_some() { "reply" } else { "comment" };
     // An agent comment carries who wrote it: the process-provable
-    // session and harness, the worker name, the observed model, and the
-    // node the session is working. A user comment carries the user's own
-    // word; no stamp.
+    // session and harness, the worker name, and the node the session is
+    // working. The observed model resolves inside the write from the row
+    // it already loads, so no read happens here. A user comment carries
+    // the user's own word; no stamp.
     let ident = if author.as_deref() != Some("user") {
-        let entry = graph_store::read_rows(&graph)
-            .ok()
-            .and_then(|rows| crate::graph_get::find_entry(&rows, &node_id).cloned());
-        Some(comment_identity(
-            entry.as_ref().unwrap_or(&Value::Null),
-            self_session.as_deref(),
-        ))
+        Some(comment_identity(self_session.as_deref()))
     } else {
         None
     };
@@ -853,7 +848,7 @@ appends to the thread and cannot conflict"
         );
         return 2;
     }
-    let ident = comment_identity(entry, parsed.self_session.as_deref());
+    let ident = comment_identity(parsed.self_session.as_deref());
     let reads: Option<Value> = parsed
         .reads
         .as_deref()
@@ -904,7 +899,7 @@ struct CommentIdentity {
     working_node: Option<String>,
 }
 
-fn comment_identity(entry: &Value, self_session: Option<&str>) -> CommentIdentity {
+fn comment_identity(self_session: Option<&str>) -> CommentIdentity {
     let ident = crate::spawn_context::resolve_self_identity(
         &|k| std::env::var(k).ok(),
         None,
@@ -918,7 +913,9 @@ fn comment_identity(entry: &Value, self_session: Option<&str>) -> CommentIdentit
         .filter(|s| !s.is_empty());
     let harness = ident.harness.clone().filter(|h| !h.is_empty());
     // The claim this session holds names the node it is working and, in the
-    // spawn-handover holder form, the worker name.
+    // spawn-handover holder form, the worker name. The observed model is
+    // not resolved here: the write's own mutation reads it off the row it
+    // already loads, so identity resolution costs no store read.
     let mut working_node = None;
     let mut holder_name = None;
     if let Some(sid) = session_id.as_deref() {
@@ -944,35 +941,12 @@ fn comment_identity(entry: &Value, self_session: Option<&str>) -> CommentIdentit
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .or(holder_name);
-    let model = observed_model_for(entry, session_id.as_deref()).or_else(|| {
-        std::env::var("FNO_ROUTE_MODEL")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-    });
     CommentIdentity {
         session_id,
         harness,
         agent_name,
-        model,
-        working_node,
+        model: None,
     }
-}
-
-/// The model the session registry observed for this session id, read off
-/// the node's served sessions rows. Only a concrete observed name counts.
-fn observed_model_for(entry: &Value, session_id: Option<&str>) -> Option<String> {
-    let sid = session_id?;
-    for s in entry.get("sessions").and_then(Value::as_array)? {
-        if s.get("session_id").and_then(Value::as_str) != Some(sid) {
-            continue;
-        }
-        let om = s.get("observed_model")?;
-        if om.get("kind").and_then(Value::as_str) == Some("observed") {
-            return om.get("model").and_then(Value::as_str).map(str::to_string);
-        }
-    }
-    None
 }
 
 /// Print one human receipt: the object under --json, else its `line`.
