@@ -5377,32 +5377,6 @@ impl View {
         }
     }
 
-    /// The display-row index the confirm's target CURRENTLY occupies,
-    /// matched by the identity carried in the [`ConfirmAction`] (squad id, agent
-    /// name, or external/dismiss attach_id, or a card node) - never a captured
-    /// numeric index. A global confirm (reap / clear-dead) has no row, and a
-    /// target that vanished returns `None`; both fall back to the bottom row.
-    fn confirm_target_index(&self, action: &ConfirmAction) -> Option<usize> {
-        self.display_rows()
-            .iter()
-            .position(|r| match (&action.action, r) {
-                (ConfirmKind::RemoveSquad { squad, .. }, DisplayRow::Sel(s)) => {
-                    s.tab.is_none() && s.squad == *squad
-                }
-                (
-                    ConfirmKind::StopAgent { name, .. } | ConfirmKind::RemoveAgent { name, .. },
-                    DisplayRow::Agent(a),
-                ) => a.name == *name,
-                (
-                    ConfirmKind::StopExternal { attach_id, .. }
-                    | ConfirmKind::RemoveExternal { attach_id, .. }
-                    | ConfirmKind::DismissMember { attach_id, .. },
-                    DisplayRow::Agent(a),
-                ) => a.attach_id.as_deref() == Some(attach_id.as_str()),
-                _ => false,
-            })
-    }
-
     fn confirm_text(&self, action: &ConfirmAction) -> String {
         let label = &action.label;
         let text = match &action.action {
@@ -11208,6 +11182,9 @@ mod court_block;
 mod glyph_legend;
 
 mod card_line;
+
+#[path = "client/confirm_anchor.rs"]
+mod confirm_anchor;
 mod node_link;
 mod row_meter;
 #[path = "client/sideline.rs"]
