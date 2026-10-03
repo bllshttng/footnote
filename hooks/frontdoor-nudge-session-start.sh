@@ -57,7 +57,7 @@ if [[ -n "$FNO_BIN" ]]; then
     # only clobber the working tool env; name the path and stop.
     echo "## fno is installed, just not on this session's PATH"
     echo
-    echo "\`fno\` lives at \`$fno_bin\`, which this session's PATH lacks. New sessions pick it up; this one can call it by that path or \`export PATH=\"\$(dirname \"$fno_bin\"):\$PATH\"\`."
+    echo "\`fno\` lives at \`$FNO_BIN\`, which this session's PATH lacks. New sessions pick it up; this one can call it by that path or \`export PATH=\"\$(dirname \"$FNO_BIN\"):\$PATH\"\`."
     exit 0
   fi
 fi

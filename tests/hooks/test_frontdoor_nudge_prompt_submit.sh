@@ -60,8 +60,13 @@ chmod +x "$PLUG/.claude-plugin/postinstall.sh"
 PWRAPPER="$PLUG/hooks/frontdoor-nudge-prompt-submit.sh"
 PSESSION="$PLUG/hooks/frontdoor-nudge-session-start.sh"
 DATA="$WORK/data"
+# HOME is isolated like the session-start twin: the wrapper's fno-bin
+# resolver checks ~/.cargo/bin and ~/.local/bin, which on a dev machine
+# carry a REAL install the case count must not see.
+EMPTY_HOME="$WORK/home"
+mkdir -p "$EMPTY_HOME"
 
-run_wrapper() { PATH="$FAKEBIN:$BASE_PATH" CLAUDE_PLUGIN_DATA="$DATA" bash "$PWRAPPER" 2>/dev/null; }
+run_wrapper() { PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" CLAUDE_PLUGIN_DATA="$DATA" bash "$PWRAPPER" 2>/dev/null; }
 
 wait_unlocked() {
   local dir="${1:-$DATA}" _
@@ -129,9 +134,9 @@ pass "live lock -> in-progress note once, then silent"
 # --- Case 5: SessionStart hook and this wrapper RACE -> one installer ---------
 rm -rf "$DATA" "$MARK"; : >"$COUNT"
 START=$(date +%s)
-PATH="$FAKEBIN:$BASE_PATH" CLAUDE_PLUGIN_DATA="$DATA" bash "$PSESSION" >"$WORK/out-ss.txt" 2>/dev/null &
+PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" CLAUDE_PLUGIN_DATA="$DATA" bash "$PSESSION" >"$WORK/out-ss.txt" 2>/dev/null &
 SS_PID=$!
-PATH="$FAKEBIN:$BASE_PATH" CLAUDE_PLUGIN_DATA="$DATA" bash "$PWRAPPER" >"$WORK/out-ps.txt" 2>/dev/null &
+PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" CLAUDE_PLUGIN_DATA="$DATA" bash "$PWRAPPER" >"$WORK/out-ps.txt" 2>/dev/null &
 PS_PID=$!
 wait "$SS_PID" "$PS_PID"
 ELAPSED=$(( $(date +%s) - START ))
@@ -148,11 +153,11 @@ pass "racing SessionStart + UserPromptSubmit triggers -> one installer (${ELAPSE
 # --- Case 6: CLAUDE_PLUGIN_DATA unset -> XDG fallback gets stamp and marker ---
 rm -rf "$DATA" "$MARK" "$WORK/xdg-state"; : >"$COUNT"
 XDG_DIR="$WORK/xdg-state/fno/plugin-install"
-out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/xdg-state" bash "$PWRAPPER" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$WORK/xdg-state" bash "$PWRAPPER" 2>/dev/null)
 grep -q "Installing the fno CLI" <<<"$out" || fail "XDG fallback must surface the note, got: $out"
 wait_unlocked "$XDG_DIR" || fail "fallback installer left its lock"
 [[ "$(cat "$XDG_DIR/postinstall.announced" 2>/dev/null)" == "9.9.9" ]] || fail "fallback marker missing"
-out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/xdg-state" bash "$PWRAPPER" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$WORK/xdg-state" bash "$PWRAPPER" 2>/dev/null)
 [[ -z "$out" ]] || fail "fallback marker must silence later prompts, got: $out"
 pass "CLAUDE_PLUGIN_DATA unset -> XDG fallback carries stamp and marker"
 
