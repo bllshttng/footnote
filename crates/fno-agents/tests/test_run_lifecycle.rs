@@ -836,7 +836,7 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
     // A pid of its own: the install run above holds build:cargo under the
     // test pid, and the door's own-holder check would return 0 before the
     // user lane or the hold was ever consulted.
-    let user_cargo = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut user_cargo = Command::new("sleep").arg("60").spawn().unwrap();
     let out = Command::new(bin())
         .args(["test-run", "build-admit", "--cargo-pid"])
         .arg(user_cargo.id().to_string())
