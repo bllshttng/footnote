@@ -1443,7 +1443,7 @@ fn api_comment_thread_write_and_reply_state_rules() {
 fn api_note_append_migrates_the_journal_into_the_thread_once() {
     let (_pin, _d1, _d2, store, _second) = store_pair();
     for store in [&store] {
-        fno_agents::backlog::note_history::append(
+        crate::backlog::note_history::append(
             &store.graph,
             "ab-one",
             crate::backlog::note_history::REASON_STATE_REPLACED,

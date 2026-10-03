@@ -73,13 +73,11 @@ pub fn record_body(original: &Value) -> &str {
 /// store's canonical placement, never to the raw graph argument: callers
 /// hold different spellings of one store (the anchor `graph.json`, the db
 /// twin `graph.db`, a legacy root), and the store layer converges them all
-/// through `database_path`. Deriving the journal from the raw spelling
+/// through `anchor_path`. Deriving the journal from the raw spelling
 /// forked the corpus - writers journaling under the anchor while a reader
-/// held `graph.db` saw zero records - so the journal resolves through the
-/// same placement the store does, spelled back as the anchor.
+/// held `graph.db` saw zero records.
 pub fn history_path(graph: &Path) -> PathBuf {
-    let store = crate::backlog::database_path(graph);
-    let anchor = store.with_extension("json");
+    let anchor = crate::backlog::anchor_path(graph);
     let file_name = anchor
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

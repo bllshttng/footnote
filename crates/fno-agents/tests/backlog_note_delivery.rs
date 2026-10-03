@@ -281,7 +281,7 @@ fn ac7_machine_and_wave_records_go_to_history_only() {
 }
 
 #[test]
-fn ac7_terminal_node_note_is_history_only() {
+fn ac7_terminal_node_note_appends_to_the_thread() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("d-1", "done")]);
@@ -291,7 +291,7 @@ fn ac7_terminal_node_note_is_history_only() {
         &[
             "--stdin", "--json", "--node", "d-1", "--quiet", &g[0], &g[1],
         ],
-        "",
+        "the terminal note",
     );
     assert_eq!(code, 0);
     let row = read_graph(&graph)["entries"]
@@ -305,9 +305,10 @@ fn ac7_terminal_node_note_is_history_only() {
         row.get(node_state::STATE_KEY).is_none(),
         "no hot state on a done node"
     );
-    let (_, total) = fno_agents::backlog::note_history::read(&graph, Some("d-1"), 0, 50).unwrap();
-    assert_eq!(total, 1);
-    // The terminal receipt still names id and text, and replaces nothing.
+    let notes = row["progress_notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["text"], json!("the terminal note"));
+    // The terminal receipt still names id and text, routed to the thread.
     let (code, stdout, _) = note_captured(
         &[
             "--stdin", "--json", "--node", "d-1", "--quiet", &g[0], &g[1],
@@ -318,338 +319,106 @@ fn ac7_terminal_node_note_is_history_only() {
     let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(receipt["id"], json!("d-1"));
     assert_eq!(receipt["text"], json!("another note"));
-    assert!(receipt["replaced"].is_null());
+    assert_eq!(receipt["routed"], json!("thread"));
 }
 
-/// The cross-session surface: the receipt names the state a take-over
-/// replaced, the guard holds a foreign note (or clear) before anything is
-/// written, the same session walks through free, and --replace is the door.
+/// The cross-session surface that survives the flip: --clear is the one
+/// state route, so a clear over a revision this session cannot prove it
+/// wrote refuses before anything is cleared, --if-revision names the
+/// deliberate clear, and the owner walks through free.
 #[test]
-fn a_note_names_the_state_it_replaced_and_holds_authorship() {
+fn a_clear_holds_authorship_until_if_revision_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("t-1", "ready")]);
     let g = graph_arg(&graph);
-    // First note over an empty state: the receipt says so.
-    let (code, stdout, stderr) = note_captured(
+    node_state::replace_state(
+        &graph,
+        &node_state::StateWriteInput {
+            node_id: "t-1".into(),
+            body: "first line\nsecond line".into(),
+            if_revision: Some(0),
+            source_session_id: Some("sess-aaaa1111".into()),
+            source_harness: None,
+            reads: None,
+        },
+    )
+    .unwrap();
+    // A foreign --clear refuses, naming the owner and the door.
+    let (code, _, stderr) = note_captured(
         &[
             "t-1",
-            "first line\nsecond line",
-            "--self-session",
-            "sess-aaaa1111",
+            "--clear",
+            "--stdin",
             "--json",
             "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let first: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert!(first["replaced"].is_null());
-    assert!(
-        first["line"]
-            .as_str()
-            .unwrap()
-            .contains("replaced nothing: t-1 had no current state"),
-        "{stdout}"
-    );
-    // Second note: the receipt names revision 1, its size and its author.
-    // The writer differs from the prior author, so --replace marks the
-    // take-over deliberate.
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "t-1",
-            "probe",
             "--self-session",
             "sess-bbbb2222",
-            "--replace",
-            "--json",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let second: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(second["replaced"]["revision"], json!(1));
-    assert_eq!(second["replaced"]["chars"], json!(22));
-    assert_eq!(
-        second["replaced"]["source_session_id"],
-        json!("sess-aaaa1111")
-    );
-    assert_eq!(second["replaced"]["head"], json!("first line..."));
-    assert_eq!(second["id"], json!("t-1"));
-    assert_eq!(second["text"], json!("probe"));
-    assert_eq!(second["routed"], json!("state"));
-    assert_eq!(second["revision"], json!(2));
-    // Third note, text receipt: both sizes and the history pointer print.
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "t-1",
-            "probe",
-            "--self-session",
-            "sess-cccc3333",
-            "--replace",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("noted t-1: revision 3, "), "{stdout}");
-    assert!(
-        stdout.contains("replaced revision 2 (5 chars, written by session sess-bbbb2222"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("fno backlog notes history t-1"), "{stdout}");
-    // AC6: the replaced body reads back whole from history, and the
-    // journal is why: one state_replaced record per take-over, each
-    // carrying the exact outgoing revision.
-    let (records, total) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
-    assert!(
-        records
-            .iter()
-            .any(|r| r["original"]["body"] == json!("first line\nsecond line")),
-        "the two-line body must read back whole"
-    );
-    assert_eq!(total, 2);
-    assert_eq!(records[0]["reason"], json!("state_replaced"));
-    assert_eq!(records[0]["prior_revision"], json!(1));
-    assert_eq!(records[1]["prior_revision"], json!(2));
-    // The guard: a note over a revision this session cannot prove it wrote
-    // refuses before anything is written, and --quiet does not bypass it.
-    let (code, _, stderr) = note_captured(
-        &[
-            "t-1",
-            "vellum replacement",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-vellum",
             &g[0],
             &g[1],
         ],
         "",
     );
     assert_eq!(code, 3, "stderr: {stderr}");
-    assert!(stderr.contains("note refused"), "{stderr}");
-    assert!(
-        stderr.contains("--replace"),
-        "names the explicit door: {stderr}"
+    assert!(stderr.contains("note --clear refused"), "{stderr}");
+    assert!(stderr.contains("sess-aaaa1111"), "{stderr}");
+    assert!(stderr.contains("--if-revision"), "{stderr}");
+    // --clear --if-revision 1 names the take-over deliberate.
+    let (code, _, stderr) = note_captured(
+        &[
+            "t-1",
+            "--clear",
+            "--stdin",
+            "--if-revision",
+            "1",
+            "--json",
+            "--quiet",
+            "--self-session",
+            "sess-bbbb2222",
+            &g[0],
+            &g[1],
+        ],
+        "",
     );
-    assert!(
-        stderr.contains("notes history t-1"),
-        "names the history readback: {stderr}"
-    );
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
-        .iter()
-        .find(|r| r["id"] == json!("t-1"))
+    assert_eq!(code, 0, "the deliberate door clears: stderr: {stderr}");
+    let row = read_graph(&graph)["entries"]
+        .as_array()
         .unwrap()
-        .clone();
-    assert_eq!(row[node_state::STATE_KEY]["revision"], json!(3));
-    assert_eq!(node_state::history_page(&graph, "t-1", 0, 10).unwrap().1, 2);
-    // The same session replaces its own state without the flag.
-    let (code, _, stderr) = note_captured(
-        &[
-            "t-1",
-            "own update",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-cccc3333",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    // An unidentified writer over an authored state is held too.
-    let (code, _, stderr) = note_captured(
-        &[
-            "t-1",
-            "anonymous overwrite",
-            "--json",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 3, "stderr: {stderr}");
-    // The clear route holds under the same guard; --clear --replace is the
-    // door, and the emptied state lands in history.
-    let (code, _, stderr) = note_captured(
-        &[
-            "t-1",
-            "--clear",
-            "--stdin",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-vellum",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 3, "stderr: {stderr}");
-    let (code, _, stderr) = note_captured(
-        &[
-            "t-1",
-            "--clear",
-            "--stdin",
-            "--replace",
-            "--json",
-            "--quiet",
-            "--self-session",
-            "sess-vellum",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "the explicit door clears: stderr: {stderr}");
-    let entries = read_graph(&graph)["entries"].as_array().unwrap().clone();
-    let row = entries
         .iter()
         .find(|r| r["id"] == json!("t-1"))
         .unwrap()
         .clone();
     assert!(row[node_state::STATE_KEY].is_null(), "state cleared");
     let (records, total) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
-    assert_eq!(total, 4, "the clear journaled the outgoing state");
-    assert_eq!(records[3]["reason"], json!("state_cleared"));
-}
-
-#[test]
-fn a_multibyte_head_is_cut_by_characters() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    write_graph(&graph, &[fixture("t-1", "ready")]);
-    let g = graph_arg(&graph);
-    let prior = "\u{1f30a}".repeat(100);
-    let (code, _, stderr) = note_captured(
-        &[
-            g[0].as_str(),
-            g[1].as_str(),
-            "t-1",
-            prior.as_str(),
-            "--json",
-            "--quiet",
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let (code, stdout, stderr) = note_captured(
-        &[
-            g[0].as_str(),
-            g[1].as_str(),
-            "t-1",
-            "probe",
-            "--json",
-            "--quiet",
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let second: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    let expected = format!("{}...", "\u{1f30a}".repeat(80));
-    assert_eq!(second["replaced"]["head"], json!(expected));
-}
-
-/// A repeat note by the same session names `fno backlog encounter` in its
-/// receipt until one encounter from that session exists on the node.
-#[test]
-fn a_repeat_note_names_encounter_once_until_one_exists() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    write_graph(&graph, &[fixture("t-1", "ready")]);
-    let g = graph_arg(&graph);
-
-    // First note over an empty state: nothing replaced, no hint.
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "t-1",
-            "first",
-            "--self-session",
-            "sess-aaaa1111",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
-
-    // Second note: the session replaced its own state, so the hint fires.
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "t-1",
-            "second",
-            "--self-session",
-            "sess-aaaa1111",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(
-        stdout.contains("fno backlog encounter t-1 --evidence"),
-        "{stdout}"
-    );
-
-    // Give t-1 an encounter from sess-aaaa1111 through the store API: the
-    // binary may have flipped the store to sqlite, and the frozen json
-    // keeper would not see the flip. The hint goes quiet for that session.
-    let payload = fno_agents::backlog::api::encounter_create(
-        &fno_agents::backlog::api::Store::new(&graph),
-        "t-1",
-        fno_agents::backlog::api::EncounterInput {
-            evidence: "x".into(),
-            session_id: Some("sess-aaaa1111".into()),
+    assert_eq!(total, 1, "the clear journaled the outgoing state");
+    assert_eq!(records[0]["reason"], json!("state_cleared"));
+    // The owner clears its own state without the flag.
+    let rev = node_state::current_revision(&graph, "t-1").unwrap_or(0);
+    node_state::replace_state(
+        &graph,
+        &node_state::StateWriteInput {
+            node_id: "t-1".into(),
+            body: "own state".into(),
+            if_revision: Some(rev),
+            source_session_id: Some("sess-cccc3333".into()),
+            source_harness: None,
+            reads: None,
         },
     )
     .unwrap();
-    assert!(payload.success);
-
-    let (code, stdout, stderr) = note_captured(
+    let (code, _, stderr) = note_captured(
         &[
             "t-1",
-            "third",
-            "--self-session",
-            "sess-aaaa1111",
+            "--clear",
+            "--stdin",
+            "--json",
             "--quiet",
+            "--self-session",
+            "sess-cccc3333",
             &g[0],
             &g[1],
         ],
         "",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
-
-    // A different session never gets the hint, whatever the prior author.
-    // --replace names the cross-session take-over deliberate; the hint is
-    // about the encounter verb, not authorship.
-    let (code, stdout, stderr) = note_captured(
-        &[
-            "t-1",
-            "fourth",
-            "--self-session",
-            "sess-bbbb2222",
-            "--replace",
-            "--quiet",
-            &g[0],
-            &g[1],
-        ],
-        "",
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
 }
