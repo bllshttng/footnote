@@ -158,6 +158,18 @@ pub(super) fn is_no_pr_stderr(stderr: &[u8]) -> bool {
         .contains("no pull requests found")
 }
 
+/// Whether a failed gh read's stderr names gh's own login remediation.
+///
+/// An unauthenticated gh prints the exact command that fixes it ("To get
+/// started with GitHub CLI, please run: gh auth login", or "not logged into"
+/// from `gh auth status`), so the wording IS the deterministic marker - and
+/// unlike a quota or an outage, this state cannot recover inside the loop:
+/// no fire logs in. Callers park on it instead of block-and-retry.
+pub(super) fn stderr_is_unauthenticated(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("gh auth login") || s.contains("not logged into")
+}
+
 /// Capture the last ~200 bytes of stderr as a lossy UTF-8 string.
 pub(super) fn stderr_tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);

@@ -333,3 +333,28 @@ fn no_pr_stderr_detected() {
     assert!(!is_no_pr_stderr(b"API rate limit exceeded"));
     assert!(!is_no_pr_stderr(b""));
 }
+
+#[test]
+fn unauthenticated_stderr_is_named_by_ghs_own_remediation() {
+    // The measured fresh-machine shape: gh prints the exact fix command.
+    assert!(stderr_is_unauthenticated(
+        "gh: To get started with GitHub CLI, please run: gh auth login"
+    ));
+    assert!(stderr_is_unauthenticated(
+        "To get started with GitHub CLI, please run:\n\n  gh auth login\n"
+    ));
+    // `gh auth status` wording for an expired or absent login.
+    assert!(stderr_is_unauthenticated(
+        "You are not logged into github.com"
+    ));
+    // Outage, quota, and no-PR shapes are NOT unauthenticated - those keep
+    // their own semantics (retry, back off, fingerprint).
+    assert!(!stderr_is_unauthenticated(
+        "connect: network is unreachable"
+    ));
+    assert!(!stderr_is_unauthenticated("API rate limit exceeded"));
+    assert!(!stderr_is_unauthenticated(
+        "no pull requests found for branch \"feat\""
+    ));
+    assert!(!stderr_is_unauthenticated(""));
+}
