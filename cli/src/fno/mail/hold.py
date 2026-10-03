@@ -620,7 +620,6 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         from fno.inbox.store import generate_msg_id
         from fno.mail.envelope import wrap_fno_mail
 
-        digest = render_digest(handle, messages, held_for_s)
         # Route through the LANE DISPATCHER, not the claude injector: wired to
         # one injector this was a producer on one of N lanes, a hold that
         # lifted on time and delivered nothing.
@@ -629,6 +628,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             miss_reason.append("no-registry-row")
         else:
             try:
+                digest = render_digest(handle, messages, held_for_s)
                 framed = wrap_fno_mail(
                     digest,
                     from_="fno-mail-hold",

@@ -956,6 +956,8 @@ pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono:
 /// With `--park-on-hold`, a held non-empty body is also parked (C15) and
 /// the verdict comes back `parked` with the park receipt; a failed park
 /// falls through to the plain hold verdict.
+/// `--render-digest` reads the held-release JSON payload from stdin and
+/// writes the Rust-rendered delivery body to stdout; it needs no session id.
 /// `--park` / `--run-parked` (C15): a raw send to a held session parks the
 /// payload in the hold store; one detached runner polls the gate every 5 s
 /// and replays it through the normal raw door when the hold ends.
