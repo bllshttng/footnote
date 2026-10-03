@@ -17,6 +17,21 @@ plugin_app = typer.Typer(help="Install the footnote plugin into a harness (from 
 
 # --- stage -------------------------------------------------------------------
 
+def _prime_plugin_root_pointer(stage: Path) -> None:
+    """Best-effort pointer write for the codex arm: it converges outside the
+    Rust verb, so the install must prime <state>/install/plugin-root here too."""
+    try:
+        if not (stage / ".claude-plugin" / "plugin.json").is_file():
+            return
+        from fno.paths import _plugin_root_pointer
+
+        pointer = _plugin_root_pointer()
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(f"{stage}\n")
+    except OSError:
+        pass
+
+
 def _binary() -> Path:
     from fno.rust_binary import resolve_binary
 
@@ -84,6 +99,7 @@ def install(
             f"plugin install codex: converged {result.plugin_id} {result.version} "
             f"(action={result.action})"
         )
+        _prime_plugin_root_pointer(stage)
         argv = ["plugin-install", "--env-only"]
     else:
         argv += [harness, *extra]

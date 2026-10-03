@@ -1106,19 +1106,25 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
 /// THIS env, and forwarding anywhere else would quietly run the install they
 /// are trying to bypass.
 fn env_override_python() -> BootResult<Option<PathBuf>> {
-    match env::var("FNO_PY") {
-        Ok(val) if !val.trim().is_empty() => {
-            let path = PathBuf::from(&val);
-            if is_executable(&path) {
-                Ok(Some(path))
-            } else {
-                Err(BootErr::new(
-                    2,
-                    format!("FNO_PY is set to `{val}`, which is not an executable file; fix or unset it"),
-                ))
-            }
-        }
-        _ => Ok(None),
+    let raw = match env::var_os("FNO_PY") {
+        None => return Ok(None),
+        Some(raw) => raw,
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    // A path is not guaranteed UTF-8, and var() would answer Err there - the
+    // silent fall-through the refusal contract exists to prevent. Refuse on
+    // the lossy form instead.
+    let val = raw.to_string_lossy().into_owned();
+    let path = PathBuf::from(&raw);
+    if is_executable(&path) {
+        Ok(Some(path))
+    } else {
+        Err(BootErr::new(
+            2,
+            format!("FNO_PY is set to `{val}`, which is not an executable file; fix or unset it"),
+        ))
     }
 }
 
