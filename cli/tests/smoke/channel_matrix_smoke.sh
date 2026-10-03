@@ -387,7 +387,11 @@ row_fno_sh_fresh() {
   fi
   curl -fsSL https://fno.sh > "$BASE/served.out" 2>/dev/null
   curl -fsSL "https://raw.githubusercontent.com/bllshttng/footnote/$tag/scripts/install/fno.sh" > "$BASE/released.out" 2>/dev/null
-  if [ -s "$BASE/served.out" ] && cmp -s "$BASE/served.out" "$BASE/released.out"; then
+  if [ ! -s "$BASE/served.out" ]; then
+    miss "fresh" "fno.sh served no script (worker unreachable or 502); the worker fails closed, check its deploy"
+    return 0
+  fi
+  if cmp -s "$BASE/served.out" "$BASE/released.out"; then
     pass "fresh" "fno.sh serves the same bytes as $tag"
   else
     miss "fresh" "fno.sh is stale against $tag; bump the fno-web Worker INSTALL_SCRIPT_URL pin to $tag and redeploy"
