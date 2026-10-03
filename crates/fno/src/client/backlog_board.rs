@@ -2387,6 +2387,7 @@ fn board_keys_popup() -> Popup {
         pick_row("/ find - f filter - r re-read"),
         pick_row("Tab list/kanban - space toggle (in f)"),
         pick_row("enter node detail - F full screen"),
+        pick_row("y copy id - Y copy session command (in detail)"),
         pick_row("c comment on the detail's node"),
         PopupRow::Header("layout".into()),
         PopupRow::Rule,

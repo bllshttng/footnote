@@ -105,6 +105,12 @@ pub fn paint_background_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "paint_background", true)
 }
 
+/// `config.mux.load_readout`: `detailed` shows the raw load numbers; any
+/// other value reads as `simple` (the default), plain words a person reads.
+pub fn load_readout_detailed(cwd: &Path) -> bool {
+    mux_str(cwd, "load_readout").is_some_and(|v| v.trim() == "detailed")
+}
+
 /// `config.resource_meter.enabled` (default OFF) - the whole-machine meter's
 /// toggle. OFF because the meter needs `macmon` on PATH, which fno core does
 /// not depend on; a meter that silently renders nothing must not ship on.

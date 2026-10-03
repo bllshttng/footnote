@@ -31,7 +31,7 @@ fn the_org_block_shrinks_the_sideline_and_yields_when_too_short() {
         arms: Vec::new(),
     }));
 
-    assert_eq!(view.org_block_rows(), 3, "minimized is three lines");
+    assert_eq!(view.org_block_rows(), 4, "minimized is four lines");
     let full = view.sideline_visible_rows() + view.org_block_rows();
 
     view.org.toggle();

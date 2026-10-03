@@ -393,6 +393,9 @@ pub struct SessionView {
     pub action: String,
     /// The dim reason when the action is `none`.
     pub reason: Option<String>,
+    /// The shell line that reaches this session: attach a live row, resume a
+    /// registry row that is not live, adopt a session the registry lacks.
+    pub command: Option<String>,
 }
 
 /// A PR bound to a node.
@@ -1265,6 +1268,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
     let str_field =
         |k: &str| -> Option<String> { e.get(k).and_then(Value::as_str).map(str::to_string) };
     // Sessions joined to the roster: the model carries the answer.
+    let node_cwd = str_field("cwd");
     let sessions = node_sessions(inp, &node_id)
         .iter()
         .map(|s| {
@@ -1274,10 +1278,27 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
                     .iter()
                     .find(|a| a.harness_session_id.as_deref() == Some(sid))
             });
-            let (action, reason) = match session_action(joined) {
+            let act = session_action(joined);
+            let (action, reason) = match &act {
                 SessionAction::Attach => ("attach", None),
                 SessionAction::Resume => ("resume", None),
-                SessionAction::Dim(why) => ("none", Some(why)),
+                SessionAction::Dim(why) => ("none", Some(why.clone())),
+            };
+            let command = match &act {
+                SessionAction::Attach => joined.map(|a| format!("fno agents attach {}", a.name)),
+                SessionAction::Resume => sid.map(|sid| {
+                    let mut cmd = format!("fno agents resume {sid} --cross-project");
+                    if let Some(cwd) = node_cwd.as_deref().filter(|c| !c.is_empty()) {
+                        cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
+                    }
+                    cmd
+                }),
+                // A session the registry lacks: adopt is the reach that
+                // heals the row from the harness stores.
+                SessionAction::Dim(_) if joined.is_none() => {
+                    sid.map(|sid| format!("fno agents adopt {sid} --cross-project"))
+                }
+                SessionAction::Dim(_) => None,
             };
             let model = s
                 .get("observed_model")
@@ -1301,6 +1322,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
                 agent: joined.map(|a| a.name.clone()),
                 action: action.to_string(),
                 reason,
+                command,
             }
         })
         .collect();
@@ -1625,6 +1647,12 @@ pub(crate) fn session_action(a: Option<&AgentRow>) -> SessionAction {
     SessionAction::Dim("not resumable".into())
 }
 
+/// POSIX single-quote a path for the resume line, so a cwd with spaces or
+/// quotes survives the shell. Mirrors the one-liner in mux_cli.rs, which
+/// stays unwidened (over the 5,000-line budget).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
 /// The node's lead: the teamed row with the narrowest territory naming the
 /// node, its parent epic, or its project - a scope naming the node beats one
 /// naming the parent, which beats the project; roster order breaks ties.

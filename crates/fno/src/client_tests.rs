@@ -6675,25 +6675,6 @@ async fn resource_meter_toggle_flips_persists_and_arms_the_sampler() {
         .load(std::sync::atomic::Ordering::Relaxed));
 }
 
-#[test]
-fn a_dark_macmon_sample_never_renders_a_number() {
-    // An empty or unparseable pipe parses to None; `sample_macmon_line`
-    // renders that as the unavailable line, never a zero.
-    assert_eq!(parse_macmon_sample(b""), None);
-    assert_eq!(parse_macmon_sample(b"not json\n"), None);
-    let good = parse_macmon_sample(
-        br#"{"cpu_usage_pct":0.45,"sys_power":53.5,"memory":{"ram_total":103079215104,"ram_usage":30702266368}}"#,
-    )
-    .expect("a healthy sample parses");
-    assert!(good.contains("cpu 45%"), "{good}");
-    // Decimal GB (bytes / 1e9), matching the Python arm's convention.
-    assert!(good.contains("mem 31G/103G"), "{good}");
-    assert!(good.contains("54W"), "{good}");
-    // A missing memory block parses to None, which renders as the
-    // unavailable line - never a zero.
-    assert_eq!(parse_macmon_sample(br#"{"cpu_usage_pct":0.45}"#), None);
-}
-
 #[tokio::test]
 async fn settings_status_toggle_stays_live_when_the_save_fails() {
     let mut v = two_pane_view();
@@ -7596,7 +7577,7 @@ fn tab_badge_rows() {
     // sideline scrolls the least it takes to reveal the focused-row band; a
     // top-row focus needs no scroll.
     let mut view = two_pane_view();
-    view.term = (6, 100); // a short panel: fewer visible rows than total
+    view.term = (8, 100); // a short panel under the 4-row court glance
     let panes = view.layout.panes.clone();
     let agents: Vec<AgentRow> = (0..8)
         .map(|i| AgentRow {

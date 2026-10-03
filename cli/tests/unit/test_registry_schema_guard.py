@@ -136,7 +136,6 @@ def test_the_refusal_names_both_versions_the_source_path_and_both_exits(
     assert str(from_source) in message
     assert "running from source" in message
     assert "fno doctor update" in message
-    assert "config.paths.agents_registry_path" in message
     assert "FNO_AGENTS_HOME" in message
 
 

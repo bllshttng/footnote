@@ -401,7 +401,17 @@ compact_instruction() {
     # neither verdict and lands on the unmeasurable branch.
     local out=""
     if command -v fno >/dev/null 2>&1; then
-        out=$(with_timeout "$NUDGE_BUDGET" fno agents mail send '/compact' --to-self --raw --check 2>/dev/null || true)
+        # A floor, not the scaled budget: this probe is the gate's one MEASURED
+        # answer and fires at most once per band per session (the latch), while
+        # the scaled budget is tuned for the hook's recurring reads. Under it,
+        # a loaded machine killed the probe before the CLI answered anything,
+        # and every no-path session read the could-not-measure text (smoke-rest
+        # red: the pinned not-injectable needles were unreachable in practice).
+        local probe_budget="$NUDGE_BUDGET"
+        if [[ "$probe_budget" -lt 4 ]]; then
+            probe_budget=4
+        fi
+        out=$(with_timeout "$probe_budget" fno agents mail send '/compact' --to-self --raw --check 2>/dev/null || true)
     fi
     local _ask="ask your operator to type /compact <brief-path> at your prompt, and say in one line what to preserve"
     if [[ "$out" == injectable:* ]]; then

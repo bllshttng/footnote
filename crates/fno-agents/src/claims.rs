@@ -1649,6 +1649,20 @@ pub enum CanonicalDisposition {
     Complete,
 }
 
+/// True when this invocation reads as the user's own typed turn: no ambient
+/// agent identity is set and stdin is a terminal. The rev-2 ruling
+/// (d-79e0186b): a row the user creates sticks around, so their adopt or
+/// revive stamps `origin operator` - the origin the gc keeps - while an
+/// agent-driven adopt stays fleet work the sweep may reap.
+pub(crate) fn adopter_is_operator() -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    let (_, _, disposition) = canonical_identity_from(|key| std::env::var(key).ok());
+    disposition == CanonicalDisposition::Absent
+}
+
 pub(crate) fn canonical_identity_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> (Option<String>, Option<String>, CanonicalDisposition) {

@@ -385,6 +385,11 @@ pub(crate) struct DoneNodeReaders<'a> {
     pub(crate) read_rows: &'a dyn Fn() -> Option<Vec<serde_json::Value>>,
     /// Does a live or suspect `node:<id>` claim exist?
     pub(crate) claim_live: &'a dyn Fn(&str) -> bool,
+    /// Is the tree's own session live per its registry row
+    /// (`row_verdict::fno_verdict`)? The claim lapsed for the
+    /// specimen (a pidless claude bg holder cannot refresh it), so the
+    /// claim read alone freed a tree whose worker was alive.
+    pub(crate) session_live: &'a dyn Fn(&str) -> bool,
 }
 
 /// Production readers: the graph store the sweep already reads (working
@@ -400,6 +405,46 @@ pub(crate) fn production_readers() -> DoneNodeReaders<'static> {
                 crate::claims::status(&format!("node:{id}"), None).0,
                 crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
             )
+        },
+        session_live: &|session: &str| {
+            // One registry read per gate process: a tree whose manifest
+            // carries both session ids must not pay two loads. The gate
+            // runs as its own short-lived invocation, so a thread-local
+            // memo cannot go stale across trees.
+            thread_local! {
+                static REGISTRY: std::cell::RefCell<
+                    Option<Option<crate::state::Registry>>,
+                > = std::cell::RefCell::new(None);
+            }
+            REGISTRY.with(|cell| {
+                let mut slot = cell.borrow_mut();
+                if slot.is_none() {
+                    *slot =
+                        Some(crate::paths::AgentsHome::from_env_opt().and_then(|home| {
+                            crate::state::load_registry(&home.registry_json()).ok()
+                        }));
+                }
+                let Some(registry) = slot.as_ref().and_then(|loaded| loaded.as_ref()) else {
+                    return false;
+                };
+                let sid = session.trim();
+                registry
+                    .entries
+                    .iter()
+                    .find(|e| {
+                        e.harness_session_id.as_deref() == Some(sid)
+                            || (!sid.is_empty()
+                                && e.harness_session_id
+                                    .as_deref()
+                                    .is_some_and(|s| s.starts_with(sid)))
+                    })
+                    .is_some_and(|entry| {
+                        matches!(
+                            crate::row_verdict::fno_verdict(entry),
+                            crate::row_verdict::RowVerdict::Live(_)
+                        )
+                    })
+            })
         },
     }
 }
@@ -440,6 +485,20 @@ fn done_node_arm(
     // resolution.
     let branch = branch_show_current(target);
     let detached = branch.is_none();
+
+    // d-79e0186b: the tree's own session holds it. The claim read above
+    // answers from the claims root, which the incident freed when the
+    // pidless holder could not refresh its TTL; the registry row's verdict
+    // (`row_verdict::fno_verdict`) still had the worker live. Both manifest
+    // session ids are asked, so either identity resolves the row.
+    for session in resolve_manifest_sessions(target) {
+        if (readers.session_live)(session.trim()) {
+            return Verdict::block(
+                "session-live",
+                format!("session {session} is live per its registry row"),
+            );
+        }
+    }
 
     // Resolve the tree's nodes: manifest first (target-minted, exact), then
     // node-id tokens in the branch name, then in the directory basename.
@@ -538,6 +597,23 @@ fn resolve_node_ids(target: &Path, branch: Option<&str>) -> Vec<String> {
         .file_name()
         .map(|n| crate::node_branch::node_ids(&n.to_string_lossy()))
         .unwrap_or_default()
+}
+
+/// The tree's own session identity, from the target manifest: the target-minted
+/// session id plus the harness transcript uuid init captured. Either can
+/// resolve the registry row whose verdict holds the tree (the claim
+/// lapsed but the worker lived).
+fn resolve_manifest_sessions(target: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(target.join(".fno").join("target-state.md")) else {
+        return Vec::new();
+    };
+    let fields = crate::finalize::parse_manifest_fields(&content);
+    [fields.session_id, fields.harness_session_id]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Classify a worktree on disk. Fails CLOSED on any probe it cannot trust.
@@ -1283,9 +1359,11 @@ mod tests {
         fn reap(&self, wt: &str, done_node: bool) -> Verdict {
             let read_rows = || Some(self.rows.clone());
             let claim_live = |id: &str| self.claims.iter().any(|c| c == id);
+            let session_live = |_: &str| false;
             let readers = DoneNodeReaders {
                 read_rows: &read_rows,
                 claim_live: &claim_live,
+                session_live: &session_live,
             };
             reapable_opts_with(wt, false, done_node, &readers)
         }
@@ -1295,9 +1373,11 @@ mod tests {
         fn reap_arm(&self, wt: &Path, porcelain: &str) -> Verdict {
             let read_rows = || Some(self.rows.clone());
             let claim_live = |id: &str| self.claims.iter().any(|c| c == id);
+            let session_live = |_: &str| false;
             let readers = DoneNodeReaders {
                 read_rows: &read_rows,
                 claim_live: &claim_live,
+                session_live: &session_live,
             };
             let discount = |_: &str| false;
             let base = classify(porcelain, Some(&discount));
@@ -1324,6 +1404,42 @@ mod tests {
         assert!(v
             .line()
             .contains("evidence=node:x-abc123 untracked=1 detached=no"));
+
+        // d-79e0186b: the tree's own session holds it even when the node
+        // reads done and the claim is gone - the incident's reap freed exactly
+        // this shape (lapsed claim, live worker, tree deleted).
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        fs::create_dir_all(wt.join(".fno")).unwrap();
+        fs::write(
+            wt.join(".fno").join("target-state.md"),
+            "session_id: \"sess-live-1\"\ngraph_node_id: x-abc123\n",
+        )
+        .unwrap();
+        let read_rows = || Some(vec![value_row("x-abc123", "done")]);
+        let claim_live = |_: &str| false;
+        let session_live = |s: &str| s == "sess-live-1";
+        let readers = DoneNodeReaders {
+            read_rows: &read_rows,
+            claim_live: &claim_live,
+            session_live: &session_live,
+        };
+        let v = reapable_opts_with(wt.to_str().unwrap(), false, true, &readers);
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "session-live");
+
+        // A finished session holds nothing: the same tree with the door
+        // answering not-live still reads done-node, so fleet rows keep
+        // reaping aggressively (rev-2 scope).
+        let session_live = |_: &str| false;
+        let readers = DoneNodeReaders {
+            read_rows: &read_rows,
+            claim_live: &claim_live,
+            session_live: &session_live,
+        };
+        let v = reapable_opts_with(wt.to_str().unwrap(), false, true, &readers);
+        assert!(v.reapable, "line was: {}", v.line());
+        assert_eq!(v.reason, "done-node");
 
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
@@ -1473,6 +1589,7 @@ mod tests {
         let readers = DoneNodeReaders {
             read_rows: &|| None,
             claim_live: &|_: &str| false,
+            session_live: &|_: &str| false,
         };
 
         let v = reapable_opts_with(wt.to_str().unwrap(), false, true, &readers);

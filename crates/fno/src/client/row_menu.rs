@@ -332,6 +332,53 @@ pub(super) fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor, viewed: 
     }
 }
 
+/// The section-header context menu. A workspace section (`squad`
+/// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
+/// added only when `dead > 0`; its label count is both what it advertises AND
+/// what the commit runs, so the two can never disagree. The caller guarantees
+/// at least one of {renamable, `dead > 0`} holds, so the menu is never empty.
+pub(super) fn build_section_menu(
+    key: SectionKey,
+    label: String,
+    squad: Option<u64>,
+    dead: usize,
+    anchor: Anchor,
+) -> RowMenu {
+    let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
+    let mut actions: Vec<MenuAction> = Vec::new();
+    if squad.is_some() {
+        let entry = |glyph: &str, label: &str| PopupRow::Entry {
+            glyph: glyph.into(),
+            label: label.into(),
+            hint: String::new(),
+            enabled: true,
+        };
+        rows.push(entry_acc("✎", "Rename", "rename-workspace"));
+        actions.push(MenuAction::Rename);
+        rows.push(entry("▲", "Move up"));
+        actions.push(MenuAction::MoveSquad(-1));
+        rows.push(entry("▼", "Move down"));
+        actions.push(MenuAction::MoveSquad(1));
+        rows.push(PopupRow::Rule);
+        rows.push(entry("✕", "Remove workspace"));
+        actions.push(MenuAction::RemoveSquad);
+    }
+    if dead > 0 {
+        rows.push(PopupRow::Entry {
+            glyph: "✕".into(),
+            label: format!("Clear dead ({dead})"),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(MenuAction::ClearDead);
+    }
+    RowMenu {
+        popup: Popup::new(rows, anchor),
+        target: MenuTarget::Section { key, label, squad },
+        actions,
+    }
+}
+
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
 /// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
 /// P1), never a misrouted action; every action maps to an existing Command /
@@ -342,6 +389,9 @@ pub(super) async fn execute_row_menu_action(
     target: MenuTarget,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
+    // The chooser remembers its picks; the row menu does not. Captured
+    // before the target is consumed by resolution below.
+    let from_chooser = matches!(target, MenuTarget::OpenSession(_));
     let target = match (target, action) {
         // The section menu's clear-dead action, resolved against the
         // section rather than a single row.
@@ -528,7 +578,7 @@ pub(super) async fn execute_row_menu_action(
             view.set_notice("action does not apply to this row".into());
             return Ok(());
         }
-        (MenuTarget::Agent(a), _) => a,
+        (MenuTarget::Agent(a) | MenuTarget::OpenSession(a), _) => a,
     };
     // Fail closed unless the identity resolves to EXACTLY one live row: two rows
     // sharing a name must never let a menu act on the wrong one (codex P1).
@@ -540,6 +590,21 @@ pub(super) async fn execute_row_menu_action(
             return Ok(());
         }
     };
+    // The chooser refuses an exited row at open, but the row can die between
+    // open and pick, and every one of its six arms would place a dead
+    // session. The same refusal the builder gave, at the execute end.
+    if from_chooser && a.exited {
+        view.set_notice(format!("{} has exited", a.name));
+        return Ok(());
+    }
+    // The chooser remembers: the pick that just executed is the pre-selected
+    // row next time. Only the chooser's own six mappings persist
+    // (`pick_of_action` answers None for everything else).
+    if from_chooser {
+        if let Some(pick) = super::open_chooser::pick_of_action(action) {
+            crate::view_store::save_open_target(pick);
+        }
+    }
     match action {
         MenuAction::OpenHere => {
             let Some(id) = a.attach_id.clone() else {
@@ -614,6 +679,33 @@ pub(super) async fn execute_row_menu_action(
             .map_err(|e| format!("break send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::PortalAt(dir) => {
+            // A paneless LIVE thread (no attach id): open a fresh portal
+            // view at the chosen spot - the same placement the portal
+            // picker's new-portal row builds, target named when split so
+            // the seat grafts beside the active tab's focus.
+            let placement = match dir {
+                Some(d) => PanePlacement {
+                    portal_new: true,
+                    split: Some(d),
+                    target: PaneTarget::SquadId(view.layout.active_squad),
+                    ..Default::default()
+                },
+                None => PanePlacement {
+                    portal_new: true,
+                    ..Default::default()
+                },
+            };
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::AttachAgent {
+                    id: a.attach_id.clone().unwrap_or(a.name.clone()),
+                    placement,
+                }),
+            )
+            .await
+            .map_err(|e| format!("portal placement send failed: {e}"))?;
+        }
         MenuAction::Detach => match (a.pane_id, a.exited) {
             (Some(pid), false) => write_msg(
                 sock_w,

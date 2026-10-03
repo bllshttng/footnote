@@ -143,7 +143,6 @@ class PathsBlock(BaseModel):
     hook_logs_dir: Optional[str] = None
     inbox_dir: Optional[str] = None
     inbox_path: Optional[str] = None
-    agents_registry_path: Optional[str] = None
     handoffs_dir: Optional[str] = None
     retro_pending_dir: Optional[str] = None
     bus_dir: Optional[str] = None
@@ -164,7 +163,6 @@ class PathsBlock(BaseModel):
         "hook_logs_dir",
         "inbox_dir",
         "inbox_path",
-        "agents_registry_path",
         "handoffs_dir",
         "retro_pending_dir",
         "bus_dir",
@@ -3714,9 +3712,9 @@ class MuxBlock(BaseModel):
     # interactive Rust client (same split-brain as attach_digest); modeled here so
     # the off-switch is discoverable via `fno config get/set`.
     hover_focus: bool = True
-    # Show the mux status row. The interactive Rust client reads this directly
-    # from config.toml, matching the `hover_focus` startup path.
+    # Show the mux status row; the Rust client reads it from config.toml, like `hover_focus`.
     status_row: bool = True
+    load_readout: Literal["simple", "detailed"] = "simple"
     # The mux chrome theme name: one of the shipped palettes the modal
     # chrome reads (`footnote-superscript`, `footnote-paper`, `terminal`,
     # `catppuccin`, `tokyo-night`, `gruvbox`). Read by the interactive Rust
