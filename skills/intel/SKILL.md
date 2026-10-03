@@ -21,7 +21,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
    fno-agents intel --json --node <id>
    ```
 
-(`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the user question. With no question, use `What were the user's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report (the raw sidecar: every later step and any re-run of categories reads it):
+(`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the user question. With no question, use `What were the user's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report. That file is the raw sidecar. Later steps read it, and any re-run of categories reads it:
 
    ```bash
    fno-agents intel --json --period 1m --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
@@ -56,7 +56,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
    If that run file exists and its question key and session set match this sample, reuse it.
 
-4. Metrics: the post-process reads the run file and the raw fold JSON. It reads no transcript. It prints the judgment summary: every aggregate plus the categories block, with the per-session rows dropped (a few KB, not megabytes; the raw rows already live in the sidecar):
+4. Metrics: the post-process reads the run file and the raw fold JSON. It reads no transcript. It prints the judgment summary: every aggregate plus the categories block. The per-session rows are dropped, so the file stays small. The raw rows already live in the sidecar:
 
    ```bash
    fno-agents intel --categories <run file> --fold <vault>/fno/intel/<date>-<question key>.fold.json > <vault>/fno/intel/<date>-<question key>.json
@@ -64,7 +64,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
    On exit 2, fix the run file from the named reason and run it once more. If it fails again, keep the raw sidecar as the report's `fold:` file and write the Categories section as `not written: <stderr line>`.
 
-5. Write the report: `<vault>/fno/intel/<date>-<question key>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md). Every number comes from the JSON named in the frontmatter `fold:` field: the judgment summary, or the raw sidecar when step 4 failed.
+5. Write the report: `<vault>/fno/intel/<date>-<question key>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md). Every number comes from the JSON named in the frontmatter `fold:` field. When step 4 failed, `fold:` names the raw sidecar. Otherwise it names the judgment summary.
 
 6. Corrections section: quote user corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
 
