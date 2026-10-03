@@ -166,10 +166,15 @@ async fn messages_reply_board_contracts() {
         .await
         .unwrap();
     let mut bytes = [0; 256];
-    assert!(matches!(
-        reader.try_read(&mut bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-    ));
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            tokio::io::AsyncReadExt::read(&mut reader, &mut bytes),
+        )
+        .await
+        .is_err(),
+        "no wire bytes are sent without a live pane"
+    );
     assert_eq!(
         view.notice.as_ref().map(|(text, _)| text.as_str()),
         Some("reply: first has no pane on screen; open a portal first")
