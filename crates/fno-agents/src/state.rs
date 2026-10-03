@@ -255,8 +255,7 @@ pub enum StateError {
          not from the deployed install, so the bump exists only on this branch and \
          every deployed reader on the machine would degrade until it merges. Either \
          deploy this schema (fno doctor update), or point this checkout at its own \
-         registry (FNO_AGENTS_HOME, or config.paths.agents_registry_path for the \
-         Python side)."
+         registry (set FNO_AGENTS_HOME)."
     )]
     SourceAheadSchemaBump {
         path: String,

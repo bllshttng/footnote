@@ -1,4 +1,4 @@
-"""`fno project init` - the config write, both refusals, and the receipt.
+"""`fno project init` - the config write, the refusal, and the receipt.
 
 The receipt assertions are not cosmetic. `fno project init` isolates fno's own
 data and cannot isolate the machine's harness substrate, so a receipt that says
