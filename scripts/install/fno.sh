@@ -468,6 +468,7 @@ report_success() {
 		say "installed, but $FNO_TOOL_BIN is not on your PATH yet (FNO_NO_MODIFY_PATH set)."
 		say "add it for this and future shells, e.g.:"
 		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
+		wire_harnesses
 		say "done. run 'fno-py --help' once $FNO_TOOL_BIN is on PATH."
 		return 0
 	fi
