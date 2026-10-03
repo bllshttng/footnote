@@ -21,12 +21,12 @@ pub fn run_revival_check(args: &[String], home: &AgentsHome) -> i32 {
             _ => {}
         }
     }
-    let Some((_, sid)) = resume
+    let sid = resume
         .as_deref()
-        .map(|s| (s.trim().to_string()))
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| (s.clone(), s))
-    else {
+        .map(str::to_string);
+    let Some(sid) = sid else {
         eprintln!("revival-check: --resume is required");
         return 2;
     };
