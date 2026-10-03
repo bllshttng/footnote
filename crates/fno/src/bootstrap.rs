@@ -1105,7 +1105,7 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
 /// unusable is a refusal, never a silent fall-through: the operator named
 /// THIS env, and forwarding anywhere else would quietly run the install they
 /// are trying to bypass.
-pub(crate) fn env_override_python() -> BootResult<Option<PathBuf>> {
+fn env_override_python() -> BootResult<Option<PathBuf>> {
     let raw = match env::var_os("FNO_PY") {
         None => return Ok(None),
         Some(raw) => raw,
@@ -1125,6 +1125,23 @@ pub(crate) fn env_override_python() -> BootResult<Option<PathBuf>> {
             2,
             format!("FNO_PY is set to `{val}`, which is not an executable file; fix or unset it"),
         ))
+    }
+}
+
+/// The override's state for surfaces that cannot carry [`BootErr`]: what the
+/// operator named via `FNO_PY`, and whether that naming is usable.
+pub(crate) enum PythonOverride {
+    Unset,
+    Active(PathBuf),
+    Unusable(String),
+}
+
+/// Flat read of [`env_override_python`] for the version surface.
+pub(crate) fn python_override_state() -> PythonOverride {
+    match env_override_python() {
+        Ok(Some(path)) => PythonOverride::Active(path),
+        Ok(None) => PythonOverride::Unset,
+        Err(e) => PythonOverride::Unusable(e.msg),
     }
 }
 
