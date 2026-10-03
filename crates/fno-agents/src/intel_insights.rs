@@ -788,6 +788,13 @@ pub(crate) fn run_categories(run_path: &str, fold_path: &str, facets_dir: &std::
     let judged = facets.len();
     doc["categories"] = categories_block(&run.question_key, judged, unjudged, items, merge_err);
     doc["populations"]["judged"] = json!(judged);
+    // The judgment summary: every aggregate the report and the renderer
+    // read, minus the per-session bulk. The raw rows live only in the
+    // transient fold file; this file is the durable artifact.
+    if let Some(obj) = doc.as_object_mut() {
+        obj.remove("sessions");
+        obj.remove("nodes");
+    }
     println!(
         "{}",
         serde_json::to_string(&doc).unwrap_or_else(|_| "{}".to_string())

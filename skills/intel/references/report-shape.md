@@ -10,7 +10,7 @@ intel: 1
 question: "<text>"
 question_key: <8 hex>
 period: <2w|1m|2m|3m|all>
-fold: <date>-<question key>.json      # the saved fold JSON, same dir
+fold: <date>-<question key>.json      # the judgment summary, same dir
 populations: {scanned: <n>, substantive: <n>, sampled: <n>, judged: <n>}
 ---
 
