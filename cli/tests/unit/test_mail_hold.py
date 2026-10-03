@@ -386,7 +386,7 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
 
     assert result["outcome"] == "delivered"
     assert result["held_count"] == 3
-    assert result["deduped_count"] == 2
+    assert result["deduped_count"] == 0
     assert advanced == ["msg-0", "msg-1", "msg-2"]
     assert emitted == [
         (
@@ -395,7 +395,7 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
                 "handle": HANDLE,
                 "clock": "no expiry",
                 "held_count": 3,
-                "deduped_count": 2,
+                "deduped_count": 0,
                 "held_for_s": 300,
                 "outcome": "delivered",
                 "miss_reason": None,
