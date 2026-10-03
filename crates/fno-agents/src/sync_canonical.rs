@@ -1542,7 +1542,6 @@ mod tests {
 
     #[test]
     fn burst_winner_re_pulls_pending_once_and_ends_at_the_newer_head() {
-        let tmp = tempfile::tempdir().unwrap();
         // The node's burst contract: two merges seconds apart -> ONE chain
         // runs (one update, one restart), the loser marks pending, the
         // winner re-pulls once at the end, HEAD lands at the newer merge.
