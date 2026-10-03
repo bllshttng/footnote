@@ -9,8 +9,9 @@ use crate::client::{
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 
-// (x-0719) The nav filter/overlay test run lives in its own module; this
-// file is shrink-only under the file-budget gate.
+// x-0719: the nav family lives in its own module.
+#[path = "client/tests/confirm_anchor_tests.rs"]
+mod confirm_anchor_tests;
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
 
@@ -829,7 +830,6 @@ fn xf331_confirm_rows() {
         "a vanished target dismisses to the bottom row, never a wrong row"
     );
 }
-
 #[test]
 fn overlay_rows() {
     // x-e9c3: popovers used to anchor at the outer terminal's top-left corner,
