@@ -188,6 +188,33 @@ def call_binary_json(
         return ("unreadable JSON receipt", None)
 
 
+def style_receipt(
+    text: str, surface: str, word_cap: Optional[int] = None
+) -> tuple[Optional[str], Any]:
+    """One style-gate read through the door: ``(error, receipt)``.
+
+    The receipt carries ``exception``, ``word_count``, ``violations`` and
+    ``report``. An error tuple means the gate could not run, and the caller
+    keeps its own failure posture.
+    """
+    argv = ["--surface", surface, "--text", text, "--json"]
+    if word_cap is not None:
+        argv += ["--word-cap", str(word_cap)]
+    return call_binary_json("style-check", argv)
+
+
+def style_word_count(text: str) -> int:
+    """Masked word count through the style door; 0 when the door fails.
+
+    The counting sites are advisory (a ledger row, a long-note nudge), so a
+    door failure counts zero rather than blocking the send.
+    """
+    err, receipt = call_binary_json("style-check", ["--text", text, "--json"])
+    if err:
+        return 0
+    return int(receipt.get("word_count") or 0)
+
+
 def mint_fno_id() -> str:
     """Footnote's one session-id mint lives in Rust: `fno-agents state mint-id`.
 

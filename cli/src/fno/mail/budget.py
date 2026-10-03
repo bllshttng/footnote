@@ -11,7 +11,8 @@ proven non-delivery. A crash after the body has left leaves the reservation
 charged: a conservative overcharge expires in 10 minutes, while the opposite
 error would make a delivered message free.
 
-Counting lives in :func:`fno.style.word_count`. This module never counts.
+Counting lives in the style gate (crates/fno-agents/src/backlog/style_check.rs,
+reached through :func:`fno.rust_binary.style_word_count`). This module never counts.
 """
 from __future__ import annotations
 

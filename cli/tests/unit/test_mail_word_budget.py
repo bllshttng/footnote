@@ -13,7 +13,7 @@ import time
 import pytest
 import typer
 
-from fno import style
+from fno import rust_binary
 from fno.mail import budget
 
 
@@ -27,7 +27,7 @@ def isolated_bus(tmp_path, monkeypatch):
 def words(n: int) -> str:
     """A body of exactly ``n`` masked words, verified through Rule 7's counter."""
     text = " ".join(f"word{i}" for i in range(n))
-    assert style.word_count(text) == n
+    assert rust_binary.style_word_count(text) == n
     return text
 
 
@@ -296,13 +296,21 @@ def test_control_lane_keys_colliding_codex_siblings_separately():
 
 
 def test_control_body_skips_the_style_check(monkeypatch):
-    from fno import style
+    from fno import rust_binary
     from fno.mail import cli
 
-    def _violation(text, **_kw):
-        return [style.Violation(rule=1, sentence_index=0, sentence=text, detail="flagged")]
+    def _violating(text, surface, word_cap=None):
+        return (
+            None,
+            {
+                "exception": None,
+                "word_count": 0,
+                "violations": [{"rule": 1}],
+                "report": "flagged",
+            },
+        )
 
-    monkeypatch.setattr(style, "check", _violation)
+    monkeypatch.setattr(rust_binary, "style_receipt", _violating)
     with pytest.raises(typer.Exit):
         cli._enforce_style(words(10))
     cli._enforce_style("control: HOLD all spawns now. Load 219 on 12 cores.")

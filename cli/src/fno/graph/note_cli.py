@@ -85,15 +85,15 @@ def warn_if_note_is_long(text, *, stream=None):
     """
     import sys
 
-    from fno import style
+    from fno import rust_binary
 
     try:
         from fno.config import load_settings
 
         cap = load_settings().style.word_cap.encounter
     except Exception:  # noqa: BLE001 - an advisory must never break a write
-        cap = style.MESSAGE_WORD_CAP
-    count = style.word_count(text)
+        cap = 80  # the gate's MESSAGE_WORD_CAP (crates/fno-agents style_check.rs)
+    count = rust_binary.style_word_count(text)
     if count <= cap * 4:
         return
     print(

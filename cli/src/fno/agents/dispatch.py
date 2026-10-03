@@ -7387,8 +7387,10 @@ def _queue_durable_fallback(
         from_session=mail_ctx.from_session,
         origin=mail_ctx.origin,
     )
-    from fno import style as _style
+    from fno import rust_binary
 
+    # Count the raw body, not the wire wrapper: Rule 7 and the rolling
+    # budget read the same string, so the row must too.
     try:
         write_new_thread(
             recipient=durable_recipient,
@@ -7403,9 +7405,7 @@ def _queue_durable_fallback(
             from_model=mail_ctx.model,  # the tag never renders the model
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
-            # Count the raw body, not the wire wrapper: Rule 7 and the rolling
-            # budget read the same string, so the row must too.
-            word_count=_style.word_count(message),
+            word_count=rust_binary.style_word_count(message),
         )
     except (OSError, ValueError, RuntimeError) as exc:
         events.emit(
@@ -7521,12 +7521,12 @@ def _reserve_send_budget(
     An ordinary body reserves nothing (rule 7 is its only word gate), so this
     returns None and callers release unconditionally.
     """
-    from fno import style
+    from fno import rust_binary
     from fno.mail import budget
 
     if not budget.is_control(message):
         return None
-    words = style.word_count(message)
+    words = rust_binary.style_word_count(message)
     try:
         return budget.reserve_control(
             sender=sender, recipient=recipient, words=words, msg_id=msg_id
@@ -7933,7 +7933,7 @@ def dispatch_send(
                             from_session=mail_ctx.from_session,
                             to_session=mail_ctx.to_session,
                         )
-                        from fno import style as _hstyle
+                        from fno import rust_binary
                         try:
                             record_hosted_delivery(
                                 msg_id=msg_id,
@@ -7946,7 +7946,7 @@ def dispatch_send(
                                 from_session=from_session,
                                 from_model=mail_ctx.model,
                                 to_kind="session",
-                                word_count=_hstyle.word_count(message),
+                                word_count=rust_binary.style_word_count(message),
                             )
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(
@@ -8479,7 +8479,7 @@ def dispatch_send_to_project(
     except Exception:  # noqa: BLE001 - sender identity is best-effort
         pass
 
-    from fno import style as _pstyle
+    from fno import rust_binary
     from fno.mail import budget
 
     msg_id = generate_msg_id()
@@ -8500,7 +8500,7 @@ def dispatch_send_to_project(
             to_kind="project",
             from_session=from_session,
             from_harness=from_harness,
-            word_count=_pstyle.word_count(message),
+            word_count=rust_binary.style_word_count(message),
             # US6: an explicit --to-project note deliberately chose the durable
             # project-inbox lane; the project's own drain owns it.
             owner=DurableOwner.INBOX_DRAIN.value,

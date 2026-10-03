@@ -2067,7 +2067,7 @@ def cmd_encounter(
     there is no correction verb, and a later correction is a `fno backlog note`.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno import style
+    from fno import rust_binary
     from fno.claims.self_identity import resolve_self_identity
     from fno.config import load_settings
     from fno.graph.store import append_encounter
@@ -2101,14 +2101,11 @@ def cmd_encounter(
 
     # Rule 7's escapes, inherited per docs/style-rules.md. Evidence and identity
     # stay required above: the cap is length policy, not the falsifiability one.
-    if (
-        os.environ.get("FNO_STYLE_ENFORCE") != "0"
-        and not style.has_exception(evidence)
-    ):
+    if os.environ.get("FNO_STYLE_ENFORCE") != "0":
         cap = load_settings().style.word_cap.encounter
-        violations = style.check(evidence, surface="encounter", word_cap=cap)
-        if violations:
-            typer.echo(style.format_violations(violations, surface="encounter"), err=True)
+        err, receipt = rust_binary.style_receipt(evidence, "encounter", cap)
+        if err or (not receipt.get("exception") and receipt.get("violations")):
+            typer.echo(err or receipt.get("report") or "", err=True)
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {

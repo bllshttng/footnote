@@ -353,7 +353,7 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         return
     if allow_reason and allow_reason.strip():
         return
-    from fno import style
+    from fno import rust_binary
     from fno.config import load_settings
     from fno.mail import budget
 
@@ -362,12 +362,12 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         # prose style re-creates the wall the lane exists to remove.
         return
 
-    if style.has_exception(body):
-        return
-    violations = style.check(body, surface="mail", word_cap=load_settings().style.word_cap.mail)
-    if violations:
-        _emit_style_refusal(violations)
-        print(style.format_violations(violations, surface="mail"), file=sys.stderr)
+    err, receipt = rust_binary.style_receipt(body, "mail", load_settings().style.word_cap.mail)
+    # A door failure refuses like a violation: the gate never silently vanishes.
+    if err or (not receipt.get("exception") and receipt.get("violations")):
+        if receipt.get("violations"):
+            _emit_style_refusal(receipt["violations"])
+        print(err or receipt.get("report") or "", file=sys.stderr)
         raise typer.Exit(code=1)
 
 
@@ -386,10 +386,10 @@ def _reserve_budget(
     An ordinary body reserves nothing: rule 7 is its only word gate, so the
     return is ``(None, words)`` and callers release unconditionally.
     """
-    from fno import style
+    from fno import rust_binary
     from fno.mail import budget
 
-    words = style.word_count(body)
+    words = rust_binary.style_word_count(body)
     if budget.is_control(body):
         return _reserve_control_budget(
             sender=sender,
@@ -465,7 +465,7 @@ def _emit_style_refusal(violations: list) -> None:
 
         data: dict = {
             "surface": "mail",
-            "rule_ids": sorted({v.rule for v in violations}),
+            "rule_ids": sorted({v["rule"] for v in violations}),
             "violation_count": len(violations),
         }
         ident = resolve_self_identity()
