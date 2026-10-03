@@ -678,7 +678,7 @@ pub(crate) fn apply_gather(
             b.snapshot.apply(v);
             if let Some(id) = b.pending_message_id.take() {
                 let target = b.projection().and_then(|projection| {
-                    projection
+                    let pair = projection
                         .get("threads")?
                         .as_array()?
                         .iter()
@@ -687,19 +687,46 @@ pub(crate) fn apply_gather(
                             let row = rows.iter().find(|row| text_of(row, "id") == id)?;
                             Some((
                                 text_of(thread, "chat_id").to_string(),
-                                text_of(row, "to_key").to_string(),
+                                Some(text_of(row, "to_key").to_string()),
                             ))
+                        });
+                    if pair.is_some() {
+                        return pair;
+                    }
+                    let channel =
+                        projection
+                            .get("channels")?
+                            .as_array()?
+                            .iter()
+                            .find_map(|channel| {
+                                let rows = channel.get("rows")?.as_array()?;
+                                rows.iter().any(|row| text_of(row, "id") == id).then(|| {
+                                    (format!("channel:{}", text_of(channel, "scope")), None)
+                                })
+                            });
+                    if channel.is_some() {
+                        return channel;
+                    }
+                    projection
+                        .get("system")?
+                        .as_object()?
+                        .iter()
+                        .find_map(|(agent, rows)| {
+                            rows.as_array()?
+                                .iter()
+                                .any(|row| text_of(row, "id") == id)
+                                .then(|| (format!("system:{agent}"), Some(agent.clone())))
                         })
                 });
-                if let Some((chat_id, agent)) =
-                    target.filter(|(chat, agent)| !chat.is_empty() && !agent.is_empty())
-                {
-                    b.sel_thread = Some(chat_id.clone());
-                    b.sel_agent = Some(agent.clone());
-                    if let Some(i) = b.partner_rows(&agent).iter().position(
-                        |row| matches!(row, PartnerRow::Thread { chat_id: id, .. } if id == &chat_id),
-                    ) {
-                        b.cursors[1] = i;
+                if let Some((thread, agent)) = target.filter(|(thread, _)| !thread.is_empty()) {
+                    b.sel_thread = Some(thread.clone());
+                    if let Some(agent) = agent {
+                        b.sel_agent = Some(agent.clone());
+                        if let Some(i) = b.partner_rows(&agent).iter().position(
+                            |row| matches!(row, PartnerRow::Thread { chat_id, .. } if chat_id == &thread),
+                        ) {
+                            b.cursors[1] = i;
+                        }
                     }
                     b.selected_message_id = Some(id);
                     b.col = Col::Thread;
