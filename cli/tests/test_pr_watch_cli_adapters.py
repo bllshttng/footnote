@@ -742,7 +742,9 @@ def test_phase_caps_fit_ceiling():
     from fno.pr_watch.cli import (
         _EVERY_TICK_CAP_S,
         _FLEET_CAP_S,
+        _MERGE_WINDOW_S,
         _PHASE_CAP_S,
+        _merge_budget_for_load,
         _resolve_tick_deadline,
     )
     from fno.pr_watch._dispatch import _MERGE_FLOOR_S
@@ -780,6 +782,12 @@ def test_phase_caps_fit_ceiling():
         f"merge cap {merge_cap}s does not fit 480s wall: room {tight_merge_room}s; "
         f"needs read {_GRANT_QUEUE_READ_TIMEOUT_S}s + floor {_MERGE_FLOOR_S}s"
     )
+    timeout_s, loaded_cap_s = _merge_budget_for_load(4.25, _MERGE_FLOOR_S + 15.0)
+    assert timeout_s == 191.25
+    assert loaded_cap_s >= timeout_s + _MERGE_FLOOR_S + 15.0 + 5.0
+    assert _MERGE_WINDOW_S - loaded_cap_s >= 30
+
+
 def _cadence_settings() -> SimpleNamespace:
     return SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
