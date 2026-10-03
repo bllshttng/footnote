@@ -406,6 +406,7 @@ pub(crate) struct BusRow {
 /// (or the `FNO_BUS_DIR` override, the one path bus readers share). An
 /// unreadable or absent bus is an empty index: the join then matches nothing
 /// and every row falls through to the text rules, which is today's behavior.
+#[derive(Clone)]
 pub(crate) struct BusIndex {
     rows: Vec<BusRow>,
 }

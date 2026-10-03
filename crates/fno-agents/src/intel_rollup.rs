@@ -61,8 +61,9 @@ pub(crate) struct RollupEntry {
     /// The running last assistant timestamp, so a tail turn's response gap
     /// reaches back across an offset boundary.
     last_assistant_ms: Option<i64>,
-    /// Bus-row ids found in the text so far: the delivery check skips
-    /// re-scanning stored bytes for them.
+    /// Bus-row ids whose delivery this transcript's text evidenced, by id
+    /// or body match: the delivery check skips re-scanning stored bytes
+    /// for them.
     relay_ids: BTreeSet<String>,
     /// The last assistant message ids: seeds the next pass's token dedupe.
     recent_message_ids: Vec<String>,
@@ -276,8 +277,10 @@ impl RollupStore {
                 entry.offset = start + consumed;
             }
         }
-        // Delivery ids: a bus-row id found in this run's consumed text stays
-        // delivered on every later run, whose tail is empty.
+        // Delivery evidence: a bus row whose id OR body text appears in
+        // this run's consumed text stays delivered on every later run,
+        // whose tail is empty. The persisted predicate is the full
+        // whole-text check, so raw (body-only) delivery keeps its verdict.
         for row in bus.rows() {
             if row.to_session.as_deref() != Some(file.session_id.as_str())
                 || row.id.is_empty()
@@ -285,7 +288,8 @@ impl RollupStore {
             {
                 continue;
             }
-            if text.contains(row.id.as_str()) {
+            let body = row.body.trim();
+            if text.contains(row.id.as_str()) || (!body.is_empty() && text.contains(body)) {
                 entry.relay_ids.insert(row.id.clone());
             }
         }
@@ -683,9 +687,9 @@ mod tests {
         }
     }
 
-    fn empty_ctx(witness: SubmitIndex) -> crate::intel::FoldCtx {
+    fn empty_ctx(bus: BusIndex, witness: SubmitIndex) -> crate::intel::FoldCtx {
         crate::intel::FoldCtx {
-            bus: BusIndex::empty(),
+            bus,
             join: std::collections::HashMap::new(),
             events: Vec::new(),
             witness,
@@ -693,6 +697,23 @@ mod tests {
             now: 1_800_000_000,
             rollups: None,
         }
+    }
+
+    /// One bus row addressed to s1 whose body, not its id, lands in the
+    /// transcript: raw (body-only) delivery.
+    fn bus_with_body_delivery(dir: &Path, body: &str) -> BusIndex {
+        let path = dir.join("messages.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"ts": "2026-10-01T11:00:00Z", "id": "fmail-bodyonly1",
+                       "body": body,
+                       "meta": {"to_session": "s1"}, "word_count": 4})
+            ),
+        )
+        .unwrap();
+        BusIndex::load(&path)
     }
 
     const T: &str = "2026-10-01T12:00";
@@ -727,6 +748,10 @@ mod tests {
         let joined = |ls: &[String]| ls.iter().map(|l| format!("{l}\n")).collect::<String>();
         let (half, rest) = (&lines[..3], &lines[3..]);
         let path = dir.join("s1.jsonl");
+        // The bus row's body lands in the second half verbatim, inside an
+        // assistant row's file path, so no user turn reclassifies; its id
+        // never appears. Raw, body-only delivery.
+        let bus = bus_with_body_delivery(&dir, "x.rs");
         std::fs::write(&path, joined(half)).unwrap();
         let src = source(&dir);
         let mut store = RollupStore::open(dir.join("rollups.json"));
@@ -737,7 +762,7 @@ mod tests {
             mtime: 0,
             size: meta.len(),
         };
-        store.advance(&f1, &src, &BusIndex::empty());
+        store.advance(&f1, &src, &bus);
         store.save();
         std::fs::write(&path, joined(half) + &joined(rest)).unwrap();
         let meta2 = std::fs::metadata(&path).unwrap();
@@ -748,12 +773,23 @@ mod tests {
             size: meta2.len(),
         };
         let bytes_after_second = {
-            let (e, _) = store.advance(&f2, &src, &BusIndex::empty());
+            let (e, _) = store.advance(&f2, &src, &bus);
             store.save();
-            let (e3, _) = store.advance(&f2, &src, &BusIndex::empty());
+            let (e3, _) = store.advance(&f2, &src, &bus);
             assert_eq!(e.counters, e3.counters);
             e
         };
+        // Cold: the body match on the consumed text delivered the row.
+        // Warm: the persisted evidence keeps the verdict on an empty tail.
+        let mut cold_ctx = empty_ctx(bus.clone(), SubmitIndex::empty());
+        let cold = build_row("claude", &bytes_after_second, &f2, &mut cold_ctx, "");
+        assert!(cold.relay.iter().all(|r| r.delivered));
+        assert_eq!(cold.relay.len(), 1);
+        // Warm: a zero-byte advance and an empty tail keep the verdict.
+        let (e_warm, tail_warm) = store.advance(&f2, &src, &bus);
+        let mut warm_ctx = empty_ctx(bus.clone(), SubmitIndex::empty());
+        let warm = build_row("claude", &e_warm, &f2, &mut warm_ctx, &tail_warm);
+        assert!(warm.relay.iter().all(|r| r.delivered));
         // The whole-file pass in a fresh store over the same content.
         let dir2 = tmp_dir("whole");
         let whole = write_lines(&dir2.join("s1.jsonl"), &lines);
@@ -852,7 +888,7 @@ mod tests {
         let src = source(&dir);
         let mut store = RollupStore::open(dir.join("rollups.json"));
         let unknown = |e: &RollupEntry, file: &SessionFile| {
-            let mut ctx = empty_ctx(SubmitIndex::empty());
+            let mut ctx = empty_ctx(BusIndex::empty(), SubmitIndex::empty());
             build_row("claude", e, file, &mut ctx, "")
                 .counters
                 .get("unknown")
@@ -907,7 +943,7 @@ mod tests {
         let (entry, _) = store.advance(&f, &src, &BusIndex::empty());
         store.save();
         // No journal: every unshaped turn reads unknown.
-        let mut ctx = empty_ctx(SubmitIndex::empty());
+        let mut ctx = empty_ctx(BusIndex::empty(), SubmitIndex::empty());
         let row = build_row("claude", &entry, &f, &mut ctx, "");
         assert_eq!(row.counters.get("unknown"), Some(&3));
         assert_eq!(row.counters.get("operator"), Some(&0));
@@ -921,7 +957,7 @@ mod tests {
         let mut store2 = RollupStore::open(dir.join("rollups.json"));
         let (entry2, tail) = store2.advance(&f, &src, &BusIndex::empty());
         assert_eq!(store2.receipt.bytes_read, 0);
-        let mut ctx2 = empty_ctx(SubmitIndex::load(&journal));
+        let mut ctx2 = empty_ctx(BusIndex::empty(), SubmitIndex::load(&journal));
         let row2 = build_row("claude", &entry2, &f, &mut ctx2, &tail);
         assert_eq!(row2.counters.get("operator"), Some(&2));
         assert_eq!(row2.counters.get("unknown"), Some(&1));
