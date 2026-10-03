@@ -51,7 +51,7 @@ printf '[package]\nname = "fno-agents"\nversion = "0.3.2"\nedition = "2021"\n' >
 # the metadata parse below tests the VERSION, not the skeleton's shape.
 printf 'fn main() {}\n' > "$sync/crates/fno/src/main.rs"
 printf 'fn main() {}\n' > "$sync/crates/fno-agents/src/main.rs"
-json_manifests=".claude-plugin/plugin.json .claude-plugin/marketplace.json gemini-extension.json .codex-plugin/plugin.json .opencode/package.json plugins/openclaw/promise-tag-reader/package.json"
+json_manifests=".claude-plugin/plugin.json .claude-plugin/marketplace.json gemini-extension.json .codex-plugin/plugin.json .opencode/package.json plugins/openclaw/promise-tag-reader/package.json plugins/buddy/.claude-plugin/plugin.json"
 for j in $json_manifests; do
   mkdir -p "$sync/$(dirname "$j")"
   printf '{\n  "name": "t",\n  "version": "0.3.2"\n}\n' > "$sync/$j"
