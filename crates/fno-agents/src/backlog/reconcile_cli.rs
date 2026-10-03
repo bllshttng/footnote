@@ -2528,7 +2528,7 @@ mod tests {
         let entries = Vec::new();
         let scope = scan_scope(
             &entries,
-            Some("ab-1111aaaa"),
+            Some("ab-1234abcd"),
             Some(7),
             None,
             &[],
@@ -2538,7 +2538,7 @@ mod tests {
         )
         .expect("node scope");
         assert_eq!(scope.len(), 1);
-        assert!(scope.contains("ab-1111aaaa"));
+        assert!(scope.contains("ab-1234abcd"));
         assert!(scan_scope(&entries, None, None, None, &[], None, true, &mut Vec::new()).is_none());
     }
 

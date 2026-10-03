@@ -326,7 +326,7 @@ mod tests {
     fn an_epic_whose_children_all_closed_is_strandable() {
         let entries = vec![
             seed("x-epic", None as Option<&str>),
-            json!({"id": "x-kid", "parent": "x-epic", "status": "done", "completed_at": "2026-10-01T00:00:00Z"}),
+            json!({"id": "x-cccc", "parent": "x-epic", "status": "done", "completed_at": "2026-10-01T00:00:00Z"}),
         ];
         let ids = strandable_epic_ids(&entries);
         assert_eq!(ids, BTreeSet::from(["x-epic".to_string()]));
@@ -336,7 +336,7 @@ mod tests {
     fn a_live_child_keeps_its_epic_open() {
         let entries = vec![
             seed("x-epic", None as Option<&str>),
-            json!({"id": "x-kid", "parent": "x-epic"}),
+            json!({"id": "x-cccc", "parent": "x-epic"}),
         ];
         assert!(strandable_epic_ids(&entries).is_empty());
     }
@@ -346,7 +346,7 @@ mod tests {
         let mut entries = vec![
             seed("x-mission", None as Option<&str>),
             seed("x-epic", Some("x-mission")),
-            done("x-kid"),
+            done("x-cccc"),
         ];
         let closed = sweep_close_done_epics(&mut entries);
         assert_eq!(closed, vec!["x-epic".to_string(), "x-mission".to_string()]);
@@ -413,26 +413,26 @@ mod tests {
 
     #[test]
     fn an_orphan_under_a_terminal_parent_is_strandable() {
-        let entries = vec![done("x-dead"), seed("x-kid", Some("x-dead"))];
+        let entries = vec![done("x-dddd"), seed("x-cccc", Some("x-dddd"))];
         assert_eq!(
             strandable_orphan_ids(&entries),
-            BTreeSet::from(["x-kid".to_string()])
+            BTreeSet::from(["x-cccc".to_string()])
         );
     }
 
     #[test]
     fn the_orphan_sweep_moves_kids_to_the_nearest_live_ancestor() {
         let mut entries = vec![
-            done("x-dead"),
-            seed("x-kid", Some("x-dead")),
-            seed("x-live", Some("x-dead")),
+            done("x-dddd"),
+            seed("x-cccc", Some("x-dddd")),
+            seed("x-eeee", Some("x-dddd")),
         ];
         let moved = sweep_reparent_stranded_orphans(&mut entries);
         assert_eq!(
             moved,
-            vec![("x-kid".to_string(), Some("x-live".to_string()))]
+            vec![("x-cccc".to_string(), Some("x-eeee".to_string()))]
         );
-        assert_eq!(entries[1]["parent"], "x-live");
+        assert_eq!(entries[1]["parent"], "x-eeee");
     }
 
     #[test]
