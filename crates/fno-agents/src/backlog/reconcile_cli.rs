@@ -2475,7 +2475,21 @@ fn status_drift(entries: &[Value]) -> Vec<(String, String, String)> {
         persisted.insert(id.to_string(), status.to_string());
     }
     let mut derived_rows = entries.to_vec();
-    crate::graph_store::recompute_statuses(&mut derived_rows);
+    // The store keeper supplies each row's plan rung on every write; the
+    // reclaim derivation needs the same supply, or a plan-less node keeps
+    // its stored status instead of deriving the ladder's idea rung.
+    let rungs: std::collections::BTreeMap<String, String> = entries
+        .iter()
+        .filter_map(|e| {
+            crate::graph_store::entry_id(e).map(|id| {
+                (
+                    id.to_string(),
+                    crate::backlog_ready::plan_rung(e).to_string(),
+                )
+            })
+        })
+        .collect();
+    crate::graph_store::recompute_statuses_with_plan_rungs(&mut derived_rows, Some(&rungs));
     let mut out: Vec<(String, String, String)> = Vec::new();
     for e in &derived_rows {
         let (Some(id), Some(status)) = (
