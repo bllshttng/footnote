@@ -1270,6 +1270,7 @@ impl View {
             .questions_block
             .cursor
             .and_then(|c| (stops > 0).then(|| c.min(stops - 1)));
+        bell::clamp_selection(self);
     }
 
     /// The row list's selector, or none while the cursor is in the

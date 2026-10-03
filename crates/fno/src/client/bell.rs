@@ -171,16 +171,12 @@ pub(crate) fn apply(view: &mut View, generation: u64, result: Result<Value, Stri
     match result {
         Ok(value) => {
             panel.error = None;
-            if panel.open {
-                mark_seen(&value);
-                panel.unread = false;
-            } else {
-                panel.unread = has_unread_in(&value);
-            }
+            panel.unread = has_unread_in(&value);
             panel.projection = Some(value);
         }
         Err(error) => panel.error = Some(error),
     }
+    clamp_selection(view);
 }
 
 fn mark_seen(projection: &Value) {
@@ -190,7 +186,9 @@ fn mark_seen(projection: &Value) {
         .into_iter()
         .flatten()
         .filter_map(|row| row.get("ts").and_then(Value::as_str))
-        .max()
+        .filter_map(|ts| timestamp_key(ts).map(|epoch| (epoch, ts)))
+        .max_by_key(|(epoch, _)| *epoch)
+        .map(|(_, ts)| ts)
     {
         crate::view_store::save_messages_read_mark(READ_MARK, ts);
     }
@@ -246,11 +244,7 @@ fn rows(view: &View) -> Vec<Row> {
     out.push(Row::Header(format!("Announcements ({count})")));
     if let Some(items) = announcements {
         let mut ordered: Vec<&Value> = items.iter().collect();
-        ordered.sort_by(|a, b| {
-            b.get("ts")
-                .and_then(Value::as_str)
-                .cmp(&a.get("ts").and_then(Value::as_str))
-        });
+        ordered.sort_by(|a, b| timestamp_of(b).cmp(&timestamp_of(a)));
         for item in ordered {
             let sender = item.get("from").and_then(Value::as_str).unwrap_or("system");
             let summary = item.get("summary").and_then(Value::as_str).unwrap_or("");
@@ -300,6 +294,10 @@ pub(super) fn hit(view: &View, row: u16, col: u16) -> Option<ChromeHit> {
 }
 
 pub(crate) fn apply_hit(view: &mut View, hit: Hit) {
+    if let Some(projection) = view.bell.projection.as_ref() {
+        mark_seen(projection);
+        view.bell.unread = false;
+    }
     match hit {
         Hit::Toggle => toggle(view),
         Hit::Focus => {}
@@ -323,12 +321,21 @@ fn question_title(view: &View, id: &str) -> String {
 }
 
 pub(crate) fn keys(view: &mut View, bytes: &[u8]) {
+    if !bytes.is_empty() {
+        if let Some(projection) = view.bell.projection.as_ref() {
+            mark_seen(projection);
+            view.bell.unread = false;
+        }
+    }
     let mut esc = std::mem::take(&mut view.bell.esc);
     let keys = fold_selector_keys(&mut esc, bytes);
     view.bell.esc = esc;
     for byte in keys {
         match byte {
-            0x1b | b'q' | b'B' => close(view),
+            0x1b | b'q' | b'B' => {
+                close(view);
+                return;
+            }
             b'j' => {
                 let len = rows(view).len();
                 view.bell.selected = (view.bell.selected + 1).min(len.saturating_sub(1));
@@ -356,6 +363,10 @@ pub(crate) fn keys(view: &mut View, bytes: &[u8]) {
             _ => {}
         }
     }
+}
+
+pub(super) fn clamp_selection(view: &mut View) {
+    view.bell.selected = view.bell.selected.min(rows(view).len().saturating_sub(1));
 }
 
 pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) {
@@ -459,6 +470,7 @@ fn paint(
 ) {
     let mut col = start;
     for ch in text.chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
         let w = unicode_width::UnicodeWidthChar::width(ch)
             .unwrap_or(0)
             .max(1);
@@ -506,9 +518,20 @@ fn has_unread_in(projection: &Value) -> bool {
     let seen = crate::view_store::load_messages_read_marks()
         .remove(READ_MARK)
         .unwrap_or_default();
-    items.iter().any(|item| {
-        item.get("ts")
-            .and_then(Value::as_str)
-            .is_some_and(|ts| ts > seen.as_str())
-    })
+    let seen_at = timestamp_key(&seen);
+    items
+        .iter()
+        .any(|item| timestamp_of(item).is_some_and(|ts| seen_at.is_none_or(|seen| ts > seen)))
+}
+
+fn timestamp_of(row: &Value) -> Option<i64> {
+    row.get("ts")
+        .and_then(Value::as_str)
+        .and_then(timestamp_key)
+}
+
+fn timestamp_key(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|date| date.timestamp_millis())
 }
