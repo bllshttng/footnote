@@ -235,7 +235,7 @@ fn rows(view: &View) -> Vec<Row> {
     }
     if !settled.is_empty() {
         out.push(Row::Header(format!("Answered ({})", settled.len())));
-        for q in settled.iter().take(4) {
+        for q in &settled {
             out.push(Row::Question(q.id.clone()));
         }
         out.push(Row::Clear(settled.len()));
