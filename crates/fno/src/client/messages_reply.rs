@@ -134,17 +134,36 @@ pub(super) fn paint(view: &View, cells: &mut [Cell], rows: usize, cols: usize) {
 }
 
 fn endpoint_pane(view: &View, target: &Endpoint) -> Option<u64> {
-    view.layout
+    let visible_pane = |agent: &crate::proto::AgentRow| {
+        agent
+            .pane_id
+            .filter(|id| view.layout.panes.iter().any(|(pane, _)| pane == id))
+    };
+    let mut exact = view
+        .layout
         .agents
         .iter()
-        .find(|a| {
-            !a.exited
-                && (a.harness_session_id.as_deref() == Some(target.session.as_str())
-                    || a.name == target.name)
-                && a.pane_id
-                    .is_some_and(|id| view.layout.panes.iter().any(|(p, _)| *p == id))
-        })
-        .and_then(|a| a.pane_id)
+        .filter(|a| !a.exited && a.harness_session_id.as_deref() == Some(target.session.as_str()))
+        .filter_map(visible_pane);
+    let exact_match = exact.next();
+    if exact.next().is_some() {
+        return None;
+    }
+    if exact_match.is_some() {
+        return exact_match;
+    }
+    let mut named = view
+        .layout
+        .agents
+        .iter()
+        .filter(|a| !a.exited && a.name == target.name)
+        .filter_map(visible_pane);
+    let named_match = named.next();
+    if named.next().is_some() {
+        None
+    } else {
+        named_match
+    }
 }
 
 fn start_compose(state: &mut ReplyState, sender: bool) {

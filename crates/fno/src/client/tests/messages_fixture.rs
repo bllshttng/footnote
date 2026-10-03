@@ -208,6 +208,29 @@ async fn messages_reply_board_contracts() {
         view.notice.is_none(),
         "fno_id resolves through the participant name"
     );
+    view.layout.agents.push(crate::proto::AgentRow {
+        name: "first".into(),
+        harness_session_id: Some("another-session".into()),
+        pane_id: Some(8),
+        ..Default::default()
+    });
+    view.layout.panes.push((
+        8,
+        crate::tree::Rect {
+            x: 1,
+            y: 0,
+            rows: 1,
+            cols: 1,
+        },
+    ));
+    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        view.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("reply: first has no pane on screen; open a portal first"),
+        "ambiguous aliases must not focus an arbitrary session"
+    );
     super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
         .await
         .unwrap();
