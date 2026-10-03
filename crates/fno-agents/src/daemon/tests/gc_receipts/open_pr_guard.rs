@@ -12,7 +12,8 @@ use super::*;
 /// recorded-graph PR read answers open for both. The same fixture pins the
 /// liveness sweeps' busy read beside the guard it extends: a node
 /// the session names, with a recorded `pr_number` and no recorded merge,
-/// holds the row; a recorded merge or a PR-less node does not.
+/// holds the row; a recorded terminal state (merged, or closed unmerged) or
+/// a PR-less node does not, and a headless one-shot row is never held.
 #[test]
 fn gc_sweep_keeps_the_open_pr_driver_without_a_termination_and_alerts_a_terminated_reap() {
     {
@@ -27,6 +28,12 @@ fn gc_sweep_keeps_the_open_pr_driver_without_a_termination_and_alerts_a_terminat
             "a recorded pr_number with no recorded merge holds the row"
         );
         g.pr_state
+            .insert("N1".into(), (Some("closed".into()), 0, 0));
+        assert!(
+            !crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
+            "a recorded closed PR is terminal: the row settles"
+        );
+        g.pr_state
             .insert("N1".into(), (Some("merged".into()), 0, 0));
         assert!(
             !crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
@@ -37,6 +44,15 @@ fn gc_sweep_keeps_the_open_pr_driver_without_a_termination_and_alerts_a_terminat
         assert!(
             !crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
             "a node with no recorded PR never holds"
+        );
+        let mut headless = RegistryEntry::new(
+            Some("sess-hold".into()),
+            crate::state::Lineage::unproven("row-has-open-pr"),
+        );
+        headless.substrate = Some("headless".into());
+        assert!(
+            !crate::gc_open_pr_guard::row_has_open_pr(&g, &headless),
+            "a headless one-shot row is never held, even with an open PR"
         );
     }
     let sandbox = tmp_home("gc-open-pr-guard");

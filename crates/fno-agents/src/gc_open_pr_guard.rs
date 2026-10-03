@@ -96,8 +96,15 @@ pub fn open_pr_verdict(
 /// merge, and its transcript silence is the watching protocol, not idle
 /// death. Read from the graph rows (the row-verdict path), never from
 /// transcript quiet time; an unrecorded `merge_status` holds, because the
-/// ship stamp can lag the open PR.
+/// ship stamp can lag the open PR. A recorded terminal state settles:
+/// `merged`, and `closed` - the writer's terminal spelling for a PR closed
+/// unmerged, which this path has no live read to override. A headless row
+/// is a one-shot run, not a seated worker: its normal exit must stay
+/// observable, so the hold never covers it.
 pub fn row_has_open_pr(graph: &GraphRead, e: &state::RegistryEntry) -> bool {
+    if e.substrate.as_deref() == Some("headless") {
+        return false;
+    }
     let sid = e
         .harness_session_id
         .as_deref()
@@ -112,12 +119,10 @@ pub fn row_has_open_pr(graph: &GraphRead, e: &state::RegistryEntry) -> bool {
         .is_some_and(|nodes| {
             nodes.iter().any(|(node, _)| {
                 graph.pr_number.get(node).copied().flatten().is_some()
-                    && graph
-                        .pr_state
-                        .get(node)
-                        .and_then(|(m, _, _)| m.clone())
-                        .as_deref()
-                        != Some("merged")
+                    && !matches!(
+                        graph.pr_state.get(node).and_then(|(m, _, _)| m.as_deref()),
+                        Some("merged") | Some("closed")
+                    )
             })
         })
 }
