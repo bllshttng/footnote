@@ -8,6 +8,7 @@
 //! thematic-break line shape.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// One rule breach on one sentence. `sentence` carries the masked text, so
