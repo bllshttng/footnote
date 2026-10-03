@@ -279,7 +279,9 @@ def test_map_covers_current_surface_once():
     # click inventory does not see, freeing its row: 600 -> 599.
     # The decide family ported native, freeing its four backlog rows and the
     # two decide-shim rows with the registrations they kept: 599 -> 593.
-    assert len(mapped) == 593, (
+    # The two daemon-free read projections (sessions-map, revival-check)
+    # allocated their rows: 593 -> 595.
+    assert len(mapped) == 595, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

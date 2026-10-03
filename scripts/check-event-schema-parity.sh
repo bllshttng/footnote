@@ -405,6 +405,11 @@ dual_owner_kinds = {
     # stop check); the Python side carries it in schema.yaml for the
     # validator and `doctor event find`, the way pr_watch_unparked above does.
     "decision_span",
+    # agent_revived: the Rust adopt path's journal_agent_revived is the only
+    # writer (the adopt that restores a reap receipt's identity); the Python
+    # side carries it in schema.yaml for the validator and `doctor event
+    # find`, the way pr_watch_unparked above does.
+    "agent_revived",
 }
 collisions -= dual_owner_kinds
 if collisions:

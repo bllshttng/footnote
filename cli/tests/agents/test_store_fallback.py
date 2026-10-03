@@ -267,6 +267,24 @@ def test_batch_confinement_resolves_scope_once_and_refuses_unsafe_hits(
             cross_project=False,
         )
 
+    # A full id is globally unique: the waiver fires with no flag and never
+    # even asks which project the caller sits in.
+    monkeypatch.setattr(
+        store_fallback,
+        "_project_identity",
+        lambda cwd: (_ for _ in ()).throw(AssertionError("must not be consulted")),
+    )
+    foreign = [store_fallback.StoreHit("codex", "session-foreign", "/foreign")]
+    assert (
+        store_fallback.confine_store_hits(
+            "979e1acc-e240-4af5-9998-0a74ec6c0683",
+            foreign,
+            scope_cwd="/scope",
+            cross_project=False,
+        )
+        == foreign
+    )
+
 
 # --- US2/US3: other harnesses ----------------------------------------------
 
