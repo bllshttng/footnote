@@ -483,11 +483,9 @@ def render_digest(
     messages: list, held_for_s: int, harness: str | None = None
 ) -> str:
     """Render held mail through the Rust header and release formatter."""
-    from fno import rust_binary
+    from fno.rust_binary import find_dev_binary, resolve_binary
 
-    binary = rust_binary.resolve_installed_binary()
-    if binary is None:
-        raise RuntimeError("fno-agents is required to render held-mail delivery")
+    binary = find_dev_binary() or resolve_binary() or "fno-agents"
     payload = {
         "held_for_s": held_for_s,
         "harness": harness,
@@ -603,6 +601,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
                     id=generate_msg_id(),
                     to=getattr(entry, "name", None),
                     to_session=getattr(entry, "harness_session_id", None),
+                    held_release=True,
                 )
                 delivered = _deliver_live(entry, framed, "fno-mail-hold", reason_out=miss_reason)
             except Exception:  # noqa: BLE001 - report the miss, never crash the timer
