@@ -273,6 +273,27 @@ def retention_for(event_type: str) -> str:
     return entry.get("retention", RETENTION_DEFAULT) if entry else RETENTION_DEFAULT
 
 
+def _utc_timestamp(value: Any) -> _dt.datetime | None:
+    """Parse an RFC3339 UTC timestamp; status_fanout reads it beside the judge."""
+    if not isinstance(value, str) or not value:
+        return None
+    if (
+        _re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
+            value,
+        )
+        is None
+    ):
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != _dt.timedelta(0):
+        return None
+    return parsed
+
+
 def _validate_via_store(event: dict[str, Any]) -> None:
     """Judge through the native door: the store's judge is the one owner.
 

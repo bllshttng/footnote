@@ -1330,8 +1330,8 @@ mod tests {
         let src = stamp.join("questions.jsonl");
         append_envelope(&q, &close, Some("old-answer")).unwrap();
         append_envelope(&src, &ask, Some("missing-ask")).unwrap();
-        let control=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"status_control","source":"test","data":{"n":1}}).to_string();
-        let historical=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"status_control","source":"test","data":{"n":0}}).to_string();
+        let control=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"loop_tick","source":"test","data":{"name":"control-one"}}).to_string();
+        let historical=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"loop_tick","source":"test","data":{"name":"missing-event"}}).to_string();
         let events = root.join("db/events.jsonl");
         append_envelope(&events, &control, Some("control-one")).unwrap();
         append_envelope(
@@ -1340,7 +1340,7 @@ mod tests {
             Some("missing-event"),
         )
         .unwrap();
-        append_envelope(&stamp.join("decisions.jsonl"),&serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_decision","source":"test","data":{"answer":"historical"}}).to_string(),Some("missing-decision")).unwrap();
+        append_envelope(&stamp.join("decisions.jsonl"),&serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_decision","source":"test","data":{"decision_id":"d1","decision":"approve","answer":"historical"}}).to_string(),Some("missing-decision")).unwrap();
         let before = recovery::audit(&root).unwrap();
         assert!(before.errors.is_empty(), "{:?}", before.errors);
         assert_eq!(before.missing_by_family["questions"], 1);
@@ -1424,7 +1424,7 @@ mod tests {
             1,
             "historical equal-timestamp rows never enter occurrence counting"
         );
-        assert_eq!(status[0][0]["data"]["n"], 1);
+        assert_eq!(status[0][0]["data"]["name"], "control-one");
         let new_close = close.replace("\"old\"", "\"new\"");
         append_envelope(&q, &new_close, Some("new-answer")).unwrap();
         let answers = read_projection(&q, "answered", &serde_json::json!({})).unwrap();

@@ -81,9 +81,15 @@ fn blocks_and_malformed_never_coalesce() {
     }
     let malformed = json!({"ts": "2026-09-10T12:03:00Z", "type": "guard_decision",
         "source": "hook", "data": {"guard": "git-protection", "tool": "Bash"}});
-    let receipt = append_envelope(&live, &malformed.to_string(), None).unwrap();
-    assert!(receipt.inserted, "a missing decision is always-audit");
-    assert_eq!(count_events(&store_path(&live)), 4);
+    // The judge owns the schema now: a guard_decision with no decision is
+    // refused at the commit, so the always-audit tolerance is gone and the
+    // row never lands to coalesce with anything.
+    let err = append_envelope(&live, &malformed.to_string(), None).unwrap_err();
+    assert!(
+        err.contains("missing required data field: decision"),
+        "err: {err}"
+    );
+    assert_eq!(count_events(&store_path(&live)), 3);
 }
 
 #[test]
