@@ -45,9 +45,36 @@ def _admit_spawn_gate(monkeypatch):
     and the smoke-pytest shard leave unresolved, so every spawn here refused
     exit 87 before reaching the revival paths under test. Sibling spawn suites
     stub the same seam; the gate's own behavior is covered in
-    test_spawn_gate_agreement.py.
+    test_spawn_gate_agreement.py. The revival answer rides the same runtime:
+    the stub mirrors the binary's predicate (claude, uuid match, not live,
+    by-name wins) against the seeded registry, driven by each test's own
+    session_is_live stub.
     """
     _admitting_gate(monkeypatch)
+
+    def _stub_revival(name, harness, sid):
+        from fno.agents.harnesses import claude as claude_mod
+        from fno.agents.registry import load_registry
+
+        rows = load_registry()
+        named = next((e for e in rows if e.name == name), None)
+        row = named or next(
+            (e for e in rows if e.harness_session_id == sid), None
+        )
+        if row is None:
+            return {"revive": False, "by": None}
+        live = False
+        if row.short_id:
+            live = claude_mod.session_is_live(row.short_id)
+        revive = (
+            harness == "claude"
+            and row.harness == "claude"
+            and row.harness_session_id == sid
+            and not live
+        )
+        return {"revive": revive, "by": "name" if named else "session"}
+
+    monkeypatch.setattr(dispatch, "_revival_answer", _stub_revival)
 
 
 @pytest.fixture

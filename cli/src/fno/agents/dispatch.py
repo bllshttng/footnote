@@ -83,11 +83,6 @@ from fno.agents.registry import (
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.agents.spawn_revival import (
-    is_revival as _is_revival,
-    revival_replacement,
-    session_revival,
-)
 from fno.agents.crown import (
     calling_agent_row,
     crown_validation_error,
@@ -1852,7 +1847,18 @@ def _claude_create_path(
             # One row per session id: the same-name revival replaces its own
             # row; the short-id-named adopted row is replaced through the
             # resumed uuid it carries.
-            return revival_replacement(entries, entry, name, resume_session_id)
+            return [
+                entry
+                if (
+                    e.name == name
+                    or (
+                        resume_session_id
+                        and getattr(e, "harness_session_id", None) == resume_session_id
+                    )
+                )
+                else e
+                for e in entries
+            ]
         return entries + [entry]
 
     try:
@@ -2275,6 +2281,32 @@ def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[st
     return None
 
 
+def _revival_answer(name: str, harness: str, resume_session_id: str) -> Optional[dict]:
+    """One ``fno-agents revival-check`` answer, ``None`` when the runtime is
+    unavailable or the answer is unreadable - the spawn then keeps today's
+    collision posture (a same-name row refuses, a fork proceeds)."""
+    import json
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [str(binary), "revival-check", "--name", name, "--harness", harness,
+             "--resume", resume_session_id],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return json.loads(proc.stdout) if proc.returncode == 0 else None
+    except Exception:  # noqa: BLE001 - fail toward the collision posture
+        return None
+
+
 def dispatch_spawn(
     name: str,
     message: str,
@@ -2606,22 +2638,32 @@ def dispatch_spawn(
             # harness disagree. Every other same-name case stays fail-closed
             # (live row, uuid mismatch, no --resume).
             existing = next((e for e in entries if e.name == name), None)
-            revive = existing is not None and _is_revival(existing, harness, resume_session_id)
+            revive = False
+            if resume_session_id:
+                # The revival decision reads one Rust answer: the row is found
+                # by name first, then by the resumed uuid itself - an adopted
+                # short-id-named row revives under the caller's explicit --name
+                # too, or the row and the harness disagree. The writer-claim
+                # gate below stays the fail-closed backstop.
+                answer = _revival_answer(name, harness, resume_session_id)
+                if answer is not None and answer.get("revive"):
+                    revive = True
+                    if answer.get("by") == "session":
+                        existing = next(
+                            (
+                                e
+                                for e in entries
+                                if getattr(e, "harness_session_id", None)
+                                == resume_session_id
+                            ),
+                            None,
+                        )
             if existing is not None and not revive:
                 raise DispatchAskError(
                     f"agent {name!r} already exists; "
                     f"use 'fno agents rm {name}' first or pick another name",
                     exit_code=2,
                 )
-            if resume_session_id and not revive:
-                # The uuid-keyed fallback (found by name, then by the resumed
-                # uuid itself): an adopted short-id-named row revives under the
-                # caller's explicit --name too, or the row and the harness
-                # disagree.
-                session_row = session_revival(entries, harness, resume_session_id)
-                if session_row is not None:
-                    existing = session_row
-                    revive = True
 
             if crown_level is not None:
                 # Refuses BEFORE launch - nothing exists as a result of an

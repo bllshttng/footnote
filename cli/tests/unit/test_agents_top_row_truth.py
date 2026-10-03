@@ -67,8 +67,7 @@ def patched(monkeypatch):
     # for the PR; blanked so every test here stays hermetic.
     import fno.agents.top as top
 
-    monkeypatch.setattr(top, "_claim_sessions", lambda: {})
-    monkeypatch.setattr(top, "_graph_session_nodes", lambda: {})
+    monkeypatch.setattr(top, "_session_node_map", lambda: {})
     return state
 
 
@@ -172,16 +171,14 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         top,
-        "_claim_sessions",
+        "_session_node_map",
         lambda: {
-            "979e1acc-e240-4af5-9998-0a74ec6c0683": ("x-4dc0", 2965),
-            "full-session-uuid": ("x-06f7", None),
+            "979e1acc-e240-4af5-9998-0a74ec6c0683": {
+                "node": "x-4dc0", "pr": 2965, "basis": "claim",
+            },
+            "full-session-uuid": {"node": "x-06f7", "pr": None, "basis": "claim"},
+            "released-session-uuid": {"node": "x-4dc0", "pr": None, "basis": "graph"},
         },
-    )
-    monkeypatch.setattr(
-        top,
-        "_graph_session_nodes",
-        lambda: {"released-session-uuid": ("x-4dc0", None)},
     )
     (row,) = _rows(
         patched,
@@ -216,30 +213,33 @@ def test_claim_join_renders_node_and_pr(patched, monkeypatch, tmp_path):
     assert from_graph["node_basis"] == "graph"
 
 
-def test_claim_sessions_reads_the_real_yaml_lockfile(tmp_path, monkeypatch):
-    """The join's reader, not a stub: a real ``node:`` claim lockfile (YAML,
-    global-rooted) parses through fno.claims' own reader, so the parse and
-    the root cannot silently rot."""
-    from fno.agents.top import _claim_sessions
-    from fno.claims.io import claim_path, global_claims_root, serialize_claim
-    from fno.claims.types import Claim
+def test_session_node_map_parses_the_binary_answer(tmp_path, monkeypatch):
+    """The thin reader parses the binary's JSON shape and answers {} on a
+    missing binary - the join degrades, it never fails the render."""
 
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    lock = claim_path("node:x-join", root=global_claims_root())
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(
-        serialize_claim(
-            Claim(
-                key="node:x-join",
-                holder="target-session:SID-X",
-                acquired_at=1_700_000_000_000,
-                pid=41468,
-                host="test",
-            )
-        ),
+    from fno.agents.top import _session_node_map
+
+    fake = tmp_path / "fake-fno-agents"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo \'{"979e1acc-e240-4af5-9998-0a74ec6c0683": '
+        '{"node": "x-4dc0", "pr": 2965, "basis": "claim"}}\'\n',
         encoding="utf-8",
     )
-    assert _claim_sessions() == {"sid-x": ("x-join", None)}
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: fake
+    )
+    assert _session_node_map() == {
+        "979e1acc-e240-4af5-9998-0a74ec6c0683": {
+            "node": "x-4dc0", "pr": 2965, "basis": "claim",
+        }
+    }
+
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: None
+    )
+    assert _session_node_map() == {}
 
 
 def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):

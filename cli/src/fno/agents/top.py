@@ -150,60 +150,34 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
         return {}, {}
 
 
-def _claim_sessions() -> dict[str, tuple[str, Optional[int]]]:
-    """session id -> (node, pr_number) from the live ``node:<id>`` claims
-    whose holder names ``target-session:<id>``. The claim is the strongest
-    node join a row can have - it is the session's own work order, so a
-    revived or registry-less session still renders its node. The PR rides the
-    claimed node's graph row (one CLI read per distinct node, cached per
-    render); a failed read drops the PR, never the node."""
+def _session_node_map() -> dict[str, dict]:
+    """session id -> {node, pr, basis} from ONE fno-agents read: the graph's
+    ``sessions[]`` rows and the node claims, a live claim outranking the
+    graph record. The join the top view renders; a failed read answers {} -
+    top is a debug view, never a failure surface."""
     import json
     import subprocess
-    import sys
 
-    from fno.claims.io import (
-        claim_path,
-        global_claims_root,
-        list_claim_keys,
-        read_claim_file,
-    )
+    from fno.rust_binary import resolve_binary
 
-    out: dict[str, tuple[str, Optional[int]]] = {}
-    pr_cache: dict[str, Optional[int]] = {}
-    # node: claims are global-rooted (claims_root_for); reading the cwd/env
-    # default would miss every claim when no env override is set.
-    root = global_claims_root()
-    try:
-        keys = list_claim_keys(prefix="node:", root=root)
-    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+    binary = resolve_binary()
+    if binary is None:
         return {}
-    for key in keys:
-        node = key[len("node:") :]
-        try:
-            claim = read_claim_file(claim_path(key, root=root))
-        except Exception:  # noqa: BLE001 — a corrupt lockfile skips, never fails
-            continue
-        holder = claim.holder or ""
-        if not holder.startswith("target-session:"):
-            continue
-        sid = holder[len("target-session:") :].strip().lower()
-        if not sid or sid in out:
-            continue
-        if node not in pr_cache:
-            try:
-                proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                    [sys.executable, "-m", "fno.cli", "backlog", "get", node],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-                row = json.loads(proc.stdout) if proc.returncode == 0 else {}
-                pr_cache[node] = row.get("pr_number")
-            except Exception:  # noqa: BLE001 — best-effort, PR is optional
-                pr_cache[node] = None
-        out[sid] = (node, pr_cache[node])
-    return out
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [str(binary), "sessions-map"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — best-effort, the join is optional
+        return {}
+    try:
+        raw = json.loads(proc.stdout) if proc.returncode == 0 else {}
+    except Exception:  # noqa: BLE001 — always parse-guarded
+        return {}
+    return {sid: v for sid, v in raw.items() if isinstance(v, dict)}
 
 
 class RowTruth(NamedTuple):
@@ -282,35 +256,10 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     return out
 
 
-def _graph_session_nodes() -> dict[str, tuple[str, Optional[int]]]:
-    """session id -> (node, pr_number) from the graph's own ``sessions[]``
-    rows. The middle join between a live claim and the name-keyed verdict:
-    a session whose claim was released but whose node row still names it
-    renders its work order from the graph record."""
-    from fno.graph.load import load_graph
-
-    out: dict[str, tuple[str, Optional[int]]] = {}
-    try:
-        entries = load_graph()
-    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
-        return {}
-    for entry in entries:
-        node_id = entry.get("id")
-        if not node_id:
-            continue
-        pr = entry.get("pr_number")
-        for row in entry.get("sessions") or []:
-            sid = str(row.get("session_id") or "").strip().lower()
-            if sid and sid not in out:
-                out[sid] = (node_id, pr)
-    return out
-
-
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
-    claim_sessions = _claim_sessions()
-    graph_sessions = _graph_session_nodes()
+    session_nodes = _session_node_map()
     # One retirement read for the whole roster, keyed by the
     # REGISTRY identity: the first-8-hex census label resolves no node.
     from fno.agents.retirement import verdicts
@@ -337,23 +286,19 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         handle = handles.get(w.session_id or "")
         reg_name = handle or w.name
         v = verdict_map.get(reg_name)
-        claim_hit = claim_sessions.get((w.session_id or "").strip().lower())
-        if claim_hit:
-            node: Optional[str] = claim_hit[0]
-            node_basis: Optional[str] = "claim"
-            pr: Optional[int] = claim_hit[1]
+        # The session-keyed join answers first: a live claim is the session's
+        # own work order, the graph's sessions[] row is the middle source, and
+        # the name-keyed retirement verdict is the last fallback.
+        joined = session_nodes.get((w.session_id or "").strip().lower())
+        if joined:
+            node: Optional[str] = joined["node"]
+            node_basis: Optional[str] = joined["basis"]
+            pr: Optional[int] = joined.get("pr")
             pr_basis: Optional[str] = "node" if pr is not None else "no-pr"
         else:
-            graph_hit = graph_sessions.get((w.session_id or "").strip().lower())
-            if graph_hit:
-                node = graph_hit[0]
-                node_basis = "graph"
-                pr = graph_hit[1]
-                pr_basis = "node" if pr is not None else "no-pr"
-            else:
-                node = v.node if v else None
-                node_basis = v.node_basis if v else None
-                pr, pr_basis = None, None
+            node = v.node if v else None
+            node_basis = v.node_basis if v else None
+            pr, pr_basis = None, None
         pid = w.session_pid or w.pid
         rows.append(
             {
