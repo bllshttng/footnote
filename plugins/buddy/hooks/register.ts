@@ -42,6 +42,7 @@ let home = ''
 let stateDir = ''
 let sessionId = ''
 let wrapped = false
+let deferred = false
 let lastFrame = ''
 let frameAt = -Infinity
 let unwrappedAt = -Infinity
@@ -76,13 +77,33 @@ async function load($: EngineInterface, now: number): Promise<void> {
   if (fresh) void givePersonality($)
 }
 
+// An fno release from before the move still loads its own copy of the buddy, which stamps fno's
+// store every few minutes. While that copy runs, this one stays off so only one buddy shows.
+async function oldCopyLive($: EngineInterface, now: number): Promise<boolean> {
+  if (!home) return false
+  const dir = `${home}/.claude/plugins/store`
+  try {
+    for (const entry of await $.fs.list(dir)) {
+      if (!entry.name.startsWith('fno_') || !entry.name.endsWith('.json')) continue
+      const old = JSON.parse(await $.fs.read(`${dir}/${entry.name}`))
+      const at = Math.max(old?.fleet?.at ?? 0, old?.feed?.at ?? 0)
+      if (now - at < FLEET_MS + 60_000) return true
+    }
+  } catch {
+    // Nothing readable: no old copy to defer to.
+  }
+  return false
+}
+
 // The buddy used to load inside the fno plugin, whose store is a different file. Bring its soul,
 // reroll bank, and mute over once, so the same buddy comes back after the move.
 async function fromFno($: EngineInterface): Promise<Soul | null> {
   if (!home) return null
   const dir = `${home}/.claude/plugins/store`
   try {
-    for (const entry of await $.fs.list(dir)) {
+    // The marketplace install (fno@footnote) wins over a local dev copy such as fno@inline.
+    const entries = (await $.fs.list(dir)).sort((a, b) => Number(b.name.startsWith('fno_footnote-')) - Number(a.name.startsWith('fno_footnote-')))
+    for (const entry of entries) {
       if (!entry.name.startsWith('fno_') || !entry.name.endsWith('.json')) continue
       const old = JSON.parse(await $.fs.read(`${dir}/${entry.name}`))
       if (!old?.soul?.seed) continue
@@ -406,6 +427,8 @@ export function register(on: On) {
     home = (await $.env.get('HOME')) ?? ''
     sessionId = await $.session.id()
     await load($, now)
+    deferred = await oldCopyLive($, now)
+    if (deferred) muted = true
     // A buddy that is off runs nothing at start: no process, no settings read.
     if (!muted) {
       stateDir = await resolveStateDir($)
@@ -453,6 +476,7 @@ export function register(on: On) {
     const now = await $.clock.now()
     const arg = e.args.trim().toLowerCase()
     if (!buddy) await load($, now)
+    if (deferred) return { text: 'Your fno plugin still runs its own buddy. Update fno (/plugin update fno@footnote), then start a new session.' }
     if (!stateDir) stateDir = await resolveStateDir($)
     if (arg === 'statusline') return { text: await statuslineOn($) }
     if (arg === 'bye') {
