@@ -47,7 +47,7 @@ def _settings(enforce: bool, access: str, rows: list) -> SimpleNamespace:
 def _declare(monkeypatch: pytest.MonkeyPatch, rows: list) -> None:
     from fno import route_resolve as rr
 
-    inv = rr.inventory_from_rows(rows, objective="cheapest-that-clears")
+    inv = _inv(rows)
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 
@@ -102,19 +102,44 @@ def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None)
         os.makedirs(os.path.join(d, "providers"), exist_ok=True)
         with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
             f.write(account)
+    monkeypatch.setenv("FNO_AGENTS_HOME", d)
+    # Same dir, not a child: the identity stamps live under <state_dir>/providers.
+    monkeypatch.setenv("FNO_STATE_DIR", d)
     monkeypatch.setenv("FNO_CONFIG", cfg)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
     return cfg, state
 
 
+def _pin_policy(cfg, enforce: bool, access: str, rows: list) -> None:
+    """Write the declared rows, the strict-routing policy and the two slot
+    lanes onto the pinned config FILE: the verb reads the file, a Python
+    stub is invisible to it."""
+    with open(cfg, "a") as f:
+        for row in rows:
+            f.write("\n[[routing.models]]\n")
+            for key, value in row.items():
+                f.write(f'{key} = "{value}"\n')
+        f.write(
+            f"\n[routing]\nenforce_inventory = {'true' if enforce else 'false'}\n"
+            f'operator_access = "{access}"\n'
+        )
+        for verb in ("target", "blueprint"):
+            f.write(
+                f"\n[agents.profiles.{verb}]\n"
+                'lanes = ["flash-zai"]\non_exhausted = "queue"\n'
+            )
+
+
 def _invoke_inventory(
-    monkeypatch: pytest.MonkeyPatch, capacity: dict | None = None
+    monkeypatch: pytest.MonkeyPatch, capacity: dict | None = None,
+    enforce: bool = False, access: str = "unknown", rows: list | None = None,
 ) -> str:
     from typer.testing import CliRunner
 
     from fno.route_cli import route_app
 
-    _pin_capacity(monkeypatch, **(capacity or {}))
+    cfg, _state = _pin_capacity(monkeypatch, **(capacity or {}))
+    _pin_policy(cfg, enforce, access, rows if rows is not None else _ROWS)
     res = CliRunner().invoke(route_app, ["inventory"])
     assert res.exit_code == 0, res.output
     return res.output
@@ -126,10 +151,7 @@ def test_inventory_names_a_policy_hold_never_an_exhaustion(monkeypatch) -> None:
     operator and the readout says policy-held - never a spent quota. The
     native-labeled subset of the same inventory arms under the same access."""
     _declare(monkeypatch, _ROWS)
-    monkeypatch.setattr(
-        "fno.config.load_settings", lambda: _settings(True, "remote", _ROWS),
-    )
-    out = _invoke_inventory(monkeypatch)
+    out = _invoke_inventory(monkeypatch, enforce=True, access="remote", rows=_ROWS)
     assert "routing=policy-held" in out
     # The policy name on_exhausted may appear; a CAPACITY claim may not.
     assert "capacity=exhausted" not in out
@@ -137,18 +159,12 @@ def test_inventory_names_a_policy_hold_never_an_exhaustion(monkeypatch) -> None:
     # AC5: the native-labeled row qualifies under the same remote access.
     rows = [dict(r, operator_view="claude-native") for r in _ROWS]
     _declare(monkeypatch, rows)
-    monkeypatch.setattr(
-        "fno.config.load_settings", lambda: _settings(True, "remote", rows),
-    )
-    out = _invoke_inventory(monkeypatch)
+    out = _invoke_inventory(monkeypatch, enforce=True, access="remote", rows=rows)
     assert "routing=armed" in out
     assert "access=remote" in out
 
     # Control: no policy, real exhaustion. The hold names its own cause.
     _declare(monkeypatch, _ROWS)
-    monkeypatch.setattr(
-        "fno.config.load_settings", lambda: _settings(False, "unknown", _ROWS),
-    )
     out = _invoke_inventory(monkeypatch, capacity={"claude": "exhausted"})
     assert "routing=capacity-held" in out
 
@@ -159,10 +175,7 @@ def test_inventory_names_an_armed_slot_and_its_work_kind(monkeypatch) -> None:
     the work kind the strict walk applied."""
     rows = [dict(r, operator_view="claude-native", route="") for r in _ROWS]
     _declare(monkeypatch, rows)
-    monkeypatch.setattr(
-        "fno.config.load_settings", lambda: _settings(True, "local", rows),
-    )
-    out = _invoke_inventory(monkeypatch)
+    out = _invoke_inventory(monkeypatch, enforce=True, access="local", rows=rows)
     assert "routing=armed" in out
     assert "access=local" in out
 
@@ -244,3 +257,18 @@ def test_audit_refuses_a_view_confirmed_under_an_old_config(tmp_path: Path) -> N
     report = json.loads(out)
     boundaries = [b["boundary"] for b in report["boundaries"]]
     assert "view-fingerprint-mismatch" in boundaries
+
+
+def _inv(rows):
+    """An Inventory declaring exactly ``rows`` (construction is all that
+    survives in Python; the fold is the verb's)."""
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""), harness=r.get("harness", ""),
+            model=r.get("model", ""), band=r.get("band", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)

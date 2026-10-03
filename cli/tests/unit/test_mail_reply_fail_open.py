@@ -108,10 +108,15 @@ def test_reply_delivers_though_the_registry_is_torn(
     _isolate_empty_discovery(monkeypatch, tmp_path)
     _seed_torn_registry(tmp_path)
     msg = _seed_inbound(from_=SENDER)
+    # The reply runs as a named session would: a bare shell has no sender,
+    # and the delivered-header guard refuses one before the fail-open branch.
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.stamp_from", lambda name=None: "reply-sender"
+    )
 
     result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 14, result.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1, f"reply never reached the bus: {result.output}"
     assert replies[0].to == SENDER
@@ -140,9 +145,11 @@ def test_the_reported_incident_end_to_end(runner, mailbox, monkeypatch, tmp_path
     _seed_source_ahead_registry(tmp_path)
     msg = _seed_inbound(from_=SENDER)
 
-    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(
+        app, ["agents", "mail", "reply", "--to", msg, "--body", "ack", "--from", "lead"]
+    )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 14, result.output
     assert [m.to for m in _bus_msgs() if m.in_reply_to == msg] == [SENDER]
 
 

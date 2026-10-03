@@ -32,12 +32,27 @@ use std::path::PathBuf;
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|flight-acquire|flight-release|long-holds|release-stopped"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|root|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
+    if op == "root" {
+        return run_claim_root(&args[1..]);
+    }
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
+    }
+    if op == "lane-acquire" {
+        return crate::claim_lanes_cli::run_lane_acquire(&args[1..]);
+    }
+    if op == "lane-release" {
+        return crate::claim_lanes_cli::run_lane_release(&args[1..]);
+    }
+    if op == "lane-count" {
+        return crate::claim_lanes_cli::run_lane_count(&args[1..]);
+    }
+    if op == "lane-reconcile" {
+        return crate::claim_lanes_cli::run_lane_reconcile(&args[1..]);
     }
     if op == "queue" {
         // One dispatch line: argument parsing and the arm body live in
@@ -77,6 +92,7 @@ pub fn run_claim(args: &[String]) -> i32 {
 
     let mut holder: Option<String> = None;
     let mut opts = crate::claims::AcquireOpts::default();
+    let mut holding_recovery_lock = false;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut take = |name: &str| -> Option<String> {
@@ -117,6 +133,7 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(r) => opts.root = Some(PathBuf::from(r)),
                 None => return 2,
             },
+            "--holding-recovery-lock" => holding_recovery_lock = true,
             "--json" | "-J" => {} // output is always JSON; accepted for symmetry
             other => {
                 eprintln!("fno-agents: claim: unknown flag {other}");
@@ -247,7 +264,12 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim force-release requires --reason");
                 return 2;
             };
-            match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
+            match crate::claim_store::force_release(
+                &key,
+                reason,
+                opts.root.as_deref(),
+                holding_recovery_lock,
+            ) {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -273,6 +295,31 @@ pub fn run_claim(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// `claim root <key>` — the one claims-root resolver: `{"key","root","dir"}`
+/// for the store `key` resolves against (`root` null for a repo-local key).
+/// The Python callers that need the PATH read this op (`_native_claim("root",
+/// key, [])`); the lockfile operations themselves never needed it, they route
+/// inside `claims::acquire`/`claims_dir`.
+fn run_claim_root(args: &[String]) -> i32 {
+    let Some(key) = args.iter().find(|a| !a.starts_with("--")) else {
+        eprintln!("fno-agents: claim root requires a key argument");
+        return 2;
+    };
+    let root = crate::claims_root::claims_root_for(key);
+    let dir = match crate::claims_root::claims_dir(key, root.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("fno-agents: claim root: {e}");
+            return 2;
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({ "key": key, "root": root, "dir": dir })
+    );
+    0
 }
 
 /// `claim session-pid [--from-pid <pid>] [--json|-J]`: the one resolver of
@@ -822,6 +869,7 @@ pub(crate) fn session_witness_primed_for<'a>(
             .into_iter()
             .filter(|(session, group)| {
                 registry_session_live(registry, session).is_none()
+                    && !row_verdict_live(registry, session)
                     && group.iter().any(|rec| may_consult_transcript(rec))
             })
             .map(|(session, _)| session)
@@ -885,6 +933,7 @@ fn resolve_subject_session(
                 .borrow()
                 .as_ref()
                 .and_then(|i| i.by_name.get(worker).cloned())
+                .flatten()
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
     }
@@ -955,11 +1004,43 @@ fn session_liveness_answer(
 struct SessionRegistryIndex {
     known: bool,
     by_session: std::collections::HashMap<String, (u32, u64)>,
-    by_name: std::collections::HashMap<String, String>,
+    /// The spawn-handover join, name/alias to session id. `None` marks a name
+    /// two live rows claim: the caller answers Unresolved, never a guessed
+    /// session. Terminal rows never join.
+    by_name: std::collections::HashMap<String, Option<String>>,
     /// The row's served `liveness` word and its measurement stamp, keyed by
     /// session id. No pid requirement: 33 of 33 thread rows carry pid None,
     /// and the served pair is the only liveness evidence they carry.
     served: std::collections::HashMap<String, (Option<String>, Option<String>)>,
+    /// The full row per session id, so the liveness readers can ask the
+    /// row_verdict door (`row_verdict::fno_verdict`) whose inside-leg and
+    /// terminal-status rungs read evidence the served word misses.
+    rows: std::collections::HashMap<String, crate::state::RegistryEntry>,
+}
+
+/// One by-name join entry: the unique sid, or `None` once a second live row
+/// claims the name, or the claimer itself carries no sid. First write wins; a
+/// disagreeing or idless second claim poisons the key.
+fn note_name(
+    map: &mut std::collections::HashMap<String, Option<String>>,
+    key: String,
+    sid: Option<String>,
+) {
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(sid);
+        }
+        std::collections::hash_map::Entry::Occupied(mut slot) => {
+            let poison = match (slot.get(), &sid) {
+                (None, _) => false,
+                (Some(_), None) => true,
+                (Some(held), Some(new)) => held != new,
+            };
+            if poison {
+                *slot.get_mut() = None;
+            }
+        }
+    }
 }
 
 fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistryIndex>>) {
@@ -970,31 +1051,41 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     let mut by_session = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
     let mut served = std::collections::HashMap::new();
+    let mut rows = std::collections::HashMap::new();
     let path = crate::paths::AgentsHome::from_env().registry_json();
     let registry = crate::state::load_registry(&path);
     let known = registry.is_ok();
     if let Ok(registry) = registry {
         for e in &registry.entries {
-            let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            if let (Some(pid), Some(start)) = (e.pid, e.pid_start_time) {
-                by_session.insert(sid.to_string(), (pid, start));
+            let sid = e.harness_session_id.as_deref().filter(|s| !s.is_empty());
+            if let Some(sid) = sid {
+                if let (Some(pid), Some(start)) = (e.pid, e.pid_start_time) {
+                    by_session.insert(sid.to_string(), (pid, start));
+                }
+                served.insert(
+                    sid.to_string(),
+                    (e.liveness.clone(), e.liveness_measured_at.clone()),
+                );
+                rows.insert(sid.to_string(), e.clone());
             }
-            served.insert(
-                sid.to_string(),
-                (e.liveness.clone(), e.liveness_measured_at.clone()),
-            );
             // The registry's own name contract (state.rs row_for_token): a
             // name OR any prior alias resolves the row. A handover holder
             // carries the name from mint time, so a worker renamed inside its
-            // window must still resolve through the alias.
-            if !e.name.is_empty() {
-                by_name.insert(e.name.clone(), sid.to_string());
-            }
-            for alias in &e.aliases {
-                if !alias.is_empty() {
-                    by_name.insert(alias.clone(), sid.to_string());
+            // window must still resolve through the alias. The mail_envelope
+            // join shape: terminal rows never join, a name two rows claim
+            // maps to None rather than a last-write-wins sid, and an idless
+            // live row still claims its name - session-capture races leave
+            // rows briefly idless, so a claim without a unique sid behind it
+            // is its own ambiguity.
+            if !crate::loop_reign::is_terminal(e) {
+                let claim = sid.map(str::to_string);
+                if !e.name.is_empty() {
+                    note_name(&mut by_name, e.name.clone(), claim.clone());
+                }
+                for alias in &e.aliases {
+                    if !alias.is_empty() {
+                        note_name(&mut by_name, alias.clone(), claim.clone());
+                    }
                 }
             }
         }
@@ -1004,6 +1095,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
         by_session,
         by_name,
         served,
+        rows,
     });
 }
 
@@ -1029,6 +1121,23 @@ fn registry_session_live(registry: &SessionRegistryIndex, session: &str) -> Opti
         .map(|_| REGISTRY_SERVED_LIVE)
 }
 
+/// Witness basis for a session the row_verdict door answers live.
+const ROW_VERDICT_LIVE: &str = "row-verdict-live";
+
+/// The row_verdict door's live answer for one session: the inside-leg rung
+/// and the terminal-status rung read evidence the served word misses - the
+/// specimen is a pidless claude bg holder whose fresh working report
+/// kept arriving while its lapsed claim was reaped for want of a pid.
+/// Absent and Unknown answer false: the door decides liveness, never death.
+fn row_verdict_live(registry: &SessionRegistryIndex, session: &str) -> bool {
+    registry.rows.get(session).is_some_and(|entry| {
+        matches!(
+            crate::row_verdict::fno_verdict(entry),
+            crate::row_verdict::RowVerdict::Live(_)
+        )
+    })
+}
+
 /// The uncached resolution: registry row first, then transcript.
 fn session_liveness_answer_uncached(
     session: &str,
@@ -1044,6 +1153,19 @@ fn session_liveness_answer_uncached(
     };
     if let Some(basis) = registry_live {
         return crate::claims::SessionLiveness::Live(basis);
+    }
+    // The row verdict door before the transcript walk: a fresh inside-leg
+    // report or a live pid on the row holds the claim where the served word
+    // went stale (the reap this closes). Unknown and Finished fall through - the
+    // door decides liveness, never death, and the transcript still answers.
+    {
+        let borrowed = index.borrow();
+        let registry = borrowed
+            .as_ref()
+            .expect("session registry index initialized");
+        if row_verdict_live(registry, session) {
+            return crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE);
+        }
     }
     // The row is missing or its pid is stale (a resume leaves rows behind) -
     // the transcript still answers. Reachability is the liveness reading;
@@ -1702,6 +1824,7 @@ mod tests {
         let s_live = format!("xa45c-live-{uniq}");
         let s_wire1 = format!("xa45c-wire-{uniq}");
         let s_worker = format!("xa45c-worker-{uniq}");
+        let s_leg = format!("xa45c-leg-{uniq}");
         with_registry(
             serde_json::json!([
                 {
@@ -1720,6 +1843,22 @@ mod tests {
                     "created_at": "2026-09-12T00:00:00Z",
                     "harness_session_id": s_worker,
                 },
+                {
+                    // The incident shape: a pidless thread row whose fresh
+                    // inside-leg report is the only live evidence. The
+                    // row_verdict rung answers it without the transcript.
+                    "name": "w-leg",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-12T00:00:00Z",
+                    "harness_session_id": s_leg,
+                    "inside_leg": {
+                        "state": "working",
+                        "seq": 1,
+                        "received_at": crate::daemon::now_rfc3339_like(),
+                        "ttl_ms": 90_000u64,
+                    },
+                },
             ]),
             || {
                 let old_path = std::env::var("PATH").unwrap_or_default();
@@ -1734,6 +1873,7 @@ mod tests {
                     witness_rec("holder-a", &s_live),
                     witness_rec("holder-b", &s_wire1),
                     witness_rec("spawn-handover:w-thread", "s-elsewhere"),
+                    witness_rec("holder-leg", &s_leg),
                 ];
                 let (witness, _drain) = session_witness_primed_for(&records);
                 // The verdicts agree with the lazy path: registry-live off
@@ -1744,7 +1884,16 @@ mod tests {
                         crate::claims::basis::REGISTRY_SESSION_LIVE
                     )
                 ));
-                for rec in records.iter().skip(1) {
+                // The row-verdict rung: a fresh inside-leg report on a
+                // pidless row answers Live without the transcript wire
+                // (the reap is held instead of starving).
+                assert!(matches!(
+                    witness(&records[3]),
+                    crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE)
+                ));
+                // The two WIRE sessions only: the fourth record is the
+                // row-verdict-live session, asserted above.
+                for rec in records.iter().skip(1).take(2) {
                     assert!(matches!(
                         witness(rec),
                         crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
@@ -1772,6 +1921,10 @@ mod tests {
                 assert!(
                     !logged.contains(s_live.as_str()),
                     "the registry-live session stays off the wire: {logged:?}"
+                );
+                assert!(
+                    !logged.contains(s_leg.as_str()),
+                    "the row-verdict-live session stays off the wire: {logged:?}"
                 );
             },
         );
@@ -2094,6 +2247,28 @@ mod tests {
                 ));
             },
         );
+        // Two live rows claiming one name, one of them idless (a
+        // session-capture race): the handover resolves to neither row.
+        with_registry(
+            serde_json::json!([
+                {
+                    "name": "twin", "status": "live", "cwd": "/w",
+                    "created_at": "2026-09-17T00:00:00Z",
+                    "harness_session_id": "s-t1",
+                },
+                {
+                    "name": "twin", "status": "live", "cwd": "/w",
+                    "created_at": "2026-09-17T00:00:00Z",
+                },
+            ]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                load_session_registry_index(&index);
+                let rec = witness_rec("spawn-gate:1:twin", "s-king");
+                assert!(resolve_subject_session(&rec, &index).is_none());
+            },
+        );
     }
 
     #[test]
@@ -2101,10 +2276,11 @@ mod tests {
         let index = std::cell::RefCell::new(Some(SessionRegistryIndex {
             known: true,
             by_session: std::collections::HashMap::new(),
-            by_name: [("w-gate".to_string(), "s-worker".to_string())]
+            by_name: [("w-gate".to_string(), Some("s-worker".to_string()))]
                 .into_iter()
                 .collect(),
             served: std::collections::HashMap::new(),
+            rows: std::collections::HashMap::new(),
         }));
         let gate = witness_rec("spawn-gate:36244:w-gate", "s-king");
         let (holder_session, dispatched_by) = holder_session_fields(&gate, &index);

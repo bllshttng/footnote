@@ -206,21 +206,119 @@ fn keeper_readopt_adopts_at_a_fresh_unreconciled_id_when_the_birth_id_is_taken()
 fn keeper_readopt_unlinks_a_socket_with_no_live_keeper_and_names_it() {
     let dir = crate::proto::mux_dir().join("panes");
     std::fs::create_dir_all(&dir).unwrap();
-    let sock = dir.join("kt-9.sock");
-    std::fs::write(&sock, b"").unwrap(); // a dead keeper's leftover
+    // Three stale sockets: the power-loss shape. Each must be refused at
+    // once (stale-is-final), not retried for the handshake deadline, so the
+    // whole sweep lands in well under a second where the retrying handshake
+    // used to cost 5s per socket (x-dbdb AC1).
+    let socks: Vec<_> = ["kt-7.sock", "kt-8.sock", "kt-9.sock"]
+        .iter()
+        .map(|n| dir.join(n))
+        .collect();
+    for sock in &socks {
+        std::fs::write(sock, b"").unwrap(); // a dead keeper's leftover
+    }
 
     let mut core = empty_core();
     core.session_name = "kt".to_string();
+    let started = std::time::Instant::now();
     core.keeper_readopt();
-
     assert!(
-        !sock.exists(),
-        "a socket with nothing behind it is removed, not waited on"
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "three stale sockets must be refused at once, not retried: {:?}",
+        started.elapsed()
     );
+
+    for sock in &socks {
+        assert!(
+            !sock.exists(),
+            "a socket with nothing behind it is removed, not waited on: {}",
+            sock.display()
+        );
+    }
     assert!(
         core.panes.is_empty(),
         "no pane is minted for a stale socket"
     );
+}
+
+#[test]
+fn keeper_handshake_is_bounded_and_names_the_keepers_death() {
+    // x-dbdb AC2 + AC3: the handshake cannot park the server. The adopt
+    // road against a listener that never answers Identify errors within the
+    // deadline and names the socket; the spawn road against a keeper that
+    // dies mid-handshake names the exit signal, never a bare os error.
+    let dir = crate::proto::mux_dir().join("panes");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Adopt road (AC2): a live listener that accepts and never answers.
+    let wedged = dir.join("kz-2.sock");
+    let _ = std::fs::remove_file(&wedged);
+    let _listener = std::os::unix::net::UnixListener::bind(&wedged).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+    let started = std::time::Instant::now();
+    let err = crate::pty::adopt_keeper_socket(&wedged, 2, tx, exit_tx)
+        .err()
+        .expect("a keeper that never answers must error, not park the caller");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(3500),
+        "the wedged keeper must cost at most the 3s deadline: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        err.contains("kz-2.sock"),
+        "the error names the socket: {err}"
+    );
+    assert!(
+        err.contains("did not finish the handshake"),
+        "the error names the bound it hit: {err}"
+    );
+    let _ = std::fs::remove_file(&wedged);
+
+    // Spawn road (AC3): a fake keeper binds, accepts one Identify byte,
+    // then SIGKILLs itself, so the handshake fails after connect. If the
+    // machine has no python3 the spawn road is skipped loudly.
+    let python3 = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("pass")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    if python3.is_err() {
+        eprintln!("SKIPPING the spawn road: no python3 for the fake keeper");
+        return;
+    }
+    let fake = dir.join("kz-fake-keeper.py");
+    std::fs::write(
+        &fake,
+        "#!/usr/bin/env python3\nimport socket, os, signal, sys\nargs = sys.argv[1:]\nsock = args[args.index(\"--sock\") + 1]\ns = socket.socket(socket.AF_UNIX)\ns.bind(sock)\ns.listen(1)\nc, _ = s.accept()\nc.recv(1)\nos.kill(os.getpid(), signal.SIGKILL)\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let permit = crate::process_admission::admit_fleet().expect("test permit");
+    let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+    let (exit_tx2, _exit_rx2) = tokio::sync::mpsc::channel(4);
+    let err = crate::pty::PtyShell::spawn_cmd_keeper_with_permit(
+        &fake,
+        &["sleep".to_string(), "1".to_string()],
+        24,
+        80,
+        None,
+        "kz",
+        4,
+        tx2,
+        exit_tx2,
+        permit,
+    )
+    .err()
+    .expect("the keeper died mid-handshake; spawn must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("keeper exited"), "names the death: {msg}");
+    assert!(msg.contains("signal 9"), "names the signal: {msg}");
 }
 
 #[test]

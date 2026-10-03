@@ -30,9 +30,9 @@ is judged correctly. Rust staleness is proven only when full evidence is present
 (cargo binary exists, the binary self-reports a crates/ rev, crates/ subtree rev
 known); any gap degrades to unknown rather than crying wolf.
 
---fix now repairs the Rust side directly : a rust-only stale
-verdict calls ``update._refresh_rust_bins`` without triggering a full Python
-reinstall.
+--fix now runs the native `fno doctor update` once for either stale kind: its
+rust leg refreshes the cargo bins and its uv leg reinstalls the Python
+package, without a second full reinstall path.
 
 Exit code is non-zero only when staleness is **proven**.
 """
@@ -90,13 +90,7 @@ def _read_marker() -> Optional[str]:
     A missing marker (install predates the feature) is "rev unknown", NOT a
     false "fresh" - the caller falls back to the capability probe.
     """
-    from fno import update
-
-    try:
-        text = update._INSTALLED_REV_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
+    return _probes(None).get("installed_rev")
 
 
 def _resolve_source(source: Optional[Path]) -> Optional[Path]:
@@ -105,12 +99,8 @@ def _resolve_source(source: Optional[Path]) -> Optional[Path]:
     Returns None when no source is resolvable (PyPI install, repo absent), so
     the verdict degrades to ``unknown`` rather than hard-failing.
     """
-    from fno import update
-
-    try:
-        return update._discover_source(source)
-    except update.SourceNotFoundError:
-        return None
+    probe = _probes(source).get("source")
+    return Path(probe) if probe else None
 
 
 def _plugin_file_relative_path(active_path: Path) -> Optional[str]:
@@ -248,10 +238,139 @@ def plugin_file_command(
 
 
 def _source_rev(source: Path) -> Optional[str]:
-    """``git rev-parse HEAD`` of the source (reuses update's network-free probe)."""
-    from fno import update
+    """``git rev-parse HEAD`` of the source, from the native readiness probe."""
+    return _probes(None).get("source_rev")
 
-    return update._source_rev(source)
+
+# ---------------------------------------------------------------------------
+# Native-verb transports (the update leg lives in the front door binary)
+# ---------------------------------------------------------------------------
+
+# One memoized `fno doctor update --check` per process: the readiness payload
+# whose `probes` object holds the machine facts the collectors read. The
+# first caller's `source` seeds it; a doctor run passes one source throughout.
+_PROBES: Optional[dict] = None
+
+
+def _front_door() -> Optional[str]:
+    """The native front door (`fno`): PATH first, then the cargo install."""
+    found = shutil.which("fno")
+    if found:
+        return found
+    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+    candidate = cargo_home / "bin" / "fno"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _run_update_verb(door: str, source: Optional[Path]) -> int:
+    """One `fno doctor update` run; its exit code is the --fix exit code."""
+    argv = [door, "doctor", "update"]
+    if source is not None:
+        argv += ["--source", str(source)]
+    return subprocess.run(argv).returncode
+
+
+def _probes(source: Optional[Path]) -> dict:
+    """The `fno doctor update --check` payload, run once and reused. An
+    unanswerable front door degrades to {} - every collector reads that as
+    unknown, never fresh."""
+    global _PROBES
+    if _PROBES is None:
+        _PROBES = _run_probes(source)
+    return _PROBES
+
+
+def _run_probes(source: Optional[Path]) -> dict:
+    door = _front_door()
+    if not door:
+        return {}
+    argv = [door, "doctor", "update", "--check"]
+    if source is not None:
+        argv += ["--source", str(source)]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=120
+        )
+        data = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        return data if isinstance(data, dict) else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+
+
+def _source_pin_transport(sub: str, args: list[str]) -> Optional[dict]:
+    """One hidden `fno-agents source-pin` invocation; None = cannot answer."""
+    try:
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_binary()
+    except Exception:  # noqa: BLE001
+        return None
+    if not binary:
+        return None
+    try:
+        proc = subprocess.run(
+            [str(binary), "source-pin", sub, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _component_verdict_transport(
+    verdict_bin: Path,
+    src: Path,
+    subtree: str,
+    bindir: Path,
+    python_tool: dict,
+) -> Optional[dict]:
+    """One `component-verdict` probe against the deployed verdict binary;
+    None = cannot answer (the caller renders the named gap, never fresh)."""
+    argv = [
+        str(verdict_bin),
+        "component-verdict",
+        "--bindir",
+        str(bindir),
+        "--expected",
+        subtree,
+        "--agents-dir",
+        str(src.parent / "crates" / "fno-agents"),
+        "--include-mux",
+    ]
+    if python_tool.get("rev"):
+        argv += ["--python-rev", python_tool["rev"]]
+    for flag, key in (
+        ("--python-expected", "expected"),
+        ("--python-evidence", "evidence"),
+        ("--python-error", "error"),
+    ):
+        if python_tool.get(key):
+            argv += [flag, python_tool[key]]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=90.0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        report = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(report, dict) and isinstance(report.get("components"), list):
+        return report
+    return None
+
 
 
 def _deployed_config_keys() -> Optional[frozenset[str]]:
@@ -353,6 +472,32 @@ def _installed_pkg_dir() -> Optional[Path]:
         return None
 
 
+def _live_tool_env_processes() -> list[str]:
+    """ps argv lines of live processes running from the installed fno tool env
+    (the ancestor of the package dir named ``fno``). The stale verdict's
+    proposed repair replaces that env in place - the 2026-10-02 study clobber
+    (gap audit blockers 1/3) - so the verdict names them first; an unfamiliar
+    layout or unreadable process table reads [] (skip).
+    """
+    pkg = _installed_pkg_dir()
+    if pkg is None:
+        return []
+    try:  # the package dir sits at <tool>/fno/lib/*/site-packages/fno
+        env_root = pkg.parents[[p.name for p in pkg.parents].index("fno")]
+    except ValueError:
+        return []
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=False, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    root, me = str(env_root), f"{os.getpid()} "
+    return [
+        s
+        for line in out.splitlines()
+        if (s := line.strip()) and root in s and not s.startswith(me) and " awk -" not in s and " ps -" not in s
+    ]
+
+
 def _pkg_py_fingerprint(pkg_dir: Path) -> Optional[dict[str, str]]:
     """Map each ``.py`` under ``pkg_dir`` to its content sha256, keyed by relpath.
 
@@ -434,32 +579,26 @@ def _probe_installed_verb() -> ProbeResult:
 def _read_rust_marker() -> Optional[str]:
     """Return the installed-rust-rev marker content, or None if missing/empty.
 
-    Thin wrapper around update._read_rust_marker so this collector is
+    Reads the native readiness payload so this collector stays
     monkeypatchable at the doctor module level (mirrors _read_marker's style).
     """
-    from fno import update
-
-    return update._read_rust_marker()
+    return _probes(None).get("rust_marker")
 
 
 def _rust_source_rev(source: Optional[Path]) -> Optional[str]:
     """Return the last crates/ subtree commit SHA for the given source, or None.
 
-    None when source is None or when the git probe fails. Wrapper around
-    update._rust_subtree_rev so the collector is monkeypatchable.
+    None when source is None or when the git probe fails. Reads the native
+    readiness payload so the collector is monkeypatchable.
     """
     if source is None:
         return None
-    from fno import update
-
-    return update._rust_subtree_rev(source)
+    return _probes(None).get("rust_subtree_rev")
 
 
 def _cargo_bin_present() -> bool:
     """Return True if the cargo-installed fno-agents binary exists."""
-    from fno import update
-
-    return update._cargo_installed_bin() is not None
+    return bool(_probes(None).get("cargo_bin"))
 
 
 def _cargo_bin_path() -> Optional[str]:
@@ -470,10 +609,7 @@ def _cargo_bin_path() -> Optional[str]:
     from it -- not from ``resolve_installed_binary()``, which can return a
     bundled/launcher sibling when one is present (codex PR #491).
     """
-    from fno import update
-
-    cargo_bin = update._cargo_installed_bin()
-    return str(cargo_bin) if cargo_bin else None
+    return _probes(None).get("cargo_bin_path")
 
 
 def _binary_version_json(binary: Optional[str]) -> dict:
@@ -655,14 +791,15 @@ def _component_convergence(
     verdict_bin = rust.get("binary")
     if not subtree or not verdict_bin or not Path(verdict_bin).is_file():
         return []
-    from fno import update as _update
-
     cargo_bin = _cargo_bin_path()
     # Probe the directory the RESOLVED binary lives in: on a wheel install with
     # no cargo bin, ~/.cargo/bin is the wrong tree and would read all-missing.
     bindir = Path(cargo_bin).parent if cargo_bin else Path(verdict_bin).parent
-    report = _update._component_verdict(
-        src, subtree, bindir, Path(verdict_bin),
+    report = _component_verdict_transport(
+        Path(verdict_bin),
+        src,
+        subtree,
+        bindir,
         python_tool={
             "rev": marker,
             "expected": _source_rev(src),
@@ -882,8 +1019,8 @@ def _cost_check() -> int:
     typer.echo(
         f"fno doctor: cost-check WARN: session {session_id} "
         f"ours=${ours:.2f} reference=${theirs:.2f} divergence={pct} "
-        f"(> {_COST_DIVERGENCE_THRESHOLD * 100:.0f}% - pricing table or "
-        "dedup drift; see scripts/lib/cost_tracker.py)"
+        f"(> {_COST_DIVERGENCE_THRESHOLD * 100:.0f}% - catalog pricing or "
+        "dedup drift; see crates/fno-agents/src/model_price.rs)"
     )
     return 1
 
@@ -896,14 +1033,12 @@ def _cost_check() -> int:
 def _cargo_installed_mux() -> Optional[Path]:
     """Path to the cargo-installed mux front-door binary (`fno`), or None.
 
-    Thin wrapper around ``update._cargo_installed_mux`` (single source of truth,
-    shared with `fno doctor update`'s install path) so this collector stays patchable.
+    Thin wrapper over the native readiness payload (single source of truth,
+    shared with `fno doctor update`'s probes) so this collector stays patchable.
     Probes the default ``$CARGO_HOME/bin``; a custom-``--root`` install is caught
     instead by the ``which("fno")`` + mux-verb probe in ``_mux_front_door_report``.
     """
-    from fno import update
-
-    return update._cargo_installed_mux()
+    return _probes(None).get("cargo_mux_path")
 
 
 def _probe_is_mux(fno_path: str) -> bool:
@@ -1187,8 +1322,6 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
     cannot answer degrades to unknown with the failure named, never a
     fabricated distance.
     """
-    from fno import update
-
     report: dict[str, Any] = {
         "status": "unknown",
         "behind": None,
@@ -1200,7 +1333,7 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
         report["detail"] = "source checkout not resolved"
         return report
 
-    data = update._source_pin_call("sync", ["--source", str(source)])
+    data = _source_pin_transport("sync", ["--source", str(source)])
     if data is None:
         report["detail"] = "source-pin helper unavailable (missing or pre-source-pin fno-agents)"
         return report
@@ -2171,6 +2304,10 @@ def _emit_human(
                     "Run fno doctor update (or fno doctor --fix); the component "
                     "lines below name which one."
                 )
+        # The proposed repair replaces the tool env in place; name anything
+        # still running from it (gap audit blocker 3, the study clobber).
+        if live := _live_tool_env_processes():
+            out(f"fno doctor: {len(live)} live process(es) run from the installed tool env, e.g. {live[0][:160]}. The repair above would replace them mid-run; stop them first.")
     elif (
         result.get("content_indeterminate")
         and result.get("installed_rev") is not None
@@ -2263,10 +2400,10 @@ def _emit_human(
         else:
             out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
     else:
-        from fno import update as _update
-
-        for line in _update._component_lines({"components": non_fresh}, prefix="fno doctor"):
-            out(line)
+        for row in non_fresh:
+            row_line = row.get("line") if isinstance(row, dict) else None
+            if row_line:
+                out(f"fno doctor: {row_line}")
 
     daemon_drift = result.get("daemon_drift")
     if daemon_drift:
@@ -3318,15 +3455,11 @@ def _a2a_handle_re() -> "re.Pattern[str]":
     the flip is undeliverable, so the dead-letter report is the only thing that
     surfaces it. Prefixes come from the complete supported-harness roster
     (KNOWN_HARNESSES), not the narrower capability-backed set, so adding a
-    harness to the roster cannot silently drop it out of the scan - the same
-    anti-drift property _legacy_handle_re in harness_identity carries.
+    harness to the roster cannot silently drop it out of the scan.
     """
     from fno.harness_names import KNOWN_HARNESSES
 
     return re.compile(rf"^(?:(?:{'|'.join(KNOWN_HARNESSES)})-)?[0-9a-fA-F]{{6,}}$")
-
-
-_A2A_HANDLE_RE = _a2a_handle_re()
 
 
 def _plugin_hooks_json() -> Optional[Path]:
@@ -3466,7 +3599,7 @@ def _stale_dead_letters(
             # addressee. The regex stays as the fallback for legacy handle mail
             # that predates the US6 stamp.
             meta = getattr(m, "meta", None) or {}
-            if meta.get("owner") or _A2A_HANDLE_RE.match(to):
+            if meta.get("owner") or _a2a_handle_re().match(to):
                 recips.add(to)
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings
         return []
@@ -4052,8 +4185,6 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     and the setup wizard (`report_machine_blockers` in `setup_cli.py`) stay
     two callers of one authority instead of two implementations that drift
 ."""
-    from fno import update as _update
-
     src = _resolve_source(source)
     source_rev = _source_rev(src) if src is not None else None
     marker = _read_marker()
@@ -4093,10 +4224,10 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # Advisory process-freshness: a long-running mux server still on the
     # OLD proto after an upgrade. Binary staleness is above; this is the running
     # PROCESS. Never changes status/exit.
-    result["mux_server_stale"] = _update.stale_mux_servers()
+    result["mux_server_stale"] = _probes(None).get("mux_server_stale") or []
 
     # Advisory running-process census; never changes status/exit.
-    result["running_components"] = _update.running_components() or []
+    result["running_components"] = _probes(None).get("running_components") or []
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()
@@ -4361,8 +4492,6 @@ def doctor_command(
         # semantics with the staleness verdict.
         raise typer.Exit(_cost_check())
 
-    from fno import update
-
     result = build_report(source)
     blockers = _blockers(result)
     source_checkout_blocked = (
@@ -4491,80 +4620,21 @@ def doctor_command(
                 "run `fno doctor --fix` without --json to repair.",
                 err=True,
             )
-        elif result["python_stale"]:
+        elif result["python_stale"] or result["rust_stale"]:
+            # One native update answers both stale kinds: its rust leg
+            # refreshes the cargo bins and its uv leg reinstalls the Python
+            # package. The verb's own IN_PROGRESS guard and source-pin gate
+            # apply; its exit code is the fix's exit code (ruling d-f2bd8d86:
+            # a failed step no longer exits 0).
+            door = _front_door()
+            if not door:
+                typer.echo(
+                    "fno doctor: --fix needs the native front door `fno` on PATH; none found.",
+                    err=True,
+                )
+                raise typer.Exit(1)
             typer.echo("fno doctor: --fix running `fno doctor update`...", err=True)
-            # Delegate to update (its own IN_PROGRESS guard applies). Its new
-            # rust leg refreshes both Python and Rust. On Unix this execs and
-            # never returns; the post-update marker then matches HEAD.
-            update.update_command(source=source, dry_run=False, force=False)
-            return
-        elif result["rust_stale"]:
-            # Rust-only stale: call the refresh helper directly (no needless
-            # Python reinstall). src cannot be None here because rust_stale
-            # requires rust_source_rev, which requires a resolved source.
-            # Same gate as update_command: an unresolvable or refused pin
-            # means the source is unproven or a worktree whose HEAD is not
-            # an ancestor of origin/main, and refreshing from it installs
-            # unmerged code machine-wide. A pin resolved to a DIFFERENT
-            # path than src is the same hazard: a concurrent `--source`
-            # repin between the verdict read and here would gate one
-            # checkout and refresh another. Name the path so the reader
-            # sees the worktree.
-            pin = update._resolve_source_pin(source)
-            if (
-                pin is None
-                or pin.get("decision") == "refuse"
-                or not pin.get("path")
-                or src is None
-                or Path(pin["path"]) != src
-            ):
-                rpath = (pin or {}).get("path") or src
-                reason = (pin or {}).get("refusal") or (
-                    "resolved pin does not match the source the verdict measured"
-                )
-                typer.echo(
-                    "fno doctor: --fix refused: source "
-                    f"{rpath} failed the source-pin gate: {reason}.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-            if update._target_in_progress():
-                typer.echo(
-                    "fno doctor: --fix refused: target-state.md shows status: IN_PROGRESS. "
-                    "Refreshing rust bins mid-loop risks binary skew; "
-                    "run `fno doctor update --force` after the loop, or to override now.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-            assert src is not None, "rust_stale True but src is None - logic error"
-            outcome = update._refresh_rust_bins(src, force=False, dry_run=False)
-            if outcome == "refreshed":
-                typer.echo("fno doctor: rust bins refreshed successfully.", err=True)
-                raise typer.Exit(0)
-            elif outcome == "fresh":
-                # A concurrent refresh can land between the verdict read and
-                # the repair; the goal state is achieved either way.
-                typer.echo(
-                    "fno doctor: rust bins already fresh (refreshed concurrently);"
-                    " nothing to fix.",
-                    err=True,
-                )
-                raise typer.Exit(0)
-            elif outcome == "refreshed-no-marker":
-                # Bins rebuilt, but no marker landed: the
-                # stale verdict will not converge - the next doctor run
-                # still reports rust stale. Exit nonzero so loop callers
-                # don't believe the repair worked.
-                typer.echo(
-                    "fno doctor: rust bins refreshed but the marker was not"
-                    " written; the stale verdict will not converge."
-                    " Check ~/.fno permissions and rerun `fno doctor`.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-            else:
-                typer.echo(f"fno doctor: rust refresh outcome: {outcome}.", err=True)
-                raise typer.Exit(1)
+            raise typer.Exit(_run_update_verb(door, source))
         else:
             typer.echo("fno doctor: nothing to fix.", err=True)
 

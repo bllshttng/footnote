@@ -110,8 +110,7 @@ def _patch_spawn(monkeypatch, *, claim_node=True, fail_on=None):
             raise adv.SpawnError("spawn boom")
         calls.append({"node": node_id, "root": root, "slug": slug})
         if claim_node:
-            acquire_claim(f"node:{node_id}", f"worker:{node_id}", ttl_ms=60_000,
-                          root=adv._claims_root_for(f"node:{node_id}"))
+            acquire_claim(f"node:{node_id}", f"worker:{node_id}", ttl_ms=60_000)
         return "short-" + node_id[-4:]
 
     monkeypatch.setattr(adv, "_spawn_worker", fake)
@@ -433,10 +432,8 @@ def test_spawn_failure_isolated_reservation_released(iso, tmp_path, monkeypatch)
     failed = [r for r in res.child_results if r.decision == "failed"]
     assert [r.node_id for r in failed] == ["x-web"]
     # no stale node:<id> for the failed child, and its dispatch reservation released
-    assert claim_status("node:x-web",
-                        root=adv._claims_root_for("node:x-web")).get("state") != "live"
-    assert claim_status("dispatch:x-web",
-                        root=adv._claims_root_for("dispatch:x-web")).get("state") != "live"
+    assert claim_status("node:x-web").get("state") != "live"
+    assert claim_status("dispatch:x-web").get("state") != "live"
     evs = _events(iso)
     fe = [e for e in evs if e["type"] == "advance_failed"]
     assert len(fe) == 1 and fe[0]["data"]["mission"] == "x-EPIC"
@@ -487,8 +484,7 @@ def test_idempotence_not_ttl_dependent(iso, tmp_path, monkeypatch):
 
     # etl's failed reservation must have been released (no live dispatch:<id>) so
     # the second pass can re-dispatch it WITHOUT waiting on a TTL.
-    assert claim_status("dispatch:x-etl",
-                        root=adv._claims_root_for("dispatch:x-etl")).get("state") != "live"
+    assert claim_status("dispatch:x-etl").get("state") != "live"
 
     _patch_spawn(monkeypatch)  # etl now succeeds on retry
     second = adv.advance_epic("x-EPIC", events_path=iso)
@@ -661,8 +657,7 @@ def test_boot_window_reservation_no_longer_caps_a_sibling(iso, tmp_path, monkeyp
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
     _patch_headroom(monkeypatch, 2)
     # x-a is mid boot-window: it holds ONLY a dispatch:<id> reservation, no node claim.
-    acquire_claim("dispatch:x-a", "advance:999", ttl_ms=60_000,
-                  root=adv._claims_root_for("dispatch:x-a"))
+    acquire_claim("dispatch:x-a", "advance:999", ttl_ms=60_000)
     _patch_spawn(monkeypatch)
     # only x-b is offered as ready (x-a is filtered out by the real ready surface)
     monkeypatch.setattr(adv, "_ready_leaf_children", lambda e: _ready(("x-b", "web")))

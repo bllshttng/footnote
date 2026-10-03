@@ -22,7 +22,6 @@ cli/tests/agents/test_grok_spawn_journey.py::test_grok_spawn_journey_public_surf
 cli/tests/agents/test_handle_collisions.py::test_codex_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_handle_collisions.py::test_legacy_opencode_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_harness_capability_parity.py::test_resolved_rows_match_between_readers::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_harness_roster_parity.py::test_rust_roster_matches_python_readable::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_king_drain_cache.py::graph::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_king_shape_cli.py::test_shape_court_lands_on_the_manifest_and_echoes::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_king_shape_cli.py::test_shape_is_idempotent_on_a_second_call::mark.skipif  # on main before this ratchet
@@ -103,17 +102,6 @@ cli/tests/integration/test_rank_operator_only.py::_binary::pytest.skip  # on mai
 cli/tests/integration/test_target_node_claim.py::_sandbox::pytest.skip  # on main before this ratchet: the sandbox helper skips when no dev fno-agents build exists
 cli/tests/integration/test_target_node_claim.py::_sandbox::pytest.skip  # second site: the real-acquire delegate needs the fno-py console script beside the test interpreter
 cli/tests/integration/test_triage_context.py::test_cli_context_tolerates_legacy_dict_cost_sessions::mark.skip  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_cargo_failure_preserves_python_update_and_refuses_freshness::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_doctor_fix_python_stale_delegates_to_real_update_command::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_malformed_version_output_halts_the_rust_leg::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_missing_cargo_names_component_evidence_and_still_installs_python::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_ordinary_update_keeps_both_refreshes::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_successful_update_chains_marker_write::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_guard.py::test_update_without_source_rev_skips_marker_chain::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_rust_leg.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_rust_leg.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/integration/test_update_rust_leg.py::test_component_verdict_binary_journey::pytest.skip  # on main before this ratchet
-cli/tests/integration/test_update_rust_leg.py::test_update_rust_leg_journey::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_verify_child_promise.py::test_diagnostic_symmetry_unreadable::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_verify_child_promise.py::test_diagnostic_symmetry::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_worktree_cleanup_merged.py::_wire_real_reapable::pytest.skip  # on main before this ratchet
@@ -149,9 +137,6 @@ cli/tests/unit/test_claims_core.py::<module>::mark.skipif  # on main before this
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_live_session_never_reads_stale::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_unresolved_names_the_witness::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_without_session_id_keeps_legacy_stale::marker.requires_rust  # on main before this ratchet
-cli/tests/unit/test_cost_characterization.py::test_parity_cost_tracker_estimate::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_cost_characterization.py::test_parity_register_task_ledger::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_cost_characterization.py::test_parity_session_cost_json::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_coverage_gate.py::test_attestation_chain_reads_a_row_that_rotated_out::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_doctor_lanes.py::test_live_macmon_smoke_answers_on_a_healthy_machine::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_failure_fixtures_wall_clock_bound_never_cost::pytest.skip  # on main before this ratchet
@@ -176,8 +161,6 @@ cli/tests/unit/test_keyless_smoke.py::test_keyless_dispatch_to_terminal_reports_
 cli/tests/unit/test_lane_experiment_contract.py::_require_seed_bank::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_launch_pick.py::TestVerbParity.test_the_argv_the_loop_shells_resolves_to_a_real_command::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_launch_pick.py::TestVerbParity.test_the_argv_the_loop_shells_resolves_to_a_real_command::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_law_scope.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/unit/test_law.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_mail_cli.py::test_named_send_ruling_appends_dated_node_block_before_transport::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_mail_keeper_lane.py::test_the_journey_mail_send_delivers_to_a_live_keeper_hosted_thread::mark.xfail  # on main before this ratchet
 cli/tests/unit/test_mail_keeper_lane.py::test_the_journey_mail_send_delivers_to_a_live_keeper_hosted_thread::pytest.skip  # on main before this ratchet
@@ -242,3 +225,7 @@ cli/tests/integration/test_collision.py::_native_supersede::pytest.skip  # nativ
 cli/tests/unit/test_contain.py::_native_contain::pytest.skip  # native contain door: the guard ladder is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_decompose.py::_native_supersede::pytest.skip  # native supersede door: the release contract is the Rust leg's; no dev build means no door to pin
 cli/tests/unit/test_pr_closure_producer.py::_native_supersede::pytest.skip  # native supersede door: the evidence-record contract is the Rust leg's; no dev build means no door to pin
+cli/tests/agents/test_rust_runtime.py::test_spawn_seam_injects_config_defaults::pytest.skip  # native door: the compose reads the config FILE through the fno-agents binary; without a dev build there is no door to pin
+cli/tests/agents/test_spawn_defaults.py::_pin_world::pytest.skip  # native door: the compose parity drives the fno-agents binary; without a dev build there is no door to pin
+cli/tests/agents/test_dispatch_harness_stage_table.py::test_spawn_door_answers_the_same_harness::pytest.skip  # native door: both doors drive the fno-agents binary; without a dev build there is no door to pin
+cli/tests/unit/test_evidence_refusal_remedy.py::test_unmeasured_refusal_names_only_remedies_the_verbs_support::pytest.skip  # front-binary probe: CI builds crates/fno, a bare checkout has none

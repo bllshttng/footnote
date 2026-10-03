@@ -3,10 +3,12 @@
 //! `TABLE_OWNERS` names the owners and the table_ownership test enforces
 //! Every mutation writes only the changed nodes' rows in one transaction.
 
+pub mod advance_fill;
 pub mod api;
 pub mod autolink;
 pub mod birth;
 pub mod cli;
+pub mod collision;
 pub mod commands;
 pub mod comments;
 pub mod costs;
@@ -48,6 +50,7 @@ pub mod session_cli;
 pub mod sessions;
 pub mod settings;
 pub mod style_check;
+pub mod target_binding;
 pub mod title_gate;
 pub mod undispatched;
 pub mod update_cli;

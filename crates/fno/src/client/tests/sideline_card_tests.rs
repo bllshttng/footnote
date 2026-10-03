@@ -1,4 +1,4 @@
-//! The sideline card layout acceptance family: two-line padded cards behind
+//! The sideline card layout acceptance family: three-line cards behind
 //! `[sideline] layout = "card"`, list mode byte-identical.
 
 use super::*;
@@ -35,7 +35,7 @@ fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
         .expect("agent card exists");
     let detail = rows
         .iter()
-        .position(|row| matches!(row, DisplayRow::CardDetail(a, _) if a.name == name))
+        .position(|row| matches!(row, DisplayRow::CardDetail(a) if a.name == name))
         .expect("card detail exists");
     (agent, detail)
 }
@@ -44,10 +44,10 @@ fn card_highlight_snapshot(view: &View, frame: &Frame, agent_i: usize, detail_i:
     let cols = frame.cols as usize;
     let text_w = view.sideline_paint_w().saturating_sub(1);
     let offset = view.sideline_offset();
-    [agent_i, detail_i]
+    [agent_i, detail_i, detail_i + 1]
         .into_iter()
         .map(|display_i| {
-            let row = display_i - offset;
+            let row = display_i - offset + 1; // the strip row owns row 0
             frame.cells[row * cols..row * cols + text_w]
                 .iter()
                 .map(|cell| if cell.bg != Color::Default { '#' } else { '.' })
@@ -61,10 +61,10 @@ fn card_pair_cells(view: &View, frame: &Frame, agent_i: usize, detail_i: usize) 
     let cols = frame.cols as usize;
     let text_w = view.sideline_paint_w().saturating_sub(1);
     let offset = view.sideline_offset();
-    [agent_i, detail_i]
+    [agent_i, detail_i, detail_i + 1]
         .into_iter()
         .flat_map(|display_i| {
-            let row = display_i - offset;
+            let row = display_i - offset + 1; // the strip row owns row 0
             frame.cells[row * cols..row * cols + text_w].iter().cloned()
         })
         .collect()
@@ -79,9 +79,8 @@ fn row_text(frame: &Frame, row: usize, width: usize) -> String {
 }
 
 #[test]
-fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
-    // AC3: two agents expand to Blank, Agent, CardDetail per card, one
-    // blank shared between adjacent cards, every agent depth 0.
+fn card_mode_expands_each_agent_into_three_lines_without_padding_rows() {
+    // AC3: each card is Agent, CardDetail, CardMetrics; no blank rows.
     let v = card_view(king_and_worker());
     let (rows, depths) = v.display_rows_with_depths();
     let names: Vec<String> = rows
@@ -89,19 +88,17 @@ fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
         .map(|r| match r {
             DisplayRow::TableHead => "head",
             DisplayRow::Sel(s) if s.tab.is_none() => "band",
-            DisplayRow::Blank => "blank",
             DisplayRow::Agent(_) => "agent",
             DisplayRow::CardDetail(..) => "detail",
+            DisplayRow::CardMetrics(..) => "metrics",
             _ => "other",
         })
         .map(String::from)
         .collect();
     assert!(
-        names.len() >= 9
-            && names[..9]
-                == [
-                    "head", "band", "blank", "agent", "detail", "blank", "agent", "detail", "blank"
-                ],
+        names.len() >= 8
+            && names[..8]
+                == ["head", "band", "agent", "detail", "metrics", "agent", "detail", "metrics"],
         "{names:?}"
     );
     assert!(
@@ -158,11 +155,11 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
         let w_old = rows
             .iter()
             .find_map(|r| match r {
-                DisplayRow::CardDetail(a, _) if a.name == "w-old" => Some(a),
+                DisplayRow::CardDetail(a) if a.name == "w-old" => Some(a),
                 _ => None,
             })
             .expect("w-old card detail exists");
-        let detail = v.card_detail_text(w_old, None, now, 80);
+        let detail = v.card_detail_text(w_old, now, 80);
         assert!(
             detail.ends_with("12m"),
             "painted age must read the sorted-on field: {detail:?}"
@@ -171,54 +168,67 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
 }
 
 #[test]
-fn card_frame_paints_glyph_slug_bar_node_pr_on_line1_model_king_message_age_on_line2() {
-    // Line 1 = glyph, slug, context bar, node, #42: no state word (the glyph
-    // carries it) and no uptime (peek has it). Line 2 = harness/model, king
-    // handle, message, age. A worker with no crowned ancestor has no king
-    // segment (and no empty `·  ·`).
+fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
+    // Three lines: identity; model, lead and ages; context, compactions, cost, tokens and message. The status glyph stays on line 1.
     let mut agents = king_and_worker();
     agents[1].context_used_pct = Some(26);
+    agents[1].compaction_count = Some(3);
+    agents[1].session_cost_cents = Some(42);
+    agents[1].session_tokens = Some(12_345);
     agents[1].started_at = Some(crate::digest_overlay::now_secs() - 10800);
+    agents[1].last_activity_age_s = Some(36);
     agents[1].node = Some("x-4310".into());
     agents[1].model = Some("gpt-6.1-sol".into());
     agents[0].model = Some("claude-opus-5-5".into());
+    agents[0].crown_title = Some("Lead of mux".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
     let frame = v.compose();
     let text = frame_text(&frame);
-    assert!(text.contains("[26%|###     ]  x-4310"), "{text:?}");
-    assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
-    let head = text.lines().next().unwrap_or_default();
+    let (king_i, _) = card_rows_for(&v, "king-a");
+    let (worker_i, _) = card_rows_for(&v, "w1");
+    let cols = frame.cols as usize;
+    let width = v.sideline_paint_w() - 1;
+    let offset = v.sideline_offset();
     assert!(
-        head.contains("ctx \u{b7} node") && !head.contains("last msg"),
+        frame.cells[(king_i - offset) * cols..(king_i - offset) * cols + width]
+            .iter()
+            .all(|cell| cell.bg == Color::Default)
+    );
+    assert!(
+        frame.cells[(worker_i - offset) * cols..(worker_i - offset) * cols + width]
+            .iter()
+            .all(|cell| cell.bg == v.theme.sel)
+    );
+    assert!(text.contains("x-4310"), "{text:?}");
+    assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
+    assert!(text.contains("3h · 36s"), "{text:?}");
+    let head = text.lines().nth(1).unwrap_or_default(); // under the strip row
+    assert!(
+        head.contains("node · PR") && !head.contains("last msg"),
         "the card head names the card's own cells: {head:?}"
     );
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
-    let red = over_frame.cells.iter();
-    let red = red
-        .filter(|c| c.c == '#' && c.fg == Color::Indexed(1))
-        .count();
-    assert_eq!(red, 8, "a near-compact bar paints its fill red");
     let over_window = frame_text(&over_frame);
-    assert!(
-        over_window.contains("[129%|########] x-4310"),
-        "{over_window:?}"
-    );
+    assert!(over_window.contains("▄▅▆▇ 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
     let unmeasured = frame_text(&v.compose());
-    let dash = format!(" -{}x-4310", " ".repeat(15));
-    assert!(unmeasured.contains(&dash), "{unmeasured:?}");
+    assert!(unmeasured.contains("???? ? · ?c · ?"), "{unmeasured:?}");
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
-    assert!(text.contains("claude/opus"), "{text:?}");
+    assert!(text.contains("opus · Lead of mux"), "{text:?}");
     assert!(text.contains("king-a"), "{text:?}");
     assert!(text.contains("one message"), "{text:?}");
-    // The king's own card shows its crown scope, not a king name.
-    assert!(text.contains("fno"), "{text:?}");
-    // Line 2's segment join: harness/model, then the king handle.
-    assert!(text.contains("codex/gpt-6.1-sol \u{b7} king-a"), "{text:?}");
+    assert!(text.contains("26%"), "{text:?}");
+    assert!(
+        text.contains("▂▃▄▅ 26% · 3c · ~$0.42 · 12,345 tok · one message"),
+        "the compact sparkline line matches its display contract: {text:?}"
+    );
+    assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
+    // A worker names its lead, and a crowned row names its role.
+    assert!(text.contains("gpt-6.1-sol · king-a"), "{text:?}");
 }
 
 #[test]
@@ -260,11 +270,11 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     a.harness = Some("claude".into());
     assert_eq!(card_line::slug(&a, &[]), "t-cards-org");
     assert_eq!(card_line::harness_model(&a), Some("claude/opus".into()));
-    // Narrow: the bar goes first, then the node; neither is ellipsized.
+    // Identity fields share a right-aligned line and remain whole tap fields.
     a.context_used_pct = Some(28);
-    assert_eq!(card_line::meter_node(&a, 30).text, "[28%|###     ]  x-4fb5");
-    assert_eq!(card_line::meter_node(&a, 21).text, "x-4fb5");
-    assert_eq!(card_line::meter_node(&a, 5).text, "");
+    assert_eq!(card_line::node_span(&a, 30), Some(24..30));
+    assert_eq!(card_line::node_span(&a, 21), Some(15..21));
+    assert_eq!(card_line::node_span(&a, 5), None);
     // The node is a tap target where it is painted.
     let mut agents = king_and_worker();
     agents[1].node = Some("x-4310".into());
@@ -273,9 +283,10 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     v.sideline_width = 80;
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let line = row_text(&frame, row, v.sideline_paint_w() - 1);
-    let col = line.find("x-4310").expect("node painted") as u16 + 2;
+    assert!(line.contains("x-4310 · #42"), "adjacent identity: {line:?}");
+    let col = line.chars().position(|c| c == 'x').expect("node painted") as u16 + 2;
     assert!(
         matches!(v.chrome_hit(row as u16, col), Some(ChromeHit::OpenNode(id)) if id == "x-4310"),
         "{line:?}"
@@ -283,6 +294,51 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     assert!(
         !matches!(v.chrome_hit(row as u16, 3), Some(ChromeHit::OpenNode(_))),
         "the glyph still focuses the row"
+    );
+    let chars: Vec<char> = line.chars().collect();
+    let pr_col = chars
+        .windows(3)
+        .position(|w| w[0] == '#' && w[1] == '4' && w[2] == '2')
+        .expect("PR painted") as u16
+        + 1;
+    assert!(
+        matches!(v.chrome_hit(row as u16, pr_col), Some(ChromeHit::OpenPr(url)) if url.ends_with("/pull/42")),
+        "PR tap opens its own link: {line:?}"
+    );
+    let node_span =
+        card_line::node_span(&v.layout.agents[1], v.sideline_paint_w() - 1).expect("node range");
+    let pr_span =
+        card_line::pr_span(&v.layout.agents[1], v.sideline_paint_w() - 1).expect("PR range");
+    assert_eq!(
+        node_span.end + 3,
+        pr_span.start,
+        "identity fields are adjacent"
+    );
+    let cols = frame.cols as usize;
+    let glyph = status_glyph(agent_lattice_state(&v.layout.agents[1]));
+    let glyph_at = chars
+        .iter()
+        .position(|c| *c == glyph)
+        .expect("status glyph");
+    assert_eq!(
+        frame.cells[row * cols + node_span.start].fg,
+        frame.cells[row * cols + glyph_at].fg,
+        "node ID matches the animated status glyph"
+    );
+    assert_eq!(
+        frame.cells[row * cols + node_span.start].flags & cell_flags::INVERSE,
+        0,
+        "node uses the status color directly"
+    );
+    assert_eq!(
+        frame.cells[row * cols + pr_span.start].fg,
+        v.theme.brand,
+        "PR number uses the theme's complementary brand color"
+    );
+    assert_ne!(
+        frame.cells[row * cols + pr_span.start].fg,
+        frame.cells[row * cols + glyph_at].fg,
+        "PR number is visually separate from the lane signal"
     );
 }
 
@@ -320,7 +376,7 @@ fn hovering_line_two_or_selecting_line_one_bands_both_card_lines() {
         let line = "#".repeat(width);
         assert_eq!(
             card_highlight_snapshot(&v, &frame, agent_i, detail_i),
-            format!("{line}\n{line}"),
+            format!("{line}\n{line}\n{line}"),
             "select={select}: the snapshot covers every cell and column boundary on both lines"
         );
     }
@@ -370,69 +426,71 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
+    let (band_fg, band_bg, _) = crate::theme::band_style(&v.theme);
     let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
-    for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+    let rows = v.painted_rows();
+    let (node_span, pr_span) = match rows.get(agent_i) {
+        Some(DisplayRow::Agent(a)) => {
+            let spans = card_line::identity_spans(a, text_w);
+            (spans.node, spans.pr)
+        }
+        _ => (None, None),
+    };
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let row = display_i - offset + 1; // the strip row owns row 0
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
             .iter()
             .enumerate()
         {
-            assert_eq!(cell.bg, Color::Indexed(0), "one background everywhere");
-            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) {
-                assert_eq!(cell.fg, Color::Indexed(3), "accent band text");
+            assert_eq!(cell.bg, band_bg, "one background everywhere");
+            let keeps_identity_color = display_i == agent_i
+                && (node_span.as_ref().is_some_and(|span| span.contains(&j))
+                    || pr_span.as_ref().is_some_and(|span| span.contains(&j)));
+            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
+                assert_eq!(cell.fg, band_fg, "accent band text");
             }
-            assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
+            assert_eq!(
+                cell.flags & (cell_flags::INVERSE | cell_flags::DIM),
+                0,
+                "no INVERSE and no DIM inside the band"
+            );
         }
     }
 }
 
 #[test]
-fn a_foreign_cwd_folds_into_the_detail_line_and_never_adds_a_third_row() {
-    // x-b5b8 scope add: a foreign-cwd agent's card stays two painted rows -
-    // the subline's cwd folds into line 2 (`harness · … · cwd`), the Sub
-    // row is gone.
+fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
+    // d-36438ea4: a member with a different project or worktree path shows
+    // it inline in parens after the slug, only when it fits whole; the dim
+    // Sub line is gone. At a width that fits, the card's line 1 reads
+    // `slug (cwd)`; at a width that does not, the parens drop and the row
+    // is still one line.
     let mut agents = king_and_worker();
     agents[1].cwd_base = Some("elsewhere".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
-    let rows = v.display_rows();
-    let kinds: Vec<&str> = rows
-        .iter()
-        .map(|r| match r {
-            DisplayRow::Blank => "blank",
-            DisplayRow::Agent(_) => "agent",
-            DisplayRow::CardDetail(..) => "detail",
-            DisplayRow::Sub(_) => "sub",
-            _ => "other",
-        })
-        .collect();
+    let frame_text = crate::vt::frame_text(&v.compose());
     assert!(
-        !kinds.contains(&"sub"),
-        "no sub row survives in card mode: {kinds:?}"
+        frame_text.contains("w1 (elsewhere)"),
+        "the cwd rides inline after the slug: {frame_text}"
     );
-    let detail = rows.iter().find_map(|r| match r {
-        DisplayRow::CardDetail(a, cwd) if a.name == "w1" => Some(cwd),
-        _ => None,
-    });
-    assert_eq!(
-        detail,
-        Some(&Some("elsewhere".to_string())),
-        "the cwd rides the detail line"
-    );
-    let text = v.card_detail_text(detail_agent(&rows, "w1"), Some("elsewhere"), 0, 80);
-    assert!(text.contains("elsewhere"), "line 2 names the cwd: {text:?}");
-}
-
-fn detail_agent<'a>(rows: &'a [DisplayRow<'_>], name: &str) -> &'a AgentRow {
-    rows.iter()
-        .find_map(|r| match r {
-            DisplayRow::CardDetail(a, _) if a.name == name => Some(*a),
-            _ => None,
-        })
-        .expect("the card's detail row")
+    // Each Agent owns its detail and metrics rows without spacer rows.
+    let rows = v.display_rows();
+    for (i, r) in rows.iter().enumerate() {
+        if matches!(r, DisplayRow::Agent(_)) {
+            assert!(
+                matches!(rows.get(i + 1), Some(DisplayRow::CardDetail(_))),
+                "agent row {i} lost its detail line"
+            );
+            assert!(
+                matches!(rows.get(i + 2), Some(DisplayRow::CardMetrics(_))),
+                "agent row {i} lost its metrics line"
+            );
+        }
+    }
 }
 
 #[test]
@@ -453,17 +511,32 @@ fn chosen_card_paints_accent_across_both_lines() {
     let rects = v.worker_column_rects(text_w as u16);
     let in_col =
         |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
-    for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+    let rows = v.painted_rows();
+    let (node_span, pr_span) = match rows.get(agent_i) {
+        Some(DisplayRow::Agent(a)) => {
+            let spans = card_line::identity_spans(a, text_w);
+            (spans.node, spans.pr)
+        }
+        _ => (None, None),
+    };
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let row = display_i - offset + 1; // the strip row owns row 0
         for (j, cell) in frame.cells[row * cols..row * cols + text_w]
             .iter()
             .enumerate()
         {
             assert_eq!(cell.bg, band_bg, "the surface band fills the card line");
-            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) {
+            let keeps_identity_color = display_i == agent_i
+                && (node_span.as_ref().is_some_and(|span| span.contains(&j))
+                    || pr_span.as_ref().is_some_and(|span| span.contains(&j)));
+            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
                 assert_eq!(cell.fg, band_fg, "the band's accent text everywhere");
             }
-            assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
+            assert_eq!(
+                cell.flags & (cell_flags::INVERSE | cell_flags::DIM),
+                0,
+                "no INVERSE and no DIM inside the band"
+            );
         }
     }
 }
@@ -481,8 +554,8 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
-    for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, band_bg, "the band wins on hover");
         }
@@ -510,8 +583,8 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
-    for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, v.theme.sel, "the band is the sel surface");
             assert_ne!(cell.fg, v.theme.needs_you, "no signal fills a banded row");
@@ -520,7 +593,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_a_signal_across_a_row() {
 }
 
 #[test]
-fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
+fn card_pr_and_created_activity_ages_keep_right_side_fields() {
     let mut agents = king_and_worker();
     agents[1].last_activity_age_s = Some(42);
     let mut v = card_view(agents);
@@ -531,8 +604,8 @@ fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
     let offset = v.sideline_offset();
     let cols = frame.cols as usize;
     let width = v.sideline_paint_w() - 1;
-    let agent_row = agent_i - offset;
-    let detail_row = detail_i - offset;
+    let agent_row = agent_i - offset + 1; // the strip row owns row 0
+    let detail_row = detail_i - offset + 1;
     let agent_cells = &frame.cells[agent_row * cols..agent_row * cols + width];
     let detail_cells = &frame.cells[detail_row * cols..detail_row * cols + width];
     let pr_end = agent_cells
@@ -540,22 +613,19 @@ fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
         .rposition(|run| [run[0].c, run[1].c, run[2].c] == ['#', '4', '2'])
         .expect("PR is visible")
         + 2;
-    let age_end = detail_cells
+    detail_cells
         .windows(3)
-        .rposition(|run| [run[0].c, run[1].c, run[2].c] == ['4', '2', 's'])
-        .expect("age is visible")
-        + 2;
+        .position(|run| [run[0].c, run[1].c, run[2].c] == ['4', '2', 's'])
+        .expect("age is visible");
 
-    assert_eq!(pr_end, age_end, "the two line snapshots share a right edge");
+    assert_eq!(pr_end, width - 1, "PR is flush with the panel edge");
     let pr_tail = agent_cells[width - 6..]
         .iter()
         .map(|cell| cell.c)
         .collect::<String>();
-    let age_tail = detail_cells[width - 6..]
-        .iter()
-        .map(|cell| cell.c)
-        .collect::<String>();
-    assert_eq!(format!("{pr_tail}\n{age_tail}"), "   #42\n   42s");
+    let detail = detail_cells.iter().map(|cell| cell.c).collect::<String>();
+    assert_eq!(pr_tail, "   #42");
+    assert!(detail.ends_with("– · 42s"), "{detail:?}");
 }
 
 #[test]
@@ -567,7 +637,7 @@ fn regular_card_snapshot_shows_a_pr_when_it_fits() {
     v.term = (30, 140);
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
 
@@ -588,7 +658,7 @@ fn regular_card_snapshot_omits_a_pr_that_would_overwrite_identity() {
     v.term = (30, 140);
     let (agent_i, _) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let row = agent_i - v.sideline_offset();
+    let row = agent_i - v.sideline_offset() + 1; // the strip row owns row 0
     let width = v.sideline_paint_w() - 1;
     let line = row_text(&frame, row, width);
     let cols = frame.cols as usize;
@@ -643,12 +713,12 @@ fn list_mode_keeps_identity_and_unknown_measurements_visible() {
     }
     let now = crate::digest_overlay::now_secs();
     assert_eq!(row_meter::ctx_cell(None), "-");
-    assert_eq!(row_meter::ctx_cell(Some(0)), "0%▫▫▫");
-    assert_eq!(row_meter::ctx_cell(Some(100)), "100%▪▪▪");
-    assert_eq!(row_meter::ctx_cell(Some(129)), "129%▪▪▪");
-    assert_eq!(row_meter::ctx_bar(None), format!("{:<15}", "-"));
-    assert_eq!(row_meter::ctx_bar(Some(0)), "[0%|        ]  ");
-    assert_eq!(row_meter::ctx_bar(Some(28)), "[28%|###     ] ");
+    assert_eq!(row_meter::ctx_cell(Some(0)), "    0%");
+    assert_eq!(row_meter::ctx_cell(Some(100)), "███ 100%");
+    assert_eq!(row_meter::ctx_cell(Some(129)), "███ 129%");
+    assert_eq!(row_meter::ctx_bar(None), format!("{:<13}", "-"));
+    assert_eq!(row_meter::ctx_bar(Some(0)), "         0%  ");
+    assert_eq!(row_meter::ctx_bar(Some(28)), "██▎      28% ");
     assert_eq!(row_meter::up_cell(None, now), "-");
     assert_eq!(row_meter::up_cell(Some(now + 1), now), "0s");
 }
@@ -772,13 +842,13 @@ fn composed_bands_hold_contrast_on_dark_and_light_frames() {
     let offset = v.sideline_offset();
     let mut chosen_cells: Vec<crate::proto::Cell> = Vec::new();
     let mut hover_cells: Vec<crate::proto::Cell> = Vec::new();
-    for display_i in [agent_i, detail_i] {
-        let row = display_i - offset;
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let row = display_i - offset + 1; // the strip row owns row 0
         chosen_cells.push(frame.cells[row * cols]);
         chosen_cells.push(frame.cells[row * cols + text_w - 1]);
     }
     for display_i in [king_i, king_detail_i] {
-        let row = display_i - offset;
+        let row = display_i - offset + 1; // the strip row owns row 0
         hover_cells.push(frame.cells[row * cols]);
         hover_cells.push(frame.cells[row * cols + text_w - 1]);
     }
@@ -853,7 +923,7 @@ fn unhighlighted_rows_read_on_a_light_terminal() {
     let frame = v.compose();
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
-    let row = detail_i - v.sideline_offset();
+    let row = detail_i - v.sideline_offset() + 1; // the strip row owns row 0
     let cells = &frame.cells[row * cols..row * cols + text_w];
     let painted = cells.iter().filter(|c| c.c != ' ').count();
     assert!(painted > 0, "detail row has text");

@@ -192,7 +192,7 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
     monkeypatch.setattr("fno.graph.api.wire_rows", lambda *_a, **_k: [entry])
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
-    monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     # Plan fixtures are absolute; skip resolve_plan_path's git rev-parse so the
     # recorded spawn calls carry ONLY join's own spawns.
     monkeypatch.setattr(
@@ -206,7 +206,7 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
         "fno.paths.agents_registry_path", lambda: tmp_path / "registry-absent.json"
     )
     monkeypatch.setattr(
-        advance, "_claude_harness_session_states", lambda: {}
+        advance, "_claude_harness_session_states", lambda ids: {}
     )
     monkeypatch.setattr(
         advance, "_transcript_recently_active", lambda sid: False
@@ -347,7 +347,7 @@ def test_missing_holder_worktree_refuses_exit_2(tmp_path, monkeypatch):
             "metadata": {"worktree": str(tmp_path / "gone")},
         },
     )
-    monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         "fno.graph.collision.resolve_plan_path", lambda p: entry_plan
     )
@@ -399,7 +399,7 @@ def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
     """Exit 5: live j-<node>-* workers make join non-idempotent. The live
     proof hit this when a JOINER re-ran join on its own node - the rewrite
     truncated the brief and nearly duplicated the spawns. A row counts only
-    when the harness store still answers non-terminally for its session."""
+    when the truth probe still answers non-terminally for its session."""
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     reg = tmp_path / "registry.json"
     reg.write_text(json.dumps({"schema_version": 2, "agents": [
@@ -409,7 +409,7 @@ def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
     monkeypatch.setattr(
         advance, "_claude_harness_session_states",
-        lambda: {"s-1": "working", "s-2": "failed"},
+        lambda ids: {"s-1": "working", "s-2": "done"},
     )
     with pytest.raises(JoinRefuse) as excinfo:
         join_node("x-8d1d", 5)
@@ -420,7 +420,7 @@ def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
 
 def test_crashed_joiner_does_not_lock_the_node(tmp_path, monkeypatch):
     """A registry row can stay ``live`` after its daemon dies (a stored field
-    is not liveness). The guard must probe: harness store terminal or a stale
+    is not liveness). The guard must probe: truth terminal or a stale
     transcript reads dead, and the re-join proceeds."""
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     reg = tmp_path / "registry.json"
@@ -430,13 +430,13 @@ def test_crashed_joiner_does_not_lock_the_node(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
     monkeypatch.setattr(
         advance, "_claude_harness_session_states",
-        lambda: {"s-dead": "failed"},
+        lambda ids: {"s-dead": "done"},
     )
     receipt = join_node("x-8d1d", 5)
     assert len(receipt["spawned"]) == 3
-    # The transcript probe is the second rung: harness store has no row at
+    # The transcript probe is the second rung: truth has no row at
     # all, but the transcript moved inside the window -> still live.
-    monkeypatch.setattr(advance, "_claude_harness_session_states", lambda: {})
+    monkeypatch.setattr(advance, "_claude_harness_session_states", lambda ids: {})
     monkeypatch.setattr(
         advance, "_transcript_recently_active", lambda sid: sid == "s-dead"
     )

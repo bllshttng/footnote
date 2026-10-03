@@ -118,7 +118,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.25x | 27 | 12 | `cli/src/fno/graph/store.py:288` | `_normalize_lock_fields` |
 | 2.25x | 9 | 4 | `cli/src/fno/lint_verb_ratchet.py:194` | `_locate_rust_front` |
 | 2.25x | 9 | 4 | `cli/src/fno/paths.py:1173` | `resolve_plugin_script_durable` |
-| 2.25x | 18 | 8 | `cli/src/fno/plan/reconcile_status.py:174` | `_node_status_map` |
 | 2.25x | 9 | 4 | `cli/src/fno/roles/context.py:48` | `catalog_revision` |
 | 2.25x | 9 | 4 | `cli/src/fno/rust_binary.py:58` | `_sibling_binary` |
 | 2.25x | 9 | 4 | `cli/src/fno/worktree_paths.py:43` | `worktree_base` |
@@ -329,7 +328,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.4x | 7 | 5 | `cli/src/fno/graph/_constants.py:188` | `node_id_prefix` |
 | 1.4x | 7 | 5 | `cli/src/fno/paths.py:706` | `plan_doc_path` |
 | 1.4x | 7 | 5 | `cli/src/fno/plan/_stamp.py:105` | `_parse_scalar` |
-| 1.4x | 7 | 5 | `cli/src/fno/plan/reconcile_status.py:81` | `target_status` |
 | 1.4x | 7 | 5 | `cli/src/fno/pr/_merge.py:437` | `_repo_slug` |
 | 1.4x | 7 | 5 | `cli/src/fno/resume/receipt.py:274` | `load_receipt` |
 | 1.4x | 7 | 5 | `cli/src/fno/skill_diff/guards.py:40` | `filter_cited_hunks` |
@@ -363,7 +361,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.33x | 8 | 6 | `cli/src/fno/config/__init__.py:1736` | `_coerce_enabled` |
 | 1.33x | 8 | 6 | `cli/src/fno/graph/maintain.py:874` | `contained_path_exists` |
 | 1.33x | 8 | 6 | `cli/src/fno/handoff/output.py:63` | `write_output_file` |
-| 1.33x | 12 | 9 | `cli/src/fno/plan/reconcile_status.py:143` | `_plan_link_id` |
 | 1.33x | 8 | 6 | `cli/src/fno/pr_watch/cli.py:35` | `_resolve_fno_binary` |
 | 1.33x | 32 | 24 | `cli/src/fno/provenance/spawn_think.py:1118` | `dispatch_conversational` |
 | 1.33x | 8 | 6 | `cli/src/fno/scoreboard/fold.py:1826` | `_plan_key` |
@@ -412,7 +409,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.25x | 20 | 16 | `cli/src/fno/agents/whoami.py:274` | `find_held_node` |
 | 1.25x | 5 | 4 | `cli/src/fno/bundle/cli.py:99` | `_default` |
 | 1.25x | 10 | 8 | `cli/src/fno/claims/core.py:597` | `_atomic_replace` |
-| 1.25x | 5 | 4 | `cli/src/fno/cost/cost_tracker.py:248` | `estimate_cache_miss_cost` |
 | 1.25x | 15 | 12 | `cli/src/fno/graph/render_html.py:42` | `_load_obsidian_vault` |
 | 1.25x | 15 | 12 | `cli/src/fno/graph/store.py:173` | `plan_path_owner_conflict` |
 | 1.25x | 10 | 8 | `cli/src/fno/observer/cli.py:879` | `replay` |

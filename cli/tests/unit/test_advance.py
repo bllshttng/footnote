@@ -172,8 +172,8 @@ def _events(events_path: Path) -> list[dict]:
 
 
 def _hold(key: str) -> None:
-    """Acquire a live TTL claim at KEY using advance's own root routing."""
-    acquire_claim(key, "test-holder", ttl_ms=60_000, root=adv._claims_root_for(key))
+    """Acquire a live TTL claim at KEY (the iso fixture pins the claims root)."""
+    acquire_claim(key, "test-holder", ttl_ms=60_000)
 
 
 # A real selection projection row (x-0961/x-ebd2): the keys the node-aware
@@ -412,7 +412,6 @@ def test_blueprint_planning_claim_blocks_dispatch(iso, monkeypatch):
         key,
         "blueprint-session:planner-a",
         pid=os.getpid(),
-        root=adv._claims_root_for(key),
     )
     spawned = []
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -436,7 +435,6 @@ def test_blueprint_planning_claim_dead_pid_frees_node(iso, monkeypatch):
         key,
         "blueprint-session:planner-a",
         pid=child.pid,
-        root=adv._claims_root_for(key),
     )
 
     assert adv._node_dispatch_block_reason(NODE["id"]) is None
@@ -675,7 +673,7 @@ def test_dispatched_happy_path_and_claim_survives(iso, monkeypatch):
     assert res.node_id == NODE["id"] and res.short_id == "deadbeef"
     # AC1-CLAIM: the dispatch reservation is live AFTER advance returns.
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+    assert claim_status(key).get("state") == "live"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_dispatched"
     assert evs[0]["data"]["node_id"] == NODE["id"]
@@ -709,7 +707,7 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
     assert res.decision == "failed" and res.node_id == NODE["id"]
     # Reservation released -> node is re-dispatchable on the next trigger.
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
@@ -777,7 +775,7 @@ def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
 
     assert res.decision == "skipped" and res.reason == "already-claimed"
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
 
 
 # ---------------------------------------------------------------------------
@@ -1300,16 +1298,23 @@ def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
     assert captured["model"] == "glm-5.3-flash[1m]"
 
 
-def _declare_grid_inventory(monkeypatch):
-    """Declare the two-harness inventory the grid tests resolve against (the
-    built-in candidate tables are gone; rows are config now)."""
-    from fno import route_resolve as rr
+_GRID_ROWS = [
+    {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
+    {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
+]
 
-    inv = rr.inventory_from_rows([
-        {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
-        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
-    ])
-    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+def _pin_grid_rows(cfg):
+    """Declare the two-harness inventory on the pinned config FILE: the verb
+    gathers its own rows, so a Python stub is invisible to it."""
+    lines = [""]
+    for row in _GRID_ROWS:
+        lines.append("[[routing.models]]")
+        for key, value in row.items():
+            lines.append(f'{key} = "{value}"')
+        lines.append("")
+    with open(cfg, "a") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
@@ -1361,6 +1366,9 @@ def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None)
         os.makedirs(os.path.join(d, "providers"), exist_ok=True)
         with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
             f.write(account)
+    monkeypatch.setenv("FNO_AGENTS_HOME", d)
+    # Same dir, not a child: the identity stamps live under <state_dir>/providers.
+    monkeypatch.setenv("FNO_STATE_DIR", d)
     monkeypatch.setenv("FNO_CONFIG", cfg)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
     return cfg, state
@@ -1390,8 +1398,8 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     captured, fake_run = _fake_spawn_run("sid-grid1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    _declare_grid_inventory(monkeypatch)
-    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _cfg, _state = _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _pin_grid_rows(_cfg)
     sid = adv._spawn_worker(
         "x-grid1",
         None,
@@ -1404,7 +1412,11 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     cmd = captured["cmd"]
     i = cmd.index("--harness")
     assert cmd[i + 1] == "codex"
-    assert "gpt-5.6-sol" in cmd
+    # The model is the verb's full-fold pick (builtins fold in beside the
+    # declared rows; the goldens pin that world), so the transport contract
+    # here is: a capacity-scoped model rides.
+    mi = cmd.index("--model")
+    assert cmd[mi + 1], "the grid's cheapest clearing pick rides as --model"
 
 
 def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
@@ -1437,11 +1449,15 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
         "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
 
-    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(
+        adv,
+        "_lane_fill_selection",
+        lambda *a, **k: ([node], {"requested": 1, "filled": 1, "stop": "filled"}),
+    )
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
-    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         "fno.claims.core.acquire_claim", lambda *a, **k: object()
     )
@@ -1465,8 +1481,8 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
         return _FakeProc(stdout='{"short_id": "s"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    _declare_grid_inventory(monkeypatch)
-    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _cfg, _state = _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
+    _pin_grid_rows(_cfg)
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
     assert receipts and receipts[0]["status"] == "dispatched"
@@ -1501,14 +1517,18 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     # The grid needs a declared inventory before capacity is consulted;
     # without it the lane declines on no-inventory-declared instead of the
     # capacity decline this test exists to pin.
-    _declare_grid_inventory(monkeypatch)
-    _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")[1]
+    _cfg, _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")
+    _pin_grid_rows(_cfg)
 
-    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(
+        adv,
+        "_lane_fill_selection",
+        lambda *a, **k: ([node], {"requested": 1, "filled": 1, "stop": "filled"}),
+    )
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
     monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
     monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
-    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(
         "fno.claims.core.acquire_claim", lambda *a, **k: object()
     )
@@ -1975,7 +1995,7 @@ def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
 
     assert res.decision == "failed" and res.node_id == NODE["id"]
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
@@ -2275,7 +2295,7 @@ def test_converge_one_releases_reservation_when_outcome_is_not_dispatched(
             {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
         )
     key = "dispatch:ab-1111aaaa"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
 
 
 def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
@@ -2290,7 +2310,7 @@ def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
     )
     assert result.decision == "dispatched"
     key = "dispatch:ab-1111aaaa"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+    assert claim_status(key).get("state") == "live"
 
 
 # ---------------------------------------------------------------------------
@@ -2441,7 +2461,7 @@ def test_dependents_cross_project_dispatch(iso, monkeypatch):
     assert captured["args"] == ("ab-3333bbbb", "/mapped/web", "frontend-bit")
     # dispatch reservation lives on after return (dedup vs a peer trigger).
     key = f"dispatch:{_DEP['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+    assert claim_status(key).get("state") == "live"
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_dispatched"
     assert evs[0]["data"]["node_id"] == _DEP["id"]
@@ -2591,7 +2611,7 @@ def test_dependents_spawn_failure_releases_reservation(iso, monkeypatch):
     )
     assert results[0].decision == "failed"
     key = f"dispatch:{_DEP['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     assert _events(iso)[0]["type"] == "advance_failed"
 
 
@@ -3180,7 +3200,7 @@ def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
 
     assert res.decision == "failed" and res.node_id == NODE["id"]
     key = f"dispatch:{NODE['id']}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
     evs = _events(iso)
     assert [e["type"] for e in evs] == ["advance_failed"]
 
@@ -3743,7 +3763,7 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
     assert "64" in evs[0]["data"]["error"]
     # Re-dispatchable: the reservation is released, not stuck holding a lane.
     key = f"dispatch:{node_id}"
-    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+    assert claim_status(key).get("state") == "free"
 
 
 def test_duplicate_dispatch_converges_on_one_dedup_name():
@@ -4190,7 +4210,7 @@ def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
     def fake_call(verb, args, *, timeout):
         assert verb == "select-read"
         assert args == ["undispatched", "--project", "fno"]
-        assert timeout is None
+        assert timeout == 180
         return None, {
             "status": "unmeasured",
             "reason": "select-unmeasured",
@@ -4209,7 +4229,7 @@ def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     def fake_call(verb, args, *, timeout):
         assert verb == "select-read"
         assert args == ["undispatched", "--project", "fno"]
-        assert timeout is None
+        assert timeout == 180
         return None, {"status": "ok", "answer": receipt}
 
     monkeypatch.setattr("fno.rust_binary.call_binary_json", fake_call)
@@ -4493,3 +4513,18 @@ def test_observe_warning_without_a_clock_names_basis_only(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "basis=pid-absent" in err
     assert "reclaimable_at=" not in err
+
+
+def _inv(rows):
+    """An Inventory declaring exactly ``rows`` (construction is all that
+    survives in Python; the fold is the verb's)."""
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""), harness=r.get("harness", ""),
+            model=r.get("model", ""), band=r.get("band", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)

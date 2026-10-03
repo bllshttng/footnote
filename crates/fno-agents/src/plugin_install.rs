@@ -685,10 +685,17 @@ fn check_roots_report(
     }
     let mut roots = Vec::new();
     let mut worst: Option<(u8, &'static str)> = None;
+    // A live root means the marketplace shape is local and the harness loads
+    // it in place; every other root is then a retired copy (B7): the leftover
+    // GitHub cache path installed_plugins.json still records. Its drift stays
+    // reported per root, but it never blocks the check - a correct directory
+    // install must not exit 3 over a cache nobody loads.
+    let any_live = scan.iter().any(|r| r.live);
     for root in scan {
         let check = check_stage_report(&root.path, source_dir);
         let drift = check.differing_count + check.missing_count;
-        let blocker = if check.status == "stale" {
+        let retired = !root.live && any_live;
+        let blocker = if check.status == "stale" && !retired {
             let role = if root.live { "live" } else { "second copy" };
             Some(format!(
                 "plugin root {} ({}) differs from source HEAD in {} file(s) (e.g. {}). Fix: {}",
@@ -701,7 +708,13 @@ fn check_roots_report(
         } else {
             None
         };
-        let note = root_note(root.live, drift, &check.remedy);
+        let note = if retired {
+            " (retired cache: kept because installed_plugins.json registers it; \
+             the harness loads the live root in place)"
+                .to_string()
+        } else {
+            root_note(root.live, drift, &check.remedy)
+        };
         let last_status = check.status;
         roots.push(RootVerdict {
             path: root.path.display().to_string(),
@@ -712,9 +725,12 @@ fn check_roots_report(
             blocker,
             check,
         });
-        let rank_cur = rank(last_status);
+        // A retired copy folds as fresh: the byte verdict above stays stale in
+        // roots[], but the install it belongs to is correct.
+        let fold_status = if retired { "fresh" } else { last_status };
+        let rank_cur = rank(fold_status);
         if worst.map_or(true, |w| rank_cur > w.0) {
-            worst = Some((rank_cur, last_status));
+            worst = Some((rank_cur, fold_status));
         }
     }
     let live = roots.iter().find(|r| r.live);
@@ -1106,10 +1122,16 @@ struct PluginInstallArgs {
     hooks_status: bool,
     adapter: Option<String>,
     crown: Option<String>,
+    guard: Option<String>,
     hooks_file: Option<String>,
     extension_src: Option<String>,
     yes: bool,
     dry_run: bool,
+    /// A deploy/read-only mode flag (`--check`, `--restage`, ...) that arrived
+    /// AFTER a harness positional and was therefore not applied. Never silent:
+    /// `plugin-install claude --check` once fell through to a full mutating
+    /// install because this was dropped (hurdle B5).
+    dropped_mode: Option<String>,
 }
 
 fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
@@ -1126,10 +1148,12 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
         hooks_status: false,
         adapter: None,
         crown: None,
+        guard: None,
         hooks_file: None,
         extension_src: None,
         yes: false,
         dry_run: false,
+        dropped_mode: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -1148,6 +1172,10 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             }
             "--crown" => {
                 parsed.crown = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--guard" => {
+                parsed.guard = args.get(i + 1).cloned();
                 i += 2;
             }
             "--hooks-file" => {
@@ -1197,6 +1225,8 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             "--check" | "--restage" | "--stage-only" | "--env-only" => {
                 if parsed.mode.is_none() {
                     parsed.mode = Some(args[i].clone());
+                } else {
+                    parsed.dropped_mode = Some(args[i].clone());
                 }
                 i += 1;
             }
@@ -1225,11 +1255,24 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         hooks_status,
         adapter,
         crown,
+        guard,
         hooks_file,
         extension_src,
         yes,
         dry_run,
+        dropped_mode,
     } = parse_plugin_install_args(args);
+    if let Some(flag) = dropped_mode {
+        // A mode flag after a harness name (`plugin-install claude --check`)
+        // used to be dropped and the mutating install ran (hurdle B5). Refuse
+        // and name the read-only form instead.
+        eprintln!(
+            "plugin install: `{flag}` after a harness name is not a form; \
+             the read-only drift check is `fno-agents plugin-install --check` \
+             (no harness name; it checks every plugin root)"
+        );
+        return 2;
+    }
     if hooks || hooks_status {
         return run_agy_hooks(
             mode.as_deref(),
@@ -1237,6 +1280,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             hooks_status,
             adapter.as_deref(),
             crown.as_deref(),
+            guard.as_deref(),
             hooks_file.as_deref(),
             json,
         );
@@ -1951,10 +1995,12 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
     let hooks = home.join(".gemini").join("config").join("hooks.json");
     let adapter = stage.join("hooks").join("footnote-agy-target-stop-hook.sh");
     let crown = stage.join("hooks").join("agy-crown-inject.sh");
+    let guard = stage.join("hooks").join("agy-king-guard.sh");
     let s = crate::agy_hooks::status(
         &hooks,
         adapter.is_file().then_some(adapter.as_path()),
         crown.is_file().then_some(crown.as_path()),
+        guard.is_file().then_some(guard.as_path()),
     );
     Ok(format!("agy plugin imported; {}", s.summary()))
 }
@@ -1970,6 +2016,7 @@ fn run_agy_hooks(
     status_flag: bool,
     adapter: Option<&str>,
     crown: Option<&str>,
+    guard: Option<&str>,
     hooks_file: Option<&str>,
     json: bool,
 ) -> i32 {
@@ -1991,7 +2038,13 @@ fn run_agy_hooks(
     if status_flag {
         let adapter = adapter.map(PathBuf::from);
         let crown = crown.map(PathBuf::from);
-        let s = crate::agy_hooks::status(&hooks_path, adapter.as_deref(), crown.as_deref());
+        let guard = guard.map(PathBuf::from);
+        let s = crate::agy_hooks::status(
+            &hooks_path,
+            adapter.as_deref(),
+            crown.as_deref(),
+            guard.as_deref(),
+        );
         if json {
             match serde_json::to_string(&s) {
                 Ok(text) => println!("{text}"),
@@ -2011,7 +2064,13 @@ fn run_agy_hooks(
         return 2;
     };
     let crown = crown.map(PathBuf::from);
-    match crate::agy_hooks::install(&hooks_path, Path::new(adapter), crown.as_deref()) {
+    let guard = guard.map(PathBuf::from);
+    match crate::agy_hooks::install(
+        &hooks_path,
+        Path::new(adapter),
+        crown.as_deref(),
+        guard.as_deref(),
+    ) {
         Ok(receipt) => {
             if json {
                 match serde_json::to_string(&receipt) {
@@ -2718,6 +2777,10 @@ mod tests {
 
     /// Regression: the --force arm once skipped `i += 1`, so the parse loop
     /// spun on the flag forever. The test returning at all is the proof.
+    /// Also pins B5 at the same parser boundary: a mode flag after a harness
+    /// positional is recorded, and the verb refuses before any install work -
+    /// `plugin-install claude --check` once dropped the flag and ran the full
+    /// mutating install.
     #[test]
     fn parse_force_flag_returns_and_sets_flags() {
         let args: Vec<String> = ["--force", "--status"]
@@ -2727,6 +2790,21 @@ mod tests {
         let parsed = parse_plugin_install_args(&args);
         assert!(parsed.force);
         assert!(parsed.status);
+
+        let args: Vec<String> = ["claude", "--check"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_plugin_install_args(&args);
+        assert_eq!(parsed.mode.as_deref(), Some("claude"));
+        assert_eq!(parsed.dropped_mode.as_deref(), Some("--check"));
+        assert_eq!(run_plugin_install(&args), 2);
+
+        let args: Vec<String> = ["codex", "--stage-only"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(run_plugin_install(&args), 2);
     }
 
     /// A throwaway HOME for the root-enumeration fixtures. The marketplace
@@ -2925,8 +3003,9 @@ mod tests {
 
     /// AC1-HP: with no --stage, the check runs once per enumerated root. A
     /// byte-identical marketplace stage reads live and fresh; a differing
-    /// registry installPath reads not live, stale with a named sample, and
-    /// the worst status drives the exit code.
+    /// registry installPath keeps its per-root stale byte verdict, but beside
+    /// a LIVE root it is a retired cache (B7): it never drives the worst
+    /// status, so a correct directory-source install exits 0.
     #[test]
     fn check_without_stage_reports_every_root_and_worst_exit() {
         let base = std::env::temp_dir().join(format!("pi-roots-ac1-{}", std::process::id()));
@@ -2949,7 +3028,10 @@ mod tests {
         let (roots, detail) = plugin_roots_for(&home);
         assert_eq!(roots.len(), 2, "roots: {roots:?} detail: {detail:?}");
         let (report, exit) = check_roots_report(&roots, detail, &source);
-        assert_eq!(exit, 3);
+        // B7: the registered cache nobody loads must not fail a correct
+        // directory-source install.
+        assert_eq!(exit, 0);
+        assert_eq!(report.status, "fresh");
         assert_eq!(report.roots.len(), 2);
         let live = &report.roots[0];
         assert!(live.live, "the marketplace root must read live");
@@ -2957,7 +3039,10 @@ mod tests {
         assert_eq!(live.path, stage.display().to_string());
         let second = &report.roots[1];
         assert!(!second.live);
+        // The byte truth survives per root, but nothing blocks on it.
         assert_eq!(second.check.status, "stale");
+        assert!(second.blocker.is_none(), "{:?}", second.blocker);
+        assert!(second.note.contains("retired cache"), "{}", second.note);
         // The registry copy also lacks the manifest HEAD tracks.
         assert_eq!(
             second.check.sample,

@@ -1,61 +1,71 @@
-//! What a sideline card's two lines say: the slug, the `harness/model`
-//! lead of line 2, and the context-bar + node cell of line 1. The paint and
-//! the click resolver both read [`meter_node`], so a node tap lands where
-//! the node is drawn.
+//! Shared sideline card fields and hit ranges.
 
 use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::row_meter::{ctx_bar, CTX_BAR_CELLS, CTX_BAR_W};
 use crate::proto::{AgentRow, BacklogCard};
 
-/// Line 1's context cell: the bar, then the node. A narrow cell drops the
-/// bar first, then the node; neither is ever ellipsized.
-pub(super) struct MeterNode {
-    pub text: String,
-    /// The bar's fill columns, relative to the cell start.
-    pub fill: Option<Range<usize>>,
-    /// The node's columns, relative to the cell start: the tap target.
-    pub node: Option<Range<usize>>,
+/// Keep node and PR adjacent at the panel's right edge, separated by ` · `.
+pub(super) fn identity_spans(a: &AgentRow, text_w: usize) -> IdentitySpans {
+    let node = a.node.as_deref().filter(|s| !s.is_empty());
+    let node_w = node.map_or(0, |s| s.width());
+    let pr_w = a.pr.map(|n| format!("#{n}").width()).filter(|w| *w <= 6);
+    let pr = pr_w.filter(|w| *w <= text_w).map(|w| text_w - w..text_w);
+    let gap = usize::from(node_w > 0 && pr.is_some()) * 3;
+    let node_end = pr
+        .as_ref()
+        .map_or(text_w, |span| span.start.saturating_sub(gap));
+    let node_span = (node_w > 0 && node_end >= node_w).then(|| node_end - node_w..node_end);
+    let separator = node_span
+        .as_ref()
+        .zip(pr.as_ref())
+        .map(|(node, pr)| node.end..pr.start);
+    IdentitySpans {
+        node: node_span,
+        separator,
+        pr,
+    }
 }
 
-pub(super) fn meter_node(a: &AgentRow, width: usize) -> MeterNode {
-    let bar = ctx_bar(a.context_used_pct);
-    let node = a.node.as_deref().unwrap_or("");
-    let node_w = node.width();
-    // `[`, the digits, `%|`, then the fill cells up to the closing `]`.
-    let fill = a.context_used_pct.map(|pct| {
-        let start = pct.to_string().len() + 3;
-        start..start + CTX_BAR_CELLS
-    });
-    if node_w > 0 && width > CTX_BAR_W + node_w {
-        let at = CTX_BAR_W + 1;
-        return MeterNode {
-            text: format!("{bar} {node}"),
-            fill,
-            node: Some(at..at + node_w),
-        };
+pub(super) fn node_span(a: &AgentRow, text_w: usize) -> Option<Range<usize>> {
+    identity_spans(a, text_w).node
+}
+
+pub(super) fn pr_span(a: &AgentRow, text_w: usize) -> Option<Range<usize>> {
+    identity_spans(a, text_w).pr
+}
+
+pub(super) struct IdentitySpans {
+    pub node: Option<Range<usize>>,
+    pub separator: Option<Range<usize>>,
+    pub pr: Option<Range<usize>>,
+}
+
+pub(super) fn metrics(a: &AgentRow, message: Option<&str>, width: usize) -> String {
+    let spark = super::row_meter::ctx_sparkline(a.context_used_pct);
+    let pct = a
+        .context_used_pct
+        .map_or_else(|| "?".into(), |n| format!("{n}%"));
+    let count = a
+        .compaction_count
+        .map_or_else(|| "?c".into(), |n| format!("{n}c"));
+    let cost = super::row_meter::cost_cell(a.session_cost_cents);
+    let tokens = super::row_meter::token_cell(a.session_tokens);
+    let prefix = format!("{spark} {pct} · {count} · {cost} · {tokens}");
+    let Some(message) = message.filter(|s| !s.is_empty()) else {
+        return crate::chrome::clip(&prefix, width);
+    };
+    let separator = " · ";
+    let room = width.saturating_sub(crate::chrome::str_cols(&prefix));
+    let separator_w = crate::chrome::str_cols(separator);
+    if room <= separator_w {
+        return crate::chrome::clip(&prefix, width);
     }
-    if node_w > 0 && width >= node_w {
-        return MeterNode {
-            text: node.to_string(),
-            fill: None,
-            node: Some(0..node_w),
-        };
-    }
-    if node_w == 0 && width >= CTX_BAR_W {
-        return MeterNode {
-            text: bar,
-            fill,
-            node: None,
-        };
-    }
-    MeterNode {
-        text: String::new(),
-        fill: None,
-        node: None,
-    }
+    format!(
+        "{prefix}{separator}{}",
+        crate::chrome::fit_ellipsis(message, room - separator_w)
+    )
 }
 
 /// The card's short model: no `[1m]` window tag, and a `claude-` id names
@@ -68,19 +78,22 @@ fn short_model(model: &str) -> &str {
     }
 }
 
-/// Line 2's lead: `claude/opus`, `codex/gpt-6.1-sol`, or whichever half is
-/// known.
-pub(super) fn harness_model(a: &AgentRow) -> Option<String> {
-    let model = a
-        .model
+/// Line 2's model, shortened to the name users recognize.
+pub(super) fn model_label(a: &AgentRow) -> Option<String> {
+    a.model
         .as_deref()
         .map(short_model)
-        .filter(|m| !m.is_empty());
-    match (a.harness.as_deref(), model) {
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+}
+
+/// The board's model badge includes the harness; card line 2 keeps just the
+/// model label so the lead name or role remains visible.
+pub(super) fn harness_model(a: &AgentRow) -> Option<String> {
+    match (a.harness.as_deref(), model_label(a)) {
         (Some(h), Some(m)) => Some(format!("{h}/{m}")),
         (Some(h), None) => Some(h.to_string()),
-        (None, Some(m)) => Some(m.to_string()),
-        (None, None) => None,
+        (None, model) => model,
     }
 }
 

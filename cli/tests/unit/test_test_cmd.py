@@ -479,7 +479,7 @@ def test_root_level_test_maps_to_the_registry_step_that_runs_it(tmp_path: Path) 
     owned = [c for _, _, c in _STRUCTURAL_STEPS if "tests/metrics/" in c]
     assert owned, "expected a registry step invoking a root tests/metrics file"
     sel, unmapped = select_changed(
-        tmp_path, ["tests/metrics/test_session_cost_dedup.py"])
+        tmp_path, ["tests/metrics/test_completion_summary_path.py"])
     assert [s["rule"] for s in sel] == ["registry-step"]
     assert unmapped == []
 

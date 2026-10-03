@@ -9,7 +9,9 @@
 # gate is its CI backstop for the direct `gh pr create` path, which never
 # runs the `fno do pr closure-trailer` generator. It never infers extra
 # nodes from prose or diffs: it only checks that a node id already present
-# in the HEAD ref is also named in the exact closure line.
+# in the HEAD ref is also named in the exact closure line. An approved body
+# line `Retarget <from> <to> <approval>` counts <from> as claimed when <to>
+# is on the closure line, so an approved retarget needs no branch rename.
 #
 # Run: PR_BODY="<body>" PR_HEAD_REF="<branch>" bash scripts/ci/check-pr-node-closure.sh
 # Env: PR_BODY (the PR body), PR_HEAD_REF (the PR's head branch name).
@@ -106,7 +108,31 @@ if [[ -n "$trailer_line" ]]; then
   trailer_body="$(printf '%s' "$trailer_line" | tr '[:upper:]' '[:lower:]' | sed -E 's/^(fixes|backlog-closure):?[[:space:]]*//')"
 fi
 
+# The approved Retarget line, mirroring the Rust grammar in
+# king_board/pr_closure.rs (retarget/retargeted_from): keyword case-insensitive
+# with optional colon, then exactly three tokens - two differing node ids and
+# an approval (msg-... or d-...). Ids stay case-sensitive, so no lowercasing
+# here. The LAST well-formed line wins; prose never erases it.
+retarget_from=""
+retarget_to=""
+retarget_approval=""
+while IFS= read -r rline; do
+  rline="${rline%$'\r'}"
+  rrest="${rline:8}"
+  rrest="${rrest#:}"
+  read -r -a rtok <<< "$rrest"
+  if [[ ${#rtok[@]} -ne 3 ]]; then continue; fi
+  if [[ "${rtok[0]}" =~ ^${node_id_re}$ && "${rtok[1]}" =~ ^${node_id_re}$ \
+       && "${rtok[0]}" != "${rtok[1]}" \
+       && "${rtok[2]}" =~ ^(msg-[0-9a-f]{6,}|d-[0-9a-f]{8})$ ]]; then
+    retarget_from="${rtok[0]}"
+    retarget_to="${rtok[1]}"
+    retarget_approval="${rtok[2]}"
+  fi
+done < <(printf '%s\n' "$PR_BODY" | grep -E '^[Rr][Ee][Tt][Aa][Rr][Gg][Ee][Tt](:|[[:space:]])' || true)
+
 missing=()
+retarget_covered=0
 for cand in "${candidates[@]}"; do
   # The preceding boundary also accepts "," - the runtime parser's
   # `.replace(",", " ")` before splitting treats a comma as an equivalent
@@ -116,9 +142,18 @@ for cand in "${candidates[@]}"; do
   # (round-8 fix). No ":" in this alternation - trailer_body already has the
   # label's own colon stripped, so any colon reaching here is a real
   # malformed token, not a separator.
-  if ! printf '%s' "$trailer_body" | grep -qE "(^|[[:space:]]|,)${cand}([[:space:]]|,|\$)"; then
-    missing+=("$cand")
+  if printf '%s' "$trailer_body" | grep -qE "(^|[[:space:]]|,)${cand}([[:space:]]|,|\$)"; then
+    continue
   fi
+  # An approved retarget counts the branch node as claimed when the node it
+  # hands the PR to sits on the closure line (same boundary regex). The
+  # merge owner still refuses the PR until the graph binding has moved.
+  if [[ "$cand" == "$retarget_from" ]] \
+     && printf '%s' "$trailer_body" | grep -qE "(^|[[:space:]]|,)${retarget_to}([[:space:]]|,|\$)"; then
+    retarget_covered=1
+    continue
+  fi
+  missing+=("$cand")
 done
 
 # AT LEAST ONE claimed, never all of them. This gate has no graph (see the
@@ -163,12 +198,17 @@ if [[ $claimed -eq 0 ]]; then
     echo "  and one unknown id voids the whole binding at merge."
     echo "  Editing the body starts a fresh run of this check by itself. Do NOT"
     echo "  rerun this failed run: a rerun replays the old body and fails again."
+    echo "  Branch names the wrong node? Move the graph binding, then add 'Retarget"
+    echo "  <branch-node> <right-node> <msg-or-d-id>' under the Fixes line; recipe in skills/ship/references/create.md."
   } >&2
   exit 1
 fi
 
+if [[ $retarget_covered -eq 1 ]]; then
+  echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' node $retarget_from is retargeted to $retarget_to (approval $retarget_approval)."
+fi
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' claims $claimed of ${#candidates[@]} candidate(s); unclaimed: ${missing[*]} (not demanded - this gate reads no graph)."
-else
+elif [[ $retarget_covered -eq 0 ]]; then
   echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' node id(s) [${candidates[*]}] all present in the exact trailer."
 fi

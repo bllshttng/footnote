@@ -165,7 +165,7 @@ impl View {
         // Keep the scroll too, so a rebuild on a long page never jumps the
         // list back to its top under the cursor.
         modal.popup.scroll = scroll;
-        modal.popup.follow_sel(self.term.0 as usize);
+        modal.popup.follow_sel(self.term);
         self.aux = Some(modal);
     }
 

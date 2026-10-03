@@ -245,20 +245,76 @@ _plan_created_date() {
     printf '%s' "$created"
 }
 
-# The plan's node id, from the frontmatter's node: then claims: key - the
-# same order _plan_link_id resolves. Empty when neither names an id.
+# The plan's node id, resolved by the same rule the Rust sweep's
+# plan_link_id applies (crates/fno-agents/src/plan_doc/reconcile.rs): keys
+# node, claims, graph_node_id in that order, a truthy one-item list
+# (inline `[x-1]` or a single block item) unwraps, and any other list shape
+# reads as empty. The validator owns this one leg of the link rule; no
+# Python import.
 _plan_node_id() {
-    local file="$1" line=""
-    line=$(awk '
+    local file="$1" raw=""
+    raw=$(awk '
         /^---/ { c++; if (c==2) exit; next }
-        c==1 && /^(node|claims):/ {
-            sub(/^(node|claims):[[:space:]]*/, "")
-            gsub(/["'"'"']/, "")
-            print
-            exit
+        c==1 {
+            if ($0 ~ /^(node|claims|graph_node_id):/) {
+                key = $0; sub(/:.*/, "", key)
+                val = $0; sub(/^[^:]*:[[:space:]]*/, "", val)
+                gsub(/["'"'"']/, "", val)
+                if (!(key in seen)) {
+                    seen[key] = 1
+                    if (val == "") { pending = key }
+                    else { vals[key] = val }
+                }
+            } else if (pending != "" && $0 ~ /^[ \t]+-[ \t]/) {
+                item = $0
+                sub(/^[ \t]*-[ \t]*/, "", item)
+                gsub(/["'"'"']/, "", item)
+                if (vals[pending] == "") { vals[pending] = "1:" item }
+                else { vals[pending] = "MANY" }
+                pending = ""
+            } else if (pending != "" && $0 ~ /^[ \t]/ && $0 !~ /^[ \t]*#/) {
+                # A nested mapping under the link key is the unusable shape
+                # the Rust plan_link_id reads as unlinked; do not fall
+                # through to a later key.
+                vals[pending] = "MANY"
+                pending = ""
+            }
+        }
+        END {
+            # A usable link unwraps to the id. A PRESENT-but-unusable shape
+            # (a multi-item list, a nested mapping) returns its raw text so
+            # the well-formed-id check in the caller still reads malformed
+            # and keeps the malformed warning voice. Only an absent key or
+            # an empty list falls through to the next key.
+            for (k in vals) {
+                v = vals[k]
+                if (v == "[]") { v = "" }
+                else if (v == "MANY") { ; }
+                else if (v ~ /^1:/) {
+                    v = substr(v, 3)
+                    gsub(/^\[|\]$/, "", v)
+                    gsub(/^[ \t]+|[ \t]+$/, "", v)
+                } else {
+                    gsub(/^\[|\]$/, "", v)
+                    gsub(/^[ \t]+|[ \t]+$/, "", v)
+                }
+                vals[k] = v
+            }
+            link = ""
+            v = vals["node"]
+            if (v != "") { link = v }
+            if (link == "") {
+                v = vals["claims"]
+                if (v != "") { link = v }
+            }
+            if (link == "") {
+                v = vals["graph_node_id"]
+                if (v != "") { link = v }
+            }
+            print link
         }
     ' "$file")
-    printf '%s' "$line"
+    printf '%s' "$raw"
 }
 
 # The node id encoded by the plan's own filename, by the same trailing
@@ -680,7 +736,7 @@ echo ""
 echo "--- Parallel Conflict Check ---"
 
 if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
-    ok "Parallel ownership validated by semantic execution contract"
+    ok "semantic wave checks run through the Rust gate in Answerer Enumeration"
 elif [[ -f "$PLAN_DIR" ]]; then
     # Find parallel waves in the Execution Strategy YAML: lines like
     # "mode: parallel" followed by tasks. Strategy: extract task IDs listed
@@ -1213,102 +1269,113 @@ sys.stdout.write("O\t%s\n" % validated.outcome)
 # one place that reads live data.
 #
 # node -> claims -> graph_node_id, same order and same one-element-list
-# unwrap as fno.plan.reconcile_status._plan_link_id (imported, not
-# re-spelled): `claims` alone missed every plan using the canonical `node:`
-# key - the field quick-template.md actually ships, `claims:` being commented
-# out there as the ab-id-input special case.
-node_id = None
-if isinstance(loaded, dict):
-    try:
-        from fno.plan.reconcile_status import _plan_link_id
-
-        node_id = _plan_link_id(loaded)
-    except Exception:  # noqa: BLE001 - a resolver import failure must not fail the shape check
-        node_id = None
+# unwrap as the Rust sweep's plan_link_id. The shell resolves the link (the
+# _plan_node_id helper) and passes it in, so this stays one leg of the rule
+# with no Python import: `claims` alone missed every plan using the canonical
+# `node:` key - the field quick-template.md actually ships, `claims:` being
+# commented out there as the ab-id-input special case.
+node_id = sys.argv[2] if len(sys.argv) > 2 else None
 if isinstance(node_id, str) and node_id.strip():
     try:
-        from fno.decide import _graph_entries, list_decisions
+        from fno.rust_binary import call_front_json
 
-        entries = _graph_entries(required=True)
+        answer = call_front_json(
+            {
+                "mode": "decisions",
+                "argv": [node_id.strip(), "--limit", "0", "--state", "all", "--json"],
+            }
+        )
+        rows = answer.get("decisions") or []
+        damaged = int(answer.get("damaged") or 0)
     except Exception as exc:  # noqa: BLE001 - an unread graph is not an empty graph
         sys.stdout.write(
             "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
             % " ".join(str(exc).split())[:160]
         )
         raise SystemExit(0)
-    try:
-        _subj, rows, damaged = list_decisions(
-            node_id.strip(), limit=None, state="all", entries=entries, scope="all"
+    if damaged:
+        # A damaged row could have held the closing verdict this whole
+        # gate exists to catch - reading the surviving rows as complete
+        # would be exactly the silent-pass failure the gate polices, one
+        # layer down. `fno backlog decide-reindex` is the recovery (same
+        # as _read_index's own operator-facing message).
+        sys.stdout.write(
+            "W\t%d damaged row(s) in the decision index - run "
+            "`fno backlog decide-reindex` and re-validate\n" % damaged
         )
-    except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
-        sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
-        if damaged:
-            # A damaged row could have held the closing verdict this whole
-            # gate exists to catch - reading the surviving rows as complete
-            # would be exactly the silent-pass failure the gate polices, one
-            # layer down. `fno backlog decide-reindex` is the recovery (same
-            # as _read_index's own operator-facing message).
+        # The door degrades a graph it cannot read to `lifecycle: unknown`
+        # rows that carry the reason; that is the fail-closed W below, never
+        # a clean read - an unreadable graph could be hiding the closing
+        # verdict this gate exists to catch.
+        unknown_graph = [
+            r
+            for r in rows
+            if r.get("lifecycle") == "unknown"
+            and "could not be read" in str(r.get("lifecycle_reason") or "")
+        ]
+        if unknown_graph:
             sys.stdout.write(
-                "W\t%d damaged row(s) in the decision index - run "
-                "`fno backlog decide-reindex` and re-validate\n" % damaged
+                "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
+                % " ".join(str(unknown_graph[0].get("lifecycle_reason") or "").split())[:160]
             )
-        else:
-            def valid_expiry_ref_shape(ref):
-                if not isinstance(ref, dict):
-                    return False
-                kind = ref.get("kind")
-                if kind == "node":
-                    return isinstance(ref.get("node_id"), str) and bool(
-                        ref["node_id"].strip()
-                    )
-                if kind == "pr":
-                    number = ref.get("number")
-                    return (
-                        isinstance(ref.get("repository"), str)
-                        and bool(ref["repository"].strip())
-                        and isinstance(number, int)
-                        and not isinstance(number, bool)
-                        and number > 0
-                    )
-                return False
+            raise SystemExit(0)
 
-            for row in rows:
-                if row.get("lane") != "coord" or "expiry_ref" not in row:
-                    continue
-                did = str(row.get("decision_id") or "<missing>")
-                if not valid_expiry_ref_shape(row.get("expiry_ref")):
-                    sys.stdout.write(
-                        "E\tcoord decision %s has invalid expiry_ref shape; "
-                        "use a node ref with node_id or a PR ref with repository "
-                        "and positive number\n" % did
-                    )
-                elif row.get("lifecycle") == "unscoped":
-                    sys.stdout.write(
-                        "E\tcoord decision %s has explicit expiry_ref but no "
-                        "positive closure evidence; repair the graph evidence "
-                        "and re-validate\n" % did
-                    )
-            # Drop rows the derived superseded_by map marks withdrawn - a
-            # withdrawn ruling must not demand acknowledgment. Never scan the
-            # ruling's own prose for this (see DecisionAcknowledgment's
-            # sibling note in ConsolidationBlock's docstring).
-            live = [r for r in rows if r.get("lifecycle") == "live"]
-            # casefold both sides: DecisionAcknowledgment accepts
-            # d-ABCD1234 (the id regex is case-insensitive, matching
-            # looks_like_decision_id), and a real minted id is always
-            # lowercase hex - but a hand-typed one in a plan need not be, and
-            # this is the only decision-id comparison in the codebase that is
-            # not already casefolded (list_decisions itself casefolds
-            # subject matches).
-            acked = {e.decision_id.casefold() for e in validated.decisions_acknowledged}
-            for row in live:
-                did = str(row.get("decision_id") or "")
-                if did and did.casefold() not in acked:
-                    text = " ".join(str(row.get("decision") or "").split())[:80]
-                    ts = str(row.get("ts") or "")
-                    sys.stdout.write("M\t%s\t%s\t%s\n" % (did, ts, text))
-            sys.stdout.write("D\t%d\n" % len(live))
+        def valid_expiry_ref_shape(ref):
+            if not isinstance(ref, dict):
+                return False
+            kind = ref.get("kind")
+            if kind == "node":
+                return isinstance(ref.get("node_id"), str) and bool(
+                    ref["node_id"].strip()
+                )
+            if kind == "pr":
+                number = ref.get("number")
+                return (
+                    isinstance(ref.get("repository"), str)
+                    and bool(ref["repository"].strip())
+                    and isinstance(number, int)
+                    and not isinstance(number, bool)
+                    and number > 0
+                )
+            return False
+
+        for row in rows:
+            if row.get("lane") != "coord" or "expiry_ref" not in row:
+                continue
+            did = str(row.get("decision_id") or "<missing>")
+            if not valid_expiry_ref_shape(row.get("expiry_ref")):
+                sys.stdout.write(
+                    "E\tcoord decision %s has invalid expiry_ref shape; "
+                    "use a node ref with node_id or a PR ref with repository "
+                    "and positive number\n" % did
+                )
+            elif row.get("lifecycle") == "unscoped":
+                sys.stdout.write(
+                    "E\tcoord decision %s has explicit expiry_ref but no "
+                    "positive closure evidence; repair the graph evidence "
+                    "and re-validate\n" % did
+                )
+        # Drop rows the derived superseded_by map marks withdrawn - a
+        # withdrawn ruling must not demand acknowledgment. Never scan the
+        # ruling's own prose for this (see DecisionAcknowledgment's
+        # sibling note in ConsolidationBlock's docstring).
+        live = [r for r in rows if r.get("lifecycle") == "live"]
+        # casefold both sides: DecisionAcknowledgment accepts
+        # d-ABCD1234 (the id regex is case-insensitive, matching
+        # looks_like_decision_id), and a real minted id is always
+        # lowercase hex - but a hand-typed one in a plan need not be, and
+        # this is the only decision-id comparison in the codebase that is
+        # not already casefolded (list_decisions itself casefolds
+        # subject matches).
+        acked = {e.decision_id.casefold() for e in validated.decisions_acknowledged}
+        for row in live:
+            did = str(row.get("decision_id") or "")
+            if did and did.casefold() not in acked:
+                text = " ".join(str(row.get("decision") or "").split())[:80]
+                ts = str(row.get("ts") or "")
+                sys.stdout.write("M\t%s\t%s\t%s\n" % (did, ts, text))
+        sys.stdout.write("D\t%d\n" % len(live))
 PYEOF
     )
     # Same ladder _semantic_validate walks: the checkout's own interpreter
@@ -1316,13 +1383,13 @@ PYEOF
     # can take.
     if [[ -n "$python_bin" ]]; then
         delegate_out=$(PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            "$python_bin" -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+            "$python_bin" -c "$consolidation_prog" "$file" "$(_plan_node_id "$file")" 2>&1) || delegate_rc=$?
     fi
     if [[ -z "$python_bin" || "$delegate_out" == U$'\t'* ]] \
             && command -v uv >/dev/null 2>&1; then
         delegate_rc=0
         delegate_out=$(uv run --project "$source_root/cli" \
-            python -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+            python -c "$consolidation_prog" "$file" "$(_plan_node_id "$file")" 2>&1) || delegate_rc=$?
     fi
     if [[ -z "$delegate_out" && "$delegate_rc" -eq 0 ]]; then
         warn "$label: consolidation block NOT CHECKED (no interpreter with the fno CLI importable at $source_root) - not a pass"
@@ -1638,13 +1705,72 @@ check_surface_file() {
     fi
 }
 
+check_wave_file() {
+    local file="$1" label="$2"
+    local wave_gate_date="2026-10-02"
+    local base node_id node_cwd="" repo_root bin wave_output wave_rc=0
+    local wave_created kind payload
+    local wave_errors=0
+    local -a receipts=()
+    [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]] || return 0
+    grep -Eq '^##[[:space:]]+Execution Strategy[[:space:]]*$' "$file" || return 0
+
+    base="$(dirname "$file")"
+    node_id="$(_plan_node_id "$file")"
+    if [[ -n "$node_id" ]] && command -v fno >/dev/null 2>&1 \
+        && node_cwd="$(fno backlog get "$node_id" --strict --field _resolved_cwd 2>/dev/null)"; then
+        [[ -d "$node_cwd" ]] && base="$node_cwd"
+    fi
+    repo_root="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$repo_root" ]] || repo_root="$(cd "$base" && pwd)"
+    bin="$(resolve_agents_bin)"
+    if [[ -z "$bin" ]]; then
+        warn "$label: parallel wave checks NOT CHECKED (no fno-agents binary) - not a pass"
+        return 0
+    fi
+
+    wave_output="$("$bin" wave check "$file" --repo "$repo_root")" || wave_rc=$?
+    if [[ "$wave_rc" -ne 0 ]]; then
+        warn "$label: parallel wave checks NOT CHECKED (the check failed to run: ${wave_output##*$'\n'}) - not a pass"
+        return 0
+    fi
+
+    wave_created="$(_plan_created_date "$file")"
+    while IFS=$'\t' read -r kind payload; do
+        case "$kind" in
+            E) error "$label: $payload"; wave_errors=$((wave_errors + 1)) ;;
+            X)
+                if _is_quick_plan; then
+                    warn "$label: $payload (quick plan)"
+                elif [[ "$wave_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ \
+                    && "$wave_created" > "$wave_gate_date" ]]; then
+                    error "$label: $payload"
+                    wave_errors=$((wave_errors + 1))
+                else
+                    warn "$label: $payload (created ${wave_created:-unknown}, not after the $wave_gate_date wave gate)"
+                fi ;;
+            O) receipts+=("$payload") ;;
+            W) warn "$label: $payload" ;;
+            U) warn "$label: parallel wave checks NOT CHECKED ($payload) - not a pass" ;;
+        esac
+    done <<< "$wave_output"
+    if [[ $wave_errors -eq 0 ]]; then
+        local receipt
+        for receipt in ${receipts[@]+"${receipts[@]}"}; do
+            ok "$label: $receipt"
+        done
+    fi
+}
+
 echo ""
 echo "--- Answerer Enumeration ---"
 
 if [[ -f "$PLAN_DIR" ]]; then
     check_surface_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+    check_wave_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
     check_surface_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
+    check_wave_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
 fi
 
 # -------------------------------------------------------------------
@@ -2181,6 +2307,7 @@ validate_task_edges_check() {
             return 0
         fi
     fi
+    [[ -f "$plan_file" ]] || return 0
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
         python_bin="${_src%%|*}"

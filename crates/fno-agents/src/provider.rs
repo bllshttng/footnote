@@ -471,7 +471,15 @@ pub fn parse_verb_token(tok: &str) -> Option<(&str, bool)> {
 /// root env hints, then the persisted `~/.fno/install/plugin-root` pointer; empty on
 /// any resolution failure, where pass-through is the safe direction and the
 /// plugin-qualified `/fno:` spelling keeps working on namespace alone.
-fn footnote_verbs() -> std::collections::HashSet<String> {
+/// The roster for out-of-crate callers (the parity tests), sorted so the
+/// order is deterministic.
+pub fn footnote_verbs_public() -> Vec<String> {
+    let mut verbs: Vec<String> = footnote_verbs().into_iter().collect();
+    verbs.sort();
+    verbs
+}
+
+pub(crate) fn footnote_verbs() -> std::collections::HashSet<String> {
     static VERBS: std::sync::OnceLock<std::collections::HashSet<String>> =
         std::sync::OnceLock::new();
     if let Some(verbs) = VERBS.get() {
@@ -1893,6 +1901,28 @@ impl Provider for GrokProvider {
     }
 }
 
+/// The COMPLETE harness roster: every harness footnote supports, dispatch or
+/// not. This is the one list - Python's `fno.harness_names` proxies
+/// it through the [`crate::harness_roster`] verb instead of carrying a tuple
+/// copy, and `scripts/ci/check-harness-roster-parity.py` holds every evidence
+/// surface (setup docs, `for_name` arms, adapter rows) as a subset of it. A
+/// name may sit here without a [`for_name`] arm (hermes, openclaw: docs-only
+/// hosts); every [`KNOWN_PROVIDERS`] name MUST be here (test-enforced).
+pub const KNOWN_HARNESSES: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "agy",
+    "opencode",
+    "pi",
+    "hermes",
+    "openclaw",
+    "cursor-agent",
+    "grok",
+    "zcode",
+    "footnote",
+];
+
 /// NAMING SKEW (Discretion 4 — commented, not lockstep-renamed, to keep
 /// the diff small): this 5-name list mirrors Python's `READABLE_PROVIDERS` (the
 /// spawn/pane read-tolerance roster), NOT Python's narrower 3-name
@@ -1911,6 +1941,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "cursor-agent",
     "grok",
     "zcode",
+    "footnote",
 ];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
@@ -1934,6 +1965,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "cursor-agent" => Some(Box::new(crate::cursor_agent::CursorAgentProvider)),
         "grok" => Some(Box::new(GrokProvider)),
         "zcode" => Some(Box::new(crate::zcode::ZcodeProvider)),
+        "footnote" => Some(Box::new(crate::footnote_harness::FootnoteProvider)),
         _ => None,
     }
 }
@@ -2691,6 +2723,44 @@ mod tests {
             );
         }
         assert!(for_name("nope").is_none(), "unknown provider must be None");
+        // KNOWN_HARNESSES is the one roster: every dispatchable provider is
+        // rostered, and every rostered name is lowercase kebab so the
+        // setup-doc glob, the parity gate's extractors, and the Python
+        // readers all agree on its shape.
+        for name in KNOWN_PROVIDERS {
+            assert!(
+                KNOWN_HARNESSES.contains(name),
+                "{name} is dispatchable but absent from KNOWN_HARNESSES"
+            );
+        }
+        assert!(!KNOWN_HARNESSES.is_empty());
+        for name in KNOWN_HARNESSES {
+            assert!(
+                !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_lowercase()
+                        || c.is_ascii_digit()
+                        || c == '-'
+                        || c == '_'),
+                "roster name {name:?} is not lowercase kebab"
+            );
+        }
+        let mut sorted = KNOWN_HARNESSES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), KNOWN_HARNESSES.len(), "duplicate roster name");
+        // The bundled capability table's harness rows stay a subset of the
+        // one roster. The Python import-time assert that used to hold this
+        // moved here, where the table's source lives: the packaged copy the
+        // Python tree reads is byte-identical (the freshness gate), so this
+        // pin covers it transitively.
+        let caps = crate::harness_capabilities::HarnessContract::packaged()
+            .expect("the packaged capability table parses");
+        for name in caps.harness.keys() {
+            assert!(
+                KNOWN_HARNESSES.contains(&name.as_str()),
+                "capability row {name} is absent from KNOWN_HARNESSES"
+            );
+        }
     }
 
     // ---- claude short-id parse ----

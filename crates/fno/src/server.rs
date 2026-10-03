@@ -2584,7 +2584,7 @@ impl Core {
                 Ok(ok) => ok,
                 Err(keeper_err) => {
                     let fallback_permit =
-                        crate::process_admission::admit_fallback().map_err(|e| e.to_string())?;
+                        crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
                     let shell = PtyShell::spawn_cmd_with_permit(
                         argv,
                         rows,
@@ -3141,7 +3141,7 @@ impl Core {
             }
         };
         let pane_count = self.placement_pane_count(dest, &placement);
-        let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
+        let permit = crate::process_admission::admit_tab(pane_count, placement.max_panes)
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
@@ -5754,8 +5754,6 @@ impl Core {
             }
             plan = None;
         }
-        // The user's own tap: the attached-and-driving test [`Core::admit_gesture_pane`] uses.
-        let human = self.clients.iter().any(|c| c.id == client_id && !c.passive);
         let (pid, tid, fallback_notice) = match self.resume_worker_into(
             &facts,
             sid,
@@ -5764,7 +5762,6 @@ impl Core {
             dims.1,
             plan.as_ref(),
             staged_argv.as_deref(),
-            human,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -5833,7 +5830,6 @@ impl Core {
         cols: u16,
         plan: Option<&ReentryVerdict>,
         staged_argv: Option<&[String]>,
-        human: bool,
     ) -> Result<(u64, TabId, Option<String>), String> {
         if !Self::resume_form(&facts.harness) {
             return Err("agent harness has no resume form".into());
@@ -5859,14 +5855,10 @@ impl Core {
         // Unit fixtures spawn short-lived `/bin/cat` inline; production
         // resumes keep the keeper's ownership contract (`pane run --worker`).
         #[cfg(test)]
-        let pid = {
-            let _ = human; // fixtures gate nothing; the flag is the prod arm's
-            self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?
-        };
+        let pid = { self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)? };
         #[cfg(not(test))]
         let pid = {
-            let permit =
-                crate::process_admission::admit_fleet_for(human).map_err(|e| e.to_string())?;
+            let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
             self.spawn_pane_shell_with_permit(&argv, rows, cols, &spawn_cwd, permit, true)?
         };
         if let Some(entry) = self.panes.get_mut(&pid) {
@@ -7680,7 +7672,7 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(", ");
             if done_worker_names.len() > 6 {
-                names.push_str(", ...");
+                names.push_str(&format!(" and {} more", done_worker_names.len() - 6));
             }
             self.notice_all(format!(
                 "restore: skipped {done_workers_total} done worker pane(s) and {skipped_done_tabs} done tab(s): {names}"
@@ -9147,7 +9139,7 @@ impl Core {
     /// the client's opener with an unvetted URL - `link_at` already filters, and
     /// this is the second lock on the same door.
     fn send_open_link(&mut self, client_id: u64, url: String) {
-        if !crate::link::is_openable(&url) {
+        if !(crate::link::is_openable(&url) || crate::link::is_sender_uri(&url)) {
             return;
         }
         let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
@@ -10198,9 +10190,6 @@ impl Core {
                             cols,
                             plan.as_ref(),
                             staged_argv.as_deref(),
-                            // Restore-revive keeps the brake's teeth: only the
-                            // tap gesture counts as human.
-                            false,
                         ) {
                             Ok((resumed, _, fallback_notice)) => {
                                 focus_pid = resumed;
@@ -10440,14 +10429,16 @@ impl Core {
                         .viewed_tab(view)
                         .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
                         .unwrap_or(0);
-                    let permit =
-                        match self.admit_gesture_pane(client_id, pane_count, placement.max_panes) {
-                            Ok(permit) => permit,
-                            Err(error) => {
-                                self.notice(client_id, format!("attach failed: {error}"));
-                                return Flow::Continue;
-                            }
-                        };
+                    let permit = match crate::process_admission::admit_tab(
+                        pane_count,
+                        placement.max_panes,
+                    ) {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            self.notice(client_id, format!("attach failed: {error}"));
+                            return Flow::Continue;
+                        }
+                    };
                     let new_pid = match self
                         .spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit)
                     {
@@ -10580,8 +10571,7 @@ impl Core {
                 let Some((argv, cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
                     return Flow::Continue;
                 };
-                let permit = match self.admit_gesture_pane(
-                    client_id,
+                let permit = match crate::process_admission::admit_tab(
                     self.placement_pane_count(dest, &effective),
                     effective.max_panes,
                 ) {

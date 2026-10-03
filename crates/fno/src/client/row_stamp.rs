@@ -162,11 +162,8 @@ impl View {
 
     /// The transient notice, right-aligned, clipped to the strip.
     ///
-    /// Clipping ELLIPSIZES. A silently cut notice reads as a whole sentence, so
-    /// on a 40-column strip "…is not TOML, keys are on defaults" became a path
-    /// fragment that looked like the entire message. Write notices meaning-first
-    /// for the same reason: whatever the strip cannot hold is what a narrow
-    /// terminal loses.
+    /// The notice is an overlay, not a row: a cut tail keeps the `…`
+    /// marker, because a silent cut reads as a whole (shorter) sentence.
     pub(super) fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
         let (full, _) = self.notice.as_ref()?;
         // The open feed panel is senior: the toast right-aligns to the
@@ -174,15 +171,8 @@ impl View {
         // through this one function, so the hit test and the paint agree.
         let right = cols.saturating_sub(self.feed_panel_w() as usize);
         let room = right.saturating_sub(1);
-        let text: String = if full.chars().count() > room {
-            full.chars()
-                .take(room.saturating_sub(1))
-                .chain(std::iter::once('…'))
-                .collect()
-        } else {
-            full.clone()
-        };
-        let start = right.saturating_sub(text.chars().count() + 1);
+        let text = crate::chrome::fit_ellipsis(full, room);
+        let start = right.saturating_sub(crate::chrome::str_cols(&text) + 1);
         Some((start, text))
     }
 }
@@ -266,25 +256,20 @@ pub(super) fn paint_row_stamp(
         return;
     };
     let mark = if failure { "✗ " } else { "✓ " };
-    // (review) Ellipsize to leave the row's leading identity cells: a
-    // stamp that swallows the name is a placement fix that eats its own target.
+    // Clip with no marker (the ROW rule, d-36438ea4), leaving the row's
+    // leading identity cells: a stamp that swallows the name is a placement
+    // fix that eats its own target.
     let cap = text_w.saturating_sub(4);
     let full = format!("{mark}{stamp_text}");
     let mut stamp: Vec<(char, usize)> = Vec::new();
     let mut width = 0usize;
-    let mut truncated = false;
     for ch in full.chars() {
         let w = glyph_cols(ch);
         if width + w > cap {
-            truncated = true;
             break;
         }
         width += w;
         stamp.push((ch, w));
-    }
-    if truncated && width < cap {
-        stamp.push(('…', 1));
-        width += 1;
     }
     let mut start = text_w.saturating_sub(width);
     for (ch, w) in stamp {
@@ -428,11 +413,11 @@ mod tests {
                 .any(|c| c.c == '✗' && c.flags & cell_flags::INVERSE == cell_flags::INVERSE)
         };
         assert!(
-            has_stamp(&agent_row_cells(1)),
+            has_stamp(&agent_row_cells(2)),
             "the agent row carries the ✗ stamp"
         );
         assert!(
-            !has_stamp(&agent_row_cells(0)),
+            !has_stamp(&agent_row_cells(1)),
             "the pinned header row never carries the stamp"
         );
     }
@@ -452,7 +437,7 @@ mod tests {
         });
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let row = &frame.cells[cols..cols * 2];
+        let row = &frame.cells[cols * 2..cols * 3];
         assert!(row.iter().any(|c| c.c == '✗'), "the stamp still renders");
         let lead = row[0];
         assert!(

@@ -98,12 +98,11 @@ so a project-local `config.toml` wins per key and deep-merges over the global (`
 
 The bus derives from `state_dir`, so an isolated environment gets its own. That is right for a demo. When the operator wants to message a demo worker from a real session, it is wrong. The receipt states it rather than leaving it inherited. There is no `--share-mail` escape until someone needs one.
 
-## The two refusals
+## The refusal
 
 `fno config project init` refuses rather than half-isolating:
 
 - **A different `state_dir` already pinned** in this repo's `config.toml`. It prints the existing value and the file path, and writes nothing. Overwriting silently moves a live environment's graph, ledger and mail bus.
-- **`config.paths.agents_registry_path` set.** That explicit override is honored ahead of the `state_dir` fallback. The environment then gets its own graph and shares the agent roster. The refusal names the key.
 
 ## Appendix: does `CLAUDE_CONFIG_DIR` give a distinct claude daemon namespace?
 

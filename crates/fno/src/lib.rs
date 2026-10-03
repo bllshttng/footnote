@@ -28,6 +28,10 @@ pub mod context_used;
 pub mod court_overlay;
 pub mod digest_overlay;
 pub mod dispatch_launch;
+pub mod doctor_update;
+#[cfg(test)]
+#[path = "doctor_update_tests.rs"]
+mod doctor_update_tests;
 pub mod event_cli;
 pub mod event_store;
 pub mod feed_overlay;
@@ -38,6 +42,7 @@ pub(crate) mod lattice;
 pub mod law_cli;
 pub mod link;
 pub mod live_store_fence;
+pub mod messages_model;
 pub mod model_catalog;
 pub mod mouse;
 pub mod mux_cli;
@@ -63,9 +68,14 @@ pub mod reign_root;
 pub mod restore_gate;
 pub mod restore_liveness;
 mod review_invocation;
+pub mod search_query;
 pub mod served_liveness;
 pub mod server;
 pub mod server_stats;
+pub mod setup_autowire;
+#[cfg(test)]
+#[path = "setup_autowire_tests.rs"]
+mod setup_autowire_tests;
 pub mod sideline_color;
 pub mod spawn_journal;
 pub mod splash;

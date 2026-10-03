@@ -239,6 +239,7 @@ impl OrgBoard {
                     agent: Some(agent.name.clone()),
                     action: "none".into(),
                     reason: None,
+                    command: None,
                 },
                 agent: Some(agent.clone()),
             };
@@ -678,6 +679,7 @@ pub(crate) fn restore(view: &mut View) {
             super::backlog_board::set_sideline_view(view, SidelineView::Agents)
         }
         SidelineView::Agents => {}
+        SidelineView::Messages => {} // restored by the caller's messages arm
     }
 }
 pub(crate) fn maybe_kick(view: &mut View, tx: &OrgTx) {

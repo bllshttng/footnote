@@ -36,6 +36,18 @@ def parse_closure_trailer(body: str) -> list[str]:
     return verb_call("pr-closure-parse", {"body": body}, VerbUnavailable)["ids"]
 
 
+def parse_closure_answer(body: str) -> dict:
+    """Forward to the Rust leg: the whole ``pr-closure-parse`` answer in one call."""
+    if not isinstance(body, str) or not body:
+        return {}
+    return verb_call("pr-closure-parse", {"body": body}, VerbUnavailable)
+
+
+def retargeted_from_ids(body: str) -> list[str]:
+    """Forward to the Rust leg: branch ids the body's Retarget line hands away."""
+    return parse_closure_answer(body).get("retargeted_from", [])
+
+
 def render_closure_trailer(node_ids: list[str]) -> str:
     """Forward to the Rust leg: the one ``Fixes`` line ("" when nothing well-formed)."""
     return verb_call("pr-closure-render", {"ids": list(node_ids)}, VerbUnavailable)["line"]

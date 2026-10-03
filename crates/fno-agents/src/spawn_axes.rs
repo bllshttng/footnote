@@ -1,9 +1,9 @@
 //! The billing axes of the spawn seam: config-sourced route, account and
-//! model, decided in one place. This is the port of the seam's largest
-//! decision block (`inject_spawn_defaults`, the route/account/model region):
-//! the Python front door projects the caller's facts and the config axes'
-//! values plus rungs, this module returns the injections, receipts and skip
-//! reasons verbatim, and the seam only applies them. The message strings are
+//! model, decided in one place. This module answers the spawn compose's
+//! axis-region asks (route/account/model): the Python front door projects the
+//! caller's facts and the config axes' values plus rungs, this module
+//! returns the injections, receipts and skip reasons verbatim, and the seam
+//! only applies them. The message strings are
 //! the seam's own vocabulary - one spelling, read by tests and operators
 //! alike. Pure over its input: no config, filesystem or network reads.
 
@@ -555,6 +555,32 @@ pub fn decide(payload: &Value) -> Value {
     Value::Object(out)
 }
 
+/// The `removal_accounting` field's answer: run the write choke point's
+/// removal accounting for the Python write primitive. The before-rows ride
+/// the payload (Python's raw pre-write snapshot); the after-rows read from
+/// the registry on disk, which the write has already persisted. The existing
+/// accounting stages the receipts and emits the events; the answer names the
+/// count so the caller's audit trail reads one line.
+pub fn removal_accounting_decide(ask: &Value) -> Value {
+    let path = std::path::PathBuf::from(ask.get("registry").and_then(Value::as_str).unwrap_or(""));
+    if path.as_os_str().is_empty() {
+        return serde_json::json!({ "refused": "registry path is required" });
+    }
+    let before: Vec<crate::state::RegistryEntry> = ask
+        .get("before")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| serde_json::from_value(row.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let removed = crate::state::load_registry(&path)
+        .map(|registry| crate::state::account_for_removed_rows(&path, &before, &registry.entries))
+        .unwrap_or(0);
+    serde_json::json!({ "removed": removed })
+}
+
 /// The `reentry_mechanism` field's answer: which relaunch a Resume resolves
 /// to for the named row, or the refusal naming why the wake may not respawn.
 pub fn reentry_mechanism_decide(ask: &Value) -> Value {
@@ -667,6 +693,15 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     // registry choke point's removal receipt (same field-on-a-verb shape).
     if let Some(ask) = parsed.get("reap_receipt") {
         println!("{}", crate::receipt::decide_reap_receipt(ask));
+        return 0;
+    }
+    // A `removal_accounting` field runs the registry write choke point's
+    // removal accounting for the Python write primitive (same
+    // field-on-a-verb shape): the before-rows ride the payload, the
+    // after-rows read from the registry on disk, and the existing
+    // accounting stages the receipts and emits the events.
+    if let Some(ask) = parsed.get("removal_accounting") {
+        println!("{}", removal_accounting_decide(ask));
         return 0;
     }
     // A `pi_session_lookup` field asks the pi store owner what a

@@ -5,8 +5,12 @@
 # install it. Claude Code has no plugin install hook, so this is the only place a
 # plugin install runs the installer. It runs detached, once per plugin version,
 # under a lock, and logs to ${CLAUDE_PLUGIN_DATA}/postinstall.log. Goes SILENT the
-# moment the front door is active. Stdout becomes session context (same
-# plain-text convention as setup-nudge-session-start.sh).
+# moment the front door is active - resolved beyond this session's PATH first
+# (~/.local/bin, ~/.cargo/bin): a fresh background session's PATH lacks those,
+# and reading a working install as missing once started the installer over a
+# live tool env (2026-10-02 gap audit, blocker 1). A proven door off PATH prints
+# a one-line hint naming the path instead of installing. Stdout becomes session
+# context (same plain-text convention as setup-nudge-session-start.sh).
 
 set -uo pipefail
 
@@ -23,8 +27,30 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
+# Resolve the front door beyond this session's PATH: a fresh background
+# session does not inherit ~/.cargo/bin, and `command -v fno` alone then reads
+# a working install as missing, which started the installer and force-replaced
+# a live tool env mid-study (2026-10-02 gap audit, blocker 1). PATH first,
+# then the known install dirs, mirroring hooks/lib/agents-bin.sh.
+fno_bin=""
 if command -v fno >/dev/null 2>&1; then
-  with_timeout 3 fno mux ls --json >/dev/null 2>&1
+  fno_bin="$(command -v fno)"
+else
+  for known_dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    if [[ -x "$known_dir/fno" ]]; then
+      fno_bin="$known_dir/fno"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$fno_bin" ]]; then
+  # The probe's EXIT CODE is the signal (2 = fno-py, 124 = hung socket that
+  # still proves the Rust door), so it keeps its FIXED bound: the load-aware
+  # budget's silence contract cannot express "the exit code is the answer",
+  # and a runner under shard load measured a 1s fork miss that turned a real
+  # rc 2 into a 124 and silenced a real reminder.
+  with_timeout 3 "$fno_bin" mux ls --json >/dev/null 2>&1
   probe_rc=$?
   # 124 means our own bound fired. A wedged socket still PROVES the Rust front
   # door is present: `fno-py` has no `mux` verb and fails fast with a usage
@@ -34,7 +60,15 @@ if command -v fno >/dev/null 2>&1; then
   # than only where Homebrew supplied timeout(1), that misread is reachable
   # everywhere, so it has to be distinguished from a real probe failure.
   if [[ $probe_rc -eq 0 || $probe_rc -eq 124 ]]; then
-    exit 0 # `fno` on PATH IS the Rust mux front door - nothing to remind
+    if command -v fno >/dev/null 2>&1; then
+      exit 0 # `fno` on PATH IS the Rust mux front door - nothing to remind
+    fi
+    # Installed but off this session's PATH. Reinstalling cannot help and can
+    # only clobber the working tool env; name the path and stop.
+    echo "## fno is installed, just not on this session's PATH"
+    echo
+    echo "\`fno\` lives at \`$fno_bin\`, which this session's PATH lacks. New sessions pick it up; this one can call it by that path or \`export PATH=\"\$(dirname \"$fno_bin\"):\$PATH\"\`."
+    exit 0
   fi
 fi
 

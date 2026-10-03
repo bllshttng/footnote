@@ -49,6 +49,7 @@ pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
 pub(crate) mod adopt_carry;
+pub(crate) mod adopt_identity;
 mod agent_lock;
 pub mod agents_config;
 pub(crate) mod agents_event;
@@ -82,7 +83,9 @@ pub mod canonical_check;
 pub mod capability_leaves;
 pub mod cargo_build_dirs;
 pub mod census;
+pub mod chats;
 pub mod check_supersession;
+pub mod claim_lanes_cli;
 pub mod claim_queue;
 pub mod claim_store;
 pub mod claim_verbs;
@@ -139,7 +142,9 @@ pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod day;
+pub mod decide_door;
 pub mod decision_index;
+pub mod decision_trace;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
@@ -147,6 +152,7 @@ pub mod distress;
 pub mod drift;
 pub mod duration;
 pub mod effect_gate;
+pub mod effort_surface;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
@@ -167,6 +173,7 @@ pub mod fleet_load;
 pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
+pub mod footnote_harness;
 pub mod gate_probes;
 pub mod gc;
 pub mod gc_adopt;
@@ -190,6 +197,7 @@ pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod harness_matrix;
 pub mod harness_reader;
+pub mod harness_roster;
 pub mod harness_verbs;
 pub mod heal;
 pub mod heal_pid;
@@ -218,6 +226,7 @@ pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
+pub mod lanes;
 pub mod launch_workdir;
 pub mod law_match;
 pub mod ledger_axes;
@@ -236,13 +245,16 @@ pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
+pub mod machine_load;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
 pub mod mail_control_drain;
 pub mod mail_envelope;
+pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod mail_threads;
 pub mod main_ci;
 pub mod main_ci_proof;
 pub mod manifest;
@@ -259,6 +271,7 @@ pub mod merge_reap;
 mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod model_family;
+pub mod model_price;
 pub mod naming;
 pub mod needs;
 pub mod node_branch;
@@ -278,6 +291,7 @@ pub mod operator_turns;
 pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
+pub mod otel_ingest;
 pub mod pane_keeper;
 pub mod pane_rebind;
 pub mod pane_relaunch;
@@ -330,6 +344,7 @@ pub mod registry_json;
 pub mod reign_eval;
 pub mod reign_goal;
 pub mod reign_hygiene;
+pub mod release_notes;
 pub mod removals;
 pub mod rename;
 pub mod repeated_asks;
@@ -344,16 +359,19 @@ pub mod resume_wake;
 pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod revival_check;
 pub mod revive_proof;
 pub mod rm_receipt;
 pub mod rm_tombstone;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
+pub mod route_gather;
 pub mod route_inventory;
 pub mod route_recovery;
 pub mod route_slot;
 pub mod row_truth;
+pub mod row_verdict;
 pub mod run_outcome;
 pub mod run_state;
 pub mod sandbox_probe;
@@ -368,6 +386,7 @@ pub(crate) mod served_liveness;
 pub mod session_activity;
 pub mod session_backfill;
 pub mod session_cost;
+pub mod session_join;
 pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
@@ -378,11 +397,13 @@ pub mod source_pin;
 pub mod spawn;
 pub mod spawn_axes;
 pub mod spawn_backends;
+pub mod spawn_compose;
 pub mod spawn_context;
 pub mod spawn_contract;
 pub mod spawn_cwd;
 pub mod spawn_edge;
 pub mod spawn_gate;
+pub mod spawn_gate_admission;
 pub mod spawn_gate_lanes;
 pub mod spawn_gate_reservations;
 pub mod spawn_gate_verb;
@@ -405,6 +426,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod surface_check;
 pub mod sync_canonical;
+pub mod system_sender;
 pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
@@ -415,12 +437,14 @@ pub mod tick_ledger;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
+pub mod update_journal;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
 pub mod watch_expiry;
+pub mod wave;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1230,19 +1254,23 @@ mod tests {
             }
         }
 
-        // The allowed files: production binary repair (install_verify), two
-        // production dir modes (paths, fleet_incident), two dir-mode restores
-        // in tests (claims, operator_turns); the bin test target cannot see a
-        // cfg(test) lib fn (client_tests); and the plan writer's production
-        // mode-preserve on its atomic plan-file replace (plan_doc/codec).
+        // The allowed files: production binary repair (install_verify), four
+        // production dir modes (paths, fleet_incident, chats, the
+        // session-state pin dir), two dir-mode
+        // restores in tests (claims, operator_turns); the bin test target
+        // cannot see a cfg(test) lib fn (client_tests); and the plan writer's
+        // production mode-preserve on its atomic plan-file replace
+        // (plan_doc/codec).
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
+            ("hook/session_state.rs", 1),
             ("king_board/claims.rs", 1),
             ("operator_turns.rs", 1),
             ("client_tests.rs", 2),
             ("plan_doc/codec.rs", 1),
             ("fleet_incident.rs", 1),
+            ("chats.rs", 1),
         ];
         let allowed_counts: std::collections::HashMap<&str, usize> =
             ALLOWED.iter().copied().collect();
@@ -1378,6 +1406,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The question intake's journal write (the ask port): the durable half
     // of `fno inbox outstanding ask`.
     "operator_question",
+    // One hop in a traced decision (decision_trace.rs): ask, route,
+    // correction, or guard block, written through emit_span into the
+    // project journal; the Python side documents the shape for the
+    // validator, the way operator_question does.
+    "decision_span",
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     // Spawn coordinator: the durable accepted record written BEFORE
@@ -1386,6 +1419,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // A launch the spawn gate or the dispatch door refused before any
     // worker existed; the feed projects it so a refused launch shows.
     "agent_spawn_refused",
+    // A reaped session came back (client-emitted): one event per revive
+    // naming the verb, the actor session, the prior name and the session id.
+    "agent_revived",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
@@ -1413,6 +1449,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_renamed",
     "agent_model_changed",
     "agent_effort_changed",
+    "agent_posture_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_skipped",
@@ -1453,6 +1490,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // One row per daemon retire tick that held rows: every held id
     // with its reason, detail and age, so the fleet reads one event stream.
     "retire_holds",
+    // The retirement sweep held a row fno's verdict keeps live while the
+    // vendor roster reads it finished: the recorded disagreement, never
+    // an override.
+    "row_liveness_drift",
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
     "graph_write_gate",

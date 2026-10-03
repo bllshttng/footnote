@@ -277,7 +277,11 @@ def test_map_covers_current_surface_once():
     # freeing one more row: counted from the merged file, 600 -> 599.
     # The control drain ported to the fno-agents client binary, which the
     # click inventory does not see, freeing its row: 600 -> 599.
-    assert len(mapped) == 599, (
+    # The decide family ported native, freeing its four backlog rows and the
+    # two decide-shim rows with the registrations they kept: 599 -> 593.
+    # The two daemon-free read projections (sessions-map, revival-check)
+    # allocated their rows: 593 -> 595.
+    assert len(mapped) == 595, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -346,7 +350,9 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     # The update cut-over retired the `backlog update` KEEP row: 81 -> 80.
     # The native retract port retired the old `decide retract` Python alias: 80 -> 79.
     # The native decisions listing retired the `decide list` KEEP shim: 79 -> 78.
-    assert projected == 78
+    # The decide family ported native: its dispatch group and the KEEP
+    # reindex leaf left the map with the registrations: 78 -> 76.
+    assert projected == 76
     assert projected <= 99
 
 

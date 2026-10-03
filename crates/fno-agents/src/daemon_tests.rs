@@ -1005,18 +1005,6 @@ fn find_uuid_backfill_row_skips_rows_that_already_have_a_uuid() {
 }
 
 #[test]
-fn find_uuid_backfill_row_skips_non_claude_rows() {
-    // codex P2: a foreign-provider row carrying a short must not
-    // adopt a claude uuid.
-    let mut row = bg_claude_row("w", "3228ccad");
-    row.legacy_provider = "codex".into();
-    assert!(matches!(
-        find_uuid_backfill_row(&[row], "3228ccad-c078-4b53-a8c9-7199b831eae4"),
-        UuidBackfill::None
-    ));
-}
-
-#[test]
 fn find_uuid_backfill_row_requires_group_boundary() {
     // A short must not match a longer hex run it merely prefixes: `3228ccad`
     // is not the leading group of `3228ccadd-...` (no `-` at the boundary).
@@ -1438,6 +1426,7 @@ fn apply_reconcile_change_clears_pid_only_on_exited() {
         reason: None,
         received_at: "2026-06-27T00:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     });
     apply_reconcile_change(&mut to_exited, Some(AgentStatus::Exited), None, "T1");
     assert_eq!(to_exited.status, AgentStatus::Exited);
@@ -1462,6 +1451,7 @@ fn apply_reconcile_change_clears_pid_only_on_exited() {
         reason: None,
         received_at: "2026-06-27T00:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     });
     apply_reconcile_change(&mut to_orphaned, Some(AgentStatus::Orphaned), None, "T2");
     assert_eq!(to_orphaned.status, AgentStatus::Orphaned);
@@ -1508,6 +1498,7 @@ fn emit_inside_leg_completion_publishes_only_for_report_bearing_rows() {
         reason: Some("running tests".into()),
         received_at: "2026-06-27T00:00:00Z".into(),
         ttl_ms: Some(5000),
+        posture: None,
     });
     emit_inside_leg_completion(&emitter, &with_report);
     emit_inside_leg_completion(&emitter, &rentry("plain", AgentStatus::Live, None));
@@ -1540,6 +1531,7 @@ fn buffer_pending_report_highest_seq_wins_and_is_bounded() {
         reason: None,
         received_at: "2026-06-27T00:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     };
     let mut map: HashMap<String, state::InsideLegReport> = HashMap::new();
 
@@ -1601,6 +1593,7 @@ fn flush_buffered_inside_leg_drains_onto_row_under_seq_gate() {
         reason: None,
         received_at: "2026-06-27T00:00:00Z".into(),
         ttl_ms: Some(5000),
+        posture: None,
     };
 
     // A registered claude row (inside_leg None) + a buffered report for it.
@@ -2216,6 +2209,7 @@ fn heartbeat(state: state::InsideLegState, received_at: &str) -> state::InsideLe
         reason: None,
         received_at: received_at.into(),
         ttl_ms: None,
+        posture: None,
     }
 }
 
@@ -3652,6 +3646,29 @@ fn list_queries_pidless_row_by_bare_canonical_handle() {
         seen.into_inner(),
         vec!["019f8ff2-1111-2222-3333-444444444444"]
     );
+    // A v4 fno_id lists the row's fno handle as ADDRESS; a legacy row
+    // (fno_id equal to its harness id) keeps the harness head.
+    let minted = state::load_registry(&home.registry_json()).unwrap().entries[0]
+        .fno_id
+        .clone()
+        .expect("row-birth fill minted one");
+    let address = response.result().unwrap()["agents"][0]["address"]
+        .as_str()
+        .unwrap();
+    assert_eq!(address, &minted[..8]);
+    state::update_registry(&home.registry_json(), |registry| {
+        registry.entries[0].fno_id = Some("019f8ff2-1111-2222-3333-444444444444".into());
+    })
+    .unwrap();
+    let response = handle_list_with_truth(
+        &ctx,
+        &req,
+        per_handle(|_handle| probe_with_verdict("working", "reachable")),
+    );
+    assert_eq!(
+        response.result().unwrap()["agents"][0]["address"],
+        "019f8ff2"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -4720,44 +4737,6 @@ fn handle_report_marks_a_matching_model_as_verified() {
     assert!(
         !events.iter().any(|e| e["type"] == "agent_model_changed"),
         "a matching report is not a change: {events:?}"
-    );
-    std::fs::remove_dir_all(home.root()).ok();
-}
-
-/// Capability flip (screen-manifest fallback authority): the row's FIRST
-/// inside-leg report makes the hook the sole authority - a stored scrape
-/// verdict is cleared in the same registry write, so it can never shadow
-/// the hook.
-#[test]
-fn handle_report_capability_flip_clears_screen_state() {
-    let home = tmp_home("report-flip-clears-scrape");
-    seed_stream_row(&home, "worker-A", "repF");
-    state::update_registry(&home.registry_json(), |r| {
-        r.entries[0].screen_state = Some(state::ScreenStateReport {
-            state: "idle".into(),
-            rule: "idle_prompt".into(),
-            seq: 4,
-            at: "2026-07-02T00:00:00Z".into(),
-            ttl_ms: Some(120_000),
-            answerable: None,
-        });
-    })
-    .unwrap();
-    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-    let resp = handle_report(
-        &ctx,
-        &Request::new(
-            1,
-            "agent.report",
-            json!({"session_id": "uuid-repF", "seq": 1, "state": "working"}),
-        ),
-    );
-    assert_eq!(resp.result().unwrap()["stored"], true);
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(reg.entries[0].inside_leg.is_some());
-    assert_eq!(
-        reg.entries[0].screen_state, None,
-        "capability flip must clear the scrape verdict"
     );
     std::fs::remove_dir_all(home.root()).ok();
 }

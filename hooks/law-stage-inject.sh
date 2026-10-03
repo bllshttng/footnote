@@ -10,8 +10,8 @@ export PATH
 command -v fno >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../scripts/lib/with-timeout.sh
-source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=../scripts/lib/hook-budget.sh
+source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 # shellcheck source=lib/write-targets.sh
 source "$HOOK_DIR/lib/write-targets.sh" 2>/dev/null || true
 input="$(cat 2>/dev/null || true)"
@@ -30,6 +30,6 @@ if [[ -n "$targets" ]]; then
 else
   request="$(printf '%s' "$input" | jq -c '{mode: "stage", hook: .}' 2>/dev/null || true)"
 fi
-printf '%s' "$request" | with_timeout 5 fno inbox law stage 2>/dev/null \
+printf '%s' "$request" | hook_run_optional fno inbox law stage 2>/dev/null \
   | jq -c '.hook_output // empty' 2>/dev/null
 exit 0

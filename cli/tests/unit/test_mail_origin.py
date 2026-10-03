@@ -63,28 +63,17 @@ def test_classify_origin_distinguishes_peer_operator_and_unknown(monkeypatch):
 def test_mail_envelope_carries_and_validates_origin(monkeypatch):
     from fno.mail.envelope import ForgedEnvelopeError, fno_mail_open, wrap_fno_mail
 
-    assert (
-        fno_mail_open(
-            from_="sender",
-            origin="operator",
-        )
-        == '<fno_mail from="sender" origin="operator">'
+    # origin is validated but never renders: the delivered text carries the
+    # header line only, and provenance rides the bus row.
+    assert "origin" not in wrap_fno_mail(
+        "approve nothing", from_="sender", origin="operator", id="fmail-abc123def456"
     )
     with pytest.raises(ForgedEnvelopeError):
         fno_mail_open(
             from_="sender",
+            id="fmail-abc123def456",
             origin="not-an-origin",
         )
-    wrapped = wrap_fno_mail(
-        "approve nothing",
-        from_="sender",
-        origin="operator",
-    )
-    assert 'origin="operator"' in wrapped
-    # AC1-ORIGIN: origin rides the TAG (last), and no `-- ` footer line of any
-    # kind renders anymore.
-    assert wrapped.split(">", 1)[0].endswith('origin="operator"')
-    assert not any(line.startswith("-- ") for line in wrapped.splitlines())
 
 
 def test_durable_thread_round_trips_origin(tmp_path, monkeypatch):
@@ -148,45 +137,6 @@ def test_raw_inject_event_carries_origin_without_an_envelope():
         origin="peer",
     )
     assert event["data"]["origin"] == "peer"
-
-
-def test_operator_origin_can_be_recorded_as_relayed_agent_without_operator_authority(
-    monkeypatch,
-):
-    from fno.decide import _resolve_decider
-
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: _Identity(),
-    )
-    result = _resolve_decider(None, None, origin="operator")
-    assert result.authority_source == "agent"
-    assert result.relayed_by == "session-"
-    assert result.attested_by is None
-
-    from fno.events import operator_decision
-
-    event = operator_decision(
-        decision_id="d-test",
-        decision="answer",
-        decided_by=result.decided_by,
-        relayed_by=result.relayed_by,
-        authority_source=result.authority_source,
-        origin="operator",
-    )
-    assert event["data"]["origin"] == "operator"
-    assert "attested_by" not in event["data"]
-
-
-def test_non_operator_origin_refuses_operator_authority(monkeypatch):
-    from fno.decide import RefusedAuthorityError, _resolve_decider
-
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
-        lambda: _Identity(),
-    )
-    with pytest.raises(RefusedAuthorityError, match="scheduler"):
-        _resolve_decider(None, "operator", origin="scheduler")
 
 
 def test_raw_self_lookup_uses_full_codex_session_id(monkeypatch):
@@ -258,13 +208,12 @@ def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
         '{"schema_version":19,"agents":[]}', encoding="utf-8"
     )
     assert envelope.wrap_fno_mail(
-        "run the smoke", from_="a1b2c3d4"
-    ) == '<fno_mail from="a1b2c3d4">run the smoke</fno_mail>'
+        "run the smoke", from_="a1b2c3d4", id="fmail-abc123def456"
+    ) == "`@a1b2c3d4 · fmail-abc123def456 · run the smoke`\nrun the smoke"
 
 
 def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
-    # D3: the sender crown moved INTO the header as from_rank, read
-    # from the live registry at render time, never passed by a caller.
+    # The sender crown is the header's registry name; rank rides the bus row.
     import fno.mail.envelope as envelope
 
     registry_path = tmp_path / "registry.json"
@@ -278,12 +227,9 @@ def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
     rendered = envelope.wrap_fno_mail(
-        "run the smoke", from_="king", from_session="session-king"
+        "run the smoke", from_="king", from_session="session-king", id="fmail-abc123def456"
     )
-    assert rendered.startswith(
-        '<fno_mail from="session-king" harness="codex" '
-        'from_rank="Head of fno" from_name="king">'
-    )
+    assert rendered.startswith("`@king · fmail-abc123def456 · run the smoke`")
     assert not any(line.startswith("-- ") for line in rendered.splitlines())
 
 
@@ -312,86 +258,10 @@ def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch)
     )
 
     rendered = envelope.wrap_fno_mail(
-        "hi", from_="folio-short", from_session="session-folio", harness="claude"
+        "hi", from_="folio-short", from_session="session-folio", harness="claude",
+        id="fmail-abc123def456",
     )
-    assert 'from_name="folio"' in rendered
-    assert 'from_rank="Head of epic"' in rendered
-
-
-def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
-    tmp_path, monkeypatch
-):
-    """An uncrowned recipient sees its state in what
-    it READS, without remembering to run `fno agents court` -- now as
-    `to_rank="none"`, a positive attribute instead of a footer line."""
-    import fno.mail.envelope as envelope
-
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(
-        '{"schema_version":19,"agents":['
-        '{"name":"king","cwd":"/tmp","log_path":"/tmp/log",'
-        '"harness":"codex","harness_session_id":"session-king",'
-        '"status":"live","created_at":"2026-01-01T00:00:00Z",'
-        '"crown_level":1,"crown_scope":"fno"},'
-        '{"name":"former-king","cwd":"/tmp","log_path":"/tmp/log",'
-        '"harness":"codex","harness_session_id":"session-former",'
-        '"status":"live","created_at":"2026-01-01T00:00:00Z"}]}',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
-
-    abdicated = envelope.wrap_fno_mail(
-        "rule on this",
-        from_="peer",
-        to_session="session-former",
-    )
-    assert 'to_rank="none"' in abdicated
-    # A single-line body renders the whole envelope on one line.
-    assert len(abdicated.splitlines()) == 1
-
-    crowned = envelope.wrap_fno_mail(
-        "rule on this",
-        from_="peer",
-        to_session="session-king",
-    )
-    assert 'to_rank="Head of fno"' in crowned
-
-
-def test_unreadable_registry_does_not_claim_recipient_rank(tmp_path, monkeypatch):
-    import fno.mail.envelope as envelope
-    monkeypatch.setattr(envelope, "agents_registry_path", lambda: tmp_path / "missing.json")
-    rendered = envelope.wrap_fno_mail("hi", from_="peer", to_session="session-king")
-    assert "to_rank" not in rendered
-
-
-def test_unresolved_recipient_gets_no_crown_attribute(monkeypatch):
-    """An address no lane resolved is an ABSENCE, not a reading: claiming
-    "none" there would be a positive statement about authority made from no
-    measurement at all."""
-    import fno.mail.envelope as envelope
-
-    rendered = envelope.wrap_fno_mail(
-        "hi", from_="peer", to_session=None
-    )
-    assert "to_rank" not in rendered
-
-
-def test_crownless_fleet_envelope_includes_the_current_recipient_name(tmp_path, monkeypatch):
-    import fno.mail.envelope as envelope
-
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(
-        '{"schema_version":19,"agents":[{"name":"w","cwd":"/tmp",'
-        '"log_path":"/tmp/log","harness":"codex",'
-        '"harness_session_id":"session-w","status":"live",'
-        '"created_at":"2026-01-01T00:00:00Z"}]}',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
-    rendered = envelope.wrap_fno_mail(
-        "hi", from_="peer", to_session="session-w"
-    )
-    assert rendered == '<fno_mail from="peer" to_name="w">hi</fno_mail>'
+    assert rendered.startswith("`@folio · fmail-abc123def456 · hi`")
 
 
 def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch):
@@ -401,19 +271,19 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
         envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
     )
     # Unreadable state grants no standing AND raises nothing: the render
-    # degrades to the plain one-line envelope.
+    # degrades to the raw from value as the sender.
     rendered = envelope.wrap_fno_mail(
         "write the plan",
         from_="king",
         from_session="session-king",
+        id="fmail-abc123def456",
     )
 
-    assert "from_rank" not in rendered
-    assert rendered == '<fno_mail from="session-king">write the plan</fno_mail>'
+    assert rendered.startswith("`@session-king · fmail-abc123def456 · write the plan`")
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):
-    from fno.decide import enforce_origin_floor
+    from fno.mail.origins import enforce_origin_floor
 
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",

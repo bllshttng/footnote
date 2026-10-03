@@ -428,8 +428,8 @@ impl LocalPty {
         out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
-        let permit = crate::process_admission::admit_shell_pane()
-            .map_err(|e| PtyError::Spawn(e.to_string()))?;
+        let permit =
+            crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
         Self::spawn_with_permit(
             candidates, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
         )
@@ -743,30 +743,31 @@ impl PtyShell {
         std::fs::create_dir_all(&dir)
             .map_err(|e| PtyError::Spawn(format!("create keeper directory: {e}")))?;
         let sock_path = dir.join(format!("{session}-{pane_id}.sock"));
-        let keeper_child = launch_keeper(
+        let mut keeper_child = launch_keeper(
             keeper_bin, &sock_path, session, pane_id, rows, cols, cwd, argv,
         )?;
         // The failure paths below kill and reap the keeper; a success hands
         // it to a waiter thread that reaps it when it exits.
         let cleanup = |mut child: std::process::Child| kill_and_reap(&mut child);
         let (stream, reply, ring, seed_buf) =
-            match keeper_handshake(&sock_path, keeper_handshake_quiet()) {
-                Ok(found) => match found {
-                    Some(found) => found,
-                    None => {
-                        cleanup(keeper_child);
-                        return Err(PtyError::Spawn(format!(
-                            "keeper at {} died before answering Identify; its stderr \
-                             carries the startup error - a keeper binary from before \
-                             the pane lane exits on the unknown flags (check \
-                             FNO_AGENTS_WORKER_BIN and the binary pairing)",
-                            sock_path.display()
-                        )));
-                    }
-                },
-                Err(e) => {
+            match keeper_handshake(&sock_path, keeper_handshake_quiet(), false) {
+                Ok(Some(found)) => found,
+                Ok(None) => {
+                    let note = keeper_exit_note(&mut keeper_child);
                     cleanup(keeper_child);
-                    return Err(PtyError::Spawn(format!("keeper handshake: {e}")));
+                    return Err(PtyError::Spawn(format!(
+                        "keeper at {} died before answering Identify ({}); its stderr \
+                     carries the startup error - a keeper binary from before \
+                     the pane lane exits on the unknown flags (check \
+                     FNO_AGENTS_WORKER_BIN and the binary pairing)",
+                        sock_path.display(),
+                        note
+                    )));
+                }
+                Err(e) => {
+                    let note = keeper_exit_note(&mut keeper_child);
+                    cleanup(keeper_child);
+                    return Err(PtyError::Spawn(format!("keeper handshake: {e}; {note}")));
                 }
             };
         // A fresh launch owns the seat by connect-before-bind; a held seat
@@ -1070,6 +1071,27 @@ fn reply_holds_seat(reply: &serde_json::Value) -> bool {
         .unwrap_or(true)
 }
 
+/// The keeper's exit status, for a failure message that must name the death.
+/// A just-died keeper may not be reapable on the first `try_wait`, so give
+/// it a beat; one still running reads `keeper still running`.
+fn keeper_exit_note(child: &mut std::process::Child) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    for _ in 0..20 {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return match (status.code(), status.signal()) {
+                    (_, Some(sig)) => format!("keeper exited: signal {sig}"),
+                    (Some(code), None) => format!("keeper exited: exit code {code}"),
+                    _ => format!("keeper exited: {status}"),
+                };
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(e) => return format!("keeper wait failed: {e}"),
+        }
+    }
+    "keeper still running".into()
+}
+
 /// Adopt a live keeper through its socket: handshake synchronously (ring
 /// drained, child pid learned), then wire the reader/writer threads. A held
 /// subscriber seat is retried briefly before giving up as SeatHeld - the
@@ -1084,7 +1106,7 @@ pub fn adopt_keeper_socket(
 ) -> Result<KeeperAdopt, String> {
     let mut held = 0u32;
     let (stream, reply, ring, seed_buf) = loop {
-        match keeper_handshake(sock, keeper_handshake_quiet())? {
+        match keeper_handshake(sock, keeper_handshake_quiet(), true)? {
             None => return Ok(KeeperAdopt::NoListener),
             Some((stream, reply, ring, seed_buf)) => {
                 if reply_holds_seat(&reply) {
@@ -1194,24 +1216,42 @@ fn launch_keeper(
     })
 }
 
-/// How long the handshake waits for the keeper's socket to appear.
-const KEEPER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// How long the handshake waits for each frame.
-const KEEPER_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// One wall-clock bound over the whole handshake (connect, Identify, ring
+/// drain), shared by the spawn road and the adopt road. A wedged or chatty
+/// keeper parks the startup thread for at most this long, then the caller
+/// moves on to the next socket.
+const KEEPER_HANDSHAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 /// After the Identify reply, drain ring Output until this much silence -
 /// the replay is finite and arrives in one burst.
 fn keeper_handshake_quiet() -> std::time::Duration {
     std::time::Duration::from_millis(150)
 }
 
+/// A connect that can only mean the path holds no live keeper: a socket
+/// file whose listener is gone (power loss) answers ECONNREFUSED; a plain
+/// leftover FILE at the socket path answers ENOTSOCK, and macOS folds that
+/// into EINVAL - the os error 22 the spawn road used to surface bare after
+/// burning the whole connect budget.
+fn stale_connect(e: &std::io::Error) -> bool {
+    match e.kind() {
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::InvalidInput => true,
+        _ => e.raw_os_error() == Some(libc::ENOTSOCK),
+    }
+}
+
 /// Connect to a keeper and run the Identify handshake synchronously.
 /// Returns (stream, IdentifyReply json, ring bytes). The stream is returned
 /// with blocking reads restored. `None`-valued Ok means the socket never
-/// appeared (the keeper died at startup).
+/// appeared (the keeper died at startup). The whole handshake - connect,
+/// Identify, ring drain - shares one wall-clock deadline. `stale_is_final`
+/// marks the adopt road: there the socket file outlived its keeper, so a
+/// refused connect is final (the NoListener path unlinks it); the
+/// fresh-launch road keeps the retry because the keeper has not bound yet.
 #[allow(clippy::type_complexity)]
 fn keeper_handshake(
     sock_path: &std::path::Path,
     quiet: std::time::Duration,
+    stale_is_final: bool,
 ) -> Result<
     Option<(
         std::os::unix::net::UnixStream,
@@ -1221,18 +1261,29 @@ fn keeper_handshake(
     )>,
     String,
 > {
-    let deadline = std::time::Instant::now() + KEEPER_CONNECT_TIMEOUT;
+    let hand_deadline = std::time::Instant::now() + KEEPER_HANDSHAKE_DEADLINE;
+    let expired = || {
+        format!(
+            "keeper at {} did not finish the handshake within 3s",
+            sock_path.display()
+        )
+    };
+    let time_left = || hand_deadline.checked_duration_since(std::time::Instant::now());
     let mut stream = loop {
         match std::os::unix::net::UnixStream::connect(sock_path) {
             Ok(s) => break s,
-            Err(_) if std::time::Instant::now() < deadline => {
+            Err(e) if stale_is_final && stale_connect(&e) && sock_path.exists() => return Ok(None),
+            Err(_) if std::time::Instant::now() < hand_deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Err(_) => return Ok(None),
         }
     };
+    let Some(left) = time_left() else {
+        return Err(expired());
+    };
     stream
-        .set_read_timeout(Some(KEEPER_REPLY_TIMEOUT))
+        .set_read_timeout(Some(left))
         .map_err(|e| e.to_string())?;
     stream
         .write_all(&keeper_frame_identify())
@@ -1242,7 +1293,8 @@ fn keeper_handshake(
     let mut ring = Vec::new();
     let mut read_buf = [0u8; 8192];
     // Phase 1: read until the IdentifyReply lands. A premature EOF or the
-    // Exited frame means the keeper's child died at startup.
+    // Exited frame means the keeper's child died at startup. Each read gets
+    // only the time the deadline has left.
     let reply = loop {
         // Parse whatever whole frames are already buffered.
         let mut answered = None;
@@ -1279,18 +1331,47 @@ fn keeper_handshake(
         if let Some(value) = answered {
             break value;
         }
-        let n = stream.read(&mut read_buf).map_err(|e| e.to_string())?;
+        let Some(left) = time_left() else {
+            return Err(expired());
+        };
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|e| e.to_string())?;
+        let n = match stream.read(&mut read_buf) {
+            Ok(n) => n,
+            // A read parked past the deadline surfaces as the expiry, never
+            // as a raw OS error.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Err(expired())
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         if n == 0 {
             return Err("keeper closed the socket before answering Identify".into());
         }
         buf.extend_from_slice(&read_buf[..n]);
     };
     // Phase 2: the ring replay follows the reply in one burst; drain until
-    // `quiet` of silence. Only the drain read carries the short timeout.
-    let _ = stream.set_read_timeout(Some(quiet));
+    // `quiet` of silence, but never past the deadline even when the child
+    // prints without pause.
     loop {
+        let Some(left) = time_left() else {
+            return Err(expired());
+        };
+        let _ = stream.set_read_timeout(Some(left.min(quiet)));
         let n = match stream.read(&mut read_buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            // The quiet window closing ends the drain; only a spent deadline
+            // is fatal.
+            Err(_) => {
+                if time_left().is_none() {
+                    return Err(expired());
+                }
+                break;
+            }
             Ok(n) => n,
         };
         buf.extend_from_slice(&read_buf[..n]);
@@ -2862,13 +2943,9 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("openpty"), "{msg}");
         assert!(msg.contains("ls /dev"), "{msg}");
-    }
 
-    #[test]
-    fn open_pty_timeout_covers_the_explicit_argv_path() {
-        let _gate = pty_gate();
-        std::env::set_var("FNO_MUX_OPENPTY_TIMEOUT_MS", "200");
-        set_hang_injection(std::time::Duration::from_secs(60));
+        // The explicit-argv road carries the same deadline and message (the
+        // argv-path test it replaces was the same contract on a second road).
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let start = std::time::Instant::now();

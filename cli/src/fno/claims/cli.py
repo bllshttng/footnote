@@ -101,16 +101,16 @@ _ROSTER_CROSSCHECK_TIMEOUT_S = 10.0
 
 
 def _node_aware_root(key: str):
-    """Resolve the claims root for a key (delegates to the shared helper).
+    """Resolve the claims root for a key: the native leg's routing read.
 
     Global-id kinds (``node:``/``dispatch:``/``reconcile:``/``session:``) route to
     the global ``~/.fno/claims`` so operator commands work without the env var
-; repo-local keys keep the cwd/env default. See
-    :func:`fno.claims.io.claims_root_for` for the single source of truth.
+; repo-local keys keep the cwd/env default. The prefix list lives once, in
+    crates/fno-agents/src/claims_root.rs.
     """
-    from .io import claims_root_for
+    from .core import native_claims_root
 
-    return claims_root_for(key)
+    return native_claims_root(key)
 
 
 @cli.command()
@@ -1232,15 +1232,15 @@ def list_cmd(
     prefix happened to fall to, silently missing the other store (measured:
     574 lockfiles in a root a bare `list` could never reach).
     A colon-less or unrecognized --prefix cannot tell which root its keys
-    live in (:func:`fno.claims.io.claims_root_for` returns None for
-    exactly that case), so narrowing to a single guessed root would
+    live in (the native read returns None for exactly that case), so
+    narrowing to a single guessed root would
     silently reintroduce the same miss; only an explicit --root narrows.
     """
     if root is not None:
         roots: list[Optional[Path]] = [root]
     else:
-        # _node_aware_root("") already resolves to None via claims_root_for's
-        # own colon check, so no separate `if prefix` branch is needed here.
+        # _node_aware_root("") already resolves to None (no colon, no route),
+        # so no separate `if prefix` branch is needed here.
         roots = [_claims_io.global_claims_root(), _node_aware_root(prefix)]
 
     deduped_roots = _claims_io.dedup_claims_roots(roots)
@@ -1868,35 +1868,48 @@ def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> 
     Exit 1 when the cap is full (no free slot) - the same "retry later" code as
     a held claim. The cap is enforced by atomic slot acquisition, never a count.
     """
-    from .lanes import acquire_lane_slot
+    import subprocess
 
-    try:
-        claim = acquire_lane_slot(max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h"))
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
+    from fno.rust_binary import resolve_binary
 
-    if claim is None:
-        typer.echo(f"lane cap full (max_lanes={max_lanes})", err=True)
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Error: no fno-agents binary", err=True)
         raise typer.Exit(code=1)
-
+    argv = [str(binary), "claim", "lane-acquire", "--lane", lane,
+            "--max-lanes", str(max_lanes), "--ttl", ttl or "1h"]
     if json_output:
-        out = claim.to_yaml_dict()
-        out["lane_id"] = lane
-        typer.echo(json.dumps(out))
-    else:
-        typer.echo(f"acquired lane slot {claim.key} for lane {lane}")
+        argv.append("--json")
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.stdout.strip():
+        typer.echo(result.stdout.strip())
+    if result.returncode == 2 and result.stderr.strip():
+        typer.echo(f"validation error: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=2)
+    if result.returncode != 0:
+        typer.echo((result.stderr or f"lane cap full (max_lanes={max_lanes})").strip(), err=True)
+        raise typer.Exit(code=result.returncode or 1)
 
 
 def _release_lane(*, lane: str, json_output: bool) -> None:
     """The former `claim lane-release`. Silent success if the lane holds none."""
-    from .lanes import release_lane_slot
+    import subprocess
 
-    release_lane_slot(lane_id=lane)
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Error: no fno-agents binary", err=True)
+        raise typer.Exit(code=1)
+    argv = [str(binary), "claim", "lane-release", "--lane", lane]
     if json_output:
-        typer.echo(json.dumps({"lane_id": lane, "released": True}))
-    else:
-        typer.echo(f"released lane {lane}")
+        argv.append("--json")
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo((result.stderr or "lane release failed").strip(), err=True)
+        raise typer.Exit(code=result.returncode or 1)
+    if result.stdout.strip():
+        typer.echo(result.stdout.strip())
 
 
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:

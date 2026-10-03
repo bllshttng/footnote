@@ -791,34 +791,6 @@ _VETO_PROBE_TIMEOUT = 24
 _HOLD_PROBE_TIMEOUT = 5
 
 
-def _inprocess_dispatch_hold_reason(pr_number):
-    """``(available, reason)`` from the shared Python hold reader."""
-    try:
-        cli_src = Path(__file__).resolve().parent.parent / "cli" / "src"
-        if cli_src.is_dir() and str(cli_src) not in sys.path:
-            sys.path.insert(0, str(cli_src))
-        from fno.pr._hold import merge_hold_reason
-    except Exception:  # noqa: BLE001 - any dead import leg degrades to subprocess
-        # The import chain reaches third-party deps (`fno.pr._hold` ->
-        # `fno.pr.__init__` -> typer), so a broken/partial install raises more
-        # than ImportError - a version-mismatch AttributeError propagated
-        # uncaught and crashed this PreToolUse hook instead of degrading to
-        # the documented subprocess fallback (round-12 finding 8). The
-        # fallback itself fails closed on failure, so widening this catch can
-        # only route to a slower reader, never a weaker verdict.
-        return False, None
-    try:
-        repo = _pr_worktree_root(pr_number)
-        if repo is None:
-            return True, "PR worktree lookup unavailable; refusing to assume no dispatch hold"
-        return True, merge_hold_reason(int(pr_number), str(repo))
-    except Exception as exc:  # noqa: BLE001 - an evaluated hold error refuses
-        return True, (
-            f"dispatch hold check unavailable ({type(exc).__name__}); "
-            "refusing to assume unheld"
-        )
-
-
 def _fno_veto_refusal(args, timeout, fallback):
     """One fno-verb probe: deny on the verb's refusal exits, else open.
 
@@ -922,25 +894,22 @@ def _dispatch_hold_refusal(command=""):
             "Run `fno do pr merge <N>` (or pass the PR number), which resolves "
             "the PR and is not gated by this hook"
         )
-    available, reason = _inprocess_dispatch_hold_reason(pr_number)
-    if available:
-        return reason
     kwargs = {
         "capture_output": True,
         "text": True,
         "timeout": _HOLD_PROBE_TIMEOUT,
     }
     try:
-        try:
-            proc = subprocess.run(
-                ["fno", "do", "pr", "hold-check", pr_number],
-                **kwargs,
-            )
-        except FileNotFoundError:
-            proc = subprocess.run(
-                [sys.executable, "-m", "fno.cli", "do", "pr", "hold-check", pr_number],
-                **kwargs,
-            )
+        # One probe, the front door. The retired in-process leg (the fno
+        # package's hold reader plus the `python -m fno.cli` source fallback)
+        # was a latency fast path; the verb owns the worktree lookup and the
+        # hold read, and its refusal lines are the same sentences the fallback
+        # returned. A missing `fno` or a probe failure reads held - the
+        # veto's fail-closed contract.
+        proc = subprocess.run(
+            ["fno", "do", "pr", "hold-check", pr_number],
+            **kwargs,
+        )
     except Exception as exc:  # noqa: BLE001 - unreadable means held
         return f"dispatch hold check unavailable ({type(exc).__name__}); refusing to assume unheld"
     if proc.returncode == 0:
@@ -1016,13 +985,12 @@ def _live_merge_switch_armed(repo_root, fm):
     The config answer comes from the shared resolver, never a local TOML
     parse: layer precedence and the legacy dispatch.auto_merge ->
     auto_merge.grant fold live there, and a second parser here is
-    how the hook drifts from every other reader. In-process first (the hook
-    interpreter often carries the package); the resolver CLI as the fallback
-    when it does not, budgeted at 5s because the lineage and coverage probes
+    how the hook drifts from every other reader. `fno config get` is the
+    resolver's CLI, budgeted at 5s because the lineage and coverage probes
     elsewhere in this hook can each approach 24s of the 60s PreToolUse
     budget - a fresh independent wait here can push the hook past it, and a
     hook killed mid-run emits NO verdict, letting the raw merge proceed.
-    Either resolver unavailable, slow, or unreadable ->
+    A resolver unavailable, slow, or unreadable ->
     fail closed (decline to authorize); the sanctioned verb remains available.
     """
     if (
@@ -1031,27 +999,20 @@ def _live_merge_switch_armed(repo_root, fm):
     ):
         return True
     try:
-        from fno.config import load_settings_for_repo
-    except ImportError:
-        try:
-            proc = subprocess.run(
-                ["fno", "config", "get", "auto_merge.enabled"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                cwd=str(repo_root),
-            )
-        except Exception:  # noqa: BLE001 - fail closed on any resolver failure
-            return False
-        return proc.returncode == 0 and proc.stdout.strip().lower() in (
-            "true",
-            "yes",
-            "1",
+        proc = subprocess.run(
+            ["fno", "config", "get", "auto_merge.enabled"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(repo_root),
         )
-    try:
-        return bool(load_settings_for_repo(repo_root).auto_merge.enabled)
-    except Exception:  # noqa: BLE001 - a config the resolver cannot read never arms
+    except Exception:  # noqa: BLE001 - fail closed on any resolver failure
         return False
+    return proc.returncode == 0 and proc.stdout.strip().lower() in (
+        "true",
+        "yes",
+        "1",
+    )
 
 
 def _check_pr_merge_allowed(command=""):

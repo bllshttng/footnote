@@ -20,7 +20,7 @@ const SCHEDULER_DOWN_HINT: &str =
     "every arm on this scheduler is silent; the job is not running, the arm is fine";
 
 /// The cause table: hint, repair verb, heal owner. An owner of `None` means
-/// the cause is not a fault (the arm is off, or the daemon is young).
+/// no automatic action is safe or useful for this cause.
 fn entry(
     cause: &str,
     scheduler: Option<&str>,
@@ -58,6 +58,11 @@ fn entry(
             "the arm's run hit its time limit; the step named in the detail is where the clock stopped, not a measured cause",
             Some(WATCH_STATUS),
             Some(OPERATOR),
+        ),
+        "grant_queue_timeout" => (
+            "the grant queue read exceeded its load-scaled bound; the next pr-watch tick retries it",
+            None,
+            None,
         ),
         "budget_spent" => (
             "the pass ran out of its slice before it covered every unit it enumerated; the detail names how many of N it reached",
@@ -346,6 +351,8 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
         ("budget_spent".to_string(), None)
     } else if skip == "timeout" {
         ("timeout".to_string(), None)
+    } else if skip == "grant_queue_timeout" {
+        ("grant_queue_timeout".to_string(), None)
     } else if detail.contains("not a git repository") {
         (
             "cwd_not_checkout".to_string(),
@@ -588,7 +595,7 @@ pub fn run_repair(action: &str, cwd: &Path) -> bool {
             let Some(root) = crate::paths::canonical_repo_root(cwd) else {
                 return false;
             };
-            let child = std::process::Command::new(crate::scrape::fno_py())
+            let child = std::process::Command::new(crate::scrape::fno_bin())
                 .args(["doctor", "update"])
                 .current_dir(root)
                 .stdin(std::process::Stdio::null())
@@ -848,7 +855,7 @@ mod tests {
 
     // AC3: an unknown failure keeps its skip token and names no verb.
     #[test]
-    fn an_unknown_failure_reads_unclassified_operator() {
+    fn failure_classes_distinguish_unknown_operator_from_queue_timeout() {
         let mut mc = row("merge_close", SCHED_DAEMON);
         mc.failing = true;
         mc.skip_reason = Some("error".into());
@@ -861,6 +868,25 @@ mod tests {
         assert!(mc.line.ends_with("heal=operator"), "{}", mc.line);
         assert!(!mc.line.contains("repair:"), "{}", mc.line);
         assert!(mc.repair.is_none());
+
+        let mut row = row("pr_watch_merge", SCHED_LAUNCHD);
+        row.failing = true;
+        row.skip_reason = Some("grant_queue_timeout".into());
+        row.detail = Some("grant queue timed out after 191.2 seconds".into());
+        let mut rows = vec![row];
+
+        annotate(&mut rows, &facts(false));
+
+        let row = &rows[0];
+        assert_eq!(row.cause.as_deref(), Some("grant_queue_timeout"));
+        assert!(
+            row.line.contains("next pr-watch tick retries"),
+            "{}",
+            row.line
+        );
+        assert!(row.repair.is_none());
+        assert!(row.heal.is_none());
+        assert!(!row.line.ends_with("heal=operator"), "{}", row.line);
     }
 
     #[test]

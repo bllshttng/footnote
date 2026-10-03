@@ -274,6 +274,64 @@ pub(crate) fn config_table_merged(cwd: &Path, keys: &[&str]) -> Option<toml::Tab
     found.then_some(merged)
 }
 
+/// Deep-merged read of one config subtree across the candidates, the way
+/// Python's loader folds them (`config_io._deep_merge`): tables merge key by
+/// key, every other value replaces whole, and the higher-priority candidate
+/// wins each leaf while lower tiers fill the keys it leaves absent.
+/// [`config_table_merged`] stops after one level, so a project
+/// `agents.profiles.target.effort` hid a global `agents.profiles.target.lanes`;
+/// this read recurses. A candidate missing the key path, unreadable, or
+/// unparseable is skipped; no candidate carrying the key returns `None`.
+pub(crate) fn config_value_deep(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
+    let mut merged: Option<toml::Value> = None;
+    for path in config_candidates(cwd) {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(table) = parse_config(&content) else {
+            continue;
+        };
+        let root = toml::Value::Table(table);
+        let mut cur: &toml::Value = &root;
+        let mut present = true;
+        for k in keys {
+            match cur.get(*k) {
+                Some(v) => cur = v,
+                None => {
+                    present = false;
+                    break;
+                }
+            }
+        }
+        if !present {
+            continue;
+        }
+        merged = Some(match merged {
+            None => cur.clone(),
+            // The already-merged (higher-priority) value overrides the lower
+            // tier, but only leaf-wise: tables still fill from below.
+            Some(acc) => deep_merge_toml(cur.clone(), acc),
+        });
+    }
+    merged
+}
+
+fn deep_merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
+    match (base.as_table().cloned(), over.as_table().cloned()) {
+        (Some(mut b), Some(o)) => {
+            for (k, v) in o {
+                let merged = match b.remove(&k) {
+                    Some(existing) => deep_merge_toml(existing, v),
+                    None => v,
+                };
+                b.insert(k, merged);
+            }
+            toml::Value::Table(b)
+        }
+        _ => over,
+    }
+}
+
 fn resolve_state_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
     let expanded = if let Some(rest) = raw.strip_prefix("~/") {
         PathBuf::from(std::env::var_os("HOME")?).join(rest)
@@ -1255,7 +1313,7 @@ pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
 
 /// The normalized raw scalar for a direct child of `agents:`, so each caller
 /// applies its own coercion.
-fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
+pub(crate) fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
     resolve(cwd, |t| {
         table_agents_scalar(t, key)
             .as_ref()
@@ -1365,6 +1423,21 @@ pub fn active_backlog_enabled(cwd: &Path) -> bool {
             .and_then(|v| v.as_bool())
     })
     .unwrap_or(false)
+}
+
+/// `[telemetry] claude_otel` (default ON): whether the daemon binds the
+/// localhost OTLP receiver (`<agents home>/otel/port` + `otel.db`) and
+/// supervisor birth injects the OTEL_* env. Off, neither happens: no listener
+/// binds, no `OTEL_*` key is set on any birthed supervisor, and the burn arm
+/// falls back to the ledger estimate everywhere.
+pub fn telemetry_claude_otel(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("telemetry")?
+            .as_table()?
+            .get("claude_otel")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(true)
 }
 
 /// `[slot_cutover] enabled` (default false): whether the shared Claude slot may switch.
@@ -2861,6 +2934,90 @@ mod tests {
             config_candidates(&fx.outside),
             vec![fx.outside.join(".fno/config.toml")],
             "the explicit pin is read under any ceiling, as in Python"
+        );
+    }
+
+    // --- config_value_deep (AC2) ----------------------------------------- //
+
+    fn deep_fixture(name: &str, project: &str, global: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("fno-deep-{name}-{}", std::process::id()));
+        let proj_dir = root.join("proj/.fno");
+        let glob_dir = root.join("glob/.fno");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::create_dir_all(&glob_dir).unwrap();
+        std::fs::write(proj_dir.join("config.toml"), project).unwrap();
+        std::fs::write(glob_dir.join("config.toml"), global).unwrap();
+        (root.join("proj"), root.join("glob/.fno/config.toml"))
+    }
+
+    #[test]
+    fn deep_read_merges_profile_leaves_across_tiers_ac2_hp() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let (cwd, global) = deep_fixture(
+            "merge",
+            "[agents.profiles.target]\neffort = \"high\"\n",
+            "[agents.profiles.target]\nmodel = \"m\"\nlanes = [\"a\", \"b\"]\n",
+        );
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
+        let v =
+            config_value_deep(&cwd, &["agents", "profiles"]).expect("both tiers carry the subtree");
+        let target = &v["target"];
+        assert_eq!(target["effort"].as_str(), Some("high"));
+        assert_eq!(target["model"].as_str(), Some("m"));
+        assert_eq!(
+            target["lanes"].as_array().map(Vec::len),
+            Some(2),
+            "the global tier's list fills the key the project tier left absent"
+        );
+    }
+
+    #[test]
+    fn deep_read_scalar_replaces_whole_and_higher_tier_wins_ac2_hp() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let (cwd, global) = deep_fixture(
+            "scalar",
+            "[routing]\nobjective = \"best-available\"\n",
+            "[routing]\nobjective = \"cheapest-that-clears\"\nenforce_inventory = true\n",
+        );
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
+        let v = config_value_deep(&cwd, &["routing"]).unwrap();
+        assert_eq!(v["objective"].as_str(), Some("best-available"));
+        assert_eq!(v["enforce_inventory"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn deep_read_pinned_config_is_the_only_candidate_ac2_err() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let (cwd, global) = deep_fixture(
+            "pin",
+            "[routing]\nobjective = \"best-available\"\n",
+            "[routing]\nobjective = \"other\"\n",
+        );
+        std::env::set_var("FNO_CONFIG", &global);
+        let v = config_value_deep(&cwd, &["routing"]).unwrap();
+        assert_eq!(v["objective"].as_str(), Some("other"));
+    }
+
+    #[test]
+    fn deep_read_skips_unparseable_and_absent_candidates_ac2_err() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let root = std::env::temp_dir().join(format!("fno-deep-bad-{}", std::process::id()));
+        let proj = root.join("proj/.fno");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("config.toml"), "not [ valid {{{{").unwrap();
+        let (glob_root, global) =
+            deep_fixture("bad-global", "", "[routing]\nobjective = \"from-global\"\n");
+        let _ = glob_root;
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
+        let v = config_value_deep(&root.join("proj"), &["routing"]).unwrap();
+        assert_eq!(v["objective"].as_str(), Some("from-global"));
+        assert!(
+            config_value_deep(&root.join("proj"), &["no", "such", "key"]).is_none(),
+            "no candidate carries the key -> None"
         );
     }
 }

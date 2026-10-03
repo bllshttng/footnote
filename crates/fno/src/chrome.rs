@@ -33,6 +33,11 @@ pub(crate) fn str_cols(s: &str) -> usize {
     s.chars().map(char_cols).sum()
 }
 
+/// Rows a wrapped subtitle or footer takes: one per line, none when unset.
+fn line_count(text: &Option<String>) -> usize {
+    text.as_deref().map_or(0, |t| t.lines().count().max(1))
+}
+
 /// Cut `s` to at most `w` display columns, ending in `…` when anything was
 /// cut. The one ellipsis rule: a wide char that does not fully fit is dropped
 /// whole rather than straddling the cut.
@@ -52,6 +57,45 @@ pub(crate) fn fit_ellipsis(s: &str, w: usize) -> String {
         used += cw;
     }
     t.push('…');
+    t
+}
+
+/// Cut `s` to at most `w` display columns with no marker: the ROW rule
+/// (ruling d-36438ea4). A wide glyph that does not fully fit is dropped
+/// whole rather than straddling the cut, the same rule [`fit_ellipsis`]
+/// applies, minus the `…`.
+pub(crate) fn clip(s: &str, w: usize) -> String {
+    let mut t = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = char_cols(ch);
+        if used + cw > w {
+            break;
+        }
+        t.push(ch);
+        used += cw;
+    }
+    t
+}
+
+/// Cut `s` to at most `w` display columns keeping the tail, no marker. The
+/// name cell's rule: worker names are suffix-distinguishing (the hex tail is
+/// the identity), so a cut head is absence before a cut tail is. A wide
+/// glyph that straddles the cut drops whole.
+pub(crate) fn clip_tail(s: &str, w: usize) -> String {
+    if str_cols(s) <= w {
+        return s.to_string();
+    }
+    let mut drop = str_cols(s) - w;
+    let mut t = String::new();
+    for ch in s.chars() {
+        let cw = char_cols(ch);
+        if drop > 0 {
+            drop = drop.saturating_sub(cw);
+            continue;
+        }
+        t.push(ch);
+    }
     t
 }
 
@@ -142,7 +186,7 @@ impl Chrome {
     }
 
     /// Clamp the chrome's own text to an inner width the viewport can
-    /// actually hold, eliding what does not fit.
+    /// actually hold, wrapping what does not fit onto more rows.
     ///
     /// [`min_inner_w`](Self::min_inner_w) widens the frame to fit the subtitle
     /// and footer, and nothing above it knows how wide the terminal is: `frame`
@@ -155,31 +199,16 @@ impl Chrome {
     /// this and every modal is sized by it, so clamping it here would resize
     /// surfaces this change has no business resizing.
     pub fn fit_to(mut self, inner_w: usize) -> Self {
-        let elide = |s: &str, w: usize| -> String {
-            if str_cols(s) <= w {
-                return s.to_string();
+        let wrap = |s: String| {
+            if str_cols(&s) <= inner_w {
+                return s;
             }
-            // Cut by display width, not char count: a wide char is two columns
-            // and must not straddle the cut.
-            let keep = w.saturating_sub(1);
-            let mut head = String::new();
-            let mut cols = 0usize;
-            for ch in s.chars() {
-                let cw = char_cols(ch);
-                if cols + cw > keep {
-                    break;
-                }
-                head.push(ch);
-                cols += cw;
-            }
-            format!("{head}…")
+            let mut lines = Vec::new();
+            crate::client::wrap_line(&s, inner_w, &mut lines);
+            lines.join("\n")
         };
-        if let Some(f) = self.footer.take() {
-            self.footer = Some(elide(&f, inner_w));
-        }
-        if let Some(s) = self.subtitle.take() {
-            self.subtitle = Some(elide(&s, inner_w));
-        }
+        self.footer = self.footer.take().map(wrap);
+        self.subtitle = self.subtitle.take().map(wrap);
         self
     }
 
@@ -201,9 +230,7 @@ impl Chrome {
     pub fn rows_above(&self) -> usize {
         match self.level {
             Level::Bare => 1,
-            Level::Full => {
-                1 + usize::from(self.subtitle.is_some()) + usize::from(!self.tabs.is_empty())
-            }
+            Level::Full => 1 + line_count(&self.subtitle) + usize::from(!self.tabs.is_empty()),
         }
     }
 
@@ -211,7 +238,7 @@ impl Chrome {
     pub fn rows_below(&self) -> usize {
         match self.level {
             Level::Bare => 1, // bottom border carries the esc label inline
-            Level::Full => usize::from(self.footer.is_some()) + 1,
+            Level::Full => line_count(&self.footer) + 1,
         }
     }
 
@@ -238,8 +265,9 @@ impl Chrome {
         // time a modal set a footer wider than its content. Widen to fit them
         // instead of cutting them. The tab strip is the same shape of chrome
         // (popup width rules): ` tab ` rows need the strip inside the border.
-        let sub_w = self.subtitle.as_ref().map_or(0, |s| str_cols(s));
-        let foot_w = self.footer.as_ref().map_or(0, |f| str_cols(f));
+        let widest = |t: &Option<String>| t.iter().flat_map(|t| t.lines()).map(str_cols).max();
+        let sub_w = widest(&self.subtitle).unwrap_or(0);
+        let foot_w = widest(&self.footer).unwrap_or(0);
         // Strip: a leading space, then per tab `● label` with two spaces
         // between tabs - matching `tab_row`'s assembly.
         let tabs_w = if self.tabs.is_empty() {
@@ -362,7 +390,7 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
     // definition (rows_above/below already account for this), so even if a Bare
     // chrome carries them they are not rendered.
     if chrome.level == Level::Full {
-        if let Some(s) = &chrome.subtitle {
+        for s in chrome.subtitle.iter().flat_map(|s| s.lines()) {
             out.push(content_row(s, Role::Subtitle, inner_w));
         }
         if !chrome.tabs.is_empty() {
@@ -378,7 +406,7 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
     // Footer rides above the bottom border under Full; under Bare the esc hint
     // IS the bottom border, so a footer (if any was set) is ignored there.
     if chrome.level == Level::Full {
-        if let Some(f) = &chrome.footer {
+        for f in chrome.footer.iter().flat_map(|f| f.lines()) {
             let mut row = content_row(f, Role::Footer, inner_w);
             // The close words are a mouse target, defined once here so every
             // popup that sets this footer inherits the clickable close (a
@@ -911,6 +939,20 @@ mod tests {
         BodyLine::plain(s)
     }
 
+    // The former fit_name middle-cut tests, against the clip they became.
+    #[test]
+    fn clip_cuts_without_a_marker_and_drops_wide_glyphs_whole() {
+        assert_eq!(clip("dispatch-fno-8bef7b", 12), "dispatch-fno");
+        assert_eq!(clip("short", 5), "short");
+        assert_eq!(clip("long", 0), "");
+        // A double-wide glyph that straddles the cut drops whole, and the
+        // result never exceeds the width.
+        let wide = "\u{4e2d}\u{6587}abc";
+        let cut = clip(wide, 3);
+        assert_eq!(str_cols(&cut), 2);
+        assert_eq!(cut, "\u{4e2d}");
+    }
+
     #[test]
     fn the_tab_strip_stays_inside_the_border() {
         // The strip-width rule: min_inner_w counts the tab strip, so a strip
@@ -1024,12 +1066,18 @@ mod tests {
         );
         let text: String = framed.lines.iter().map(|l| l.text.clone()).collect();
         assert!(
-            text.contains('…'),
-            "the elision is visible as one: {text:?}"
+            !text.contains('…'),
+            "the footer wraps, never elides: {text:?}"
         );
+        for word in footer.split(' ') {
+            assert!(text.contains(word), "every word stays: {word} in {text:?}");
+        }
         assert!(
-            !text.contains("besides"),
-            "the tail really was dropped: {text:?}"
+            framed
+                .lines
+                .iter()
+                .any(|l| l.hits.iter().any(|h| h.0 == ESC_CLOSE_HIT)),
+            "the esc close words keep their tap target"
         );
         for line in &framed.lines {
             for &(_, off, len) in &line.hits {

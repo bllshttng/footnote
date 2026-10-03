@@ -45,7 +45,7 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
 use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
-pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
+pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
 mod list_rows;
 use self::list_rows::{
@@ -1626,17 +1626,14 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     );
     // Sandbox homes skip fleet work that could target real state from a tempdir
     // and keep the daemon open forever.
-    let ab_handle = if sandbox {
-        tokio::spawn(std::future::ready(()))
-    } else {
-        let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
-        let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
-        let live = Arc::clone(&ab_live);
-        let shutdown = Arc::clone(&ab_shutdown);
-        tokio::spawn(crate::active_backlog::run_supervisor(
-            fno_bin, ab_emitter, live, shutdown,
-        ))
-    };
+    let ab_handle = crate::active_backlog::spawn_for_daemon(
+        &ctx.home,
+        sandbox,
+        Arc::clone(&ab_live),
+        Arc::clone(&ab_shutdown),
+    );
+    // Exact-cost telemetry receiver; same sandbox skip; opt-out: telemetry.claude_otel.
+    let otel_shutdown = crate::otel_ingest::spawn_for_daemon(&ctx.home, sandbox);
 
     // SIGTERM -> graceful shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1821,6 +1818,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // filter excludes the still-in-flight node (no double-dispatch).
     ab_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     ab_handle.abort();
+    if let Some(flag) = &otel_shutdown {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 
     // Only reap the socket if it's still ours -- never unlink a live
     // successor's socket, the same discipline stop_worker_confirmed
@@ -1884,9 +1884,12 @@ use crate::codex_thread::InterruptOutcome;
 mod codex_thread_lane;
 mod codex_thread_resume;
 mod convert;
+mod report;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
 use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
+pub(crate) use report::{find_uuid_backfill_row, UuidBackfill};
+use report::{flush_buffered_inside_leg, handle_report};
 pub(crate) use thread_row_status::notify_transition;
 use thread_row_status::{
     codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row, notify_badge,
@@ -4271,13 +4274,11 @@ where
                     .as_deref()
                     .map(|s| Value::String(s.to_string()))
                     .unwrap_or(Value::Null);
-                // Only Claude's short transport key is a mailbox address;
-                // other harnesses need their full session identity.
-                let address: Value = e
-                    .harness_session_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Value::String(canonical_handle(s)))
+                // ADDRESS is the row's fno handle (codex rows; others keep
+                // the harness head), and Claude's transport key is the
+                // last-resort fallback.
+                let address: Value = list_rows::row_address(e)
+                    .map(Value::String)
                     .or_else(|| {
                         if e.harness_name() == "claude" {
                             e.transport_short().map(|s| Value::String(s.to_string()))
@@ -4350,10 +4351,6 @@ where
                         e.liveness_measured_at.as_deref(),
                     ),
                     "liveness_measured_at": e.liveness_measured_at,
-                    "context_used_pct": e.context_used_pct,
-                    "context_used_tokens": e.context_used_tokens,
-                    "context_window_tokens": e.context_window_tokens,
-                    "context_measured_at": e.context_measured_at,
                     "mail_unread": e.mail_unread,
                     // The harness's own title for the session, served
                     // from the probe's fresh reading; a probe that ANSWERED
@@ -4453,6 +4450,9 @@ where
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {
+                    for (key, value) in crate::model_price::served_session_metrics_keys(e) {
+                        object.insert(key, value);
+                    }
                     // No `pid_alive` injection here: this row's `status` is
                     // `rendered_status`, which `rendered_status_from_truth`
                     // draws from a closed set of live/orphaned/unknown, so the
@@ -5370,7 +5370,7 @@ async fn handle_rm_with(
     // next `fno agents rm`.
     let mut provably_gone = claude_agents
         .as_ref()
-        .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
+        .is_some_and(|snapshot| row_death_reason(&entry, snapshot).is_some())
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     // Law d-81c6da7e: remove needs no prior stop. rm owns the one exception's
@@ -5392,7 +5392,7 @@ async fn handle_rm_with(
         if let Some(short) = short {
             let _ = off_executor(|| claude_stop(&short));
             let snapshot = off_executor(read_claude_agents);
-            provably_gone = crate::gc_sweep::claude_death_reason(&entry, &snapshot).is_some()
+            provably_gone = row_death_reason(&entry, &snapshot).is_some()
                 || claude_row_provably_absent(Some(&snapshot), harness_row_id.as_deref());
             claude_agents = Some(snapshot);
         }
@@ -6481,14 +6481,13 @@ pub(crate) fn run_reconcile_sweep(
     // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
-    // The rollout file recorded at spawn is the durable codex thread object
-    // (docs/architecture/codex-thread-driver.md): existence separates an
-    // unhosted thread's Orphaned from Exited; freshness keeps working ones unsettled.
+    let codex_index = crate::client_verbs::codex_rollout_index(None);
     let rollout_exists = |e: &RegistryEntry| -> bool {
-        e.log_path
-            .as_deref()
-            .map(Path::new)
-            .is_some_and(Path::is_file)
+        crate::codex_store::codex_rollout_exists(
+            codex_index.as_deref(),
+            e.log_path.as_deref(),
+            e.harness_session_id.as_deref(),
+        )
     };
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.
@@ -6519,7 +6518,7 @@ pub(crate) fn run_reconcile_sweep(
     let prober = live_liveness_prober(
         truth,
         crate::client_verbs::sessions_socket_index(&crate::claude_ask::ClaudeHome::from_env()),
-        crate::client_verbs::codex_rollout_index(None),
+        codex_index.clone(),
     );
     // The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the
@@ -6831,396 +6830,6 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// `agent.report` — the inside-leg state push (inside-out E3.2). A per-turn hook
-/// calls `fno agents report --session-id <uuid> --seq <n> --state
-/// working|blocked|done [--reason ...] [--ttl-ms <n>]`; the daemon stamps
-/// `received_at` and STORES the report on the matching registry row's
-/// [`RegistryEntry::inside_leg`] field (contract v2 / X2). Storage-only: the
-/// seq-drop (a `seq <= last_seq` is rejected so a reordered/duplicate report
-/// cannot clobber a newer one, AC-X2-1) and the unknown-session drop (no phantom
-/// row, AC-X2-5) live here; TTL-aging, the 3-tier render authority, and the
-/// ordered exit teardown are E3.3. The row is matched by the daemon-pinned
-/// session id via [`entry_holds_session`], so a claude pane reports under the
-/// same UUID E1 recorded. A DROP is non-fatal: an unregistered session (the row
-/// not up yet) or a stale seq returns `ok` with `stored:false`, so the hook stays
-/// fire-and-forget and never reds a turn.
-/// Outcome of trying to buffer an early-push inside-leg report (E3.3).
-enum BufferOutcome {
-    /// Held in the pending buffer until the row registers.
-    Buffered,
-    /// A reordered/duplicate early push (`seq <= buffered seq`); dropped.
-    StaleSeq { last: u64 },
-    /// The buffer is at cap and this is a new session; dropped (logged).
-    Full,
-}
-
-/// Insert an early-push report into the bounded pending buffer, highest-seq-wins
-/// per session (a reorder cannot regress a buffered report, the same seq rule the
-/// registered path enforces). Pure over the map so it is unit-testable without a
-/// daemon (inside-out E3.3, buffer-on-early-push).
-fn buffer_pending_report(
-    map: &mut std::collections::HashMap<String, state::InsideLegReport>,
-    session_id: &str,
-    report: state::InsideLegReport,
-) -> BufferOutcome {
-    if let Some(prev) = map.get(session_id) {
-        if report.seq <= prev.seq {
-            return BufferOutcome::StaleSeq { last: prev.seq };
-        }
-        map.insert(session_id.to_string(), report);
-        return BufferOutcome::Buffered;
-    }
-    if map.len() >= PENDING_INSIDE_LEG_CAP {
-        return BufferOutcome::Full;
-    }
-    map.insert(session_id.to_string(), report);
-    BufferOutcome::Buffered
-}
-
-/// Flush a buffered early-push report onto its session's row AFTER the row is
-/// registered (E3.3 flush).
-///
-/// Called only on a winning insert with the row's pinned claude session uuid.
-/// Takes the buffered report out of the pending map (highest-seq, since
-/// `buffer_pending_report` keeps only the newest) and applies it to the row
-/// under a seq gate, so a report that raced in on the row's *store* path between
-/// insert and this drain is never regressed (codex P2: highest-seq-wins must
-/// survive the flush). Draining strictly after the insert closes the
-/// peek-then-commit window where a newer buffered report could be deleted by an
-/// unconditional remove. A no-op for a row with no buffered report; a poisoned
-/// lock leaves the report buffered.
-fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
-    let rep = match ctx.pending_inside_leg.lock() {
-        Ok(mut buf) => buf.remove(session_uuid),
-        Err(_) => None,
-    };
-    let Some(rep) = rep else {
-        return;
-    };
-    let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
-    let mut notify: Option<(String, String, bool)> = None;
-    // Apply under the seq gate: a store-path report that landed on the row after
-    // it became visible (but before this drain) set a >= seq; never regress it.
-    let _ = state::update_registry(&ctx.home.registry_json(), |r| {
-        if let Some((body, is_done)) = gate_inside_leg_onto_row(r, session_uuid, rep.clone()) {
-            notify = Some((name.to_string(), body, is_done));
-        }
-    });
-    if let Some((title, body, is_done)) = notify {
-        let o = &ctx.opts;
-        notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
-    }
-    let _ = ctx.emitter.emit(
-        "inside_leg_buffer_flushed",
-        &json!({"name": name, "session_id": session_uuid, "state": state_str, "seq": seq}),
-    );
-}
-
-/// Which null-uuid row (if any) should adopt a full session uuid seen on an
-/// inside-leg report.
-pub(crate) enum UuidBackfill {
-    None,
-    One(usize),
-    Ambiguous,
-}
-
-/// Find the `claude --bg` row awaiting its full session uuid. A bg spawn writes
-/// the row with the 8-hex jobId in `short_id` (v9) but `claude_session_uuid:
-/// null` -- the full uuid only arrives on the first inside-leg report, so until
-/// it is backfilled `entry_holds_session` never matches and every report is
-/// buffered-then-lost. Match a null-uuid claude row whose short-id is
-/// the leading hex group of `full_uuid` (`3228ccad` -> `3228ccad-c078-...`).
-/// Two rows sharing that short-id is ambiguous -> refuse rather than backfill
-/// the wrong row (AC1-ERR).
-pub(crate) fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
-    let mut found = None;
-    for (i, e) in entries.iter().enumerate() {
-        // Only a claude bg row owns a jobId + uuid identity; skip any other
-        // provider so a malformed foreign row can't adopt a claude uuid.
-        if e.harness_name() != "claude" || e.claude_session_uuid.is_some() {
-            continue;
-        }
-        let Some(short) = e.transport_short() else {
-            continue;
-        };
-        // Require the group boundary (`<short>-`) so a short cannot match a
-        // longer hex run it merely prefixes.
-        if short.is_empty()
-            || !full_uuid
-                .strip_prefix(short)
-                .is_some_and(|rest| rest.starts_with('-'))
-        {
-            continue;
-        }
-        if found.is_some() {
-            return UuidBackfill::Ambiguous;
-        }
-        found = Some(i);
-    }
-    found.map_or(UuidBackfill::None, UuidBackfill::One)
-}
-
-fn handle_report(ctx: &Ctx, req: &Request) -> Response {
-    let session_id = match req.params.get("session_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => return Response::err(req.id, ErrorCode::InvalidParams, "missing `session_id`"),
-    };
-    let seq = match req.params.get("seq").and_then(|v| v.as_u64()) {
-        Some(n) => n,
-        None => {
-            return Response::err(
-                req.id,
-                ErrorCode::InvalidParams,
-                "missing or non-integer `seq`",
-            )
-        }
-    };
-    // Validate against the wire vocabulary; keep the label for the event payload
-    // and map to the typed enum for storage. `model` is the
-    // PostModelSwitch posture: no inside-leg transition, the report only
-    // diffs the row's SERVED model/effort axes, and it must carry at least
-    // one of them.
-    let state_label = match req.params.get("state").and_then(|v| v.as_str()) {
-        Some(s @ ("working" | "blocked" | "done" | "model")) => s.to_string(),
-        _ => {
-            return Response::err(
-                req.id,
-                ErrorCode::InvalidParams,
-                "`state` must be working|blocked|done|model",
-            )
-        }
-    };
-    let model_only = state_label == "model";
-    let model = req
-        .params
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let effort = req
-        .params
-        .get("effort")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    if model_only && model.is_none() && effort.is_none() {
-        return Response::err(
-            req.id,
-            ErrorCode::InvalidParams,
-            "state=model requires `model` or `effort`",
-        );
-    }
-    let state = match state_label.as_str() {
-        "working" => Some(state::InsideLegState::Working),
-        "blocked" => Some(state::InsideLegState::Blocked),
-        "done" => Some(state::InsideLegState::Done),
-        _ => None,
-    };
-    let reason = req
-        .params
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let ttl_ms = req.params.get("ttl_ms").and_then(|v| v.as_u64());
-
-    // Build the report once; a clone moves into the locked store path, the
-    // original is reused for the early-push buffer when no row exists yet.
-    // `None` under the model posture: there is no transition to store.
-    let report = state.map(|state| state::InsideLegReport {
-        state,
-        seq,
-        reason,
-        received_at: now_rfc3339_like(),
-        ttl_ms,
-    });
-    let report_for_store = report.clone();
-
-    // The store/drop decision is made UNDER the registry flock so two concurrent
-    // reporters on one session id can't both pass the seq gate.
-    enum Outcome {
-        Stored,
-        StaleSeq { last: u64 },
-        Unknown,
-    }
-    let mut outcome = Outcome::Unknown;
-    // Badge-transition notify intent: (title, body, is_done). Captured
-    // UNDER the flock from prev-vs-new state; fired AFTER the write so a slow
-    // notifier can never stall ingestion.
-    let mut notify: Option<(String, String, bool)> = None;
-    // The row's label, captured under the flock for the axis-change
-    // events emitted after the write.
-    let mut entry_name: Option<String> = None;
-    // Served-axis change records captured under the flock, emitted
-    // after the write: (kind, from, to). `requested_*` are never touched -
-    // they stay the spawn request, which is the provenance.
-    let mut axis_changes: Vec<(&str, Option<String>, String)> = Vec::new();
-    if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
-        // Match by the pinned session id (fast path). If nothing holds it, a
-        // `claude --bg` row may still be waiting for its uuid: backfill it by
-        // short-id prefix so the report can store on it AND ask/mail/push route
-        // to it. Ambiguous prefix -> no backfill (AC1-ERR).
-        let idx = match r
-            .entries
-            .iter()
-            .position(|e| entry_holds_session(e, &session_id))
-        {
-            Some(i) => Some(i),
-            None => match find_uuid_backfill_row(&r.entries, &session_id) {
-                UuidBackfill::One(i) => {
-                    r.entries[i].claude_session_uuid = Some(session_id.clone());
-                    Some(i)
-                }
-                UuidBackfill::None | UuidBackfill::Ambiguous => None,
-            },
-        };
-        let Some(idx) = idx else {
-            outcome = Outcome::Unknown;
-            return;
-        };
-        let entry = &mut r.entries[idx];
-        entry_name = Some(entry.name.clone());
-        if let Some(rep) = &report_for_store {
-            if let Some(prev) = &entry.inside_leg {
-                if !prev.yields_to(rep) {
-                    outcome = Outcome::StaleSeq { last: prev.seq };
-                    return;
-                }
-            }
-            let prev_state = entry.inside_leg.as_ref().map(|r| r.state);
-            if state::enters(prev_state, rep.state, state::InsideLegState::Blocked) {
-                let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
-                notify = Some((entry.name.clone(), body, false));
-            } else if state::enters(prev_state, rep.state, state::InsideLegState::Done) {
-                let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
-                notify = Some((entry.name.clone(), body, true));
-            }
-            entry.inside_leg = Some(rep.clone());
-            // Capability flip: the hook now owns this row's signal; a stale
-            // scrape verdict must never shadow it (per-capability arbitration).
-            entry.screen_state = None;
-        }
-        if let Some(m) = &model {
-            if entry.model.as_deref() != Some(m.as_str()) {
-                axis_changes.push(("agent_model_changed", entry.model.clone(), m.clone()));
-                entry.model = Some(m.clone());
-            }
-            // Any report is an observation; a matching one is the success case.
-            entry.model_basis = Some("verified".to_string());
-        }
-        if let Some(eff) = &effort {
-            if entry.effort.as_deref() != Some(eff.as_str()) {
-                axis_changes.push(("agent_effort_changed", entry.effort.clone(), eff.clone()));
-                entry.effort = Some(eff.clone());
-            }
-        }
-        outcome = Outcome::Stored;
-    }) {
-        return Response::err(
-            req.id,
-            ErrorCode::Internal,
-            format!("registry write failed during inside-leg report: {e}"),
-        );
-    }
-
-    match outcome {
-        Outcome::Stored => {
-            let _ = ctx.emitter.emit(
-                "inside_leg_report",
-                &json!({"session_id": session_id, "seq": seq, "state": state_label}),
-            );
-            // One event per served-axis change, emitted only after
-            // the write landed.
-            for (kind, from, to) in &axis_changes {
-                let _ = ctx.emitter.emit(
-                    kind,
-                    &json!({
-                        "name": entry_name,
-                        "harness_session_id": session_id,
-                        "from": from,
-                        "to": to,
-                    }),
-                );
-            }
-            if let Some((title, body, is_done)) = notify {
-                let o = &ctx.opts;
-                notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
-            }
-            Response::ok(req.id, json!({"stored": true, "seq": seq}))
-        }
-        Outcome::StaleSeq { last } => {
-            let _ = ctx.emitter.emit(
-                "inside_leg_report_dropped",
-                &json!({"session_id": session_id, "seq": seq, "last_seq": last, "reason": "stale_seq"}),
-            );
-            Response::ok(
-                req.id,
-                json!({"stored": false, "dropped": "stale_seq", "last_seq": last}),
-            )
-        }
-        // E3.3 buffer-on-early-push: the row is not up yet (the hook fired before
-        // the daemon registered the pane). Hold the report in the bounded buffer
-        // instead of dropping it; the spawn path flushes it onto the row at
-        // creation. Still fire-and-forget: every branch returns `ok`. The lock is
-        // scoped to the buffer op (released before the emit) via `.map(..).ok()`;
-        // a poisoned lock -> `None` -> the old hard-drop degrade. A
-        // model-posture report has no transition to buffer: an unknown session
-        // is a plain drop.
-        Outcome::Unknown => {
-            let buffered = report
-                .map(|rep| {
-                    ctx.pending_inside_leg
-                        .lock()
-                        .map(|mut buf| buffer_pending_report(&mut buf, &session_id, rep))
-                        .ok()
-                })
-                .flatten();
-            match buffered {
-                Some(BufferOutcome::Buffered) => {
-                    let _ = ctx.emitter.emit(
-                        "inside_leg_report_buffered",
-                        &json!({"session_id": session_id, "seq": seq, "state": state_label}),
-                    );
-                    Response::ok(
-                        req.id,
-                        json!({"stored": false, "buffered": true, "seq": seq}),
-                    )
-                }
-                Some(BufferOutcome::StaleSeq { last }) => {
-                    let _ = ctx.emitter.emit(
-                        "inside_leg_report_dropped",
-                        &json!({"session_id": session_id, "seq": seq, "last_seq": last, "reason": "stale_seq"}),
-                    );
-                    Response::ok(
-                        req.id,
-                        json!({"stored": false, "dropped": "stale_seq", "last_seq": last}),
-                    )
-                }
-                Some(BufferOutcome::Full) => {
-                    let _ = ctx.emitter.emit(
-                        "inside_leg_report_dropped",
-                        &json!({"session_id": session_id, "seq": seq, "reason": "buffer_full"}),
-                    );
-                    Response::ok(req.id, json!({"stored": false, "dropped": "buffer_full"}))
-                }
-                // Poisoned buffer lock: degrade to the old hard-drop rather than
-                // panicking a fire-and-forget hook.
-                None => {
-                    let _ = ctx.emitter.emit(
-                        "inside_leg_report_dropped",
-                        &json!({"session_id": session_id, "seq": seq, "reason": "unknown_session"}),
-                    );
-                    Response::ok(
-                        req.id,
-                        json!({"stored": false, "dropped": "unknown_session"}),
-                    )
-                }
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // channel.* (Phase 5 integration point; minimal Wave 3 surface).
 // ---------------------------------------------------------------------------
@@ -7466,6 +7075,11 @@ pub(crate) mod sweeps;
 pub(crate) use sweeps::{park_sweep, stale_sweep};
 #[cfg(test)]
 pub(crate) use sweeps::{parse_stale_sweep, STALE_SWEEP_INTERVAL_SECS};
+// Test-only report imports live in this tail block beside the sweeps ones:
+// a `#[cfg(test)]` line above the emit region would split the emit-kind
+// scanner's production boundary mid-file.
+#[cfg(test)]
+use report::{buffer_pending_report, BufferOutcome};
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
@@ -7478,3 +7092,6 @@ mod adopt_pin_tests;
 #[cfg(test)]
 #[path = "daemon/tests/pid_zombie_tests.rs"]
 mod pid_zombie_tests;
+#[cfg(test)]
+#[path = "daemon/tests/report_codex.rs"]
+mod report_codex_tests;

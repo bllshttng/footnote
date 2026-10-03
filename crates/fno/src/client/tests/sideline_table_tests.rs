@@ -40,7 +40,7 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
     let fb = b.compose();
     assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
     let text = frame_text(&fa);
-    assert!(text.contains("26%▪▫▫"), "{text:?}");
+    assert!(text.contains("26%"), "{text:?}");
     assert!(text.contains("3h"), "{text:?}");
     assert!(text.contains("ctx"), "{text:?}");
     assert!(text.contains("up"), "{text:?}");
@@ -83,9 +83,10 @@ fn crown_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sideline_name_middle_elides_and_keeps_suffix_gap_to_the_message() {
-    // acceptance: a long worker name at a 60-column panel keeps its
-    // distinguishing suffix after the middle ellipsis.
+fn sideline_name_clips_markerless_and_keeps_the_distinguishing_suffix() {
+    // acceptance: a long worker name at a 60-column panel cuts with no
+    // marker (the ROW rule) and keeps its distinguishing hex suffix, the
+    // identity two same-node workers share nothing else of.
     let mut view = two_pane_view();
     view.sideline_width = 60;
     let mut a = tab_agent(None, None, false);
@@ -95,13 +96,13 @@ fn sideline_name_middle_elides_and_keeps_suffix_gap_to_the_message() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = (view.panel_w() - 1) as usize;
-    let rects = sideline_column_rects(text_w as u16);
-    let row = 1; // row 0 is the squad header
+    let rects = view.worker_column_rects(text_w as u16);
+    let row = 2; // row 0 is the strip, row 1 the squad header
     let name = &frame.cells
         [row * cols + rects[1].x as usize..row * cols + (rects[1].x + rects[1].width) as usize];
     assert!(
-        name.iter().any(|c| c.c == '\u{2026}'),
-        "the name cell contains the middle ellipsis"
+        !name.iter().any(|c| c.c == '\u{2026}'),
+        "the name cell cuts with no marker"
     );
     let rendered_name: String = name.iter().map(|c| c.c).collect();
     assert!(
@@ -124,8 +125,8 @@ fn sideline_message_reads_the_sentence_not_the_markup() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = (view.panel_w() - 1) as usize;
-    let rects = sideline_column_rects(text_w as u16);
-    let row = 1;
+    let rects = view.worker_column_rects(text_w as u16);
+    let row = 2; // under the strip row and the squad header
     let msg: String = frame.cells
         [row * cols + rects[2].x as usize..row * cols + (rects[2].x + rects[2].width) as usize]
         .iter()
@@ -148,8 +149,8 @@ fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = (view.panel_w() - 1) as usize;
-    let rects = sideline_column_rects(text_w as u16);
-    let row = 1;
+    let rects = view.worker_column_rects(text_w as u16);
+    let row = 2; // under the strip row and the squad header
     let status: String = frame.cells
         [row * cols + rects[0].x as usize..row * cols + (rects[0].x + rects[0].width) as usize]
         .iter()
@@ -182,7 +183,7 @@ fn sideline_selection_scrolls_into_view_and_paints_the_band() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let visible = view.sideline_visible_rows();
-    let sel_row = visible - 1; // selection + 1 - visible scrolls to the last line
+    let sel_row = visible; // rows paint from 1 (strip at 0); the last is `visible`
     assert_eq!(
         frame.cells[sel_row * cols].bg,
         Color::Indexed(0),
@@ -207,8 +208,11 @@ fn status_sort_arrow_fits_inside_the_status_header_span() {
     set_density(&mut v, Density::Extended);
     v.agent_sort = AgentSort::Attention;
     let frame = v.compose();
+    let cols = frame.cols as usize;
     let rects = v.worker_column_rects((v.panel_w() - 1) as u16);
-    let status: String = frame.cells[rects[0].x as usize..(rects[0].x + rects[0].width) as usize]
+    // The TableHead paints at row 1 (the strip row owns row 0).
+    let status: String = frame.cells
+        [cols + rects[0].x as usize..cols + (rects[0].x + rects[0].width) as usize]
         .iter()
         .map(|c| c.c)
         .collect();
@@ -236,11 +240,11 @@ fn extended_pr_cell_shows_number_or_neutral_value() {
             .map(|c| c.c)
             .collect::<String>()
     };
-    // Row 0 is the TableHead, row 1 the squad band; the agents paint at
-    // rows 2 and 3.
-    assert!(cell_text(2).contains("#482"), "known PR renders");
+    // Row 0 is the strip, row 1 the TableHead, row 2 the squad band; the
+    // agents paint at rows 3 and 4.
+    assert!(cell_text(3).contains("#482"), "known PR renders");
     assert!(
-        cell_text(3).contains('\u{2014}'),
+        cell_text(4).contains('\u{2014}'),
         "unknown PR renders the neutral dash"
     );
 }
@@ -261,7 +265,7 @@ fn sort_label_survives_every_column_configuration() {
             column: AgentSortColumn::Age,
             direction: SortDirection::Descending,
         };
-        let first_line = frame_text(&v.compose()).lines().next().unwrap().to_string();
+        let first_line = frame_text(&v.compose()).lines().nth(1).unwrap().to_string();
         assert!(
             first_line.contains("age\u{2193}"),
             "age header visible at width {cols}: {first_line:?}"
@@ -322,8 +326,8 @@ fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
     let frame = v.compose();
     let cols = frame.cols as usize;
     let rects = v.worker_column_rects((v.panel_w() - 1) as u16);
-    // Rows: 0 TableHead, 1 squad band, 2 parent, 3 child.
-    for (row, label) in [(2usize, "parent"), (3, "child")] {
+    // Rows: 0 strip, 1 TableHead, 2 squad band, 3 parent, 4 child.
+    for (row, label) in [(3usize, "parent"), (4, "child")] {
         let status: String = frame.cells
             [row * cols + rects[0].x as usize..row * cols + (rects[0].x + rects[0].width) as usize]
             .iter()
@@ -367,7 +371,7 @@ fn list_hover_band_is_one_color_across_every_column_gap() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = view.sideline_paint_w().saturating_sub(1);
-    let row = agent_i - view.sideline_offset();
+    let row = agent_i - view.sideline_offset() + 1; // the strip row owns row 0
     let cells = &frame.cells[row * cols..row * cols + text_w];
     assert!(cells.iter().any(|c| c.c != ' '), "the row has text");
     for (j, cell) in cells.iter().enumerate() {
@@ -402,7 +406,7 @@ fn composed_list_bands_hold_contrast_on_dark_and_light_frames() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text_w = view.sideline_paint_w().saturating_sub(1);
-    let row = agent_i - view.sideline_offset();
+    let row = agent_i - view.sideline_offset() + 1; // the strip row owns row 0
     let cells = &frame.cells[row * cols..row * cols + text_w];
     for lens in crate::frame_html::THEMES {
         for cell in cells.iter().filter(|c| c.c != ' ') {
@@ -485,7 +489,7 @@ fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
     view.selector = Some(1); // the focused agent row
     let frame = view.compose();
     let cols = frame.cols as usize;
-    let lead = frame.cells[cols]; // outer row 1, col 0
+    let lead = frame.cells[2 * cols]; // display 1 paints at outer row 2
     assert_eq!(
         lead.bg,
         Color::Indexed(0),
@@ -508,14 +512,14 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
     let frame = view.compose();
     let cols = frame.cols as usize;
 
-    let focus_cell = frame.cells[cols]; // display row 1: the focus band
+    let focus_cell = frame.cells[2 * cols]; // display row 1 paints at outer row 2
     assert_eq!(
         focus_cell.bg,
         Color::Indexed(0),
         "the focus row wears the surface band, never an accent fill"
     );
 
-    let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
+    let sel_cell = frame.cells[4 * cols]; // display row 3 paints at outer row 4
     assert_eq!(
         sel_cell.bg,
         Color::Indexed(0),

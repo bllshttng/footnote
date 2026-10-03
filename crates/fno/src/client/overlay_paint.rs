@@ -84,13 +84,19 @@ pub(crate) fn layout_lines_overlay<S: AsRef<str>>(
 ) -> OverlayLayout {
     let (content_rows, content_cols) = content_dims;
     // Body width: the widest line (across the whole body, windowed-out rows
-    // included), capped to the viewport minus the side borders.
+    // included), capped to the viewport minus the side borders. The framer
+    // spends two of these columns on side pad, so a line's text needs its
+    // trimmed width plus two; a line wider than the cap wraps instead of
+    // losing its tail.
+    let cap = content_cols.saturating_sub(chrome::Chrome::FRAME_COLS);
+    let (lines, src) = wrap_overlay_lines(lines, cap);
+    let follow = follow.and_then(|f| src.iter().position(|&s| s == f));
     let body_w = lines
         .iter()
-        .map(|l| l.as_ref().chars().count())
+        .map(|l| chrome::str_cols(l).max(chrome::str_cols(l.trim_end()) + 2))
         .max()
         .unwrap_or(0)
-        .min(content_cols.saturating_sub(chrome::Chrome::FRAME_COLS));
+        .min(cap);
     // Reserve the chrome overhead and window the body to the rows that remain.
     // Before chrome the body had the whole viewport; the frame borrows `overhead`
     // rows for its border/footer, so without windowing a body that filled the
@@ -131,7 +137,7 @@ pub(crate) fn layout_lines_overlay<S: AsRef<str>>(
     };
     let body: Vec<chrome::BodyLine> = lines[start..start + take]
         .iter()
-        .map(|l| chrome::BodyLine::plain(l.as_ref()))
+        .map(|l| chrome::BodyLine::plain(l))
         .collect();
     let framed = chrome::frame(&body, chrome, body_w, scroll);
     let box_h = framed.lines.len().min(content_rows);
@@ -143,6 +149,37 @@ pub(crate) fn layout_lines_overlay<S: AsRef<str>>(
         window: (start, take),
         body_top: chrome.rows_above(),
     }
+}
+
+/// Wrap each line whose text would not fit `cap` body columns less the two
+/// pad columns, keeping its indent on every continuation. Returns the lines
+/// and, per line, the index of the source line it came from.
+fn wrap_overlay_lines<S: AsRef<str>>(lines: &[S], cap: usize) -> (Vec<String>, Vec<usize>) {
+    let text_w = cap.saturating_sub(2).max(1);
+    let mut out = Vec::with_capacity(lines.len());
+    let mut src = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.as_ref();
+        let text = line.trim_end();
+        if chrome::str_cols(text) <= text_w {
+            out.push(line.to_string());
+            src.push(i);
+            continue;
+        }
+        let indent = &text[..text.len() - text.trim_start().len()];
+        let indent = if chrome::str_cols(indent) * 2 < text_w {
+            indent
+        } else {
+            ""
+        };
+        let mut wrapped = Vec::new();
+        crate::client::wrap_line(text, text_w - chrome::str_cols(indent), &mut wrapped);
+        for w in wrapped {
+            out.push(format!("{indent}{w}"));
+            src.push(i);
+        }
+    }
+    (out, src)
 }
 
 /// The backlog panels' variant of [`layout_lines_overlay`]: the caller has

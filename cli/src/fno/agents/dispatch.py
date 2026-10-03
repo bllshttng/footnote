@@ -1844,7 +1844,14 @@ def _claude_create_path(
                 king_loop_armed = False
                 king_unarmed_reason = str(exc)
         if revive:
-            return [entry if e.name == name else e for e in entries]
+            # One row per session id: the revival replaces its own row, or the
+            # adopted row reached through the resumed uuid (never None here).
+            return [
+                entry
+                if e.name == name or e.harness_session_id == resume_session_id
+                else e
+                for e in entries
+            ]
         return entries + [entry]
 
     try:
@@ -2074,45 +2081,6 @@ def validate_spawn_name(name: str) -> None:
             f"({bad!r} would corrupt subprocess env injection)",
             exit_code=2,
         )
-
-
-def _is_revival(
-    existing: "AgentEntry", provider: str, resume_session_id: Optional[str]
-) -> bool:
-    """True iff spawning an existing same-name row with ``--resume`` is a revival,
-    not a collision (Fix 3).
-
-    Gated on: the spawn carries ``--resume``, both the spawn and the row are
-    claude, the row's own recorded ``claude_session_uuid`` equals the ``--resume``
-    target, and the row's supervisor is NOT live. Liveness is a reality probe
-    (``session_is_live``), never the registry ``status`` field, so a row whose
-    supervisor is actually alive can never be revived into a second writer on one
-    transcript. Every other same-name case (live row, uuid mismatch, no
-    ``--resume``) stays fail-closed. The uuid check runs before the (heavier)
-    liveness probe so the common mismatch never pays for a socket connect.
-    """
-    if not resume_session_id or provider != "claude":
-        return False
-    if getattr(existing, "harness", None) != "claude":
-        return False
-    if getattr(existing, "harness_session_id", None) != resume_session_id:
-        return False
-    from fno.agents.harnesses import claude as claude_mod
-
-    short_id = getattr(existing, "short_id", "") or None
-    if short_id:
-        # A liveness-probe error fails SAFE toward "possibly live": never revive
-        # (--resume) into what could be a second writer on one transcript. A
-        # spurious collision refusal is retryable; a double writer is not. So a
-        # probe crash refuses the revival, it does not wave it through.
-        try:
-            if claude_mod.session_is_live(short_id):
-                return False
-        except Exception:
-            return False
-    return True
-
-
 def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str]]:
     """The route a relaunch of ``entry`` must come back on, or ``None``.
 
@@ -2304,6 +2272,18 @@ def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[st
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def _revival_answer(name: str, harness: str, resume_session_id: str) -> Optional[dict]:
+    """One ``fno-agents revival-check`` answer; ``None`` keeps the collision posture."""
+    from fno.rust_binary import call_binary_json
+
+    answer, parsed = call_binary_json(
+        "revival-check",
+        ["--name", name, "--harness", harness, "--resume", resume_session_id],
+        timeout=30,
+    )
+    return parsed if answer is None and isinstance(parsed, dict) else None
 
 
 def dispatch_spawn(
@@ -2628,13 +2608,23 @@ def dispatch_spawn(
                     exit_code=12,
                 )
 
-            # Revive-in-place (Fix 3): a --resume spawn whose target uuid
-            # matches an EXITED same-name claude row is a revival, not a
-            # collision - the row is updated in place below (new short_id, same
-            # uuid) instead of refused. Every other same-name case stays
-            # fail-closed (live row, uuid mismatch, no --resume).
+            # Revive-in-place: a --resume spawn whose target uuid matches an
+            # EXITED claude row is a revival, not a collision; every other
+            # same-name case stays fail-closed (live row, uuid mismatch, no
+            # --resume).
             existing = next((e for e in entries if e.name == name), None)
-            revive = existing is not None and _is_revival(existing, harness, resume_session_id)
+            revive = False
+            if resume_session_id:
+                # One Rust answer: by name, then by the resumed uuid; the
+                # writer-claim gate stays the fail-closed backstop.
+                answer = _revival_answer(name, harness, resume_session_id)
+                if answer is not None and answer.get("revive"):
+                    revive = True
+                    if answer.get("by") == "session":
+                        existing = next(
+                            (e for e in entries if e.harness_session_id == resume_session_id),
+                            None,
+                        )
             if existing is not None and not revive:
                 raise DispatchAskError(
                     f"agent {name!r} already exists; "
@@ -4755,126 +4745,6 @@ def reconcile_agents(
     )
 
 
-# =====================================================================
-# Phase 5 (US6) — register_mcp_channel write verb
-# =====================================================================
-#
-# Locked Decision 11 says channel registration happens at session-create
-# time only. ``register_mcp_channel(name)`` is the write verb the create
-# path calls (after a successful bg-claude spawn but BEFORE the user
-# sees a "ready" signal) to assign an mcp_channel_id to the AgentEntry.
-#
-# The write uses ``with_agent_lock_and_entry`` so the entry is read
-# under the per-agent flock AND the registry-wide flock; concurrent
-# create-or-ask calls against the same name therefore serialize on the
-# per-agent lock and the rename is atomic.
-#
-# Design note: ``mcp_channel_id`` currently equals the claude jobId (``short_id``)
-# (1:1 mapping; see harnesses/claude.py module-level note). The value
-# is generated here at registration time so a future UUIDv4 swap is a
-# one-line change.
-
-
-def register_mcp_channel(
-    name: str,
-    *,
-    registry_path: Optional[Path] = None,
-) -> str:
-    """Assign an ``mcp_channel_id`` to an existing claude agent.
-
-    Idempotent on the server side: calling twice for the same name
-    returns the existing ``mcp_channel_id`` without allocating a fresh
-    one (per spec invariant "registration is idempotent on the server
-    side").
-
-    Args:
-        name: agent name (must already exist in the registry).
-        registry_path: optional override forwarded to the lock + read.
-
-    Returns:
-        The assigned ``mcp_channel_id`` (today this equals the agent's
-        ``short_id``; in a follow-up it will be a UUIDv4
-        generated here).
-
-    Raises:
-        DispatchAskError(exit_code=2): agent name not found, or entry
-            has no ``short_id`` (cannot generate an mcp id for
-            a non-Claude or pre-create entry).
-    """
-    with with_agent_lock_and_entry(name, registry_path=registry_path) as (
-        _lock_handle,
-        entry,
-    ):
-        if entry.harness != "claude":
-            raise DispatchAskError(
-                f"register_mcp_channel: agent {name!r} provider is "
-                f"{entry.harness!r}; MCP channel backend is Claude-only "
-                "this release",
-                exit_code=2,
-            )
-        if not entry.short_id:
-            raise DispatchAskError(
-                f"register_mcp_channel: agent {name!r} has no "
-                "short id on file; cannot derive mcp_channel_id",
-                exit_code=12,
-            )
-        # Idempotent: if already set, return the existing value.
-        if entry.mcp_channel_id:
-            events.emit(
-                events.KIND_MCP_CHANNEL_REGISTERED,
-                name=name,
-                short_id=entry.short_id,
-                mcp_channel_id=entry.mcp_channel_id,
-                idempotent=True,
-            )
-            return entry.mcp_channel_id
-
-        # Today the mcp_channel_id IS the claude jobId in short_id (1:1; see
-        # harnesses/claude.py module note). A follow-up will swap in
-        # uuid.uuid4().hex here without a schema change.
-        new_id = entry.short_id
-
-        from dataclasses import replace
-
-        def _set_mcp_id(entries: list[AgentEntry]) -> list[AgentEntry]:
-            out: list[AgentEntry] = []
-            for e in entries:
-                if e.name == name:
-                    out.append(replace(e, mcp_channel_id=new_id))
-                else:
-                    out.append(e)
-            return out
-
-        try:
-            update_registry(_set_mcp_id, path=registry_path)
-        except (OSError, RegistryVersionError) as exc:
-            # Spec AC1-ROLLBACK: callers who already spawned bg-claude
-            # need a single exception class to match so they can SIGTERM
-            # the PGID and clean up. Surfacing the raw OSError directly
-            # would force every caller to handle two exception shapes.
-            events.emit(
-                "mcp_channel_register_failed",
-                name=name,
-                short_id=entry.short_id,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            raise DispatchAskError(
-                f"register_mcp_channel: registry write failed for "
-                f"{name!r}: {exc}. The agent's bg-claude spawn (if any) "
-                "may need to be SIGTERM'd by the caller (AC1-ROLLBACK).",
-                exit_code=12,
-            ) from exc
-        events.emit(
-            events.KIND_MCP_CHANNEL_REGISTERED,
-            name=name,
-            short_id=entry.short_id,
-            mcp_channel_id=new_id,
-            idempotent=False,
-        )
-        return new_id
-
-
 # ---------------------------------------------------------------------------
 # G2 Task 2.1 — send verb (async, durable-first)
 # ---------------------------------------------------------------------------
@@ -5056,12 +4926,10 @@ def _load_a2a_settings() -> tuple[bool, int]:
 
 
 def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
-    """Wrap a relay hop body in the peer's ``<fno_mail>`` envelope, or return it
-    raw when no context is supplied (an unwrapped hop) (node). The stream-json
-    switchboard injects a whole turn, so this uses the paired multiline form, not
-    the relay single-line PTY variant."""
+    """Wrap a relay hop in the peer's envelope; the hop mints its header id."""
     if ctx is None:
         return cur
+    from fno.inbox.store import generate_msg_id
     from fno.mail.envelope import wrap_fno_mail
 
     return wrap_fno_mail(
@@ -5070,6 +4938,7 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
         harness=ctx.harness,
         node=ctx.node,
         to=ctx.to,
+        id=ctx.id or generate_msg_id(),
         from_session=ctx.from_session,
         origin=ctx.origin,
         to_session=ctx.to_session,
@@ -7264,8 +7133,8 @@ def _deliver_live(
     # short id) and confirms transcript growth before reporting delivered.
     #
     # Recipient resolution guarantees no former MCP recipient is stranded:
-    # mcp_channel_id is minted 1:1 from short_id by its sole producer
-    # (register_mcp_channel), so it IS a roster-resolvable id. Live rows can carry
+    # mcp_channel_id is minted 1:1 from short_id, so it IS a roster-resolvable
+    # id. Live rows can carry
     # an empty plain `short_id`, so mcp_channel_id is the load-bearing
     # fallback for an MCP-registered row whose short_id field was since cleared.
     recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
@@ -7996,36 +7865,31 @@ def dispatch_send(
             return DispatchSendResult(
                 msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
                 durable_owner=durable_owner if delivery == "durable" else None,
+                to=durable_recipient or existing.short_id or None,
+                to_harness=existing.harness,
+                to_session=existing.harness_session_id or None,
             )
 
     except AgentLockTimeout as exc:
-        # INVARIANT, and it is load-bearing: this handler guards the whole
-        # `with` body, not only the acquire, and the body now ends in a
-        # durable queue that returns exit 0. That is safe ONLY because no
-        # callee inside the block takes a per-agent flock - not _deliver_live,
-        # _switchboard_exchange, _mux_pane_send, _registered_family1_state,
-        # _queue_durable_fallback or _stamp_after_delivery. Add a nested
-        # acquire and a timeout AFTER a confirmed hosted delivery lands here,
-        # queues the same message a second time, and prints a durable receipt
-        # for one that already arrived. Narrow this `try` to the acquire
-        # before adding one.
+        # INVARIANT: this handler guards the whole `with` body, not only the
+        # acquire, and the body ends in a durable queue returning exit 0. Safe
+        # ONLY because no callee inside takes a per-agent flock (deliver,
+        # switchboard, pane send, family-1 state, durable fallback, stamp).
+        # Add a nested acquire and a confirmed hosted delivery lands here
+        # DOUBLE-QUEUED with a receipt for one that already arrived. Narrow
+        # this `try` to the acquire before adding one.
         #
-        # A durable write needs a VERIFIED recipient, and ONLY the lock
-        # verifies one. An unlocked re-read cannot: the contender may be a
-        # same-name reclaim that holds the flock and has not committed its
-        # replacement row yet, so the read returns the OLD identity and the
-        # "identity unchanged" check passes vacuously. Unchanged has two
-        # explanations there - it really is, or the change is not visible yet -
-        # and queuing on that reading strands the message in the dead session's
-        # mailbox. So the queue takes the lock too, on a short grace window
-        # that asks "did the holder just finish?" rather than waiting again.
+        # A durable write needs a VERIFIED recipient and only the lock gives
+        # one: an unlocked re-read can hit a same-name reclaim that has not
+        # committed its row, where "identity unchanged" passes vacuously and
+        # the queue strands the message in the dead session's mailbox. So the
+        # queue takes the lock too, on a grace window that asks "did the
+        # holder just finish?" rather than waiting again.
         #
         # The locked path rebinds `name` to the registry primary key before it
         # emits or stamps anything; this path never entered that block, so it
-        # must do the same. Everything below keys on the name: a stamp keyed to
-        # the caller's alias matches no row, so it silently skips
-        # `last_message_at` AND reports the miss as "recipient identity
-        # changed" - a false failure on a send that succeeded.
+        # must do the same: a stamp keyed to the caller's alias matches no row
+        # and reports "recipient identity changed" over a send that succeeded.
         name = canonical_name
         grace_seconds = _queue_grace_seconds(exc.timeout)
         # Reassigned under the lock once the row is resolved: a bus-only row
@@ -8260,6 +8124,9 @@ def dispatch_send(
             msg_id=msg_id,
             delivery="durable",
             reason=queue_reason,
+            to=timeout_recipient or timeout_entry.short_id or None,
+            to_harness=timeout_entry.harness,
+            to_session=timeout_entry.harness_session_id or None,
         )
 
 

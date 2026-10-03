@@ -43,18 +43,27 @@ fn ac2_hp_every_hold_line_carries_an_age_and_basis() {
         conf.node = Some("x-cccc".into());
         conf.harness_session_id = Some("sess-conf".into());
         conf.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        conf.status = crate::AgentStatus::Idle;
         r.entries.push(conf);
         // transcript unresolved: the age seam answers nothing for this row.
         let mut tu = ask_row("tu-row", None);
         tu.short_id = "turow".into();
         tu.harness_session_id = Some("sess-tu".into());
         tu.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        tu.status = crate::AgentStatus::Idle;
         r.entries.push(tu);
         // open do row on a done node.
         let mut odr = ask_row("odr-row", None);
         odr.short_id = "odrrow".into();
         odr.harness_session_id = Some("sess-odr".into());
         odr.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        odr.status = crate::AgentStatus::Idle;
         r.entries.push(odr);
         // needs live stop: a claude row a dry run cannot promise a stop for.
         let nls = claude_worker_row("nls-row", "nlsrow");
@@ -315,17 +324,26 @@ fn ac3_hp_the_release_retires_the_ruled_row_and_keeps_the_rest() {
         old.harness_session_id = Some("sess-old".into());
         old.origin = Some("spawn".into());
         old.created_at = stamp(7200);
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        old.status = crate::AgentStatus::Idle;
         r.entries.push(old);
         let mut mid = ask_row("mid-row", None);
         mid.short_id = "midrow".into();
         mid.harness_session_id = Some("sess-mid".into());
         mid.origin = Some("spawn".into());
         mid.created_at = stamp(60);
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        mid.status = crate::AgentStatus::Idle;
         r.entries.push(mid);
         let mut act = ask_row("act-row", None);
         act.short_id = "actrow".into();
         act.harness_session_id = Some("sess-act".into());
         act.origin = Some("spawn".into());
+        // The verdict door reads the stored status first; these scenarios vary
+        // the vendor word, so the row itself must be fno-undecided.
+        act.status = crate::AgentStatus::Idle;
         r.entries.push(act);
     })
     .unwrap();
@@ -1488,9 +1506,10 @@ fn an_adopted_row_retires_once_the_roster_sweep_removed_its_session() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// An unread roster snapshot no longer shields a terminal adopted row: the
-/// registry's own exited status is the death fact the carve-out needs, so
-/// the row takes the normal pipeline and its quiet transcript retires it.
+/// A terminal adopted row retires on fno's own verdict: the stored exited
+/// status is the death fact, so the unread roster proves nothing and no
+/// stop proof is owed. The stop-proof hold belongs to the undecided
+/// sibling, which the sweep-family hold tests pin.
 #[test]
 fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
     let home = tmp_home("gc-corpse-unknown");
@@ -1500,6 +1519,9 @@ fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
     state::update_registry(&home.registry_json(), |r| {
         let mut row = claude_worker_row("au-row", "aurow000");
         row.origin = Some("adopted".into());
+        // The scenario is the TERMINAL adopted row: the stored exited
+        // status is the death fact the door reads.
+        row.status = crate::AgentStatus::Exited;
         r.entries.push(row);
     })
     .unwrap();
@@ -1519,13 +1541,20 @@ fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
         &|_| true,
     );
 
-    assert_eq!(
-        summary.needs_live_stop.len(),
-        1,
-        "the phantom-forever keep is gone: the row reaches the pipeline and holds at the stop proof, which a dry run never promises: {summary:?}"
-    );
-    assert_eq!(summary.needs_live_stop[0].0, "aurow000");
+    // A dry run never retires: the proven row is NAMED at the unevaluated
+    // active-surface gate instead, and owes no stop proof.
     assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(
+        summary.dry_run_unverified,
+        vec![(
+            "aurow000".to_string(),
+            "active-surface removal was not evaluated".to_string()
+        )]
+    );
+    assert!(
+        summary.needs_live_stop.is_empty(),
+        "a row fno proves finished owes no stop proof: {summary:?}"
+    );
     assert!(
         summary.kept_not_spawn.is_empty(),
         "{:?}",
@@ -1611,6 +1640,7 @@ fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
         reason: None,
         received_at: "2026-09-15T19:52:20Z".into(),
         ttl_ms: None,
+        posture: None,
     };
     let leg_working = state::InsideLegReport {
         state: crate::state::InsideLegState::Working,
@@ -1618,6 +1648,7 @@ fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
         reason: None,
         received_at: "2026-09-15T19:52:20Z".into(),
         ttl_ms: None,
+        posture: None,
     };
     state::update_registry(&home.registry_json(), |r| {
         // The name carries no node token, the registry node field is empty,

@@ -84,7 +84,14 @@ def _send(monkeypatch, session, injector, capsys):
 
     monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve_agent)
 
-    cli._name_lane_send("ping", from_name="web", resolved=session)
+    import typer
+
+    try:
+        cli._name_lane_send("ping", from_name="web", resolved=session)
+    except typer.Exit:
+        # A durable demotion that cannot prove landing ends NOT LANDED on a
+        # non-zero exit; what it printed is still this helper's answer.
+        return recorded, capsys.readouterr()
     return recorded, capsys.readouterr()
 
 
@@ -102,7 +109,9 @@ def test_a_keeper_recipient_routes_to_the_keeper_verb_and_reads_delivered(
     recipient, text, harness = recorded[0]
     assert recipient == KEEPER_SID
     assert harness == "pi", "the hosted harness names the settle-delay row"
-    assert "<fno_mail" in text, "the keeper lane carries the wrapped envelope"
+    assert text.splitlines()[0].startswith("`@web · fmail-"), (
+        "the keeper lane carries the delivered header"
+    )
     assert "delivered (hosted)" in out.out
     assert "queued (durable)" not in out.out
     assert "typed (pane" not in out.out
@@ -238,7 +247,10 @@ def test_an_unknown_harness_keeps_the_fallthrough_lanes(mailbox, monkeypatch, ca
         status="live",
         agent="notaharness",
     )
-    cli._name_lane_send("ping", from_name="web", resolved=session)
+    import typer
+
+    with pytest.raises(typer.Exit):
+        cli._name_lane_send("ping", from_name="web", resolved=session)
     out = capsys.readouterr()
     assert "queued (durable)" in out.out
 

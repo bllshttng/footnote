@@ -104,23 +104,10 @@ def _stub_signals(
     monkeypatch.setattr(
         doctor, "_launch_agent_failures", lambda: {"applicable": True, "dead": []}
     )
-    # mux-server freshness probe shells out to `fno mux ls --json` and only
-    # short-circuits when no mux is running. A developer machine with a live mux
-    # (or a sibling bg session) trips the subprocess tripwire below for a reason
-    # unrelated to the verdict under test, so stub it like the other probes.
-    from fno import update
-
-    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
-    # The rust-stale --fix guard re-resolves the source pin; left unstubbed
-    # it shells to the real native authority and refuses from a feature
-    # worktree, so every fix test inherits this machine's checkout. The
-    # guard refuses on an unresolvable pin, so the default is an allow
-    # verdict for the stubbed source; pin tests override it.
-    monkeypatch.setattr(
-        update,
-        "_resolve_source_pin",
-        lambda override=None: {"decision": "allow", "path": str(src)},
-    )
+    # The mux-freshness and machine-fact probes read one native readiness
+    # payload; seed it empty (unknown, never fresh) so no test inherits this
+    # machine's live mux or checkout.
+    monkeypatch.setattr(doctor, "_PROBES", {"mux_server_stale": []})
     # Control-plane arm staleness shells out to the real `fno-agents status
     # --json`. A developer machine with genuinely stale arms leaks STALE lines
     # into full-output assertions, so stub it like the other probes.
@@ -198,8 +185,6 @@ def _fake_native_sync(payload):
 def test_source_checkout_sync_maps_native_payload(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from fno import update
-
     source = tmp_path / "cli"
     source.mkdir()
     payload = {
@@ -210,7 +195,7 @@ def test_source_checkout_sync_maps_native_payload(
         "detail": "",
     }
     fake, captured = _fake_native_sync(payload)
-    monkeypatch.setattr(update, "_source_pin_call", fake)
+    monkeypatch.setattr(doctor, "_source_pin_transport", fake)
 
     report = doctor._source_checkout_sync(source)
 
@@ -222,12 +207,10 @@ def test_source_checkout_sync_maps_native_payload(
 def test_source_checkout_sync_degrades_without_native_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from fno import update
-
     source = tmp_path / "cli"
     source.mkdir()
     fake, _captured = _fake_native_sync(None)
-    monkeypatch.setattr(update, "_source_pin_call", fake)
+    monkeypatch.setattr(doctor, "_source_pin_transport", fake)
 
     report = doctor._source_checkout_sync(source)
 
@@ -330,9 +313,7 @@ def test_build_report_checks_source_sync_after_post_merge_refresh(
         monkeypatch.setattr(doctor, name, lambda *args, **kwargs: {})
     monkeypatch.setattr(doctor, "_auto_merge_armed_manifests", lambda: [])
 
-    from fno import update
-
-    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    monkeypatch.setattr(doctor, "_PROBES", {"mux_server_stale": []})
 
     doctor.build_report(source)
 
@@ -358,12 +339,7 @@ def test_source_checkout_behind_refuses_fix_before_repair(
     )
     monkeypatch.setattr(doctor, "_post_merge_sync_health", lambda: {})
 
-    from fno import update
-
-    def tripwire(*args, **kwargs):
-        raise AssertionError("repair must not run from a stale source checkout")
-
-    monkeypatch.setattr(update, "update_command", tripwire)
+    monkeypatch.setattr(doctor, "_front_door", lambda: None)
 
     result = runner.invoke(app, ["doctor", "--fix"])
 
@@ -1347,205 +1323,6 @@ def test_ac2_ui_rust_human_line_states(
 # ---------------------------------------------------------------------------
 
 
-def test_ac2_edge_rust_only_stale_fix_calls_refresh_not_update(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC2-EDGE (a): rust-only stale + --fix -> refresh_rust_bins called, update_command NOT called, exit 0."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    from fno import update
-
-    # Fix C2: ensure the IN_PROGRESS guard does not fire so the fix proceeds
-    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-
-    refresh_calls: list[dict] = []
-    update_calls: list[dict] = []
-
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        refresh_calls.append({"source": source, "force": force, "dry_run": dry_run})
-        return "refreshed"
-
-    def _fake_update(source=None, dry_run=False, force=False):
-        update_calls.append({"source": source})
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-    monkeypatch.setattr(update, "update_command", _fake_update)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 0
-    assert len(refresh_calls) == 1
-    assert refresh_calls[0]["source"] == Path("/src")
-    assert len(update_calls) == 0
-
-
-def test_ac2_edge_rust_only_fix_fresh_outcome_exits_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC2-EDGE (PR #438 Gemini): a concurrent refresh can land between the
-    verdict read and the repair, making the helper return 'fresh'. The goal
-    state is achieved, so --fix exits 0 - never a failure."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    from fno import update
-
-    # Fix C2: ensure the IN_PROGRESS guard does not fire so the fix proceeds
-    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        return "fresh"
-
-    def _fake_update(source=None, dry_run=False, force=False):
-        raise AssertionError("update_command must not run for rust-only --fix")
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-    monkeypatch.setattr(update, "update_command", _fake_update)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 0
-    assert "already fresh" in result.stderr
-
-
-def test_ac2_edge_rust_only_fix_no_marker_outcome_exits_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ab-703f2ed2: cargo succeeded but the marker was not written (e.g.
-    ~/.fno unwritable). The stale verdict cannot converge - the next
-    doctor run still reports rust stale - so --fix must not claim success."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    from fno import update
-
-    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        return "refreshed-no-marker"
-
-    def _fake_update(source=None, dry_run=False, force=False):
-        raise AssertionError("update_command must not run for rust-only --fix")
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-    monkeypatch.setattr(update, "update_command", _fake_update)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 1
-    assert "will not converge" in result.stderr
-
-
-def test_fix_rust_stale_refused_pin_exits_one_without_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A refused source pin (resolved HEAD not an ancestor of origin/main)
-    must make rust-only --fix exit 1 and never call _refresh_rust_bins -
-    that refresh would install an unmerged feature worktree across the
-    fleet. Sync status reads `unknown` for such a HEAD, so the `behind`
-    guard alone does not catch it."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/wt/x-20d2"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-        source_checkout_sync={
-            "status": "unknown",
-            "behind": None,
-            "source_head": "deadbeef",
-            "remote_head": "mainhead",
-            "detail": "not an ancestor",
-        },
-    )
-    from fno import update
-
-    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-    monkeypatch.setattr(
-        update,
-        "_resolve_source_pin",
-        lambda override=None: {
-            "decision": "refuse",
-            "path": "/wt/x-20d2",
-            "refusal": "refusing source /wt/x-20d2: linked worktree HEAD deadbeef "
-            "is not an ancestor of origin/main HEAD mainhead",
-        },
-    )
-
-    def _no_refresh(source, *, force=False, dry_run=False):
-        raise AssertionError("_refresh_rust_bins must not run on a refused pin")
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _no_refresh)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 1
-    assert "/wt/x-20d2" in result.stderr
-    assert "refused" in result.stderr
-
-
-def test_fix_rust_stale_pin_path_mismatch_refuses_without_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An allow verdict for a DIFFERENT path than the one the verdict
-    measured gates nothing: a concurrent --source repin between the verdict
-    read and the fix would validate one checkout and refresh another. The
-    refresh may only run on the exact tree the pin just allowed."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    from fno import update
-
-    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-    monkeypatch.setattr(
-        update,
-        "_resolve_source_pin",
-        lambda override=None: {"decision": "allow", "path": "/elsewhere/safe"},
-    )
-
-    def _no_refresh(source, *, force=False, dry_run=False):
-        raise AssertionError("_refresh_rust_bins must not run on a pin path mismatch")
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _no_refresh)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 1
-    assert "/elsewhere/safe" in result.stderr
-
-
 def test_ac2_edge_python_and_rust_stale_fix_delegates_update_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1560,25 +1337,18 @@ def test_ac2_edge_python_and_rust_stale_fix_delegates_update_only(
         rust_source_rev="bbb",
         cargo_bin_present=True,
     )
-    from fno import update
+    calls: list[list[str]] = []
 
-    refresh_calls: list[dict] = []
-    update_calls: list[dict] = []
+    def _fake_run(door, source):
+        calls.append([door, "doctor", "update", *(["--source", str(source)] if source else [])])
+        return 0
 
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        refresh_calls.append({})
-        return "refreshed"
+    monkeypatch.setattr(doctor, "_front_door", lambda: "/fake/fno")
+    monkeypatch.setattr(doctor, "_run_update_verb", _fake_run)
 
-    def _fake_update(source=None, dry_run=False, force=False):
-        update_calls.append({"source": source})
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-    monkeypatch.setattr(update, "update_command", _fake_update)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
+    result = runner.invoke(app, ["doctor", "--fix", "--source", "/src"])
     assert result.exception is None
-    assert len(update_calls) == 1
-    assert len(refresh_calls) == 0  # doctor did not call it directly; update_command owns it
+    assert calls == [["/fake/fno", "doctor", "update", "--source", "/src"]]
 
 
 def test_ac2_edge_fix_json_rust_stale_no_repair(
@@ -1596,26 +1366,16 @@ def test_ac2_edge_fix_json_rust_stale_no_repair(
         rust_source_rev="bbb",
         cargo_bin_present=True,
     )
-    from fno import update
+    def _no_update(door, source):
+        raise AssertionError("update must not run under --json")
 
-    refresh_calls: list[dict] = []
-
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        refresh_calls.append({})
-        return "refreshed"
-
-    def _fake_update(source=None, dry_run=False, force=False):
-        pass
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-    monkeypatch.setattr(update, "update_command", _fake_update)
+    monkeypatch.setattr(doctor, "_run_update_verb", _no_update)
 
     result = runner.invoke(app, ["doctor", "--json", "--fix"])
     # stdout is still a single parseable JSON object.
     payload = json.loads(result.stdout.strip())
     assert payload["status"] == "stale"
     assert payload["rust_stale"] is True
-    assert len(refresh_calls) == 0
     # The skip message appears on stderr.
     assert "--fix skipped under --json" in result.stderr
 
@@ -1623,53 +1383,6 @@ def test_ac2_edge_fix_json_rust_stale_no_repair(
 # ---------------------------------------------------------------------------
 # AC2-FR: follow-up fresh run after successful rust-only fix
 # ---------------------------------------------------------------------------
-
-
-def test_ac2_fr_rust_only_fix_exits_zero_and_followup_is_fresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC2-FR: successful rust-only fix exits 0; re-run with matching markers -> fresh exit 0."""
-    # First run: rust only stale.
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    from fno import update
-
-    # Fix C2: ensure the IN_PROGRESS guard does not fire
-    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        return "refreshed"
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 0
-
-    # Follow-up run: markers match -> fresh.
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="bbb",  # after fix, marker == source rev
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    result2 = runner.invoke(app, ["doctor"])
-    assert result2.exit_code == 0
-    combined = result2.stdout + result2.stderr
-    assert "fresh" in combined
 
 
 # ---------------------------------------------------------------------------
@@ -1801,26 +1514,24 @@ def test_ac3_hp_fix_delegates_to_update(monkeypatch: pytest.MonkeyPatch) -> None
         marker="oldsha",
         capture_present="present",
     )
-    calls: dict[str, object] = {}
+    calls: list[list[str]] = []
 
-    from fno import update
+    def _fake_run(door, source):
+        calls.append([door, "doctor", "update", *(["--source", str(source)] if source else [])])
+        return 0
 
-    def _fake_update(source=None, dry_run=False, force=False):  # noqa: ANN001
-        calls["source"] = source
-        calls["called"] = True
-
-    monkeypatch.setattr(update, "update_command", _fake_update)
+    monkeypatch.setattr(doctor, "_front_door", lambda: "/fake/fno")
+    monkeypatch.setattr(doctor, "_run_update_verb", _fake_run)
     result = runner.invoke(app, ["doctor", "--fix", "--source", "/src"])
-    assert calls.get("called") is True
-    assert str(calls["source"]) == "/src"
+    assert calls == [["/fake/fno", "doctor", "update", "--source", "/src"]]
     assert result.exception is None
 
 
-def test_ac3_edge_fix_respects_in_progress_guard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_ac3_edge_fix_reports_the_update_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC3-EDGE: --fix during an IN_PROGRESS target refuses (the update guard fires)."""
-    # Stale via probe so --fix reaches the python_stale branch without needing source.
+    """--fix reports the native update verb's exit code; the verb's own
+    IN_PROGRESS guard and source-pin gate are what refuse."""
     _stub_signals(
         monkeypatch,
         src=None,
@@ -1828,21 +1539,15 @@ def test_ac3_edge_fix_respects_in_progress_guard(
         marker=None,
         capture_present="missing",
     )
-    # An IN_PROGRESS target-state.md in the resolved repo root triggers update's guard.
-    repo_root = tmp_path / "repo"
-    (repo_root / ".fno").mkdir(parents=True)
-    (repo_root / ".fno" / "target-state.md").write_text(
-        "---\nstatus: IN_PROGRESS\n---\n", encoding="utf-8"
-    )
-    monkeypatch.setenv("FNO_REPO_ROOT", str(repo_root))
-    # Defensive: even if the guard were bypassed, never actually install.
-    import fno.update as update_mod
 
-    monkeypatch.setattr(update_mod.os, "execvp", lambda *a, **kw: None)
+    def _refusing_update(door, source):
+        return 1
+
+    monkeypatch.setattr(doctor, "_front_door", lambda: "/fake/fno")
+    monkeypatch.setattr(doctor, "_run_update_verb", _refusing_update)
 
     result = runner.invoke(app, ["doctor", "--fix"])
     assert result.exit_code == 1
-    assert "refused" in (result.stderr + result.stdout)
 
 
 def test_fix_nothing_to_do_when_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1890,21 +1595,15 @@ def test_json_fix_does_not_pollute_stdout_or_delegate(
         marker="oldsha",
         capture_present="present",  # rev-mismatch stale
     )
-    from fno import update
+    def _no_update(door, source):
+        raise AssertionError("update must not run under --json")
 
-    called = {"update": False}
-
-    def _fake_update(source=None, dry_run=False, force=False):  # noqa: ANN001
-        called["update"] = True
-
-    monkeypatch.setattr(update, "update_command", _fake_update)
+    monkeypatch.setattr(doctor, "_run_update_verb", _no_update)
     result = runner.invoke(app, ["doctor", "--json", "--fix"])
     assert result.exit_code != 0  # stale
     # stdout is still a single parseable JSON object - no update chatter.
     payload = json.loads(result.stdout.strip())
     assert payload["status"] == "stale"
-    # update was NOT executed under --json (would have polluted stdout).
-    assert called["update"] is False
     # The skip is explicit, on stderr.
     assert "--fix skipped under --json" in result.stderr
 
@@ -1912,43 +1611,6 @@ def test_json_fix_does_not_pollute_stdout_or_delegate(
 # ---------------------------------------------------------------------------
 # Fix C2: doctor --fix rust-only branch honors the IN_PROGRESS guard
 # ---------------------------------------------------------------------------
-
-
-def test_ac2_edge_rust_only_fix_respects_in_progress_guard(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fix C2: rust-only stale + --fix + IN_PROGRESS -> exit 1, "refused" in stderr,
-    _refresh_rust_bins never called.
-
-    The python_stale delegation path already inherits update's own guard. The
-    rust-only branch called _refresh_rust_bins directly, bypassing the guard.
-    """
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    from fno import update
-
-    # Simulate IN_PROGRESS
-    monkeypatch.setattr(update, "_target_in_progress", lambda: True)
-
-    # Tripwire: _refresh_rust_bins must NOT be called
-    def _tripwire_refresh(source, *, force=False, dry_run=False):
-        raise AssertionError("_refresh_rust_bins must not be called when IN_PROGRESS")
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _tripwire_refresh)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 1
-    assert "refused" in result.stderr
-    assert "IN_PROGRESS" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -2167,69 +1829,6 @@ def test_doctor_prints_the_unobserved_row_the_reader_rendered(
     combined = result.stdout + result.stderr
     assert f"fno doctor: control-plane arm {unobserved_line}" in combined, f"Got:\n{combined}"
     assert combined.count("UNOBSERVED") == 1, "the unobserved line must print exactly once"
-
-
-def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC3-FR (new contract): rust-only stale --fix RUNS the refresh helper, never invokes
-    cargo via raw subprocess directly from doctor.py.
-
-    Tripwire: doctor.subprocess.run is wired to explode; only the helper (which is
-    stubbed separately) may be called.
-    """
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-
-    # Tripwire: doctor must never call subprocess.run (which would mean raw cargo).
-    monkeypatch.setattr(
-        doctor.subprocess,
-        "run",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("doctor.py must never run cargo directly")),
-    )
-    # The advisory mux front-door probe (`fno mux ls`) is a legit doctor
-    # subprocess, unrelated to the raw-cargo concern this tripwire guards; stub it
-    # so the tripwire isolates cargo, not the probe.
-    monkeypatch.setattr(doctor, "_probe_is_mux", lambda p: False)
-    # Same reasoning for the per-harness surface probe (`codex plugin marketplace
-    # list`) - a legit advisory subprocess, not raw cargo.
-    monkeypatch.setattr(doctor, "_harness_surface_report", lambda: {})
-    # Same reasoning for the control-plane arms readout (`fno-agents status
-    # --json`): a legit advisory subprocess, stubbed so the tripwire isolates
-    # cargo, not the readout.
-    monkeypatch.setattr(
-        doctor, "_control_plane_arms_report", lambda: {"arms": [], "stale": [], "unknown_reason": None}
-    )
-    # Same reasoning for the plugin-roots probe (`fno-agents plugin-install
-    # --check`): a legit advisory subprocess on machines with a cargo bin,
-    # stubbed so the tripwire isolates cargo, not the probe.
-    monkeypatch.setattr(
-        doctor, "_plugin_cache_report", lambda: {"status": "unknown"}
-    )
-
-    from fno import update
-
-    refresh_calls: list[str] = []
-
-    def _fake_refresh(source, *, force=False, dry_run=False):
-        refresh_calls.append(str(source))
-        return "refreshed"
-
-    monkeypatch.setattr(update, "_refresh_rust_bins", _fake_refresh)
-
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 0
-    assert len(refresh_calls) == 1
-    assert refresh_calls[0] == str(Path("/src"))
 
 
 # ---------------------------------------------------------------------------
@@ -3451,3 +3050,64 @@ def test_doctor_component_stale_renders_repair_and_gates_exit(
     assert result.exit_code != 0
     assert "component fno-agents-daemon: stale" in result.stdout
     assert "repair: cargo install --path /src/crates/fno-agents --bins" in result.stdout
+
+
+def test_live_tool_env_scan_filters_and_names_in_stale_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Full chain over a fake ps: the scanner walks from the installed package
+    dir (the real depth, <tool>/fno/lib/pythonX.Y/site-packages/fno) up to the
+    ancestor named fno, drops its own ps/awk lines and the doctor process
+    itself, returns [] on an unfamiliar layout, and the stale verdict names
+    what survived (gap audit blocker 3: the repair replaces that env in
+    place)."""
+    pkg = tmp_path / "fno" / "lib" / "python3.11" / "site-packages" / "fno"
+    pkg.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: pkg)
+    root = str(tmp_path / "fno")
+    me_pid = os.getpid()
+    ps_out = "\n".join(
+        [
+            f"  77 {root}/bin/fno-py backlog capture",
+            f"{me_pid:6} {root}/bin/fno-py doctor --fix",
+            f"  99 awk -v td={root} index($0, td)",
+            "  55 /usr/sbin/syslogd",
+        ]
+    )
+
+    class FakeProc:
+        stdout = ps_out
+
+    def fake_run(*args, **kwargs):
+        return FakeProc()
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    live = doctor._live_tool_env_processes()
+    assert live == [f"77 {root}/bin/fno-py backlog capture"], live
+
+    # An unfamiliar layout (no ancestor named fno) degrades to empty.
+    other = tmp_path / "elsewhere" / "lib" / "python3.11" / "site-packages" / "fno"
+    other.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: other)
+    assert doctor._live_tool_env_processes() == []
+
+    # Restore real subprocess for the CLI collectors and pin the scanner's
+    # output: the stale verdict must name the surviving process.
+    monkeypatch.setattr(subprocess, "run", real_run)
+    monkeypatch.setattr(
+        doctor,
+        "_live_tool_env_processes",
+        lambda: [f"77 {root}/bin/fno-py backlog capture"],
+    )
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="bbb222",
+        capture_present="present",
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    assert "1 live process(es) run from the installed tool env" in result.stdout
+    assert f"{root}/bin/fno-py backlog capture" in result.stdout

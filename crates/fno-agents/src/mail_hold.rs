@@ -549,18 +549,24 @@ fn caller_is_recipient(sid: &str) -> bool {
 }
 
 /// The C15 control pass: the body's first non-blank line -- after one
-/// leading `<fno_mail ...>` open tag is stripped, because the wrapped lane
-/// puts the directive after the tag -- starts with `control:`
-/// (case-insensitive, the budget rule).
+/// leading `<fno_mail ...>` open tag is stripped (the wrapped lane puts the
+/// directive after the tag), or after the delivered-mail header line is
+/// stripped (header framing puts it first; the directive rides the body
+/// under it) -- starts with `control:` (case-insensitive, the budget rule).
 fn body_is_control(body: &str) -> bool {
-    let Some(first) = body.lines().map(str::trim).find(|l| !l.is_empty()) else {
+    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
+    let Some(first) = lines.next() else {
         return false;
     };
-    let rest = match first.find('>') {
-        Some(gt) if first.len() >= 9 && first[..9].eq_ignore_ascii_case("<fno_mail") => {
-            &first[gt + 1..]
+    let rest = if first.len() >= 9 && first[..9].eq_ignore_ascii_case("<fno_mail") {
+        match first.find('>') {
+            Some(gt) => &first[gt + 1..],
+            None => first,
         }
-        _ => first,
+    } else if crate::mail_header::is_header_line(first) {
+        lines.next().unwrap_or("")
+    } else {
+        first
     };
     rest.trim_start().to_lowercase().starts_with("control:")
 }
@@ -1691,6 +1697,16 @@ pub(crate) mod tests {
             let v = gate(
                 SID,
                 Some("<fno_mail from=\"k\">\nstop, control: said late"),
+                now,
+            );
+            assert!(!v.deliver);
+            // Header framing: the directive rides the body under the header.
+            let v = gate(SID, Some("`@k · msg-7 · control note`\ncontrol: stop"), now);
+            assert!(v.deliver && v.pass == Some("control"));
+            // ...and never from the second body line.
+            let v = gate(
+                SID,
+                Some("`@k · msg-8 · hello`\nbody prose\ncontrol: stop"),
                 now,
             );
             assert!(!v.deliver);

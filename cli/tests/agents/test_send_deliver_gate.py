@@ -194,7 +194,7 @@ def test_deliver_live_codex_daemon_delivered_true(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey codex via PTY",
         provider=None,
@@ -204,20 +204,20 @@ def test_deliver_live_codex_daemon_delivered_true(
     assert result.delivery == "hosted", (
         f"daemon delivered=true must produce delivery='hosted', got {result.delivery!r}"
     )
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     # Bus demotion (node x-1f23): a hosted delivery is self-recording (transcript),
     # NOT also queued durable.
     assert read_all_threads("00000001") == [], "hosted delivery must not queue durable"
 
-    # The deliver RPC carried the <fno_mail>-wrapped turn (codex/gemini share the
-    # envelope now), not the raw body.
+    # The deliver RPC carried the delivered-mail header turn (codex/gemini share
+    # the envelope now), not the raw body.
     assert len(rpc_calls) == 1
     rpc = rpc_calls[0]
     assert rpc["method"] == "agent.deliver"
     assert rpc["params"]["name"] == "codex-agent"
     body = rpc["params"]["body"]
-    assert body.startswith("<fno_mail ") and body.rstrip().endswith("</fno_mail>")
+    assert body.splitlines()[0].startswith("`@lead · fmail-"), body[:80]
     assert "hey codex via PTY" in body
 
 
@@ -243,7 +243,7 @@ def test_deliver_live_codex_daemon_delivered_false(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey queued",
         provider=None,
@@ -251,7 +251,7 @@ def test_deliver_live_codex_daemon_delivered_false(
     )
 
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     threads = read_all_threads("deadbeef")
     assert len(threads) == 1
@@ -284,7 +284,7 @@ def test_deliver_live_codex_daemon_unreachable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="hey unreachable",
         provider=None,
@@ -292,7 +292,7 @@ def test_deliver_live_codex_daemon_unreachable(
     )
 
     assert result.delivery == "durable"
-    assert result.msg_id.startswith("msg-")
+    assert result.msg_id.startswith("fmail-")
 
     threads = read_all_threads("deadbeef")
     assert len(threads) == 1
@@ -357,7 +357,7 @@ def test_deliver_live_codex_thread_routes_through_switchboard_not_deliver(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-thread-agent",
         message="hey hosted thread",
         provider=None,
@@ -372,9 +372,10 @@ def test_deliver_live_codex_thread_routes_through_switchboard_not_deliver(
 
 
 def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_MAIL_LANDED_SETTLE_S", "0")
     _register_codex_thread_peer()
 
     def _mock_rpc(method: str, params: dict, **kwargs):
@@ -390,7 +391,7 @@ def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-thread-agent",
         message="hello anyone",
         provider=None,
@@ -402,6 +403,31 @@ def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
     # codex-peer tests, which read "deadbeef" for deadbeef-0000-...).
     threads = read_all_threads("0198c0de")
     assert threads, "the body must land in the durable queue"
+
+    # the result carries the coordinates the post-send landed verify
+    # reads - the durable bus address, the harness, the full harness session id.
+    from fno.harness_identity import canonical_handle
+
+    assert result.to_harness == "codex"
+    assert result.to_session == "0198c0de-0000-7000-8000-00000000000a"
+    assert result.to == canonical_handle("0198c0de-0000-7000-8000-00000000000a")
+
+    # the same miss must never read as delivered. The receipt names
+    # NOT LANDED, the substrate-correct verify command for a codex thread with
+    # no pane (fno cannot inject; the session's own surface receives it), and
+    # the exit is non-zero so a last-line reader cannot record it as delivered.
+    from fno.mail.cli import mail_app
+
+    cli = runner.invoke(
+        mail_app,
+        ["send", "codex-thread-agent", "hello again", "--cwd", str(cwd),
+         "--from-name", "lead"],
+    )
+    out = (cli.stdout or "") + (cli.stderr or "")
+    assert cli.exit_code == 14, out
+    assert "NOT LANDED" in out, out
+    assert "fno agents peek codex-thread-agent --grep " in out, out
+    assert "the user's Codex window" in out, out
 
 
 # ---------------------------------------------------------------------------
@@ -427,11 +453,11 @@ def test_cmd_send_codex_delivered_hosted_stdout(
     cwd.mkdir()
     result = runner.invoke(
         mail_app,
-        ["send", "codex-agent", "hello", "--cwd", str(cwd)],
+        ["send", "codex-agent", "hello", "--cwd", str(cwd), "--from-name", "lead"],
     )
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    assert out.startswith("msg-"), f"stdout: {out!r}"
+    assert out.startswith("fmail-"), f"stdout: {out!r}"
     assert "delivered (hosted)" in out, f"stdout: {out!r}"
     assert "queued" not in out
 
@@ -461,7 +487,7 @@ def test_deliver_live_codex_daemon_rpc_error_still_durable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="codex-agent",
         message="error path",
         provider=None,
@@ -534,7 +560,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-peer",
         message="hi claude",
         provider=None,
@@ -568,10 +594,10 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
             status="live",
         ),
         AgentEntry(
-            name="fno",
+            name="stream-sender",
             harness="claude",
             cwd="/tmp",
-            log_path="/tmp/fno.log",
+            log_path="/tmp/stream-sender.log",
             short_id="fno12345",
             harness_session_id="aaaaaaaa-2222-3333-4444-666666666666",
             status="live",
@@ -601,7 +627,7 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="stream-sender",
         name="claude-stream",
         message="hi via switchboard",
         provider=None,
@@ -1017,7 +1043,7 @@ def deliver(entry, body, from_name, mail=None, sender_entry=None, reason_out=Non
     )
 
 dispatch._deliver_live = deliver
-result = dispatch.dispatch_send(
+result = dispatch.dispatch_send(from_name="lead", 
     name="red",
     message="hello",
     provider=None,
@@ -1341,7 +1367,7 @@ def test_deliver_live_gemini_daemon_delivered_true(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="gemini-agent",
         message="hey gemini",
         provider=None,
@@ -1661,7 +1687,7 @@ def test_dispatch_send_stamp_valueerror_non_fatal(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_mod.dispatch_send(
+    result = dispatch_mod.dispatch_send(from_name="lead", 
         name="codex-agent", message="hello", provider=None, cwd=cwd
     )
     assert result.delivery == "durable"
@@ -1725,7 +1751,7 @@ def test_deliver_live_mcp_row_delivers_via_control_sock(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-mcp", message="fyi built", provider=None, cwd=cwd
     )
 
@@ -1740,8 +1766,7 @@ def test_deliver_live_mcp_channel_id_is_the_recipient_fallback(
     """No former MCP recipient is stranded by the lane retirement: a live row
     whose plain short_id was cleared (x-3dac) and which carries no
     harness_session_id still resolves a control.sock recipient via its
-    mcp_channel_id -- which is the original roster-resolvable short_id, minted 1:1
-    by register_mcp_channel."""
+    mcp_channel_id -- which is the original roster-resolvable short_id."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1770,7 +1795,7 @@ def test_deliver_live_mcp_channel_id_is_the_recipient_fallback(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="claude-mcp-only", message="fyi built", provider=None, cwd=cwd
     )
 
@@ -1818,7 +1843,7 @@ def test_deliver_live_claude_no_live_lane_queues_durable(
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = dispatch_send(
+    result = dispatch_send(from_name="lead", 
         name="offline-claude", message="hello?", provider=None, cwd=cwd
     )
     assert result.delivery != "hosted", "no live lane -> durable fallback"
@@ -1829,7 +1854,8 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
 ) -> None:
     """A live claude recipient is reached over the control.sock lane (the sole
     live inject path after the PTY worker lane retired, x-3dac), and the injected
-    turn carries a named <fno_mail> envelope with full identity and no `session=`."""
+    turn carries the delivered-mail header naming the sender, with no `session=`
+    attr."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1881,10 +1907,9 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert result.delivery == "hosted", "live control.sock recipient delivers, not durable"
     assert len(inject_calls) == 1, "the control.sock lane is the sole live path"
     framed = inject_calls[0]["text"]
-    # The current sender label and the short claude reply handle are recorded.
-    assert framed.startswith('<fno_mail from="5e9de401"'), framed
-    assert 'from_name="sender"' in framed
-    assert framed.rstrip().endswith("</fno_mail>"), framed
+    # The current sender label rides the header line; the retired attrs
+    # (from=, from_name=) no longer render.
+    assert framed.splitlines()[0].startswith("`@sender · fmail-"), framed
     assert "reach me on control" in framed
     assert ' session="' not in framed
 
@@ -1949,11 +1974,11 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
         recipient_identities=_sb_identities("alice", "bob"),
     )
     body = calls[0]["body"]
-    # A claude sender renders the short 8-hex handle, not the full uuid.
-    assert body.startswith('<fno_mail from="b0b00000"'), body
-    assert 'from_name="bob"' in body
-    assert 'to_name="alice"' in body
-    assert 'to_rank="Head of fno"' in body, body
+    # The continuation is wrapped as BOB (the delivered header names the
+    # sender row). Crown context no longer rides wire attrs: the reader's own
+    # surface renders its crown, so only the wrap contract is assertable here.
+    assert body.splitlines()[0].startswith("`@bob · fmail-"), body
+    assert "bob says hi" in body
 
 
 def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
@@ -1969,7 +1994,7 @@ def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
         from_session=None, to_session=None,
     )
     wrapped = _wrap_relay_body("bob says hi", ctx)
-    assert wrapped.startswith('<fno_mail from="bbbb2222"'), wrapped
+    assert wrapped.splitlines()[0].startswith("`@bbbb2222 · fmail-"), wrapped
     assert "to_rank" not in wrapped, wrapped
 
 
@@ -2010,8 +2035,7 @@ def test_relay_loop_wraps_continuations_with_mail_ctxs(monkeypatch) -> None:
     )
     assert len(calls) == 1
     body = calls[0]["body"]
-    assert body.startswith('<fno_mail from="bbbb2222"'), body
-    assert body.rstrip().endswith("</fno_mail>")
+    assert body.splitlines()[0].startswith("`@bbbb2222 · fmail-"), body
     assert "bob says hi" in body
 
 

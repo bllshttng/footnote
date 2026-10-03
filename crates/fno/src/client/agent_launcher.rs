@@ -251,6 +251,19 @@ pub(crate) struct Launcher {
     /// leaves it again. Not a draft field: shell mode never rides a
     /// retained draft across an Esc.
     pub shell: bool,
+    /// A refused or unknown footer shows the full raw reason instead of its
+    /// one-sentence head. Toggled with Ctrl+O; a fresh attempt clears it.
+    pub show_detail: bool,
+    /// The selected harness's `--help` flag rows (entry spelling + one-line
+    /// description), captured once per binary version and cached on disk.
+    /// Empty or harness-mismatched means the toml capture shows instead.
+    pub runtime_flags: Vec<crate::client::harness_flags::FlagRow>,
+    /// The harness `runtime_flags` was captured for.
+    pub runtime_flags_harness: String,
+    /// The harness-flags capture is in flight (the same one-in-flight
+    /// discipline as the catalog probe). Dies with the launcher: a capture
+    /// landing after a close is dropped, and the next open probes fresh.
+    pub flags_inflight: bool,
     /// The mouse rests on the Project chip: the cwd facts line shows.
     pub project_hover: bool,
     /// A chip-owned pill (`--model`) awaiting its value: the flag rides the
@@ -278,6 +291,10 @@ pub(crate) enum PickerAction {
         flag: String,
         picks_value: bool,
     },
+    /// The fno section's `--force` row: arms the per-request force override
+    /// for the next launch. Shows as a `--force` pill; the flag itself
+    /// never rides extra argv (the request field carries it, journaled).
+    Force,
     /// The "<harness> decides" first row of the mode or effort picker:
     /// clear the pin.
     Clear,
@@ -335,13 +352,15 @@ pub(crate) struct Picker {
 }
 
 /// Which Model row set an open picker shows: the main list, the harness's
-/// `more` catalog tail, or the connect-steps sheet a more row opened. Esc
-/// steps back down: Steps -> More -> Main -> close.
+/// `more` catalog tail, the connect-steps sheet a more row opened, or the
+/// composer help sheet `?` opens. Esc steps back down: Help -> close,
+/// Steps -> More -> Main -> close.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PickerMode {
     Main,
     More,
     Steps { title: String },
+    Help,
 }
 
 /// Where the launched session goes. Thread placements are VIEW choices, not
@@ -540,6 +559,8 @@ impl LaunchDraft {
             // keeps the in-place default.
             worktree: false,
             branch: None,
+            // Force is armed in `submit` too; a bare request never forces.
+            force: false,
         }
     }
 
@@ -673,6 +694,11 @@ fn trailing_word(message: &str) -> Option<&str> {
 fn pill_argv(pills: &[(String, Option<String>)]) -> Result<Vec<String>, String> {
     let mut flags = Vec::new();
     for (flag, value) in pills {
+        // The force pill is visual only: the request's force field carries
+        // the override (journaled server-side), never a bare door flag.
+        if flag == "--force" {
+            continue;
+        }
         flags.push(flag.clone());
         if let Some(value) = value {
             flags.push(value.clone());
@@ -712,6 +738,10 @@ pub(crate) fn open(view: &mut View) {
             armed: None,
             next_request_id: 1,
             shell: false,
+            show_detail: false,
+            runtime_flags: Vec::new(),
+            runtime_flags_harness: String::new(),
+            flags_inflight: false,
             project_hover: false,
             pending_chip_pin: None,
             picker: None,
@@ -939,6 +969,27 @@ pub(crate) fn close(view: &mut View) {
 /// through the existing command path).
 pub(crate) fn apply_launch_update(view: &mut View, update: AgentLaunchUpdate) -> Option<u64> {
     let request_id = update.request_id;
+    // A launch that actually rode the override spent it: the force pill
+    // clears on the terminal Launched state. A refusal or an Unknown keeps
+    // it armed for the operator's retry.
+    if let LaunchState::Launched { .. } = update.state {
+        let mut spent = false;
+        if let Some(l) = view.launcher.as_mut() {
+            if let Some(at) = l.draft.pills.iter().position(|(f, _)| f == "--force") {
+                l.draft.pills.remove(at);
+                l.draft.bump();
+                spent = true;
+            }
+        }
+        if !spent {
+            if let Some(l) = view.launcher_closed.as_mut() {
+                if let Some(at) = l.draft.pills.iter().position(|(f, _)| f == "--force") {
+                    l.draft.pills.remove(at);
+                    l.draft.bump();
+                }
+            }
+        }
+    }
     // The seed note folds in here, once, from the same update the rest of
     // the state derives from - never re-derived from a moved-out value.
     let seed_note: Option<&'static str>;
@@ -1130,6 +1181,7 @@ async fn submit(
     request.extra_flags = extra_flags;
     request.worktree = worktree;
     request.branch = branch;
+    request.force = l.draft.pills.iter().any(|(f, _)| f == "--force");
     if (request.provider.is_some() || request.route.is_some() || !request.extra_flags.is_empty())
         && !supports_launch_extra_axes(&view.session)
     {
@@ -1148,6 +1200,7 @@ async fn submit(
     }
     l.armed = Some(request_id);
     l.phase = Phase::Submitting { request_id };
+    l.show_detail = false;
     remember_harness(&selected);
     write_msg(sock_w, &ClientMsg::AgentLaunch(request))
         .await
@@ -1197,6 +1250,15 @@ pub(crate) enum LKey {
     Tab,
     BackTab,
     Backspace,
+    /// Cmd+Backspace or Ctrl+U: delete everything left of the cursor on the
+    /// row. Terminals send Cmd+Backspace as ESC+DEL or Ctrl+U depending on
+    /// the emulator, so the fold maps both to this one key.
+    KillLeft,
+    /// Shift+Enter, when the terminal spells it (`CSI 13;2u`). Handled by
+    /// the force launch; dropped where force means nothing.
+    ShiftEnter,
+    /// Ctrl+O toggles the raw refusal text in the footer.
+    CtrlO,
     Left,
     Right,
     Up,
@@ -1268,6 +1330,13 @@ impl LauncherEsc {
                         self.esc.push(b);
                         continue;
                     }
+                    // ESC+DEL is Cmd+Backspace on emulators that spell it
+                    // that way: the pair is one key, never Esc then delete.
+                    if b == 0x7f {
+                        self.esc.clear();
+                        keys.push(LKey::KillLeft);
+                        continue;
+                    }
                     // A lone ESC then a normal byte: the ESC was the key.
                     self.esc.clear();
                     keys.push(LKey::Esc);
@@ -1301,6 +1370,13 @@ impl LauncherEsc {
                             }
                             if let Some(k) = arrow_key(&seq) {
                                 keys.push(k);
+                                continue;
+                            }
+                            // Shift+Enter as the kitty/CSI-u spell (`[13;2u`,
+                            // or `[13;6u` for ctrl+shift): one key, never a
+                            // dropped whole-sequence swallow.
+                            if seq == b"[13;2u" || seq == b"[13;6u" {
+                                keys.push(LKey::ShiftEnter);
                             }
                         }
                     }
@@ -1319,7 +1395,9 @@ impl LauncherEsc {
                 b'\n' => keys.push(LKey::CtrlJ),
                 b'\t' => keys.push(LKey::Tab),
                 0x7f | 0x08 => keys.push(LKey::Backspace),
-                0x01..=0x1a | 0x1c..=0x1f => {
+                0x15 => keys.push(LKey::KillLeft),
+                0x0f => keys.push(LKey::CtrlO),
+                0x01..=0x0e | 0x10..=0x14 | 0x16..=0x1a | 0x1c..=0x1f => {
                     // Control keys other than Enter/Tab/Backspace are not
                     // composer keys; swallow them so a chord can never
                     // fabricate text.
@@ -1407,6 +1485,20 @@ fn backspace(draft: &mut LaunchDraft) {
     draft.bump();
 }
 
+/// KillLeft: everything left of the cursor on the cursor's own row. The
+/// message wraps and holds newlines, so the kill stops at the line break
+/// before the cursor, never at offset 0.
+fn kill_to_line_start(draft: &mut LaunchDraft) {
+    let cur = char_byte(&draft.message, draft.cursor_chars);
+    let start = draft.message[..cur].rfind('\n').map_or(0, |b| b + 1);
+    if start == cur {
+        return;
+    }
+    draft.message.replace_range(start..cur, "");
+    draft.cursor_chars = draft.message[..start].chars().count();
+    draft.bump();
+}
+
 fn char_byte(s: &str, chars: usize) -> usize {
     s.char_indices()
         .nth(chars)
@@ -1487,7 +1579,12 @@ pub(crate) async fn launcher_keys(
                         // ladder (More -> Main) and closes from the main
                         // list; the dock keeps the draft either way. Tab
                         // hands the keyboard back to the dock, which then
-                        // moves focus normally.
+                        // moves focus normally. The help sheet has no ladder:
+                        // Esc closes it outright.
+                        if matches!(key, LKey::Esc) && picker.mode == PickerMode::Help {
+                            l.picker = None;
+                            break;
+                        }
                         if matches!(key, LKey::Esc) && picker.mode != PickerMode::Main {
                             picker_step_down(l, &catalog, &backlog, picker);
                         }
@@ -1502,12 +1599,12 @@ pub(crate) async fn launcher_keys(
                     }
                     LKey::Up => {
                         picker.popup.nav(NavDir::Up);
-                        picker.popup.follow_sel(view.term.0 as usize);
+                        picker.popup.follow_sel(view.term);
                         l.picker = Some(picker);
                     }
                     LKey::Down => {
                         picker.popup.nav(NavDir::Down);
-                        picker.popup.follow_sel(view.term.0 as usize);
+                        picker.popup.follow_sel(view.term);
                         l.picker = Some(picker);
                     }
                     LKey::Enter => {
@@ -1645,6 +1742,22 @@ pub(crate) async fn launcher_keys(
                     }
                 }
             }
+            LKey::KillLeft => {
+                if let Some(l) = view.launcher.as_mut() {
+                    if l.focus == Focus::Message && !l.draft.pill_value_capture {
+                        kill_to_line_start(&mut l.draft);
+                    }
+                }
+            }
+            LKey::CtrlO => {
+                // The raw refusal text toggles only when there is one to
+                // show; a refused/unknown footer carries it, editing does not.
+                if let Some(l) = view.launcher.as_mut() {
+                    if matches!(l.phase, Phase::Refused { .. } | Phase::Unknown { .. }) {
+                        l.show_detail = !l.show_detail;
+                    }
+                }
+            }
             LKey::CtrlJ => {
                 // Message: a newline, never a launch. List tabs: the
                 // launch-from-anywhere key.
@@ -1713,11 +1826,46 @@ pub(crate) async fn launcher_keys(
                     }
                 }
             }
+            LKey::ShiftEnter => {
+                // The force launch: what Enter does, with the per-request
+                // admission and spawn-gate override armed. Shell lines never
+                // force (a `!` line is never refused for admission).
+                let (focus, pending, shell) = view
+                    .launcher
+                    .as_ref()
+                    .map(|l| {
+                        (
+                            l.focus,
+                            matches!(l.phase, Phase::Unknown { .. } | Phase::Submitting { .. }),
+                            l.shell,
+                        )
+                    })
+                    .unwrap_or((Focus::Message, false, false));
+                if !pending && focus == Focus::Message && !shell {
+                    if let Some(l) = view.launcher.as_mut() {
+                        // The pill IS the armed state: visible, removable,
+                        // and it survives a refusal for the retry.
+                        if !l.draft.pills.iter().any(|(f, _)| f == "--force") {
+                            l.draft.pills.push(("--force".to_string(), None));
+                            l.draft.bump();
+                        }
+                    }
+                    if let Some(l) = view.launcher.as_mut() {
+                        finalize_pill_value(l);
+                    }
+                    submit(view, sock_w).await?;
+                }
+            }
             LKey::Char(c) => {
                 // The palette's node gesture: `@` in the message opens the
                 // node picker; the glyph itself never lands. The anchor is
                 // read before the mutable borrow.
                 let at_anchor = if c == '@' {
+                    view.launcher.as_ref().and_then(|l| picker_anchor(l, view))
+                } else {
+                    None
+                };
+                let help_anchor = if c == '?' {
                     view.launcher.as_ref().and_then(|l| picker_anchor(l, view))
                 } else {
                     None
@@ -1729,6 +1877,21 @@ pub(crate) async fn launcher_keys(
                 };
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
+                        // `?` on an empty input opens the composer help
+                        // sheet, in plain or shell mode: a glyph on an empty
+                        // input is a mode switch, not text (the `!` rule).
+                        Focus::Message
+                            if c == '?'
+                                && l.draft.message.is_empty()
+                                && !l.draft.pill_value_capture =>
+                        {
+                            open_help(
+                                l,
+                                help_anchor
+                                    .map(|(row, col)| Anchor::At { row, col })
+                                    .unwrap_or(Anchor::Center),
+                            );
+                        }
                         // Shell mode: every character is command text; the
                         // launch gestures (@, --, space) stay literal (AC3).
                         Focus::Message if l.shell && !l.draft.pill_value_capture => {
@@ -2126,18 +2289,11 @@ pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
     } else {
         (Vec::new(), None)
     };
-    // The models.dev catalog: read whatever cache exists now and refresh in
-    // the background when stale. The picker never waits on the network; a
-    // failed or missing cache only fills `catalog_error`.
+    // The models.dev catalog: read whatever cache exists now; the stale
+    // check moved to `model_catalog::refresh_if_stale`, which the mux server
+    // also runs hourly so pricing never depends on opening the composer.
     let state = crate::model_catalog::state_dir();
-    let cache = crate::model_catalog::cache_path(&state);
-    let mtime = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
-    if crate::model_catalog::needs_refresh(mtime, std::time::SystemTime::now()) {
-        let spawn_state = state.clone();
-        tokio::spawn(async move {
-            let _ = crate::model_catalog::refresh(&spawn_state).await;
-        });
-    }
+    crate::model_catalog::refresh_if_stale(&state);
     let (catalog, catalog_error) = match crate::model_catalog::load(&state) {
         Ok(catalog) => (Some(catalog), None),
         Err(reason) => (None, Some(reason)),
@@ -2433,7 +2589,9 @@ fn title_for(field: Focus) -> String {
 fn refresh_stale_picker(view: &mut View) {
     let fresh = view.launcher.as_ref().and_then(|l| {
         let pk = l.picker.as_ref()?;
-        if pk.field == Focus::Message || matches!(pk.mode, PickerMode::Steps { .. }) {
+        if pk.field == Focus::Message
+            || matches!(pk.mode, PickerMode::Steps { .. } | PickerMode::Help)
+        {
             return None;
         }
         let (rows, actions) = match pk.mode {
@@ -2989,10 +3147,50 @@ pub(crate) fn picker_rows(
             }
         }
         Focus::Plus => {
-            // The `--` flags picker: the chosen harness's launch_flags off
-            // the capability table, filtered by what the user typed after
+            // The `--` flags picker: fno's own spawn options first (labelled
+            // apart from the harness's), then the chosen harness's launch
+            // flags off the capture, filtered by what the user typed after
             // the dashes. Each entry spells `--flag <value>` when the flag
             // takes one; the picker's type-to-filter narrows in place.
+            rows.push(PopupRow::Header("fno spawn options".to_string()));
+            actions.push(None);
+            push_entry(
+                &mut rows,
+                &mut actions,
+                if l.draft.pills.iter().any(|(f, _)| f == "--force") {
+                    "\u{2713}"
+                } else {
+                    "\u{2022}"
+                },
+                "--force",
+                "past the admission brake and the spawn gate; journaled",
+                true,
+                Some(PickerAction::Force),
+            );
+            push_entry(
+                &mut rows,
+                &mut actions,
+                "\u{2022}",
+                "--name <name>",
+                "name the worker",
+                true,
+                Some(PickerAction::AddPill {
+                    flag: "--name".to_string(),
+                    picks_value: true,
+                }),
+            );
+            push_entry(
+                &mut rows,
+                &mut actions,
+                "\u{2022}",
+                "--account <account>",
+                "pick the provider account",
+                true,
+                Some(PickerAction::AddPill {
+                    flag: "--account".to_string(),
+                    picks_value: true,
+                }),
+            );
             let Some(CatalogOutcome::Ok(catalog_rows, _, _)) = catalog else {
                 push_entry(
                     &mut rows,
@@ -3006,36 +3204,61 @@ pub(crate) fn picker_rows(
                 return (rows, actions);
             };
             let harness = l.draft.harness();
-            let flags = catalog_rows
-                .iter()
-                .find(|r| r.name == harness)
-                .and_then(|r| r.launch_flags.as_deref())
-                .unwrap_or(&[]);
-            if flags.is_empty() {
-                push_entry(
-                    &mut rows,
-                    &mut actions,
-                    "\u{2022}",
-                    "no captured flags; type --flag value and Space",
-                    "",
-                    true,
-                    None,
-                );
+            // The runtime capture wins when it holds rows for this harness:
+            // fresh from the installed binary's own --help, descriptions
+            // beside each flag. An empty capture (binary absent, help
+            // unreadable) falls back to the static toml capture.
+            let runtime = (l.runtime_flags_harness == harness && !l.runtime_flags.is_empty())
+                .then_some(&l.runtime_flags);
+            if runtime.is_none() {
+                let flags = catalog_rows
+                    .iter()
+                    .find(|r| r.name == harness)
+                    .and_then(|r| r.launch_flags.as_deref())
+                    .unwrap_or(&[]);
+                if flags.is_empty() {
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        "no captured flags; type --flag value and Space",
+                        "",
+                        true,
+                        None,
+                    );
+                }
+                for entry in flags {
+                    let (flag, takes_value) = split_flag_entry(entry);
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        entry,
+                        "",
+                        true,
+                        Some(PickerAction::AddPill {
+                            flag,
+                            picks_value: takes_value,
+                        }),
+                    );
+                }
             }
-            for entry in flags {
-                let (flag, takes_value) = split_flag_entry(entry);
-                push_entry(
-                    &mut rows,
-                    &mut actions,
-                    "\u{2022}",
-                    entry,
-                    "",
-                    true,
-                    Some(PickerAction::AddPill {
-                        flag,
-                        picks_value: takes_value,
-                    }),
-                );
+            if let Some(runtime) = runtime {
+                for (entry, desc) in runtime {
+                    let (flag, takes_value) = split_flag_entry(entry);
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        entry,
+                        desc,
+                        true,
+                        Some(PickerAction::AddPill {
+                            flag,
+                            picks_value: takes_value,
+                        }),
+                    );
+                }
             }
         }
         _ => {}
@@ -3052,12 +3275,13 @@ fn split_flag_entry(entry: &str) -> (String, bool) {
     }
 }
 
-/// The flags picker's anchor: one row under the editor block, where the
-/// pills row lives.
+/// The flags picker's anchor: one row under the editor block's last pills
+/// row.
 fn pills_anchor(l: &Launcher, view: &View) -> Option<(u16, u16)> {
     let sl = l.sheet_layout(view)?;
+    let last_pill_y = sl.pills.last().map_or(sl.pills_y, |r| r.y);
     Some((
-        (sl.origin.0 as usize + 1 + sl.pills_y as usize + 1) as u16,
+        (sl.origin.0 as usize + 1 + last_pill_y as usize + 1) as u16,
         (sl.origin.1 as usize + 1) as u16,
     ))
 }
@@ -3197,6 +3421,46 @@ pub(crate) fn show_steps(l: &mut Launcher, title: String, lines: Vec<String>, an
     });
 }
 
+/// The composer help sheet `?` opens on an empty input: the key grammar and
+/// the gestures, one line each. Esc closes; nothing here is selectable.
+pub(crate) fn open_help(l: &mut Launcher, anchor: Anchor) {
+    let lines = [
+        "enter: launch \u{b7} ctrl+j: launch from any chip \u{b7} shift+enter: force launch",
+        "--: flag picker \u{b7} type --flag value + space: free-hand pill",
+        "--force: force past admission and the spawn gate (journaled)",
+        "@: pick a backlog node into the prompt",
+        "!: run a shell line in a pane",
+        "ctrl+u or cmd+backspace: clear left of the cursor",
+        "ctrl+o: show a refusal's raw text",
+        "tab: next chip \u{b7} esc: close",
+    ];
+    let mut all_rows = vec![PopupRow::Header("composer help".to_string())];
+    let mut all_actions: Vec<Option<PickerAction>> = vec![None];
+    for line in lines {
+        push_entry(
+            &mut all_rows,
+            &mut all_actions,
+            "\u{2022}",
+            line,
+            "",
+            false,
+            None,
+        );
+    }
+    let (mut popup, actions) = filtered_popup(Focus::Model, &all_rows, &all_actions, "", anchor);
+    popup = popup.footer("esc back");
+    l.picker = Some(Picker {
+        popup,
+        actions,
+        all_rows,
+        all_actions,
+        field: Focus::Model,
+        anchor,
+        filter: String::new(),
+        mode: PickerMode::Help,
+    });
+}
+
 /// Esc in a drilled view: More -> Main, the list the view came from, at
 /// the same anchor.
 pub(crate) fn picker_step_down(
@@ -3212,6 +3476,12 @@ pub(crate) fn picker_step_down(
             return;
         }
         PickerMode::Steps { .. } => PickerMode::More,
+        // The help sheet never drills down to a row list; Esc closes it at
+        // the key arm, so a Help picker only reaches here defensively.
+        PickerMode::Help => {
+            l.picker = Some(picker);
+            return;
+        }
     };
     let (all_rows, all_actions) = match mode {
         PickerMode::More => more_rows(l, catalog),
@@ -3241,6 +3511,8 @@ pub(crate) fn apply_picker_action(
 ) {
     l.picker = None;
     match action {
+        // The force arm commits in commit_picker_action; nothing to place here.
+        PickerAction::Force => {}
         PickerAction::Set(name) => match field {
             Focus::Permission => {
                 l.draft.permission = name;
@@ -3391,6 +3663,14 @@ fn commit_picker_action(
     match action {
         PickerAction::OpenMore => open_more(l, catalog, anchor),
         PickerAction::ShowSteps { title, lines } => show_steps(l, title, lines, anchor),
+        PickerAction::Force => {
+            // The pill is the armed state: visible, removable, and it
+            // survives a refusal. Picking twice stays one arm.
+            if !l.draft.pills.iter().any(|(f, _)| f == "--force") {
+                l.draft.pills.push(("--force".to_string(), None));
+                l.draft.bump();
+            }
+        }
         action => apply_picker_action(l, catalog, action, portal, field),
     }
 }
@@ -3400,22 +3680,107 @@ fn commit_picker_action(
 /// The model chip shows the selected configured row or explicit model id.
 /// The effort pin rides the effort chip now, never the model chip.
 fn model_label(d: &LaunchDraft) -> String {
-    let base = d
-        .model_row
+    d.model_row
         .clone()
         .or_else(|| non_empty(&d.model))
-        .unwrap_or_else(|| "default".to_string());
-    compact_chip_value(&base, 28)
+        .unwrap_or_else(|| "default".to_string())
 }
 
-fn compact_chip_value(value: &str, limit: usize) -> String {
-    let mut chars = value.chars();
-    let mut preview: String = chars.by_ref().take(limit).collect();
-    if chars.next().is_some() {
-        preview.pop();
-        preview.push('\u{2026}');
+/// Where the facts value starts, past its label.
+const FACTS_VALUE_X: usize = 18;
+
+/// The keybar wrapped to `w` columns, and where its trailing esc word
+/// (`esc close` / `esc cancel`) sits as `(row, col, width)`. The esc word
+/// never splits across rows.
+fn keybar_lines(kb: &str, w: usize) -> (Vec<String>, Option<(usize, usize, usize)>) {
+    let esc = ["esc close", "esc cancel"]
+        .into_iter()
+        .find(|e| kb.ends_with(e));
+    let head = esc.map_or(kb, |e| kb[..kb.len() - e.len()].trim_end());
+    let mut lines = Vec::new();
+    if !head.is_empty() {
+        crate::client::wrap_line(head, w, &mut lines);
     }
-    preview
+    let Some(e) = esc else {
+        return (lines, None);
+    };
+    let last_w = lines.last().map_or(0, |l| label_width(l) as usize);
+    if !lines.is_empty() && last_w + 1 + e.len() <= w {
+        let row = lines.len() - 1;
+        lines[row].push(' ');
+        lines[row].push_str(e);
+        (lines, Some((row, last_w + 1, e.len())))
+    } else {
+        lines.push(e.to_string());
+        let row = lines.len() - 1;
+        (lines, Some((row, 0, e.len())))
+    }
+}
+
+impl Launcher {
+    /// The project's launch facts, for the facts line under Branch focus.
+    fn branch_facts(&self, view: &View) -> String {
+        match self
+            .draft
+            .facts(&view.launcher_catalog)
+            .map(|f| (f.policy.as_deref(), f.current.as_deref()))
+        {
+            Some((Ok("never"), _)) => "policy never: runs in place".to_string(),
+            Some((Ok(word), Some(current))) => format!("policy {word} \u{b7} branch {current}"),
+            Some((Ok(word), None)) => format!("policy {word} \u{b7} branch ?"),
+            Some((Err(e), _)) => format!("policy unread: {e}"),
+            None => "reading project facts...".to_string(),
+        }
+    }
+
+    /// One pill's text: the flag and its value, or the typed value draft
+    /// while capture holds on it.
+    fn pill_spell(&self, idx: usize) -> String {
+        let (flag, value) = &self.draft.pills[idx];
+        if self.capturing_pill_index() == Some(idx) {
+            if self.draft.pill_value_draft.is_empty() {
+                format!("{flag} <value>")
+            } else {
+                format!("{flag} {}", self.draft.pill_value_draft)
+            }
+        } else {
+            match value {
+                Some(v) => format!("{flag} {v}"),
+                None => flag.clone(),
+            }
+        }
+    }
+
+    /// The pills flowed onto as many rows as they need: each pill's text
+    /// rows, each pill's rect on its last row (text plus the x cell), and
+    /// the row count. A pill wider than the row wraps onto rows of its own.
+    #[allow(clippy::type_complexity)]
+    fn pill_rows(&self, w: usize) -> (Vec<(u16, u16, String)>, Vec<RtRect>, usize) {
+        let mut text = Vec::new();
+        let mut rects = Vec::new();
+        let (mut x, mut row) = (0usize, 0usize);
+        for idx in 0..self.draft.pills.len() {
+            let chunks: Vec<String> =
+                wrap_message(&self.pill_spell(idx), w.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|(_, c)| c)
+                    .collect();
+            let last_w = chunks.last().map_or(0, |c| label_width(c) as usize) + 2;
+            if x > 0 && (chunks.len() > 1 || x + last_w > w) {
+                row += 1;
+                x = 0;
+            }
+            for (k, c) in chunks.into_iter().enumerate() {
+                if k > 0 {
+                    row += 1;
+                }
+                text.push((x as u16, row as u16, c));
+            }
+            rects.push(RtRect::new(x as u16, row as u16, last_w.min(w) as u16, 1));
+            x += last_w + 2;
+        }
+        (text, rects, row + 1)
+    }
 }
 
 impl Launcher {
@@ -3430,19 +3795,38 @@ impl Launcher {
     }
 
     /// The lifecycle line: refusal reasons, unknown-evidence, seed doubt,
-    /// or blank in Editing (the hint row above carries the key rule).
+    /// or blank in Editing (the hint row above carries the key rule). A
+    /// refusal shows its one-sentence head; Ctrl+O swaps in the raw text.
     pub(crate) fn footer(&self) -> String {
         match &self.phase {
             Phase::Editing => String::new(),
             Phase::Submitting { .. } => "starting...".to_string(),
-            Phase::Refused { reason, .. } => format!("refused: {reason}"),
-            Phase::Unknown { reason, .. } => format!("outcome unknown: {reason}"),
+            Phase::Refused { reason, .. } => format!("refused: {}", self.detail_text(reason)),
+            Phase::Unknown { reason, .. } => {
+                format!("outcome unknown: {}", self.detail_text(reason))
+            }
             Phase::Launched {
                 name, seed_note, ..
             } => {
                 let note = seed_note.map(|n| format!(" ({n})")).unwrap_or_default();
                 format!("launched {name}{note}")
             }
+        }
+    }
+
+    /// The refusal text the footer shows: the raw reason under Ctrl+O,
+    /// otherwise its first sentence. Gate output is multi-line and
+    /// machine-shaped; the head names the limit, the detail keeps the
+    /// evidence and the remedy the gate printed.
+    fn detail_text(&self, reason: &str) -> String {
+        if self.show_detail {
+            return reason.to_string();
+        }
+        let short = first_sentence(reason);
+        if short == reason {
+            short
+        } else {
+            format!("{short} (^o raw)")
         }
     }
 
@@ -3454,7 +3838,7 @@ impl Launcher {
                 if d.placement == Placement::default() {
                     "Local".to_string()
                 } else {
-                    compact_chip_value(&format!("Local \u{b7} {}", d.placement.label()), 28)
+                    format!("Local \u{b7} {}", d.placement.label())
                 }
             }
             Focus::Project => d
@@ -3481,7 +3865,7 @@ impl Launcher {
                 if d.permission.is_empty() {
                     "auto".to_string()
                 } else {
-                    compact_chip_value(&d.permission, 28)
+                    d.permission.clone()
                 }
             }
             Focus::Harness => non_empty(&d.harness()).unwrap_or_else(|| "harness".to_string()),
@@ -3490,12 +3874,46 @@ impl Launcher {
                 if d.effort.is_empty() {
                     "default".to_string()
                 } else {
-                    compact_chip_value(&d.effort, 28)
+                    d.effort.clone()
                 }
             }
             _ => String::new(),
         }
     }
+}
+
+/// The first sentence of a refusal: the first non-empty line, cut at a
+/// sentence end or a `;` past ten chars so the head stays one readable
+/// clause. The raw text stays behind Ctrl+O and in the journal either way.
+pub(crate) fn first_sentence(reason: &str) -> String {
+    // An admission refusal is machine-shaped (`process admission refused:
+    // count=unknown, ceiling=...`): the head is a canned line naming the
+    // limit and the way out, never a cut-off mid-word string.
+    if reason.contains("process admission refused") {
+        if reason.contains("runaway") {
+            return "process limit: machine runaway brake on; run it in a terminal or wait for the all-clear".into();
+        }
+        if reason.contains("count=unknown") || reason.contains("not measuring") {
+            return "process limit: fno cannot read the machine's load (count=unknown); wait a beat or run it in a terminal".into();
+        }
+        return "process limit reached; wait for load to drop or run it in a terminal".into();
+    }
+    let line = reason
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.len() > 24 {
+        let head = line
+            .char_indices()
+            .nth(10)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        if let Some(at) = line[head..].find(". ").or_else(|| line[head..].find("; ")) {
+            return line[..head + at + 1].to_string();
+        }
+    }
+    line.to_string()
 }
 
 /// One wrapped message row: `(char offset into the message, the chunk's
@@ -3574,8 +3992,9 @@ pub(crate) struct SheetLayout {
     /// One rect per painted chip, in paint order. `Message` and the flags
     /// editor paint no chip.
     pub chips: Vec<(Focus, RtRect)>,
-    /// The cwd facts line above the chips (reserved row, painted only while
-    /// Project holds focus or the mouse).
+    /// The cwd facts line above the chips (reserved rows, painted only while
+    /// Project holds focus or the mouse). Its height fits the longer of the
+    /// two facts texts wrapped, so moving focus never resizes the sheet.
     pub cwd_line: RtRect,
     /// The editor window (the message, or the flags editor focused in its
     /// place) in body coords.
@@ -3587,8 +4006,12 @@ pub(crate) struct SheetLayout {
     pub pills: Vec<RtRect>,
     /// The pills row's y (painted only when a pill or value capture shows).
     pub pills_y: u16,
-    /// The keybar's body row (right under the bottom chip row).
+    /// The keybar's first body row (right under the bottom chip row).
     pub keybar_y: u16,
+    /// The keybar wrapped to the sheet, one entry per row.
+    pub keybar: Vec<String>,
+    /// Each pill's text rows: `(x, y, text)` in body coords.
+    pub pill_text: Vec<(u16, u16, String)>,
     /// The [cancel] footer rect while an attempt is pending.
     pub cancel: Option<RtRect>,
     /// The keybar's trailing `esc close` / `esc cancel` word: a clickable
@@ -3642,6 +4065,14 @@ impl Launcher {
         let left_w: usize = left.iter().map(|f| chip_w(*f)).sum::<usize>() + (left.len() - 1) * 2;
         let right_w: usize =
             right.iter().map(|f| chip_w(*f)).sum::<usize>() + (right.len() - 1) * 2;
+        let facts_w = inner_w.saturating_sub(FACTS_VALUE_X).max(1);
+        let facts_rows = [self.branch_facts(view), self.draft.cwd()]
+            .iter()
+            .map(|t| wrap_message(t, facts_w).len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let (keybar, esc_at) = keybar_lines(&self.keybar(), inner_w);
         let top_rows = if branch_w == 0 || top_w + 2 + branch_w <= inner_w {
             1
         } else {
@@ -3654,8 +4085,18 @@ impl Launcher {
         };
         // The editor gets the leftover height, capped at 6 wrapped rows.
         let pills_row = !self.draft.pills.is_empty() || self.draft.pill_value_capture;
-        let other = 1 + top_rows + 1 + 1 + pills_row as usize + bottom_rows + 2;
-        // cwd, top chips, 2 blanks, pills row, bottom chips, keybar+footer
+        let (mut pill_text, mut pill_rects, pill_rows) = if pills_row {
+            self.pill_rows(inner_w)
+        } else {
+            (Vec::new(), Vec::new(), 0)
+        };
+        // top chips, 2 blanks, pills rows, bottom chips, keybar, footer
+        let rest = top_rows + 1 + 1 + pill_rows + bottom_rows + keybar.len() + 1;
+        // The facts rows give way first on a short terminal, so the keybar and
+        // its esc word never fall off the bottom; one row and one editor row
+        // always stay.
+        let facts_rows = facts_rows.min(rows.saturating_sub(2 + rest + 1).max(1));
+        let other = facts_rows + rest;
         let editor_rows = (rows.saturating_sub(2 + other)).clamp(1, 6);
         let framed_h = 2 + other + editor_rows;
         let origin = (
@@ -3674,14 +4115,20 @@ impl Launcher {
                 x = (x + w + 2).min(inner_w);
             }
         };
-        push_row(1, 0, &top);
+        push_row(facts_rows, 0, &top);
         if !branch.is_empty() {
-            let row = if top_rows == 1 { 1 } else { 2 };
+            let row = facts_rows + top_rows - 1;
             push_row(row, inner_w.saturating_sub(branch_w), &branch);
         }
-        // Bottom chips (the pills row sits between editor and blank).
-        let pills_y = 3 + top_rows + editor_rows;
-        let bottom_y = pills_y + pills_row as usize;
+        // Bottom chips (the pills rows sit between editor and blank).
+        let pills_y = facts_rows + 2 + top_rows + editor_rows;
+        let bottom_y = pills_y + pill_rows;
+        for (_, y, _) in &mut pill_text {
+            *y += pills_y as u16;
+        }
+        for r in &mut pill_rects {
+            r.y += pills_y as u16;
+        }
         if bottom_rows == 1 {
             push_row(bottom_y, 0, &left);
             push_row(bottom_y, inner_w.saturating_sub(right_w), &right);
@@ -3706,43 +4153,27 @@ impl Launcher {
         // The keybar's trailing esc word is the chip: "esc close" at rest,
         // "esc cancel" while an attempt is pending. Either way the click is
         // the Esc key's gesture.
-        let kb = compact_chip_value(&self.keybar(), inner_w);
-        let esc_rect = if kb.ends_with("esc close") || kb.ends_with("esc cancel") {
-            let off = (kb.chars().count() - 9) as u16;
-            Some(RtRect::new(off, keybar_y as u16, 9, 1))
-        } else {
-            None
-        };
-        // Pill rects for the x hit test, laid out exactly as paint does.
-        let mut pill_rects: Vec<RtRect> = Vec::new();
-        if pills_row {
-            let mut x = 0usize;
-            for (flag, value) in &self.draft.pills {
-                let spell = match value {
-                    Some(v) => format!("{flag} {v}"),
-                    None => flag.clone(),
-                };
-                let spell = compact_chip_value(&spell, inner_w);
-                let w = (spell.chars().count() + 2).min(inner_w.saturating_sub(x));
-                pill_rects.push(RtRect::new(x as u16, pills_y as u16, w as u16, 1));
-                x += w + 2;
-                if x >= inner_w.saturating_sub(4) {
-                    break;
-                }
-            }
-        }
+        let esc_rect =
+            esc_at.map(|(row, x, w)| RtRect::new(x as u16, (keybar_y + row) as u16, w as u16, 1));
         Some(SheetLayout {
             origin,
             framed_w,
             framed_h,
             chips,
-            cwd_line: RtRect::new(0, 0, inner_w as u16, 1),
-            message: RtRect::new(0, (2 + top_rows) as u16, inner_w as u16, editor_rows as u16),
+            cwd_line: RtRect::new(0, 0, inner_w as u16, facts_rows as u16),
+            message: RtRect::new(
+                0,
+                (facts_rows + 1 + top_rows) as u16,
+                inner_w as u16,
+                editor_rows as u16,
+            ),
             start_chunk,
             editor_rows,
             pills: pill_rects,
             pills_y: pills_y as u16,
             keybar_y: keybar_y as u16,
+            keybar,
+            pill_text,
             cancel,
             esc_rect,
         })
@@ -3779,45 +4210,33 @@ impl Launcher {
         // The cwd facts line (row 0, reserved): the label bold, the value
         // regular. It shows while Project holds focus or the mouse;
         // Branch/Worktree focus shows the project's launch facts instead.
-        if self.focus == Focus::Branch || self.focus == Focus::Worktree {
-            let text = match self
-                .draft
-                .facts(&view.launcher_catalog)
-                .map(|f| (f.policy.as_deref(), f.current.as_deref()))
-            {
-                Some((Ok("never"), _)) => "policy never: runs in place".to_string(),
-                Some((Ok(word), Some(current))) => {
-                    format!("policy {word} \u{b7} branch {current}")
-                }
-                Some((Ok(word), None)) => format!("policy {word} \u{b7} branch ?"),
-                Some((Err(e), _)) => format!("policy unread: {e}"),
-                None => "reading project facts...".to_string(),
-            };
-            buf.set_string(
-                sl.cwd_line.x,
-                sl.cwd_line.y,
-                "Branch",
-                role_style(Role::PanelHead, &view.theme),
-            );
-            buf.set_string(
-                sl.cwd_line.x + 18,
-                sl.cwd_line.y,
-                compact_chip_value(&text, inner_w.saturating_sub(18)),
-                role_style(Role::PanelBody, &view.theme),
-            );
+        let facts = if self.focus == Focus::Branch || self.focus == Focus::Worktree {
+            Some(("Branch", self.branch_facts(view)))
         } else if self.focus == Focus::Project || self.project_hover {
+            Some(("Working directory", self.draft.cwd()))
+        } else {
+            None
+        };
+        if let Some((label, text)) = facts {
             buf.set_string(
                 sl.cwd_line.x,
                 sl.cwd_line.y,
-                "Working directory",
+                label,
                 role_style(Role::PanelHead, &view.theme),
             );
-            buf.set_string(
-                sl.cwd_line.x + 18,
-                sl.cwd_line.y,
-                compact_chip_value(&self.draft.cwd(), inner_w.saturating_sub(18)),
-                role_style(Role::PanelBody, &view.theme),
-            );
+            let facts_w = inner_w.saturating_sub(FACTS_VALUE_X).max(1);
+            for (i, (_, line)) in wrap_message(&text, facts_w)
+                .into_iter()
+                .take(usize::from(sl.cwd_line.height))
+                .enumerate()
+            {
+                buf.set_string(
+                    sl.cwd_line.x + FACTS_VALUE_X as u16,
+                    sl.cwd_line.y + i as u16,
+                    line,
+                    role_style(Role::PanelBody, &view.theme),
+                );
+            }
         }
         // The chip row(s): the focused chip is the one filled chip; the
         // caret rides the dim caret role. The worktree box greys out under a
@@ -3871,8 +4290,12 @@ impl Launcher {
                     .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
                     .sum();
                 if (disp_col as u16) + (PROMPT_GUTTER as u16) < sl.message.width {
-                    buf[(sl.message.x + disp_col as u16 + PROMPT_GUTTER as u16, y)]
-                        .set_char('\u{258f}');
+                    let (x, yy) = (sl.message.x + disp_col as u16 + PROMPT_GUTTER as u16, y);
+                    // The theme's cursor surface, not a default-styled bar:
+                    // the same role the popups' input cursor paints with.
+                    buf[(x, yy)]
+                        .set_char('\u{258f}')
+                        .set_style(role_style(Role::BodyCursor, &view.theme));
                 }
             }
         }
@@ -3894,7 +4317,7 @@ impl Launcher {
                 let placeholder = if self.shell {
                     format!("shell command in {}", self.draft.cwd())
                 } else {
-                    "What do you want to work on?".to_string()
+                    "prompt \u{b7} -- flags \u{b7} @ node \u{b7} ! shell \u{b7} ? help".to_string()
                 };
                 buf.set_string(
                     sl.message.x + PROMPT_GUTTER as u16,
@@ -3908,41 +4331,16 @@ impl Launcher {
         // bottom chips: one row, horizontally laid out; each pill keeps its
         // own rect for the x hit test. While value capture holds, the
         // capturing pill paints the typed value draft.
-        if !sl.pills.is_empty() {
-            let mut x = 0usize;
-            for (idx, (flag, value)) in self.draft.pills.iter().enumerate() {
-                let capturing_here = self.capturing_pill_index() == Some(idx);
-                let spell = if capturing_here {
-                    if self.draft.pill_value_draft.is_empty() {
-                        format!("{flag} <value>")
-                    } else {
-                        format!("{flag} {}", self.draft.pill_value_draft)
-                    }
-                } else {
-                    match value {
-                        Some(v) => format!("{flag} {v}"),
-                        None => flag.clone(),
-                    }
-                };
-                let spell = compact_chip_value(&spell, inner_w);
-                let w = (spell.chars().count() + 2).min(inner_w.saturating_sub(x));
-                buf.set_string(
-                    x as u16,
-                    sl.pills_y,
-                    &spell,
-                    role_style(Role::Chip, &view.theme),
-                );
-                buf.set_string(
-                    (x + w - 1) as u16,
-                    sl.pills_y,
-                    "\u{00d7}",
-                    role_style(Role::PanelMeta, &view.theme),
-                );
-                x += w + 2;
-                if x >= inner_w.saturating_sub(4) {
-                    break;
-                }
-            }
+        for (x, y, text) in &sl.pill_text {
+            buf.set_string(*x, *y, text, role_style(Role::Chip, &view.theme));
+        }
+        for r in &sl.pills {
+            buf.set_string(
+                r.x + r.width - 1,
+                r.y,
+                "\u{00d7}",
+                role_style(Role::PanelMeta, &view.theme),
+            );
         }
         // Keybar row: [cancel] while pending, then the key rule; the
         // lifecycle line under it, dim.
@@ -3958,38 +4356,25 @@ impl Launcher {
         }
         // The esc word paints with the chip style so it reads as the same
         // affordance the modal borders carry; the click target sits under it.
-        let kb = compact_chip_value(&self.keybar(), inner_w);
-        if let Some(r) = sl.esc_rect {
-            let byte_off = kb
-                .char_indices()
-                .nth(r.x as usize)
-                .map(|(b, _)| b)
-                .unwrap_or(kb.len());
-            buf.set_string(
-                0,
-                keybar_y.min((body_h as u16).saturating_sub(1)),
-                &kb[..byte_off],
-                RtStyle::new(),
-            );
-            buf.set_string(
-                r.x,
-                keybar_y.min((body_h as u16).saturating_sub(1)),
-                &kb[byte_off..],
-                role_style(Role::Chip, &view.theme),
-            );
-        } else {
-            buf.set_string(
-                0,
-                keybar_y.min((body_h as u16).saturating_sub(1)),
-                &kb,
-                RtStyle::new(),
-            );
+        let last_row = (body_h as u16).saturating_sub(1);
+        for (i, line) in sl.keybar.iter().enumerate() {
+            let y = (keybar_y + i as u16).min(last_row);
+            let esc = sl.esc_rect.filter(|r| r.y == keybar_y + i as u16);
+            let split = esc.map_or(line.len(), |r| {
+                line.char_indices()
+                    .nth(r.x as usize)
+                    .map_or(line.len(), |(b, _)| b)
+            });
+            buf.set_string(0, y, &line[..split], RtStyle::new());
+            if let Some(r) = esc {
+                buf.set_string(r.x, y, &line[split..], role_style(Role::Chip, &view.theme));
+            }
         }
         // The lifecycle line wraps inside the sheet instead of clipping at
         // the width: a refusal reason cut mid-sentence hid its own remedy.
         // One row is the floor: a too-short terminal still shows the line's
         // head, as the single clipped row always did.
-        let footer_y = usize::from(keybar_y + 1);
+        let footer_y = usize::from(keybar_y) + sl.keybar.len();
         let footer_rows = body_h.saturating_sub(footer_y).max(1);
         for (i, (_, line)) in wrap_message(&self.footer(), inner_w)
             .into_iter()
@@ -4012,7 +4397,10 @@ impl Launcher {
 impl Launcher {
     fn keybar(&self) -> String {
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
-            return "esc cancel".to_string();
+            return "^o detail \u{b7} esc cancel".to_string();
+        }
+        if matches!(self.phase, Phase::Refused { .. }) {
+            return "^o detail \u{b7} esc close".to_string();
         }
         // Shell mode runs instead of launching: the bar names its own keys.
         if self.shell {

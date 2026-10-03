@@ -255,8 +255,7 @@ pub enum StateError {
          not from the deployed install, so the bump exists only on this branch and \
          every deployed reader on the machine would degrade until it merges. Either \
          deploy this schema (fno doctor update), or point this checkout at its own \
-         registry (FNO_AGENTS_HOME, or config.paths.agents_registry_path for the \
-         Python side)."
+         registry (set FNO_AGENTS_HOME)."
     )]
     SourceAheadSchemaBump {
         path: String,
@@ -480,12 +479,37 @@ pub fn find_keyed_mut<'r>(
 /// wire shape. PTY liveness (`ConnState::Exited`) always overrides
 /// this badge -- a dead pane is never resurrected by a stale inside-leg state
 /// (umbrella Locked Decision D4).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum InsideLegState {
+    #[default]
     Working,
     Blocked,
     Done,
+}
+
+/// The observed sandbox posture one inside-leg report carries, the
+/// truth_probe `observed_model` shape (`{"kind": "observed", ...}`) applied
+/// to posture: requested vs observed stay distinct facts, so a worker whose
+/// runtime posture disagrees with its spawn request reads as the
+/// disagreement it is, never as the request. `sandbox`/`approval` are the
+/// codex posture words (`workspace-write`/`on-request`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObservedPosture {
+    pub kind: String,
+    pub sandbox: String,
+    pub approval: String,
+}
+
+impl ObservedPosture {
+    /// The only kind this module stores: the report's own observation.
+    pub fn observed(sandbox: &str, approval: &str) -> Self {
+        Self {
+            kind: "observed".into(),
+            sandbox: sandbox.into(),
+            approval: approval.into(),
+        }
+    }
 }
 
 /// The stored form of one inside-leg report (contract v2: X2). The wire payload
@@ -499,7 +523,7 @@ pub enum InsideLegState {
 /// consume these fields land in E3.2/E3.3. Mirrored in Python's `AgentEntry`
 /// (`inside_leg: Optional[dict]`, a lossless passthrough) so a row round-trips
 /// across the mixed-language registry (X3 /).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct InsideLegReport {
     pub state: InsideLegState,
     pub seq: u64,
@@ -508,6 +532,12 @@ pub struct InsideLegReport {
     pub received_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+    /// The observed posture that rode THIS report (`None` on every older row
+    /// and every report that carried none); mirrored losslessly through
+    /// Python's `inside_leg: Optional[dict]` passthrough, so a row
+    /// round-trips with no Python edit (X3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<ObservedPosture>,
 }
 
 /// fno's own stop of a worker, so the harness `stopped` state it leaves
@@ -1935,17 +1965,18 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
 }
 
 /// Best-effort registry read for metadata that must not hold up delivery.
-/// Returns `None` when a writer owns the registry lock.
+/// A writer owning the lock never blocks the read: publishes are atomic
+/// (tempfile + rename), so the unlocked read still sees one whole registry.
 pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
-    let Some(lock) = try_acquire_shared(&registry_lock_path(path))? else {
-        return Ok(None);
-    };
+    let lock = try_acquire_shared(&registry_lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
         Ok(file) => read_registry_tolerant(path, &file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
         Err(error) => Err(error.into()),
     };
-    let _ = lock.unlock();
+    if let Some(lock) = lock {
+        let _ = lock.unlock();
+    }
     result.map(|(registry, _)| Some(registry))
 }
 
@@ -2405,6 +2436,35 @@ fn snapshot_registry(path: &Path) {
     let _ = crate::graph_store::rotate_backups(&snapshots, "registry.json.");
 }
 
+/// Every short handle any row answers to today: its fno handle, the canonical
+/// and retired-suffix heads of its harness id, a non-empty short id and its
+/// name, all lowercased. The unique mint draws against this set so a new row
+/// never shares a handle with an existing one.
+pub(crate) fn taken_handles(entries: &[RegistryEntry]) -> std::collections::HashSet<String> {
+    let mut taken = std::collections::HashSet::new();
+    for e in entries {
+        let own: Vec<&str> = [
+            e.harness_session_id.as_deref(),
+            e.related_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if let Some(handle) = crate::identity::fno_handle(e.fno_id.as_deref(), &own) {
+            taken.insert(handle);
+        }
+        if let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) {
+            taken.insert(crate::identity::canonical_handle(sid));
+            taken.insert(crate::identity::legacy_suffix_handle(sid));
+        }
+        if !e.short_id.is_empty() {
+            taken.insert(e.short_id.to_ascii_lowercase());
+        }
+        taken.insert(e.name.to_ascii_lowercase());
+    }
+    taken
+}
+
 pub fn update_registry<F, T>(path: &Path, f: F) -> Result<T, StateError>
 where
     F: FnOnce(&mut Registry) -> T,
@@ -2473,7 +2533,11 @@ where
     // value its predecessor held - the harness session id is the primary key,
     // so it names the same row whatever its label is; a row with no harness id
     // matches by name instead. A non-empty fno_id is never touched, so legacy
-    // rows keep their harness copies, short ids and names.
+    // rows keep their harness copies, short ids and names. A fresh mint
+    // redraws until its head is unique among every handle the rows already
+    // answer to.
+    let mut taken = taken_handles(&before_entries);
+    taken.extend(taken_handles(&registry.entries));
     for entry in &mut registry.entries {
         if entry.fno_id.as_deref().is_some_and(|v| !v.is_empty()) {
             continue;
@@ -2490,8 +2554,11 @@ where
         };
         entry.fno_id = match inherited.filter(|v| !v.is_empty()) {
             Some(v) => Some(v),
-            None => match crate::identity::mint_fno_id() {
-                Ok(id) => Some(id),
+            None => match crate::identity::mint_unique_fno_id(&taken) {
+                Ok(id) => {
+                    taken.insert(id[..8].to_ascii_lowercase());
+                    Some(id)
+                }
                 Err(msg) => return Err(StateError::InvariantViolation(msg)),
             },
         };
@@ -2831,7 +2898,14 @@ pub fn is_valid_registry_label(name: &str) -> bool {
 /// A row counts as removed only when NO surviving row shares any of its
 /// identity tokens (session id, short id, name): a rename or a session-id
 /// backfill mutates one token while the row itself stays.
-fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[RegistryEntry]) {
+/// Pub(crate): the spawn-axes `removal_accounting` op serves the same fn to
+/// the Python write primitive, so one accounting owns both doors.
+/// Returns the number of rows the write dropped.
+pub(crate) fn account_for_removed_rows(
+    path: &Path,
+    before: &[RegistryEntry],
+    after: &[RegistryEntry],
+) -> usize {
     let after_sids: std::collections::BTreeSet<&str> = after
         .iter()
         .filter_map(|e| e.harness_session_id.as_deref().filter(|s| !s.is_empty()))
@@ -2868,10 +2942,10 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
         })
         .collect();
     if removed.is_empty() {
-        return;
+        return 0;
     }
     let Some(home_dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return;
+        return 0;
     };
     let home = crate::paths::AgentsHome::at(home_dir);
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
@@ -2905,6 +2979,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
             "lost": lost,
         }),
     );
+    removed.len()
 }
 
 /// The command line that named this write, bounded: argv0's basename plus up

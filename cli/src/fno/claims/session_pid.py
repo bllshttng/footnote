@@ -78,40 +78,39 @@ def pid_dies_with_session(harness: Optional[str]) -> bool:
 
 @functools.lru_cache(maxsize=None)
 def _session_identity(from_pid: Optional[int]) -> tuple[Optional[int], Optional[str]]:
-    """One `fno agents claim session-pid --json` read, cached per ``from_pid``
-    for the process's lifetime. Env changes after the first call are not seen;
-    the stamp pair (`FNO_SESSION_PID` / `FNO_SESSION_HARNESS`) is applied
-    Rust-side on the exec, with the rules the verb's docstring states.
-
-    Any failure to read - the verb missing, a non-zero exit, a malformed
-    payload - degrades to ``(None, None)``, the uncapturable answer, never an
-    exception into a caller that holds a claim lock.
+    """One session-pid read, cached per ``from_pid``. The stamp pair
+    (`FNO_SESSION_PID` / `FNO_SESSION_HARNESS`) is applied Rust-side on the
+    exec. The native front answers first - one ~10 ms exec, where the Python
+    front pays an interpreter spawn no Stop-hook-budget identity caller can
+    afford - and a valid answer from either front is final.
     """
-    cmd = ["fno", "agents", "claim", "session-pid", "--json"]
-    if from_pid is not None:
-        cmd += ["--from-pid", str(from_pid)]
-    try:
-        proc = subprocess.run(  # noqa: S603 - a fixed verb, never user input
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+    from fno.rust_binary import resolve_binary
+
+    # The rust_binary door locates the binary: pydoor bars a literal exec.
+    native = resolve_binary()
+    fronts = [
+        *([[str(native), "claim", "session-pid", "--json"]] if native else []),
+        ["fno", "agents", "claim", "session-pid", "--json"],
+    ]
+    for cmd in fronts:
+        if from_pid is not None:
+            cmd += ["--from-pid", str(from_pid)]
+        try:
+            proc = subprocess.run(  # noqa: S603 - a fixed verb, never user input
+                cmd, capture_output=True, text=True, timeout=30, check=False
+            )
+            payload = json.loads(proc.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+            continue  # a spawn or parse miss on one front: try the next
+        if not isinstance(payload, dict):
+            continue
+        pid = payload.get("session_pid")
+        harness = payload.get("harness")
+        return (
+            pid if isinstance(pid, int) and pid > 0 else None,
+            harness if isinstance(harness, str) and harness else None,
         )
-        payload = json.loads(proc.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
-        # AttributeError: a caller's stubbed or foreign subprocess result
-        # carries no stdout; this read degrades like every other failure and
-        # never raises into a caller that holds a claim lock.
-        return (None, None)
-    if not isinstance(payload, dict):
-        return (None, None)
-    pid = payload.get("session_pid")
-    harness = payload.get("harness")
-    return (
-        pid if isinstance(pid, int) and pid > 0 else None,
-        harness if isinstance(harness, str) and harness else None,
-    )
+    return (None, None)
 
 
 def resolve_session_pid(from_pid: Optional[int] = None) -> Optional[int]:

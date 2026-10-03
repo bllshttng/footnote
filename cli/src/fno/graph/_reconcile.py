@@ -1012,6 +1012,20 @@ def resolve_promise_evidence(
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
 
+    # An Execution Strategy that declares waves promises one ship per wave
+    # (the multi-wave stamp bug: wave 1's merge closed a 3-wave node).
+    if expected is None:
+        m = re.search(r"^## +Execution Strategy\b.*?$(.*?)(?=^## +|\Z)", _body, re.M | re.S)
+        if m is not None:
+            try:
+                from fno.plan.brief import parse_execution_strategy
+
+                waves = parse_execution_strategy(m.group(1)).get("waves")
+            except Exception:  # noqa: BLE001 - unread skips the gate, never blocks
+                waves = None
+            if isinstance(waves, list) and len(waves) >= 2:
+                expected = len(waves)
+
     # Condition E: an open prove-it FAIL on this node's own plan
     # artifacts is claimed work whose outcome did not hold; it needs no
     # declaration. A done node is never reopened; a failed reader is a warning.
@@ -1187,7 +1201,7 @@ def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: i
     return (
         f"Refused: {node_id} promised {expected} ships; only {merged} merged.\n"
         f"  plan: {plan_display}\n"
-        f"  expected_url_count: {expected}    merged refs: {merged}\n"
+        f"  promised ships: {expected}    merged refs: {merged}\n"
         f"\n"
         f"  Two legal exits:\n"
         f"    ship the rest, then close; or\n"
@@ -1724,7 +1738,7 @@ def classify_open_pr_bindings(
     Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
     board all read the same verdicts.
     """
-    from fno.pr.closure import branch_node_ids, parse_closure_trailer
+    from fno.pr.closure import branch_node_ids, parse_closure_answer
 
     real_ids = {
         e.get("id")
@@ -1754,10 +1768,15 @@ def classify_open_pr_bindings(
         head = str(row.get("headRefName") or "")
         if not isinstance(number, int) or not head:
             continue
-        matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
         body_supplied = "body" in row
+        # ONE pr-closure-parse spawn per body answers both fields.
+        answer = parse_closure_answer(row["body"]) if body_supplied else {}
+        matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
+        gone = answer.get("retargeted_from", [])
+        if matched and gone:
+            matched = [nid for nid in matched if nid not in gone]
         trailer: list[str] = (
-            [nid for nid in parse_closure_trailer(row["body"]) if nid in real_ids]
+            [nid for nid in answer.get("ids", []) if nid in real_ids]
             if body_supplied
             else []
         )
@@ -2146,10 +2165,12 @@ def reverse_map_unstamped(
 
         for node in nodes:
             nid = node["id"]
+            from fno.pr.closure import retargeted_from_ids
             hits = [
                 row for row in merged
                 if isinstance(row, dict)
                 and _branch_matches_node(str(row.get("headRefName") or ""), nid)
+                and nid not in retargeted_from_ids(str(row.get("body") or ""))
             ]
             if not hits:
                 continue

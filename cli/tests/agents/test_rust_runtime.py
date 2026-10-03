@@ -242,19 +242,31 @@ def test_agents_group_execs_when_opted_in(monkeypatch) -> None:
     assert captured == [["ask", "worker-A", "hi", "--harness", "codex"]]
 
 
-def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
+def test_spawn_seam_injects_config_defaults(
+    monkeypatch, tmp_path
+) -> None:
     """x-de9d US8: the seam injects config.agents.defaults into a bare spawn
-    argv before the route, so the Rust route sees the config provider."""
+    argv before the route, so the Rust route sees the config provider. The
+    compose reads the config FILE (the Python stub is invisible to it), so
+    the test pins a real TOML and the real binary."""
+    import pytest
+
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[agents.defaults]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(config_path))
+    monkeypatch.setenv("FNO_NO_CANONICAL_CONFIG", "1")
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "events.jsonl"))
+
     from fno.cli import app
-    import fno.config as _config
-
-    class _D:
-        provider, model, effort = "codex", "gpt-5.6-sol", ""
-
-    class _S:
-        agents = type("A", (), {"defaults": _D()})()
-
-    monkeypatch.setattr(_config, "load_settings", lambda: _S())
 
     captured: list = []
 
@@ -399,9 +411,6 @@ def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
-    monkeypatch.setattr(
-        "fno.agents.spawn_defaults._permission_mappable", lambda *a, **k: True
-    )
     monkeypatch.setattr("fno.agents.dispatch._codex_thread_spawn", fake_thread_spawn)
     result = CliRunner().invoke(
         app,
@@ -548,9 +557,6 @@ def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
-    monkeypatch.setattr(
-        "fno.agents.spawn_defaults._permission_mappable", lambda *a, **k: True
-    )
     monkeypatch.setattr("fno.agents.dispatch._codex_thread_spawn", fake_thread_spawn)
     result = CliRunner().invoke(
         app,
@@ -882,6 +888,23 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # `fno backlog session backfill` shells the binary through
             # resolve_binary, never `fno agents` routing.
             "session-backfill",
+            # `release-notes` is the update modal's notes builder: Python's
+            # `fno doctor update --check` resolver shells it through
+            # verb_call with a stdin JSON payload, never an argv route.
+            "release-notes",
+            # `update-journal` is the update lifecycle's transport-only door:
+            # crates/fno/src/doctor_update.rs execs the binary with the verb
+            # as the first token (like `backlog`), so it dispatches on the
+            # `verb ==` arm and is never routed or help-listed.
+            "update-journal",
+            # `chats` is the conversation store's read model: the bus log and
+            # reply resolver shell it through verb_call with a stdin JSON
+            # payload, never an argv route.
+            "chats",
+            # `mail-threads` is the messages tab's projection over the chats
+            # store: the fno client's gather and details door shell it
+            # directly, never an argv route.
+            "mail-threads",
         }
     )
 

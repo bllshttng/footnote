@@ -219,6 +219,18 @@ pub struct CommentCreateInput {
     pub kind: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// The thread vocabulary (all optional, all extras on the row):
+    /// `author` defaults to `agent`; `reply_to` names the comment a reply
+    /// answers; `state` moves the PARENT comment to accepted/done/declined;
+    /// `state_ref` carries the commit or PR link a `done` names.
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub state_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -909,11 +921,69 @@ pub fn label_remove(store: &Store, id: &str, name: &str) -> Result<Payload<Node>
     label_mutation(store, id, name, false)
 }
 
+/// One threaded comment row. `kind: comment` is a thread head (the user's
+/// ask); `kind: reply` is a threaded answer. Extras carry the vocabulary:
+/// `comment_id` (`c-<6 hex>`, minted per node), `author` (default
+/// `agent`), `reply_to`, and the ask state. A fresh comment starts
+/// `state: open`; a reply that names a state moves the PARENT row to
+/// `accepted`/`done`/`declined` in the same mutation, with `state_ref`
+/// naming the commit, PR or reason, so the open-ask filter reads one row.
 pub fn comment_create(
     store: &Store,
     id: &str,
     input: CommentCreateInput,
 ) -> Result<Payload<Node>, ApiError> {
+    let kind = input.kind.clone().unwrap_or_else(|| "comment".to_string());
+    if kind != "comment" && kind != "reply" {
+        return Err(ApiError(format!(
+            "comment kind must be comment or reply, got '{kind}'"
+        )));
+    }
+    let reply_to = input.reply_to.clone();
+    if kind == "reply" {
+        let Some(target) = &reply_to else {
+            return Err(ApiError(
+                "a reply names its thread: reply_to is required".into(),
+            ));
+        };
+        let known = comments(store, id, &Page::default())?
+            .nodes
+            .iter()
+            .any(|c| c.extras.get("comment_id").and_then(Value::as_str) == Some(target.as_str()));
+        if !known {
+            return Err(ApiError(format!(
+                "reply_to '{target}' names no comment on {id}"
+            )));
+        }
+    }
+    let state = input.state.clone();
+    if input.state_ref.is_some() && state.is_none() {
+        return Err(ApiError(
+            "state_ref names a landing: carry it with --state done or accepted".into(),
+        ));
+    }
+    if kind == "comment" && (state.is_some() || input.state_ref.is_some()) {
+        return Err(ApiError(
+            "state moves a thread head: answer with reply_to (the CLI --reply <cid>)".into(),
+        ));
+    }
+    if let Some(state) = &state {
+        if !matches!(state.as_str(), "accepted" | "done" | "declined") {
+            return Err(ApiError(format!(
+                "reply state must be accepted, done or declined, got '{state}'"
+            )));
+        }
+        if state == "done" && input.state_ref.is_none() {
+            return Err(ApiError(
+                "state done names its landing: the ref carries the commit or PR link".into(),
+            ));
+        }
+        if state == "declined" && input.body.trim().is_empty() {
+            return Err(ApiError(
+                "state declined carries its reason in the reply text".into(),
+            ));
+        }
+    }
     let mut updated: Option<Node> = None;
     let ok = mutate(store, "comment_create", |rows| {
         for row in rows.iter_mut() {
@@ -923,18 +993,66 @@ pub fn comment_create(
             let Ok(mut parsed) = Node::from_json(row) else {
                 return Ok(false);
             };
-            parsed.comments.get_or_insert_with(Vec::new).push(Comment {
+            let comments = parsed.comments.get_or_insert_with(Vec::new);
+            let mut extras = serde_json::Map::new();
+            if kind == "comment" {
+                let taken: Vec<&str> = comments
+                    .iter()
+                    .filter_map(|c| c.extras.get("comment_id").and_then(Value::as_str))
+                    .collect();
+                loop {
+                    let minted = mint_comment_id();
+                    if !taken.contains(&minted.as_str()) {
+                        extras.insert("comment_id".into(), Value::String(minted));
+                        break;
+                    }
+                }
+                extras.insert(
+                    "author".into(),
+                    Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
+                );
+                extras.insert("state".into(), Value::String("open".into()));
+            } else {
+                extras.insert(
+                    "reply_to".into(),
+                    Value::String(reply_to.clone().unwrap_or_default()),
+                );
+                extras.insert(
+                    "author".into(),
+                    Value::String(input.author.clone().unwrap_or_else(|| "agent".to_string())),
+                );
+            }
+            comments.push(Comment {
                 created_at: Some(crate::graph_store::now_isoformat()),
                 body: Some(input.body.clone()),
-                kind: input.kind.clone(),
+                kind: Some(kind.clone()),
                 title: input.title.clone(),
                 details: None,
                 difficulty: None,
                 source: None,
                 source_session_id: None,
                 source_harness: None,
-                extras: serde_json::Map::new(),
+                extras,
             });
+            // A stateful reply moves its thread head in the same mutation.
+            if kind == "reply" {
+                if let (Some(state), Some(target)) = (&state, &reply_to) {
+                    if let Some(parent) = comments.iter_mut().find(|c| {
+                        c.kind.as_deref() == Some("comment")
+                            && c.extras.get("comment_id").and_then(Value::as_str)
+                                == Some(target.as_str())
+                    }) {
+                        parent
+                            .extras
+                            .insert("state".into(), Value::String(state.clone()));
+                        if let Some(reference) = &input.state_ref {
+                            parent
+                                .extras
+                                .insert("state_ref".into(), Value::String(reference.clone()));
+                        }
+                    }
+                }
+            }
             *row = parsed.to_json();
             updated = Some(parsed);
             break;
@@ -950,6 +1068,13 @@ pub fn comment_create(
     } else {
         refusal(store)
     }
+}
+
+fn mint_comment_id() -> String {
+    let mut bytes = [0u8; 3];
+    getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("c-{hex}")
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

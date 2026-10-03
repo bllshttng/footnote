@@ -17,7 +17,8 @@
 //!
 //! That key-free rule is the default, not the whole story. `E` focuses the
 //! panel explicitly: while focused it takes the arrows (row select and
-//! horizontal pan), Enter and Esc, and the header says so. Esc releases it.
+//! horizontal pan), Enter, and Esc and e, which close the panel - there is
+//! no release that leaves it open and key-less, a state no key could leave.
 //! The property the rule protects - typing reaches the pane - holds whenever
 //! the operator has not asked for the opposite.
 //!
@@ -300,7 +301,7 @@ pub(crate) fn feed_panel_rows(
     }
     let footer = if let Some(e) = &o.error {
         // The typed reason renders verbatim: a timeout names its
-        // budget, an admission refusal its slot count. pad_to truncates a
+        // budget, an admission refusal its slot count. The panel clips a
         // long stderr tail; the cause still leads the line.
         pad_to(&format!("   {e}"), w)
     } else if o.inflight && o.items.is_empty() {
@@ -399,11 +400,11 @@ pub(crate) fn header_line(focused: bool, order: FeedOrder, w: usize) -> String {
     let candidates: [String; 4] = if focused {
         [
             format!(
-                " FEED FOCUSED · up/down row · enter details · o order: {order_word} · esc release"
+                " FEED FOCUSED · up/down row · enter details · o order: {order_word} · esc close"
             ),
-            format!(" FOCUSED · arrows move · enter details · o {order_word} · esc release"),
-            format!(" FOCUSED · o {order_word} · esc release"),
-            " esc release".to_string(),
+            format!(" FOCUSED · arrows move · enter details · o {order_word} · esc close"),
+            format!(" FOCUSED · o {order_word} · esc close"),
+            " esc close".to_string(),
         ]
     } else {
         [
@@ -413,7 +414,7 @@ pub(crate) fn header_line(focused: bool, order: FeedOrder, w: usize) -> String {
             " E focus".to_string(),
         ]
     };
-    let narrowest = if focused { " esc release" } else { " E focus" };
+    let narrowest = if focused { " esc close" } else { " E focus" };
     candidates
         .into_iter()
         .find(|c| unicode_width::UnicodeWidthStr::width(c.as_str()) <= w)
@@ -697,6 +698,27 @@ impl View {
                 flags: border_flags,
             };
         }
+        // The panel's esc chip, at the header row's right edge. A tap on it
+        // presses Esc through the shared chip path: a focused panel reads the
+        // Esc itself and closes; an unfocused one owns no keys, so
+        // `esc_close::tap` closes it directly.
+        let chip = " esc ";
+        if rows > 0 && w > chip.len() {
+            for (i, ch) in chip.chars().enumerate() {
+                cells[x0 + w - chip.len() + i] = Cell {
+                    c: ch,
+                    fg: self.theme.brand,
+                    bg: Color::Default,
+                    flags: cell_flags::BOLD,
+                };
+            }
+            crate::chrome::record_close_spans(
+                (rows, cols),
+                (0, x0 + 1),
+                w - 1,
+                &[(crate::chrome::ESC_CLOSE_HIT, w - 5, 3)],
+            );
+        }
     }
 
     /// The `chrome_hit` branch for the panel's columns: a click opens that
@@ -945,9 +967,12 @@ pub(crate) async fn toggle(
         view.feed = Some(open_overlay(view.feed.take(), gen));
     } else {
         // Closing releases the keyboard with the panel, so a later reopen
-        // never starts already holding it.
+        // never starts already holding it. The owner field is reset too:
+        // `input_owner` normalizes a closed panel to Pane, but the stored
+        // choice would silently RE-focus a reopened panel.
         view.feed = None;
         view.feed_detail = None;
+        view.region_owner = super::region_focus::RegionOwner::Pane;
         // A half-read escape sequence must not survive the close: carried
         // into the next focus it folds with the fresh bytes into a key
         // nobody pressed.
@@ -1025,16 +1050,6 @@ pub(crate) async fn focus(
     Ok(())
 }
 
-/// Release the keyboard, leaving the panel open. The Esc half of `focus`.
-pub(crate) fn release(view: &mut View) -> bool {
-    if view.feed.is_some() && view.input_owner() == super::region_focus::RegionOwner::Feed {
-        view.region_owner = super::region_focus::RegionOwner::Pane;
-        true
-    } else {
-        false
-    }
-}
-
 /// The focused feed panel's keys, and the provenance view's.
 ///
 /// Reached only when the operator asked for it: `E` focused the panel, or a
@@ -1043,7 +1058,10 @@ pub(crate) fn release(view: &mut View) -> bool {
 ///
 /// Precedence inside: the provenance view wins while it is open (it is the
 /// thing in front), then the focused panel. Esc unwinds one layer at a time -
-/// the view first, then the focus - so a reader never loses both at once.
+/// the view first, then the panel - so a reader never loses both at once, and
+/// each landing keeps the keyboard with the feed. From the panel itself, Esc
+/// and e close it; the old Esc-only release left the panel open but key-less,
+/// a state no further key could leave.
 pub(crate) async fn feed_keys(
     view: &mut View,
     bytes: &[u8],
@@ -1054,7 +1072,6 @@ pub(crate) async fn feed_keys(
     view.feed_esc = esc;
     for tok in toks {
         if view.feed_detail.is_some() {
-            let trows = view.term.0.max(1) as usize;
             match tok {
                 ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
                     view.feed_detail = None;
@@ -1062,7 +1079,7 @@ pub(crate) async fn feed_keys(
                 ModalKey::Up => {
                     if let Some(m) = view.feed_detail.as_mut() {
                         m.popup.nav(crate::popup::NavDir::Up);
-                        m.popup.follow_sel(trows);
+                        m.popup.follow_sel(view.term);
                     }
                 }
                 // The node_created modal's composer gesture, carried over
@@ -1092,7 +1109,7 @@ pub(crate) async fn feed_keys(
                 ModalKey::Down => {
                     if let Some(m) = view.feed_detail.as_mut() {
                         m.popup.nav(crate::popup::NavDir::Down);
-                        m.popup.follow_sel(trows);
+                        m.popup.follow_sel(view.term);
                     }
                 }
                 ModalKey::Enter => feed_detail::execute_selected(view, sock_w).await?,
@@ -1101,8 +1118,12 @@ pub(crate) async fn feed_keys(
             }
             continue;
         }
-        if matches!(tok, ModalKey::Esc) {
-            release(view);
+        if matches!(tok, ModalKey::Esc | ModalKey::Byte(b'e')) {
+            // Close once; a second close token in the same chunk is
+            // swallowed, never a reopen.
+            if view.feed.is_some() {
+                toggle(view, sock_w).await?;
+            }
             continue;
         }
         let Some(f) = view.feed.as_mut() else {

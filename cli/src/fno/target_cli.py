@@ -505,6 +505,25 @@ def _resolve_dispatch_node(
     return matches[0] if len(matches) == 1 else None
 
 
+def _target_binding(input_, node_id, plan_path, phase: str, *, exit_on_fork: bool) -> dict:
+    """Transport to the native binding owner; refused exits 1, a fork may exit 3."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+    payload = {"input": input_ or "", "node": node_id or "", "plan_path": plan_path or "",
+               "phase": phase, "allow_in_review": os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1"}
+    try:
+        receipt = verb_call(["backlog", "target-binding", "--stdin"], payload, timeout=120)
+    except VerbUnavailable as exc:
+        typer.echo(f"fno do target {phase}: target binding unavailable: {exc}", err=True)
+        return {}
+    if receipt.get("message"):
+        typer.echo(receipt["message"], err=True)
+    if receipt.get("verdict") == "refused" or (receipt.get("verdict") == "forked" and exit_on_fork):
+        if receipt.get("next"):
+            typer.echo(f"next: {receipt['next']}", err=True)
+        raise typer.Exit(code=1 if receipt["verdict"] == "refused" else 3)
+    return receipt
+
+
 def _redirect_if_contained(node: Optional[dict]) -> None:
     """Route a named contained node to the delivery unit that owns its PR.
 
@@ -1680,6 +1699,9 @@ def init(
     # A named contained node is redirected to its delivery unit before anything
     # is claimed (task 1.3b).
     _redirect_if_contained(_dispatch_node)
+    _binding = _target_binding(
+        input_, _dispatch_node.get("id"), plan_path, "init", exit_on_fork=True
+    ) if isinstance(_dispatch_node, dict) else {}
 
     from fno.review_capability import env_marks_unattended
 
@@ -1841,6 +1863,8 @@ def init(
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
+    env["FNO_TARGET_BINDING"] = str(_binding.get("verdict") or "")
+    env["TARGET_ADOPTED_PR"] = str(_binding.get("pr") or "")
     # Change D: resolve `attended` from the substrate before the bash
     # manifest writer runs. Marking the run unattended makes init stamp
     # `attended: false`, so the skill surfaces offers as non-blocking lines
@@ -2073,7 +2097,7 @@ def _maybe_reconcile_lane_slot() -> None:
     dispatcher (``fno backlog dispatch-lanes``) holds a lane slot
     (``parallel-lane:<node>``) across the spawn->init window, TTL-anchored to
     itself; now that this worker owns the node, re-anchor that slot to the
-    worker's durable session pid so ``active_lane_count`` tracks the real lane
+    worker's durable session pid so the native lane count tracks the real lane
     and frees the slot when the worker ends. A no-op for every non-parallel run
     (this node holds no lane slot) and for a missing pid. Strictly non-fatal:
     never affects the init exit code the caller propagates.
@@ -2090,10 +2114,20 @@ def _maybe_reconcile_lane_slot() -> None:
         node_id = m.group(1).strip().strip("\"'")
         if not node_id or node_id == "null":
             return
-        from fno.claims.lanes import reconcile_lane_slot
-        from fno.claims.session_pid import resolve_session_pid
+        import subprocess
 
-        reconcile_lane_slot(node_id, pid=resolve_session_pid())
+        from fno.claims.session_pid import resolve_session_pid
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is not None:
+            subprocess.run(
+                [
+                    str(binary), "claim", "lane-reconcile",
+                    "--lane", node_id, "--pid", str(resolve_session_pid()),
+                ],
+                capture_output=True, timeout=30, check=False,
+            )
     except Exception:  # noqa: BLE001 - additive; never affect the init exit code
         pass
 
@@ -2423,7 +2457,7 @@ def resolve_model(
     refuse_retired_provider(_provider_tombstone)
 
     # include_difficulty: the bash dispatch lane pins --harness in its spawn
-    # argv, which stands inject_spawn_defaults' grid down - there is no grid
+    # argv, which stands the compose's grid down - there is no grid
     # receiving end here, so the band resolves statically (the resolution
     # model_tier gave this lane before the field retired).
     model, _source = _resolve_node_model(
@@ -3117,16 +3151,15 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
 def _read_node_claim(node_id: str) -> Optional[dict]:
     """``claim_status`` dict for ``node:<id>``, or None (free / unreadable).
 
-    node: claims live under $HOME, not the default root - ``claims_root_for``
-    routes there; a bare ``claim_status(key)`` would read the wrong tree as free.
+    The native leg routes node: keys to the global claims root, so a bare
+    ``claim_status(key)`` reads the store the claim was written to.
     Read-only and never raises: any probe failure degrades to None.
     """
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     key = f"node:{node_id}"
     try:
-        return claim_status(key, root=claims_root_for(key))
+        return claim_status(key)
     except Exception:
         return None
 
@@ -3289,7 +3322,6 @@ def _reacquire_node_claim(
         ClaimHeldByOther,
         acquire_claim,
     )
-    from fno.claims.io import claims_root_for
     from fno.claims.session_pid import resolve_session_pid
 
     key = f"node:{node_id}"
@@ -3321,7 +3353,6 @@ def _reacquire_node_claim(
             pid=pid,
             pid_unavailable=pid is None,
             reason="target start successor re-acquire",
-            root=claims_root_for(key),
         )
     except ClaimHeldByOther as exc:
         _print_foreign_holder_park(
@@ -3627,6 +3658,12 @@ def _start_body(
     refuse_retired_provider(_provider_tombstone)
 
     cwd = Path.cwd()
+    # Bare id: init binds. Scope may fork a child, so a held parent refuses first.
+    if len(node.split()) > 1 or os.environ.get("TARGET_ALLOW_IN_REVIEW") == "1":
+        _refuse_dispatch_hold(_resolve_dispatch_node(node, plan_path))
+        binding = _target_binding(node, None, plan_path, "start", exit_on_fork=_is_linked_worktree(cwd))
+        if binding.get("verdict") == "forked":
+            node, plan_path = str(binding["effective_node"]), binding.get("effective_plan") or None
 
     # Boundary: already isolated -> no-op, create nothing (case). But
     # first refuse if a DIFFERENT live session holds this node's claim: this cwd

@@ -1383,6 +1383,7 @@ fn inside_leg_cross_language_round_trip_parity() {
         reason: None,
         received_at: "2026-06-27T01:00:00Z".into(),
         ttl_ms: None,
+        posture: None,
     });
     let mut reg = Registry::default();
     reg.entries.push(withrep);
@@ -1403,6 +1404,7 @@ fn inside_leg_cross_language_round_trip_parity() {
             reason: None,
             received_at: "2026-06-27T01:00:00Z".into(),
             ttl_ms: None,
+            posture: None,
         })
     );
 }
@@ -1453,6 +1455,7 @@ fn inside_leg_is_live_at_ttl_gate() {
         reason: None,
         received_at: recv.into(),
         ttl_ms: ttl,
+        posture: None,
     };
 
     // No ttl -> never ages out on its own (cleared by teardown/done/newer report).
@@ -2165,9 +2168,9 @@ fn source_root_for_exe_stops_at_a_symlinked_home_too() {
 /// saves a deployed binary: `~/.fno/agents/registry.json` sits inside `$HOME`,
 /// so the store-inside-the-root escape hatch already returns "proceed" with
 /// or without it. The stop is load-bearing only once the registry lives
-/// OUTSIDE home - `FNO_AGENTS_HOME` pointed at `/var/lib/...`, or a
-/// relocated `config.paths.agents_registry_path`. Both are asserted below,
-/// in both directions, so neither reads as passing by accident.
+/// OUTSIDE home - `FNO_AGENTS_HOME` pointed at `/var/lib/...`. It is
+/// asserted below, in both directions, so it does not read as passing by
+/// accident.
 #[test]
 fn a_deployed_binary_under_a_git_managed_home_still_writes() {
     let home = tmpdir("git-managed-home").canonicalize().unwrap();
@@ -2578,6 +2581,24 @@ fn update_registry_mints_a_row_its_own_fno_id() {
         load_registry(&path).unwrap().entries[1].fno_id.as_deref(),
         Some("thread-a")
     );
+    // A fresh mint never lands on a head another row already answers to:
+    // seed born with a known handle, then birth a row and compare heads.
+    let seeded = "a1a1a1a1-1111-4111-8111-111111111111";
+    update_registry(&path, |r| {
+        r.find_mut("born-renamed").unwrap().fno_id = Some(seeded.into());
+    })
+    .unwrap();
+    update_registry(&path, |r| {
+        let mut row = sample_entry("second");
+        row.harness_session_id = Some("7c5dcf5d-2222-4222-8222-222222222299".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+    let second = load_registry(&path).unwrap().entries[2]
+        .fno_id
+        .clone()
+        .expect("second row minted at the write");
+    assert_ne!(second.get(..8), seeded.get(..8), "heads stay unique");
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -129,7 +129,7 @@ def test_question_send_emits_one_valid_overlay_event(runner, mailbox, emitted_ev
     assert d["sender"] == "etl"
     assert d["recipient"] == "web"
     assert "which schema wins?" in d["summary"]
-    assert d["msg_id"].startswith("msg-"), "carries the mail id for correlation"
+    assert d["msg_id"].startswith("fmail-"), "carries the mail id for correlation"
 
 
 def test_debounce_gates_the_event_exactly_like_the_notifier(
@@ -249,7 +249,10 @@ def test_attended_live_miss_escalates(mailbox, monkeypatch, emitted_events):
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     _skip_mux(monkeypatch)
 
-    _name_lane_send("need your eyes on this", from_name="sender", resolved=_resolved_claude(sid))
+    import typer
+
+    with pytest.raises(typer.Exit):
+        _name_lane_send("need your eyes on this", from_name="sender", resolved=_resolved_claude(sid))
 
     assert len(emitted_events) == 1, "operator live-miss escalates once"
     assert emitted_events[0]["data"]["reason"] == "attended-miss"
@@ -272,7 +275,10 @@ def test_reachable_worker_live_miss_escalates_as_reachable_miss(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     _skip_mux(monkeypatch)
 
-    _name_lane_send("fyi", from_name="sender", resolved=_resolved_claude(sid))
+    import typer
+
+    with pytest.raises(typer.Exit):
+        _name_lane_send("fyi", from_name="sender", resolved=_resolved_claude(sid))
 
     assert len(emitted_events) == 1, "a reachable worker live-miss escalates once"
     assert emitted_events[0]["data"]["reason"] == "reachable-miss"
@@ -334,7 +340,10 @@ def test_mail_demote_reason_codex_no_daemon_carries_fix(mailbox, monkeypatch, ca
     _skip_mux(monkeypatch)
     monkeypatch.setattr("fno.mail.cli._codex_daemon_socket_absent", lambda: True)
 
-    _name_lane_send("ping", from_name="sender", resolved=_resolved_codex(sid))
+    import typer
+
+    with pytest.raises(typer.Exit):
+        _name_lane_send("ping", from_name="sender", resolved=_resolved_codex(sid))
 
     out = capsys.readouterr().out
     assert "queued (durable)" in out
@@ -351,7 +360,10 @@ def test_mail_demote_reason_codex_daemon_present_no_hint(mailbox, monkeypatch, c
     _skip_mux(monkeypatch)
     monkeypatch.setattr("fno.mail.cli._codex_daemon_socket_absent", lambda: False)
 
-    _name_lane_send("ping", from_name="sender", resolved=_resolved_codex(sid))
+    import typer
+
+    with pytest.raises(typer.Exit):
+        _name_lane_send("ping", from_name="sender", resolved=_resolved_codex(sid))
 
     out = capsys.readouterr().out
     assert "queued (durable)" in out

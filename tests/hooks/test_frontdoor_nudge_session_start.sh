@@ -10,8 +10,15 @@
 # Cases 5-9 cover the installer launch: with CLAUDE_PLUGIN_DATA set, the hook
 # starts .claude-plugin/postinstall.sh detached, once per plugin version.
 #
+# Cases 3b/3c cover the known-install-dir resolution (gap audit blocker 1,
+# 2026-10-02): a fresh background session's PATH lacks ~/.cargo/bin, so `fno`
+# installed there must be FOUND (probe by absolute path: door proven -> a
+# named hint, never the installer) rather than read as missing.
+#
 # Isolation: a FAKE `fno` is placed first on PATH per case, so no real mux is
-# probed. The installer cases run a copy of the hook under a fake plugin root
+# probed. HOME points at an empty temp dir for every case, so the hook's
+# known-install-dir probe never resolves the caller's real `~/.cargo/bin/fno`.
+# The installer cases run a copy of the hook under a fake plugin root
 # whose postinstall.sh is a stub, so the real installer never runs.
 # Run: bash tests/hooks/test_frontdoor_nudge_session_start.sh
 
@@ -33,6 +40,10 @@ WORK=$(mktemp -d -t frontdoor-ss-XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
+# Empty HOME: the hook's known-install-dir fallback (~/.local/bin, ~/.cargo/bin)
+# must resolve nothing from the caller's real machine.
+EMPTY_HOME="$WORK/home"
+mkdir -p "$EMPTY_HOME"
 
 # A minimal PATH that resolves the utilities the hook needs but never the real
 # `fno`. It no longer needs a coreutils timeout(1): the hook's bound comes from
@@ -46,7 +57,7 @@ if [[ "${1:-}" == "mux" && "${2:-}" == "ls" ]]; then echo '[]'; exit 0; fi
 exit 0
 FAKE
 chmod +x "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
 [[ -z "$out" ]] || fail "active front door must be silent, got: $out"
 pass "active front door -> silent"
 
@@ -67,16 +78,46 @@ echo "No such command 'mux'." >&2
 exit 2
 FAKE
 chmod +x "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
 grep -q "Install the .fno. front door" <<<"$out" || fail "fno-py-only must remind, got: $out"
 grep -q "cargo install fno" <<<"$out" || fail "reminder must name the fix, got: $out"
 pass "fno-py only -> reminder with fix"
 
 # --- Case 3: no `fno` on PATH at all -> REMIND --------------------------------
 rm -f "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
 grep -q "Install the .fno. front door" <<<"$out" || fail "missing fno must remind, got: $out"
 pass "no fno on PATH -> reminder"
+
+# --- Case 3b: fno only in ~/.local/bin, proving the door -> HINT, no installer -
+# The gap-audit blocker: a fresh background session's PATH lacks the install
+# dir, the hook read the install as missing and started the installer, which
+# force-replaced a live tool env. Found-and-proven must name the path instead.
+mkdir -p "$EMPTY_HOME/.local/bin"
+cat > "$EMPTY_HOME/.local/bin/fno" <<'FAKE'
+#!/usr/bin/env bash
+[[ "${1:-}" == "mux" && "${2:-}" == "ls" ]] && { echo '[]'; exit 0; }
+exit 0
+FAKE
+chmod +x "$EMPTY_HOME/.local/bin/fno"
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
+grep -q "installed, just not on this session's PATH" <<<"$out" || fail "known-dir door must print the PATH hint, got: $out"
+grep -qF "$EMPTY_HOME/.local/bin/fno" <<<"$out" || fail "hint must name the resolved path, got: $out"
+pass "fno in ~/.local/bin proving the door -> hint naming the path"
+
+# --- Case 3c: fno in ~/.cargo/bin but NOT the door -> falls through to REMIND --
+rm -rf "$EMPTY_HOME/.local"
+mkdir -p "$EMPTY_HOME/.cargo/bin"
+cat > "$EMPTY_HOME/.cargo/bin/fno" <<'FAKE'
+#!/usr/bin/env bash
+echo "No such command 'mux'." >&2
+exit 2
+FAKE
+chmod +x "$EMPTY_HOME/.cargo/bin/fno"
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
+grep -q "Install the .fno. front door" <<<"$out" || fail "known-dir non-door fno must fall through to the reminder, got: $out"
+pass "fno in ~/.cargo/bin without a mux verb -> reminder"
+rm -rf "$EMPTY_HOME/.cargo"
 
 # --- Case 4: wedged mux socket -> BOUNDED and SILENT --------------------------
 # This hook probes a socket at SessionStart, so an unbounded probe stalls every
@@ -91,7 +132,7 @@ exit 0
 FAKE
 chmod +x "$FAKEBIN/fno"
 START=$(date +%s)
-out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
 END=$(date +%s)
 ELAPSED=$((END - START))
 (( ELAPSED < 8 )) || fail "wedged mux probe not bounded: ${ELAPSED}s (the 3s cap did not fire)"
@@ -106,6 +147,7 @@ PLUG="$WORK/plug"
 mkdir -p "$PLUG/hooks" "$PLUG/scripts/lib" "$PLUG/.claude-plugin"
 cp "$HOOK" "$PLUG/hooks/"
 cp "$REPO_ROOT_REAL/scripts/lib/with-timeout.sh" "$PLUG/scripts/lib/"
+cp "$REPO_ROOT_REAL/scripts/lib/hook-budget.sh" "$PLUG/scripts/lib/"
 printf '{\n  "name": "fno",\n  "version": "9.9.9"\n}\n' >"$PLUG/.claude-plugin/plugin.json"
 MARK="$WORK/installer-ran"
 cat >"$PLUG/.claude-plugin/postinstall.sh" <<STUB
@@ -118,7 +160,7 @@ PHOOK="$PLUG/hooks/frontdoor-nudge-session-start.sh"
 DATA="$WORK/data"
 rm -f "$FAKEBIN/fno"
 
-run_hook() { PATH="$FAKEBIN:$BASE_PATH" CLAUDE_PLUGIN_DATA="$DATA" bash "$PHOOK" 2>/dev/null; }
+run_hook() { PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" CLAUDE_PLUGIN_DATA="$DATA" bash "$PHOOK" 2>/dev/null; }
 
 # Wait up to 10s for the detached installer to release its lock. $1 = the data
 # dir to poll (default $DATA).
@@ -204,7 +246,7 @@ pass "lock older than 60 minutes with a live (reused) pid -> reclaimed, installe
 # XDG state dir and run the installer there, same log, stamp and lock.
 rm -rf "$DATA" "$MARK"
 XDG_DIR="$WORK/xdg-state/fno/plugin-install"
-out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/xdg-state" bash "$PHOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$WORK/xdg-state" bash "$PHOOK" 2>/dev/null)
 grep -q "Installing the fno CLI" <<<"$out" || fail "no plugin data dir must start the installer in the XDG fallback, got: $out"
 grep -qF "$XDG_DIR/postinstall.log" <<<"$out" || fail "fallback message must name the XDG log, got: $out"
 wait_unlocked "$XDG_DIR" || fail "fallback installer left its lock"
@@ -216,7 +258,7 @@ pass "CLAUDE_PLUGIN_DATA unset -> XDG fallback dir gets the installer"
 # --- Case 9b: no CLAUDE_PLUGIN_DATA and no XDG dir writable -> plain reminder --
 rm -rf "$WORK/xdg-state" "$MARK"
 touch "$WORK/not-a-dir"
-out=$(PATH="$FAKEBIN:$BASE_PATH" XDG_STATE_HOME="$WORK/not-a-dir" bash "$PHOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$WORK/not-a-dir" bash "$PHOOK" 2>/dev/null)
 sleep 3
 [[ ! -e "$MARK" ]] || fail "an unwritable XDG fallback must not start the installer"
 grep -q "Install the .fno. front door" <<<"$out" || fail "unwritable fallback must remind, got: $out"

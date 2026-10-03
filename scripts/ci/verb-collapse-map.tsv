@@ -98,8 +98,10 @@ agents recover	T1	agents recover	0
 agents reign-ledger	T1	agents reign-ledger	0
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
-agents registry-repair	T1	agents registry-repair	4	
+agents registry-repair	T1	agents registry-repair	4
 agents rename	T1	agents rename	0
+agents revival-check	T1	agents revival-check	1
+agents sessions-map	T1	agents sessions-map	1
 agents report	T1	agents report	3
 agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
@@ -183,10 +185,6 @@ backlog carveout resolve	T1	backlog carveout resolve	1
 backlog carveout update	T1	backlog carveout update	1	
 backlog collisions check	T1	backlog collisions check	11
 backlog cost	T1	backlog cost	1
-backlog decide	T1	backlog decide	13
-backlog decide-reindex	T1	backlog decide-reindex	5
-backlog decide-retract	T1	backlog decide-retract	0
-backlog decisions	T1	backlog decisions	16
 backlog decompose	T1	backlog decompose	8
 backlog defer	T1	backlog defer	14
 backlog demand	T1	backlog demand	0
@@ -290,8 +288,6 @@ config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
-decide decide-reindex	T1	decide decide-reindex	0
-decide reindex	KEEP	decide reindex	0	deprecated shim remains distinct during migration
 delivery	KEEP	delivery	7	single-leaf group
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1

@@ -100,19 +100,9 @@ from fno.backlog.advance import refuse_unknown_source as _refuse_unknown_source 
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
-# Decision records are node/PR metadata, so their three leaves live directly
-# under backlog. The old top-level spelling remains a lazy shim.
-from fno.decide.cli import (  # noqa: E402
-    backlog_decide,
-    backlog_decide_retract,
-    backlog_decide_reindex,
-    backlog_decisions,
-)
-
-cli.command("decide", hidden=True)(backlog_decide)
-cli.command("decisions", hidden=True)(backlog_decisions)
-cli.command("decide-retract", hidden=True)(backlog_decide_retract)
-cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
+# Decision records are node/PR metadata; their backlog leaves (decide,
+# decisions, decide-retract, decide-reindex) are the grouped dispatcher's
+# native arms since the decide family ported. No Python mount remains.
 
 
 # Node-lifecycle sub-apps folded under backlog (unit 6 of the  reorg):
@@ -392,11 +382,10 @@ def _live_worker(node_id: str) -> Optional[str]:
     probe moved to the native leg, which reads the same lockfiles.
     """
     from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
 
     key = f"node:{node_id}"
     try:
-        info = claim_status(key, root=claims_root_for(key))
+        info = claim_status(key)
     except Exception:  # noqa: BLE001 - a status read must never crash the table
         return None
     if info.get("state") in ("live", "suspect"):
@@ -2329,7 +2318,7 @@ def _dispatch_node_summary(e) -> dict:
         "parent": e.get("parent"),
         "size": e.get("size"),
         "difficulty": e.get("difficulty"),
-        # select_lane_fill's dispatch-time collision gate compares plan file
+        # the native lane-fill door's dispatch-time collision gate compares plan file
         # surfaces; without this it has nothing to read.
         "plan_path": e.get("plan_path"),
         # The per-node model pin rides so the active-backlog drain can
@@ -2563,7 +2552,6 @@ def cmd_next(
         if pre_entries is not None:
             from fno.claims.cli import _parse_ttl
             from fno.claims.core import ClaimHeldByOther, acquire_claim
-            from fno.claims.io import claims_root_for
 
             occupied, observer = _prepare(pre_entries)
             candidates = _with_observer(
@@ -2576,7 +2564,6 @@ def cmd_next(
                         key,
                         claim,
                         ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
-                        root=claims_root_for(key),
                     )
                 except ClaimHeldByOther:
                     continue
@@ -2754,45 +2741,28 @@ def cmd_ready(
 # -- lane-fill --
 
 
+# -- lane-fill (native door) --
+
+
 @cli.command("lane-fill", hidden=True)
 def cmd_lane_fill(
-    max_lanes: Optional[int] = typer.Option(
-        None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
-    ),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
-    mission: Optional[str] = typer.Option(
-        None, "--mission", help="Restrict selection to this mission's nodes."
-    ),
-    claim: bool = typer.Option(
-        False,
-        "--claim",
-        help="Atomically hold a lane slot per selected node (default: preview only).",
-    ),
+    max_lanes: Optional[int] = typer.Option(None, "--max"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    mission: Optional[str] = typer.Option(None, "--mission"),
+    claim: bool = typer.Option(False, "--claim"),
 ) -> None:
-    """Select up to max_lanes ready nodes, each collision-clean (parallel mode).
+    """The parallel fill answers natively; there is no external body here.
 
-    Prints the JSON list of nodes that would dispatch as concurrent lanes -
-    the file-collision gate decides, so same-domain nodes with disjoint
-    surfaces co-schedule (epic , group 2). Read-only by
-    default; ``--claim``
-    atomically holds a dispatch-time lane slot per node - what the dispatcher
-    does before spawn (Locked Decision #8). ``max_lanes < 1`` prints ``[]``
-    (a single lane is the daemon's sequential path).
+    Unlike next/undispatched this wheel spelling keeps nothing: the tombstone
+    is the whole arm, on every backend.
     """
-    from fno.backlog.advance import select_lane_fill
-
-    if max_lanes is None:
-        from fno.config import load_settings
-
-        max_lanes = load_settings().parallel.max_lanes
-
-    selected = select_lane_fill(max_lanes, project, mission=mission, claim=claim)
-    typer.echo(json.dumps(selected, indent=2))
-
-
-# -- schedule (shadow) --
-
-# -- dispatch-lanes --
+    del max_lanes, project, mission, claim
+    typer.echo(
+        "Error: the parallel fill is served by the native door; "
+        "run `fno backlog lane-fill`.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 @cli.command("dispatch-lanes", hidden=True)
@@ -3044,7 +3014,7 @@ def cmd_lanes(
     outcome view. Read-only.
     """
     from fno.claims.core import list_claims
-    from fno.claims.lanes import LANE_SLOT_PREFIX
+    LANE_SLOT_PREFIX = "lane-slot:"  # the binary-owned slot namespace
 
     try:
         from fno.config import load_settings
@@ -4255,13 +4225,13 @@ def cmd_roadmap(
     out: Optional[str] = typer.Option(
         None, "--out", help="Write markdown to this path instead of stdout."
     ),
-    html: Optional[str] = typer.Option(
-        None, "--html", help="Also write a standalone HTML file to this path."
-    ),
     backlog_html: Optional[str] = typer.Option(
         None,
         "--backlog-html",
-        help="Also write the grouped public open-work HTML projection.",
+        help=(
+            "Also write the public open-work HTML board (leak-gated, native "
+            "renderer) to this path."
+        ),
     ),
 ) -> None:
     """Render public roadmap and backlog projections through one leak gate.
@@ -4276,6 +4246,7 @@ def cmd_roadmap(
         atomic_write_documents,
         load_render_entries,
         omit_leaky_rows,
+        render_public_backlog_html,
         render_public_roadmap_md,
     )
 
@@ -4296,19 +4267,12 @@ def cmd_roadmap(
         raise typer.Exit(code=1) from exc
     entries, _ = omit_leaky_rows(entries, resolved_project)
 
-    md = render_public_roadmap_md(entries, resolved_project)
+    if backlog_html:
+        if not render_public_backlog_html(resolved_project, backlog_html):
+            typer.echo("Error: public backlog HTML render failed; see the warning above", err=True)
+            raise typer.Exit(code=1)
 
-    if html or backlog_html:
-        # The public HTML pages were the second board this surface retired;
-        # refuse BY NAME so a script fails loudly instead of silently
-        # rendering nothing.
-        typer.echo(
-            "Error: --html/--backlog-html are retired; the web backlog page "
-            "is the one board (fno mux serve --web / fno backlog view). "
-            "The markdown roadmap still renders.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    md = render_public_roadmap_md(entries, resolved_project)
 
     documents: dict[Path, str] = {}
     out_path = Path(os.path.expanduser(out)) if out else None

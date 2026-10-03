@@ -449,9 +449,14 @@ _FLEET_CAP_S: dict[str, float] = {
 }
 _PHASE_CAP_S: dict[str, float] = {**_EVERY_TICK_CAP_S, **_FLEET_CAP_S, "merge": 245.0}
 
-#: The grant-queue read measured 38s under a 21-worker fleet; 90s bounds a
-#: stalled read while retaining margin over that observed high.
 _GRANT_QUEUE_READ_TIMEOUT_S = 90.0
+_MERGE_WINDOW_S = _PHASE_CAP_S["merge"] + _EVERY_TICK_CAP_S["sweep"]
+
+
+def _merge_budget_for_load(load_per_core: float, drain_floor_s: float) -> tuple[float, float]:
+    timeout_s = min(_MERGE_WINDOW_S - drain_floor_s - 35.0,
+                    _GRANT_QUEUE_READ_TIMEOUT_S * max(1.0, load_per_core / 2.0))
+    return timeout_s, max(_PHASE_CAP_S["merge"], timeout_s + drain_floor_s + 5.0)
 
 
 class TickDeadlineExceeded(BaseException):
@@ -558,6 +563,8 @@ def tick() -> None:
     ceiling_box: dict[str, Optional[int]] = {"v": None}
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
     roots_box: dict[str, Optional[list]] = {"v": None}
+    phase_caps = dict(_PHASE_CAP_S)
+    grant_queue_timeout_s = _GRANT_QUEUE_READ_TIMEOUT_S
 
     # One sidecar scan per tick: four phases each swept the same roots.
     def _tick_roots() -> list:
@@ -652,16 +659,16 @@ def tick() -> None:
             if ceiling_box["v"] is None:
                 # The settings phase runs before a ceiling exists: its slice
                 # is its measured cap, min(the env seam) when the seam is set.
-                slice_s = float(_PHASE_CAP_S.get("settings", 60.0))
+                slice_s = float(phase_caps.get("settings", 60.0))
                 env = (os.environ.get(_ENV_TICK_TIMEOUT) or "").strip()
                 if env.isdigit() and int(env) > 0:
                     slice_s = min(slice_s, float(env))
             else:
                 assert left is not None
-                slice_s = min(_PHASE_CAP_S.get(name, left), left)
+                slice_s = min(phase_caps.get(name, left), left)
             # Which budget fired if the alarm does: a cap below the
             # remaining wall starves one phase; the wall is the tick deadline.
-            cap = _PHASE_CAP_S.get(name)
+            cap = phase_caps.get(name)
             wall_limited = (
                 ceiling_box["v"] is None or cap is None or cap >= (left or 0.0)
             )
@@ -702,12 +709,22 @@ def tick() -> None:
             return True
 
         def _phase_settings(_slice_s: float) -> None:
-            nonlocal settings, cfg, tick_enabled
+            nonlocal settings, cfg, tick_enabled, grant_queue_timeout_s
+            from fno.pr_watch._dispatch import _MERGE_FLOOR_S
+
             settings = load_settings()
             cfg = settings.pr_watch
             # wave 3: the master panic switch outranks pr_watch's own gate too.
             tick_enabled = cfg.enabled and settings.autonomy.enabled
             ceiling_box["v"] = _resolve_tick_deadline(cfg)
+            try:
+                load_per_core = os.getloadavg()[0] / (os.cpu_count() or 1)
+            except (AttributeError, OSError):
+                load_per_core = None
+            if load_per_core is not None and ceiling_box["v"] is not None and ceiling_box["v"] >= 480:
+                grant_queue_timeout_s, phase_caps["merge"] = _merge_budget_for_load(
+                    load_per_core, _MERGE_FLOOR_S + 15.0
+                )
 
         _run_phase("settings", _phase_settings)
 
@@ -1200,15 +1217,13 @@ def tick() -> None:
 
             roots = _tick_roots()
             try:
-                # Durable grants, never the sweep's result. Bounded, not
-                # slice-derived: merge runs on a fresh wall now, and a
-                # slice-derived timeout would let one hung read hold ~400s
-                # of tick. 120s is 3x the 38s fleet worst, and still expires
-                # as a recorded failure BEFORE the phase alarm.
+                # Durable grants, never the sweep's result. Its timeout and
+                # phase cap share one load-scaled window, leaving room for a
+                # merge attempt and at least a short sweep before the deadline.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd())},
-                                timeout=min(_GRANT_QUEUE_READ_TIMEOUT_S,
+                                timeout=min(grant_queue_timeout_s,
                                             max(1.0, slice_s - 10.0)))
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
@@ -1221,7 +1236,8 @@ def tick() -> None:
                 ]
                 progress["merge"] = f"queue={len(queue)}"
             except (VerbUnavailable, KeyError, TypeError, ValueError) as exc:
-                _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="error",
+                reason = "grant_queue_timeout" if "timed out after" in str(exc).lower() else "error"
+                _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason=reason,
                                detail=f"{head} grant queue unreadable ({exc})")
                 return
             counts = run_execute_queue(
@@ -1435,8 +1451,6 @@ def tick() -> None:
         # follows as the one arm that resumes per-PR across ticks.
         sweep_started = True
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
-        # Merge runs ahead of the sweep, with a 245s phase cap and 135s
-        # per-ritual timeout so a slow authorization cannot consume the tick.
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")

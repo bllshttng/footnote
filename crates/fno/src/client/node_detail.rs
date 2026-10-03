@@ -9,7 +9,7 @@
 //! time so a worker that exited between paint and press answers with its
 //! reason, never a stale launch.
 
-use super::backlog_board::{rule, trunc, BoardView};
+use super::backlog_board::{rule, BoardView};
 use super::backlog_style::{BLine, BRole, BSeg};
 use super::*;
 use crate::backlog_model::{session_action, SessionAction};
@@ -98,6 +98,44 @@ pub(crate) enum Sel {
     Session(usize),
 }
 
+/// What `y` (and `Y` for the command) copy from the detail: the selected
+/// session row's full id or command, a link row's node id, or - nothing
+/// selected - the current node id. A link row carries no command; `Y`
+/// answers it with the notice instead.
+pub(crate) fn copy_target(
+    nv: &crate::backlog_model::NodeView,
+    node_id: &str,
+    sel: usize,
+    command: bool,
+) -> Option<String> {
+    match sel_list(nv).get(sel) {
+        Some(Sel::Session(i)) => {
+            let s = nv.sessions.get(*i)?;
+            if command {
+                s.command.clone()
+            } else {
+                s.session_id.clone()
+            }
+        }
+        Some(Sel::Link(id)) => (!command).then(|| id.clone()),
+        None => (!command).then(|| node_id.to_string()),
+    }
+}
+
+/// `y`/`Y` in the detail: copy the selected target, or say why not.
+fn copy_sel(view: &mut View, command: bool) {
+    let target = view.backlog_board.as_ref().and_then(|b| {
+        let d = b.detail.as_ref()?;
+        let inputs = b.inputs.as_ref()?;
+        crate::backlog_model::node(inputs, &d.node_id)
+            .and_then(|nv| copy_target(&nv, &d.node_id, d.sel, command))
+    });
+    match target {
+        Some(value) => feed_detail::copy_value(view, value),
+        None => view.set_notice("no command for this row".to_string()),
+    }
+}
+
 /// The detail pane's open state, held in `BoardView.detail`. `sel`
 /// indexes ONE list: link rows first, then session rows. `trail` is the
 /// pushed ids behind the current node; an empty trail's Esc returns focus
@@ -139,8 +177,8 @@ fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
 
 /// The drill-down's body: the styled title (id, bold title, the
 /// status/priority pill), dim fields, and every section (body, links,
-/// sessions, notes) under a bold header with a thin rule. `w` truncates
-/// every line.
+/// sessions, notes) under a bold header with a thin rule. A line wider than
+/// `w` wraps onto the next rows.
 /// The detail pane's body for an explicit node: the pane shows the
 /// cursor card's node when it lacks focus, and marks no link row then
 /// (`sel` is `None`).
@@ -168,17 +206,16 @@ pub(crate) fn pane_lines(
     };
     let mut k: usize = 0;
     let mut follow: Option<usize> = None;
-    let t = |s: &str| trunc(s, w);
     // Title: the id (accent), the title (bold), and the status/priority pill.
     let status = view.card.status.clone().unwrap_or_else(|| "none".into());
     let prio = view.card.priority.clone().unwrap_or_else(|| "none".into());
-    let mut title = BLine::of(&[
+    let title = BLine::of(&[
         BSeg {
             text: view.card.id.clone(),
             role: BRole::Label,
         },
         BSeg {
-            text: format!("  {}", t(&view.card.title)),
+            text: format!("  {}", view.card.title),
             role: BRole::Head,
         },
         BSeg {
@@ -186,14 +223,13 @@ pub(crate) fn pane_lines(
             role: BRole::Pill,
         },
     ]);
-    title = title.trunc(w);
     lines.push(title);
     // Meta.
     let king = match &view.card.king {
         Some(king) => format!("{} (L{})", king.name, king.level),
         None => "none".into(),
     };
-    lines.push(BLine::meta(t(&format!(
+    lines.push(BLine::meta(format!(
         "{} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} king: {}",
         status,
         view.card.project.as_deref().unwrap_or("none"),
@@ -201,7 +237,7 @@ pub(crate) fn pane_lines(
         view.card.size.as_deref().unwrap_or("none"),
         view.difficulty.as_deref().unwrap_or("none"),
         king
-    ))));
+    )));
     lines.push(BLine::plain(String::new()));
     // Field lines: the label dim (the accent-dim slot is the id's, so a
     // field label reads as the meta rank) and the value plain.
@@ -212,7 +248,7 @@ pub(crate) fn pane_lines(
                 role: BRole::Meta,
             },
             BSeg {
-                text: format!(" {}", t(&value)),
+                text: format!(" {}", value),
                 role: BRole::Body,
             },
         ])
@@ -241,7 +277,7 @@ pub(crate) fn pane_lines(
         view.cwd.clone().unwrap_or_else(|| "none".into()),
     ));
     for f in &view.unavailable {
-        lines.push(BLine::meta(t(&format!("{}: {}", f.feature, f.reason))));
+        lines.push(BLine::meta(format!("{}: {}", f.feature, f.reason)));
     }
     lines.push(BLine::plain(String::new()));
 
@@ -261,7 +297,7 @@ pub(crate) fn pane_lines(
             continue;
         }
         any_links = true;
-        lines.push(BLine::head(t(&format!("{name} ({}):", group.len()))));
+        lines.push(BLine::head(format!("{name} ({}):", group.len())));
         lines.push(BLine::meta(rule(w)));
         for l in group.iter() {
             let marker = if k == sel {
@@ -274,29 +310,26 @@ pub(crate) fn pane_lines(
             };
             let col = l.column.clone().unwrap_or_default();
             let title = l.title.clone().unwrap_or_default();
-            lines.push(
-                BLine::of(&[
-                    BSeg {
-                        text: format!("{marker} "),
-                        role: BRole::Body,
-                    },
-                    BSeg {
-                        text: l.id.clone(),
-                        role: BRole::Label,
-                    },
-                    BSeg {
-                        text: format!(" {} {}", col, title),
-                        role: BRole::Body,
-                    },
-                ])
-                .trunc(w),
-            );
+            lines.push(BLine::of(&[
+                BSeg {
+                    text: format!("{marker} "),
+                    role: BRole::Body,
+                },
+                BSeg {
+                    text: l.id.clone(),
+                    role: BRole::Label,
+                },
+                BSeg {
+                    text: format!(" {} {}", col, title),
+                    role: BRole::Body,
+                },
+            ]));
         }
     }
     if !any_links {
-        lines.push(BLine::head(t("links")));
+        lines.push(BLine::head("links"));
         lines.push(BLine::meta(rule(w)));
-        lines.push(BLine::meta(t("none")));
+        lines.push(BLine::meta("none"));
     }
     if !view.prs.is_empty() {
         let pr: Vec<String> = view
@@ -313,7 +346,7 @@ pub(crate) fn pane_lines(
                 role: BRole::Meta,
             },
             BSeg {
-                text: format!(" {}", t(&pr.join(", "))),
+                text: format!(" {}", pr.join(", ")),
                 role: BRole::Body,
             },
         ]));
@@ -321,12 +354,12 @@ pub(crate) fn pane_lines(
     lines.push(BLine::plain(String::new()));
 
     // Session section: bold header + thin rule, then the phase table.
-    lines.push(BLine::head(t("sessions")));
+    lines.push(BLine::head("sessions"));
     lines.push(BLine::meta(rule(w)));
-    lines.push(BLine::meta(t(&format!(
-        "{:<9} {:<7} {:<9} {:<12} {}",
-        "phase", "harness", "id", "model", "action"
-    ))));
+    lines.push(BLine::meta(format!(
+        "{:<9} {:<7} {:<9} {}",
+        "phase", "harness", "model", "action"
+    )));
     for s in view.sessions.iter() {
         let marker = if k == sel {
             follow = Some(lines.len());
@@ -340,109 +373,164 @@ pub(crate) fn pane_lines(
             "none" => s.reason.clone().unwrap_or_else(|| "none".into()),
             other => other.to_string(),
         };
-        lines.push(BLine::plain(t(&format!(
-            "{marker} {:<8} {:<7} {:<9} {:<12} {}",
+        lines.push(BLine::plain(format!(
+            "{marker} {:<8} {:<7} {:<9} {}",
             s.phase.as_deref().unwrap_or("-"),
             s.harness.as_deref().unwrap_or("-"),
-            short_id(s.session_id.as_deref().unwrap_or("-")),
             s.model.as_deref().unwrap_or("-"),
             action
-        ))));
+        )));
+        if let Some(sid) = s.session_id.as_deref() {
+            lines.push(BLine::meta(sid.to_string()));
+        }
+        if let Some(cmd) = s.command.as_deref() {
+            lines.push(BLine::meta(format!("$ {cmd}")));
+        }
     }
     if view.sessions.is_empty() {
-        lines.push(BLine::meta(t("sessions: none")));
+        lines.push(BLine::meta("sessions: none"));
     }
     lines.push(BLine::plain(String::new()));
 
-    // Notes section: bold header + thin rule, the newest three.
-    lines.push(BLine::head(t(&format!(
-        "notes ({}) \u{b7} decisions ({})",
-        view.notes.len(),
+    // The comment thread: bold header + thin rule, oldest first, replies
+    // indented under their heads; the ask state rides as a mark. Plain
+    // progress notes do not render here.
+    let thread: Vec<&crate::backlog_model::Note> = view
+        .notes
+        .iter()
+        .filter(|n| matches!(n.kind.as_deref(), Some("comment") | Some("reply")))
+        .collect();
+    let open = thread
+        .iter()
+        .filter(|n| n.state.as_deref() == Some("open"))
+        .count();
+    lines.push(BLine::head(format!(
+        "comments ({}, {} open) \u{b7} decisions ({})",
+        thread.len(),
+        open,
         view.decisions.len()
-    ))));
+    )));
     lines.push(BLine::meta(rule(w)));
-    for note in view.notes.iter().take(3) {
-        lines.push(BLine::plain(t(&format!("   {}", note.text))));
+    for note in &thread {
+        let mark = match note.state.as_deref() {
+            Some("open") => "\u{25cb}",
+            Some("accepted") => "\u{25d0}",
+            Some("done") => "\u{2713}",
+            Some("declined") => "\u{2717}",
+            _ => " ",
+        };
+        let indent = if note.kind.as_deref() == Some("reply") {
+            "  "
+        } else {
+            ""
+        };
+        let author = note.author.as_deref().unwrap_or("?");
+        let age = note_age(&note.ts);
+        let mut row = format!("{indent}{mark} {author} \u{b7} {age}  {}", note.text);
+        if let Some(reference) = &note.state_ref {
+            row.push_str(&format!(" \u{b7} {reference}"));
+        }
+        lines.push(BLine::plain(row));
     }
     lines.push(BLine::plain(String::new()));
     // Document section: the node's markdown plan when readable, else its
     // details text.
-    lines.push(BLine::head(t("document")));
+    lines.push(BLine::head("document"));
     lines.push(BLine::meta(rule(w)));
     let doc = b.doc.as_ref().filter(|d| d.node_id == node_id);
     match (&view.plan_path, doc) {
         (Some(path), Some(d)) if d.error.is_empty() => {
-            lines.extend(backlog_md::md_lines(&d.lines_src, w, DOC_LINE_CAP));
+            lines.extend(backlog_md::md_lines(&d.lines_src, w));
         }
         (Some(path), _) => {
             let reason = doc
                 .map(|d| d.error.clone())
                 .filter(|e| !e.is_empty())
                 .unwrap_or_else(|| "still loading".into());
-            lines.push(BLine::meta(t(&format!(
-                "plan: {path} (unreadable: {reason})"
-            ))));
+            lines.push(BLine::meta(format!("plan: {path} (unreadable: {reason})")));
             render_details(&view, w, &mut lines);
         }
         (None, _) => render_details(&view, w, &mut lines),
     }
-    (lines, follow)
+    // One wrap pass: a line wider than the pane continues on the next rows,
+    // and the selected link keeps its first row.
+    let mut out = Vec::with_capacity(lines.len());
+    let mut moved = None;
+    for (i, line) in lines.into_iter().enumerate() {
+        if follow == Some(i) {
+            moved = Some(out.len());
+        }
+        out.extend(line.wrap(w));
+    }
+    (out, moved)
 }
-
-/// The pane's document line cap before the renderer's ellipsis line.
-const DOC_LINE_CAP: usize = 400;
 
 /// The details text wrapped as plain lines, or `details: none`.
 fn render_details(view: &crate::backlog_model::NodeView, w: usize, out: &mut Vec<BLine>) {
     let text = view.details.as_ref().and_then(|d| d.as_str()).unwrap_or("");
     if text.trim().is_empty() {
-        out.push(BLine::meta(trunc("details: none", w)));
+        out.push(BLine::meta("details: none"));
         return;
     }
     let mut wrapped: Vec<String> = Vec::new();
     for para in text.split('\n') {
         wrap_line(para, w, &mut wrapped);
     }
-    for l in wrapped {
-        out.push(BLine::plain(trunc(&l, w)));
-    }
+    out.extend(wrapped.into_iter().map(BLine::plain));
 }
 
-/// Word-wrap one paragraph into lines of at most `w` chars on whitespace
-/// boundaries; a single word longer than `w` is hard-cut.
+/// Word-wrap one paragraph into lines of at most `w` display columns on
+/// whitespace. The one wrap rule: a word wider than `w` breaks across lines,
+/// and a wide char never straddles a break.
 pub(crate) fn wrap_line(para: &str, w: usize, out: &mut Vec<String>) {
+    use crate::chrome::{char_cols, str_cols};
+    let w = w.max(1);
     if para.is_empty() {
         out.push(String::new());
         return;
     }
     let mut line = String::new();
+    let mut used = 0;
     for word in para.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w {
+        if used > 0 && used + 1 + str_cols(word) > w {
             out.push(std::mem::take(&mut line));
+            used = 0;
         }
-        if line.is_empty() {
-            let n = word.chars().count();
-            if n > w {
-                let cut: String = word.chars().take(w).collect();
-                out.push(cut);
-                let rest: String = word.chars().skip(w).collect();
-                line = rest;
-                continue;
-            }
-        }
-        if !line.is_empty() {
+        if used > 0 {
             line.push(' ');
+            used += 1;
         }
-        line.push_str(word);
+        for ch in word.chars() {
+            let cw = char_cols(ch);
+            if used > 0 && used + cw > w {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push(ch);
+            used += cw;
+        }
     }
     if !line.is_empty() {
         out.push(line);
     }
 }
 
-/// First 8 chars of a session id - the join key `fno agents top` prints.
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
+/// Relative age for a thread row, from the row's RFC 3339 stamp.
+fn note_age(ts: &Option<String>) -> String {
+    use chrono::{DateTime, Utc};
+    let Some(text) = ts.as_deref() else {
+        return "?".into();
+    };
+    let Ok(then) = DateTime::parse_from_rfc3339(text) else {
+        return text.to_string();
+    };
+    let secs = (Utc::now() - then.with_timezone(&Utc)).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
 }
 
 /// The detail pane's keys. j/k (and arrows) move the selection, Enter
@@ -450,6 +538,7 @@ fn short_id(id: &str) -> String {
 /// the hit cascade, a dim row answers with its reason), PgUp/PgDn scroll
 /// the document, `b` plans, `t` launches the node as a target through the
 /// prefilled launcher, and `A` asks the king (the board's own sends).
+/// `c` posts a user comment on the node's thread.
 pub(crate) async fn detail_keys(
     view: &mut View,
     bytes: &[u8],
@@ -501,13 +590,9 @@ pub(crate) async fn detail_keys(
             ModalKey::Byte(b'b') => backlog_board::dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => backlog_board::launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => backlog_board::ask_the_king(view, sock_w).await?,
-            ModalKey::Byte(b'e') => backlog_board::edit_title(view)?,
-            ModalKey::Byte(b'p') => backlog_board::edit_priority(view)?,
-            ModalKey::Byte(b's') => backlog_board::edit_size(view)?,
-            ModalKey::Byte(b'S') => backlog_board::edit_status(view)?,
-            ModalKey::Byte(b'D') => backlog_board::append_details(view)?,
-            ModalKey::Byte(b'N') => backlog_board::add_note(view)?,
-            ModalKey::Byte(b'E') => backlog_board::edit_description(view).await?,
+            ModalKey::Byte(b'y') => copy_sel(view, false),
+            ModalKey::Byte(b'Y') => copy_sel(view, true),
+            ModalKey::Byte(b'c') => backlog_board::begin_comment(view),
             ModalKey::Byte(b'?') => {
                 if let Some(b) = view.backlog_board.as_mut() {
                     b.keys_overlay = !b.keys_overlay;

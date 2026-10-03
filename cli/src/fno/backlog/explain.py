@@ -230,7 +230,6 @@ def routing_for(node: Optional[dict]) -> dict:
         }
     profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
     try:
-        inventory = route_resolve.resolve_inventory()
         # Display, never a probe: the summary rides the verb's answer now.
         meta: dict = {}
         candidate, chain, verdict = route_resolve.resolve_slot(
@@ -238,7 +237,6 @@ def routing_for(node: Optional[dict]) -> dict:
             node,
             None,
             role=role,
-            inventory=inventory,
             meta=meta,
         )
     except Exception as exc:  # noqa: BLE001 - an unreadable grid is reported
@@ -495,7 +493,7 @@ def build_lane_fill_report(
 
     The daemon's only walk is ``active_backlog`` shelling ``advance --epic``,
     whose fan-out runs ``_ready_leaf_children`` through the converge gates.
-    This preview used to call ``select_lane_fill(mission=epic)`` instead, which
+    This preview used to call the wheel's lane-fill selector instead, which
     reaches ``fno backlog ready --mission <epic>`` - a ``mission_id`` field 0 of
     2320 graph nodes carry - so it reported an empty mission for every epic
 . It now classifies the SAME children through the SAME pre-spawn

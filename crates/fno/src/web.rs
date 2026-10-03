@@ -1066,8 +1066,34 @@ async fn backlog_model(
         Ok(q) => q,
         Err(msg) => return plain_status(StatusCode::BAD_REQUEST, &msg),
     };
+    // The question journal is 38 MB: read it only when the parsed query
+    // actually asks `has:question`, over a clone of the cached inputs.
+    let wants_questions =
+        q.q.as_deref()
+            .and_then(|text| {
+                crate::search_query::parse(
+                    text,
+                    crate::search_query::Surface::Node,
+                    crate::search_query::now_secs(),
+                )
+                .ok()
+            })
+            .is_some_and(|p| p.wants_questions());
+    if wants_questions {
+        let mut fresh = (*model_inputs(&st).await).clone();
+        backlog_model::read_search_sources(&mut fresh, true);
+        let mut board = backlog_model::board(&fresh, &q);
+        if raw.iter().any(|(k, v)| k == "keys" && v == "1") {
+            board.search_keys = Some(crate::search_query::keys_json());
+        }
+        return json_response(&board);
+    }
     let inputs = model_inputs(&st).await;
-    json_response(&backlog_model::board(&inputs, &q))
+    let mut board = backlog_model::board(&inputs, &q);
+    if raw.iter().any(|(k, v)| k == "keys" && v == "1") {
+        board.search_keys = Some(crate::search_query::keys_json());
+    }
+    json_response(&board)
 }
 
 /// `GET /backlog/node.json?id=<id>`: one node's answer behind the token.
@@ -1179,11 +1205,6 @@ fn write_guard(headers: &HeaderMap, writable: bool) -> Result<(), (StatusCode, S
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "act", rename_all = "snake_case")]
 enum Act {
-    Field {
-        id: String,
-        field: String,
-        value: String,
-    },
     Rank {
         id: String,
         place: String,
@@ -1211,8 +1232,7 @@ impl Act {
 
 fn act_id(act: &Act) -> &str {
     match act {
-        Act::Field { id, .. }
-        | Act::Rank { id, .. }
+        Act::Rank { id, .. }
         | Act::Blueprint { id }
         | Act::Target { id }
         | Act::Encounter { id, .. } => id,
@@ -1247,21 +1267,6 @@ fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (Statu
             .map(|u| u.reason.clone())
     };
     match act {
-        Act::Field { field, value, .. } => {
-            if let Some(reason) = unavailable(backlog_model::unavailable_features::FIELD_EDITS) {
-                return Err((StatusCode::CONFLICT, reason));
-            }
-            let field = match field.as_str() {
-                "title" => crate::backlog_write::Field::Title,
-                "priority" => crate::backlog_write::Field::Priority,
-                "size" => crate::backlog_write::Field::Size,
-                "status" => crate::backlog_write::Field::Status,
-                other => return Err((StatusCode::BAD_REQUEST, format!("unknown field {other:?}"))),
-            };
-            crate::backlog_write::field_argv(id, field, value, "the web backlog board")
-                .map_err(|e| (StatusCode::BAD_REQUEST, e))
-                .map(Planned::Verb)
-        }
         Act::Rank { place, .. } => {
             if let Some(reason) = unavailable(backlog_model::unavailable_features::CARD_MOVES) {
                 return Err((StatusCode::CONFLICT, reason));
@@ -1389,6 +1394,7 @@ async fn model_inputs(st: &AppState) -> Arc<backlog_model::Inputs> {
     if let Some(e) = roster_error {
         inputs.errors.push(e);
     }
+    backlog_model::read_search_sources(&mut inputs, false);
     let version = inputs.version;
     let inputs = Arc::new(inputs);
     *cached = Some(CachedModel {
@@ -2327,7 +2333,7 @@ console.log("evictedRowCount: 18 cases ok");
             .expect("controls exist");
         assert!(bar < controls, "the search bar leads the page");
         assert!(
-            BACKLOG_PAGE.contains(r#"placeholder="search id, title, label""#),
+            BACKLOG_PAGE.contains(r#"placeholder="search: s:ready h:codex -t:epic, ? for keys""#),
             "the placeholder names what search covers"
         );
         assert!(
@@ -2394,11 +2400,6 @@ const eq = (got, want, what) => {
 eq(cellHead({column: "Now", total: 12}), "Now 12", "cell head");
 // laneTotal: the lane's whole count from its cells' (uncapped) totals.
 eq(laneTotal({cells: [{total: 3}, {total: 4}, {}]}), 7, "lane total");
-// sessionCommand: attach by agent name, resume by the FULL session id, null when dim.
-eq(sessionCommand({action: "attach", agent: "w1"}), "fno agents attach w1", "attach cmd");
-eq(sessionCommand({action: "resume", session_id: "abcd1234-full-id"}),
-   "fno agents resume abcd1234-full-id", "resume cmd carries the full id");
-eq(sessionCommand({action: "none", reason: "done"}), null, "dim row has no command");
 // mergeBoard: an errors-only answer keeps the last lanes and stamps staleness.
 const last = {lanes: [{key: "p"}], fetched_at: 111};
 const bad = mergeBoard(last, {errors: ["boom"], lanes: []}, 222);
@@ -2411,14 +2412,13 @@ const good = mergeBoard(last, {errors: [], lanes: [{key: "q"}]}, 333);
 eq(good.lanes.length, 1, "a good answer lanes carry");
 eq(good.errors.length, 0, "a good answer clears the errors");
 eq(good.fetched_at, 333, "a good answer is stamped at its fetch time");
-console.log("backlog page helpers: 12 cases ok");
+console.log("backlog page helpers: 9 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cellHead"),
             lift_js_fn(BACKLOG_PAGE, "laneTotal"),
             lift_js_fn(BACKLOG_PAGE, "mergeBoard"),
-            lift_js_fn(BACKLOG_PAGE, "sessionCommand"),
             asserts
         );
         let path =
@@ -2443,7 +2443,7 @@ console.log("backlog page helpers: 12 cases ok");
                 // The end-of-harness marker is the whole verdict.
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 assert!(
-                    stdout.contains("backlog page helpers: 12 cases ok"),
+                    stdout.contains("backlog page helpers: 9 cases ok"),
                     "the shipped backlog helpers did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)
@@ -2454,10 +2454,11 @@ console.log("backlog page helpers: 12 cases ok");
 
     /// The snapshot engine's pure half, the board's shortcut resolver and
     /// the recent-search store hold their contracts when run for real:
-    /// lift cardKeeps / laneKeyOf / voteText, shortcutAction /
-    /// isTypingTarget / copiedToast and pushRecent / loadRecent from the
-    /// shipped page and run every case under node, the same rule as the
-    /// board helpers.
+    /// lift cardKeeps / laneKeyOf, the date-filter and sort helpers,
+    /// statusLabel / clampPanelWidth / fuzzyHit, nestChildren,
+    /// shortcutAction / isTypingTarget / copiedToast and pushRecent /
+    /// loadRecent from the shipped page and run every case under node, the
+    /// same rule as the board helpers.
     #[test]
     fn snapshot_page_helpers_hold_under_node() {
         let asserts = r#"
@@ -2472,8 +2473,46 @@ eq(cardKeeps(any, nodes, Object.assign({}, off, { status: ["idea"] })), false, "
 eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["bug"] })), true, "kind filter keeps");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["epic"] })), false, "kind filter drops");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { epic: ["e1"] })), true, "own id keeps an epic filter");
-eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "NEEDLE" })), true, "q is case-insensitive over details");
-eq(cardKeeps(any, nodes, Object.assign({}, off, { q: "absent" })), false, "q drops");
+// The grammar: every case-file row through the page's parser, the same
+// table the Rust case test runs.
+const searchKeys = KEYS.keys;
+const sortTable = KEYS.sort;
+const grammarNow = stampEpoch(CASES.now);
+let searchFails = 0;
+for (const id of Object.keys(CASES.rows)) {
+  const r = CASES.rows[id];
+  for (const k of Object.keys(r.fields)) {
+    r.fields[k] = (r.fields[k] || []).map(String);
+  }
+}
+for (const c of CASES.cases) {
+  try {
+    const p = parseSearch(c.q, searchKeys, c.surface, grammarNow, sortTable);
+    if (c.error) { console.error("FAIL(wanted error) " + c.q); searchFails++; continue; }
+    const kept = Object.keys(CASES.rows)
+      .filter((id) => CASES.rows[id].surface === c.surface && searchKeeps(p, CASES.rows[id].fields))
+      .sort();
+    const want = (c.keep || []).slice().sort();
+    if (JSON.stringify(kept) !== JSON.stringify(want)) {
+      console.error("FAIL " + c.q + " kept " + JSON.stringify(kept) + " want " + JSON.stringify(want));
+      searchFails++;
+    }
+  } catch (e) {
+    if (c.error && e.message === c.error) continue;
+    console.error("FAIL(err) " + c.q + " got " + e.message + " want " + c.error);
+    searchFails++;
+  }
+}
+eq(searchFails, 0, "the case file clears on the page leg");
+eq(setSortTerm("s:ready sort:created h:codex", "updated-desc"),
+  "s:ready h:codex sort:updated-desc", "setSortTerm replaces the term");
+eq(setSortTerm("s:ready", ""), "s:ready", "an empty sort drops the term only");
+eq(setSortTerm("", "created"), "sort:created", "setSortTerm on empty text appends");
+console.log("search cases: " + CASES.cases.length + " ok");
+// in-order subsequence matching still holds on its own.
+eq(fuzzyHit("wbsrt", "web board list: sorts"), true, "the title subsequence matches");
+eq(fuzzyHit("wbsrt", "word sort"), false, "letters out of order drop");
+eq(fuzzyHit("af8", "af8e03f2-1234"), true, "a session id head matches");
 const parents = new Set(["e1"]);
 const byId = new Map([["e1", { id: "e1", title: "Epic", completed_at: null }], ["x-1", any]]);
 eq(laneKeyOf(byId.get("e1"), "epic", parents, byId), { key: "e1", title: "Epic" }, "an epic sits in its own lane");
@@ -2482,17 +2521,33 @@ byId.get("e1").completed_at = "2026-01-01";
 eq(laneKeyOf(any, "epic", parents, byId), { key: "", title: "no epic" }, "a done parent's child has no epic lane");
 eq(laneKeyOf(any, "none", parents, byId), { key: "all", title: "all" }, "none is one lane");
 eq(laneKeyOf(Object.assign({}, any, { project: "" }), "project", parents, byId), { key: "", title: "unscoped" }, "unscoped project lane");
-eq(voteText("x-9"), 'fno backlog encounter x-9 --operator --evidence "REPLACE: what it cost"', "vote command");
 const nestIn = [
-  { id: "p1", title: "Parent" },
+  { id: "p1", title: "Parent", child_count: 2 },
   { id: "c1", title: "Kid", parent: "p1" },
   { id: "l1", title: "Loose" },
 ];
 const nested = nestChildren(nestIn);
 eq(nested.map((r) => r.card.id), ["p1", "c1", "l1"], "a child follows its parent");
 eq(nested.map((r) => r.depth), [0, 1, 0], "the child sits one step in");
+eq(nested[0].hidden, 1, "one of two children is absent, so one hides");
+// lane-wide: a child nests under a parent from another cell, two steps deep.
+const wide = [
+  { id: "g1", title: "Grand" },
+  { id: "p2", title: "Parent", parent: "g1", child_count: 1 },
+  { id: "c3", title: "Kid", parent: "p2" },
+];
+const wideNested = nestChildren(wide);
+eq(wideNested.map((r) => r.card.id), ["g1", "p2", "c3"], "the whole lane nests");
+eq(wideNested.map((r) => r.depth), [0, 1, 2], "depth follows the tree");
 eq(nestChildren([{ id: "c2", title: "Orphan", parent: "absent" }]).map((r) => r.depth), [0], "a child whose parent is elsewhere keeps its own row");
-console.log("snapshot page helpers: 16 cases ok");
+// a sort can place a child before its parent; the tree still nests.
+const reversed = nestChildren([
+  { id: "kid", title: "Z kid", parent: "par", child_count: 0 },
+  { id: "par", title: "A parent", child_count: 1 },
+]);
+eq(reversed.map((r) => r.card.id), ["par", "kid"], "a child listed first still follows its parent");
+eq(reversed.map((r) => r.depth), [0, 1], "and sits one step in");
+console.log("snapshot page helpers: 35 cases ok");
 // The board shortcuts: every key the ? sheet advertises, the typing guard,
 // the Escape unwind order, and the copied-id toast line.
 const M = { meta: false, ctrl: false };
@@ -2505,6 +2560,10 @@ eq(shortcutAction("k", { meta: true, ctrl: false }, { typing: true }), null, "cm
 eq(shortcutAction("j", M, {}), "sel-next", "j moves down");
 eq(shortcutAction("k", M, {}), "sel-prev", "k moves up");
 eq(shortcutAction("j", M, { hasSelection: false }), "sel-next", "j starts the selection");
+eq(shortcutAction("ArrowDown", M, {}), "sel-next", "ArrowDown moves down");
+eq(shortcutAction("ArrowUp", M, {}), "sel-prev", "ArrowUp moves up");
+eq(shortcutAction("l", M, {}), "cycle-lanes", "l cycles the lanes");
+eq(shortcutAction("l", M, { typing: true }), null, "l never fires while typing");
 // enter and y answer only with a selection on the board.
 eq(shortcutAction("Enter", M, { hasSelection: true }), "open", "enter opens the selection");
 eq(shortcutAction("Enter", M, { hasSelection: false }), null, "enter without a selection is nothing");
@@ -2535,7 +2594,7 @@ eq(isTypingTarget({}), false, "no tag is no target");
 eq(isTypingTarget(null), false, "no target is no target");
 // the toast names what landed on the clipboard.
 eq(copiedToast("n-1234"), "copied n-1234", "the toast carries the id");
-console.log("backlog shortcuts: 35 cases ok");
+console.log("backlog shortcuts: 39 cases ok");
 // The recent-search store: a capped, newest-first, string-only list under
 // one localStorage key.
 eq(pushRecent([], "a"), ["a"], "empty list grows one");
@@ -2556,16 +2615,53 @@ eq(loadRecent('[\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s9\",\
 console.log("recent searches: 12 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            lift_js_fn(BACKLOG_PAGE, "cardKeeps"),
-            lift_js_fn(BACKLOG_PAGE, "nestChildren"),
-            lift_js_fn(BACKLOG_PAGE, "laneKeyOf"),
-            lift_js_fn(BACKLOG_PAGE, "voteText"),
-            lift_js_fn(BACKLOG_PAGE, "shortcutAction"),
-            lift_js_fn(BACKLOG_PAGE, "isTypingTarget"),
-            lift_js_fn(BACKLOG_PAGE, "copiedToast"),
-            lift_js_fn(BACKLOG_PAGE, "pushRecent"),
-            lift_js_fn(BACKLOG_PAGE, "loadRecent"),
+            "{}\n{}\n{}\n{}",
+            [
+                "cardKeeps",
+                "nestChildren",
+                "laneKeyOf",
+                "lev",
+                "nearestKey",
+                "normVal",
+                "cmpParse",
+                "tokenizeSearch",
+                "splitColon",
+                "unquote",
+                "splitAlts",
+                "stampEpoch",
+                "absDate",
+                "dateBound",
+                "datePred",
+                "numPred",
+                "agePred",
+                "cmpHolds",
+                "sortTerm",
+                "looksNodeId",
+                "isUuid",
+                "bareAlts",
+                "termFrom",
+                "parseSearch",
+                "bareHit",
+                "predHolds",
+                "termHolds",
+                "searchKeeps",
+                "setSortTerm",
+                "sortCards",
+                "statusLabel",
+                "clampPanelWidth",
+                "fuzzyHit",
+                "shortcutAction",
+                "isTypingTarget",
+                "copiedToast",
+                "pushRecent",
+                "loadRecent",
+            ]
+            .iter()
+            .map(|name| lift_js_fn(BACKLOG_PAGE, name))
+            .collect::<Vec<String>>()
+            .join("\n"),
+            format!("const CASES = {};", include_str!("search_query_cases.json")),
+            format!("const KEYS = {};", crate::search_query::keys_json()),
             asserts
         );
         let path =
@@ -2588,11 +2684,15 @@ console.log("recent searches: 12 cases ok");
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 assert!(
-                    stdout.contains("snapshot page helpers: 16 cases ok"),
+                    stdout.contains("snapshot page helpers: 35 cases ok"),
                     "the shipped snapshot helpers did not clear every case:\n{stdout}{stderr}"
                 );
                 assert!(
-                    stdout.contains("backlog shortcuts: 35 cases ok"),
+                    stdout.contains("search cases: 56 ok"),
+                    "the shipped page parser did not clear every case-file row:\n{stdout}{stderr}"
+                );
+                assert!(
+                    stdout.contains("backlog shortcuts: 39 cases ok"),
                     "the shipped board shortcuts did not clear every case:\n{stdout}{stderr}"
                 );
                 assert!(
@@ -3125,18 +3225,6 @@ console.log("recent searches: 12 cases ok");
         let inp = backlog_model::fixture(vec![serde_json::json!({
             "id": "x-1", "status": "ready", "priority": "p1"
         })]);
-        // AC4's argv half: a priority act plans the field_argv form.
-        let act = Act::Field {
-            id: "x-1".into(),
-            field: "priority".into(),
-            value: "p1".into(),
-        };
-        match plan_act(&inp, &act) {
-            Ok(Planned::Verb(args)) => {
-                assert_eq!(args, vec!["backlog", "update", "x-1", "--priority", "p1"]);
-            }
-            _ => panic!("a field act plans a verb argv"),
-        }
         // AC9-EDGE: a claimed card refuses a launch, naming the node.
         let claimed = backlog_model::fixture(vec![serde_json::json!({
             "id": "x-2", "status": "in_progress"
@@ -3147,22 +3235,8 @@ console.log("recent searches: 12 cases ok");
             err.1,
             "x-2 is already being worked; open its session instead"
         );
-        // AC10-ERR: an external backend's field-edits reason is the 409 body.
-        let mut github = backlog_model::fixture(vec![serde_json::json!({
-            "id": "x-3", "status": "ready"
-        })]);
-        github.backend = "github".into();
-        let err = plan_act(
-            &github,
-            &Act::Field {
-                id: "x-3".into(),
-                field: "status".into(),
-                value: "done".into(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::CONFLICT);
-        assert_eq!(err.1, "edit it in github");
+        // AC10-ERR: an external backend's field-edits reason is gone with
+        // the field act itself; fields are agent-owned.
         // A failed read is 503; a miss is 404 naming the id; a bad field is
         // 400.
         let mut bad = backlog_model::fixture(Vec::new());
@@ -3184,16 +3258,22 @@ console.log("recent searches: 12 cases ok");
             .0,
             StatusCode::NOT_FOUND
         );
+        // A field POST no longer deserializes: the Act enum has no field
+        // variant, so the act route refuses it as unknown (AC7).
+        let raw = serde_json::json!({
+            "act": "field", "id": "x-1", "field": "color", "value": "blue"
+        });
+        let parsed: Result<Act, _> = serde_json::from_value(raw);
+        assert!(parsed.is_err(), "act field is not an act any more");
         let err = plan_act(
             &inp,
-            &Act::Field {
-                id: "x-1".into(),
-                field: "color".into(),
-                value: "blue".into(),
+            &Act::Rank {
+                id: "x-nope".into(),
+                place: "before".into(),
             },
         )
         .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
     // The route's refusal order over a real listener: guards, token, then
@@ -3234,7 +3314,7 @@ console.log("recent searches: 12 cases ok");
             stream.read_to_string(&mut reply).await.unwrap();
             reply
         }
-        let body = br#"{"act":"field","id":"x-1","field":"priority","value":"p1"}"#;
+        let body = br#"{"act":"rank","id":"x-1","place":"top"}"#;
         // AC6-ERR: a read-only bridge refuses every act.
         let readonly_state = AppState {
             writable: false,

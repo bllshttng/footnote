@@ -11,6 +11,7 @@
 //! `None` so the client can say WHICH failure fired.
 
 use serde::Deserialize;
+use serde_json::Value;
 use std::time::Duration;
 
 /// Ten seconds, court_overlay's budget for a comparable multi-store read.
@@ -23,7 +24,7 @@ const SHELLOUT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One feed row, as emitted by `fno agents feed --json`. `session_id` is what
 /// the deep link resolves through the sideline's own attach path.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct FeedItem {
     pub ts: String,
     pub kind: String,
@@ -68,6 +69,10 @@ pub struct FeedItem {
     /// `L{level} {scope}` for the crown kinds and a crowned removal.
     #[serde(default)]
     pub crown: Option<String>,
+    /// The crowned worker's name on the crown kinds; the feed search
+    /// answers `l:` through it.
+    #[serde(default)]
+    pub holder: Option<String>,
     /// The king or epic the row rolls up to; the panel groups on it.
     #[serde(default)]
     pub owner: Option<String>,
@@ -171,6 +176,163 @@ fn parse_feed(stdout: &[u8], stderr: &[u8]) -> Result<Vec<FeedItem>, FeedError> 
     })
 }
 
+/// The context one event row's field map reads: the graph rows' project,
+/// parent and open state per node, and the registry's session identities.
+pub struct EventCtx {
+    /// node id -> (project, parent, open)
+    pub nodes: std::collections::HashMap<String, (Option<String>, Option<String>, bool)>,
+    pub sessions: crate::search_query::SessionDirectory,
+}
+
+impl EventCtx {
+    pub fn from_rows(rows: &[Value], registry: &[crate::agents_view::RegistryAgent]) -> Self {
+        let mut nodes = std::collections::HashMap::new();
+        for r in rows {
+            let Some(id) = r.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let project = r.get("project").and_then(Value::as_str).map(str::to_string);
+            let parent = r.get("parent").and_then(Value::as_str).map(str::to_string);
+            let open = r
+                .get("completed_at")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty);
+            nodes.insert(id.to_string(), (project, parent, open));
+        }
+        EventCtx {
+            nodes,
+            sessions: crate::search_query::SessionDirectory::from_registry(registry),
+        }
+    }
+}
+
+/// The event row's search field map, the `Surface::Event` leg. The same
+/// canonical keys the node leg answers; `s:` refuses here because kind is
+/// the event's work state.
+pub fn event_fields(item: &FeedItem, ctx: &EventCtx) -> crate::search_query::Fields {
+    use crate::search_query::Fields;
+    let mut f = Fields::new();
+    let push = |f: &mut Fields, key: &str, val: Option<String>| {
+        if let Some(v) = val.filter(|v| !v.is_empty()) {
+            // Stamps stay as stored: the page's stamp parser reads the
+            // RFC3339 markers case-sensitively.
+            let v = if key == "ts" { v } else { v.to_lowercase() };
+            let slot = f.entry(key.to_string()).or_default();
+            if !slot.contains(&v) {
+                slot.push(v);
+            }
+        }
+    };
+    push(&mut f, "id", item.node.clone());
+    push(&mut f, "kind", Some(item.kind.clone()));
+    if let Some(sid) = &item.session_id {
+        push(&mut f, "session", Some(sid.clone()));
+        if let Some(entry) = ctx.sessions.get(sid) {
+            for id in &entry.ids {
+                push(&mut f, "session", Some(id.clone()));
+            }
+            push(&mut f, "agent", Some(entry.name.clone()));
+            push(&mut f, "harness", entry.harness.clone());
+            push(&mut f, "model", entry.model.clone());
+        }
+    }
+    push(&mut f, "spawner", item.parent.clone());
+    push(&mut f, "agent", item.name.clone());
+    push(&mut f, "actor", item.actor.clone());
+    push(&mut f, "harness", item.harness.clone());
+    push(&mut f, "model", item.model.clone());
+    push(&mut f, "effort", item.effort.clone());
+    push(&mut f, "phase", item.phase.clone());
+    if let Some(url) = &item.url {
+        if let Some(rest) = url.split("/pull/").nth(1) {
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            push(&mut f, "pr", (!num.is_empty()).then_some(num));
+        }
+    }
+    let node_ctx = item.node.as_deref().and_then(|n| ctx.nodes.get(n));
+    let project = item
+        .cwd
+        .as_deref()
+        .and_then(|cwd| {
+            cwd.rsplit('/')
+                .find(|seg| !seg.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| node_ctx.and_then(|(p, _, _)| p.clone()));
+    push(&mut f, "project", project);
+    let epic = item
+        .owner
+        .as_deref()
+        .and_then(|o| o.strip_prefix("epic "))
+        .and_then(|rest| rest.split_whitespace().next().map(str::to_string));
+    push(&mut f, "epic", epic);
+    push(&mut f, "epic", node_ctx.and_then(|(_, p, _)| p.clone()));
+    // `in`: the node and its ancestors through the context.
+    let mut chain: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(n) = &item.node {
+        chain.push(n.clone());
+        seen.insert(n.clone());
+        let mut cur = node_ctx.and_then(|(_, p, _)| p.clone());
+        while let Some(p) = cur {
+            if !seen.insert(p.clone()) {
+                break;
+            }
+            chain.push(p.clone());
+            cur = ctx.nodes.get(&p).and_then(|(_, parent, _)| parent.clone());
+        }
+    }
+    for id in chain {
+        push(&mut f, "in", Some(id));
+    }
+    let holder = item.holder.clone().or_else(|| {
+        let o = item.owner.as_deref().unwrap_or("");
+        if let Some(rest) = o.strip_prefix("king ") {
+            rest.split_once(" L").map(|(h, _)| h.to_string())
+        } else {
+            o.rsplit_once('(')
+                .and_then(|(_, r)| r.strip_suffix(')').map(str::to_string))
+        }
+    });
+    push(&mut f, "lead", holder.clone());
+    push(&mut f, "agent", holder.clone());
+    push(&mut f, "ts", Some(item.ts.clone()));
+    let area = crate::search_query::areas_for_kind(&item.kind);
+    for a in area {
+        push(&mut f, "area", Some(a.to_string()));
+    }
+    if node_ctx.is_some_and(|(_, _, open)| *open) {
+        push(&mut f, "is", Some("open".to_string()));
+    }
+    if item
+        .session_id
+        .as_deref()
+        .and_then(|sid| ctx.sessions.get(sid))
+        .is_some_and(|entry| !entry.exited)
+    {
+        push(&mut f, "is", Some("live".to_string()));
+    }
+    if item.node.is_some() {
+        push(&mut f, "has", Some("node".to_string()));
+    }
+    if item.session_id.is_some() {
+        push(&mut f, "has", Some("session".to_string()));
+    }
+    if item.url.as_deref().is_some_and(|u| u.contains("/pull/")) {
+        push(&mut f, "has", Some("pr".to_string()));
+    }
+    if item.reason.is_some() {
+        push(&mut f, "has", Some("reason".to_string()));
+    }
+    push(&mut f, "title", Some(item.title.clone()));
+    push(&mut f, "details", item.reason.clone());
+    push(&mut f, "details", item.detail.clone());
+    push(&mut f, "text", Some(item.title.clone()));
+    push(&mut f, "text", item.node.clone());
+    push(&mut f, "text", item.name.clone());
+    f
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,13 +355,58 @@ mod tests {
 
     #[test]
     fn new_fields_deserialize_when_the_projection_sends_them() {
-        let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"heir removed","reason":"why","crown":"L2 x-eeee","owner":"epic x-2222 the epic","parent":"s-lead"},{"ts":"2026-09-29T08:00:00Z","kind":"node_created","node":"x-aaaa","cwd":"/workspace/node-project","title":"created node"}]"#;
+        let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"heir removed","reason":"why","crown":"L2 x-eeee","owner":"epic x-2222 the epic","parent":"s-lead","holder":"heir"},{"ts":"2026-09-29T08:00:00Z","kind":"node_created","node":"x-aaaa","cwd":"/workspace/node-project","title":"created node"}]"#;
         let items = parse_feed(body, b"").expect("a body carrying the new fields parses");
         assert_eq!(items[0].reason.as_deref(), Some("why"));
         assert_eq!(items[0].crown.as_deref(), Some("L2 x-eeee"));
         assert_eq!(items[0].owner.as_deref(), Some("epic x-2222 the epic"));
         assert_eq!(items[0].parent.as_deref(), Some("s-lead"));
+        assert_eq!(items[0].holder.as_deref(), Some("heir"));
         assert_eq!(items[1].cwd.as_deref(), Some("/workspace/node-project"));
+        // AC7-HP: the event row interface answers the grammar's keys, and
+        // `s:` refuses on the event surface.
+        let item = FeedItem {
+            ts: "2026-10-01T08:00:00Z".into(),
+            kind: "question_asked".into(),
+            node: Some("x-eeee".into()),
+            session_id: Some("s-king-1234".into()),
+            title: "proceed with the merge?".into(),
+            owner: Some("king rowan L2".into()),
+            url: Some("https://github.com/o/r/pull/2890".into()),
+            ..Default::default()
+        };
+        let mut ctx = EventCtx::from_rows(&[], &[]);
+        ctx.nodes.insert("x-eeee".into(), (None, None, true));
+        let f = event_fields(&item, &ctx);
+        let now = 1791854400;
+        let keeps = |q: &str| -> bool {
+            match crate::search_query::parse(q, crate::search_query::Surface::Event, now) {
+                Ok(p) => p.keeps(&f),
+                Err(e) => panic!("{q} refused: {e}"),
+            }
+        };
+        assert!(keeps("k:question"), "k:question keeps");
+        assert!(keeps("l:rowan"), "l:rowan keeps through the owner holder");
+        assert!(keeps("pr:2890"), "pr:2890 keeps through the url");
+        assert!(keeps("ar:mail"), "ar:mail keeps");
+        assert!(keeps("sid:s-king-1234"), "sid: keeps");
+        assert!(keeps("is:open"), "the open node keeps is:open");
+        assert!(
+            crate::search_query::parse("s:ready", crate::search_query::Surface::Event, now)
+                .is_err()
+        );
+        // A crown row keeps under l: through the new holder field.
+        let crown = FeedItem {
+            ts: "2026-09-30T10:00:00Z".into(),
+            kind: "crown_granted".into(),
+            title: "heir crowned L2 x-eeee".into(),
+            holder: Some("heir".into()),
+            ..Default::default()
+        };
+        let fc = event_fields(&crown, &ctx);
+        let p = crate::search_query::parse("l:heir", crate::search_query::Surface::Event, now)
+            .expect("l:heir parses");
+        assert!(p.keeps(&fc), "the crown row keeps under l:heir");
     }
 
     #[test]

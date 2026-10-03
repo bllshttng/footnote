@@ -21,10 +21,10 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.hook_logs_dir` | str (optional) | _(none)_ | never | Override path to hook logs. |
 | `paths.inbox_dir` | str (optional) | _(none)_ | never | Override path to the cross-project messaging inbox dir. |
 | `paths.inbox_path` | str (optional) | _(none)_ | never | Override path to the capture-tier inbox/parking-lot file. |
-| `paths.agents_registry_path` | str (optional) | _(none)_ | never | Override path to the agents registry.json. |
 | `paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
 | `paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
 | `paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
+| `paths.chats` | str (optional) | _(none)_ | never | Override root dir for the per-chat message store (default ~/.fno/chats). |
 | `paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
 | `paths.operator_lane` | str (optional) | _(none)_ | never | Override path to the operator's priorities lane. |
 | `paths.spaces_dir` | str (optional) | _(none)_ | never | Override path to the per-repo spaces root. |
@@ -279,6 +279,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `mux.attach_digest_threshold_min` | int | `10` | advanced | Minutes since last detach before the catch-up digest overlay shows (default 10). |
 | `mux.hover_focus` | bool | `true` | advanced | Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on). |
 | `mux.status_row` | bool | `true` | advanced | Show the mux status row at the bottom of the terminal (default on). |
+| `mux.load_readout` | typing.Literal['simple', 'detailed'] | `simple` | advanced | How the mux shows machine load: simple (default) says it in plain words, e.g. 'CPU 80% busy: agents 58%, everything else 22%'; detailed shows the raw numbers (cores, load averages, GB). Both draw a CPU graph. Latched at mux client start. |
 | `mux.theme` | str (optional) | _(none)_ | advanced | Mux chrome theme: footnote-superscript (default, the brand dark palette) \| footnote-paper (auto-picked on a light terminal background) \| terminal (no-op, inherits the emulator colors) \| catppuccin \| tokyo-night \| gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - "theme.brand", "theme.needs_you" and "theme.border" take #rrggbb values that hold under any theme, and every role also takes `default` to pin that role to the terminal's own text color (white on a dark ground, black on paper); theme.border recolors every border at once (the pane frame, the modal outlines). The tab-bar mark's stamp takes no override. |
 | `mux.paint_background` | bool | `true` | advanced | While a footnote theme is active, paint the terminal's own background, foreground and 16-color palette from the theme (OSC 11/10/4) and restore them on exit (default on). |
 | `dev.source` | str | `` | never | Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default). |

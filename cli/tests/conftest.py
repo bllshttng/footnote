@@ -11,12 +11,17 @@ from pathlib import Path
 
 import pytest
 
-# Registration binds `update_command` at FIRST import of fno.doctor_cli, and
-# the test_doctor.py tests patch `fno.update.update_command` - a patch that
-# lands before that first import registers the fake permanently. Importing
-# doctor_cli here, at collection, makes the real registration the only order
-# any test process can see (both orders pinned in test_doctor_cli_registration.py).
-import fno.doctor_cli  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _no_send_settle_wait(monkeypatch):
+    """The post-send landed verify reads immediately under test.
+
+    Its settle window waits for a REAL recipient to poll or flush; no test
+    measures the wait itself, and without this every durable-demotion test
+    in the suite pays the window as sleep.
+    """
+    monkeypatch.setenv("FNO_MAIL_LANDED_SETTLE_S", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -142,20 +147,6 @@ def native_board_render(monkeypatch):
     monkeypatch.setattr(rp, "render_local_targets", render)
     return render
 
-
-@pytest.fixture(autouse=True)
-def _sandbox_decision_index(tmp_path, monkeypatch):
-    """Keep the machine-wide decision index out of the developer's ~/.fno.
-
-    ``record_decision`` writes to ``fno.decide._decisions_index_path()`` on every call, and
-    that path is deliberately machine-wide: ``FNO_REPO_ROOT`` does not move it,
-    so without this every test that records a decision appends to the real
-    index and reads back another test's rows. Autouse rather than opt-in
-    because the write happens two layers down from any test that calls
-    ``fno outstanding clear --answer``, which is not where anyone looks for it.
-    """
-    sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
-    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: sandbox)
 
 
 @pytest.fixture(autouse=True)
@@ -1307,21 +1298,24 @@ def _no_review_coverage_recompute(monkeypatch):
 def _no_live_evidence_gate(monkeypatch):
     """Hermetic default for the evidence gate.
 
-    `fno.decide.check_ruling_evidence`/`note_evidence` transport to the
+    The note gate (`fno.graph.note_cli.note_evidence`) transports to the
     `fno-agents evidence-gate` verb through `fno.rust_binary.verb_call`. In
     the test environment that resolver can find a real installed binary, so
-    an unstubbbed gate would run a foreign implementation of the claim
-    checker. The default answers pass-through (no claim); tests that need a
-    specific verdict install their own responder on
-    `fno.decide._evidence_gate`.
+    an unstubbed gate would run a foreign implementation of the claim
+    checker. The default answers pass-through (no claim) for that verb and
+    delegates every other verb to the real transport; tests that need a
+    specific verdict stub `fno.rust_binary.verb_call` themselves.
     """
+    import fno.rust_binary as rust_binary
 
-    def _passthrough(payload):
-        return {"ok": True, "rows": None, "claims": None}
+    real_verb_call = rust_binary.verb_call
 
-    from fno import decide
+    def _passthrough(verb, payload, **kwargs):
+        if verb == "evidence-gate":
+            return {"ok": True, "rows": None, "claims": None}
+        return real_verb_call(verb, payload, **kwargs)
 
-    monkeypatch.setattr(decide, "_evidence_gate", _passthrough)
+    monkeypatch.setattr(rust_binary, "verb_call", _passthrough)
 
 
 @pytest.fixture(autouse=True)

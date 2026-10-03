@@ -87,7 +87,7 @@ def _graph_details(graph_path):
 def _hosted_dispatch(monkeypatch, before_transport=None):
     calls = []
 
-    def dispatch_send(**kwargs):
+    def dispatch_send(from_name="lead", **kwargs):
         if before_transport is not None:
             before_transport()
         calls.append(kwargs)
@@ -842,7 +842,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     sent = runner.invoke(
         app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
     assert "019f48e1" in sent.output
     assert "queued (durable)" in sent.output
 
@@ -965,7 +965,7 @@ def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
     sent = runner.invoke(
         app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
     assert "queued (durable)" in sent.output
     assert len(calls) == 1
 
@@ -990,7 +990,7 @@ def test_us7b_unrostered_session_skips_pane_rung_silently(
     sent = runner.invoke(
         app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
     assert "queued (durable)" in sent.output
     assert calls == []
     assert "no agent matching" not in sent.output
@@ -1036,7 +1036,7 @@ def test_us7b_non_live_entry_never_pane_sends(
     sent = runner.invoke(
         app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
     assert "queued (durable)" in sent.output
     assert calls == []  # the stale pane was never written to
 
@@ -1076,6 +1076,11 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
 
     def _guard_run(args, *a, **kw):
         if isinstance(args, (list, tuple)) and "mux" in [str(x) for x in args]:
+            # The post-send recovery hint reads the LIVE pane list after the
+            # receipt; its own verb timeout bounds it. The delivery rung
+            # itself must still never reach the mux for a paneless row.
+            if args[:3] == ["fno", "mux", "pane"] and "ls" in [str(x) for x in args]:
+                return real_run(args, *a, **kw)
             pytest.fail(f"paneless entry must not shell out to mux: {args}")
         return real_run(args, *a, **kw)
 
@@ -1084,7 +1089,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     sent = runner.invoke(
         app, ["mail", "send", "019f48e1", "ping", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
     assert "queued (durable)" in sent.output
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
@@ -1138,7 +1143,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     sent = runner.invoke(
         app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
     assert "9a063cd3" in sent.output
     assert "queued (durable)" in sent.output
 
@@ -1201,19 +1206,23 @@ def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
 
     # No --from-name: from + model are auto-stamped from the invoking session.
     sent = runner.invoke(app, ["agents", "mail", "send", "9a063cd3", "hello"])
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    # Full sender identity travels with the message; model remains in bus record.
-    assert 'from="abcd1234"' in body
+    # Full sender identity rides the header line; the model stays on the bus
+    # record, never in the delivered text.
+    assert body.splitlines()[0].startswith("`@abcd1234 · fmail-")
     assert 'model=' not in body
-    assert 'harness="claude-code"' in body
     from fno.bus.log import iter_messages
 
-    row = next(m for m in iter_messages() if 'from="abcd1234"' in m.body)
+    row = next(
+        m for m in iter_messages()
+        if m.body.splitlines()[0].startswith("`@abcd1234 · fmail-")
+    )
     assert row.from_model == "claude-opus-4-8"
+    assert row.from_harness == "claude"
 
 
 # ---------------------------------------------------------------------------
@@ -1245,7 +1254,7 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     sent = runner.invoke(
         app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
-    assert sent.exit_code == 0, sent.output
+    assert sent.exit_code == 14, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])

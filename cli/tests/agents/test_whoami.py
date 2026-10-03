@@ -56,6 +56,24 @@ class TestResolveSelf:
         assert result.status == "live"
         assert result.resolved_via == "env"
         assert result.exit_code == 0
+        # A name two live rows claim enriches from neither (tier 1 still
+        # answers); one live row beside a dead twin enriches, and the dead
+        # twin never answers.
+        dup = _claude(harness_session_id="s-1")
+        dup2 = _claude(harness_session_id="s-2")
+        result = whoami_mod.resolve_self(
+            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_HARNESS": "claude"},
+            registry=[dup, dup2],
+        )
+        assert result.short_id is None, "an ambiguous name enriches from no row"
+        twin = _claude(status="exited")
+        live = _claude()
+        result = whoami_mod.resolve_self(
+            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_HARNESS": "claude"},
+            registry=[twin, live],
+        )
+        assert result.status == "live", "the live twin answers, never the dead one"
+        assert result.short_id == "4a1f9c2b"
 
     def test_empty_env_self_treated_as_unset(self):
         # Boundaries: FNO_AGENT_SELF="" reads as unset, not a zero-length name.

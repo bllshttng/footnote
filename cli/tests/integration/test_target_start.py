@@ -1437,7 +1437,7 @@ def _declare_fleet(monkeypatch):
     """Declare the two-harness fleet these reachability-guard tests rely on."""
     from fno import route_resolve as rr
 
-    inv = rr.inventory_from_rows([
+    inv = _inv([
         {"name": "gpt-5.4", "harness": "codex", "model": "gpt-5.4"},
         {"name": "claude-sonnet-5", "harness": "claude", "model": "claude-sonnet-5"},
     ])
@@ -1489,7 +1489,6 @@ def test_model_reachable_by_conservative_on_unknown(monkeypatch):
 # _foreign_live_holder unit tests -------------------------------------------- #
 def _wire_claim(monkeypatch, status, *, own_pid=None):
     monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: own_pid
     )
@@ -1611,7 +1610,6 @@ def test_foreign_live_holder_probe_error_degrades_none(monkeypatch):
         raise RuntimeError("corrupt claim file")
 
     monkeypatch.setattr("fno.claims.core.claim_status", boom)
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
     assert target_cli._foreign_live_holder("N") is None
 
 
@@ -1655,7 +1653,6 @@ def test_foreign_live_holder_freetext_reads_free(monkeypatch):
         return {"key": key, "state": "free"}
 
     monkeypatch.setattr("fno.claims.core.claim_status", status)
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
     assert target_cli._foreign_live_holder("fix the login bug") is None
     assert seen["key"] == "node:fix the login bug"
 
@@ -1737,7 +1734,6 @@ def test_classify_node_claim_unreadable_is_free(monkeypatch):
         raise RuntimeError("unreadable")
 
     monkeypatch.setattr("fno.claims.core.claim_status", _raise)
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
     verdict, info = target_cli._classify_node_claim("N")
     assert verdict == "free" and info is None
 
@@ -2182,3 +2178,18 @@ def test_truthful_base_names_a_timeout_apart_from_a_fetch_failure(monkeypatch):
     assert "behind=unmeasured:fetch-failed" in target_cli._truthful_base(
         Path("/repo"), "origin/main"
     )
+
+
+def _inv(rows):
+    """An Inventory declaring exactly ``rows`` (construction is all that
+    survives in Python; the fold is the verb's)."""
+    from fno import route_resolve as _rr
+
+    built = {}
+    for r in rows:
+        r = dict(r)
+        built[r.get("name", "")] = _rr.InventoryRow(
+            name=r.get("name", ""), harness=r.get("harness", ""),
+            model=r.get("model", ""), band=r.get("band", ""),
+        )
+    return _rr.Inventory(rows=built, declared=True)

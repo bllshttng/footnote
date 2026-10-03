@@ -220,7 +220,14 @@ pub(crate) fn paint(
             );
         }
         let sel = b.detail.as_ref().map(|d| d.sel);
-        let (ls, f) = node_detail::pane_lines(b, &node, sel, detail_inner_w);
+        // The frame spends two body columns on side pad: wrap the text to
+        // the columns it paints, so no line loses its tail.
+        let text_w = if framed {
+            detail_inner_w.saturating_sub(2)
+        } else {
+            detail_inner_w
+        };
+        let (ls, f) = node_detail::pane_lines(b, &node, sel, text_w);
         let body = ls
             .iter()
             .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_inner_w)))
@@ -268,9 +275,9 @@ pub(crate) fn paint(
     // The hint bar: two unframed rows of the wrapped hint text.
     let hint_top = top + h - hint_h;
     let hint = if focus_pane {
-        "j/k link · enter open · PgUp/PgDn scroll · esc board · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
+        "j/k link · enter open · y copy id · Y copy cmd · PgUp/PgDn scroll · esc board · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
     } else {
-        "hjkl move · [ ] lane · L lanes · Tab list/kanban · / search · f filter · enter details · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
+        "hjkl move · [ ] lane · L lanes · Tab list/kanban · / search · f filter · enter details · c comment (detail) · b blueprint · t target · A king · T/K/J rank · c cols · F full · ? keys"
     };
     let [a, b2] = hint_rows(hint, w);
     let hint_lines = [BLine::meta(a), BLine::meta(b2)];
@@ -304,7 +311,6 @@ pub(crate) fn framed_region(
     if h == 0 || w == 0 {
         return;
     }
-    let inner_w = w.saturating_sub(chrome::Chrome::FRAME_COLS);
     let layout = overlay_paint::layout_body_overlay(
         (top, left),
         (h, w),
@@ -331,7 +337,6 @@ pub(crate) fn framed_region(
             );
         }
     }
-    let _ = inner_w;
 }
 
 use super::overlay_paint;
@@ -476,12 +481,17 @@ mod tests {
         assert_eq!(hint_rows("tiny", 40), ["tiny".to_string(), String::new()]);
     }
 
-    // AC13-HP: the ellipsis lands only when two rows still cannot hold it.
+    // AC13-HP: two rows cannot hold the hint, so the tail drops with no
+    // marker (the ROW rule, d-36438ea4). Every painted word is whole.
     #[test]
-    fn hint_ellipsizes_when_two_rows_cannot_hold_it() {
+    fn hint_drops_the_tail_when_two_rows_cannot_hold_it() {
         let long = "word ".repeat(60);
         let [a, b] = hint_rows(long.trim(), 20);
-        assert!(b.ends_with('\u{2026}'), "{b:?}");
+        assert!(!b.contains('\u{2026}'), "{b:?}");
+        assert!(
+            b.split(' ').all(|w| w == "word"),
+            "no partial word survives the cut: {b:?}"
+        );
         assert!(a.chars().count() <= 20);
     }
 
@@ -505,8 +515,8 @@ mod tests {
     }
 }
 
-/// The two-row hint: words wrap onto two rows; row two ends with an
-/// ellipsis only when two rows cannot hold the hint.
+/// The two-row hint: words wrap onto two rows; a word that fits in neither
+/// drops whole, no marker.
 pub(crate) fn hint_rows(text: &str, w: usize) -> [String; 2] {
     if w == 0 {
         return [String::new(), String::new()];
@@ -521,8 +531,6 @@ pub(crate) fn hint_rows(text: &str, w: usize) -> [String; 2] {
                 row = 1;
                 used = 0;
             } else {
-                // Two rows cannot hold the hint: mark the cut.
-                rows[1].push_str(" \u{2026}");
                 break;
             }
         }

@@ -201,6 +201,7 @@ NON_INSTALL_SMOKES = {
     "test_json_flag.sh",
     "test_migrate_inbox_path.sh",
     "test_postinstall.sh",  # greps the installer's TEXT; runs no installer
+    "test_postinstall_clobber_guard.sh",  # stub uv refuses every install; imports nothing
     "test_preflight_hermetic.sh",  # sets PYTHONPATH on purpose, installs nothing
     "test_skeleton.sh",
     "test_stop_hook_wake_log.sh",

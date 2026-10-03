@@ -1,9 +1,8 @@
 """Semantic validation for executable single-doc plans."""
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
-import posixpath
 import re
 import shlex
 
@@ -718,25 +717,6 @@ def validate_execution(
                                 f"dependency '{dependency_id}' must reference an earlier declared wave",
                             )
                         )
-
-        if wave_mode == "parallel":
-            owners: dict[str, list[str]] = defaultdict(list)
-            for ref in refs:
-                task = tasks_by_id.get(ref)
-                if not task:
-                    continue
-                for path in task.get("surface", []):
-                    normalized = posixpath.normpath(str(path).strip())
-                    if normalized:
-                        owners[normalized].append(ref)
-            for path, owner_ids in sorted(owners.items()):
-                if len(owner_ids) > 1:
-                    violations.append(
-                        _violation(
-                            f"waves.{label}.surface",
-                            f"parallel tasks share surface '{path}': {', '.join(owner_ids)}",
-                        )
-                    )
 
     for task_id, count in sorted(Counter(referenced_tasks).items()):
         if task_id in tasks_by_id and count > 1:

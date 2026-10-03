@@ -37,7 +37,7 @@
 #      settings.local.json (Claude Code's config, not footnote's state), and
 #      scripts/save-session.py's read of the ~/.claude/.session-context.json
 #      statusline sidecar (its OWN transcript writes were re-homed to
-#      ${FNO_HOME}/sessions - see below - so only the sidecar READ remains).
+#      ${FNO_HOME}/saved-sessions - see below - so only the sidecar READ remains).
 #      setup/cli_hooks.py WRITES ~/.claude/settings.json for the same reason
 #      its siblings write ~/.gemini/settings.json and ~/.codex/config.toml:
 #      it wires a hook into the CLI's OWN config. `claude rm` runs with no
@@ -148,6 +148,13 @@
 #      level of each config dir (CLAUDE_CONFIG_DIR, else ~/.claude, plus the
 #      roster's isolated account roots). It removes only dead-pid temp files
 #      Claude Code itself created; footnote stores nothing there.
+#      setup_autowire.rs belongs here for the same site integration.py is
+#      listed for: its claude skills-dir fallback probes and clones the
+#      plugin drop into Claude Code's OWN ~/.claude/skills/fno, where
+#      Claude Code loads it as fno@skills-dir - the harness's plugin store,
+#      not footnote state (the Rust leg of the wizard adapter,
+#      dual-implementation-inventory 2026-10-02). Its test builds the same
+#      tree under temp_dir as a fixture and asserts on that.
 #      claude-config-write-guard.sh is the PreToolUse write guard for the
 #      same dir: the config dir IS the thing being guarded, so every token
 #      it matches (the ambient root, CLAUDE_CONFIG_DIR, the regex-quoted
@@ -196,7 +203,7 @@
 #     nothing under the harness dir and holds no reference to it, so CI
 #     enforces the placement rule for it with no exception.
 #   - scripts/save-session.py stays listed above under category (1): its
-#     transcript WRITES moved to ${FNO_HOME}/sessions, and its only remaining
+#     transcript WRITES moved to ${FNO_HOME}/saved-sessions, and its only remaining
 #     reference is the legitimate READ of Claude Code's own statusline sidecar.
 #
 # A file not on this list that starts referencing .claude/ must be a
@@ -281,6 +288,7 @@ cli/src/fno/agents/self_stamp.py
 cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
+crates/fno/src/doctor_update.rs
 crates/fno-agents/src/backlog/birth.rs
 crates/fno-agents/src/backlog/session_cli.rs
 crates/fno-agents/src/claude_vault.rs
@@ -291,7 +299,6 @@ cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py
 cli/src/fno/cost/_register.py
 cli/src/fno/cost/_session_cost.py
-cli/src/fno/cost/cost_tracker.py
 cli/src/fno/context_audit.py
 cli/src/fno/doctor.py
 cli/src/fno/graph/cli.py
@@ -317,6 +324,8 @@ cli/src/fno/setup_cli.py
 cli/src/fno/setup/cli_hooks.py
 cli/src/fno/setup/doctor.py
 cli/src/fno/setup/integration.py
+crates/fno/src/setup_autowire.rs
+crates/fno/src/setup_autowire_tests.rs
 cli/src/fno/setup/recommended_rules.py
 cli/src/fno/setup/test_recommended_rules.py
 cli/src/fno/target_cli.py
@@ -397,7 +406,6 @@ scripts/lint/no-invalid-events.sh
 scripts/metrics/port-order.sh
 scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py
-scripts/diagnostics/token-diagnose.py
 scripts/rename/rename-to-fno.sh
 scripts/setup/archive-worktree.sh
 scripts/setup/setup-worktree.sh

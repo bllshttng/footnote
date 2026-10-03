@@ -158,9 +158,12 @@ def _law_rows() -> "list[dict]":
     asks a question the operator already settled). ``lane`` is the verdict of
     the same authority rule `backlog decide-retract` enforces, so the ask
     gate reads the retraction constraint instead of re-deriving it."""
-    from fno.decide import list_decisions
+    from fno.rust_binary import call_front_json
 
-    _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
+    answer = call_front_json(
+        {"mode": "decisions", "argv": ["--lane", "law", "--state", "live", "--json"]}
+    )
+    rows = answer.get("decisions") or []
     return [
         {
             key: row.get(key)
@@ -301,35 +304,47 @@ def clear(
     ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
-    from fno import decide, events, paths, rust_binary
+    from fno import events, paths, rust_binary
     from fno.outstanding.deliver import deliver_answer
     from types import SimpleNamespace
 
-    if authority is not None and authority not in decide.AUTHORITY_SOURCES:
-        typer.echo(f"outstanding: --authority '{authority}' is not one of {', '.join(decide.AUTHORITY_SOURCES)}. Nothing was closed.", err=True)
+    authority_sources = ("operator", "crown", "agent", "beastmode")
+    if authority is not None and authority not in authority_sources:
+        typer.echo(f"outstanding: --authority '{authority}' is not one of {', '.join(authority_sources)}. Nothing was closed.", err=True)
         raise typer.Exit(2)
     if answer is not None and len(answer) > events.QUESTION_CAP:
         typer.echo(f"outstanding: recorded truncated: the answer is {len(answer)} characters, the event stores {events.QUESTION_CAP}.", err=True)
     provenance = {}
     if answer is not None:
+        # One resolver, one law: the native decide door resolves provenance
+        # (the deleted Python engine's three states, fail-closed third).
+        from fno.rust_binary import VerbUnavailable, call_front_json
+
         try:
-            origin = decide.enforce_origin_floor(origin)
-            provenance = decide._resolve_decider(None, authority, origin=origin)._asdict()
-            provenance["origin"] = origin
-        except (decide.UnknownOriginError, decide.RefusedAuthorityError, decide.UnattributedAuthorityError) as exc:
-            remedy = "" if isinstance(exc, decide.UnknownOriginError) else "This process has no session identity and no terminal, so it is not an agent and has no chat to compose in. Run it from an attended terminal, or from a real agent session, and answer again." if isinstance(exc, decide.UnattributedAuthorityError) else f"The refusal is about the claimed --origin {exc.origin!r}, not about who you are. Drop --origin (or drop --authority operator) and answer again." if exc.origin is not None else "An agent answers as agent or crown. The superuser lane is not an agent's to claim. Drop --authority operator and answer again."
-            typer.echo(f"outstanding: refused: {exc}. Nothing was closed; all {len(question_ids)} question(s) stay open." + (f"\n{remedy}" if remedy else ""), err=True)
+            answer_meta = call_front_json(
+                {"mode": "resolve-provenance", "authority": authority, "origin": origin}
+            )
+        except VerbUnavailable as exc:
+            typer.echo(
+                f"outstanding: refused: {exc}. Nothing was closed; all "
+                f"{len(question_ids)} question(s) stay open.",
+                err=True,
+            )
             raise typer.Exit(3)
+        kind = answer_meta.get("refusal_kind")
+        if kind:
+            refusal = answer_meta.get("refusal") or "the provenance resolver refused"
+            remedy = {
+                "unknown-origin": "",
+                "unattributed": "This process has no session identity and no terminal, so it is not an agent and has no chat to compose in. Run it from an attended terminal, or from a real agent session, and answer again.",
+                "authority": "An agent answers as agent or crown. The superuser lane is not an agent's to claim. Drop --authority operator and answer again.",
+                "origin-authority": f"The refusal is about the claimed --origin {answer_meta.get('origin')!r}, not about who you are. Drop --origin (or drop --authority operator) and answer again.",
+            }.get(kind, "")
+            typer.echo(f"outstanding: refused: {refusal}. Nothing was closed; all {len(question_ids)} question(s) stay open." + (f"\n{remedy}" if remedy else ""), err=True)
+            raise typer.Exit(3)
+        provenance = answer_meta
     result = rust_binary.verb_call("question-clear", {"ids": question_ids, "answer": answer, "cap": events.QUESTION_CAP, "provenance": provenance, "closed_by": _session_id(), "journal_path": str(paths.project_log("events.jsonl")), "index_path": str(paths.questions_jsonl()), "decisions_path": str(paths.decisions_jsonl()), "graph": str(paths.graph_json()), "repo_root": str(Path.cwd())})
     typer.echo("\n".join(result.get("lines") or ()))
-    for item in result.get("closed") or ():
-        if item.get("node") and item.get("decision_event"):
-            try:
-                projected = decide._project(item["decision_event"])
-            except (Exception, SystemExit) as exc:
-                projected = (None, f"the graph projection failed ({exc!r})")
-            if projected[0] is None:
-                typer.echo(f"outstanding: {item['qid']} decision {item['decision_id']} is recorded but not on node {item['node']}: {projected[1]}", err=True)
     for item in result.get("deliveries") or ():
         typer.echo(deliver_answer(SimpleNamespace(id=item["qid"], question=item["question"], asker=item["asker"], session_id=item.get("session_id")), answer, item["decision_id"]), err=True)
     raise typer.Exit(result["exit_code"])

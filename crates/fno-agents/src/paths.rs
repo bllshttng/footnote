@@ -339,6 +339,13 @@ impl AgentsHome {
         self.root.join("events.jsonl")
     }
 
+    /// Local OTel ingest tree: `port` (the receiver's bound port) and
+    /// `otel.db` (one `api_requests` row per API request, harness-neutral).
+    /// Owned by the daemon's otel_ingest arm.
+    pub fn otel_dir(&self) -> PathBuf {
+        self.root.join("otel")
+    }
+
     /// Directory of terminal-stop markers. `finalize` drops one file
     /// per fire-and-forget `claude --bg` session whose loop reached a terminal
     /// decision; the daemon sweep consumes it to `claude stop` the parked

@@ -34,15 +34,14 @@ def test_dedup_key_none_when_no_id_attr():
     assert dedup_key("plain body, no envelope") is None
 
 
-def test_dedup_key_stable_for_identical_envelope_but_differs_by_content():
-    # A byte-identical duplicate keys the same (true duplicate); an envelope with
-    # the SAME id but different from/body keys differently, so a 24-bit id
-    # collision between two distinct messages never causes a false drop.
-    a1 = '<fno_mail from="aaaa1111" model="opus" id="msg-x">\nhello\n</fno_mail>'
-    a2 = '<fno_mail from="aaaa1111" model="opus" id="msg-x">\nhello\n</fno_mail>'
-    b = '<fno_mail from="bbbb2222" model="opus" id="msg-x">\ngoodbye\n</fno_mail>'
-    assert dedup_key(a1) == dedup_key(a2)
-    assert dedup_key(a1) != dedup_key(b)
+def test_dedup_key_is_the_message_id():
+    # The id names the message: a re-delivery keys the same whatever the body
+    # says, both shapes dedup, and different ids never collide on the key.
+    header = "`@aaaa1111 · fmail-abc123def456 · hello`"
+    assert dedup_key(header) == dedup_key("`@aaaa1111 · fmail-abc123def456 · goodbye`")
+    assert dedup_key(header) != dedup_key("`@aaaa1111 · fmail-123abc456def · hello`")
+    tag = '<fno_mail from="aaaa1111" model="opus" id="msg-x">\nhello\n</fno_mail>'
+    assert dedup_key(tag) == dedup_key('<fno_mail from="bbbb2222" id="msg-x">x</fno_mail>')
 
 
 # ---- seen-set roundtrip + bound --------------------------------------------

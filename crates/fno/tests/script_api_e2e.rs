@@ -598,7 +598,8 @@ fn defensive_reaper_sweeps_a_pane_when_its_exit_notification_is_lost() {
     );
     let log = std::fs::read_to_string(scratch.0.join("main.log")).unwrap_or_default();
     assert!(
-        log.contains("deliberately dropped exit") && log.contains("last dead pane reaped"),
+        log.contains("deliberately dropped exit")
+            && log.contains("shutting down (last-dead-pane-reaped"),
         "the test must exercise the lost-exit timer path; log: {log}"
     );
 }

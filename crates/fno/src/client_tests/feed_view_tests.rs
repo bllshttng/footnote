@@ -33,6 +33,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         detail: None,
         reason: None,
         crown: None,
+        holder: None,
         owner: None,
         parent: None,
         url: None,
@@ -57,6 +58,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         detail: Some(resume.into()),
         reason: None,
         crown: None,
+        holder: None,
         owner: None,
         parent: None,
         url: None,
@@ -198,7 +200,7 @@ fn render_rows() {
         "unreadable store: graph.json".into(),
     ));
     let lines = feed_panel_lines(&o, false, W, ROWS, 0);
-    // At the panel's 40 columns pad_to truncates the tail; the CAUSE still
+    // At the panel's 40 columns the panel clips the tail; the CAUSE still
     // leads the line (the x-d15a contract).
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
 }
@@ -478,8 +480,8 @@ fn width_rows() {
 // (AC4) The narrowed invariant, both halves. An unfocused panel takes no
 // keys, so the header says how to focus and the marker does not move; a
 // focused panel takes the arrows and says so.
-#[test]
-fn header_rows() {
+#[tokio::test]
+async fn header_rows() {
     let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
     let lines = feed_panel_lines(&unfocused, false, W, ROWS, 0);
     assert!(
@@ -496,7 +498,7 @@ fn header_rows() {
     let focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
     let lines = feed_panel_lines(&focused, true, W, ROWS, 0);
     assert!(lines[0].contains("FOCUSED"), "focused header: {}", lines[0]);
-    assert!(lines[0].contains("esc release"));
+    assert!(lines[0].contains("esc close"));
 
     // The focus key is advertised nowhere else, so it survives every width
     // the border can be dragged to rather than being clipped off the end.
@@ -532,13 +534,9 @@ fn header_rows() {
         crate::theme::band_style(&v.theme).1,
         "the selected row wears the band while the feed owns the keyboard"
     );
-    assert!(crate::client::feed_view::release(&mut v));
-    assert!(v.feed.is_some(), "the panel stays open");
-    assert_eq!(
-        v.input_owner(),
-        crate::client::region_focus::RegionOwner::Pane,
-        "the release returns typing to the pane"
-    );
+    // The keyboard returns to the pane when the panel CLOSES, not through a
+    // release that leaves it open: the release arm is gone.
+    v.region_owner = crate::client::region_focus::RegionOwner::Pane;
     let frame = v.compose();
     let cols = frame.cols as usize;
     let x0 = cols - v.feed_panel_w() as usize;
@@ -548,9 +546,32 @@ fn header_rows() {
         Color::Default,
         "the band is gone once typing returns to the pane"
     );
-    // Releasing twice is a no-op, never a close.
-    assert!(!crate::client::feed_view::release(&mut v));
-    assert!(v.feed.is_some());
+    // Esc and e close the focused panel outright; there is no key-less open
+    // state left behind.
+    v.region_owner = crate::client::region_focus::RegionOwner::Feed;
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"e", &mut writer)
+        .await
+        .unwrap();
+    assert!(v.feed.is_none(), "e closes the focused panel");
+    assert_eq!(
+        v.input_owner(),
+        crate::client::region_focus::RegionOwner::Pane,
+        "closing returns typing to the pane"
+    );
+    // A lone Esc through the same fold closes too: the fold carries a lone
+    // ESC, and the quiet-window flush (the empty read) releases it.
+    let mut v = view_with_rows(vec![]);
+    v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
+    v.region_owner = crate::client::region_focus::RegionOwner::Feed;
+    feed_view::feed_keys(&mut v, &[0x1b], &mut writer)
+        .await
+        .unwrap();
+    assert!(v.feed.is_some(), "the carried Esc has not fired yet");
+    feed_view::feed_keys(&mut v, &[], &mut writer)
+        .await
+        .unwrap();
+    assert!(v.feed.is_none(), "esc closes the focused panel");
 
     assert_eq!(feed_view::pan_by("abcdef", 0), "abcdef");
     assert_eq!(feed_view::pan_by("abcdef", 2), "cdef");
@@ -572,7 +593,7 @@ fn header_rows() {
         );
         let focused = header_line(true, FeedOrder::Grouped, w);
         assert!(
-            focused.starts_with(" esc release")
+            focused.starts_with(" esc close")
                 || unicode_width::UnicodeWidthStr::width(focused.as_str()) <= w,
             "w={w} picked {focused:?}"
         );
@@ -583,8 +604,8 @@ fn header_rows() {
     assert!(header_line(true, FeedOrder::Grouped, 8).starts_with(" esc"));
 }
 
-// (AC4-EDGE) Esc releases the keyboard and leaves the panel open, so the very
-// next byte reaches the pane again.
+// Esc and e close the focused panel; a close returns typing to the pane,
+// and the reopen starts unfocused.
 
 // The pan moves the TITLE only, in display columns, and never splits a wide
 // glyph: the stamp, kind and node stay anchored so a panned row is still the

@@ -149,8 +149,9 @@ pub(crate) async fn run_fno_captured_full(
 /// `fno` front door with `agents spawn`; cwd, harness and advanced values
 /// ride as separate argv elements, and the message NEVER rides argv - it
 /// arrives through `--prompt-file -` stdin at the shell-out below. No
-/// `--force`, no `--yolo`: normal gates decide, and a refusal is the
-/// product.
+/// `--yolo`: normal gates decide, and a refusal is the product. `--force`
+/// rides only when the user pressed it (the per-request composer override,
+/// journaled server-side).
 pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &str) -> Vec<String> {
     let mut argv: Vec<String> = vec![fno.to_string(), "agents".to_string(), "spawn".to_string()];
     // A model picked from a routing row rides as a MODEL-ONLY pin: with
@@ -185,6 +186,9 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
         // popup launch that silently waits reads as a hung button.
         "--no-wait".to_string(),
     ]);
+    if req.force {
+        argv.push("--force".to_string());
+    }
     // A routing-row pick rides the row's route alone: a route owns the
     // model, so the model+vendor pair (a route AND a model) never forms.
     if let Some(r) = &req.route {
@@ -293,7 +297,10 @@ pub(crate) async fn run_fno_captured_with_stdin_full(
         .kill_on_drop(true);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let fut = async move {
-        let mut child = crate::process_admission::tokio_spawn(&mut command).ok()?;
+        let mut child = match crate::process_admission::tokio_spawn(&mut command) {
+            Ok(child) => child,
+            Err(_) => return None,
+        };
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             // The seed write can lose a race with a door that refuses
@@ -925,6 +932,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         assert_eq!(
             launch_spawn_argv("fno", &req, "work"),
@@ -953,6 +961,25 @@ mod tests {
                 "-",
             ]
         );
+        // Force rides only when the user pressed it, and always as its own
+        // argv element (the door's own flag).
+        let mut forced = req.clone();
+        forced.force = true;
+        let argv = launch_spawn_argv("fno", &forced, "work");
+        assert!(
+            argv.iter().any(|a| a == "--force"),
+            "a forced request carries --force: {argv:?}"
+        );
+        let without: Vec<String> = argv
+            .iter()
+            .filter(|a| a.as_str() != "--force")
+            .cloned()
+            .collect();
+        assert_eq!(
+            launch_spawn_argv("fno", &req, "work"),
+            without,
+            "force adds nothing else"
+        );
         let configured_route = AgentLaunchRequest {
             request_id: 6,
             revision: 1,
@@ -973,6 +1000,7 @@ mod tests {
             extra_flags: vec!["--agent".into(), "abc".into(), "--name".into(), "x".into()],
             worktree: false,
             branch: None,
+            force: false,
         };
         assert_eq!(
             launch_spawn_argv("fno", &configured_route, "work"),
@@ -1018,6 +1046,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         assert_eq!(
             launch_spawn_argv("fno", &thread, "s"),
@@ -1060,6 +1089,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         assert_eq!(
             launch_spawn_argv("fno", &pane, "s"),
@@ -1106,6 +1136,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         let argv = launch_spawn_argv("fno", &row_pinned, "s");
         assert!(
@@ -1140,6 +1171,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         let argv = launch_spawn_argv("fno", &route_pinned, "s");
         assert!(
@@ -1175,6 +1207,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         assert_eq!(
             launch_spawn_argv("fno", &new_tab, "s"),
@@ -1224,6 +1257,7 @@ mod tests {
             extra_flags: Vec::new(),
             worktree: false,
             branch: None,
+            force: false,
         };
         assert_eq!(
             launch_spawn_argv("fno", &req, "s"),

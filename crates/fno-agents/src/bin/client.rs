@@ -159,6 +159,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("wave") {
+        std::process::exit(fno_agents::wave::run(&args[1..]));
+    }
     // cli/src/fno/pr/_sync_canonical.py transports HERE through verb_call:
     // the post-merge canonical sync + its catch-up sweep and staleness
     // alarm, native. Registers no verb (the shrink law allows no new
@@ -195,6 +198,11 @@ fn main() {
         Some("harness-probe" | "harness-matrix")
     ) {
         std::process::exit(fno_agents::harness_reader::transport_doors(&args));
+    }
+    // `harness-roster`: the one-roster JSON read; Python's
+    // fno.harness_names transports here through resolve_binary.
+    if args.first().map(String::as_str) == Some("harness-roster") {
+        std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
@@ -654,6 +662,32 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::announce::run_announce(&args[1..]);
     }
 
+    // `chats`: the conversation record plane (see chats.rs doc). Direct
+    // dispatch like announce; no daemon RPC - a record write must work when
+    // the daemon is wedged, and the read doors back the thread read model.
+    if verb == "chats" {
+        return fno_agents::chats::run_chats(&args[1..]);
+    }
+
+    // `mail-threads`: the mux Messages tab's thread read model (see
+    // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
+    // read must work when the daemon is wedged. Hidden from help and from
+    // ALL_CLIENT_ACTIONS, like court-fold.
+    if verb == "mail-threads" {
+        return fno_agents::mail_threads::run_mail_threads(&args[1..]);
+    }
+
+    // `update-journal`: the `fno doctor update` lifecycle's one Rust door
+    // (see update_journal.rs doc). Direct dispatch, no daemon RPC: the
+    // lifecycle rows land even when the daemon is wedged, which is the
+    // failure the node exists to name. Never registered in
+    // ALL_CLIENT_ACTIONS (the action list is shrink-only); the update
+    // lifecycle execs the binary directly, the dispatch rides the
+    // `verb ==` arm.
+    if verb == "update-journal" {
+        return fno_agents::update_journal::run_update_journal(&args[1..]);
+    }
+
     // `capabilities` / `target-family` (change 2): read-only leaves
     // over the packaged capability table and the merge-posture family table,
     // `review-coverage`: standalone review_coverage producer (see its own doc
@@ -734,6 +768,14 @@ async fn run(args: Vec<String>) -> i32 {
     // own - it answers, the caller judges.
     if verb == "sandbox-probe" {
         return fno_agents::sandbox_probe::run_sandbox_probe(&args[1..]);
+    }
+
+    // `release-notes`: the update modal's PR-grouped release notes (see
+    // release_notes.rs). Python's `fno doctor update --check` resolver calls
+    // it through the verb seam; it answers `{"notes": null}` on any git
+    // failure rather than refusing - the payload never blocks on it.
+    if verb == "release-notes" {
+        return fno_agents::release_notes::run_release_notes(&args[1..]);
     }
 
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
@@ -948,6 +990,16 @@ async fn run(args: Vec<String>) -> i32 {
     // Starts nothing, so the Stop hook's never-lazy-start promise holds.
     if verb == "registry-json" {
         return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
+    }
+    // sessions-map: the daemon-free session-to-node join the top view reads
+    // (graph sessions rows + node claims, claim precedence). Starts nothing.
+    if verb == "sessions-map" {
+        return fno_agents::session_join::run_sessions_map(&AgentsHome::from_env());
+    }
+    // revival-check: whether a spawn --resume revives an existing row instead
+    // of forking. Starts nothing.
+    if verb == "revival-check" {
+        return fno_agents::revival_check::run_revival_check(&args[1..], &AgentsHome::from_env());
     }
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);
@@ -1315,6 +1367,10 @@ async fn run(args: Vec<String>) -> i32 {
         // zcode `ask` resumes by name over the headless lane: one -p --resume
         // turn per ask, session id from the row's harness_session_id.
         if let Some(code) = fno_agents::zcode_ask::maybe_run_zcode_ask(&home, &params, &agent_name)
+        {
+            return code;
+        }
+        if let Some(code) = fno_agents::footnote_harness::maybe_run_ask(&home, &params, &agent_name)
         {
             return code;
         }
@@ -1955,13 +2011,10 @@ fn validate_effort_for_spawn(
     if value.is_empty() {
         return Err("--effort must be non-empty".to_string());
     }
-    if matches!(provider, "gemini") {
-        return Err(format!(
-            "harness {} has no reasoning-effort surface; omit --effort",
-            provider
-        ));
-    }
-    Ok(())
+    // The one effort owner (effort_surface.rs) answers the whole deny set:
+    // gemini, cursor-agent and an undeclared harness refuse on the thread and
+    // headless lanes exactly as the Python lane's bridge refuses them.
+    fno_agents::effort_surface::effort_tokens(provider, value).map(|_| ())
 }
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
@@ -2071,7 +2124,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
     Ok(())
 }
 
-/// The Python seam (rust_runtime.make_context -> inject_spawn_defaults) is
+/// The Python seam (rust_runtime.make_context -> compose_spawn_argv) is
 /// the only reader of config.agents.profiles. A spawn that skipped it carries
 /// no configured route, model, effort or account, so it goes back to the
 /// front door; the marker asserts the crossing and is parsed beside `--yolo`.
@@ -2744,6 +2797,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             permission_mode,
             timeout,
             &harness_args,
+            params.get("node").and_then(|v| v.as_str()),
+        )),
+
+        // footnote headless: footnote's own loop, run in this process.
+        ("footnote", "headless") => emit!(fno_agents::footnote_harness::dispatch_once(
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            timeout,
             params.get("node").and_then(|v| v.as_str()),
         )),
 
@@ -3812,7 +3877,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("yolo".into(), Value::Bool(true));
             }
             // The Python spawn seam (rust_runtime
-            // make_context -> inject_spawn_defaults) is the only reader of
+            // make_context -> compose_spawn_argv) is the only reader of
             // config.agents.profiles. This token asserts it crossed upstream
             // and carries its enforcement verdict. Consumed here - never
             // forwarded, never read past the `--` fence - so no harness argv

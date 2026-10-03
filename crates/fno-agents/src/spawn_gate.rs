@@ -189,6 +189,11 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
 /// and before any capacity math. Mail stays ungated so the incident can be
 /// announced and explained; `fno agents incident clear` reopens admission.
 fn fleet_incident_gate() -> Result<(), Refusal> {
+    // A caller with no worker identity is the human's own typed verb: their
+    // call is the recovery path, so the stop holds agent fan-out only.
+    if !crate::spawn_gate_admission::gate_agent_origin() {
+        return Ok(());
+    }
     match crate::fleet_incident::verdict_for("spawns") {
         crate::fleet_incident::Verdict::Clear(_) => Ok(()),
         crate::fleet_incident::Verdict::Stopped(record) => {
@@ -1368,6 +1373,10 @@ fn decide_gate(
     // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
+    // the machine admission door is the same shape one door later: an
+    // arm-measured world fact that holds agent spawns before any capacity
+    // math.
+    crate::spawn_gate_admission::process_admission_gate()?;
     if let Some(refusal) = review_session_gate(&input) {
         return Err(refusal);
     }
@@ -1441,6 +1450,16 @@ fn decide_gate(
         for w in &lane_warnings {
             eprintln!("{w}");
         }
+    }
+
+    // A caller with no worker identity is the human's own typed verb: no
+    // capacity gate below may refuse or hold it. The slot acquire stays
+    // best-effort so the spawned worker still joins the roster accounting.
+    if !crate::spawn_gate_admission::gate_agent_origin() {
+        if substrate == "headless" {
+            acquire_worker_slot(&mut guard, name, &holder, holder_pid, route_provider, false).ok();
+        }
+        return Ok(guard);
     }
 
     // The lane cap binds the provider axis only; an unrouted spawn is
@@ -2477,6 +2496,17 @@ pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
     (footer, keeper)
 }
 
+/// The footprint payload's admission split, `(fleet_cores, machine_cores)`,
+/// as the one fleet-share answer for the machine arm and the spawn CPU
+/// axis alike. `None` when the probe or the parse fails, which classifies
+/// as fleet load.
+pub(crate) fn fleet_split() -> Option<(f64, f64)> {
+    let raw = footprint_cause_raw().ok()?;
+    let payload: FootprintCausePayload = serde_json::from_str(&raw).ok()?;
+    let admission = payload.admission?;
+    Some((admission.fleet_cores, admission.machine_cores))
+}
+
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     // Test seam: a pinned payload keeps gate tests measuring their own axis,
     // never the live machine's load or whatever probe PATH resolves here.
@@ -3194,7 +3224,8 @@ MemAvailable:    8000000 kB\n";
 
     /// AC3-HP (Rust side): an active stop refuses at the FIRST boundary -
     /// this call runs before `run_gate`'s `FNO_SPAWN_GATE=0` return, so the
-    /// bypass env cannot wave a spawn through.
+    /// bypass env cannot wave a spawn through. AC2-HP: the machine brake
+    /// door one step later refuses the same way and admits an expired one.
     #[test]
     fn fleet_incident_gate_refuses_a_stopped_record() {
         let _guard = crate::claims::test_env_lock()
@@ -3222,13 +3253,74 @@ MemAvailable:    8000000 kB\n";
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 
+        // The stop holds an agent-origin caller only; the human's own typed
+        // verb is the recovery path and passes.
+        std::env::set_var("FNO_AGENT_SELF", "incident-test-worker");
         assert_eq!(
             fleet_incident_gate().err().map(|r| r.exit_code),
             Some(EXIT_FLEET_STOP)
         );
+        std::env::remove_var("FNO_AGENT_SELF");
+        assert!(fleet_incident_gate().is_ok(), "no identity, no hold");
         match saved {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        // The machine admission door one boundary later: armed refuses a
+        // worker identity with the same exit code and a machine-runaway
+        // reason; expired admits; no identity admits under the same armed
+        // brake (the human's own typed verb is never held here).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brake.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::env::set_var("FNO_MACHINE_BRAKE", &path);
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "until_epoch": now + 600,
+                "reason": "machine runaway: load hot for 700s",
+                "group": {"name": "claude", "count": 9, "ppid": 1},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("FNO_AGENT_SELF", "gate-admission-test");
+        let refusal = crate::spawn_gate_admission::process_admission_gate()
+            .err()
+            .expect("armed brake refuses");
+        assert_eq!(refusal.exit_code, EXIT_FLEET_STOP);
+        assert!(
+            verdict_line(&refusal).contains("machine-runaway"),
+            "{refusal:?}"
+        );
+        // No worker identity, no hold: the default door admits.
+        std::env::remove_var("FNO_AGENT_SELF");
+        assert!(
+            crate::spawn_gate_admission::process_admission_gate().is_ok(),
+            "a caller with no identity passes the armed brake"
+        );
+        std::env::set_var("FNO_AGENT_SELF", "gate-admission-test");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "until_epoch": now - 10,
+                "reason": "machine runaway: expired",
+                "group": serde_json::Value::Null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            crate::spawn_gate_admission::process_admission_gate().is_ok(),
+            "an expired brake admits the spawn"
+        );
+        std::env::remove_var("FNO_AGENT_SELF");
+        match std::env::var_os("FNO_MACHINE_BRAKE") {
+            Some(v) if v == path.as_os_str() => std::env::remove_var("FNO_MACHINE_BRAKE"),
+            _ => {}
         }
     }
 
@@ -3505,6 +3597,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-nowait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -3829,6 +3922,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-rows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -3920,6 +4014,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-wrows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -4029,6 +4124,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-share-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
@@ -4812,6 +4908,7 @@ Swapouts: 3444531.\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = tempfile::tempdir().unwrap();
         let fnodir = dir.path().join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();

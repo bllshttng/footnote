@@ -1,5 +1,8 @@
 {
-  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection",
+  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection. Optional context/nudge/inject/announce hooks fail open fast under scripts/lib/hook-budget.sh; their timeout entries here are backstops just above that internal budget. Gates that decide (target-stop-hook.sh, the PreToolUse guards, edit-integrity.sh, code-review-attest.sh, target-subagent-guard.sh, inject-control-drain-tool-boundary.sh) keep their own budgets; docs/hooks-fail-open.md owns the list.",
+  "modules": [
+    "./buddy/register.ts"
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -92,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude PreToolUse"
           },
           {
             "type": "command",
@@ -117,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh blocked"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude Notification"
           }
         ]
       }
@@ -128,29 +131,37 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude UserPromptSubmit"
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-mail-notify.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
-          },
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-prompt-submit.sh",
             "timeout": 5
           },
           {
             "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/born-with-why-offer-inject.sh",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-mail-notify.sh",
+            "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-announce.sh prompt",
+            "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
+            "timeout": 4
+          },
+          {
+            "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prompt-outstanding.sh",
-            "timeout": 2
+            "timeout": 4
           }
         ]
       }
@@ -168,11 +179,12 @@
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh",
+            "timeout": 4
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude Stop"
           }
         ]
       }
@@ -182,7 +194,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh model"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-state.sh claude PostModelSwitch"
           }
         ]
       }
@@ -249,7 +261,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           }
         ]
       },
@@ -259,7 +271,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
-            "timeout": 5
+            "timeout": 4
           }
         ]
       }
@@ -365,7 +377,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-run.sh claude-session-start",
-            "timeout": 60
+            "timeout": 50
           }
         ]
       }

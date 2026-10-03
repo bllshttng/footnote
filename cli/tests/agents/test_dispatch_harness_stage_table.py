@@ -4,7 +4,7 @@
 deprecated ``dispatch.harness`` reads as the fallback rung beneath it for one
 release. Both dispatch doors - ``resolve_dispatch`` (dispatch-node.sh /
 ``resolve_node_spawn``) and ``fno agents spawn``
-(inject_spawn_defaults) - must answer one harness for one node.
+(compose_spawn_argv) - must answer one harness for one node.
 """
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from typing import Optional
 
 from fno.agents.harness_map import resolve_dispatch
 from fno.dispatch_flags import configured_dispatch_harness
+
+import pytest
 
 
 class _Defaults:
@@ -135,18 +137,30 @@ def test_dispatch_door_keeps_the_legacy_key_alone() -> None:
     assert not any("ignored" in entry for entry in out["decision"])
 
 
-def test_spawn_door_answers_the_same_harness() -> None:
+def test_spawn_door_answers_the_same_harness(tmp_path, monkeypatch) -> None:
     """The measured failure this file pins: one node through both doors must
     not land on two vendors. The spawn door reads the same stage-table field
     its own merge already owned; the dispatch door now reads it too."""
-    from fno.agents.spawn_defaults import inject_spawn_defaults
+    from fno.rust_binary import find_dev_binary
 
-    stub = _settings(profile_provider="codex", legacy_harness="claude")
-    argv = inject_spawn_defaults(
-        ["spawn", "/fno:target x-1"], settings=stub, env={}
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[agents.profiles.target]\nprovider = "codex"\n', encoding="utf-8"
     )
-    assert "--harness" in argv
+    monkeypatch.setenv("FNO_CONFIG", str(config_path))
+    monkeypatch.setenv("FNO_NO_CANONICAL_CONFIG", "1")
+
+    from fno.agents.spawn_defaults import compose_spawn_argv
+
+    argv = compose_spawn_argv(["spawn", "/fno:target x-1"])
     assert argv[argv.index("--harness") + 1] == "codex"
+
+    out = resolve_dispatch(settings=_settings(profile_provider="codex"))
+    assert out["harness"] == "codex"
 
 
 def test_dispatch_door_carries_the_stage_table_route() -> None:

@@ -198,7 +198,9 @@ fn tmp_claims_root(tag: &str) -> PathBuf {
 /// child alive in the SAME process group (no job control under `sh -c`, so
 /// the background job never gets its own pgid). The old `wait_or_kill_group`
 /// only killed on timeout/exception; this proves the native owner kills it on
-/// a plain, successful, on-time exit too.
+/// a plain, successful, on-time exit too. Since the suite_leaked verdict
+/// (x-bd69 change 3), that same green-plus-leak run also reads as FAILURE:
+/// the group was emptied, but a green suite that leaked is not done.
 #[test]
 fn normal_exit_still_reaps_a_backgrounded_group_mate() {
     let root = tmp_claims_root("normal-exit");
@@ -215,9 +217,10 @@ fn normal_exit_still_reaps_a_backgrounded_group_mate() {
         ))
         .status()
         .expect("run fno-agents test-run");
-    assert!(
-        status.success(),
-        "leader's own exit must still read as success"
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a green suite that leaked its group is not done (suite_leaked)"
     );
 
     let leftover_pid: u32 = std::fs::read_to_string(&pid_file)
@@ -779,6 +782,89 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
         "the argv must never spawn mid-incident: {stderr}"
     );
 
+    // Same stop, the install-build contract (law d-829648bb: nothing stops
+    // fno loading for the user): an agent-origin build-admit parks at the
+    // hold while the marked install build and any user-origin build (no
+    // FNO_AGENT_SELF, law d-705a00a3) walk straight through.
+    let wt = tmp_claims_root("fleet-recheck-wt");
+    let cargo_pid = std::process::id().to_string();
+    let mut plain = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .env("FNO_AGENT_SELF", "worker")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the held plain build");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        plain.try_wait().unwrap().is_none(),
+        "an agent-origin build must still wait at the tests hold"
+    );
+    plain.kill().expect("kill the waiting plain build");
+    let _ = plain.wait();
+
+    let start = Instant::now();
+    let out = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(&cargo_pid)
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .env("FNO_INSTALL_BUILD", "1")
+        .output()
+        .expect("run the install build");
+    assert!(
+        out.status.success(),
+        "the install build walks past the tests hold: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the install build must not wait out the hold, took {:?}",
+        start.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("fleet stop holds tests"),
+        "the install build must not park at the hold: {stderr}"
+    );
+
+    let start = Instant::now();
+    // A pid of its own: the install run above holds build:cargo under the
+    // test pid, and the door's own-holder check would return 0 before the
+    // user lane or the hold was ever consulted.
+    let mut user_cargo = Command::new("sleep").arg("60").spawn().unwrap();
+    let out = Command::new(bin())
+        .args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(user_cargo.id().to_string())
+        .arg("--worktree")
+        .arg(&wt)
+        .env("FNO_AGENTS_HOME", &home)
+        .env_remove("FNO_AGENT_SELF")
+        .output()
+        .expect("run the user-origin build");
+    assert!(
+        out.status.success(),
+        "a user-origin build walks past the tests hold: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the user-origin build must not wait out the hold, took {:?}",
+        start.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("fleet stop holds tests"),
+        "the user-origin build must not park at the hold: {stderr}"
+    );
+    let _ = user_cargo.kill();
+    let _ = user_cargo.wait();
+    let _ = std::fs::remove_dir_all(&wt);
+
     let _ = holder.wait();
     let cleared = Command::new(bin())
         .args(["fleet-incident", "clear", "--reason", "queue wedge done"])
@@ -867,7 +953,11 @@ fn build_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Pat
         .arg(worktree)
         .env("FNO_TEST_NEVER_WAIT_AFTER_SECS", "0")
         .env("FNO_CLAIMS_ROOT", root)
-        .env("TMPDIR", root);
+        .env("TMPDIR", root)
+        // Every queue contract at these doors is agent-origin (law
+        // d-705a00a3: a user-typed cargo never queues); the user-origin
+        // callers below strip this.
+        .env("FNO_AGENT_SELF", "worker");
     cmd
 }
 
@@ -877,8 +967,10 @@ fn build_holder(root: &std::path::Path) -> Option<String> {
         .map(|rec| rec.holder)
 }
 
-/// A second cargo waits on the first cargo's `build:cargo` claim, names the
-/// holder while it waits, and is admitted once that cargo process exits.
+/// A second agent-origin cargo waits on the first cargo's `build:cargo`
+/// claim, names the holder while it waits, and is admitted once that cargo
+/// process exits. A user-origin cargo held at the same moment does not
+/// queue: it admits at once beside the holder (law d-705a00a3).
 #[test]
 fn a_second_cargo_waits_until_the_building_cargo_exits() {
     let root = std::fs::canonicalize(tmp_claims_root("build-admit")).unwrap();
@@ -887,6 +979,7 @@ fn a_second_cargo_waits_until_the_building_cargo_exits() {
     std::fs::create_dir_all(&tree_b).unwrap();
     let mut cargo_a = Command::new("sleep").arg("60").spawn().unwrap();
     let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut cargo_user = Command::new("sleep").arg("60").spawn().unwrap();
 
     let first = build_admit(&root, cargo_a.id(), &tree_a).status().unwrap();
     assert!(first.success(), "the first cargo must be admitted at once");
@@ -901,6 +994,41 @@ fn a_second_cargo_waits_until_the_building_cargo_exits() {
     assert!(
         waiter.try_wait().unwrap().is_none(),
         "the second cargo must hold while the first builds"
+    );
+
+    // The user lane outranks the whole queue: while the agent holder keeps
+    // the door and the agent waiter sits queued, the user's cargo walks
+    // through at once, compiles beside the holder, and leaves the claim
+    // with the holder.
+    let start = Instant::now();
+    let out = build_admit(&root, cargo_user.id(), &tree_a)
+        .env_remove("FNO_AGENT_SELF")
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the user-origin build-admit");
+    assert!(
+        out.status.success(),
+        "the user-origin cargo must be admitted beside the holder: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the user-origin cargo must not queue, took {:?}",
+        start.elapsed()
+    );
+    let user_stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        user_stderr.contains("user build compiles beside") && user_stderr.contains(&holder),
+        "the user line must name the holder it compiles beside: {user_stderr}"
+    );
+    assert_eq!(
+        build_holder(&root),
+        Some(holder.clone()),
+        "the holder keeps its claim; the user build is claimless"
+    );
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "the agent waiter must still hold after the user walk-through"
     );
 
     let _ = cargo_a.kill();
@@ -928,6 +1056,8 @@ fn a_second_cargo_waits_until_the_building_cargo_exits() {
     assert_ne!(build_holder(&root), Some(holder), "the waiter now holds");
     let _ = cargo_b.kill();
     let _ = cargo_b.wait();
+    let _ = cargo_user.kill();
+    let _ = cargo_user.wait();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1129,7 +1259,9 @@ fn run_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path)
         .env("FNO_TEST_NEVER_WAIT_AFTER_SECS", "0")
         .env("FNO_CLAIMS_ROOT", root)
         .env("TMPDIR", root)
-        .env("FNO_CONFIG", root.join("config.toml"));
+        .env("FNO_CONFIG", root.join("config.toml"))
+        // Same agent-origin default as build_admit above.
+        .env("FNO_AGENT_SELF", "worker");
     cmd
 }
 
@@ -1159,6 +1291,27 @@ fn a_third_cargo_run_waits_until_a_slot_frees() {
     assert!(
         waiter.try_wait().unwrap().is_none(),
         "the third cargo must wait while both slots are held"
+    );
+
+    // The user lane never queues on the slots: with both held and an agent
+    // waiter parked, a user-origin run-admit walks through at once.
+    let start = Instant::now();
+    let user = run_admit(&root, std::process::id(), &tree_3)
+        .env_remove("FNO_AGENT_SELF")
+        .status()
+        .unwrap();
+    assert!(
+        user.success(),
+        "the user-origin cargo must be admitted with every slot held"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the user-origin cargo must not queue on the slots, took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "the agent waiter must still hold after the user walk-through"
     );
 
     let _ = holder_1.kill();

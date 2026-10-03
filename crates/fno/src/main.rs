@@ -64,6 +64,10 @@ enum Role {
     /// `fno uninstall`: native, because it removes the Python wheel it would
     /// otherwise forward to.
     Uninstall(fno::uninstall::Opts),
+    /// `fno config setup auto-wire`: detect agent CLIs on PATH and wire the
+    /// fno plugin into each. Native, because it must answer before the wheel
+    /// exists on a mid-install machine and forwards would 127 there.
+    SetupAutowire,
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
@@ -149,6 +153,10 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno doctor update` and root `fno update`: the native updater (the
+    /// Python leg is deleted in the same change). Args from the verb name
+    /// onward.
+    DoctorUpdate(Vec<OsString>),
     /// `fno agents history ... --graph ...`: the native session-card reader.
     AgentsHistory(Vec<OsString>),
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
@@ -162,6 +170,9 @@ enum Role {
     /// `fno inbox decisions ...`: the native listing read, classified beside
     /// the law verbs; the Python `inbox` tree keeps every other name.
     InboxDecisions(Vec<OsString>),
+    /// `fno inbox decide ...`: the native decide record verb, classified
+    /// beside the law verbs.
+    InboxDecide(Vec<OsString>),
     /// `fno board-render`: the local board's snapshot writer, a native front
     /// verb because the page and the read model both live in this crate.
     BoardRender(Vec<String>),
@@ -215,6 +226,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
     }
+    if let Some(rest) = fno::doctor_update::classify(args) {
+        return Role::DoctorUpdate(rest);
+    }
     if let Some(rest) = fno::agents_history::classify(args) {
         return Role::AgentsHistory(rest);
     }
@@ -240,6 +254,12 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::law_cli::classify_inbox_decisions(args) {
         return Role::InboxDecisions(rest);
+    }
+    if let Some(rest) = fno::law_cli::classify_inbox_decide(args) {
+        return Role::InboxDecide(rest);
+    }
+    if fno::setup_autowire::classify(args).is_some() {
+        return Role::SetupAutowire;
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -356,6 +376,21 @@ fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let env_session = mux_cli::env_server();
+    // The agent-spawn door: `fno agents spawn` from a worker (a caller
+    // carrying FNO_AGENT_SELF) opts into the machine gate here, before any
+    // forwarding, so a held spawn never reaches the Python CLI. The gate
+    // verb carries the brake for every door; this front door adds the
+    // census and the ceiling. The same verb from a human's shell has no
+    // identity to carry and admits.
+    if let (Some("agents"), Some("spawn")) = (
+        args.first().and_then(|a| a.to_str()),
+        args.get(1).and_then(|a| a.to_str()),
+    ) {
+        if let Err(failure) = fno::process_admission::admit_agent_spawn() {
+            eprintln!("fno agents spawn: {failure}");
+            std::process::exit(1);
+        }
+    }
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
         Role::Backlog => bootstrap::forward_backlog(&args),
@@ -380,6 +415,7 @@ fn main() {
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
         Role::Uninstall(opts) => std::process::exit(fno::uninstall::run_uninstall(opts)),
+        Role::SetupAutowire => std::process::exit(fno::setup_autowire::run()),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(kill_req) => {
             if kill_req.stale_idle || kill_req.all {
@@ -405,6 +441,7 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::AgentsAlias(fno::agents_alias::Org::Forward(argv)) => bootstrap::forward(&argv),
         Role::AgentsAlias(fno::agents_alias::Org::Help(text)) => {
@@ -416,6 +453,7 @@ fn main() {
         }
         Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
+        Role::InboxDecide(rest) => std::process::exit(fno::law_cli::run_decide(&rest)),
         Role::BoardRender(rest) => std::process::exit(fno::backlog_snapshot::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxSnapshot(tail) => match fno::client::snapshot::parse(&tail) {
@@ -506,6 +544,10 @@ fn run_server(socket: PathBuf) {
     }
     // The owner=mux sidecars move at their long-lived writer's start.
     proto::migrate_mux_sidecars();
+    // A server an agent spawned inherits its worker identity and a
+    // background policy; strip both so the brake never holds the user's
+    // taps and the server never runs demoted.
+    fno::process_admission::claim_server_priority();
     std::process::exit(fno::server::run(socket));
 }
 

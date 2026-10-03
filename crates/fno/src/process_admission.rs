@@ -1,3 +1,11 @@
+//! Process admission: the machine-load gate for fno's own spawns.
+//!
+//! The default is admit: nothing blocks a human's own fno start, and no
+//! spawn fno makes for any internal purpose is ever measured or held. The
+//! only caller a gate may slow is a new agent or harness launch that an
+//! agent asked for, and only through that entry's explicit opt-in
+//! ([`admit_agent_spawn`]).
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -261,7 +269,7 @@ impl AdmissionDecision {
             AdmissionReason::MachineRunaway => "machine-runaway",
         };
         Some(format!(
-            "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}{BYPASS_HINT}",
+            "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}",
             scope.as_str(),
         ))
     }
@@ -315,9 +323,6 @@ pub fn decide_panes(count: PaneCount, ceiling: MaxPanes) -> AdmissionDecision {
 
 pub const DEFAULT_MAX_PROCESSES: usize = 400;
 pub const DEFAULT_PANE_GROUP_MAX: usize = 4;
-/// The recovery hint every refusal carries, shared with the e2e assertions so
-/// the string can only drift in one place.
-pub const BYPASS_HINT: &str = "; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery; the value is inherited by children spawned from that shell";
 const LOCK_FILE: &str = "fno-process-admission.lock";
 const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
 const ADMISSION_SWITCH: &str = "FNO_PROCESS_ADMISSION";
@@ -330,8 +335,8 @@ const ADMISSION_SWITCH: &str = "FNO_PROCESS_ADMISSION";
 /// together rather than a comment asking that they be kept in step.
 const ADMISSION_OFF: [&str; 4] = ["off", "false", "0", "no"];
 const ADMISSION_ON: [&str; 4] = ["on", "true", "1", "yes"];
-/// Shared with the e2e assertions, like `BYPASS_HINT`, so the accepted set
-/// an operator is shown can only drift in one place.
+/// Shared with the e2e assertions so the accepted set an operator is shown
+/// can only drift in one place.
 pub const ADMISSION_ACCEPTED: &str = "on|true|1|yes and off|false|0|no";
 
 /// True when the switch says the gate is disabled.
@@ -367,18 +372,18 @@ fn admission_disabled() -> Result<bool, String> {
     }
 }
 
-/// Where admission looks for the machine arm's runaway brake. Mirrors the
-/// fno-agents writer; `FNO_MACHINE_BRAKE` overrides the full path.
+/// Where admission looks for the machine arm's runaway brake. Resolves the
+/// same table row the fno-agents writer does, so reader and writer follow
+/// the migrated file together; `FNO_MACHINE_BRAKE` overrides the full path.
 fn brake_file_path() -> Option<std::path::PathBuf> {
     if let Some(v) = std::env::var_os("FNO_MACHINE_BRAKE").filter(|v| !v.is_empty()) {
         return Some(std::path::PathBuf::from(v));
     }
     let home = std::env::var_os("HOME")?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".fno")
-            .join("machine-brake.json"),
-    )
+    Some(crate::state_layout::place(
+        &std::path::PathBuf::from(home).join(".fno"),
+        "machine-brake.json",
+    ))
 }
 
 /// The machine arm's runaway brake, honored at admission: an unexpired brake
@@ -415,13 +420,22 @@ fn describe_brake(until: u64, value: &serde_json::Value) -> String {
                 .get("ppid")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            let outside = u32::try_from(ppid)
-                .ok()
-                .filter(|pid| *pid != 0)
-                .and_then(group_outside_fleet)
-                .unwrap_or(false);
+            // The arm wrote the fleet/outside split it measured; an older
+            // brake without the fields names only the group.
+            let split = value
+                .get("fleet_cores")
+                .and_then(serde_json::Value::as_f64)
+                .zip(
+                    value
+                        .get("machine_cores")
+                        .and_then(serde_json::Value::as_f64),
+                )
+                .map(|(fleet, machine)| {
+                    format!(" (fleet {fleet:.1} of {machine:.1} machine cores)")
+                })
+                .unwrap_or_default();
             format!(
-                "{} x{} (ppid {ppid}){}",
+                "{} x{} (ppid {ppid}){split}",
                 group
                     .get("name")
                     .and_then(serde_json::Value::as_str)
@@ -430,70 +444,44 @@ fn describe_brake(until: u64, value: &serde_json::Value) -> String {
                     .get("count")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
-                if outside { ", outside the fleet" } else { "" },
             )
         }
     };
     format!("machine runaway brake holds ({left}s left): {reason}; largest group {group}")
 }
 
-/// Whether the brake's largest group descends from no fno root, so the load
-/// is not the fleet's. `None` when the parent cannot be read.
-fn group_outside_fleet(ppid: u32) -> Option<bool> {
-    let rows = snapshot_processes().ok()?;
-    let roots = process_root_names().ok()?;
-    let by_pid: HashMap<u32, &ProcessRow> = rows.iter().map(|row| (row.pid, row)).collect();
-    let parent = by_pid.get(&ppid)?;
-    reaches_root(parent, &by_pid, &roots, std::process::id())
-        .ok()
-        .map(|inside| !inside)
-}
-
-/// A human at a terminal is the recovery path, so the brake never holds
-/// their own command. The brake exists to stop agents spawning, and an agent
-/// either has no terminal or inherits its worker identity.
-fn human_at_tty() -> bool {
-    use std::io::IsTerminal;
+/// True when this process carries a worker identity. Only an agent-origin
+/// caller of the agent-spawn entry can be held: the arm attributes load
+/// before it arms the brake, so a refusal there means fno's own fan-out,
+/// never the user's tap or their mux server.
+fn agent_origin() -> bool {
     std::env::var_os("FNO_AGENT_SELF")
         .filter(|name| !name.is_empty())
-        .is_none()
-        && io::stdin().is_terminal()
-        && io::stderr().is_terminal()
+        .is_some()
 }
 
-/// Set while the client's TUI owns the terminal. A warning written then
-/// lands on top of the screen, so admission warnings stay silent until the
-/// terminal is handed back.
-static TERMINAL_OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn set_terminal_owned(owned: bool) {
-    TERMINAL_OWNED.store(owned, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn warn(line: std::fmt::Arguments<'_>) {
-    if !TERMINAL_OWNED.load(std::sync::atomic::Ordering::Relaxed) {
-        eprintln!("{line}");
+/// The server's start: a server an agent spawned inherits its worker
+/// identity and a background QoS policy, so the agent-spawn gate would hold
+/// the user's taps and the server would run demoted. Stripping the identity
+/// and clearing the inherited policy keeps fno's most important process out
+/// of both traps. A no-op on Linux.
+pub fn claim_server_priority() {
+    std::env::remove_var("FNO_AGENT_SELF");
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // PRIO_DARWIN_PROCESS 0,0 clears an inherited background policy on
+        // the calling process; permitted without root for self.
+        libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, 0);
     }
 }
 
-/// The brake check every admit shares. A `human` caller passes with one
-/// warning per armed brake instead of a refusal; a long-lived server still
-/// logs each new brake it waives. The brake is a world fact the arm
-/// measured, so it outranks the census read below.
-fn brake_check(scope: Scope, ceiling: usize, human: bool) -> Result<(), AdmissionFailure> {
+/// The brake check behind the agent-spawn door's opt-in. The brake is a
+/// world fact the arm measured, so it outranks the census read that
+/// follows it.
+fn brake_check(scope: Scope, ceiling: usize) -> Result<(), AdmissionFailure> {
     let Some((until, value)) = runaway_brake() else {
         return Ok(());
     };
-    if human {
-        static WARNED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if WARNED_UNTIL.swap(until, std::sync::atomic::Ordering::Relaxed) != until {
-            warn(format_args!(
-                "fno: {}; admitting a human's own start anyway",
-                describe_brake(until, &value)
-            ));
-        }
-        return Ok(());
-    }
     Err(AdmissionFailure {
         decision: AdmissionDecision::Refuse {
             count: None,
@@ -585,32 +573,30 @@ fn census_receipt_reason(census: &Census) -> Option<&str> {
     }
 }
 
-/// Acquire the machine-global admission lock, measure the relevant process
-/// tree, and return a permit that must remain alive through the spawn syscall.
+/// The default door: every spawn fno makes for an internal purpose admits.
+/// No brake read, no census, no ceiling: a gate that never measures can
+/// never hold an internal call, and an unreadable process table can never
+/// decide anything. The permit still records children, so the agent-spawn
+/// door's census reads the truth.
 pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
-    admit_fleet_for(human_at_tty())
+    Ok(AdmissionPermit {
+        _lock: None,
+        scope: Scope::Fleet,
+        count: 0,
+        ceiling: DEFAULT_MAX_PROCESSES,
+        #[cfg(test)]
+        track_children: true,
+    })
 }
 
-/// Fleet admission for a plain shell pane. A bare shell is how a human
-/// recovers a loaded machine, so the runaway brake never holds it.
-pub fn admit_shell_pane() -> Result<AdmissionPermit, AdmissionFailure> {
-    admit_fleet_for(true)
-}
-
-/// Fleet admission for the inline pty a failed keeper falls back to. The
-/// spawn's first permit already answered the brake, human or agent, so the
-/// same spawn is not braked twice. The census and ceiling still apply.
-pub fn admit_fallback() -> Result<AdmissionPermit, AdmissionFailure> {
-    admit_fleet_for(true)
-}
-
-/// [`admit_fleet`] for a spawn the caller knows a human asked for. The mux
-/// server has no TTY, so `human_at_tty` reads false there even for a resume
-/// from the user's own tap. The server passes that fact here, and the
-/// runaway brake warns instead of refusing the user's own resume.
-pub fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure> {
-    if human {
-        return Ok(admit_human());
+/// The agent-spawn door, and the only one that may hold a spawn: an agent
+/// asking for a new agent or harness launch (`fno agents spawn` and the
+/// dispatch paths). The brake, the census and the ceiling are this entry's
+/// opt-in, and only a caller carrying `FNO_AGENT_SELF` is held; the same
+/// verb typed at a human's shell admits through the default.
+pub fn admit_agent_spawn() -> Result<AdmissionPermit, AdmissionFailure> {
+    if !agent_origin() {
+        return admit_fleet();
     }
     match admission_disabled() {
         Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
@@ -623,7 +609,7 @@ pub fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure>
             ))
         }
     }
-    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, false)?;
+    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES)?;
     let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -668,7 +654,7 @@ pub fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure>
                     reason: AdmissionReason::LockUnavailable,
                 },
                 detail,
-            });
+            })
         }
     };
     let census = process_census();
@@ -694,57 +680,6 @@ pub fn admit_fleet_for(human: bool) -> Result<AdmissionPermit, AdmissionFailure>
     }
 }
 
-/// A human's own start or attach always gets in. Gates may warn or slow
-/// agents, never refuse the user's own fno. So this door never waits on the
-/// lock (it never queues behind agent spawns) and turns every refusal into
-/// one warning a minute. When the lock is free the census runs, so an
-/// over-full fleet is named, and the permit still records children, so
-/// agents count the human's panes.
-fn admit_human() -> AdmissionPermit {
-    let ceiling = configured_max_processes()
-        .unwrap_or(MaxProcesses::new(DEFAULT_MAX_PROCESSES))
-        .get();
-    let permit = |lock, count| AdmissionPermit {
-        _lock: lock,
-        scope: Scope::Fleet,
-        count,
-        ceiling,
-        #[cfg(test)]
-        track_children: true,
-    };
-    // Waived brakes warn inside the check.
-    let _ = brake_check(Scope::Fleet, ceiling, true);
-    #[cfg(test)]
-    if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
-        return test_permit(Scope::Fleet, 0, ceiling);
-    }
-    if matches!(admission_disabled(), Ok(true)) {
-        return permit(None, 0);
-    }
-    // A held lock means an agent is mid-census: skip ours rather than wait,
-    // and rewrite no marker ledger under its feet.
-    let Ok(lock) = acquire_lock(false) else {
-        return permit(None, 0);
-    };
-    let census = process_census();
-    if let Some(refusal) = decide_processes(&census, MaxProcesses::new(ceiling)).refusal() {
-        static WARNED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let last = WARNED_AT.load(std::sync::atomic::Ordering::Relaxed);
-        if now.saturating_sub(last) >= 60 {
-            WARNED_AT.store(now, std::sync::atomic::Ordering::Relaxed);
-            let refusal = refusal.strip_suffix(BYPASS_HINT).unwrap_or(&refusal);
-            warn(format_args!(
-                "fno: {refusal}; admitting a human's own start anyway"
-            ));
-        }
-    }
-    permit(Some(lock), census.count().unwrap_or(0))
-}
-
 /// When the census died to descriptor exhaustion, the refusal is the
 /// open-file ceiling, not a broken measurement: the same wall the pty spawn
 /// names, so the operator reads one diagnostic wherever the wall surfaces.
@@ -765,64 +700,26 @@ fn enrich_fd_ceiling(detail: &str) -> String {
     )
 }
 
-/// Acquire the same machine lock for a pane-tab decision. The pane count is
-/// read from the serialized server state before a PTY is opened or a child is
-/// created.
+/// The pane-tab layout cap. Machine admission is the agent-spawn door's
+/// opt-in, so this decision reads no process table: the pane count arrives
+/// from the serialized server state, and the cap is a layout rule that
+/// binds every caller.
 pub fn admit_tab(
     pane_count: usize,
     requested_cap: Option<usize>,
 ) -> Result<AdmissionPermit, AdmissionFailure> {
-    match admission_disabled() {
-        Ok(true) => return bypass_permit(Scope::Tab, DEFAULT_PANE_GROUP_MAX),
-        Ok(false) => {}
-        Err(detail) => return Err(override_failure(Scope::Tab, DEFAULT_PANE_GROUP_MAX, detail)),
+    if matches!(admission_disabled(), Ok(true)) {
+        return bypass_permit(Scope::Tab, DEFAULT_PANE_GROUP_MAX);
     }
-    brake_check(Scope::Tab, DEFAULT_PANE_GROUP_MAX, human_at_tty())?;
     let ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Tab, pane_count, ceiling.get()));
     }
-    let lock = match acquire_lock(true) {
-        Ok(lock) => Some(lock),
-        // Same famine door as admit_fleet: the pane count needs no snapshot,
-        // and the spawn below names its own limit. The cap itself still
-        // applies: deciding it reads server state and needs no descriptor,
-        // so a famine never buys panes past it.
-        Err(AcquireFailure::DescriptorsExhausted(reason)) => {
-            write_not_measuring_receipt(&reason);
-            let tab = decide_panes(PaneCount::new(pane_count), ceiling);
-            if !matches!(tab, AdmissionDecision::Admit) {
-                return Err(AdmissionFailure {
-                    decision: tab,
-                    detail: String::new(),
-                });
-            }
-            return Ok(AdmissionPermit {
-                _lock: None,
-                scope: Scope::Tab,
-                count: pane_count,
-                ceiling: ceiling.get(),
-                #[cfg(test)]
-                track_children: true,
-            });
-        }
-        Err(AcquireFailure::Other(detail)) => {
-            return Err(AdmissionFailure {
-                decision: AdmissionDecision::Refuse {
-                    count: None,
-                    ceiling: ceiling.get(),
-                    scope: Scope::Tab,
-                    reason: AdmissionReason::LockUnavailable,
-                },
-                detail,
-            });
-        }
-    };
     let decision = decide_panes(PaneCount::new(pane_count), ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: lock,
+            _lock: None,
             scope: Scope::Tab,
             count: pane_count,
             ceiling: ceiling.get(),
@@ -834,120 +731,6 @@ pub fn admit_tab(
             detail: String::new(),
         }),
     }
-}
-
-/// One permit for a pane launch. Fleet admission is evaluated first, then the
-/// target-tab cap, while one machine lock covers both measurements and the
-/// eventual child-creation syscall.
-pub fn admit_pane(
-    pane_count: usize,
-    requested_cap: Option<usize>,
-) -> Result<AdmissionPermit, AdmissionFailure> {
-    admit_pane_for(human_at_tty(), pane_count, requested_cap)
-}
-
-/// [`admit_pane`] for a pane the caller knows a human asked for. The mux
-/// server has no TTY, so `human_at_tty` reads false there even for a click
-/// from the user's own attached client. The server passes that fact here, and
-/// the runaway brake warns instead of refusing the user's own attach.
-pub fn admit_pane_for(
-    human: bool,
-    pane_count: usize,
-    requested_cap: Option<usize>,
-) -> Result<AdmissionPermit, AdmissionFailure> {
-    match admission_disabled() {
-        Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
-        Ok(false) => {}
-        Err(detail) => {
-            return Err(override_failure(
-                Scope::Fleet,
-                DEFAULT_MAX_PROCESSES,
-                detail,
-            ))
-        }
-    }
-    brake_check(Scope::Fleet, DEFAULT_MAX_PROCESSES, human)?;
-    let (fleet_ceiling, config_error) = match configured_max_processes() {
-        Ok(value) => (value, None),
-        Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
-    };
-    let tab_ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
-    if let Some(detail) = config_error {
-        return Err(AdmissionFailure {
-            decision: AdmissionDecision::Refuse {
-                count: None,
-                ceiling: fleet_ceiling.get(),
-                scope: Scope::Fleet,
-                reason: AdmissionReason::MeasurementUnavailable,
-            },
-            detail,
-        });
-    }
-    #[cfg(test)]
-    if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
-        return Ok(test_permit(Scope::Fleet, 0, fleet_ceiling.get()));
-    }
-    let lock = match acquire_lock(true) {
-        Ok(lock) => Some(lock),
-        // Same famine door as admit_fleet: with no descriptor left, the
-        // census behind the lock would fail the same way. The tab cap still
-        // applies, for the same reason as admit_tab's famine door.
-        Err(AcquireFailure::DescriptorsExhausted(reason)) => {
-            write_not_measuring_receipt(&reason);
-            let tab = decide_panes(PaneCount::new(pane_count), tab_ceiling);
-            if !matches!(tab, AdmissionDecision::Admit) {
-                return Err(AdmissionFailure {
-                    decision: tab,
-                    detail: String::new(),
-                });
-            }
-            return Ok(AdmissionPermit {
-                _lock: None,
-                scope: Scope::Fleet,
-                count: 0,
-                ceiling: fleet_ceiling.get(),
-                #[cfg(test)]
-                track_children: true,
-            });
-        }
-        Err(AcquireFailure::Other(detail)) => {
-            return Err(AdmissionFailure {
-                decision: AdmissionDecision::Refuse {
-                    count: None,
-                    ceiling: fleet_ceiling.get(),
-                    scope: Scope::Fleet,
-                    reason: AdmissionReason::LockUnavailable,
-                },
-                detail,
-            });
-        }
-    };
-    let fleet = process_census();
-    let fleet_decision = decide_processes(&fleet, fleet_ceiling);
-    if !matches!(fleet_decision, AdmissionDecision::Admit) {
-        return Err(AdmissionFailure {
-            decision: fleet_decision,
-            detail: fleet.reason().unwrap_or_default().to_string(),
-        });
-    }
-    if let Some(reason) = census_receipt_reason(&fleet) {
-        write_not_measuring_receipt(reason);
-    }
-    let tab = decide_panes(PaneCount::new(pane_count), tab_ceiling);
-    if !matches!(tab, AdmissionDecision::Admit) {
-        return Err(AdmissionFailure {
-            decision: tab,
-            detail: String::new(),
-        });
-    }
-    Ok(AdmissionPermit {
-        _lock: lock,
-        scope: Scope::Fleet,
-        count: fleet.count().unwrap_or(0),
-        ceiling: fleet_ceiling.get(),
-        #[cfg(test)]
-        track_children: true,
-    })
 }
 
 #[cfg(test)]
@@ -975,11 +758,6 @@ pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comman
 
 pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process::Child> {
     spawn_permitted(command, admit_fleet().map_err(admission_io_error)?)
-}
-
-/// A spawn on a human's attach path, which never waits on or meets a gate.
-pub fn std_spawn_for_human(command: &mut std::process::Command) -> io::Result<std::process::Child> {
-    spawn_permitted(command, admit_human())
 }
 
 fn spawn_permitted(
@@ -1833,21 +1611,40 @@ mod tests {
     /// The measured 2026-09-02 wedge: one alive-but-unreadable marker pid
     /// took the whole census down and refused every spawn on the machine.
     /// Our own pid stands in for it (alive, not a zombie, not confirmed
-    /// dead) paired with a reader that never resolves a start time.
+    /// dead) paired with a reader that never resolves a start time. The
+    /// malformed-line case prunes the torn line and keeps the readable one.
+    /// Each case scopes its own isolate: two live guards would deadlock on
+    /// the same env lock.
     #[test]
     fn unreadable_marker_pid_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-unreadable");
         let pid = std::process::id();
-        std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
+        {
+            let (_guard, path) = isolate("marker-unreadable");
+            std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
 
-        let count = marker_count_with(&[], &HashSet::new(), |_| None)
-            .expect("an unreadable marker pid must not collapse the census");
+            let count = marker_count_with(&[], &HashSet::new(), |_| None)
+                .expect("an unreadable marker pid must not collapse the census");
 
-        assert_eq!(count, 0);
-        assert!(
-            !path.exists(),
-            "the unreadable entry must be pruned from the ledger"
-        );
+            assert_eq!(count, 0);
+            assert!(
+                !path.exists(),
+                "the unreadable entry must be pruned from the ledger"
+            );
+        }
+        {
+            let (_guard, path) = isolate("marker-malformed");
+            std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
+
+            let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
+                .expect("a torn ledger line must not collapse the census");
+
+            assert_eq!(count, 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{pid}:777\n")
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// A readable marker still counts, so the skip above is a targeted drop
@@ -1886,25 +1683,6 @@ mod tests {
             .expect("an unreadable start time must not fail the spawn");
 
         assert!(!path.exists(), "no marker line may be written");
-    }
-
-    /// The ledger is appended to by concurrent spawns, so a torn line is
-    /// possible. One must not refuse every spawn on the machine.
-    #[test]
-    fn malformed_ledger_line_is_skipped_and_pruned_not_fatal() {
-        let (_guard, path) = isolate("marker-malformed");
-        let pid = std::process::id();
-        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
-
-        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
-            .expect("a torn ledger line must not collapse the census");
-
-        assert_eq!(count, 1);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            format!("{pid}:777\n")
-        );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// A recovery switch that refuses on a plausible spelling strands the
@@ -2030,9 +1808,10 @@ mod tests {
     }
 
     /// The guard against retry-then-hold-forever: a NoSource answer stops
-    /// the loop on its first answer, with no wait spent.
+    /// Both stopping answers end the loop on their first answer, with no
+    /// wait spent.
     #[test]
-    fn census_stops_at_the_first_no_source_answer() {
+    fn census_stops_at_the_first_stopping_answer() {
         let mut calls = 0;
         let census = census_with(
             || {
@@ -2044,11 +1823,6 @@ mod tests {
         );
         assert_eq!(census, Census::no_source("no /proc on this host"));
         assert_eq!(calls, 1);
-    }
-
-    /// The famine answer stops the loop the same way.
-    #[test]
-    fn census_stops_at_the_first_descriptors_exhausted_answer() {
         let mut calls = 0;
         let census = census_with(
             || {
@@ -2168,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unexpired_brake_refuses_agents_admits_humans_and_names_outside_load() {
+    fn an_unexpired_brake_holds_only_the_agent_spawn_door_and_names_the_split() {
         let _env = BRAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brake.json");
@@ -2183,6 +1957,8 @@ mod tests {
                         + 600,
                     "reason": "machine runaway: 10005 processes",
                     "group": {"name": "g i t", "count": 8000, "ppid": ppid},
+                    "fleet_cores": 6.0,
+                    "machine_cores": 8.0,
                 })
                 .to_string(),
             )
@@ -2193,7 +1969,9 @@ mod tests {
         std::env::set_var("FNO_AGENT_SELF", "brake-test-worker");
         // The group's parent is this process, so the load is the fleet's.
         arm(std::process::id());
-        let failure = admit_fleet().err().expect("brake refuses an agent");
+        let failure = admit_agent_spawn()
+            .err()
+            .expect("brake holds an agent spawn");
         match failure.decision() {
             AdmissionDecision::Refuse {
                 reason: AdmissionReason::MachineRunaway,
@@ -2203,44 +1981,33 @@ mod tests {
         }
         let text = failure.to_string();
         assert!(text.contains("largest group g i t x8000"), "{text}");
-        assert!(!text.contains("outside the fleet"), "{text}");
-        // pid 1 descends from no fno root: the refusal says whose load it
-        // is. A process snapshot that cannot resolve pid 1 gets the
-        // suffix-free line instead, so assert only what the snapshot supports.
-        let pid1_outside = group_outside_fleet(1);
+        // The arm's measured split rides the brake file; the refusal names it
+        // where a re-walk of the process table used to guess.
         arm(1);
-        let text = admit_fleet().err().expect("brake refuses").to_string();
-        if pid1_outside == Some(true) {
-            assert!(text.contains("(ppid 1), outside the fleet"), "{text}");
-        } else {
-            assert!(text.contains("(ppid 1)"), "{text}");
-        }
-        // A human's shell pane is the recovery path and passes the brake.
-        let shell = admit_shell_pane();
-        // The mux server has no TTY: a row tap from the user's own client
-        // passes the brake by the flag the server hands in, an agent's does not.
-        let tap = admit_pane_for(true, 0, None);
-        let agent_pane = admit_pane_for(false, 0, None);
-        // The same flag at the fleet scope: the server hands a resume tap's
-        // human fact in, and a braked resume of an agent spawn stays refused.
-        let resume_tap = admit_fleet_for(true);
-        let agent_resume = admit_fleet_for(false);
+        let text = admit_agent_spawn().err().expect("brake holds").to_string();
+        assert!(text.contains("fleet 6.0 of 8.0 machine cores"), "{text}");
+        // The inversion: an armed brake holds nothing else. The default door,
+        // the tab cap, and the same verb typed without a worker identity all
+        // admit while the brake is armed.
+        assert!(
+            admit_fleet().is_ok(),
+            "the default door admits under an armed brake"
+        );
+        assert!(
+            admit_tab(0, None).is_ok(),
+            "the tab cap admits under an armed brake"
+        );
         std::env::remove_var("FNO_AGENT_SELF");
-        assert!(shell.is_ok(), "a shell pane passes the brake");
-        assert!(tap.is_ok(), "the user's own row tap passes the brake");
-        assert!(agent_pane.is_err(), "an agent's pane stays braked");
         assert!(
-            resume_tap.is_ok(),
-            "the user's own resume tap passes the brake"
+            admit_agent_spawn().is_ok(),
+            "a caller with no worker identity passes the agent-spawn door"
         );
-        assert!(
-            agent_resume.is_err(),
-            "an agent's fleet resume stays braked"
-        );
-        // The absent-file branch: admission reads byte-for-byte as before.
+        // The absent-file branch: the agent-spawn door reads as admitted.
         std::env::set_var("FNO_MACHINE_BRAKE", dir.path().join("absent.json"));
-        let permit = admit_fleet();
+        std::env::set_var("FNO_AGENT_SELF", "brake-test-worker");
+        let permit = admit_agent_spawn();
         std::env::remove_var("FNO_MACHINE_BRAKE");
+        std::env::remove_var("FNO_AGENT_SELF");
         assert!(permit.is_ok(), "absent brake admits as before");
     }
 }

@@ -1,6 +1,6 @@
 ---
 name: think
-description: "Investigate a question against primary sources - repo source code, specs, first-party APIs - and write cited findings to one Markdown file. Use when: 'research this', 'think through this', 'how does this break' (what-if), 'several lenses on this' (panel), 'what owns this' (class). Prefix `bg` or `subagent` to run it off the main thread."
+description: Investigate a question against source evidence and write cited findings to one document.
 argument-hint: "[bg|subagent] [what-if|panel|class] <question | node-id>"
 metadata:
   requires:
