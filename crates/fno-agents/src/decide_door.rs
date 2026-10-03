@@ -781,6 +781,7 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     // The self route span rides ahead of the row: the row's parent names it.
     let journal = project_events_journal();
     let mut route_span_id: Option<String> = None;
+    let mut pending_route: Option<(Trace, Map<String, Value>)> = None;
     if let Some(ask) = door
         .answers_ask
         .as_deref()
@@ -807,25 +808,23 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             attrs.insert("class".to_string(), json!(c));
         }
         let span_id = trace.span_id.clone();
-        if emit_span_to(&journal, "route", &trace, &attrs).is_ok() {
-            route_span_id = Some(span_id);
-        }
+        // The span rides behind the row (minted here, emitted after the row
+        // lands), so a failed decision write never leaves an orphan route.
+        route_span_id = Some(span_id);
+        pending_route = Some((trace, attrs));
     }
     // The correction span: parented at the overturned span; the row's trace
-    // names the same parent.
-    if let Some(t) = overturns.as_ref() {
-        let trace = Trace {
-            trace_id: subject.clone(),
-            span_id: new_span_id(),
-            parent_span_id: Some(t.to_string()),
-            actor_session: caller_session.clone(),
-            actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
-            comms: "mail",
-            recipient_session: None,
-            recipient_kind: None,
-        };
-        emit_span_to(&journal, "correction", &trace, &Map::new());
-    }
+    // names the same parent. Captured here, emitted after the row lands.
+    let pending_correction = overturns.as_ref().map(|t| Trace {
+        trace_id: subject.clone(),
+        span_id: new_span_id(),
+        parent_span_id: Some(t.to_string()),
+        actor_session: caller_session.clone(),
+        actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
+        comms: "mail",
+        recipient_session: None,
+        recipient_kind: None,
+    });
     // The decision IS the span when it answers or overturns: the row carries
     // the trace envelope, span_id = decision_id, parented at the hop it
     // answers or overturns.
@@ -851,6 +850,14 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     if let Err(e) = crate::event_store::append_envelope(&journal, &envelope.to_string(), None) {
         eprintln!("decide: failed to record: {e}");
         return 1;
+    }
+    // The row is durable: now the hops it parents. Emitting here keeps a
+    // failed decision write from leaving orphan spans behind it.
+    if let Some((trace, attrs)) = pending_route {
+        emit_span_to(&journal, "route", &trace, &attrs);
+    }
+    if let Some(trace) = pending_correction {
+        emit_span_to(&journal, "correction", &trace, &Map::new());
     }
     // Recall second: the machine-wide decision index. The event id names the
     // recovery, because re-running would mint a second id for one ruling.

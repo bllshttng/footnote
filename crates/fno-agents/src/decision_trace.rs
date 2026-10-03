@@ -270,7 +270,9 @@ fn run_mail_record_with(
     };
 
     // The ask span: an Approval:-template body is a worker asking its lead.
-    if body_is_ask(body) {
+    // A sweep-origin send (scheduler, recovery) replays text, it does not
+    // ask, so it records the origin row alone.
+    if body_is_ask(body) && kind != "sweep" {
         let trace = Trace {
             trace_id,
             span_id: new_span_id(),
@@ -448,6 +450,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spans3.len(), 2, "plain body adds no span");
+        // A sweep-origin send replays the template without asking: the
+        // origin row lands, the ask span does not.
+        let replay = MailRecordArgs {
+            origin: "scheduler".into(),
+            lane: "raw".into(),
+            sender: None,
+            target_session: None,
+            reply_to: None,
+            node: None,
+        };
+        assert_eq!(run_mail_record_with(&journal, &lifecycle, &replay, body), 0);
+        let spans4 = crate::event_store::query_events(
+            &journal,
+            &crate::event_store::EventQuery::of_types(&["decision_span"]),
+        )
+        .unwrap();
+        assert_eq!(spans4.len(), 2, "sweep origin adds no ask span");
         match prev_home {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
