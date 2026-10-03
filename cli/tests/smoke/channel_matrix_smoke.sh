@@ -386,9 +386,15 @@ row_fno_sh_fresh() {
     return 0
   fi
   curl -fsSL https://fno.sh > "$BASE/served.out" 2>/dev/null
+  _served_rc=$?
   curl -fsSL "https://raw.githubusercontent.com/bllshttng/footnote/$tag/scripts/install/fno.sh" > "$BASE/released.out" 2>/dev/null
-  if [ ! -s "$BASE/served.out" ]; then
-    miss "fresh" "fno.sh served no script (worker unreachable or 502); the worker fails closed, check its deploy"
+  _released_rc=$?
+  if [ "$_served_rc" -ne 0 ] || [ ! -s "$BASE/served.out" ]; then
+    miss "fresh" "fno.sh fetch failed (curl rc=$_served_rc; worker unreachable or 502); the worker fails closed, check its deploy"
+    return 0
+  fi
+  if [ "$_released_rc" -ne 0 ] || [ ! -s "$BASE/released.out" ]; then
+    miss "fresh" "could not fetch scripts/install/fno.sh at $tag (curl rc=$_released_rc); row unscoreable this run, not a stale pin"
     return 0
   fi
   if cmp -s "$BASE/served.out" "$BASE/released.out"; then
