@@ -2777,6 +2777,10 @@ mod tests {
 
     /// Regression: the --force arm once skipped `i += 1`, so the parse loop
     /// spun on the flag forever. The test returning at all is the proof.
+    /// Also pins B5 at the same parser boundary: a mode flag after a harness
+    /// positional is recorded, and the verb refuses before any install work -
+    /// `plugin-install claude --check` once dropped the flag and ran the full
+    /// mutating install.
     #[test]
     fn parse_force_flag_returns_and_sets_flags() {
         let args: Vec<String> = ["--force", "--status"]
@@ -2786,6 +2790,21 @@ mod tests {
         let parsed = parse_plugin_install_args(&args);
         assert!(parsed.force);
         assert!(parsed.status);
+
+        let args: Vec<String> = ["claude", "--check"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_plugin_install_args(&args);
+        assert_eq!(parsed.mode.as_deref(), Some("claude"));
+        assert_eq!(parsed.dropped_mode.as_deref(), Some("--check"));
+        assert_eq!(run_plugin_install(&args), 2);
+
+        let args: Vec<String> = ["codex", "--stage-only"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(run_plugin_install(&args), 2);
     }
 
     /// A throwaway HOME for the root-enumeration fixtures. The marketplace
@@ -3033,29 +3052,6 @@ mod tests {
             ]
         );
         let _ = fs::remove_dir_all(&base);
-    }
-
-    /// B5: a mode flag after a harness positional is recorded at the parser
-    /// and refused at the verb - `plugin-install claude --check` once dropped
-    /// the flag silently and ran the full mutating install.
-    #[test]
-    fn harness_then_mode_flag_refuses_instead_of_installing() {
-        let args: Vec<String> = ["claude", "--check"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let parsed = parse_plugin_install_args(&args);
-        assert_eq!(parsed.mode.as_deref(), Some("claude"));
-        assert_eq!(parsed.dropped_mode.as_deref(), Some("--check"));
-        // The verb refuses before any install work; exit 2 matches the
-        // --uninstall/--status refusal family.
-        assert_eq!(run_plugin_install(&args), 2);
-
-        let args: Vec<String> = ["codex", "--stage-only"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        assert_eq!(run_plugin_install(&args), 2);
     }
 
     /// The installLocation (where Claude actually loads a local marketplace)
