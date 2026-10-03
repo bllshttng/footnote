@@ -393,12 +393,23 @@ pub(crate) fn pane_lines(
     lines.push(BLine::plain(String::new()));
 
     // The comment thread: bold header + thin rule, oldest first, replies
-    // indented under their heads; the ask state rides as a mark. Plain
-    // progress notes do not render here.
+    // indented under their heads; the ask state rides as a mark. Note-kind
+    // feed rows render in the same thread (x-fb4f), each with its writer
+    // identity line when one is stamped.
     let thread: Vec<&crate::backlog_model::Note> = view
         .notes
         .iter()
-        .filter(|n| matches!(n.kind.as_deref(), Some("comment") | Some("reply")))
+        .filter(|n| {
+            matches!(
+                n.kind.as_deref(),
+                Some("comment")
+                    | Some("reply")
+                    | Some("progress")
+                    | Some("finding")
+                    | Some("ruling")
+                    | Some("collision")
+            )
+        })
         .collect();
     let open = thread
         .iter()
@@ -427,10 +438,30 @@ pub(crate) fn pane_lines(
         let author = note.author.as_deref().unwrap_or("?");
         let age = note_age(&note.ts);
         let mut row = format!("{indent}{mark} {author} \u{b7} {age}  {}", note.text);
-        if let Some(reference) = &note.state_ref {
-            row.push_str(&format!(" \u{b7} {reference}"));
+        if let Some(refer) = &note.state_ref {
+            row.push_str(&format!(" \u{b7} {refer}"));
         }
         lines.push(BLine::plain(row));
+        // Who wrote it, shown in the thread and copyable (x-fb4f).
+        let mut who: Vec<String> = Vec::new();
+        if let Some(name) = &note.agent_name {
+            who.push(name.clone());
+        }
+        if let Some(model) = &note.model {
+            who.push(model.clone());
+        }
+        if let Some(session) = &note.source_session_id {
+            who.push(format!("session {session}"));
+        }
+        if let Some(working) = &note.working_node {
+            who.push(format!("on {working}"));
+        }
+        if !who.is_empty() {
+            lines.push(BLine::plain(format!(
+                "{indent}      \u{b7} {}",
+                who.join(" \u{b7} ")
+            )));
+        }
     }
     lines.push(BLine::plain(String::new()));
     // Document section: the node's markdown plan when readable, else its
