@@ -28,7 +28,12 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     };
     let tree = crate::org_model::derive(&inputs, board_now());
     open(view);
-    apply_gather(view, 0, Ok(json!({})), tree);
+    let gen = view
+        .messages_board
+        .as_ref()
+        .expect("the fixture opens the board")
+        .gen;
+    apply_gather(view, gen, Ok(json!({})), tree);
     assert!(view.messages_board.is_some(), "the fixture opens the board");
 }
 
