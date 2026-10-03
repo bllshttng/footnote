@@ -832,6 +832,10 @@ impl View {
         self.question_detail = Detail::open(fold, None);
     }
 
+    pub(super) fn list_selector(&self) -> Option<usize> {
+        self.selector
+    }
+
     /// Apply the latest questions projection. An Err remains visible in the
     /// bell panel instead of becoming an empty list.
     pub(super) fn apply_questions_fold(
