@@ -472,6 +472,51 @@ def _installed_pkg_dir() -> Optional[Path]:
         return None
 
 
+def _live_tool_env_processes() -> list[str]:
+    """ps argv lines of live processes running from the installed fno tool env.
+
+    The uv tool env root sits three parents above the package dir
+    (``<tool>/fno/lib/pythonX.Y/site-packages`` -> ``<tool>/fno``). A process
+    "runs from" the env when its argv names a path under that root, and an
+    in-place repair (``fno doctor update`` / ``--fix``) replaces that env
+    mid-run - the 2026-10-02 study clobber (gap audit blocker 1/3). Empty when
+    the layout is unfamiliar, the process table is unreadable, or nothing runs
+    from the env. Own-ps/awk lines are filtered so the scan never names itself.
+    """
+    pkg = _installed_pkg_dir()
+    if pkg is None or len(pkg.parents) < 3:
+        return []
+    root = pkg.parents[2]
+    if root.name != "fno":
+        return []
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    needle = str(root)
+    lines = []
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or needle not in stripped:
+            continue
+        pid_text = stripped.split(None, 1)[0]
+        try:
+            if int(pid_text) == os.getpid():
+                continue
+        except ValueError:
+            pass
+        if " awk -" in stripped or " ps -" in stripped:
+            continue
+        lines.append(stripped)
+    return lines
+
+
 def _pkg_py_fingerprint(pkg_dir: Path) -> Optional[dict[str, str]]:
     """Map each ``.py`` under ``pkg_dir`` to its content sha256, keyed by relpath.
 
@@ -2278,6 +2323,17 @@ def _emit_human(
                     "Run fno doctor update (or fno doctor --fix); the component "
                     "lines below name which one."
                 )
+        # The proposed repair replaces the tool env in place. Name anything
+        # still running from it, so the user never repeats the 2026-10-02
+        # clobber: a session-start repair replaced a study's CLI mid-run
+        # (gap audit blocker 3).
+        live = _live_tool_env_processes()
+        if live:
+            out(
+                f"fno doctor: {len(live)} live process(es) run from the installed "
+                f"tool env, e.g. {live[0][:160]}. The repair above would replace "
+                "them mid-run; stop them first."
+            )
     elif (
         result.get("content_indeterminate")
         and result.get("installed_rev") is not None
@@ -4603,6 +4659,17 @@ def doctor_command(
                     err=True,
                 )
                 raise typer.Exit(1)
+            # The update reinstalls the tool env in place. Name live processes
+            # before delegating (gap audit blocker 3): the repair is the same
+            # move that replaced a live study's CLI unnoticed.
+            live = _live_tool_env_processes()
+            if live:
+                typer.echo(
+                    f"fno doctor: {len(live)} live process(es) run from the installed "
+                    f"tool env, e.g. {live[0][:160]}. This repair replaces that env "
+                    "in place; stop them first, or re-run once they exit.",
+                    err=True,
+                )
             typer.echo("fno doctor: --fix running `fno doctor update`...", err=True)
             raise typer.Exit(_run_update_verb(door, source))
         else:

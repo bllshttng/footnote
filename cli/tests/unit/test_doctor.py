@@ -3050,3 +3050,64 @@ def test_doctor_component_stale_renders_repair_and_gates_exit(
     assert result.exit_code != 0
     assert "component fno-agents-daemon: stale" in result.stdout
     assert "repair: cargo install --path /src/crates/fno-agents --bins" in result.stdout
+
+
+def test_stale_verdict_names_live_tool_env_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gap audit blocker 3 (2026-10-02): the proposed repair replaces the tool
+    env in place, so a stale verdict must name processes still running from it
+    before the user repeats the study-clobber incident."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="bbb222",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_live_tool_env_processes",
+        lambda: ["4242 /tools/fno/bin/fno-py backlog capture"],
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    assert "1 live process(es) run from the installed tool env" in result.stdout
+    assert "/tools/fno/bin/fno-py backlog capture" in result.stdout
+
+
+def test_live_tool_env_processes_filters_self_and_scan_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scanner reads a uv tool layout (site-packages three parents under
+    <tool>/fno), drops its own ps/awk lines and the doctor process itself, and
+    returns [] on any unfamiliar layout."""
+    pkg = tmp_path / "fno" / "lib" / "python3.11" / "site-packages"
+    pkg.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: pkg)
+    root = str(tmp_path / "fno")
+    me_pid = os.getpid()
+    ps_out = "\n".join(
+        [
+            f"  77 {root}/bin/fno-py backlog capture",
+            f"{me_pid:6} {root}/bin/fno-py doctor --fix",
+            f"  99 awk -v td={root} index($0, td)",
+            "  55 /usr/sbin/syslogd",
+        ]
+    )
+
+    class FakeProc:
+        stdout = ps_out
+
+    def fake_run(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    live = doctor._live_tool_env_processes()
+    assert live == [f"77 {root}/bin/fno-py backlog capture"], live
+
+    # An unfamiliar layout (root not named fno) degrades to empty.
+    other = tmp_path / "elsewhere" / "lib" / "python3.11" / "site-packages"
+    other.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: other)
+    assert doctor._live_tool_env_processes() == []
