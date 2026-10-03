@@ -88,7 +88,7 @@ else
 fi
 ```
 
-On the next stop, for a live session the hook reads `.target-cancelled` via `check_cancel_sentinel`, writes `status: BLOCKED`, generates a postmortem, returns the backlog node to `ready`, and allows a clean exit.
+On the next stop, for a live session the hook reads `.target-cancelled` via `check_cancel_sentinel`. It writes `status: BLOCKED`, generates a postmortem, and returns the backlog node to `ready`. Then it allows a clean exit.
 
 The `Interrupted` finalize releases the run's `node:<id>` claim with `--stamp-do`. The release closes the `do` row that was pinning the status.
 
