@@ -43,15 +43,19 @@ pub(super) struct IdentitySpans {
 }
 
 pub(super) fn metrics(a: &AgentRow, status: &str) -> String {
-    let context = a.context_used_pct.map_or_else(
-        || "????  ?".into(),
-        |pct| super::row_meter::ctx_meter_text(pct, 4),
-    );
+    let spark = if a.context_used_pct.is_some() {
+        "▂▃▃▄"
+    } else {
+        "????"
+    };
+    let pct = a
+        .context_used_pct
+        .map_or_else(|| "?".into(), |n| format!("{n}%"));
     let count = a
         .compaction_count
         .map_or_else(|| "?c".into(), |n| format!("{n}c"));
     let cost = super::row_meter::cost_cell(a.session_cost_cents);
-    format!("{context} · {count} · {cost} · {status}")
+    format!("{spark} {pct} · {count} · {cost} · {status}")
 }
 
 /// The card's short model: no `[1m]` window tag, and a `claude-` id names
