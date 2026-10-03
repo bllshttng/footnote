@@ -1270,8 +1270,7 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
         error=RegistryVersionError,
         what="registry",
         remedy=(
-            "point this checkout at its own registry "
-            "(config.paths.agents_registry_path, or FNO_AGENTS_HOME for the Rust side)"
+            "point this checkout at its own registry (set FNO_AGENTS_HOME)"
         ),
     )
 
@@ -1348,7 +1347,7 @@ def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: 
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("FNO_TEST_HERMETIC") == "1":
         raise RegistryWriteRefused(
             f"refusing {target}: a test or probe process never writes the shared registry; "
-            "pin its state dir (config.paths.agents_registry_path) instead."
+            "pin its own home (FNO_AGENTS_HOME) instead."
         )
     if os.environ.get("FNO_REGISTRY_ALLOW_ROW_LOSS") == "1":
         return

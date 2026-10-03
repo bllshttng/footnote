@@ -55,8 +55,6 @@ prefix = "fno"
 # inbox_dir = <unset>   # optional; no default
 # Override path to the capture-tier inbox/parking-lot file.
 # inbox_path = <unset>   # optional; no default
-# Override path to the agents registry.json.
-# agents_registry_path = <unset>   # optional; no default
 # Override path to the handoffs dir.
 # handoffs_dir = <unset>   # optional; no default
 # Override path to the retro-pending dir.

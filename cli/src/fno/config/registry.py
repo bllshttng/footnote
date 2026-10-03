@@ -57,7 +57,6 @@ FIELD_META: dict[str, Meta] = {
     "paths.inbox_dir": Meta("never", "Override path to the cross-project messaging inbox dir."),
     "paths.inbox_path": Meta("never", "Override path to the capture-tier inbox/parking-lot file."),
     "paths.chats": Meta("never", "Override root dir for the per-chat message store (default ~/.fno/chats)."),
-    "paths.agents_registry_path": Meta("never", "Override path to the agents registry.json."),
     "paths.handoffs_dir": Meta("never", "Override path to the handoffs dir."),
     "paths.retro_pending_dir": Meta("never", "Override path to the retro-pending dir."),
     "paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),

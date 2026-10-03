@@ -21,8 +21,8 @@ runner = CliRunner()
 def _isolate_global_settings(tmp_path_factory, monkeypatch):
     """Keep every read off the developer's real ~/.fno config.
 
-    Without this the `paths.agents_registry_path` refusal reads the machine's
-    global settings and the test's verdict depends on the developer's box.
+    The init refusals and the project-scoped config write must not depend
+    on what the developer's own box happens to pin.
     """
     monkeypatch.setenv(
         "FNO_GLOBAL_SETTINGS_PATH",
@@ -85,26 +85,6 @@ def test_re_running_with_the_same_id_is_idempotent(tmp_path, monkeypatch):
 
     assert second.exit_code == 0, second.output
     assert _read(repo)["state_dir"] == "~/.fno/projects/demo"
-
-
-def test_ac2_edge_refuses_an_agents_registry_override(tmp_path, monkeypatch):
-    # An explicit `paths.agents_registry_path` is honored AHEAD of the state_dir
-    # fallback, so this environment would get its own graph and share the
-    # roster. Half-isolation is worse than none: it looks clean and is not.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    globals_toml = tmp_path / "globals.toml"
-    globals_toml.write_text(
-        "[paths]\nagents_registry_path = \"~/.fno/agents/registry.json\"\n"
-    )
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(globals_toml))
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    res = _run(repo, "demo")
-
-    assert res.exit_code == 1
-    assert "paths.agents_registry_path" in res.output
-    assert not (repo / ".fno" / "config.toml").exists()
 
 
 def test_refuses_an_id_the_node_grammar_rejects(tmp_path, monkeypatch):
