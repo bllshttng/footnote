@@ -373,6 +373,27 @@ row_fno_sh_head() {
   shared_smoke "$HOME/.local/bin"
 }
 
+# The Worker pins a release tag, so the served bytes lag a release whenever
+# the pin is not bumped. Compare against the newest stable tag; bytes-only,
+# the served rows above already prove installability.
+row_fno_sh_fresh() {
+  local tag
+  tag="$(git ls-remote --tags --refs https://github.com/bllshttng/footnote 'refs/tags/v*' \
+    | awk -F'refs/tags/' '{print $2}' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+  if [ -z "$tag" ]; then
+    miss "fresh" "could not read the newest stable tag from bllshttng/footnote"
+    return 0
+  fi
+  curl -fsSL https://fno.sh > "$BASE/served.out" 2>/dev/null
+  curl -fsSL "https://raw.githubusercontent.com/bllshttng/footnote/$tag/scripts/install/fno.sh" > "$BASE/released.out" 2>/dev/null
+  if [ -s "$BASE/served.out" ] && cmp -s "$BASE/served.out" "$BASE/released.out"; then
+    pass "fresh" "fno.sh serves the same bytes as $tag"
+  else
+    miss "fresh" "fno.sh is stale against $tag; bump the fno-web Worker INSTALL_SCRIPT_URL pin to $tag and redeploy"
+  fi
+}
+
 row_install_sh_alias() {
   assert_clean_machine
   curl -fsSL https://fno.sh > "$BASE/root.out" 2>/dev/null
@@ -509,6 +530,7 @@ run_row() {
     codex-plugin-session)  row_codex_plugin_session ;;
     fno-sh-served)         row_fno_sh_served ;;
     fno-sh-head)           row_fno_sh_head ;;
+    fno-sh-fresh)          row_fno_sh_fresh ;;
     install-sh-alias)      row_install_sh_alias ;;
     pypi-uv)               row_pypi_uv ;;
     pypi-uv-pinned)        row_pypi_uv_pinned ;;

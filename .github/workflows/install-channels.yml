@@ -81,6 +81,11 @@ jobs:
             expect: pass
             node: ''
             readme: []
+          - id: fno-sh-fresh
+            runs-on: ubuntu-latest
+            expect: fail
+            node: x-f867
+            readme: []
           - id: install-sh-alias
             runs-on: ubuntu-latest
             expect: pass
