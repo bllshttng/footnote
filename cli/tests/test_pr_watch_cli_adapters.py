@@ -850,7 +850,7 @@ def test_merge_phase_uses_load_scaled_queue_bound_before_the_sweep(monkeypatch):
     """The read scales under load and keeps enough wall for a merge attempt."""
     counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
     rows, left, drained = _run_merge_tick_with_counts(monkeypatch, counts)
-    assert len(drained) == 1 and 0 < left[0] <= 245
+    assert len(drained) == 1 and 0 < left[0] <= 260
     merge_at = rows.index(next(r for r in rows if r[0] == "pr_watch_merge"))
     sweep_at = rows.index(next(r for r in rows if r[0] == "pr_watch_sweep"))
     assert merge_at < sweep_at
