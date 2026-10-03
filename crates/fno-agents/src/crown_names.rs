@@ -936,17 +936,32 @@ pub fn revert_stale_pending(
     let reg = crate::state::load_registry(registry_path)
         .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
     for (scope, pending) in stale {
-        let evidence = match reg.entries.iter().find(|e| e.name == pending.heir_name) {
-            None => "heir row removed".to_string(),
-            Some(row) if crate::loop_reign::is_terminal(row) => {
-                format!("heir row {:?}", row.status)
-            }
-            Some(row) => {
+        let evidence = match crate::loop_reign::live_name_join(&reg.entries, &pending.heir_name) {
+            crate::loop_reign::NameJoin::One(row) => {
                 kept.push(format!(
                     "{scope}: heir row {} still {:?}",
                     pending.heir_name, row.status
                 ));
                 continue;
+            }
+            crate::loop_reign::NameJoin::Ambiguous => {
+                kept.push(format!(
+                    "{scope}: heir row {} name ambiguous; revert refused",
+                    pending.heir_name
+                ));
+                continue;
+            }
+            crate::loop_reign::NameJoin::None => {
+                // No live row answers the heir name; the name's raw matches
+                // are all terminal by the join's construction, so the first
+                // names why the succession reverts.
+                match reg.entries.iter().find(|e| {
+                    e.name == pending.heir_name
+                        || e.aliases.iter().any(|a| *a == pending.heir_name)
+                }) {
+                    None => "heir row removed".to_string(),
+                    Some(row) => format!("heir row {:?}", row.status),
+                }
             }
         };
         if apply {
@@ -1872,6 +1887,22 @@ mod tests {
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
                 crown_row("heir-live", "other", 1, "sess-l"),
+                json!({
+                    "name": "heir-dup", "status": "live", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-d1",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                json!({
+                    "name": "heir-dup", "status": "live", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-d2",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                json!({
+                    "name": "heir-twin", "status": "failed", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-tw1",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                crown_row("heir-twin", "other", 1, "sess-tw2"),
             ]),
         );
         let store = store_path(tmp.path());
@@ -1896,6 +1927,14 @@ mod tests {
                         "x-yyyy".into(),
                         pending_record("young-heir", "king-four", Some("sess-4"), &now_stamp()),
                     ),
+                    (
+                        "x-dupd".into(),
+                        pending_record("heir-dup", "king-five", Some("sess-5"), &now_stamp()),
+                    ),
+                    (
+                        "x-twin".into(),
+                        pending_record("heir-twin", "king-six", Some("sess-6"), &now_stamp()),
+                    ),
                 ]),
             },
         )
@@ -1914,8 +1953,16 @@ mod tests {
         assert_eq!(reverted[0].evidence, "heir row removed");
         assert_eq!(reverted[1].scope, "x-tttt");
         assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
-        assert_eq!(kept.len(), 1, "{kept:?}");
-        assert!(kept[0].contains("heir-live"), "{kept:?}");
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert!(kept.iter().any(|k| k.contains("heir-live")), "{kept:?}");
+        // A name two live rows answer is ambiguous: keep, never guess.
+        assert!(
+            kept.iter()
+                .any(|k| k.contains("heir-dup") && k.contains("ambiguous")),
+            "{kept:?}"
+        );
+        // A dead twin never answers for the live heir.
+        assert!(kept.iter().any(|k| k.contains("heir-twin")), "{kept:?}");
         let dump = snapshot(&store).unwrap();
         // Reverted records name the predecessor again, marker gone.
         assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-old"));
@@ -1933,6 +1980,16 @@ mod tests {
         assert_eq!(
             dump["crowns"]["x-yyyy"]["pending_succession"]["heir_name"],
             json!("young-heir")
+        );
+        // The ambiguous and twin records keep too.
+        assert_eq!(dump["crowns"]["x-dupd"]["holder_session"], json!(null));
+        assert_eq!(
+            dump["crowns"]["x-dupd"]["pending_succession"]["heir_name"],
+            json!("heir-dup")
+        );
+        assert_eq!(
+            dump["crowns"]["x-twin"]["pending_succession"]["heir_name"],
+            json!("heir-twin")
         );
 
         // The dry run reports the same revert and writes nothing.

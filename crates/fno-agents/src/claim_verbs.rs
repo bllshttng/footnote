@@ -932,6 +932,7 @@ fn resolve_subject_session(
                 .borrow()
                 .as_ref()
                 .and_then(|i| i.by_name.get(worker).cloned())
+                .flatten()
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
     }
@@ -1002,11 +1003,33 @@ fn session_liveness_answer(
 struct SessionRegistryIndex {
     known: bool,
     by_session: std::collections::HashMap<String, (u32, u64)>,
-    by_name: std::collections::HashMap<String, String>,
+    /// The spawn-handover join, name/alias to session id. `None` marks a name
+    /// two live rows claim: the caller answers Unresolved, never a guessed
+    /// session. Terminal rows never join.
+    by_name: std::collections::HashMap<String, Option<String>>,
     /// The row's served `liveness` word and its measurement stamp, keyed by
     /// session id. No pid requirement: 33 of 33 thread rows carry pid None,
     /// and the served pair is the only liveness evidence they carry.
     served: std::collections::HashMap<String, (Option<String>, Option<String>)>,
+}
+
+/// One by-name join entry: the unique sid, or `None` once two rows claim the
+/// name. First write wins; a disagreeing second write poisons the key.
+fn note_name(
+    map: &mut std::collections::HashMap<String, Option<String>>,
+    key: String,
+    sid: String,
+) {
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(Some(sid));
+        }
+        std::collections::hash_map::Entry::Occupied(mut slot) => {
+            if slot.get().as_deref() != Some(sid.as_str()) {
+                *slot.get_mut() = None;
+            }
+        }
+    }
 }
 
 fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistryIndex>>) {
@@ -1035,13 +1058,17 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
             // The registry's own name contract (state.rs row_for_token): a
             // name OR any prior alias resolves the row. A handover holder
             // carries the name from mint time, so a worker renamed inside its
-            // window must still resolve through the alias.
-            if !e.name.is_empty() {
-                by_name.insert(e.name.clone(), sid.to_string());
-            }
-            for alias in &e.aliases {
-                if !alias.is_empty() {
-                    by_name.insert(alias.clone(), sid.to_string());
+            // window must still resolve through the alias. The mail_envelope
+            // join shape: terminal rows never join, and a name two rows claim
+            // maps to None rather than a last-write-wins sid.
+            if !crate::loop_reign::is_terminal(e) {
+                if !e.name.is_empty() {
+                    note_name(&mut by_name, e.name.clone(), sid.to_string());
+                }
+                for alias in &e.aliases {
+                    if !alias.is_empty() {
+                        note_name(&mut by_name, alias.clone(), sid.to_string());
+                    }
                 }
             }
         }
@@ -2148,7 +2175,7 @@ mod tests {
         let index = std::cell::RefCell::new(Some(SessionRegistryIndex {
             known: true,
             by_session: std::collections::HashMap::new(),
-            by_name: [("w-gate".to_string(), "s-worker".to_string())]
+            by_name: [("w-gate".to_string(), Some("s-worker".to_string()))]
                 .into_iter()
                 .collect(),
             served: std::collections::HashMap::new(),

@@ -71,7 +71,28 @@ class TestResolveSelf:
         assert result.registered is True
         assert result.name == "ghost-worker"
         assert result.provider is None
-        assert result.short_id is None
+
+    def test_ambiguous_name_answers_name_only_and_dead_twin_skipped(self):
+        # A name two live rows claim enriches from neither (tier 1 still
+        # answers); one live row beside a dead twin still enriches, and the
+        # dead twin never answers.
+        dup = _claude(harness_session_id="s-1")
+        dup2 = _claude(harness_session_id="s-2")
+        result = whoami_mod.resolve_self(
+            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_HARNESS": "claude"},
+            registry=[dup, dup2],
+        )
+        assert result.registered is True
+        assert result.name == "spawn-x-301a-whoami"
+        assert result.short_id is None, "an ambiguous name enriches from no row"
+        twin = _claude(status="exited")
+        live = _claude()
+        result = whoami_mod.resolve_self(
+            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_HARNESS": "claude"},
+            registry=[twin, live],
+        )
+        assert result.status == "live", "the live twin answers, never the dead one"
+        assert result.short_id == "4a1f9c2b"
         assert result.exit_code == 0
 
     def test_session_fallback_matches_by_uuid(self):

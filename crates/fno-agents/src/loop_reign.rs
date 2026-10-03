@@ -45,6 +45,43 @@ pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
     )
 }
 
+/// The one name join `mail_envelope.rs` renders addresses with: filter the
+/// rows by a liveness side first (dead twins must never answer for a live
+/// name), match name or alias, and refuse when the name still matches more
+/// than one row - the first match of a duplicate name is a guess, and the
+/// callers below act on the row.
+pub(crate) enum NameJoin<'a> {
+    One(&'a RegistryEntry),
+    Ambiguous,
+    None,
+}
+
+fn join_rows<'a, F>(rows: &'a [RegistryEntry], name: &str, keep: F) -> NameJoin<'a>
+where
+    F: Fn(&RegistryEntry) -> bool,
+{
+    let mut matches = rows.iter().filter(|row| {
+        keep(row) && (row.name == name || row.aliases.iter().any(|alias| alias == name))
+    });
+    match (matches.next(), matches.next()) {
+        (Some(row), None) => NameJoin::One(row),
+        (None, _) => NameJoin::None,
+        (Some(_), Some(_)) => NameJoin::Ambiguous,
+    }
+}
+
+/// The join over live rows: every terminal row is invisible to it.
+pub(crate) fn live_name_join<'a>(rows: &'a [RegistryEntry], name: &str) -> NameJoin<'a> {
+    join_rows(rows, name, |row| !is_terminal(row))
+}
+
+/// The join over terminal rows: the caller already knows the row it wants is
+/// dead (a stale-crown reading), so a live twin of the same name must never
+/// answer for it.
+pub(crate) fn terminal_name_join<'a>(rows: &'a [RegistryEntry], name: &str) -> NameJoin<'a> {
+    join_rows(rows, name, is_terminal)
+}
+
 /// One read of who is reigning, over what, in what shape, and is it live.
 /// Field names mirror the Python dataclass the JSON client deserializes into.
 #[derive(Debug, Default, Serialize)]
@@ -2338,6 +2375,36 @@ mod tests {
             Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
             None => std::env::remove_var("FNO_SPACES_DIR"),
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The mail_envelope join contract, on both liveness sides: a dead twin
+    /// never answers a live name, a live twin never answers a terminal name,
+    /// and a side that still matches two rows refuses instead of guessing.
+    #[test]
+    fn name_joins_skip_the_other_side_and_refuse_duplicates() {
+        let dir = tmp("name-join");
+        let rows = [
+            row("heir", "s-1", None, AgentStatus::Live),
+            row("heir", "s-2", None, AgentStatus::Exited),
+            row("king", "s-3", None, AgentStatus::Orphaned),
+            row("king", "s-4", None, AgentStatus::Exited),
+        ];
+        registry_file(&dir, &rows);
+        let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+        assert!(matches!(
+            live_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(live_name_join(&reg.entries, "king"), NameJoin::None));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "king"),
+            NameJoin::Ambiguous
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 }
