@@ -962,7 +962,7 @@ pub fn comment_create(
             "state_ref names a landing: carry it with --state done or accepted".into(),
         ));
     }
-    if kind == "comment" && (state.is_some() || state_ref.is_some()) {
+    if kind == "comment" && (state.is_some() || input.state_ref.is_some()) {
         return Err(ApiError(
             "state moves a thread head: answer with reply_to (the CLI --reply <cid>)".into(),
         ));
