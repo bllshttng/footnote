@@ -508,12 +508,14 @@ fn the_acquire_leaf_matches_the_python_leg_on_every_frozen_case() {
     let root = tempfile::tempdir().unwrap();
     plant(
         root.path(),
+        // Same host-stability rule as case 4: the plant anchors to the
+        // live test process, never to a pid the host may or may not run.
         &[
             "session:par-heldjson",
             "--holder",
             "pty:par",
             "--pid",
-            "4242",
+            &std::process::id().to_string(),
         ],
     );
     let out = run_raw(
@@ -531,6 +533,6 @@ fn the_acquire_leaf_matches_the_python_leg_on_every_frozen_case() {
     let v: serde_json::Value = serde_json::from_str(out.1.trim()).expect("held json on stdout");
     assert_eq!(v["outcome"], "held_by_other");
     assert_eq!(v["holder"], "pty:par");
-    assert_eq!(v["pid"], 4242);
+    assert_eq!(v["pid"], std::process::id());
     assert!(v["host"].is_string(), "host names the recorded host");
 }
