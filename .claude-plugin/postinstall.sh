@@ -226,7 +226,17 @@ uv_tool_install_retry() {
 # session-start installer ran unnoticed. Every install path here routes through
 # one call to this guard first. FNO_INSTALL_REPLACE=1 is the named override.
 tool_env_dir() {
-  NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null
+  if command -v uv >/dev/null 2>&1; then
+    NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null && return 0
+    return 1
+  fi
+  # uv itself is absent (the fno.sh delegation path): the env it left behind
+  # still lives at the default location, and the guard must still read it.
+  if [[ -n "${UV_TOOL_DIR:-}" ]]; then
+    printf '%s\n' "$UV_TOOL_DIR"
+    return 0
+  fi
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools"
 }
 
 # The direct_url.json uv records for a local-path install, stripped to its
@@ -270,7 +280,12 @@ clobber_guard() {
   if [[ -n "$receipt" ]]; then
     receipt_dir="${receipt#file://}"
     receipt_dir="${receipt_dir%/}"
-    if [[ "$receipt_dir" != "$CLI_DIR" ]]; then
+    # Physical-path both sides before comparing: uv records the path AS GIVEN,
+    # so a symlinked install must not read as a foreign source (a dead source
+    # dir keeps its recorded path and still refuses).
+    cli_physical="$(cd "$CLI_DIR" 2>/dev/null && pwd -P)" || cli_physical="$CLI_DIR"
+    receipt_physical="$(cd "$receipt_dir" 2>/dev/null && pwd -P)" || receipt_physical="$receipt_dir"
+    if [[ "$receipt_physical" != "$cli_physical" ]]; then
       err "refusing to reinstall: the existing fno tool env was installed from $receipt_dir, not this plugin's $CLI_DIR."
       err "Replacing it would discard that install. Re-run the install from that source instead, or set FNO_INSTALL_REPLACE=1."
       return 1
@@ -332,6 +347,10 @@ if ! command -v uv >/dev/null 2>&1; then
     esac
     if [[ -n "$fno_sh_spec" ]]; then
       log "uv not found; delegating to scripts/install/fno.sh (it provisions uv)..."
+      # The guard reads the env at its default location while uv itself is
+      # absent: a tool env outliving a removed uv is exactly the one the
+      # delegation would otherwise replace unguarded.
+      clobber_guard || exit 3
       fno_sh_rc=0
       env "$fno_sh_spec" sh "$FNO_SH" || fno_sh_rc=$?
       if [[ "$fno_sh_rc" -eq 0 ]]; then

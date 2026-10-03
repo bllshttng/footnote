@@ -86,5 +86,37 @@ grep -q "$ENVDIR/fno-py" <<<"$out" || die "refusal must name the live process li
 [[ "$rc" == 3 ]] || die "live-process refusal must exit 3, got rc=$rc"
 echo "PASS live process beside the env -> exit 3 naming the process"
 
+# --- Case 4: uv ABSENT (delegation path) but the default tool dir survives ->
+# the guard must still read it and refuse a foreign receipt (finding: the
+# delegation branch used to install unguarded when uv itself was gone).
+NOUV_HOME="$WORK/nouv-home"
+NOUV_TOOLS="$NOUV_HOME/.local/share/uv/tools"
+NOUV_ENV="$NOUV_TOOLS/fno"
+mkdir -p "$NOUV_ENV/lib/python3.11/site-packages/fno-0.4.0.dist-info"
+printf '{"dir": "/somewhere-else/cli", "url": "file:///somewhere-else/cli/"}\n' \
+  >"$NOUV_ENV/lib/python3.11/site-packages/fno-0.4.0.dist-info/direct_url.json"
+# A bin dir with the pip stubs but NO uv, so command -v uv fails and the
+# postinstall takes the fno.sh delegation.
+FAKEBIN_NOUV="$WORK/bin-nouv"
+mkdir -p "$FAKEBIN_NOUV"
+for pip in pip pip3; do cp "$FAKEBIN/$pip" "$FAKEBIN_NOUV/$pip"; done
+out="$(HOME="$NOUV_HOME" PATH="$FAKEBIN_NOUV:/usr/bin:/bin" bash "$POSTINSTALL" 2>&1)"
+rc=$?
+grep -q "refusing to reinstall" <<<"$out" || die "delegation path must consult the guard over the default tool dir, got: $out"
+grep -q "uv not found; delegating" <<<"$out" || die "case must run the delegation branch, got: $out"
+[[ "$rc" == 3 ]] || die "delegation-path refusal must exit 3, got rc=$rc"
+echo "PASS uv absent, surviving default tool env -> delegation refuses exit 3"
+
+# --- Case 5: receipt names a SYMLINK to this tree's cli/ -> same source, the
+# guard passes (physical-path comparison), install arms reached.
+ln -s "$REPO_ROOT/cli" "$WORK/cli-link"
+printf '{"dir": "%s", "url": "file://%s/"}\n' "$WORK/cli-link" "$WORK/cli-link" \
+  >"$ENVDIR/lib/python3.11/site-packages/fno-0.4.0.dist-info/direct_url.json"
+out="$(PATH="$TESTPATH" bash "$POSTINSTALL" 2>&1)"
+rc=$?
+grep -q "refusing to reinstall" <<<"$out" && die "symlinked same-source receipt must not refuse, got: $out"
+grep -q "fake uv: install refused by test stub" <<<"$out" || die "symlinked receipt must reach the install arms, got: $out"
+echo "PASS symlinked same-source receipt -> guard passes"
+
 echo "fails=$fails"
 exit "$fails"
