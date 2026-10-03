@@ -1844,9 +1844,8 @@ def _claude_create_path(
                 king_loop_armed = False
                 king_unarmed_reason = str(exc)
         if revive:
-            # One row per session id: the same-name revival replaces its own
-            # row; the short-id-named adopted row is replaced through the
-            # resumed uuid it carries.
+            # One row per session id: the revival replaces its own row, or the
+            # adopted row reached through the resumed uuid.
             return [
                 entry
                 if (
@@ -2282,9 +2281,8 @@ def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[st
 
 
 def _revival_answer(name: str, harness: str, resume_session_id: str) -> Optional[dict]:
-    """One ``fno-agents revival-check`` answer, ``None`` when the runtime is
-    unavailable or the answer is unreadable - the spawn then keeps today's
-    collision posture (a same-name row refuses, a fork proceeds)."""
+    """One ``fno-agents revival-check`` answer; ``None`` when the runtime is
+    unavailable, so the spawn keeps today's collision posture."""
     import json
     import subprocess
 
@@ -2631,20 +2629,15 @@ def dispatch_spawn(
 
             # Revive-in-place (Fix 3): a --resume spawn whose target uuid
             # matches an EXITED claude row is a revival, not a collision - the
-            # row is updated in place below (new short_id, same uuid) instead
-            # of refused. The row is found by NAME first, then by the resumed
-            # uuid itself: an adopted row named by its short id must revive
-            # under the caller's explicit --name too, or the row and the
-            # harness disagree. Every other same-name case stays fail-closed
-            # (live row, uuid mismatch, no --resume).
+            # row is updated in place below instead of refused. Every other
+            # same-name case stays fail-closed (live row, uuid mismatch, no
+            # --resume).
             existing = next((e for e in entries if e.name == name), None)
             revive = False
             if resume_session_id:
-                # The revival decision reads one Rust answer: the row is found
-                # by name first, then by the resumed uuid itself - an adopted
-                # short-id-named row revives under the caller's explicit --name
-                # too, or the row and the harness disagree. The writer-claim
-                # gate below stays the fail-closed backstop.
+                # One Rust answer: by name, then by the resumed uuid itself -
+                # an adopted short-id-named row revives under --name too. The
+                # writer-claim gate stays the fail-closed backstop.
                 answer = _revival_answer(name, harness, resume_session_id)
                 if answer is not None and answer.get("revive"):
                     revive = True

@@ -151,10 +151,8 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
 
 
 def _session_node_map() -> dict[str, dict]:
-    """session id -> {node, pr, basis} from ONE fno-agents read: the graph's
-    ``sessions[]`` rows and the node claims, a live claim outranking the
-    graph record. The join the top view renders; a failed read answers {} -
-    top is a debug view, never a failure surface."""
+    """session id -> {node, pr, basis} from ONE fno-agents read; a failed
+    read answers {} (top is a debug view, never a failure surface)."""
     import json
     import subprocess
 
@@ -286,9 +284,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         handle = handles.get(w.session_id or "")
         reg_name = handle or w.name
         v = verdict_map.get(reg_name)
-        # The session-keyed join answers first: a live claim is the session's
-        # own work order, the graph's sessions[] row is the middle source, and
-        # the name-keyed retirement verdict is the last fallback.
+        # Claim first, then the graph row; the name-keyed verdict is last.
         joined = session_nodes.get((w.session_id or "").strip().lower())
         if joined:
             node: Optional[str] = joined["node"]

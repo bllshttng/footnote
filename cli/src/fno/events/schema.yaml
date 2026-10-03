@@ -2315,21 +2315,10 @@ event_types:
           type: string
 
   - name: agent_revived
-    description: "A reaped session came back: one event per revive naming the verb that brought it, the actor session, the prior name and the session id; the revived row reads origin=revived."
+    description: "A reaped session came back: one per revive naming the verb, the actor session, the prior name and the session id; the revived row reads origin=revived."
     sources: [agents]
     data:
       required: [verb, prior_name, name, harness, harness_session_id]
-      properties:
-        verb:
-          type: string
-        prior_name:
-          type: string
-        name:
-          type: string
-        harness:
-          type: string
-        harness_session_id:
-          type: string
 
   - name: session_aliases_merged
     description: "The reconcile sweep folded legible aliases onto registry rows (the session-names overlay, plus default aliases minted for rows that had none). Count-only: the row is the name store, this says how many addresses moved."

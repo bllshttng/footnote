@@ -26,9 +26,8 @@ Three rules keep it from guessing:
   (NOT toplevel -- footnote is worktree-first, so toplevel differs per worktree
   and would refuse canonical->worktree traffic), then refuse. An out-of-project
   hit is refused with the candidate named, copying the ambiguity posture; an
-  explicit ``cross_project`` flag overrides it for a spawn into a foreign
-  repo, and a full session id needs no flag (it is globally unique, so adopt
-  and resume reach it in every project folder). The confinement lives here and
+  explicit ``cross_project`` flag overrides it, and a full session id needs
+  no flag. The confinement lives here and
   batch callers must route verified hits
   through :func:`confine_store_hits`; ``resume`` does not adopt store hits (it
   matches loaded registry entries via ``resolve_agent_in``), so it is uncovered
@@ -381,13 +380,10 @@ def confine_store_hits(
 
     The refused posture copies ambiguity: an out-of-project candidate is named,
     never silently adopted and woken. A full session id waives the flag: it is
-    globally unique, so ``adopt`` and ``resume`` reach it in every project
-    folder with no ``--cross-project``. Returns ``hits`` unchanged when
-    confinement does not apply -- ``cross_project`` set, a full-id token, or
-    the scope is itself not a known project (no settings project and not a git
-    repo), in which case there is no "across" to protect and the historical
-    behavior stands. Raises :class:`AgentResolutionError` (``ambiguous=True``)
-    on the refuse.
+    globally unique. Returns ``hits`` unchanged when confinement does not
+    apply -- ``cross_project`` set, a full-id token, or the scope is itself
+    not a known project. Raises :class:`AgentResolutionError`
+    (``ambiguous=True``) on the refuse.
     """
     from fno.harness_identity import harness_of_session_id
 
