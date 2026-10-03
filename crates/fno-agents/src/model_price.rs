@@ -405,10 +405,18 @@ fn prune_session_folds(folds: &mut HashMap<String, (RunningCost, Option<SessionC
         return;
     };
     let cutoff = stamp - chrono::Duration::hours(24);
-    folds.retain(|_, (fold, _)| {
-        fold.last_measured_at
+    folds.retain(|_, (fold, cost)| {
+        let last_compaction = fold
+            .last_measured_at
             .as_deref()
-            .and_then(|measured| chrono::DateTime::parse_from_rfc3339(measured).ok())
+            .and_then(|measured| chrono::DateTime::parse_from_rfc3339(measured).ok());
+        let last_cost = cost
+            .as_ref()
+            .and_then(|cost| chrono::DateTime::parse_from_rfc3339(&cost.measured_at).ok());
+        last_compaction
+            .into_iter()
+            .chain(last_cost)
+            .max()
             .is_some_and(|measured| measured > cutoff)
     });
 }
@@ -783,8 +791,7 @@ mod tests {
         );
 
         let damaged_path = dir.join("damaged.jsonl");
-        let damaged =
-            r#"{"type":"compacted","timestamp":"2026-10-02T00:03:00Z""#.to_string() + "\n";
+        let damaged = transcript.clone() + "not-json\n";
         std::fs::write(&damaged_path, damaged).unwrap();
         measure_session_cost(
             &dir,
@@ -798,6 +805,11 @@ mod tests {
             served_compaction_count(Some("sess-damaged")),
             None,
             "malformed transcript rows stay unknown instead of reading zero"
+        );
+        assert_eq!(
+            served_session_cost(Some("sess-damaged")).0,
+            keys["session_cost_cents"].as_u64(),
+            "a malformed transcript does not evict the independent cost reading"
         );
     }
 
