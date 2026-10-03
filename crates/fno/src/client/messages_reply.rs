@@ -31,7 +31,7 @@ pub(super) struct ReplyState {
     esc: Vec<u8>,
 }
 
-fn text(row: &Value, field: &str) -> &str {
+fn text<'a>(row: &'a Value, field: &str) -> &'a str {
     row.get(field).and_then(Value::as_str).unwrap_or("")
 }
 

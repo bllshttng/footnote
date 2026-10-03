@@ -880,7 +880,10 @@ async fn act(
             }
         }
         Col::Thread => {
-            let row = b.conversation_rows().get(b.cursors[2]).cloned();
+            let row = b
+                .conversation_rows()
+                .get(b.cursors[2])
+                .map(|row| (**row).clone());
             if let Some(row) = row {
                 super::messages_reply::open(view, row);
             }
@@ -1101,7 +1104,7 @@ pub(crate) async fn mouse(
         Col::Thread => 2,
     };
     if col == Col::Thread {
-        let row = b.conversation_rows().get(i).cloned();
+        let row = b.conversation_rows().get(i).map(|row| (**row).clone());
         b.cursors[2] = i;
         if let Some(row) = row {
             super::messages_reply::open(view, row);
