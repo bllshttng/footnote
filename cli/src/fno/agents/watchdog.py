@@ -1326,9 +1326,10 @@ def _ledger_nodes() -> dict[str, str]:
 
 
 def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]]:
-    """Enumerate Claude and non-Claude live rows with machine-written identity."""
+    """Live rows fno-first: registry spine, roster as state column (d-e096c669)."""
     from fno.agents.harnesses.claude import claude_agents_rows
     from fno.agents.registry import load_registry
+    from fno.agents.spawn_gate import LIVE_STATUSES
     from fno.recovery import _node_id_from_worktree
 
     budget = ROSTER_TIMEOUT_S if timeout is None else max(1.0, min(timeout, ROSTER_TIMEOUT_S))
@@ -1336,91 +1337,100 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     raw, warnings = claude_agents_rows(timeout=budget)
     elapsed = time.time() - probe_started
     if elapsed > budget * ROSTER_HEADROOM:
-        warnings = [
-            *warnings,
-            f"{HEADROOM_WARNING_PREFIX}took {elapsed:.1f}s of its {budget:.0f}s "
-            f"budget for {len(raw)} row(s); past the budget the sweep reads zero "
-            f"rows and refuses. Raise ROSTER_TIMEOUT_S",
-        ]
+        warnings.append(f"{HEADROOM_WARNING_PREFIX}took {elapsed:.1f}s of its "
+                        f"{budget:.0f}s budget for {len(raw)} row(s); the roster "
+                        "read is slow, fno rows still stand. Raise ROSTER_TIMEOUT_S")
     by_sid: dict[str, Any] = {}
-    registry_rows: list[Any] = []
+    registry_rows: Optional[list[Any]] = None
     try:
         registry_rows = list(load_registry())
         for entry in registry_rows:
-            if getattr(entry, "harness", None) != "claude":
-                continue
-            sid = (
-                getattr(entry, "harness_session_id", None)
-                or getattr(entry, "cc_session_id", None)
-            )
-            if sid:
-                by_sid[str(sid)] = entry
-    except Exception:  # noqa: BLE001 - registry read miss degrades to claude rows
-        by_sid = {}
+            if getattr(entry, "harness", None) == "claude":
+                sid = (getattr(entry, "harness_session_id", None)
+                       or getattr(entry, "cc_session_id", None))
+                if sid:
+                    by_sid[str(sid)] = entry
+    except Exception:  # noqa: BLE001 - an unread registry leaves the vendor view as the read
+        pass
     ledger_nodes: Optional[dict[str, str]] = None
     out: list[Row] = []
     unmapped_states: set[str] = set()
     skipped_no_sid = 0
+
+    def _node_for(cwd: str, sid: str, reg_node: Any = None) -> Any:
+        if reg_node is not None:
+            return reg_node
+        if _is_linked_worktree(cwd):
+            return _node_id_from_worktree(cwd)
+        nonlocal ledger_nodes
+        if ledger_nodes is None:
+            ledger_nodes = _ledger_nodes()
+        return ledger_nodes.get(sid)
+
+    vendor_by_sid: dict[str, Any] = {}
     for r in raw:
         sid = str(r.get("sessionId") or r.get("session_id") or "")
-        if not sid:
-            cwd = str(r.get("cwd") or "")
-            node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
-            if node:
-                warnings.append(
-                    f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
-                    f"harness=claude node={node} name={r.get('name') or 'unknown'}"
-                )
-            else:
-                skipped_no_sid += 1
+        if sid:
+            vendor_by_sid.setdefault(sid, r)
             continue
-        match: Any = by_sid.get(sid)
-        name = str(getattr(match, "name", None) or r.get("name") or sid)
-        cwd = str(r.get("cwd") or getattr(match, "cwd", "") or "")
+        cwd = str(r.get("cwd") or "")
+        node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
+        if node:
+            warnings.append(f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
+                            f"harness=claude node={node} "
+                            f"name={r.get('name') or 'unknown'}")
+        else:
+            skipped_no_sid += 1
+    # fno-first (d-e096c669): registry rows list even when the vendor omits them.
+    for sid, entry in by_sid.items():
+        vendor = vendor_by_sid.get(sid)
+        state, state_warning = _row_state(vendor if vendor is not None else {
+            "status": str(getattr(entry, "status", "") or "")})
+        if state_warning:
+            unmapped_states.add(state_warning)
+        cwd = str((vendor or {}).get("cwd") or getattr(entry, "cwd", "") or "")
+        out.append(Row(
+            row_id=sid, name=str(getattr(entry, "name", None) or sid),
+            state=state, node=_node_for(cwd, sid, getattr(entry, "node", None)),
+            cwd=cwd, agent="claude",
+            stopped_at=(getattr(entry, "stop", None) or {}).get("at"),
+        ))
+    # An unclaimed vendor row is listed and named vendor-only, never dropped.
+    seen_row_ids = {row.row_id for row in out}
+    for sid, r in vendor_by_sid.items():
+        if sid in seen_row_ids:
+            continue
+        if registry_rows is not None:
+            warnings.append(f"{ADVISORY_WARNING_PREFIX}vendor-only row: session "
+                            f"{sid} is listed by claude agents but absent from "
+                            "the fno registry")
         state, state_warning = _row_state(r)
         if state_warning:
             unmapped_states.add(state_warning)
-        node = getattr(match, "node", None)
-        if node is None and _is_linked_worktree(cwd):
-            node = _node_id_from_worktree(cwd)
-        if node is None:
-            if ledger_nodes is None:
-                ledger_nodes = _ledger_nodes()
-            node = ledger_nodes.get(sid)
+        cwd = str(r.get("cwd") or "")
         out.append(Row(
-            row_id=sid,
-            name=name,
-            state=state,
-            node=node,
-            cwd=cwd,
-            agent="claude",
-            stopped_at=(getattr(match, "stop", None) or {}).get("at"),
+            row_id=sid, name=str(r.get("name") or sid),
+            state=state, node=_node_for(cwd, sid), cwd=cwd, agent="claude",
         ))
-    from fno.agents.spawn_gate import LIVE_STATUSES
-
-    seen_row_ids = {row.row_id for row in out}
+        seen_row_ids.add(sid)
     skipped_nonclaude_no_id = 0
-    for entry in registry_rows:
+    for entry in (registry_rows or []):
         if getattr(entry, "harness", None) == "claude":
             continue
         if getattr(entry, "status", None) not in LIVE_STATUSES:
             continue
-        row_id = (
-            getattr(entry, "harness_session_id", None)
-            or getattr(entry, "session_id", None)
-            or getattr(entry, "short_id", None)
-        )
+        row_id = (getattr(entry, "harness_session_id", None)
+                  or getattr(entry, "session_id", None)
+                  or getattr(entry, "short_id", None))
         if not row_id:
             node = getattr(entry, "node", None)
             name = str(getattr(entry, "name", None) or "") or "unknown"
             if not node:
                 skipped_nonclaude_no_id += 1
             else:
-                warnings.append(
-                    f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
-                    f"harness={getattr(entry, 'harness', None) or 'unknown'} "
-                    f"node={node} name={name}"
-                )
+                warnings.append(f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
+                                f"harness={getattr(entry, 'harness', None) or 'unknown'} "
+                                f"node={node} name={name}")
             continue
         if str(row_id) in seen_row_ids:
             continue
@@ -1432,33 +1442,23 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         state, state_warning = _row_state({"status": str(getattr(entry, "status", "") or "")})
         if state_warning:
             unmapped_states.add(state_warning)
-        out.append(
-            Row(
-                row_id=row_id,
-                name=str(getattr(entry, "name", None) or row_id),
-                state=state,
-                node=getattr(entry, "node", None),
-                cwd=str(getattr(entry, "cwd", "") or ""),
-                # The loop exists only because this entry is NOT claude; the
-                # harness it filtered on is the one the row must carry.
-                agent=str(getattr(entry, "harness", "") or "claude"),
-                pid=getattr(entry, "pid", None),
-                pid_start_time=getattr(entry, "pid_start_time", None),
-                mux=getattr(entry, "mux", None),
-            )
-        )
+        out.append(Row(
+            row_id=row_id, name=str(getattr(entry, "name", None) or row_id),
+            state=state, node=getattr(entry, "node", None),
+            cwd=str(getattr(entry, "cwd", "") or ""),
+            # NOT claude: the harness it filtered on is the row's agent.
+            agent=str(getattr(entry, "harness", "") or "claude"),
+            pid=getattr(entry, "pid", None),
+            pid_start_time=getattr(entry, "pid_start_time", None),
+            mux=getattr(entry, "mux", None),
+        ))
         seen_row_ids.add(row_id)
     if skipped_no_sid:
-        warnings = [
-            *warnings,
-            f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
-        ]
+        warnings.append(f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped")
     if skipped_nonclaude_no_id:
-        warnings = [
-            *warnings,
+        warnings.append(
             f"{skipped_nonclaude_no_id} non-claude row(s) carried no session id, "
-            "unmeasurable, skipped",
-        ]
+            "unmeasurable, skipped")
     warnings = [*warnings, *sorted(unmapped_states)]
     return out, warnings
 
