@@ -64,8 +64,8 @@ export PATH
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/with-timeout.sh
-source "$PLUGIN_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=scripts/lib/hook-budget.sh
+source "$PLUGIN_ROOT/scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 # shellcheck source=../scripts/lib/events.sh
 source "$PLUGIN_ROOT/scripts/lib/events.sh" 2>/dev/null || true
 
@@ -116,16 +116,23 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$HOOK_INPUT" | sed -n \
 # never consume each other's latch (same fix target-stop-hook applied).
 TBASE="$(basename "$TRANSCRIPT" .jsonl 2>/dev/null || echo "$TRANSCRIPT")"
 
+# ── 1b. The load-aware read budget. Live fno reads ride it; past
+# the load threshold they are skipped and defaults apply. The PROBE is served
+# from a cache refreshed off the turn path, so the pressure check costs
+# milliseconds even when the machine is too loaded for a live read. The
+# compact DELIVERY keeps its own 45s bound: it is a decision, not a read.
+NUDGE_BUDGET="$(hook_budget_secs)"
+
 # ── 2. Both triggers from config (general 50, king 40). ───────────────────────
 GENERAL_TRIGGER="50"
 KING_TRIGGER="40"
-if command -v fno >/dev/null 2>&1; then
+if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
     # ONE boot for the whole block. Each `fno config get` pays ~1.7s of
     # interpreter startup, so a read per scalar costs a boot per scalar; a Stop
     # hook that wants two numbers from one block asks for the block.
     # stdout is `{"enabled":...,"used_pct_trigger":50,"king_used_pct_trigger":40}`;
     # provenance goes to stderr. sed, not jq: jq is optional in this hook.
-    _blk=$(with_timeout 3 fno config get target.handoff 2>/dev/null || true)
+    _blk=$(with_timeout "$NUDGE_BUDGET" fno config get target.handoff 2>/dev/null || true)
     _t=$(printf '%s' "$_blk" | sed -n 's/.*"used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 50
@@ -167,10 +174,22 @@ COMPACTION_BAND=""
 COMPACTION_PREPARATION=0
 PROBE_OUT=""
 CONTEXT_RUNNER="${FNO_AGENTS_FRONT:-fno-agents}"
+# The probe rides the stale-while-revalidate cache: an unchanged transcript
+# inside the window is served in milliseconds, a served copy past two thirds
+# of its life arms a DETACHED refresher for the next boundary, and a live
+# read that skipped or expired under load serves the stale copy rather than
+# nothing. The fingerprint (size + mtime) rides in the key: a GROWN
+# transcript always re-measures, because pressure truth is the one thing a
+# compaction gate may not serve stale by choice. Keyed by the transcript
+# basename the payload handed us.
+TSTATS="$(stat -c %s,%Y "$TRANSCRIPT" 2>/dev/null || stat -f %z,%m "$TRANSCRIPT" 2>/dev/null || true)"
+TSTATS="$(printf '%s' "$TSTATS" | tr -c '0-9' '-')"
 if command -v jq >/dev/null 2>&1 && command -v "$CONTEXT_RUNNER" >/dev/null 2>&1; then
-    PROBE_OUT=$(with_timeout 5 "$CONTEXT_RUNNER" context-run --probe --transcript "$TRANSCRIPT" --session "$SESSION_ID" --json 2>/dev/null || true)
+    PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 "$TSTATS" -- \
+        "$CONTEXT_RUNNER" context-run --probe --transcript "$TRANSCRIPT" --session "$SESSION_ID" --json 2>/dev/null || true)
 elif command -v jq >/dev/null 2>&1 && command -v fno >/dev/null 2>&1; then
-    PROBE_OUT=$(with_timeout 5 fno whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
+    PROBE_OUT=$(hook_cache_serve "ctxprobe-$TBASE" 300 "$TSTATS" -- \
+        fno whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
 fi
 if command -v jq >/dev/null 2>&1; then
     # jq, not sed: BSD sed (macOS) does not support `[0-9]\+` in basic regex, and
@@ -205,8 +224,8 @@ UNLINKED_ORPHANS=""
 UNLINKED_ORPHAN_COUNT=0
 UNLINKED_UNKNOWN=""
 UNLINKED_UNKNOWN_COUNT=0
-if command -v fno >/dev/null 2>&1; then
-    AGENTS_JSON=$(with_timeout 5 fno agents registry-json 2>/dev/null || true)
+if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
+    AGENTS_JSON=$(with_timeout "$NUDGE_BUDGET" fno agents registry-json 2>/dev/null || true)
     if printf '%s' "$AGENTS_JSON" | jq -e '.agents' >/dev/null 2>&1; then
         # This session's row (by session_id). No row -> non-crowned (not an exit).
         MY_ROW=$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SESSION_ID" \
@@ -318,7 +337,7 @@ fi
 # same door as every other path (`fno config paths shell-stub`), so an overridden
 # `config.state_dir` moves the latches with it; hardcoding a new
 # `$HOME/.fno/latches` would repeat the bug one directory down.
-_stub="$(with_timeout 3 fno config paths shell-stub 2>/dev/null || true)"
+_stub="$(with_timeout "$NUDGE_BUDGET" fno config paths shell-stub 2>/dev/null || true)"
 [ -n "$_stub" ] && [ -f "$_stub" ] && . "$_stub" 2>/dev/null
 LATCH_DIR="${LATCHES_DIR:-${STATE_DIR:-$HOME/.fno}/latches}"
 mkdir -p "$LATCH_DIR" 2>/dev/null || true
@@ -327,10 +346,6 @@ mkdir -p "$LATCH_DIR" 2>/dev/null || true
 # session ends nothing will ever read it again. Two days, not one: a long
 # session must not have its own latch swept mid-flight.
 find "$LATCH_DIR" -maxdepth 1 -type f -mtime +2 -delete 2>/dev/null || true
-# Legacy sweep: latches written to the state-dir TOP LEVEL before they moved
-# into latches/. Nothing writes that pattern there any more, so a match is by
-# definition pre-migration and needs no age bound. Delete this line after 0.4.0.
-find "${STATE_DIR:-$HOME/.fno}" -maxdepth 1 -type f -name '.context-nudge-*' -delete 2>/dev/null || true
 
 CTX_LATCH="${LATCH_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
 ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
@@ -386,7 +401,7 @@ compact_instruction() {
     # neither verdict and lands on the unmeasurable branch.
     local out=""
     if command -v fno >/dev/null 2>&1; then
-        out=$(with_timeout 5 fno agents mail send '/compact' --to-self --raw --check 2>/dev/null || true)
+        out=$(with_timeout "$NUDGE_BUDGET" fno agents mail send '/compact' --to-self --raw --check 2>/dev/null || true)
     fi
     local _ask="ask your operator to type /compact <brief-path> at your prompt, and say in one line what to preserve"
     if [[ "$out" == injectable:* ]]; then
@@ -482,9 +497,9 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
             # rolling doc is scope-keyed, so this ask must name THAT file or
             # the king's judgment lands where the pipeline never reads.
             if [[ -n "$CROWN_SCOPE" ]]; then
-                CANON_DOC=$(with_timeout 3 fno config paths handoff --scope "${CROWN_SCOPE}" 2>/dev/null | head -1 || true)
+                CANON_DOC=$(with_timeout "$NUDGE_BUDGET" fno config paths handoff --scope "${CROWN_SCOPE}" 2>/dev/null | head -1 || true)
             else
-                CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+                CANON_DOC=$(with_timeout "$NUDGE_BUDGET" fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
         fi
         _king_doc_ask="fill its two crown-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold."
@@ -518,7 +533,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # pass, which has no such manifest, still fires on real pressure above.
         PLAN_PATH=""
         if command -v fno >/dev/null 2>&1; then
-            PLAN_PATH=$(with_timeout 3 fno do state show --type target --field plan_path 2>/dev/null | head -1 || true)
+            PLAN_PATH=$(with_timeout "$NUDGE_BUDGET" fno do state show --type target --field plan_path 2>/dev/null | head -1 || true)
         fi
         if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
             _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). The Astra preparation band is active. Preserve volatile decisions and continue; the provider compact action waits for the action band. ${_compact_ask}"
@@ -530,7 +545,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         else
             CANON_DOC=""
             if command -v fno >/dev/null 2>&1; then
-                CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+                CANON_DOC=$(with_timeout "$NUDGE_BUDGET" fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
             if [[ -n "$CANON_DOC" ]]; then
                 REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc at ${CANON_DOC} - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off. The PreCompact hook keeps that doc's mechanical sections fresh; you fill its merge-order and open-decisions sections."
@@ -554,7 +569,7 @@ if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
     # below: a broken reader never silently clears a guard.
     RESOLVED=0
     if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
-        KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents king \
+        KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout "$NUDGE_BUDGET" fno agents king \
             manifest-path --harness-session-id "$SESSION_ID" 2>/dev/null || true)
         if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
             KING_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
@@ -568,7 +583,7 @@ if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
         # --all is load-bearing: `carveout list` now scopes to the current
         # session by default, and this check must see a carveout filed by ANY
         # session (the king that stated the orphaning is usually not this one).
-        CARVEOUTS=$(with_timeout 3 fno backlog carveout list --all --json 2>/dev/null || true)
+        CARVEOUTS=$(with_timeout "$NUDGE_BUDGET" fno backlog carveout list --all --json 2>/dev/null || true)
         # carveout list --json emits JSONL (one object per line), so stream-filter
         # rather than map (which needs an array). Structured .scope field match,
         # Only a RECENT carveout (last 24h) counts: a historical one from a

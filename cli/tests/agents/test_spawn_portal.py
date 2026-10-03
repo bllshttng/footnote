@@ -121,7 +121,6 @@ def _stub_default_spawn_env(monkeypatch, tmp_path):
     spawn can run the whole cmd_spawn body to its receipt."""
     from fno.agents import mux_spawn, spawn_gate
 
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: tmp_path)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setattr(
         mux_spawn,

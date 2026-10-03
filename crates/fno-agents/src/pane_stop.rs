@@ -535,7 +535,7 @@ fn session_holder_live(e: &RegistryEntry) -> SessionHolder {
             match answer {
                 SessionHolder::Unmeasured(why) => {
                     let snapshot = crate::claude_roster::read_all_agents_union();
-                    match crate::gc_sweep::claude_death_reason(e, &snapshot) {
+                    match crate::daemon::row_death_reason(e, &snapshot) {
                         Some(reason) => SessionHolder::NotHeld(reason),
                         None => SessionHolder::Unmeasured(format!(
                             "{why}; claude roster shows no terminal state and no dead pid for this session"

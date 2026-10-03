@@ -695,14 +695,21 @@ resume = "native-session"
 # and viewport selection remain separate environment checks and are not implied.
 autonomous_pane = false
 route_on_pane = false
-# opencode, measured 2026-08-28, and the old "native" was WRONG. opencode has no
-# shell hook and no exit veto; its own plugin says so in its header. The loop
-# closes here through a JS plugin fno ships and installs into
-# ~/.config/opencode/plugins/footnote.js, which subscribes to `session.idle`,
-# synthesizes a claude-shaped transcript, shells the same `fno-agents loop-check`,
-# and re-drives the session in-context on a block. That is a working loop, so the
-# honest value is "extension" rather than "none": the boundary exists, it is just
-# an artifact somebody wrote instead of a hook the harness fires.
+# opencode, measured 2026-08-28, updated 2026-10-02 for v2. The loop closes
+# through a JS plugin fno ships and installs into the config root the target
+# opencode resolves (`FNO_OPENCODE_BIN` names the binary; the install asks that
+# binary's `debug paths` for the root; OPENCODE_CONFIG_DIR and the XDG chain
+# remain the override and fallback). On 1.x the bridge subscribes to
+# `session.idle`; on v2 it listens to every turn-end name (`session.status`
+# with status.type "idle", the documented `session.idle`, and the live
+# 2.0.19 bus's `session.execution.succeeded`/`.failed`), deduped by a
+# per-session latch re-armed on the next prompt, and wires the full hook set
+# (tool before/after, shell env, prompt, system context, compaction). It
+# synthesizes a claude-shaped transcript, shells the same `fno-agents
+# loop-check`, and re-drives the session in-context on a block. That is a
+# working loop, so the honest value is "extension" rather than "none": the
+# boundary exists, it is just an artifact somebody wrote instead of a hook the
+# harness fires.
 loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/opencode/footnote.js"
 command_surface = "slash"
@@ -1897,11 +1904,23 @@ reason = "no fno hook registration for zcode (no plugin hook file and no capabil
 
 [harness.claude.hooks.session_state]
 state = "supported"
-via = ["hooks/inside-leg-report.sh", "hooks/hooks.json"]
+via = ["hooks/session-state.sh", "hooks/hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
+
+[harness.claude.hooks.session_state.wiring]
+events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done", PostModelSwitch = "model" }
+blocked = "Notification"
 
 [harness.codex.hooks.session_state]
 state = "supported"
-via = ["hooks/inside-leg-report.sh", "hooks/codex-hooks.json"]
+via = ["hooks/session-state.sh", "hooks/codex-hooks.json", "crates/fno-agents/src/hook/session_state.rs"]
+
+# PreToolUse is the load-bearing entry: a goal-mode continuation is a
+# user-role row, so UserPromptSubmit never fires and the goal leg is only
+# visible through its tool calls. PermissionRequest is NOT wired: the
+# payload shape was never captured, so `blocked` stays "none" until one is.
+[harness.codex.hooks.session_state.wiring]
+events = { UserPromptSubmit = "working", PreToolUse = "working", Stop = "done" }
+blocked = "none"
 
 [harness.footnote.hooks.session_state]
 state = "supported"

@@ -45,7 +45,7 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
 use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
-pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
+pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
 mod list_rows;
 use self::list_rows::{
@@ -5370,7 +5370,7 @@ async fn handle_rm_with(
     // next `fno agents rm`.
     let mut provably_gone = claude_agents
         .as_ref()
-        .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
+        .is_some_and(|snapshot| row_death_reason(&entry, snapshot).is_some())
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     // Law d-81c6da7e: remove needs no prior stop. rm owns the one exception's
@@ -5392,7 +5392,7 @@ async fn handle_rm_with(
         if let Some(short) = short {
             let _ = off_executor(|| claude_stop(&short));
             let snapshot = off_executor(read_claude_agents);
-            provably_gone = crate::gc_sweep::claude_death_reason(&entry, &snapshot).is_some()
+            provably_gone = row_death_reason(&entry, &snapshot).is_some()
                 || claude_row_provably_absent(Some(&snapshot), harness_row_id.as_deref());
             claude_agents = Some(snapshot);
         }

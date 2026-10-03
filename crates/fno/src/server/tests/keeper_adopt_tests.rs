@@ -299,7 +299,7 @@ fn keeper_handshake_is_bounded_and_names_the_keepers_death() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let permit = crate::process_admission::admit_fallback().expect("test permit");
+    let permit = crate::process_admission::admit_fleet().expect("test permit");
     let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
     let (exit_tx2, _exit_rx2) = tokio::sync::mpsc::channel(4);
     let err = crate::pty::PtyShell::spawn_cmd_keeper_with_permit(
