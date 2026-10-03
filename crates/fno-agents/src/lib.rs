@@ -208,6 +208,7 @@ pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
 pub mod intel_insights;
+pub mod intel_rollup;
 pub mod interrupt_classify;
 pub mod json_output;
 pub(crate) mod keeper_revival;
