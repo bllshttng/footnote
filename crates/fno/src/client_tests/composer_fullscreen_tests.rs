@@ -15,6 +15,13 @@ async fn toggle_composer_opens_closes_and_retains_the_draft() {
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message = "hello".into();
     }
+    // The mail composer's draft is fno state on disk: saved per target row,
+    // restored on the next open, gone only after an Esc or a send - the
+    // sibling contract the launcher retention here already holds in memory.
+    super::composer_draft::save("candor", "hello there");
+    assert_eq!(super::composer_draft::load("candor"), "hello there");
+    super::composer_draft::delete("candor");
+    assert_eq!(super::composer_draft::load("candor"), "");
     dispatch_event(&mut v, Event::ToggleComposer, &mut buf)
         .await
         .unwrap();

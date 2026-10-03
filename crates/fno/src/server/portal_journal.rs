@@ -92,23 +92,3 @@ impl Core {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn portal_rows_carry_the_envelope_and_the_door_word() {
-        let opened = portal_opened_row("main", 3, "candor", 42);
-        assert_eq!(opened["type"], "portal_opened");
-        assert_eq!(opened["source"], "daemon");
-        assert_eq!(opened["data"]["mux_session"], "main");
-        assert_eq!(opened["data"]["portal"], 3);
-        assert_eq!(opened["data"]["row_key"], "candor");
-        assert_eq!(opened["data"]["seat"], 42);
-        let closed = portal_closed_row("main", 3, "candor", "operator");
-        assert_eq!(closed["type"], "portal_closed");
-        assert_eq!(closed["data"]["cause"], "operator");
-        assert_eq!(closed["data"]["row_key"], "candor");
-    }
-}

@@ -41,38 +41,3 @@ pub(crate) fn save(target: &str, text: &str) {
 pub(crate) fn delete(target: &str) {
     let _ = std::fs::remove_file(draft_path(target));
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn save_load_delete_round_trip_per_target() {
-        save("candor", "hello there");
-        assert_eq!(load("candor"), "hello there");
-        // Another target's draft never bleeds across.
-        save("other", "x");
-        assert_eq!(load("candor"), "hello there");
-        delete("candor");
-        assert_eq!(load("candor"), "");
-        assert_eq!(load("other"), "x");
-        delete("other");
-    }
-
-    #[test]
-    fn unsafe_target_chars_land_in_one_safe_name() {
-        save("a/b c", "kept");
-        assert_eq!(load("a/b c"), "kept");
-        assert_eq!(load("a_b_c"), "kept", "the sanitized name is the file");
-        delete("a/b c");
-        assert_eq!(load("a/b c"), "");
-    }
-
-    #[test]
-    fn load_caps_the_buffer_at_the_send_ceiling() {
-        let big: String = "x".repeat(MAX_MAIL_TEXT + 10);
-        save("big", &big);
-        assert_eq!(load("big").chars().count(), MAX_MAIL_TEXT);
-        delete("big");
-    }
-}

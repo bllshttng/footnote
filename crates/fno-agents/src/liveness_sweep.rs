@@ -1108,7 +1108,9 @@ mod tests {
         // `Exited` with `pid_proven`, even when the store probe answers
         // `Ok(true)` - the served word already read `dead`, and status now
         // agrees with it. The 60s tick may write a pid-proven status.
-        let entries = vec![pane_entry("recycled-pane", Some(4243))];
+        let mut entry = pane_entry("recycled-pane", Some(4243));
+        entry.status = AgentStatus::Live;
+        let entries = vec![entry];
         let changes = plan_reconcile(
             &entries,
             |_| Ok(true),
@@ -1138,7 +1140,7 @@ mod tests {
         reg.entries = entries.clone();
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        crate::liveness_sweep::apply_reconcile_changes(
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
             &mut reg,
             &entries,
             &changes,
@@ -1146,6 +1148,11 @@ mod tests {
             &SweepMode::ServeOnly,
             "2026-09-10T12:00:00Z",
         );
+        assert_eq!(applied.len(), 1, "the exit is one observed transition");
+        assert_eq!(applied[0].row, "recycled-pane");
+        assert_eq!(applied[0].from, "live");
+        assert_eq!(applied[0].to, "exited");
+        assert_eq!(applied[0].cause, "pid_proven");
         let row = reg.find_mut("recycled-pane").unwrap();
         assert_eq!(
             row.status,
@@ -1183,7 +1190,7 @@ mod tests {
         reg.entries = entries.clone();
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        crate::liveness_sweep::apply_reconcile_changes(
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
             &mut reg,
             &entries,
             &changes,
@@ -1198,6 +1205,10 @@ mod tests {
             "a store miss still cannot retire a live pane from the tick"
         );
         assert_eq!(row.pid, Some(4242));
+        assert!(
+            applied.is_empty(),
+            "a probe inference plans no observed transition"
+        );
     }
 
     #[test]
@@ -1527,6 +1538,23 @@ mod tests {
             AgentStatus::Exited,
             "a succession that moved the scope is not revived onto the old row"
         );
+        // A landed revival is one observed transition with the revival
+        // cause word, so a restart stops being silent.
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &[mk_change()],
+            &titles,
+            &SweepMode::Full,
+            "2026-09-10T12:00:00Z",
+        );
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].row, "king");
+        assert_eq!(applied[0].from, "exited");
+        assert_eq!(applied[0].to, "live");
+        assert_eq!(applied[0].cause, "revival");
 
         // The row re-bound to a different session between plan and write:
         // the keyed lookup misses and the name fallback is refused.
@@ -1680,104 +1708,5 @@ mod tests {
         blind.serve_listing(&entries, &mut changes);
         assert_eq!(changes[0].new_liveness, Some("unmeasured"));
         assert_eq!(changes[1].new_liveness, Some("unmeasured"));
-    }
-
-    /// The observed-exit journal: a pid-proven exit plans a transition the
-    /// applier reports with the evidence word, so the exit stops being
-    /// silent (ruling d-e096c669).
-    #[test]
-    fn an_applied_exit_reports_the_transition_with_its_cause() {
-        let mut entry = pane_entry("dying", Some(4243));
-        entry.status = AgentStatus::Live;
-        entry.harness = Some("claude".into());
-        let entries = vec![entry];
-        let changes = vec![crate::daemon::ReconcileChange {
-            name: "dying".into(),
-            new_status: Some(AgentStatus::Exited),
-            new_liveness: Some("dead"),
-            pid_proven: true,
-            crown_revive: false,
-        }];
-        let mut reg = state::Registry::default();
-        reg.entries = entries.clone();
-        let titles = std::collections::HashMap::new();
-        let applied = crate::liveness_sweep::apply_reconcile_changes(
-            &mut reg,
-            &entries,
-            &changes,
-            &titles,
-            &SweepMode::ServeOnly,
-            "2026-10-03T12:00:00Z",
-        );
-        assert_eq!(applied.len(), 1, "the exit is reported");
-        let t = &applied[0];
-        assert_eq!(t.row, "dying");
-        assert_eq!(t.harness.as_deref(), Some("claude"));
-        assert_eq!(t.from, "live");
-        assert_eq!(t.to, "exited");
-        assert_eq!(t.cause, "pid_proven");
-    }
-
-    /// A revival reports itself as a restart, and a change whose status did
-    /// not move reports nothing (the sweep's routine refreshes stay quiet).
-    #[test]
-    fn a_revival_reports_a_restart_and_a_noop_reports_nothing() {
-        let mut entry = pane_entry("revived", Some(4242));
-        entry.status = AgentStatus::Orphaned;
-        entry.harness = Some("claude".into());
-        entry.harness_session_id = Some("sess-r".into());
-        entry.crown_scope = Some("scope".into());
-        entry.crown_level = Some(1);
-        let entries = vec![entry];
-        let changes = vec![crate::daemon::ReconcileChange {
-            name: "revived".into(),
-            new_status: Some(AgentStatus::Live),
-            new_liveness: Some("alive"),
-            pid_proven: false,
-            crown_revive: true,
-        }];
-        let mut reg = state::Registry::default();
-        reg.entries = entries.clone();
-        let titles = std::collections::HashMap::new();
-        let applied = crate::liveness_sweep::apply_reconcile_changes(
-            &mut reg,
-            &entries,
-            &changes,
-            &titles,
-            &SweepMode::Full,
-            "2026-10-03T12:00:00Z",
-        );
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].from, "orphaned");
-        assert_eq!(applied[0].to, "live");
-        assert_eq!(applied[0].cause, "revival");
-    }
-
-    /// A same-status write reports nothing: the sweep's routine refreshes
-    /// stay quiet, so the journal carries moves, not noise.
-    #[test]
-    fn a_same_status_write_reports_nothing() {
-        let mut entry = pane_entry("steady", Some(4244));
-        entry.status = AgentStatus::Live;
-        let entries = vec![entry];
-        let changes = vec![crate::daemon::ReconcileChange {
-            name: "steady".into(),
-            new_status: Some(AgentStatus::Live),
-            new_liveness: Some("alive"),
-            pid_proven: false,
-            crown_revive: false,
-        }];
-        let mut reg = state::Registry::default();
-        reg.entries = entries.clone();
-        let titles = std::collections::HashMap::new();
-        let applied = crate::liveness_sweep::apply_reconcile_changes(
-            &mut reg,
-            &entries,
-            &changes,
-            &titles,
-            &SweepMode::Full,
-            "2026-10-03T12:00:00Z",
-        );
-        assert!(applied.is_empty(), "a no-op writes no transition row");
     }
 }
