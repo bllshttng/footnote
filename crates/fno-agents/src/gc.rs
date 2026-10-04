@@ -268,9 +268,9 @@ pub enum KeepReason {
     OpenPr { node: String, pr: u64 },
     /// The node reads in_progress and the row's claude roster row is a
     /// stale pre-death row (non-terminal state, no pid): the worker died
-    /// with uncommitted work on the node (law d-71d03643: resumed, never
-    /// stranded). The keep holds the row so the nudge ladder's Resume rung
-    /// can run `fno agents resume` on it.
+    /// mid-node (law d-71d03643: resumed, never stranded). The keep holds
+    /// the row so the nudge ladder's Resume rung can run `fno agents
+    /// resume` on it.
     DeadOpenWork { node: String },
     /// A live or suspect work-claim names this session as its holder:
     /// the claim's holder process answered the pid probe, the strongest
