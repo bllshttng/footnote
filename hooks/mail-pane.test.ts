@@ -44,6 +44,16 @@ function pane() {
   } as const
 }
 
+function orderedContent(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (Array.isArray(node)) return node.map(orderedContent).join(' ')
+  if (!node || typeof node !== 'object') return ''
+  const element = node as { props?: { key?: string; label?: string }; children?: unknown }
+  return [element.props?.key, element.props?.label, orderedContent(element.children)]
+    .filter(Boolean)
+    .join(' ')
+}
+
 test('delivered sender and message buttons resolve the canonical session and thread', async ($, on) => {
   const clock = mock.clock(on)
   let version = '2.1.288'
@@ -178,7 +188,7 @@ test('delivered sender and message buttons resolve the canonical session and thr
   if (!await message.find({ type: 'Text', text: /original mail body/ })) throw new Error('mail body was not preserved')
   if (!await message.find({ type: 'Text', text: /second mail body/ })) throw new Error('second held body was not preserved')
   const messageTree = await message.find({ type: 'Box' })
-  const messageLayout = JSON.stringify(messageTree)
+  const messageLayout = orderedContent(messageTree)
   const heldSummaryAt = messageLayout.indexOf('2 held messages')
   const firstControlAt = messageLayout.indexOf(senderKey)
   const firstBodyAt = messageLayout.indexOf('original mail body')
