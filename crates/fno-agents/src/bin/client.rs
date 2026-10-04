@@ -2544,8 +2544,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ) {
             Ok(g) => Some(g),
             Err(refusal) => {
-                if let Some(receipt) = &refusal.receipt {
-                    println!("{receipt}");
+                // One line by default: the verdict went to stderr; the receipt
+                // prints as JSON only when the caller passed --json.
+                if params.get("json_out").and_then(Value::as_bool) == Some(true) {
+                    if let Some(receipt) = &refusal.receipt {
+                        println!("{receipt}");
+                    }
                 }
                 return Some(refusal.exit_code);
             }
@@ -3841,7 +3845,15 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // Task 3.1: --json is a client-side rendering flag. We recognize it
                 // here so it is not rejected as "unknown flag". It is NOT forwarded
                 // to the daemon as a param. The caller captures it separately.
-                // -J is the global-register short for --json.
+                // -J is the global-register short for --json. On spawn it stays a
+                // client bit: the gate refusal's receipt prints only with it.
+                if verb == "spawn" {
+                    params.insert("json_out".into(), Value::Bool(true));
+                }
+            }
+            "--verbose" => {
+                // Client-side too: the spawn seam's compose read it before the
+                // exec; nothing downstream prints more on the native route.
             }
             "--all" | "-A" => {
                 params.insert("all".into(), Value::Bool(true));

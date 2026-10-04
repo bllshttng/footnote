@@ -1218,7 +1218,6 @@ PERMISSION_MODE_HELP = (
 
 
 _VALID_SUBSTRATES = ("thread", "headless", "pane")
-_LEGACY_SUBSTRATE_ALIASES = {"bg": "thread"}
 # US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
 _DEFAULT_ALLOWED_VERBS = ("/target", "/think", "/blueprint")
 # The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
@@ -1341,9 +1340,12 @@ def resolve_dispatch(
         chosen_substrate = substrate_default(chosen_harness)
         decision.append(f"substrate=default({chosen_substrate})")
 
-    if chosen_substrate in _LEGACY_SUBSTRATE_ALIASES:
-        decision.append("substrate=deprecated-alias(bg->thread)")
-        chosen_substrate = _LEGACY_SUBSTRATE_ALIASES[chosen_substrate]
+    if chosen_substrate == "bg":
+        # Retired outright, like the spawn front doors: refuse with the
+        # redirect instead of silently mapping, so a stale config is named.
+        raise DispatchResolveError(
+            "substrate 'bg' was retired; set substrate = \"thread\""
+        )
     if chosen_substrate not in _VALID_SUBSTRATES:
         raise DispatchResolveError(
             f"unknown substrate {chosen_substrate!r}; "

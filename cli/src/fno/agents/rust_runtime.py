@@ -1805,9 +1805,24 @@ def make_agents_group_cls() -> type:
                         route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
+            # The Python dispatch route: the Rust client (which owns
+            # --json/--verbose on the native exec) never runs, so consume both
+            # here instead of handing typer flags it does not declare. The
+            # compose already read --verbose; --json rides the context to
+            # cmd_spawn's refusal print.
+            spawn_json = False
+            if args and args[0] == "spawn":
+                fence = next(
+                    (i for i, a in enumerate(args) if a in ("--", "--argv")),
+                    len(args),
+                )
+                kept = [a for a in args[1:fence] if a not in ("--json", "--verbose")]
+                spawn_json = len(kept) != len(args[1:fence])
+                args = args[:1] + kept + args[fence:]
             context = super().make_context(info_name, args, parent=parent, **extra)
             if args and args[0] == "spawn":
                 context.meta["fno_spawn_existing_pane"] = existing_pane
+                context.meta["fno_spawn_json"] = spawn_json
             return context
 
     return _AgentsRuntimeGroup

@@ -1266,8 +1266,6 @@ def cmd_spawn(
         hidden=True,
         help="Internal headless Claude output format; only 'json' is supported.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Print the refusal receipt as JSON."),
-    verbose: bool = typer.Option(False, "--verbose", help="Print routing provenance on stderr."),
     squad: str | None = typer.Option(
         None,
         "--workspace",
@@ -2339,7 +2337,7 @@ def cmd_spawn(
             now = time.monotonic()
             if wait_deadline is None or reason not in waitable_reasons or now >= wait_deadline:
                 _release_dispatch_claims(node_reservation, node_claim)
-                if json_output and exc.receipt is not None:
+                if bool(ctx.meta.get("fno_spawn_json")) and exc.receipt is not None:
                     print(json.dumps(exc.receipt))
                 raise
             if last_wait_note == 0.0 or now - last_wait_note >= 60.0:
