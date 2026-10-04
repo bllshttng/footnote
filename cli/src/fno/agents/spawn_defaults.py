@@ -917,7 +917,6 @@ def compose_spawn_argv(
             pass
 
     fence = next((i for i, t in enumerate(out) if t in ("--", "--argv")), len(out))
-    verbose = "--verbose" in out[1:fence]
     payload = {
         "kind": "compose",
         "argv": list(out),
@@ -926,7 +925,7 @@ def compose_spawn_argv(
         "permission_builtin": SPAWN_PERMISSION_BUILTIN if apply_permission_builtin else None,
         "scan": scan,
         "facts": facts,
-        "verbose": verbose,
+        "verbose": "--verbose" in out[1:fence],
     }
     try:
         from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
@@ -1044,10 +1043,7 @@ def resolve_spawn_gates(substrate, monitor, *, once, harness):
         )
         raise SystemExit(2)
     if substrate == "bg":
-        print(
-            "substrate 'bg' was retired; use --substrate thread",
-            file=sys.stderr,
-        )
+        print("substrate 'bg' was retired; use --substrate thread", file=sys.stderr)
         raise SystemExit(2)
     if substrate == "thread":
         substrate = "bg"

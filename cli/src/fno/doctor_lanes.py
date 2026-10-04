@@ -354,10 +354,9 @@ def _census(
         from fno.agents.spawn_gate import probe_capacity
 
         probe = probe_capacity()
-        share = probe.get("share")
     except Exception:
         probe = {}
-        share = None
+    share = probe.get("share")
     census: dict[str, Any] = {
         "kings": None, "king_conflicts": None, "workers": None,
         "tests": None if reading is None else reading.test_process_count,

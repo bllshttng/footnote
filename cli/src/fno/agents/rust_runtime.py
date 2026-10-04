@@ -1805,8 +1805,7 @@ def make_agents_group_cls() -> type:
                         route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
-            # The Python route never runs the client that owns --json/--verbose; consume both here.
-            if args and args[0] == "spawn":
+            if args and args[0] == "spawn":  # the python route never runs the client that owns --json/--verbose
                 fence = next((i for i, a in enumerate(args) if a in ("--", "--argv")), len(args))
                 args = args[:1] + [a for a in args[1:fence] if a not in ("--json", "--verbose")] + args[fence:]
             context = super().make_context(info_name, args, parent=parent, **extra)
