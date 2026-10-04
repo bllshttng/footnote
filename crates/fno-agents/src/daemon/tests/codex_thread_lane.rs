@@ -731,8 +731,11 @@ async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
     assert_eq!(after.turn_policy_source.as_deref(), Some("resolved"));
 
     // The other half of the freeze: `unknown` is no baseline, so a real
-    // fresh read replaces it at the first resume.
-    state::update_registry(&home.registry_json(), |registry| {
+    // fresh read replaces it at the first resume. A second home, because the
+    // registry refuses two rows carrying one session identity.
+    let home2 = tmp_home("codex-resume-freeze-unknown");
+    let ctx2 = test_ctx(home2.clone(), PathBuf::from("/nonexistent"));
+    state::update_registry(&home2.registry_json(), |registry| {
         let mut entry = thread_entry("t-resume-unknown", AgentStatus::Live, None);
         entry.cwd = cwd.path().to_string_lossy().into_owned();
         entry.project_root = entry.cwd.clone();
@@ -743,21 +746,22 @@ async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
         registry.entries.push(entry);
     })
     .unwrap();
-    let entry = state::load_registry(&home.registry_json())
+    let entry = state::load_registry(&home2.registry_json())
         .unwrap()
         .find("t-resume-unknown")
         .cloned()
         .unwrap();
-    ensure_codex_thread_handle(&ctx, &entry)
+    ensure_codex_thread_handle(&ctx2, &entry)
         .await
         .expect("the fake daemon answers the second thread/resume");
-    let after = state::load_registry(&home.registry_json())
+    let after = state::load_registry(&home2.registry_json())
         .unwrap()
         .find("t-resume-unknown")
         .cloned()
         .unwrap();
     // `unknown` is no baseline: the fake's real resolution replaces it.
     assert_eq!(after.resolved_sandbox.as_deref(), Some("readOnly"));
+    std::fs::remove_dir_all(home2.root()).ok();
     std::fs::remove_dir_all(home.root()).ok();
 }
 
