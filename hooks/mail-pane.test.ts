@@ -167,7 +167,7 @@ test('delivered sender and message buttons resolve the canonical session and thr
   expect(commands.filter(argv => argv[0] === 'fno-agents' && argv[1] === 'mail-envelope')).toHaveLength(0)
   await plain.unmount()
 
-  const messageText = `${HEADER}\noriginal mail body\n\`@old-label · ${SECOND_MESSAGE_ID} · second header\`\nsecond mail body`
+  const messageText = `2 held messages · sent 20:00 · held 1m\n${HEADER}\noriginal mail body\n\`@old-label · ${SECOND_MESSAGE_ID} · second header\`\nsecond mail body`
   const message = await $.ui.mount(userMessage(messageText))
   const senderKey = `mail-sender-${REQUEST_ID}-${MESSAGE_ID}`
   const messageKey = `mail-message-${REQUEST_ID}-${MESSAGE_ID}`
@@ -177,6 +177,19 @@ test('delivered sender and message buttons resolve the canonical session and thr
   if (!await message.find({ key: secondMessageKey })) throw new Error('second held message button missing')
   if (!await message.find({ type: 'Text', text: /original mail body/ })) throw new Error('mail body was not preserved')
   if (!await message.find({ type: 'Text', text: /second mail body/ })) throw new Error('second held body was not preserved')
+  const messageTree = await message.find({ type: 'Box' })
+  const messageLayout = JSON.stringify(messageTree)
+  const heldSummaryAt = messageLayout.indexOf('2 held messages')
+  const firstControlAt = messageLayout.indexOf(senderKey)
+  const firstBodyAt = messageLayout.indexOf('original mail body')
+  const secondControlAt = messageLayout.indexOf(secondMessageKey)
+  const secondBodyAt = messageLayout.indexOf('second mail body')
+  if (
+    !(heldSummaryAt < firstControlAt && firstControlAt < firstBodyAt &&
+      firstBodyAt < secondControlAt && secondControlAt < secondBodyAt)
+  ) {
+    throw new Error('held-mail controls were not kept beside their message bodies')
+  }
 
   await message.press({ key: senderKey })
   expect(paneOpen).toMatchObject({ id: PANE_ID, focus: true, closeOnEscape: true })

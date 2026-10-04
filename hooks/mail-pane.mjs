@@ -532,10 +532,17 @@ export function registerMailPane(on) {
     }
     if (!turns.length) return next(event)
 
-    const { Box } = $.ui.resolve(event)
+    const { Box, Text } = $.ui.resolve(event)
     const pending = [...turns]
-    const buttons = []
-    const bodyLines = text.split('\n').map(line => {
+    const children = []
+    let plainLines = []
+    let hasButtons = false
+    const flushPlain = () => {
+      if (!plainLines.length) return
+      children.push(Text({ wrap: 'wrap', children: [plainLines.join('\n')] }))
+      plainLines = []
+    }
+    for (const line of text.split('\n')) {
       let index = -1
       let result = null
       for (let candidate = 0; candidate < pending.length; candidate += 1) {
@@ -546,25 +553,23 @@ export function registerMailPane(on) {
         result = parsed
         break
       }
-      if (index < 0 || !result) return line
+      if (index < 0 || !result) {
+        plainLines.push(line)
+        continue
+      }
       pending.splice(index, 1)
-      buttons.push(result.buttons)
-      return result.bodyLine
-    })
-    if (!buttons.length) return next(event)
-
-    let original
-    try {
-      original = await next({
-        ...event,
-        props: { ...event.props, text: bodyLines.join('\n') },
-      })
-    } catch {
-      original = null
+      flushPlain()
+      children.push(result.buttons)
+      if (result.bodyLine) {
+        children.push(Text({ wrap: 'wrap', children: [result.bodyLine] }))
+      }
+      hasButtons = true
     }
+    flushPlain()
+    if (!hasButtons) return next(event)
     return Box({
       flexDirection: 'column',
-      children: original ? [...buttons, original] : buttons,
+      children,
     })
   })
 
