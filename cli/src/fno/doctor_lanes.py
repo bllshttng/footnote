@@ -349,7 +349,6 @@ def _census(
     together. The gap rides as its own field for the same reason.
     Full rule: docs/architecture/resource-meter.md.
     """
-    # The ONE gate's probe answer: the share, plus the advisory notes.
     try:
         from fno.agents.spawn_gate import probe_capacity
 
