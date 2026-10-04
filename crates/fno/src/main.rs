@@ -170,6 +170,11 @@ enum Role {
     /// `fno agents mail view`: refused by name; the verb is now `show`
     /// (no compat shell, the same rule as a removed mux verb).
     MailViewRenamed,
+    /// `fno config paths emit-shell`: the native paths verb. Args from the
+    /// verb name onward; the worker's --paths-exec lane answers, the other
+    /// three paths verbs still forward to Python (one verb per PR,
+    /// d-450caaeb).
+    PathsCli(Vec<OsString>),
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
     /// binary's grouped dispatcher. The argv passes through byte-verbatim
     /// (the sibling's catalog owns grouped and legacy spellings).
@@ -278,6 +283,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::lint_cli::classify_doctor_lint_style(args) {
         return Role::DoctorLintStyle(rest);
+    }
+    if let Some(rest) = fno::paths_route::classify(args) {
+        return Role::PathsCli(rest);
     }
     if let Some(rest) = fno::doctor_update::classify(args) {
         return Role::DoctorUpdate(rest);
@@ -505,6 +513,7 @@ fn main() {
             argv.extend(rest);
             bootstrap::forward_agents(&argv, "fno doctor lint style")
         }
+        Role::PathsCli(rest) => std::process::exit(fno::paths_route::run(&rest)),
         Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),

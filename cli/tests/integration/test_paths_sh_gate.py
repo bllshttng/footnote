@@ -1,4 +1,4 @@
-"""Integration tests for fno paths emit-shell and fno paths verify commands.
+"""Integration tests for fno config paths verify (the emit-shell verb answers natively).
 
 Task 2.5 of plan 2026-05-14-path-config-impl.
 
@@ -156,53 +156,3 @@ def test_atomic_write_uses_tmp_rename(tmp_path: Path) -> None:
     assert not tmp_remnants, f"Unexpected .tmp remnants: {tmp_remnants}"
 
 
-# ---------------------------------------------------------------------------
-# AC2-HP: fno paths emit-shell --output writes a sourceable file
-# ---------------------------------------------------------------------------
-
-
-def test_paths_emit_shell_writes_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-HP: `fno paths emit-shell --output PATH` writes the stub to the given path."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-    out = tmp_path / "generated.sh"
-
-    result = runner.invoke(
-        app,
-        ["paths", "emit-shell", "--output", str(out)],
-        env=_ENV,
-    )
-    assert result.exit_code == 0, (
-        f"Expected exit 0, got {result.exit_code}.\nOutput:\n{result.output}"
-    )
-    assert out.exists(), "output file must be created"
-    content = out.read_text(encoding="utf-8")
-    assert "STATE_DIR" in content
-    # GRAPH_JSON_PATH is gone by design: the json-leg path bridge was deleted
-    # and the shell stub no longer publishes a graph path.
-
-
-# ---------------------------------------------------------------------------
-# AC2-HP: Roundtrip: emit then verify passes
-# ---------------------------------------------------------------------------
-
-
-def test_emit_then_verify_roundtrip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-HP: Emit followed immediately by verify exits 0 (roundtrip)."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-    out = tmp_path / "paths.sh"
-
-    emit_result = runner.invoke(
-        app,
-        ["paths", "emit-shell", "--output", str(out)],
-        env=_ENV,
-    )
-    assert emit_result.exit_code == 0, f"emit-shell failed: {emit_result.output}"
-
-    verify_result = runner.invoke(app, ["paths", "verify", str(out)], env=_ENV)
-    assert verify_result.exit_code == 0, (
-        f"verify failed after fresh emit: {verify_result.output}"
-    )
