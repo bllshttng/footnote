@@ -2002,10 +2002,8 @@ fn chrome_hit_rows() {
     // right-align now, so the word column reads from the shared span table.
     let view = two_pane_view();
     let word_start = view.top_row_spans()[0].0;
-    assert!(matches!(
-        view.chrome_hit(0, word_start as u16),
-        Some(ChromeHit::TopRow(_))
-    ));
+    let word_hit = view.chrome_hit(0, word_start as u16);
+    assert!(matches!(word_hit, Some(ChromeHit::TopRow(_))));
     assert_eq!(cmds(view.chrome_hit(3, 4)), vec![Command::SelectSquad(2)]);
     // The Blank spacer row is inert.
     assert!(view.chrome_hit(2, 4).is_none());
