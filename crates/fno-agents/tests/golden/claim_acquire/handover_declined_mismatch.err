@@ -1,0 +1,2 @@
+handover declined: holder mismatch: expected 'spawn-handover:worker', claim held by 'target-session:other' (pid=PID)
+claim 'node:par-ho' held by target-session:other (pid=PID, host=HOST)
