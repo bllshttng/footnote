@@ -140,10 +140,11 @@ def test_mail_origin_event_marks_presumed_human_positively(monkeypatch):
     _record_mail_origin(origin="peer", lane="reply", sender="w-1",
                         body="Approval: X", reply_to="m-1")
     assert seen["argv"][1] == "mail-record"
-    assert "--origin=peer" in seen["argv"]
-    assert "--lane=reply" in seen["argv"]
-    assert "--sender=w-1" in seen["argv"]
-    assert "--reply-to=m-1" in seen["argv"]
+    # The leaf parses flag/value pairs, so each value rides its own token.
+    for flag, value in (("--origin", "peer"), ("--lane", "reply"),
+                        ("--sender", "w-1"), ("--reply-to", "m-1")):
+        i = seen["argv"].index(flag)
+        assert seen["argv"][i + 1] == value
     assert seen["input"] == "Approval: X"
 
     def missing_binary(argv, **kwargs):

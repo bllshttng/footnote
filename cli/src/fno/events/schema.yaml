@@ -4064,7 +4064,7 @@ event_types:
           description: "Optional. The structured context the Rust intake writes: blocked_because, options_rationale, recommendation {option, why, downside}, unknowns, reversible, cost_if_wrong, meanwhile. Keys are open; the attention projection reads each by name."
         trace:
           type: object
-          description: "Optional. The traced-decision envelope (shape: decision_span.trace), stamped by the intake when the question files with answers_ask: span_id is this question's question_id and parent_span_id names the escalate route span."
+          description: "Optional. The traced-decision envelope (shape: decision_span.trace), stamped by the intake on every question: span_id is this question's question_id and parent_span_id names the escalate route span when the question files with answers_ask:"
     consumers: [operator, fno-agents needs]
 
   - name: fleet_task

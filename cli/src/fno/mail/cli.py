@@ -272,7 +272,10 @@ def _record_mail_origin(
 
         pairs = (("--origin", origin), ("--lane", lane), ("--sender", sender),
                  ("--target-session", target_session), ("--reply-to", reply_to))
-        flags = [f"{flag}={value}" for flag, value in pairs if value]
+        flags: list[str] = []
+        for flag, value in pairs:
+            if value:
+                flags += [flag, value]
         subprocess.run(
             [shutil.which("fno-agents"), "mail-record", *flags],
             input=body or "", timeout=2, capture_output=True,

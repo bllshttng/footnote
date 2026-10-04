@@ -221,7 +221,11 @@ fn find_ask_span_id(journal: &Path, key: &str) -> Option<String> {
         let Ok(line) = serde_json::from_str::<Value>(&row.line) else {
             continue;
         };
-        let data = line.get("data")?;
+        // A row without data skips, never ends the scan: one odd row must
+        // not hide the ask span the later rows carry.
+        let Some(data) = line.get("data") else {
+            continue;
+        };
         if data.get("ask_key").and_then(Value::as_str) == Some(key) {
             return data
                 .get("trace")
@@ -366,6 +370,22 @@ mod tests {
     fn mail_record_leaf_writes_origin_row_ask_span_and_route_parent() {
         let lock = crate::claims::test_env_lock();
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // The wire the Python caller sends parses: paired flag/value tokens.
+        let wire = parse_mail_record_args(&[
+            "--origin".into(),
+            "peer".into(),
+            "--lane".into(),
+            "reply".into(),
+            "--sender".into(),
+            "w-1".into(),
+            "--reply-to".into(),
+            "m-1".into(),
+        ])
+        .expect("the caller wire parses");
+        assert_eq!(wire.origin, "peer");
+        assert_eq!(wire.lane, "reply");
+        assert_eq!(wire.sender.as_deref(), Some("w-1"));
+        assert_eq!(wire.reply_to.as_deref(), Some("m-1"));
         let td = tempfile::TempDir::new().unwrap();
         let home = td.path().join("agents-home");
         let prev_home = std::env::var_os("FNO_AGENTS_HOME");
