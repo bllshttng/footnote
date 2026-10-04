@@ -193,20 +193,24 @@ fn strip_leading_header(body: &str) -> (String, Option<String>) {
 }
 
 /// A pane-delivered body rides inside a backtick fence one run longer than
-/// any run it holds. A fence that wraps the WHOLE body - first line all
-/// backticks, last line the same run - is the pane lane's framing, not body
-/// text, and display strips it. Anything else stays untouched.
+/// any run it holds, and the pane lane marks its OPEN fence `fno-pane`.
+/// Only that marked shape strips: a body's own fenced code block (no
+/// marker) keeps its fences. The close is a bare run at least as long as
+/// the open.
 fn strip_body_fence(body: &str) -> &str {
     let Some((first, rest)) = body.split_once('\n') else {
         return body;
     };
-    if first.is_empty() || !first.bytes().all(|b| b == b'`') {
+    let Some(open) = first.strip_suffix("fno-pane") else {
+        return body;
+    };
+    if open.is_empty() || !open.bytes().all(|b| b == b'`') {
         return body;
     }
     let Some((inner, last)) = rest.rsplit_once('\n') else {
         return body;
     };
-    if last == first {
+    if !last.is_empty() && last.len() >= open.len() && last.bytes().all(|b| b == b'`') {
         inner
     } else {
         body

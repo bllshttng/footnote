@@ -304,7 +304,9 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     Ok(match wrapping {
         Some(_) if fence_requested(input) => {
             let fence = fence_for(&delivered);
-            format!("{header}\n{fence}\n{delivered}\n{fence}")
+            // The open fence carries the fno-pane marker so a reader can
+            // strip exactly this fence and never a body's own code fence.
+            format!("{header}\n{fence}fno-pane\n{delivered}\n{fence}")
         }
         Some(_) => format!("{header}\n{delivered}"),
         None => header,
@@ -521,7 +523,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fenced,
-            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\n````\nhi ```x``` there\n````",
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\n````fno-pane\nhi ```x``` there\n````",
         );
         // The fence clears: a run one longer than anything the body holds.
         assert_eq!(fence_for("hi ```x``` there"), "````");
@@ -546,6 +548,9 @@ mod tests {
             crate::mail_header::display_body(&fenced),
             "hi ```x``` there",
         );
+        // A body's own fenced code block keeps its fences: no marker, no strip.
+        let plain_code = "```rust\nfn main() {}\n```";
+        assert_eq!(crate::mail_header::display_body(plain_code), plain_code);
     }
 
     #[test]
