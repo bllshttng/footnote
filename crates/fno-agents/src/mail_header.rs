@@ -321,6 +321,25 @@ pub fn without_first_sentence(body: &str) -> String {
     }
 }
 
+/// The body a reader sees under the delivered header. The header's third
+/// field is the sender's subject or the body's first sentence; when it
+/// echoes the WHOLE first sentence, the delivered copy drops that sentence:
+/// it reads as already shown. A first sentence the summary CUT stays whole:
+/// the header shows only its first [`SUMMARY_MAX_WORDS`], and dropping the
+/// sentence would silently lose the words past the cut.
+pub fn delivered_body(subject: Option<&str>, body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return body.to_string();
+    }
+    let sentence = first_sentence_of(trimmed).replace('`', "'");
+    if header_subject(subject, body) == sentence {
+        without_first_sentence(body)
+    } else {
+        body.to_string()
+    }
+}
+
 /// The header's inner span and what follows it: the opening backtick through
 /// the first closing backtick whose remainder is the line's end or the
 /// transcript's one-line body separator " ⏎ " (a turn renders on ONE

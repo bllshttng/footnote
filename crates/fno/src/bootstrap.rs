@@ -127,7 +127,11 @@ fn peel_mail_subject(args: &[OsString]) -> Result<Vec<OsString>, String> {
                 i += 1;
             }
             None => {
-                if names[i] == "--subject" && i + 1 < names.len() {
+                // A separate-token value that itself reads as a flag is a
+                // typo (--subject --verbose): taking it would swallow the
+                // flag and stamp the subject with its text.
+                if names[i] == "--subject" && i + 1 < names.len() && !names[i + 1].starts_with('-')
+                {
                     subject = Some(names[i + 1].clone());
                     i += 2;
                 } else {
@@ -138,9 +142,14 @@ fn peel_mail_subject(args: &[OsString]) -> Result<Vec<OsString>, String> {
         }
     }
     if let Some(s) = subject {
-        if s.chars().count() > 80 || s.contains('\n') || s.contains('\r') || s.contains(" · ") {
+        if s.chars().count() > 80
+            || s.contains('\n')
+            || s.contains('\r')
+            || s.contains(" · ")
+            || s.contains('`')
+        {
             return Err(
-                "fno mail send: --subject must be one line, at most 80 characters, without ' · '"
+                "fno mail send: --subject must be one line, at most 80 characters, without a backtick or ' · '"
                     .to_string(),
             );
         }
@@ -1960,6 +1969,14 @@ mod tests {
         assert_eq!(untouched.len(), 4, "a non-send argv keeps every token");
         assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a \u{b7} b"])).is_err());
         assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a\nb"])).is_err());
+        // A flag-shaped value is a typo, not a subject: both tokens ride to
+        // the CLI, which errors on the valueless flag, and no subject rides.
+        let flag =
+            peel_mail_subject(&os(&["mail", "send", "a", "--subject", "--verbose"])).unwrap();
+        assert_eq!(flag, os(&["mail", "send", "a", "--subject", "--verbose"]));
+        // A backtick refuses at the peel, where the flag was typed, not
+        // later at the envelope render.
+        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "run `make`"])).is_err());
         let long = "x".repeat(81);
         assert!(
             peel_mail_subject(&os(&["mail", "send", "a", "--subject", long.as_str()])).is_err()

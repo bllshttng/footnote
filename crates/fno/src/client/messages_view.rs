@@ -539,16 +539,15 @@ impl MessagesBoard {
     }
 
     /// Column 3's title: the other party's display name plus the info and
-    /// more affordances (item 10), and the other party's participant key
-    /// when the view is a pair thread.
-    fn thread_title(&self) -> (BLine, Option<String>) {
+    /// more affordances (item 10).
+    fn thread_title(&self) -> BLine {
         let Some(sel) = self.sel_thread.as_deref() else {
-            return (BLine::meta("Thread"), None);
+            return BLine::meta("Thread");
         };
-        let (name, other_key) = if let Some(scope) = sel.strip_prefix("channel:") {
-            (channel_label(scope), None)
+        let name = if let Some(scope) = sel.strip_prefix("channel:") {
+            channel_label(scope)
         } else if sel.starts_with("system:") {
-            ("System".to_string(), None)
+            "System".to_string()
         } else {
             let other = self
                 .conversation_rows()
@@ -565,14 +564,13 @@ impl MessagesBoard {
                 })
                 .or_else(|| self.sel_agent.clone())
                 .unwrap_or_default();
-            let other_key = (!other.is_empty()).then_some(other.clone());
-            (self.participant_name(&other), other_key)
+            self.participant_name(&other)
         };
         let title = BLine::of(&[
             seg(name, BRole::Head),
             seg("  [i]  ...".to_string(), BRole::Meta),
         ]);
-        (title, other_key)
+        title
     }
 
     /// Column 3's lines, with the conversation row each line belongs to
@@ -583,7 +581,7 @@ impl MessagesBoard {
     /// no envelopes, no delivered-header lines (item 9 runs, item 12
     /// padding).
     pub(crate) fn thread_lines(&self, w: usize) -> (Vec<BLine>, Vec<Option<usize>>) {
-        let (title, _) = self.thread_title();
+        let title = self.thread_title();
         let mut lines = vec![title];
         let mut owners: Vec<Option<usize>> = vec![None];
         let Some(_sel) = self.sel_thread.as_deref() else {
@@ -1309,7 +1307,7 @@ pub(crate) async fn mouse(
             if rep.row == 1 {
                 // The title line: the name and [i] open the detail modal,
                 // ... opens the chat-id popup (item 10).
-                let (title, _) = board.thread_title();
+                let title = board.thread_title();
                 let rel = (rep.col as usize).saturating_sub(tree_w + part_w);
                 let name_len = title.text.find("  [i]").unwrap_or(title.text.len());
                 let at = |span: std::ops::Range<usize>| span.contains(&rel);

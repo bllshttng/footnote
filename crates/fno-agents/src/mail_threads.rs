@@ -370,8 +370,17 @@ fn note(
     participants
         .entry(key.to_string())
         .and_modify(|v| {
+            // A from-string name is a fallback: once the registry names the
+            // participant, the stored row adopts its name. A row named by
+            // key upgrades on any sighting; a fallback-named row only when
+            // the registry actually supplies a name, so a nameless row
+            // cannot clobber the fallback.
             let named = v.get("name").and_then(Value::as_str) != Some(key);
-            if row.is_some() && !named {
+            let reg_name = row
+                .and_then(|r| r.get("name"))
+                .and_then(Value::as_str)
+                .filter(|_| !crate::system_sender::is_system_sender(key));
+            if row.is_some() && (!named || reg_name.is_some()) {
                 *v = participant_row(key, row, None);
             }
         })

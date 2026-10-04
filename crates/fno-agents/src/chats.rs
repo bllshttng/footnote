@@ -1044,11 +1044,15 @@ fn message_body(line: &Value) -> &str {
 /// answers and resolves with - and the row's subject, else the body's first
 /// sentence.
 fn render_message(line: &Value) -> String {
-    let body = message_body(line);
+    let raw = message_body(line);
     let subject = line
         .get("meta")
         .and_then(|m| m.get("subject"))
         .and_then(Value::as_str);
+    // The read/show surface renders the same body the Messages tab does:
+    // legacy framed rows are cleaned, and a subjectless whole first sentence
+    // is not printed twice under the header's echo of it.
+    let body = crate::mail_header::delivered_body(subject, &crate::mail_header::display_body(raw));
     format!(
         "{}\n{}",
         crate::mail_header::render_header(
@@ -1057,7 +1061,7 @@ fn render_message(line: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             line.get("id").and_then(Value::as_str).unwrap_or(""),
-            &crate::mail_header::header_subject(subject, body),
+            &crate::mail_header::header_subject(subject, &body),
         ),
         body,
     )
@@ -1583,6 +1587,28 @@ mod tests {
 
     #[test]
     fn chats_store_contracts() {
+        // The read/show surface renders what the Messages tab delivers: a
+        // subjectless whole first sentence shows once, under the header's
+        // echo of it; a sentence the summary cut stays whole; a legacy
+        // framed body is cleaned before render.
+        let dup = render_message(&serde_json::json!({
+            "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
+            "body": "Fix the gate. Details follow."
+        }));
+        assert_eq!(
+            dup,
+            "`@folio \u{b7} fmail-0badc0de1234 \u{b7} Fix the gate.`\nDetails follow."
+        );
+        let cut = render_message(&serde_json::json!({
+            "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
+            "body": "one two three four five six seven eight nine ten eleven twelve thirteen. Rest here."
+        }));
+        assert!(cut.ends_with("twelve thirteen. Rest here."), "{cut}");
+        let framed = render_message(&serde_json::json!({
+            "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
+            "body": "<fno_mail from=\"quill\" id=\"fmail-1\">\nlegacy body text\n</fno_mail>"
+        }));
+        assert!(!framed.contains("<fno_mail"), "{framed}");
         // The recipient-key read resolves the registry through AgentsHome;
         // pin a declared test root or the home-fallback fence fires.
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

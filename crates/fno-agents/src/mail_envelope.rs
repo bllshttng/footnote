@@ -275,11 +275,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let body_text = wrapping.as_deref().unwrap_or("");
     let third = crate::mail_header::header_subject(subject, body_text);
     let header = crate::mail_header::render_header(form, sender, msg_id, &third);
-    let delivered = if third == crate::mail_header::summary_of(body_text) {
-        crate::mail_header::without_first_sentence(body_text)
-    } else {
-        body_text.to_string()
-    };
+    let delivered = crate::mail_header::delivered_body(subject, body_text);
     Ok(match wrapping {
         Some(_) => format!("{header}\n{delivered}"),
         None => header,
@@ -435,6 +431,22 @@ mod tests {
         assert_eq!(
             body_once,
             "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\nDetails follow."
+        );
+        // A first sentence longer than the summary cut stays whole: the
+        // header shows only its first 12 words, and dropping the sentence
+        // would silently lose the words past the cut (AC10).
+        let long = render_at(
+            &json!({
+                "mode":"wrap",
+                "body":"one two three four five six seven eight nine ten eleven twelve thirteen. Rest here.",
+                "from":"folio-short", "id":"fmail-0123456789ab"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            long,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} one two three four five six seven eight nine ten eleven twelve`\none two three four five six seven eight nine ten eleven twelve thirteen. Rest here."
         );
         // A given subject rides the header and the body follows whole
         // (AC11-HP).
