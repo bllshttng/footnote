@@ -84,6 +84,15 @@ fi
 run "no trailer here" "main" \
   && pass "non-node branch skips" || fail "non-node branch should skip"
 
+# revert branch: a word-hex segment outside the minted families ("pr-2809")
+# is an ordinary branch word, never a node demand. The liberal grammar used
+# to read it as a node id and demanded a Fixes line naming no real node, so
+# a p0 revert could not pass on its own branch and had to move to a fresh
+# one (reproduced live).
+run "Fixes x-f890" "revert-pr-2809" \
+  && pass "revert branch word-hex segment is not a node id" \
+  || fail "revert branch should skip, not demand pr-2809"
+
 # prose-only: the id is mentioned in prose, never on the exact trailer line.
 if run "This PR also touches x-aaaa in passing." "feature/x-aaaa"; then
   fail "prose-only mention should fail"

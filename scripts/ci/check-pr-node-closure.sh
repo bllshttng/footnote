@@ -28,9 +28,10 @@ if [[ -z "$PR_HEAD_REF" ]]; then
   exit 0
 fi
 
-# Graphless candidate shape, sourced from the shared shell library: dashed ids
-# plus the historical compact x family. Other compact tokens often look like
-# ordinary branch words, and CI has no graph to confirm them.
+# Graphless candidate shape, sourced from the shared shell library: the id
+# families this repo mints (x-, legacy ab-, the historical compact x form).
+# Other shapes - any lowercase-word-hex token like "pr-2809" on a revert
+# branch - are ordinary branch words, and CI has no graph to confirm them.
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/node-id.sh
 source "${_script_dir}/../lib/node-id.sh"
