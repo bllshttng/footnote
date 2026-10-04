@@ -11,7 +11,7 @@ The numbers come from `run/report_run0.py`. Its `first` mode reproduces the firs
 - Model: `glm-5.3-flash` through z.ai at effort high. The claude-code arm asks for `glm-5.3-flash[1m]` (Amendment 10).
 - Harness versions inside the task containers: Claude Code 2.1.286, opencode 1.18.34, pi 1.0.0. Two opencode trials and two pi trials recorded no version.
 - Arm order ran: pi, opencode, terminus-2, then claude-code. The seeded order put claude-code second. Its first smoke read as a false negative and the arm ran last (Amendment 10).
-- Amendment 12 retries ran on 2026-10-04 from 04:58Z to 12:31Z, one arm at a time in the seeded order: pi, claude-code, opencode, terminus-2.
+- Amendment 12 retries ran on 2026-10-04 from 04:58Z to 12:31Z. They ran one arm at a time, in the seeded order: pi, claude-code, opencode, terminus-2.
 - zcode is `unavailable`: the iMac has no ZCode.app, and the zcode adapter stays out of this repo (Amendment 6).
 
 ## Per arm
