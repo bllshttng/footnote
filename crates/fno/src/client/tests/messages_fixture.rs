@@ -63,41 +63,122 @@ async fn messages_reply_board_contracts() {
             {"key":"s1","name":"first","system":false,"live":true},
             {"key":"s-q","name":"quill","archive_scope":"team","system":false,"live":false},
             {"key":"s-c","name":"candor","system":false,"live":true},
+            {"key":"s-ivy","name":"ivy","system":false,"live":true},
+            {"key":"s-maple","name":"maple","system":false,"live":true},
+            {"key":"s-oak","name":"oak","system":false,"live":true},
             {"key":"fno/pr-nudge","name":"fno/pr-nudge","system":true,"live":false},
         ],
         "threads": [
             {"chat_id":"chat-a1","participants":["s1","s-c"],
              "rows":[
                {"id":"m1","ts":"2026-10-01T09:00:00Z","from":"candor","from_key":"s-c","to_key":"s1","summary":"Ship it.","body":"Ship it.","system":false},
-               {"id":"m2","ts":"2026-10-01T09:05:00Z","from":"first","from_key":"s1","to_key":"s-c","summary":"On it.","body":"On it.","system":false}],
-             "last_ts":"2026-10-01T09:05:00Z"}
+               {"id":"m2","ts":"2026-10-01T09:01:00Z","from":"first","from_key":"s1","to_key":"s-c","summary":"On it.","body":"On it.","system":false},
+               {"id":"m3","ts":"2026-10-01T09:20:00Z","from":"candor","from_key":"s-c","to_key":"s1","summary":"Merged.","body":"Merged.","system":false}],
+             "last_ts":"2026-10-01T09:20:00Z"}
         ],
         "system": {"s-c": [
             {"id":"m3","ts":"2026-10-01T09:10:00Z","from":"fno/pr-nudge","from_key":"fno/pr-nudge","to_key":"s-c","summary":"Nudge.","body":"Nudge.","system":true}]},
         "channels": [
             {"scope":"fno","rows":[{"id":"m4","ts":"2026-10-01T09:00:00Z","from":"first","from_key":"s1","to":"fleet:fno","summary":"Standup.","body":"Standup.","system":false}]},
+            {"scope":"kings","rows":[]},
         ],
         "announcements": [], "unreadable": 0,
     }));
-    // Column 1: the channel, then the lead folder.
+    // Column 1: a flat chat list - the channels, then every non-system
+    // participant live-first by name, one row per key. No tree, no fold,
+    // no Archive (AC1-HP); the kings scope reads `agents` (AC2-HP).
     let tree = b.tree_rows();
-    assert!(matches!(tree[0], TreeRow::Channel(_)), "{tree:?}");
-    assert!(matches!(tree[1], TreeRow::Lead { .. }), "{tree:?}");
-    // Column 2: System first, then the partner thread, unread.
-    b.sel_agent = Some("s-c".into());
-    let partners = b.partner_rows("s-c");
-    assert!(
-        matches!(partners[0], PartnerRow::System { .. }),
-        "{partners:?}"
+    assert_eq!(
+        tree.iter()
+            .filter(|r| matches!(r, TreeRow::Agent { .. }))
+            .count(),
+        6,
+        "{tree:?}"
     );
-    let PartnerRow::Thread {
+    let lines1 = b.tree_column(100);
+    let text1: String = lines1
+        .iter()
+        .map(|l| l.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text1.contains("agents"), "{text1}");
+    assert!(!text1.contains('#'), "{text1}");
+    assert!(!text1.contains("Archive"), "{text1}");
+    assert!(!text1.contains('▸') && !text1.contains('▾'), "{text1}");
+    // Column 2: System first, then the chat, unread (AC5-HP: the column
+    // is Chats, never Partners).
+    b.sel_agent = Some("s-c".into());
+    let chats = b.chat_rows("s-c");
+    assert!(matches!(chats[0], ChatRow::System { .. }), "{chats:?}");
+    let ChatRow::Thread {
         unread, partner, ..
-    } = &partners[1]
+    } = &chats[1]
     else {
-        panic!("thread row: {partners:?}")
+        panic!("thread row: {chats:?}")
     };
     assert!(unread, "no mark reads unread");
     assert_eq!(partner, "first");
+    let chats_lines = b.chats_column();
+    assert_eq!(chats_lines[0].text, "Chats");
+    let all_text: String = b
+        .columns(100)
+        .0
+        .into_iter()
+        .chain(b.columns(100).1)
+        .map(|l| l.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!all_text.contains("Partners"), "{all_text}");
+    // Column 3: the channel's rows resolve; the System exchange shows
+    // the fno/<arm> sender (AC14-HP).
+    b.sel_thread = Some("channel:fno".into());
+    assert_eq!(b.conversation_rows().len(), 1);
+    b.sel_thread = Some("system:s-c".into());
+    let rows = b.conversation_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get("from").and_then(Value::as_str),
+        Some("fno/pr-nudge")
+    );
+    // The bubble thread: one centered HH:MM before each gap of five
+    // minutes or more, mine right-aligned to the edge, theirs at column
+    // 0, and only the body - no delivered-header or envelope text
+    // (AC6-HP).
+    b.sel_thread = Some("chat-a1".into());
+    let (lines3, owners3) = b.thread_lines(50);
+    let texts: Vec<String> = lines3.iter().map(|l| l.text.clone()).collect();
+    let time_of = |ts: &str| {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string()
+    };
+    let t1 = time_of("2026-10-01T09:00:00Z");
+    let t3 = time_of("2026-10-01T09:20:00Z");
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|t| t.trim() == t1 || t.trim() == t3)
+            .count(),
+        2,
+        "{texts:?}"
+    );
+    let ship = texts
+        .iter()
+        .find(|t| t.ends_with("Ship it."))
+        .expect("my bubble right-aligned");
+    assert_eq!(ship.chars().count(), 49, "right edge: {ship:?}");
+    assert_eq!(
+        texts.iter().find(|t| t.as_str() == "On it."),
+        Some(&"On it.".to_string()),
+        "theirs starts at column 0: {texts:?}"
+    );
+    assert!(!texts
+        .iter()
+        .any(|t| t.contains("fmail-") || t.contains("<fno_mail")));
+    assert_eq!(owners3[2], Some(0), "{owners3:?}");
+    assert_eq!(owners3[3], Some(1), "{owners3:?}");
     // Column 3: the channel's rows resolve; the System exchange shows
     // the fno/<arm> sender (AC14-HP).
     b.sel_thread = Some("channel:fno".into());
@@ -119,14 +200,14 @@ async fn messages_reply_board_contracts() {
     // default, quote or wrapped-row regression can misroute a human reply;
     // existing fixture coverage owns projection only, so these assertions extend
     // that owner. It uses the real View/wire and needs no production seam.
-    b.col = Col::Partners;
+    b.col = Col::Chats;
     b.cursors[1] = 1;
     super::keys(&mut view, b"\r", &mut tokio::io::sink())
         .await
         .unwrap();
     assert_eq!(
         view.messages_board.as_ref().unwrap().cursors[2],
-        1,
+        2,
         "opening a long thread shows the newest message"
     );
     super::keys(&mut view, b"k", &mut tokio::io::sink())
@@ -145,7 +226,7 @@ async fn messages_reply_board_contracts() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(labels, ["first", "candor"]);
+    assert_eq!(labels, ["candor", "first"]);
     super::super::messages_reply::keys(&mut view, b"\r", &mut tokio::io::sink())
         .await
         .unwrap();
@@ -157,7 +238,7 @@ async fn messages_reply_board_contracts() {
             crate::popup::PopupRow::Input { text, .. } => Some(text.as_str()),
             _ => None,
         });
-    assert_eq!(seed, Some("re candor/m1: \"Ship it.\" "));
+    assert_eq!(seed, Some("re first/m2: \"On it.\" "));
     super::super::messages_reply::keys(&mut view, b"ok", &mut tokio::io::sink())
         .await
         .unwrap();
@@ -177,7 +258,7 @@ async fn messages_reply_board_contracts() {
     );
     assert_eq!(
         view.notice.as_ref().map(|(text, _)| text.as_str()),
-        Some("reply: first has no pane on screen; open a portal first")
+        Some("reply: candor has no pane on screen; open a portal first")
     );
     super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
         .await
@@ -264,7 +345,7 @@ async fn messages_reply_board_contracts() {
         &mut view,
         crate::mouse::MouseReport {
             kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-            row: 2,
+            row: 3,
             col: 60,
             shift: false,
         },
