@@ -111,6 +111,12 @@ fi
 
 # AC: Ledger rollup fills session_id / cost_usd / cost_sessions / points
 # Seed a second ab node AND a matching ledger entry, then run fno done.
+# The node's plan must be readable and parseable: the promise gate refuses
+# a close whose delivery promise cannot be read, so a fake path would stop
+# this test at the gate instead of the rollup it is about.
+PLAN="$TMP/plans/feature-x.md"
+mkdir -p "$TMP/plans"
+printf -- '---\nstatus: ready\n---\n# feature-x\n' > "$PLAN"
 uv run python -c "
 from fno.graph.store import commit_rows_via_store
 commit_rows_via_store(__import__('pathlib').Path('$TMP/.fno/graph.json'), lambda entries: entries + [{
@@ -118,14 +124,14 @@ commit_rows_via_store(__import__('pathlib').Path('$TMP/.fno/graph.json'), lambda
     'title': 'Rollup smoke target',
     'status': 'ready',
     'domain': 'code',
-    'plan_path': '/smoke/plans/feature-x',
+    'plan_path': '$PLAN',
     'created_at': '2026-04-22T00:00:00+00:00',
 }])"
-cat > "$TMP/.fno/ledger.json" <<'JSON'
+cat > "$TMP/.fno/ledger.json" <<JSON
 {
   "entries": [
     {
-      "plan_path": "/smoke/plans/feature-x",
+      "plan_path": "$PLAN",
       "sessions": ["smoke-sess-1"],
       "cost_usd": 4.25,
       "completed": "2026-04-22T19:00:00+00:00",

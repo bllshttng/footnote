@@ -166,7 +166,7 @@ impl KingQueue {
             .join(format!("{scope}.md"));
         let content = fs::read_to_string(&manifest_path).map_err(|_| {
             LoopError::Queue(format!(
-                "no king manifest at {} - grant the scope first (`fno agents spawn --promote \
+                "no king manifest at {} - grant the scope first (`fno agents spawn --crown \
                  <scope>` or `fno agents crown` arms it); the walk respawns a king, it \
                  cannot mint one",
                 manifest_path.display()

@@ -40,7 +40,7 @@ How a crown is bestowed, the ladder and succession: [the crown model](references
 - Register as a roster citizen if absent: `/fno:fno-me`.
 - Verify the merge machinery is alive: `fno doctor`, pr-watch row.
 - Declare the shape now: `fno agents org shape pass` for a one-wave pass, and `fno agents org shape court` THE MOMENT the reign spawns its first worker. This is the field the Stop nudge reads; an undeclared court is nagged at every stop.
-- Declare the term now: `fno agents org term <span:Nh|compactions:N>` (e.g. `fno agents org term span:96h`). An undeclared term still reads a 96h default, so this is optional but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --promote <scope> --succeed`, or extend it with a written reason: `fno agents org term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt.
+- Declare the term now: `fno agents org term <span:Nh|compactions:N>` (e.g. `fno agents org term span:96h`). An undeclared term still reads a 96h default. This is optional, but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --crown <scope> --succeed`, or extend it with a written reason: `fno agents org term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt.
 
 ## One wave: --once
 
@@ -131,7 +131,7 @@ The verb journals `reign_checkin` itself, so the row carries the readings the ve
 
 Read the reign back with `fno agents org history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents org -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
-Read `fno agents org verdict` and print its first line and its `hygiene:` line. The `hygiene:` line is evidence about this session's own ordering, never a stop. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents org escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --promote <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
+Read `fno agents org verdict` and print its first line and its `hygiene:` line. The `hygiene:` line is evidence about this session's own ordering, never a stop. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents org escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
 
 ## Recording a ruling
 
