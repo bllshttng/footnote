@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::io::Read;
 use std::path::Path;
 
 /// Who acted on a span. `lead` needs a live team bound to the session,
@@ -273,7 +274,7 @@ fn run_mail_record_with(
     // ask, so it records the origin row alone.
     if body_is_ask(body) && kind != "sweep" {
         let trace = Trace {
-            trace_id,
+            trace_id: trace_id.clone(),
             span_id: new_span_id(),
             parent_span_id: None,
             actor_session: args.sender.clone(),
@@ -297,7 +298,12 @@ fn run_mail_record_with(
 /// at the ask span its ask_key names. A route whose ask span is missing still
 /// emits (the answer-in-place is the fact), only parentless; a missing bus row
 /// or a non-ask body emits nothing.
-fn run_mail_record_route(journal: &Path, args: &MailRecordArgs, trace_id: &str, kind: &str) {
+fn run_mail_record_route(
+    journal: &Path,
+    args: &MailRecordArgs,
+    trace_id: &str,
+    kind: &'static str,
+) {
     let Some(msg_id) = &args.reply_to else {
         return;
     };

@@ -562,7 +562,7 @@ pub fn run_decide_door(args: &[String]) -> i32 {
 /// in the Python order. Exit contract: 0 recorded, 1 failed write or a
 /// supersession target the index cannot recover, 2 a bad flag value, 3
 /// refused.
-pub(crate) fn decide_door_write(door: DecideDoor, id: DecideIdentity) -> i32 {
+pub(crate) fn decide_door_write(mut door: DecideDoor, id: DecideIdentity) -> i32 {
     // Positional subject and decision are required to record.
     let (subject, decision) = match (&door.subject, &door.decision) {
         (Some(s), Some(d)) if !s.trim().is_empty() && !d.trim().is_empty() => {

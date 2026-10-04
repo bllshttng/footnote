@@ -608,7 +608,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         "trace".into(),
         serde_json::to_value(&Trace {
             trace_id: node.unwrap_or("none").to_string(),
-            span_id: qid,
+            span_id: qid.clone(),
             parent_span_id: route_span_id,
             actor_session: req.session_id.clone(),
             actor_kind: actor_kind(req.session_id.as_deref(), "question"),
