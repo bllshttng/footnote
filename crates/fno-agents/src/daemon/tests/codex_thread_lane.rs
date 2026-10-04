@@ -660,13 +660,15 @@ async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
 /// with no state dirs and overwrote the row with the narrowed result, which
 /// is the loss `codex_thread_resumed_without_state_grant` used to announce.
 #[tokio::test(flavor = "current_thread")]
-async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
+async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
     // CODEX_HOME is process-global: hold the same guard every other fake
     // user holds, or a parallel test's driver reads THIS test's fake.
     let _guard = crate::path_test_guard();
     let home = tmp_home("codex-resume-records-posture");
     let cwd = tempfile::tempdir().unwrap();
-    let behavior = crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed");
+    let behavior = crate::codex_fake_daemon::Behavior::quick()
+        .with_thread_id("thread-resumed")
+        .with_thread_sandbox(serde_json::json!({"type": "readOnly"}));
     let received = std::sync::Arc::clone(&behavior.received);
     let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
     // Must match the fake's configured thread_id: `resume()` refuses when
@@ -712,12 +714,10 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         .find("t-resume")
         .cloned()
         .unwrap();
-    // The fake models no sandbox, so the fresh read is the explicit
-    // unknown - not the workspaceWrite the row was seeded with.
-    assert_eq!(
-        after.resolved_sandbox.as_deref(),
-        Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN)
-    );
+    // The crowning resolution is FROZEN: the fake resolves readOnly, and the
+    // seeded workspaceWrite must survive it - a mid-reign refresh would mask
+    // the drift a narrowed resolution caused.
+    assert_eq!(after.resolved_sandbox.as_deref(), Some("workspaceWrite"));
     // AC3-EDGE: the recorded grant survives the write-back.
     assert!(
         after
@@ -728,6 +728,35 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
     );
     // AC6: the v35 columns are stamped.
     assert_eq!(after.turn_policy_source.as_deref(), Some("requested"));
+
+    // The other half of the freeze: `unknown` is no baseline, so a real
+    // fresh read replaces it at the first resume.
+    state::update_registry(&home.registry_json(), |registry| {
+        let mut entry = thread_entry("t-resume-unknown", AgentStatus::Live, None);
+        entry.cwd = cwd.path().to_string_lossy().into_owned();
+        entry.project_root = entry.cwd.clone();
+        entry.harness_session_id = Some(session_id.clone());
+        entry.codex_session_id = Some(session_id.clone());
+        entry.sandbox_posture = Some("workspace-write".into());
+        entry.resolved_sandbox = Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN.into());
+        registry.entries.push(entry);
+    })
+    .unwrap();
+    let entry = state::load_registry(&home.registry_json())
+        .unwrap()
+        .find("t-resume-unknown")
+        .cloned()
+        .unwrap();
+    ensure_codex_thread_handle(&ctx, &entry)
+        .await
+        .expect("the fake daemon answers the second thread/resume");
+    let after = state::load_registry(&home.registry_json())
+        .unwrap()
+        .find("t-resume-unknown")
+        .cloned()
+        .unwrap();
+    // `unknown` is no baseline: the fake's real resolution replaces it.
+    assert_eq!(after.resolved_sandbox.as_deref(), Some("readOnly"));
     std::fs::remove_dir_all(home.root()).ok();
 }
 

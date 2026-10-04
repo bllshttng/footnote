@@ -1232,6 +1232,12 @@ pub struct RegistryEntry {
     /// the server's own spelling (`"workspaceWrite"`, `"dangerFullAccess"`),
     /// or `"unknown"` when `thread/start` reported no sandbox (schema v29).
     ///
+    /// FROZEN at its first real value: the resume write-back stamps the
+    /// column only while it holds `None`/`unknown`, so the name never moves
+    /// after the crowning resolution. It is the baseline the lead check-in's
+    /// drift judge reads, and a mid-reign refresh would mask the drift a
+    /// narrowed resolution caused.
+    ///
     /// Distinct from `sandbox_posture`, which records what the spawn REQUESTED
     /// and is what `thread/resume` re-applies. The two disagree in practice: a
     /// `yolo` thread asks for full access and the app-server can still keep its
