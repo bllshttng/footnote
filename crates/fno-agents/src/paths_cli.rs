@@ -767,11 +767,11 @@ mod tests {
     }
 
     #[test]
-    fn live_stub_resolves_vault_template_in_state_dir() {
+    fn live_stub_resolves_vault_templates() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = LiveFx::new("vault", "");
         fx.body(&format!(
-            "state_dir = '{{vault}}/state'\n[obsidian]\nenabled = true\nvault = '{}'\n",
+            "state_dir = '{{vault}}/state'\n[project]\nid = 'testproj'\n[obsidian]\nenabled = true\nvault = '{}'\n",
             fx.base.display()
         ));
         let _env = EnvGuard::new(&fx.pins());
@@ -779,6 +779,9 @@ mod tests {
         let expected = format!("{}/state", fx.base.display());
         assert!(stub.contains(&expected), "stub:\n{stub}");
         assert!(!stub.contains("{vault}") && !stub.contains("{project}"));
+        let line = line_with(&stub, "export HANDOFFS_DIR=");
+        let handoffs = format!("{}/internal/testproj/handoffs", fx.base.display());
+        assert!(line.contains(&handoffs), "HANDOFFS_DIR: {line}");
     }
 
     #[test]
@@ -821,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn live_stub_handoffs_uses_project_id() {
+    fn live_stub_handoffs_project_id_guard() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = LiveFx::new("handpid", "[project]\nid = 'my-pinned-id'\n");
         let _env = EnvGuard::new(&fx.pins());
@@ -829,21 +832,10 @@ mod tests {
         let line = line_with(&stub, "export HANDOFFS_DIR=");
         assert!(line.contains("my-pinned-id"), "HANDOFFS_DIR: {line}");
         assert!(!line.contains("basename"), "HANDOFFS_DIR: {line}");
-    }
-
-    #[test]
-    fn live_stub_handoffs_vault_path() {
-        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let fx = LiveFx::new("handvault", "");
-        fx.body(&format!(
-            "[project]\nid = 'testproj'\n[obsidian]\nenabled = true\nvault = '{}'\n",
-            fx.base.display()
-        ));
-        let _env = EnvGuard::new(&fx.pins());
-        let stub = emit_paths_sh_live(&fx.root).unwrap();
-        let line = line_with(&stub, "export HANDOFFS_DIR=");
-        let expected = format!("{}/internal/testproj/handoffs", fx.base.display());
-        assert!(line.contains(&expected), "HANDOFFS_DIR: {line}");
+        let bad = LiveFx::new("badpid", "[project]\nid = '$(touch /tmp/pwned)'\n");
+        let _env2 = EnvGuard::new(&bad.pins());
+        let err = emit_paths_sh_live(&bad.root).unwrap_err();
+        assert!(err.contains("invalid characters"), "error: {err}");
     }
 
     #[test]
@@ -871,15 +863,6 @@ mod tests {
             conf.contains(&yaml.display().to_string()),
             "CONFIG_FILE: {conf}"
         );
-    }
-
-    #[test]
-    fn live_stub_refuses_unsafe_project_id() {
-        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let fx = LiveFx::new("badpid", "[project]\nid = '$(touch /tmp/pwned)'\n");
-        let _env = EnvGuard::new(&fx.pins());
-        let err = emit_paths_sh_live(&fx.root).unwrap_err();
-        assert!(err.contains("invalid characters"), "error: {err}");
     }
 
     fn fx_shared_dir(tag: &str) -> PathBuf {
