@@ -218,9 +218,10 @@ pub fn upsert_identity(
             .map(|_| ())
             .map_err(|error| error.to_string())?;
     }
-    // A succession keeps the fno_id and remints the session: the stored
-    // identity MOVES to the successor row instead of colliding on the
-    // unique index, which the id-conflict clause cannot catch.
+    // A succession keeps the fno_id and remints the session: the old row
+    // RELEASES the identity (its child references pin its id, which never
+    // changes) and the successor row takes it, so the unique index always
+    // maps one fno_id to the registry's CURRENT session.
     if let Some(fno) = fno_id {
         let held: Option<String> = connection
             .query_row(
@@ -230,17 +231,13 @@ pub fn upsert_identity(
             )
             .ok();
         if held.as_deref().is_some_and(|held| held != session_id) {
-            return connection
+            connection
                 .execute(
-                    "UPDATE agent_sessions
-                       SET id = ?1,
-                           harness_id = COALESCE(harness_id, ?2),
-                           display_name = COALESCE(?4, display_name)
-                     WHERE fno_id = ?3",
-                    rusqlite::params![session_id, harness, fno, display_name],
+                    "UPDATE agent_sessions SET fno_id = NULL WHERE fno_id = ?1",
+                    rusqlite::params![fno],
                 )
                 .map(|_| ())
-                .map_err(|error| error.to_string());
+                .map_err(|error| error.to_string())?;
         }
     }
     connection
@@ -483,12 +480,11 @@ mod tests {
                 Some("newer".into())
             )
         );
-        assert!(connection
-            .query_row("SELECT 1 FROM agent_sessions WHERE id = 'abc'", [], |r| r
-                .get::<_, i64>(
-                0
-            ))
-            .is_err());
+        // The predecessor row stays, its identity released with it.
+        assert_eq!(
+            identity_row(&connection, "abc"),
+            (Some("claude".into()), None, Some("new".into()))
+        );
     }
 
     #[test]
