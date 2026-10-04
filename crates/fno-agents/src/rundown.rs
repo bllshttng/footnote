@@ -1520,6 +1520,7 @@ mod tests {
             double_ruled: Vec::new(),
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-dead".into(),
+                session: None,
                 scope: "shared".into(),
                 stored_status: "orphaned".into(),
             }],

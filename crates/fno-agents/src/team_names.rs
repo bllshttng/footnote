@@ -1741,6 +1741,7 @@ mod tests {
             "x-aaaa",
             Some(PendingSuccession {
                 heir_name: "lead-heir".into(),
+                heir_session: None,
                 predecessor_name: "lead-a".into(),
                 predecessor_session: Some("sess-a".into()),
                 ts: now_stamp(),
@@ -1793,6 +1794,7 @@ mod tests {
             "x-aaaa",
             Some(PendingSuccession {
                 heir_name: "lead-heir".into(),
+                heir_session: None,
                 predecessor_name: "lead-old".into(),
                 predecessor_session: Some("sess-old".into()),
                 ts: now_stamp(),
