@@ -2114,7 +2114,7 @@ mod tests {
         let row = json!({
             "ts": "2026-09-22T08:27:07Z",
             "type": "pr_watch_tick_end",
-            "source": "test",
+            "source": "daemon",
             "data": {"phase": "merge", "outcome": "ok", "cut": ["merge"]},
         });
         commit_row(&journal, &row);

@@ -3630,7 +3630,7 @@ event_types:
 
   - name: control_plane_tick
     description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch, reap, retire): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
-    sources: [daemon, loop, hook, test]
+    sources: [daemon, loop, hook, test, pr-heal]
     data:
       required: [arm, scheduler, acted, interval_s]
       properties:
@@ -8060,6 +8060,58 @@ event_types:
     sources: [target]
     data:
       required: [value]
+  - name: agent_attach_refused
+    description: "A mux thread attach attempt was refused before any session attached; names the row, provider, and refusal reason. Rust-emitted via append_agents_event."
+    sources: [agents]
+    data:
+      required: [name, provider, reason]
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+        reason:
+          type: string
+  - name: agent_resume_failed
+    description: "A keeper revival launched its child but the proof window closed without a live socket; the registry row is left unchanged. Rust-emitted via append_resume_event."
+    sources: [agents]
+    data:
+      required: [name, provider, session_id, cwd, substrate, socket]
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+        session_id:
+          type: string
+        cwd:
+          type: string
+        substrate:
+          type: string
+        socket:
+          type: string
+        reason:
+          type: string
+  - name: x
+    description: "Test fixture only: a minimal row store-mutex tests append. Never emitted in production."
+    sources: [test, daemon, hook, loop]
+    data:
+      required: []
+  - name: tick
+    description: "Test fixture only: a FIFO-ordering row the events library tests append. Never emitted in production."
+    sources: [test, daemon, hook, loop]
+    data:
+      required: []
+  - name: heartbeat
+    description: "Test fixture only: a null-payload row the events library tests append. Never emitted in production."
+    sources: [test, daemon, hook, loop]
+    data:
+      required: []
+  - name: status_control
+    description: "Test fixture only: a minimal row the question-clear recovery test appends beside a decision. Never emitted in production."
+    sources: [test, daemon, hook, loop]
+    data:
+      required: []
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

@@ -495,7 +495,7 @@ mod tests {
         )
         .replacen(
             "\"type\":\"operator_decision\"",
-            "\"type\":\"operator_decision\",\"source\":\"operator\"",
+            "\"type\":\"operator_decision\",\"source\":\"test\"",
             1,
         );
         crate::event_store::append_envelope(&path, &row, None).unwrap();

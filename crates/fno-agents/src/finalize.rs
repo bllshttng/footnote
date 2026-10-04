@@ -4080,10 +4080,10 @@ mod tests {
         let log = dir.join("events.jsonl");
         fs::write(
             &log,
-            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"OLD\",\"ship\":true}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"OLD\",\"termination_reason\":\"DoneAwaitingMerge\",\"ship\":true}}\n",
         )
         .unwrap();
-        let line = "{\"ts\":\"2026-01-01T00:00:05Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"NEW\",\"ship\":true}}";
+        let line = "{\"ts\":\"2026-01-01T00:00:05Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"NEW\",\"termination_reason\":\"DoneAwaitingMerge\",\"ship\":true}}";
         let receipt = crate::event_store::append_envelope(&log, line, None).unwrap();
         assert!(receipt.inserted);
         assert_eq!(
@@ -4901,13 +4901,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         let old = serde_json::json!({
-            "ts": "2026-09-17T11:00:00Z", "type": "review_coverage", "source": "test",
-            "data": {"head_sha": "h0", "coverage": "covered", "reviewed_count": 0}
+            "ts": "2026-09-17T11:00:00Z", "type": "review_coverage", "source": "target",
+            "data": {"pr": 123, "verdicts": [], "head_sha": "h0", "coverage": "covered", "reviewed_count": 0}
         })
         .to_string();
         let new = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "test",
-            "data": {"head_sha": "h1", "coverage": "covered", "reviewed_count": 3}
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "target",
+            "data": {"pr": 123, "verdicts": [], "head_sha": "h1", "coverage": "covered", "reviewed_count": 3}
         })
         .to_string();
         let events = crate::paths::events_path(cwd);

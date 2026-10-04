@@ -4958,8 +4958,8 @@ mod tests {
         // head. A store-only covered row still answers.
         let _ = head;
         let line = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "test",
-            "data": {"head_sha": "aaaaaaaaaa", "coverage": "covered", "reviewed_count": 2}
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "target",
+            "data": {"pr": 124, "verdicts": [], "head_sha": "aaaaaaaaaa", "coverage": "covered", "reviewed_count": 2}
         })
         .to_string();
         let events = crate::paths::events_path(cwd);

@@ -1077,7 +1077,7 @@ mod tests {
             "ts": "2026-09-06T02:00:00Z",
             "type": "merge_cleanup_completed",
             "source": "daemon",
-            "data": {"request_id": "merge-cleanup-1", "repo": "/repo", "pr": 42}
+            "data": {"request_id": "merge-cleanup-1", "repo": "/repo", "pr": 42, "reclaimed_bytes": 0}
         });
         std::fs::OpenOptions::new()
             .append(true)
@@ -1106,7 +1106,7 @@ mod tests {
             "ts": "2026-09-06T02:00:00Z",
             "type": "merge_cleanup_completed",
             "source": "daemon",
-            "data": {"request_id": "store-req-1", "repo": "/repo", "pr": 42}
+            "data": {"request_id": "store-req-1", "repo": "/repo", "pr": 42, "reclaimed_bytes": 0}
         })
         .to_string();
         crate::event_store::append_envelope(&home.events_jsonl(), &completed, None).unwrap();

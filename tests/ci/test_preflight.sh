@@ -97,7 +97,7 @@ fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "doctor event emit-envelope" ]]; then
     # The validate-only door reads one envelope on stdin and answers with its
     # verdict; the stub accepts every row the scenarios feed it.
-    if [[ "\$\*" == *--validate-only* ]]; then
+    if [[ "\$*" == *--validate-only* ]]; then
         cat >/dev/null
         exit 0
     fi
@@ -110,7 +110,7 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "doctor event emit-envelope" ]]; then
         esac
     done
     if [[ -z "\$events" ]]; then
-        echo "stub: emit-envelope needs --events" >&2
+        echo "stub: emit-envelope needs --events (args: \$*)" >&2
         exit 2
     fi
     line="\$(cat)"
