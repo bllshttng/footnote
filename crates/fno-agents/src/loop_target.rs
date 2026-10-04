@@ -908,6 +908,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                     "respawn_count": kq.respawn_count(),
                     "respawn_ceiling": kq.respawn_ceiling(),
                     "scope": kq.scope(),
+                    // The ceiling check runs before the walk loop starts.
+                    "iterations_used": 0,
+                    "units_closed": 0,
                 }),
             )?;
             eprintln!(
