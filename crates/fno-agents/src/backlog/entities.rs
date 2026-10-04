@@ -25,9 +25,7 @@ pub fn ddl() -> String {
            fno_id TEXT,
            display_name TEXT,
            links TEXT NOT NULL DEFAULT '[]'{}
-         );
-         CREATE UNIQUE INDEX IF NOT EXISTS agent_sessions_fno_id
-           ON agent_sessions(fno_id) WHERE fno_id IS NOT NULL;",
+         );",
         stamps("harnesses"),
         stamps("models"),
         stamps("agent_sessions"),
