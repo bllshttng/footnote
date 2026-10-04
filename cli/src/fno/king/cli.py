@@ -587,7 +587,7 @@ def shape_cmd(
 
     if shape not in ("pass", "court"):
         _refuse("king: shape must be 'pass' or 'court'.")
-    argv, own = _own_crown_argv("reign-shape", scope)
+    argv, own = _own_crown_argv("lead-shape", scope)
     argv += ["--shape", shape]
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -632,7 +632,7 @@ def term_cmd(ctx: typer.Context) -> None:
     )
     if not re.fullmatch(r"span:[0-9]+[smhd]|compactions:[0-9]+", spec.strip()):
         _refuse(f"king: bad term spec {spec!r}; legal forms: span:<N>[smhd], compactions:<N>")
-    argv, own = _own_crown_argv("reign-shape", scope)
+    argv, own = _own_crown_argv("lead-shape", scope)
     argv += ["--term", spec]
     if reason.strip():
         argv += ["--reason", reason]
@@ -716,7 +716,7 @@ def checkin_cmd(ctx: typer.Context) -> None:
         )
     argv = [
         str(binary),
-        "king-checkin",
+        "lead-checkin",
         *passed,
         "--graph",
         str(graph_json()),
@@ -757,7 +757,7 @@ def ledger_cmd(
 ) -> None:
     """Render the reign ledger page: every crown, its territory, its nodes.
 
-    The page assembly is the native ``reign-ledger`` verb; this shell resolves
+    The page assembly is the native ``lead-rundown`` verb; this shell resolves
     the court and the paths. Contract: docs/architecture/reign.md.
     """
     from fno.king.ledger import build_ledger_data, write_ledger

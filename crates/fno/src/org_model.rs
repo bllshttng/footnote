@@ -65,16 +65,16 @@ impl OrgSnapshot {
     }
 }
 pub async fn gather(graph: &std::path::Path, agents: Vec<AgentRow>) -> OrgInputs {
-    let crowns: Vec<Value> = agents.iter().filter(|a| !a.exited).filter_map(|a| {
+    let teams: Vec<Value> = agents.iter().filter(|a| !a.exited).filter_map(|a| {
         Some(serde_json::json!({"scope": a.crown_scope.as_ref()?, "level": a.crown_level?, "holder": a.name}))
     }).collect();
     let mut command = tokio::process::Command::new("fno-agents");
     command
-        .args(["court-fold", "--graph"])
+        .args(["org-fold", "--graph"])
         .arg(graph)
         .args([
-            "--crowns-json",
-            &serde_json::to_string(&crowns).expect("JSON values always serialize"),
+            "--teams-json",
+            &serde_json::to_string(&teams).expect("JSON values always serialize"),
             "--format",
             "json",
         ])
@@ -84,10 +84,10 @@ pub async fn gather(graph: &std::path::Path, agents: Vec<AgentRow>) -> OrgInputs
         tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
     );
     let fold = match output {
-        Err(_) => Err("court-fold timed out after 30s".into()),
-        Ok(Err(error)) => Err(format!("court-fold could not run: {error}")),
+        Err(_) => Err("org-fold timed out after 30s".into()),
+        Ok(Err(error)) => Err(format!("org-fold could not run: {error}")),
         Ok(Ok(output)) if !output.status.success() => Err(format!(
-            "court-fold exited {}: {}",
+            "org-fold exited {}: {}",
             output
                 .status
                 .code()
@@ -96,7 +96,7 @@ pub async fn gather(graph: &std::path::Path, agents: Vec<AgentRow>) -> OrgInputs
             String::from_utf8_lossy(&output.stderr).trim()
         )),
         Ok(Ok(output)) => serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("court-fold invalid JSON: {e}")),
+            .map_err(|e| format!("org-fold invalid JSON: {e}")),
     };
     OrgInputs {
         backlog,
@@ -192,7 +192,7 @@ fn action(agent: Option<&AgentRow>) -> (String, Option<String>) {
 }
 fn org_node(inputs: &Inputs, id: &str, fold: &Value, now: u64) -> Result<OrgNode, String> {
     let view = crate::backlog_model::node(inputs, id)
-        .ok_or_else(|| format!("court-fold node {id} missing from graph read"))?;
+        .ok_or_else(|| format!("org-fold node {id} missing from graph read"))?;
     let mut current = Vec::new();
     let mut former = Vec::new();
     for mut session in view.sessions.clone() {
@@ -281,11 +281,11 @@ pub fn derive(inputs: &OrgInputs, now: u64) -> Result<OrgTree, String> {
     let scopes = fold
         .get("scope_nodes")
         .and_then(Value::as_object)
-        .ok_or("court-fold scope_nodes missing")?;
+        .ok_or("org-fold scope_nodes missing")?;
     let owners = fold
         .get("owned_scopes")
         .and_then(Value::as_object)
-        .ok_or("court-fold ownership unavailable")?;
+        .ok_or("org-fold ownership unavailable")?;
     let mut leads = Vec::new();
     for holder in inputs.backlog.agents.iter().filter(|a| !a.exited) {
         let (Some(scope), Some(level)) = (&holder.crown_scope, holder.crown_level) else {
@@ -293,22 +293,22 @@ pub fn derive(inputs: &OrgInputs, now: u64) -> Result<OrgTree, String> {
         };
         let own = scopes
             .get(scope)
-            .ok_or_else(|| format!("court-fold scope {scope} missing"))?;
+            .ok_or_else(|| format!("org-fold scope {scope} missing"))?;
         if own.get("status").and_then(Value::as_str) != Some("ok") {
             return Err(
-                text(own, "reason").unwrap_or_else(|| format!("court-fold scope {scope} failed"))
+                text(own, "reason").unwrap_or_else(|| format!("org-fold scope {scope} failed"))
             );
         }
         let records = own
             .get("nodes")
             .and_then(Value::as_array)
-            .ok_or_else(|| format!("court-fold scope {scope} nodes missing"))?;
+            .ok_or_else(|| format!("org-fold scope {scope} nodes missing"))?;
         let mut nodes = Vec::new();
         for record in records {
             let id = record
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or("court-fold node id missing")?;
+                .ok_or("org-fold node id missing")?;
             // Ancestor folds overlap; the owner read chooses the team.
             if owners.get(id).and_then(Value::as_str) != Some(scope) {
                 continue;

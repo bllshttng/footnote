@@ -224,7 +224,7 @@ pub(crate) fn resolve(row: &Value) -> Option<String> {
         "refs/heads".to_string(),
         "refs/remotes/origin".to_string(),
     ];
-    let refs = match crate::king_board::budget::run_with_timeout(
+    let refs = match crate::org_board::budget::run_with_timeout(
         &cmd,
         Path::new("."),
         Duration::from_secs(5),

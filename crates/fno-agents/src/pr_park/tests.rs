@@ -242,7 +242,7 @@ fn a_row_that_merged_while_parked_is_handled_not_resumed() {
 fn resolve_follows_a_configured_state_dir() {
     let _env_lock = crate::claims::test_env_lock();
     // The store must follow the same `state_dir` the Python watcher reads,
-    // or the king's parked board and the daemon sweep watch an empty file
+    // or the lead's parked board and the daemon sweep watch an empty file
     // while the parks live under the override.
     // The default-home leg compares two HOME-derived paths, so the env is
     // pinned for the body: a sibling test's leaked HOME or FNO_HOME makes

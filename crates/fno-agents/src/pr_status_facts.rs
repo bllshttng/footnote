@@ -1,6 +1,6 @@
 //! Read-only `fno do pr status` facts riding the `authorized-merge` op door.
 //!
-//! Two false readings cost workers and the crown on 2026-09-18:
+//! Two false readings cost workers and the team on 2026-09-18:
 //! `ready` answered "does it conflict" while GitHub's
 //! `mergeable_state` answers "will GitHub merge it", and the failure line
 //! named stderr from a PASSING test because the block scanner only matched
@@ -29,7 +29,7 @@ pub(crate) trait GhProbe {
 pub(crate) struct RealGhProbe;
 
 /// One wall-clock bound per gh call: the status door serves callers (the
-/// king-board gate read, the nudge ladder) that each lost their own
+/// lead-board gate read, the nudge ladder) that each lost their own
 /// per-call bound when they moved in process, so the bound lives here where
 /// every door read passes. Generous by design - it stops a hang, it does
 /// not pace reads (the fleet budget ledger owns that).

@@ -143,7 +143,7 @@ pub struct AttentionItem {
     /// accepted, the asker names what it did not check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unknowns: Option<String>,
-    /// `yes | costly | no`; says whether a king may answer instead.
+    /// `yes | costly | no`; says whether a lead may answer instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reversible: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -887,7 +887,7 @@ mod tests {
             json!({"ask": "publish fno-event-store"}),
         );
         // Escalation note with status: open.
-        let note = "---\nclass: irreversible\nstatus: open\nnode: x-aaaa\nraised_by: king-fno-g6\nraised_at: 2026-09-18T09:00:00Z\ndeadline: 2026-09-19T09:00:00Z\nrecommend: 1\non_silence: wait\n---\n# Decide the outage\n\n## What is being decided\nThe rollback.\n\n## Options\n- Roll back now\n    What happens next: the fleet restarts\n- Wait an hour\n    What happens next: risk grows\n\n## Recommendation\nOption 1, the narrowest stop.\n\n## If no answer by the deadline\nWe wait.\n";
+        let note = "---\nclass: irreversible\nstatus: open\nnode: x-aaaa\nraised_by: lead-fno-g6\nraised_at: 2026-09-18T09:00:00Z\ndeadline: 2026-09-19T09:00:00Z\nrecommend: 1\non_silence: wait\n---\n# Decide the outage\n\n## What is being decided\nThe rollback.\n\n## Options\n- Roll back now\n    What happens next: the fleet restarts\n- Wait an hour\n    What happens next: risk grows\n\n## Recommendation\nOption 1, the narrowest stop.\n\n## If no answer by the deadline\nWe wait.\n";
         let items = project(
             &pin,
             &[("outage".to_string(), note.to_string())],
@@ -920,7 +920,7 @@ mod tests {
             ],
             "context": {
                 "blocked_because": "two repairs are both Python edits",
-                "options_rationale": "the three readings kings acted on",
+                "options_rationale": "the three readings leads acted on",
                 "recommendation": {"option": 1, "why": "narrowest", "downside": "a repair hides a feature"},
                 "unknowns": "whether a net-zero move counts",
                 "reversible": "costly",

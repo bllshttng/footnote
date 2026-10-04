@@ -142,13 +142,13 @@ mod tests {
     #[test]
     fn ac12_hp_block_lists_items_with_a_count() {
         let items = vec![
-            item("Which reading?", "question", "king-fno-g6"),
+            item("Which reading?", "question", "lead-fno-g6"),
             item("Publish the crate", "pin", "worker-2"),
             item("ship tonight", "mine", ""),
         ];
         let text = render_block(&items);
         assert!(text.contains("Waiting on you (3)"));
-        assert!(text.contains("- question: Which reading? (from king-fno-g6)"));
+        assert!(text.contains("- question: Which reading? (from lead-fno-g6)"));
         assert!(text.contains("- pin: Publish the crate (from worker-2)"));
         assert!(text.contains("- mine: ship tonight"));
     }

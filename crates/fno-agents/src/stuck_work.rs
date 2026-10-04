@@ -1,7 +1,7 @@
 //! What work is stuck: a verb process running far past its own deadline, and
 //! a single-flight lock whose holder pid is gone. One module answers "is any
 //! work stuck on this machine" for the three readers that page or print it
-//! (`fno agents status`, arm_watch, the king check-in), so a hung `backlog
+//! (`fno agents status`, arm_watch, the lead check-in), so a hung `backlog
 //! advance` can never again run 3h29m with the only signal a banner nobody
 //! sees.
 //!

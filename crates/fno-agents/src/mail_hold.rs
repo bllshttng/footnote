@@ -1,7 +1,7 @@
 //! Arm or lift a busy-mode hold for ANOTHER session (transport-only client
 //! action, registered in no client menu - the shrink law allows no new
 //! client verbs; the harness hook entries (`hook prompt`, `hook stop`) and
-//! `king cancel` reach it through the binary path like the other early
+//! `lead cancel` reach it through the binary path like the other early
 //! dispatches).
 //!
 //! The hold is the registry row's `delivery_policy = "bus-only"` stamp plus
@@ -945,7 +945,7 @@ pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono:
 /// `fno-agents mail-hold --session <id> [--off | --gate]`
 ///
 /// Arm (default): run the conversation arm and report its outcome.
-/// `--off`: clear the clock and unstamp the policy, so a cancelled crown's
+/// `--off`: clear the clock and unstamp the policy, so a cancelled team's
 /// mail delivers normally instead of holding forever on a stamped row with
 /// no clock (the never-lapses state). No row for the session: exit 3,
 /// nothing written.

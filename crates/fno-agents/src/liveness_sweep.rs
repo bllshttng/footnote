@@ -16,14 +16,14 @@ use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 
 /// The roster witness both reconcile decisions read. `bg_live` answers
-/// presence for the zombie flip; `crown_running` answers the POSITIVE
-/// running witness a crown revival needs - the row's session listed in a
+/// presence for the zombie flip; `team_running` answers the POSITIVE
+/// running witness a team revival needs - the row's session listed in a
 /// parsed `roster.json` whose worker pid is not gone. A MISSING roster
 /// parses as zero workers (no claude daemon ever ran); an UNREADABLE one is
 /// unknown liveness: the flip refuses to declare death on it, and the
 /// revival refuses to revive on it. Read once per sweep, not per row.
 /// Moved here from `run_reconcile_sweep` (the daemon file is shrink-only;
-/// the code the crown-revival change touched moves with it).
+/// the code the team-revival change touched moves with it).
 pub(crate) struct BgRoster {
     roster: Option<crate::claude_roster::ClaudeRoster>,
     readable: bool,
@@ -128,7 +128,7 @@ impl BgRoster {
     /// carries a pid that answers ESRCH and reads as the absence it is, and
     /// a RECYCLED pid answers kill(0) even though the worker is gone, so
     /// presence plus not-gone alone must not pass.
-    pub(crate) fn crown_running(&self, e: &RegistryEntry) -> bool {
+    pub(crate) fn team_running(&self, e: &RegistryEntry) -> bool {
         if e.harness_name() != "claude" {
             return false;
         }
@@ -193,11 +193,11 @@ pub(crate) struct ReconcileChange {
     /// probe inference. A process fact is writable by any sweep; a probe
     /// inference stays on the operator-driven sweeps.
     pub(crate) pid_proven: bool,
-    /// A guarded crown revival: the write must re-resolve the row by its own
+    /// A guarded team revival: the write must re-resolve the row by its own
     /// (harness, session id) - never the name fallback - and skip unless the
-    /// crown fields still sit on it, so a concurrent stop or succession
+    /// team fields still sit on it, so a concurrent stop or succession
     /// cannot revive the wrong holder.
-    pub(crate) crown_revive: bool,
+    pub(crate) team_revive: bool,
 }
 
 /// What a reconcile sweep did, for the `reconcile_done` event and tests.
@@ -330,7 +330,7 @@ where
                     None
                 },
                 pid_proven: false,
-                crown_revive: false,
+                team_revive: false,
             });
             continue;
         }
@@ -347,7 +347,7 @@ where
         // claude's own daemon owns it and lists it in `roster.json`. Reaping it
         // unprobed made `wait --state done` answer "done (via exit)" seconds
         // after spawn, for a worker whose transcript was still growing, so a
-        // court king read a live teammate as dead and could respawn a duplicate
+        // org lead read a live teammate as dead and could respawn a duplicate
         // against it. `bg_live` asks the roster before we declare death; a
         // genuinely finished ask is absent from it and still reaps to Exited.
         if entry.is_one_shot_ask() {
@@ -419,7 +419,7 @@ where
                     }
                 },
                 pid_proven: false,
-                crown_revive: false,
+                team_revive: false,
             });
             continue;
         }
@@ -533,28 +533,28 @@ where
             new_status,
             new_liveness: crate::liveness_sweep::served_word(entry, &measured, &mut pid_live),
             pid_proven: pid_proven_dead,
-            crown_revive: false,
+            team_revive: false,
         });
     }
     (changes, out)
 }
 
-/// The reboot arm of the reconcile sweep: an Exited claude CROWN row whose
+/// The reboot arm of the reconcile sweep: an Exited claude TEAM row whose
 /// holder session actually came back. A reboot writes `Exited` on rows whose
-/// workers were merely absent (the machine was down), and a crown must not
-/// read dead while its session resumes - court, sideline, and king-share all
-/// count live-ish crowned rows. Recovery needs two POSITIVE witnesses - the
+/// workers were merely absent (the machine was down), and a team must not
+/// read dead while its session resumes - org, sideline, and lead-share all
+/// count live-ish teamed rows. Recovery needs two POSITIVE witnesses - the
 /// roster lists the exact recorded session with a live pid, and the shared
 /// ladder answers Alive - and never revives from session-store existence, a
 /// transcript mtime, a stale or partial roster, a terminal roster state, or
-/// an unmeasured probe. Crowned rows only: a one-shot ask that exited stays
-/// exited. Plan-only; the batched write re-checks identity and crown fields
+/// an unmeasured probe. Teamed rows only: a one-shot ask that exited stays
+/// exited. Plan-only; the batched write re-checks identity and team fields
 /// under the lock.
 #[allow(clippy::type_complexity)]
-pub(crate) fn plan_crown_revivals<L>(
+pub(crate) fn plan_team_revivals<L>(
     entries: &[RegistryEntry],
     roster_readable: bool,
-    mut crown_running: impl FnMut(&RegistryEntry) -> bool,
+    mut team_running: impl FnMut(&RegistryEntry) -> bool,
     mut liveness: L,
 ) -> (Vec<ReconcileChange>, Vec<String>)
 where
@@ -569,7 +569,7 @@ where
         if entry.status != AgentStatus::Exited || entry.crown_scope.is_none() {
             continue;
         }
-        if !crown_running(entry) || liveness(entry) != RowLiveness::Alive {
+        if !team_running(entry) || liveness(entry) != RowLiveness::Alive {
             continue;
         }
         recovered.push(entry.name.clone());
@@ -578,7 +578,7 @@ where
             new_status: Some(AgentStatus::Live),
             new_liveness: Some("alive"),
             pid_proven: false,
-            crown_revive: true,
+            team_revive: true,
         });
     }
     (changes, recovered)
@@ -842,10 +842,10 @@ pub(crate) fn apply_reconcile_changes(
         let keyed = ident
             .as_ref()
             .and_then(|(h, sid)| sid.as_deref().and_then(|sid| r.find_by_session_mut(h, sid)));
-        let target = if ch.crown_revive {
+        let target = if ch.team_revive {
             // A revival re-resolves by the row's own (harness, session id) -
             // the name fallback could hand a successor's row the old
-            // holder's status - and only while the crown fields still sit on
+            // holder's status - and only while the team fields still sit on
             // it: a succession that moved the scope mid-sweep ends the
             // revival. A miss touches nothing, not even the stamp.
             keyed.filter(|e| e.crown_scope.is_some() && e.crown_level.is_some())
@@ -871,7 +871,7 @@ pub(crate) fn apply_reconcile_changes(
                         harness_session: e.harness_session_id.clone(),
                         from: status_word(from),
                         to: status_word(to),
-                        cause: if ch.crown_revive {
+                        cause: if ch.team_revive {
                             "revival"
                         } else if ch.pid_proven {
                             "pid_proven"
@@ -1158,7 +1158,7 @@ mod tests {
             new_status: Some(AgentStatus::Exited),
             new_liveness: Some("dead"),
             pid_proven: false,
-            crown_revive: false,
+            team_revive: false,
         }];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -1386,7 +1386,7 @@ mod tests {
             new_status: Some(AgentStatus::Exited),
             new_liveness: Some("dead"),
             pid_proven,
-            crown_revive: false,
+            team_revive: false,
         };
         assert!(mode_writes_status(&SweepMode::Full, &mk(true)));
         assert!(mode_writes_status(&SweepMode::Full, &mk(false)));
@@ -1534,20 +1534,20 @@ mod tests {
             e.spawned_by_session = spawned_by.map(String::from);
             e
         }
-        let mut king = row("king-x-1", "s-king", None);
-        king.crown_level = Some(1);
-        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
-        court.status = AgentStatus::Busy;
-        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        let mut lead = row("lead-x-1", "s-lead", None);
+        lead.crown_level = Some(1);
+        let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
+        org.status = AgentStatus::Busy;
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead-walk"));
         joiner.status = AgentStatus::Busy;
-        let mut handoff = row("sob-t-x-2-glm", "s-t", Some("s-lead"));
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some("s-lead-walk"));
         handoff.status = AgentStatus::Busy;
         let plain = row("solo-x-2", "s-solo", None);
-        let lead = row("t-x-1-lead", "s-lead", None);
+        let walk = row("t-x-1-lead", "s-lead-walk", None);
         let entries = vec![
-            king.clone(),
-            court.clone(),
             lead.clone(),
+            org.clone(),
+            walk.clone(),
             joiner.clone(),
             handoff.clone(),
             plain.clone(),
@@ -1576,16 +1576,16 @@ mod tests {
         assert_eq!(kind_of("jn-t-x-1-1"), Some(Some("child".into())));
         assert_eq!(kind_of("sob-t-x-2-glm"), Some(Some("peer".into())));
         assert_eq!(kind_of("solo-x-2"), Some(None), "no edge, no word");
-        assert_eq!(kind_of("king-x-1"), Some(None), "no edge, no word");
+        assert_eq!(kind_of("lead-x-1"), Some(None), "no edge, no word");
     }
 
-    fn crowned_exited(name: &str, sid: &str, crowned: bool) -> RegistryEntry {
+    fn teamed_exited(name: &str, sid: &str, teamed: bool) -> RegistryEntry {
         let mut e = state::RegistryEntry::default();
         e.name = name.to_string();
         e.harness_session_id = Some(sid.to_string());
         e.status = AgentStatus::Exited;
         e.exited_at = Some("2026-09-24T00:00:00Z".to_string());
-        if crowned {
+        if teamed {
             e.crown_scope = Some("zed".to_string());
             e.crown_level = Some(2);
         }
@@ -1593,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn crown_running_rejects_a_recycled_pid_on_start_time_mismatch() {
+    fn team_running_rejects_a_recycled_pid_on_start_time_mismatch() {
         // The roster pid must be LIVE on this machine (the test process's
         // own), so the ESRCH probe passes and the start-time compare is what
         // the assertions exercise.
@@ -1608,87 +1608,87 @@ mod tests {
             listing: crate::claude_roster::ClaudeAgentsSnapshot::unknown("not read"),
         };
         let mut e = state::RegistryEntry::default();
-        e.name = "king".into();
+        e.name = "lead".into();
         e.harness = Some("claude".into());
         e.harness_session_id = Some("a1b2c3d4-1111-2222-3333-444455556666".into());
         // The recorded start time no longer matches the roster's: the pid
         // was recycled, so the row is not a running witness.
         e.pid_start_time = Some(222);
         assert!(
-            !witness.crown_running(&e),
+            !witness.team_running(&e),
             "a recycled pid fails the start-time compare"
         );
         e.pid_start_time = Some(111);
-        assert!(witness.crown_running(&e));
+        assert!(witness.team_running(&e));
         e.pid_start_time = None;
         assert!(
-            witness.crown_running(&e),
+            witness.team_running(&e),
             "a missing row start time leaves the pid answer standing"
         );
     }
 
     #[test]
-    fn a_resumed_crowned_exited_row_recovers_on_two_positive_witnesses() {
-        let entries = vec![crowned_exited("king", "s-king-uuid", true)];
-        let (changes, recovered) = plan_crown_revivals(
+    fn a_resumed_teamed_exited_row_recovers_on_two_positive_witnesses() {
+        let entries = vec![teamed_exited("lead", "s-lead-uuid", true)];
+        let (changes, recovered) = plan_team_revivals(
             &entries,
             true,
-            |e: &RegistryEntry| e.harness_session_id.as_deref() == Some("s-king-uuid"),
+            |e: &RegistryEntry| e.harness_session_id.as_deref() == Some("s-lead-uuid"),
             |_| RowLiveness::Alive,
         );
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
         assert_eq!(changes[0].new_liveness, Some("alive"));
-        assert!(changes[0].crown_revive);
+        assert!(changes[0].team_revive);
         assert!(!changes[0].pid_proven, "a revival is a probe inference");
-        assert_eq!(recovered, vec!["king".to_string()]);
+        assert_eq!(recovered, vec!["lead".to_string()]);
     }
 
     #[test]
-    fn a_crown_revival_needs_every_witness() {
+    fn a_team_revival_needs_every_witness() {
         // One witness missing, no revival: an unmeasured ladder answer, a
         // roster that does not list the session with a live pid, a row with
-        // no crown to restore, and an unreadable roster all leave the row
+        // no team to restore, and an unreadable roster all leave the row
         // Exited. Silence and partial reads never revive.
         let measured: &[RowLiveness] = &[RowLiveness::Unknown, RowLiveness::Dead];
         for answer in measured {
-            let entries = vec![crowned_exited("king", "s-1", true)];
-            let (changes, recovered) = plan_crown_revivals(&entries, true, |_| true, |_| *answer);
+            let entries = vec![teamed_exited("lead", "s-1", true)];
+            let (changes, recovered) = plan_team_revivals(&entries, true, |_| true, |_| *answer);
             assert!(changes.is_empty() && recovered.is_empty(), "{answer:?}");
         }
-        let entries = vec![crowned_exited("king", "s-1", true)];
+        let entries = vec![teamed_exited("lead", "s-1", true)];
         let (changes, recovered) =
-            plan_crown_revivals(&entries, true, |_| false, |_| RowLiveness::Alive);
+            plan_team_revivals(&entries, true, |_| false, |_| RowLiveness::Alive);
         assert!(changes.is_empty() && recovered.is_empty());
-        // Not crowned: a finished one-shot ask stays exited.
-        let entries = vec![crowned_exited("ask", "s-2", false)];
+        // Not teamed: a finished one-shot ask stays exited.
+        let entries = vec![teamed_exited("ask", "s-2", false)];
         let (changes, recovered) =
-            plan_crown_revivals(&entries, true, |_| true, |_| RowLiveness::Alive);
+            plan_team_revivals(&entries, true, |_| true, |_| RowLiveness::Alive);
         assert!(changes.is_empty() && recovered.is_empty());
         // Unreadable roster: no revival.
-        let entries = vec![crowned_exited("king", "s-3", true)];
+        let entries = vec![teamed_exited("lead", "s-3", true)];
         let (changes, recovered) =
-            plan_crown_revivals(&entries, false, |_| true, |_| RowLiveness::Alive);
+            plan_team_revivals(&entries, false, |_| true, |_| RowLiveness::Alive);
         assert!(changes.is_empty() && recovered.is_empty());
     }
 
     #[test]
-    fn the_revival_write_rechecks_identity_and_crown_fields_under_the_lock() {
+    fn the_revival_write_rechecks_identity_and_team_fields_under_the_lock() {
         let mk_change = || crate::daemon::ReconcileChange {
-            name: "king".into(),
+            name: "lead".into(),
             new_status: Some(AgentStatus::Live),
             new_liveness: Some("alive"),
             pid_proven: false,
-            crown_revive: true,
+            team_revive: true,
         };
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        let entries = vec![crowned_exited("king", "s-king-uuid", true)];
+        let entries = vec![teamed_exited("lead", "s-lead-uuid", true)];
 
-        // A succession moved the crown mid-sweep: the crown fields are gone
+        // A succession moved the team mid-sweep: the team fields are gone
         // from the row, so the revival is refused.
         let mut reg = state::Registry::default();
-        let mut uncrowned = crowned_exited("king", "s-king-uuid", true);
+        let mut uncrowned = teamed_exited("lead", "s-lead-uuid", true);
         uncrowned.crown_scope = None;
         uncrowned.crown_level = None;
         reg.entries = vec![uncrowned];
@@ -1718,7 +1718,7 @@ mod tests {
             "2026-09-10T12:00:00Z",
         );
         assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].row, "king");
+        assert_eq!(applied[0].row, "lead");
         assert_eq!(applied[0].from, "exited");
         assert_eq!(applied[0].to, "live");
         assert_eq!(applied[0].cause, "revival");
@@ -1726,7 +1726,7 @@ mod tests {
         // The row re-bound to a different session between plan and write:
         // the keyed lookup misses and the name fallback is refused.
         let mut reg = state::Registry::default();
-        let mut rebound = crowned_exited("king", "s-successor", true);
+        let mut rebound = teamed_exited("lead", "s-successor", true);
         rebound.crown_scope = None;
         reg.entries = vec![rebound];
         crate::liveness_sweep::apply_reconcile_changes(
@@ -1745,13 +1745,13 @@ mod tests {
     }
 
     #[test]
-    fn a_revived_crown_clears_its_stamp_and_counts_in_live_crowns() {
+    fn a_revived_team_clears_its_stamp_and_counts_in_live_teams() {
         // AC2-HP end to end at the store: the applied revival flips the row
         // to Live, update_registry's drive-eligible rule drops the stale
-        // exited_at, and the court's registry source (which sideline and
-        // king-share read) counts one crown.
+        // exited_at, and the org's registry source (which sideline and
+        // lead-share read) counts one team.
         let dir = std::env::temp_dir().join(format!(
-            "crown-revive-{}-{}",
+            "team-revive-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1760,7 +1760,7 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let registry = dir.join("registry.json");
-        let entry = crowned_exited("king", "s-king-uuid", true);
+        let entry = teamed_exited("lead", "s-lead-uuid", true);
         fs::write(
             &registry,
             serde_json::json!({"schema_version": 11, "agents": [entry]}).to_string(),
@@ -1768,11 +1768,11 @@ mod tests {
         .unwrap();
         let entries = vec![entry];
         let change = crate::daemon::ReconcileChange {
-            name: "king".into(),
+            name: "lead".into(),
             new_status: Some(AgentStatus::Live),
             new_liveness: Some("alive"),
             pid_proven: false,
-            crown_revive: true,
+            team_revive: true,
         };
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -1789,16 +1789,16 @@ mod tests {
         .unwrap();
         let rows: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
-        let king = &rows["agents"][0];
-        assert_eq!(king["status"], "live", "{king}");
+        let lead = &rows["agents"][0];
+        assert_eq!(lead["status"], "live", "{lead}");
         assert!(
-            king["exited_at"].is_null(),
-            "the drive-eligible rule drops the stale stamp: {king}"
+            lead["exited_at"].is_null(),
+            "the drive-eligible rule drops the stale stamp: {lead}"
         );
-        let crowns = crate::territory::live_crowns(&registry).unwrap();
-        assert_eq!(crowns.len(), 1, "{crowns:?}");
-        assert_eq!(crowns[0].holder, "king");
-        assert_eq!(crowns[0].scope, "zed");
+        let teams = crate::territory::live_teams(&registry).unwrap();
+        assert_eq!(teams.len(), 1, "{teams:?}");
+        assert_eq!(teams[0].holder, "lead");
+        assert_eq!(teams[0].scope, "zed");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1827,7 +1827,7 @@ mod tests {
             new_status: None,
             new_liveness: Some("unmeasured"),
             pid_proven: false,
-            crown_revive: false,
+            team_revive: false,
         };
         let mut changes = vec![change("quill"), change("warden"), change("gone")];
         let witness = BgRoster {

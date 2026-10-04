@@ -7,8 +7,8 @@
 //! names the repo it read and where that choice came from. A failed read never
 //! prints the receipt and exits 4, so an empty repo and a failed read differ.
 
-use crate::king_board::budget::run_with_timeout;
-use crate::king_board::prs::pr_binding_verdicts;
+use crate::org_board::budget::run_with_timeout;
+use crate::org_board::prs::pr_binding_verdicts;
 use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::process::Command;
@@ -47,7 +47,7 @@ pub fn run_pr_list(args: &[String]) -> i32 {
         })
     };
     let graph = || {
-        let path = crate::king_board::scope::graph_json_path(&cwd);
+        let path = crate::org_board::scope::graph_json_path(&cwd);
         let store = crate::backlog::api::Store::new(&path);
         crate::backlog::api::rows(&store).map_err(|e| e.0)
     };

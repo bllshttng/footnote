@@ -76,7 +76,7 @@ fn row_json_with_node(harness: &str, sid: &str, cwd: &Path, node: &str) -> Strin
     row
 }
 
-fn row_json_crowned(harness: &str, sid: &str, cwd: &Path) -> String {
+fn row_json_teamed(harness: &str, sid: &str, cwd: &Path) -> String {
     let mut row = row_json(harness, sid, cwd);
     row.insert(row.len() - 1, ',');
     row.insert_str(row.len() - 1, r#""crown_level":1"#);
@@ -283,53 +283,53 @@ fn node_mismatch_is_refused_with_both_nodes() {
 }
 
 #[test]
-fn crowned_row_without_node_routes_to_the_king_path() {
+fn teamed_row_without_node_routes_to_the_lead_path() {
     let home = HomeGuard::new();
     let cwd_dir = TempDir::new().unwrap();
     let cwd = cwd_dir.path();
-    home.seed_registry(&[row_json_crowned("opencode", "ses_king", cwd)]);
+    home.seed_registry(&[row_json_teamed("opencode", "ses_lead", cwd)]);
 
-    // No target manifest at all: the king path answers on its own evidence.
+    // No target manifest at all: the lead path answers on its own evidence.
     let missing = cwd.join("no-such-target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
     fs::write(&transcript_path, transcript("x")).unwrap();
 
     let (code, out) = run_loop_check_capture(&with_binding(
         base_args(&missing, &transcript_path, cwd),
-        "ses_king",
+        "ses_lead",
     ));
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(code, 0);
     assert_ne!(v["decision"], "refuse");
     let msg = v["message"].as_str().unwrap();
     assert!(
-        msg.contains("no king manifest"),
-        "expected the king path's own allow, got: {out}"
+        msg.contains("no lead manifest"),
+        "expected the lead path's own allow, got: {out}"
     );
 }
 
 #[test]
-fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
-    // The Crown route runs the king's own reads under a fire stamped
-    // driver=target. The drain reserve now arms on the shared king entry
+fn teamed_row_routes_a_real_drain_read_and_the_drain_answers() {
+    // The Team route runs the lead's own reads under a fire stamped
+    // driver=target. The drain reserve now arms on the shared lead entry
     // (not the driver string), and the drain answers through a scripted
     // fno-bin after a real sleep - it is never the 250ms floor that made
     // this route's floor kills look like load flakes.
     let home = HomeGuard::new();
     let cwd_dir = TempDir::new().unwrap();
     let cwd = cwd_dir.path();
-    home.seed_registry(&[row_json_crowned("opencode", "ses_king", cwd)]);
-    // A king manifest with a scope: the board reads in-process, then the
+    home.seed_registry(&[row_json_teamed("opencode", "ses_lead", cwd)]);
+    // A lead manifest with a scope: the board reads in-process, then the
     // drain read shells to the scripted binary. created_at is NOW: a stale
-    // stamp puts the crown past its 96h default span and the term gate
+    // stamp puts the team past its 96h default span and the term gate
     // blocks before the drain read ever runs. FNO_HOME carries a seeded
     // graph store and FNO_CONFIG a workspace config: the scope read demands
     // an epic entry and a work.workspaces mapping, and neither may lean on
     // an ambient machine's graph or config.
     let created = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let king_md = cwd.join("king.md");
+    let lead_md = cwd.join("lead.md");
     fs::write(
-        &king_md,
+        &lead_md,
         format!("---\nfno_id: k-2440\ncreated_at: {created}\nscope: x-2440\n---\n"),
     )
     .unwrap();
@@ -385,10 +385,10 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     }
     let transcript_path = cwd.join("transcript.jsonl");
     fs::write(&transcript_path, transcript("x")).unwrap();
-    let mut args = base_args(&king_md, &transcript_path, cwd);
+    let mut args = base_args(&lead_md, &transcript_path, cwd);
     args.push("--fno-bin".into());
     args.push(stub.to_string_lossy().into_owned());
-    let (code, out) = run_loop_check_capture(&with_binding(args, "ses_king"));
+    let (code, out) = run_loop_check_capture(&with_binding(args, "ses_lead"));
     match saved_py {
         Some(v) => std::env::set_var("FNO_PY", v),
         None => std::env::remove_var("FNO_PY"),
@@ -407,7 +407,7 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     let msg = v["message"].as_str().unwrap();
     assert!(
         msg.contains("2 driven rows undelivered"),
-        "expected the drain's own verdict through the Crown route, got: {out}"
+        "expected the drain's own verdict through the Team route, got: {out}"
     );
 }
 

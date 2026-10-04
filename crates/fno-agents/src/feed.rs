@@ -31,8 +31,8 @@ pub struct FeedRow {
     pub ts: String,
     /// `question_asked` | `question_closed` | `decision_recorded` |
     /// `node_created` | `node_started` | `node_shipped` | `node_ended` |
-    /// `session_spawned` | `session_reaped` | `crown_granted` |
-    /// `crown_vacated` | `day_boundary`
+    /// `session_spawned` | `session_reaped` | `team_granted` |
+    /// `team_vacated` | `day_boundary`
     pub kind: String,
     pub node: Option<String>,
     /// The node's project directory. Present on `node_created` rows so a
@@ -72,15 +72,15 @@ pub struct FeedRow {
     /// recorded cause, verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// `L{level} {scope}` for the crown kinds and a crowned removal.
+    /// `L{level} {scope}` for the team kinds and a teamed removal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown: Option<String>,
-    /// The crowned worker's name on `crown_granted` and `crown_vacated`
+    pub team: Option<String>,
+    /// The teamed worker's name on `team_granted` and `team_vacated`
     /// rows; the feed search answers `l:` through it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder: Option<String>,
-    /// The king or epic the row rolls up to, set on non-crown rows only:
-    /// `king {holder} L{level}` or `epic {parent} {title}`.
+    /// The lead or epic the row rolls up to, set on non-team rows only:
+    /// `lead {holder} L{level}` or `epic {parent} {title}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// The session that spawned this row's session, from the birth event.
@@ -166,7 +166,7 @@ pub(crate) fn ts_key(ts: &str) -> (u8, i64) {
 }
 
 /// The pure projection: questions text + graph entries + removals + the
-/// agents journal's spawn events + the crown events (both journals) ->
+/// agents journal's spawn events + the team events (both journals) ->
 /// ordered rows. Ascending by ts, so a consumer reads history forward and
 /// `--limit` trims from the newest end.
 pub fn project(
@@ -174,7 +174,7 @@ pub fn project(
     graph_entries: &[Value],
     removals: &[crate::removals::Removal],
     spawns_raw: &str,
-    crown_raw: &str,
+    team_raw: &str,
     closes_raw: &str,
 ) -> Projection {
     let mut rows = Vec::new();
@@ -221,7 +221,11 @@ pub fn project(
                 continue;
             }
         };
-        let kind = match v.get("type").and_then(Value::as_str) {
+        let kind = match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
             Some("day_boundary") => {
                 let boundary_kind = s_field(data, "kind").unwrap_or_default();
                 FeedRow {
@@ -326,7 +330,7 @@ pub fn project(
         // on every entry the graph holds. The creating session rides the
         // entry's source fields when the graph recorded them.
         if let Some(created) = s_field(entry, "created_at") {
-            // Model, effort, parent session and crown ride the entry's
+            // Model, effort, parent session and team ride the entry's
             // write-time source stamps (the creating session's registry row
             // at birth). An entry from before the stamps reads them as
             // absent, never as a current lookup.
@@ -340,7 +344,7 @@ pub fn project(
                 model: s_field(entry, "source_model"),
                 effort: s_field(entry, "source_effort"),
                 parent: s_field(entry, "source_parent_session"),
-                crown: s_field(entry, "source_crown"),
+                team: s_field(entry, "source_team"),
                 title: node_title.clone(),
                 ..FeedRow::default()
             });
@@ -459,7 +463,7 @@ pub fn project(
             name: Some(r.name.clone()),
             actor: removed_by,
             reason: r.reason.clone(),
-            crown: r.crown.clone(),
+            team: r.team.clone(),
             // Copied verbatim from the receipt, and set only when a receipt
             // exists: the provenance view treats any `detail` as a recovery
             // line, so a recovered receipt-less removal must not carry one.
@@ -487,7 +491,11 @@ pub fn project(
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        let kind = match v.get("type").and_then(Value::as_str) {
+        let kind = match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
             Some(
                 k @ ("pane_closed"
                 | "server_stopped"
@@ -607,51 +615,51 @@ pub fn project(
         });
     }
 
-    // Crown rows from the crown events, which land in BOTH journals, so rows
+    // Team rows from the team events, which land in BOTH journals, so rows
     // dedupe on (ts, scope, holder, cause). The same parse feeds the owner
     // assignment below.
-    let mut crown_events = parse_crown_events(crown_raw);
-    crown_events.sort_by_key(|c| ts_key(&c.ts));
+    let mut team_events = parse_team_events(team_raw);
+    team_events.sort_by_key(|c| ts_key(&c.ts));
     // The themes render once per fold, not once per row: one tolerant store
-    // read feeds every crown row's title below.
+    // read feeds every team row's title below.
     let themes = crate::paths::AgentsHome::from_env_opt()
-        .map(|home| crate::crown_names::theme_map(&home.crown_names_json()))
+        .map(|home| crate::team_names::theme_map(&home.team_names_json()))
         .unwrap_or_default();
     let rank = |level: i64, scope: &str| -> String {
         let theme = themes
             .get(crate::territory::canonical_scope(scope).as_str())
             .cloned();
-        crate::crown_names::title(level as u32, scope, theme.as_deref())
+        crate::team_names::title(level as u32, scope, theme.as_deref())
     };
-    let mut seen_crowns: std::collections::HashSet<(String, String, String, String)> =
+    let mut seen_teams: std::collections::HashSet<(String, String, String, String)> =
         std::collections::HashSet::new();
-    for c in &crown_events {
+    for c in &team_events {
         let key = (
             c.ts.clone(),
             c.scope.clone(),
             c.holder.clone(),
             c.cause.clone().unwrap_or_default(),
         );
-        if !seen_crowns.insert(key) {
+        if !seen_teams.insert(key) {
             continue;
         }
         match c.action {
-            CrownAction::Granted => {
-                let mut title = format!("{} crowned L{} {}", c.holder, c.level, c.scope);
+            TeamAction::Granted => {
+                let mut title = format!("{} teamed L{} {}", c.holder, c.level, c.scope);
                 if let Some(from) = &c.vacated_scope {
                     title.push_str(&format!(" (moved from {from})"));
                 }
                 rows.push(FeedRow {
                     ts: c.ts.clone(),
-                    kind: "crown_granted".into(),
-                    crown: Some(rank(c.level, &c.scope)),
+                    kind: "team_granted".into(),
+                    team: Some(rank(c.level, &c.scope)),
                     holder: Some(c.holder.clone()),
                     actor: c.actor.clone(),
                     title,
                     ..FeedRow::default()
                 });
             }
-            CrownAction::Vacated => {
+            TeamAction::Vacated => {
                 let mut title = format!(
                     "{} left L{} {}: {}",
                     c.holder,
@@ -664,8 +672,8 @@ pub fn project(
                 }
                 rows.push(FeedRow {
                     ts: c.ts.clone(),
-                    kind: "crown_vacated".into(),
-                    crown: Some(rank(c.level, &c.scope)),
+                    kind: "team_vacated".into(),
+                    team: Some(rank(c.level, &c.scope)),
                     holder: Some(c.holder.clone()),
                     actor: c.actor.clone(),
                     title,
@@ -676,7 +684,7 @@ pub fn project(
     }
 
     rows.sort_by(|a, b| ts_key(&a.ts).cmp(&ts_key(&b.ts)));
-    assign_owners(&mut rows, &crown_events, graph_entries);
+    assign_owners(&mut rows, &team_events, graph_entries);
     Projection {
         rows,
         skipped_lines,
@@ -684,12 +692,12 @@ pub fn project(
     }
 }
 
-/// One parsed crown event, used twice: for the crown rows and for the owner
+/// One parsed team event, used twice: for the team rows and for the owner
 /// assignment's scope-to-holder timeline.
 #[derive(Debug, Clone)]
-struct CrownEvent {
+struct TeamEvent {
     ts: String,
-    action: CrownAction,
+    action: TeamAction,
     holder: String,
     scope: String,
     level: i64,
@@ -700,14 +708,14 @@ struct CrownEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum CrownAction {
+enum TeamAction {
     Granted,
     Vacated,
 }
 
-fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
+fn parse_team_events(team_raw: &str) -> Vec<TeamEvent> {
     let mut out = Vec::new();
-    for line in crown_raw.lines() {
+    for line in team_raw.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
@@ -715,8 +723,12 @@ fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
         let Some(ts) = s_field(&v, "ts") else {
             continue;
         };
-        match v.get("type").and_then(Value::as_str) {
-            Some("agent_crowned") => {
+        match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
+            Some("agent_teamed") => {
                 let Some(name) = s_field(&data, "name") else {
                     continue;
                 };
@@ -726,9 +738,9 @@ fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
                 let Some(scope) = s_field(&data, "scope") else {
                     continue;
                 };
-                out.push(CrownEvent {
+                out.push(TeamEvent {
                     ts,
-                    action: CrownAction::Granted,
+                    action: TeamAction::Granted,
                     holder: name.to_string(),
                     scope: scope.to_string(),
                     level,
@@ -738,7 +750,7 @@ fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
                     vacated_scope: s_field(&data, "vacated_scope"),
                 });
             }
-            Some("agent_crown_vacated") => {
+            Some("agent_team_vacated") => {
                 let Some(holder) = s_field(&data, "holder") else {
                     continue;
                 };
@@ -748,9 +760,9 @@ fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
                 let Some(scope) = s_field(&data, "scope") else {
                     continue;
                 };
-                out.push(CrownEvent {
+                out.push(TeamEvent {
                     ts,
-                    action: CrownAction::Vacated,
+                    action: TeamAction::Vacated,
                     holder: holder.to_string(),
                     scope: scope.to_string(),
                     level,
@@ -766,12 +778,12 @@ fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
     out
 }
 
-/// Assign `owner` to every non-crown row. Crown events folded in time order
-/// hold a map from scope to its holder; a removal row whose `crown` is set
+/// Assign `owner` to every non-team row. Team events folded in time order
+/// hold a map from scope to its holder; a removal row whose `team` is set
 /// clears its scope at its own ts. A row whose node, or that node's graph
-/// parent, sits in a held scope gets `king {holder} L{level}`; otherwise a
+/// parent, sits in a held scope gets `lead {holder} L{level}`; otherwise a
 /// row whose node has a graph parent gets `epic {parent} {parent title}`.
-fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entries: &[Value]) {
+fn assign_owners(rows: &mut [FeedRow], team_events: &[TeamEvent], graph_entries: &[Value]) {
     if rows.is_empty() {
         return;
     }
@@ -791,10 +803,10 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
             .map(str::to_string)
     };
     // The scope timeline in time order: (ts_key, grant?, scope, holder, level).
-    // Owned strings, because a clear entry derives from a row's crown string
+    // Owned strings, because a clear entry derives from a row's team string
     // while the walk below borrows `rows` mutably.
     let mut timeline: Vec<((u8, i64), bool, String, String, i64)> = Vec::new();
-    for c in crown_events {
+    for c in team_events {
         timeline.push((
             ts_key(&c.ts),
             true,
@@ -803,13 +815,13 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
             c.level,
         ));
     }
-    // A removal whose crown is set clears that crown's scope from its own ts:
-    // after the heir's removal the territory has no king, so later rows stop
+    // A removal whose team is set clears that team's scope from its own ts:
+    // after the heir's removal the territory has no lead, so later rows stop
     // rolling up to it.
     for r in rows.iter() {
-        if r.kind == "session_reaped" && r.crown.is_some() {
+        if r.kind == "session_reaped" && r.team.is_some() {
             let scope = r
-                .crown
+                .team
                 .as_deref()
                 .and_then(|c| c.strip_prefix("L"))
                 .and_then(|rest| rest.split_once(' '))
@@ -833,19 +845,19 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
             }
             ti += 1;
         }
-        if r.kind == "crown_granted"
-            || r.kind == "crown_vacated"
-            || (r.kind == "session_reaped" && r.crown.is_some())
+        if r.kind == "team_granted"
+            || r.kind == "team_vacated"
+            || (r.kind == "session_reaped" && r.team.is_some())
         {
-            // A crown-band row carries no owner: the band IS its group.
+            // A team-band row carries no owner: the band IS its group.
             continue;
         }
         let parent = r.node.as_deref().and_then(parent_of);
-        let king = held.iter().find(|(scope, _, _)| {
+        let lead = held.iter().find(|(scope, _, _)| {
             r.node.as_deref().is_some_and(|n| scope_holds(scope, n))
                 || parent.as_deref().is_some_and(|p| scope_holds(scope, p))
         });
-        if let Some((_, holder, level)) = king {
+        if let Some((_, holder, level)) = lead {
             let scope = held
                 .iter()
                 .find(|(s, _, _)| {
@@ -855,8 +867,8 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
                 .map(|(s, _, _)| s.clone())
                 .unwrap_or_default();
             let theme = crate::paths::AgentsHome::from_env_opt()
-                .and_then(|home| crate::crown_names::theme_for(&home.crown_names_json(), &scope));
-            let rank = crate::crown_names::title(*level as u32, &scope, theme.as_deref());
+                .and_then(|home| crate::team_names::theme_for(&home.team_names_json(), &scope));
+            let rank = crate::team_names::title(*level as u32, &scope, theme.as_deref());
             r.owner = Some(format!("{rank} ({holder})"));
         } else if let Some(p) = parent {
             let title = title_of(&p).unwrap_or_default();
@@ -869,7 +881,7 @@ fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entrie
     }
 }
 
-/// True when a crown scope (comma-separated node ids) holds `node`.
+/// True when a team scope (comma-separated node ids) holds `node`.
 fn scope_holds(scope: &str, node: &str) -> bool {
     scope.split(',').any(|seg| seg.trim() == node)
 }
@@ -979,12 +991,12 @@ fn agents_journal(home: &AgentsHome, types: &[&str], since_epoch: Option<u64>) -
     crate::event_store::journal_text_checked(&home.events_jsonl(), &query).unwrap_or_default()
 }
 
-/// The crown events, concatenated from BOTH journals so a crown row dedupes
+/// The team events, concatenated from BOTH journals so a team row dedupes
 /// on (ts, scope, holder, cause) instead of depending on which store an
-/// emitter wrote. Unbounded by the window: a crown is granted before the
+/// emitter wrote. Unbounded by the window: a team is granted before the
 /// events it owns.
-fn crown_journals(home: &AgentsHome) -> String {
-    let types = ["agent_crowned", "agent_crown_vacated"];
+fn team_journals(home: &AgentsHome) -> String {
+    let types = ["agent_teamed", "agent_team_vacated"];
     let mut raw = agents_journal(home, &types, None);
     if let Some(parent) = home.root().parent() {
         let path = parent.join("events.jsonl");
@@ -1060,7 +1072,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         &["agent_spawned", "agent_spawn_refused"],
         args.since_epoch,
     );
-    let crown_raw = crown_journals(home);
+    let team_raw = team_journals(home);
     let closes_raw = agents_journal(
         home,
         &[
@@ -1081,7 +1093,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         &graph_entries,
         &removals,
         &spawns_raw,
-        &crown_raw,
+        &team_raw,
         &closes_raw,
     );
     if skipped_lines > 0 {
@@ -1149,7 +1161,7 @@ mod tests {
             "source_model": "claude-opus-5",
             "source_effort": "high",
             "source_parent_session": "s-parent",
-            "source_crown": "L2 e-0001",
+            "source_team": "L2 e-0001",
             "completed_at": "2026-09-05T16:41:25Z",
             "sessions": [
                 {"phase": "blueprint", "harness": "claude", "session_id": "s-blue",
@@ -1353,7 +1365,7 @@ mod tests {
             reason: Some("every named node done: x-aaaa".into()),
             cause: Some("agent_row_reaped".into()),
             cause_at: Some("2026-09-06T10:00:00Z".into()),
-            crown: None,
+            team: None,
             resume: Some("claude --resume 00847995".into()),
             cwd: Some("/tmp/wt".into()),
             trigger: Some("unattended".into()),
@@ -1468,7 +1480,7 @@ mod tests {
         assert_eq!(created.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(created.effort.as_deref(), Some("high"));
         assert_eq!(created.parent.as_deref(), Some("s-parent"));
-        assert_eq!(created.crown.as_deref(), Some("L2 e-0001"));
+        assert_eq!(created.team.as_deref(), Some("L2 e-0001"));
         let wire = serde_json::to_value(created).unwrap();
         assert_eq!(
             wire.get("cwd").and_then(Value::as_str),
@@ -1521,16 +1533,16 @@ mod tests {
 
         // AC1: the jolly-finch shape, projected. The removal is recovered from
         // its registry_row_removed event; the feed row carries the deeper
-        // uncaptured reason, the crown it held, and no detail (a recovered
+        // uncaptured reason, the team it held, and no detail (a recovered
         // removal has no resume line to hand over).
         let mut r = removal_fixture();
         r.session_id = None;
         r.harness = Some("codex".into());
         r.name = "jolly-finch".into();
         r.removed_by = "fno-py".into();
-        r.verb = Some("fno-py agents spawn --substrate pane --crown".into());
+        r.verb = Some("fno-py agents spawn --substrate pane --team".into());
         r.reason = Some("no unique codex rollout for this cwd after spawn".into());
-        r.crown = Some("L2 x-eeee".into());
+        r.team = Some("L2 x-eeee".into());
         r.receipt = None;
         r.resume = None;
         r.cwd = None;
@@ -1547,10 +1559,10 @@ mod tests {
             row.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
-        // The receipt row's crown copies verbatim: the receipt is the
-        // surviving record, and the crown-event rows above are what render
+        // The receipt row's team copies verbatim: the receipt is the
+        // surviving record, and the team-event rows above are what render
         // the title.
-        assert_eq!(row.crown.as_deref(), Some("L2 x-eeee"));
+        assert_eq!(row.team.as_deref(), Some("L2 x-eeee"));
         assert_eq!(row.detail, None);
 
         // AC4: agent_spawned carries provider (not harness), so the fallback
@@ -1582,28 +1594,20 @@ mod tests {
             .title
             .starts_with("spawn refused: --mux-session is pane-only"));
 
-        // AC5: the same crown pair landing in both journals yields exactly
+        // AC5: the same team pair landing in both journals yields exactly
         // one granted and one vacated row.
-        let crown = [
-            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-eeee"}}"#,
-            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crown_vacated","source":"python","data":{"cause":"succession","grantor":"vellum","holder":"warden","level":2,"scope":"x-eeee","successor":"jolly-finch"}}"#,
+        let team = [
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_teamed","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-eeee"}}"#,
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_team_vacated","source":"python","data":{"cause":"succession","grantor":"vellum","holder":"warden","level":2,"scope":"x-eeee","successor":"jolly-finch"}}"#,
         ]
         .join("\n");
-        let both = format!("{crown}\n{crown}");
+        let both = format!("{team}\n{team}");
         let p = project("", &[], &[], "", &both, "");
-        let granted: Vec<_> = p
-            .rows
-            .iter()
-            .filter(|r| r.kind == "crown_granted")
-            .collect();
-        let vacated: Vec<_> = p
-            .rows
-            .iter()
-            .filter(|r| r.kind == "crown_vacated")
-            .collect();
+        let granted: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_granted").collect();
+        let vacated: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_vacated").collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
-        assert_eq!(granted[0].title, "jolly-finch crowned L2 x-eeee");
-        assert_eq!(granted[0].crown.as_deref(), Some("Lead of x-eeee"));
+        assert_eq!(granted[0].title, "jolly-finch teamed L2 x-eeee");
+        assert_eq!(granted[0].team.as_deref(), Some("Lead of x-eeee"));
         assert_eq!(granted[0].holder.as_deref(), Some("jolly-finch"));
         assert_eq!(vacated.len(), 1, "vacated dedupes");
         assert_eq!(
@@ -1612,8 +1616,8 @@ mod tests {
         );
         assert_eq!(vacated[0].holder.as_deref(), Some("warden"));
 
-        // AC6: a node in a held crown's scope rolls up to the king; a node
-        // whose only tie is a graph parent rolls up to the epic; the crown
+        // AC6: a node in a held team's scope rolls up to the lead; a node
+        // whose only tie is a graph parent rolls up to the epic; the team
         // kinds get no owner at all.
         let entries = vec![
             serde_json::json!({
@@ -1624,28 +1628,28 @@ mod tests {
                 "id": "x-epic", "title": "the epic", "created_at": "2026-09-28T16:00:00Z",
             }),
         ];
-        let crown = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_crowned","source":"python","data":{"grantor":"s-king","level":2,"name":"heir","scope":"x-epic"}}"#;
-        let p = project("", &entries, &[], "", crown, "");
+        let team = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-epic"}}"#;
+        let p = project("", &entries, &[], "", team, "");
         let child = p
             .rows
             .iter()
             .find(|r| r.node == Some("x-child".into()))
             .unwrap();
         assert_eq!(child.owner.as_deref(), Some("Lead of x-epic (heir)"));
-        // The crown row itself renders in the crowns band: no owner on it.
+        // The team row itself renders in the teams band: no owner on it.
         let granted = p
             .rows
             .iter()
-            .find(|r| r.kind == "crown_granted")
-            .expect("the crown projects a granted row");
-        assert_eq!(granted.owner, None, "crown rows carry no owner");
+            .find(|r| r.kind == "team_granted")
+            .expect("the team projects a granted row");
+        assert_eq!(granted.owner, None, "team rows carry no owner");
         let epic = p
             .rows
             .iter()
             .find(|r| r.node == Some("x-epic".into()))
             .unwrap();
         assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
-        // Without a crown the child rolls up to its epic by the graph parent.
+        // Without a team the child rolls up to its epic by the graph parent.
         let p = project("", &entries, &[], "", "", "");
         let child = p
             .rows

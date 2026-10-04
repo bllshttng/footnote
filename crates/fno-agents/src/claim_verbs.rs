@@ -866,7 +866,7 @@ pub(crate) fn session_witness_primed_for<'a>(
 /// liveness about the session that WROTE it: `claims::acquire` fills the
 /// writer's ambient identity into the fields the minter left blank, so a
 /// gate record's `session_id` is the DISPATCHER's, and asking it about the
-/// dispatcher keeps a long-lived king reading live forever.
+/// dispatcher keeps a long-lived lead reading live forever.
 fn holder_worker_name(holder: &str) -> Option<&str> {
     if let Some(worker) = holder.strip_prefix(HANDOVER_HOLDER_PREFIX) {
         return Some(worker);
@@ -879,7 +879,7 @@ fn holder_worker_name(holder: &str) -> Option<&str> {
 /// The subject a liveness answer is keyed on: the holder the record NAMES,
 /// not the session that wrote it. A dispatcher-minted `spawn-handover:<worker>`
 /// record carries the MINTER's session_id, so answering from that field asks
-/// the dispatcher whether the worker is alive - a long-lived king then keeps
+/// the dispatcher whether the worker is alive - a long-lived lead then keeps
 /// every claim it ever launched reading live after the worker died. A
 /// `spawn-gate:<pid>:<worker>` lane reservation is the same shape: the
 /// record's session id is the gate's caller, not the worker the lane is
@@ -1052,7 +1052,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
             // live row still claims its name - session-capture races leave
             // rows briefly idless, so a claim without a unique sid behind it
             // is its own ambiguity.
-            if !crate::loop_reign::is_terminal(e) {
+            if !crate::lead_state::is_terminal(e) {
                 let claim = sid.map(str::to_string);
                 if !e.name.is_empty() {
                     note_name(&mut by_name, e.name.clone(), claim.clone());
@@ -1637,25 +1637,25 @@ mod tests {
 
     #[test]
     fn handover_witness_never_answers_from_the_minter_session() {
-        // The minter (a long-lived king) is PROVABLY live: its session's
+        // The minter (a long-lived lead) is PROVABLY live: its session's
         // registry row names this very test process. The handover names a
         // worker with no row. The witness must answer Unresolved anyway -
         // answering from the minter kept every claim a dead worker left
-        // behind reading live for the rest of the king's reign.
+        // behind reading live for the rest of the lead's lead.
         let me = std::process::id();
         with_registry(
             serde_json::json!([{
-                "name": "king-row",
+                "name": "lead-row",
                 "status": "live",
                 "cwd": "/w",
                 "created_at": "2026-09-07T00:00:00Z",
-                "harness_session_id": "s-king",
+                "harness_session_id": "s-lead",
                 "pid": me,
                 "pid_start_time": own_pid_start(),
             }]),
             || {
                 let (witness, _drain) = default_session_witness();
-                let handover = witness_rec("spawn-handover:ghost", "s-king");
+                let handover = witness_rec("spawn-handover:ghost", "s-lead");
                 assert!(matches!(
                     witness(&handover),
                     crate::claims::SessionLiveness::Unresolved
@@ -1663,7 +1663,7 @@ mod tests {
                 // Control: the SAME session answers Live for a non-handover
                 // record, so the Unresolved above is the subject switch, not
                 // a dead fixture.
-                let plain = witness_rec("plain-holder", "s-king");
+                let plain = witness_rec("plain-holder", "s-lead");
                 assert!(matches!(
                     witness(&plain),
                     crate::claims::SessionLiveness::Live(_)
@@ -1705,7 +1705,7 @@ mod tests {
             || {
                 let (witness, _drain) = default_session_witness();
                 for holder in ["spawn-handover:w-thread", "spawn-handover:w-thread-orig"] {
-                    let rec = witness_rec(holder, "s-king-elsewhere");
+                    let rec = witness_rec(holder, "s-lead-elsewhere");
                     assert!(
                         matches!(witness(&rec), crate::claims::SessionLiveness::Live(_)),
                         "{holder} must resolve to the worker's session"
@@ -1724,11 +1724,11 @@ mod tests {
         let me = std::process::id();
         with_registry(
             serde_json::json!([{
-                "name": "king-row",
+                "name": "lead-row",
                 "status": "live",
                 "cwd": "/w",
                 "created_at": "2026-09-07T00:00:00Z",
-                "harness_session_id": "s-king",
+                "harness_session_id": "s-lead",
                 "pid": me,
                 "pid_start_time": own_pid_start(),
             }]),
@@ -1737,7 +1737,7 @@ mod tests {
                 let now = crate::claims::now_ms();
                 let past = now - (crate::claims::UNRESOLVED_GRACE_MS + 60_000);
                 let verdict = |holder: &str| {
-                    let mut rec = witness_rec(holder, "s-king");
+                    let mut rec = witness_rec(holder, "s-lead");
                     rec.acquired_at = past;
                     rec.expires_at = Some(past);
                     // A dead pid: nothing but the witness could hold it live.
@@ -1973,7 +1973,7 @@ mod tests {
             }]),
             || {
                 let (witness, drain) = default_session_witness();
-                let rec = witness_rec("spawn-handover:w-thread", "s-king-elsewhere");
+                let rec = witness_rec("spawn-handover:w-thread", "s-lead-elsewhere");
                 let answer = witness(&rec);
                 assert!(
                     matches!(answer, crate::claims::SessionLiveness::Live(b) if b == REGISTRY_SERVED_LIVE),
@@ -2083,7 +2083,7 @@ mod tests {
                 // shim PATH pins.
                 std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let (witness, _drain) = default_session_witness();
-                let rec = witness_rec("spawn-handover:w-dead", "s-king-elsewhere");
+                let rec = witness_rec("spawn-handover:w-dead", "s-lead-elsewhere");
                 let answer = witness(&rec);
                 match prev_bin {
                     Some(v) => std::env::set_var("FNO_BIN", v),
@@ -2121,10 +2121,10 @@ mod tests {
                 std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let cell = std::cell::RefCell::new(None);
                 let index_cell = std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:w-worker", "s-king");
+                let rec = witness_rec("spawn-handover:w-worker", "s-lead");
                 let out = claim_status_value_with_witness(&rec, None, &cell, &index_cell);
                 assert_eq!(out["session_id"], "s-worker");
-                assert_eq!(out["metadata"]["dispatched_by_session"], "s-king");
+                assert_eq!(out["metadata"]["dispatched_by_session"], "s-lead");
 
                 let sweep = claim_sweep_payload_from_records(
                     std::slice::from_ref(&rec),
@@ -2134,7 +2134,7 @@ mod tests {
                 );
                 let row = &sweep["claims"][0];
                 assert_eq!(row["session_id"], "s-worker");
-                assert_eq!(row["metadata"]["dispatched_by_session"], "s-king");
+                assert_eq!(row["metadata"]["dispatched_by_session"], "s-lead");
                 match prev_bin {
                     Some(v) => std::env::set_var("FNO_BIN", v),
                     None => std::env::remove_var("FNO_BIN"),
@@ -2152,10 +2152,10 @@ mod tests {
         with_registry(serde_json::json!([]), || {
             let cell = std::cell::RefCell::new(None);
             let index_cell = std::cell::RefCell::new(None);
-            let handover = witness_rec("spawn-handover:ghost", "s-king");
+            let handover = witness_rec("spawn-handover:ghost", "s-lead");
             let out = claim_status_value_with_witness(&handover, None, &cell, &index_cell);
             assert!(out.get("session_id").is_none());
-            assert_eq!(out["metadata"]["dispatched_by_session"], "s-king");
+            assert_eq!(out["metadata"]["dispatched_by_session"], "s-lead");
 
             let plain = witness_rec("target-session:s1", "s1");
             let out = claim_status_value_with_witness(&plain, None, &cell, &index_cell);
@@ -2192,7 +2192,7 @@ mod tests {
             ]),
             || {
                 let (witness, _drain) = default_session_witness();
-                let gate = witness_rec("spawn-gate:36244:w-gate", "s-king-elsewhere");
+                let gate = witness_rec("spawn-gate:36244:w-gate", "s-lead-elsewhere");
                 assert!(matches!(
                     witness(&gate),
                     crate::claims::SessionLiveness::Live(_)
@@ -2209,22 +2209,22 @@ mod tests {
         // switch.
         with_registry(
             serde_json::json!([{
-                "name": "king-row",
+                "name": "lead-row",
                 "status": "live",
                 "cwd": "/w",
                 "created_at": "2026-09-17T00:00:00Z",
-                "harness_session_id": "s-king",
+                "harness_session_id": "s-lead",
                 "pid": std::process::id(),
                 "pid_start_time": own_pid_start(),
             }]),
             || {
                 let (witness, _drain) = default_session_witness();
-                let gate = witness_rec("spawn-gate:36244:ghost", "s-king");
+                let gate = witness_rec("spawn-gate:36244:ghost", "s-lead");
                 assert!(matches!(
                     witness(&gate),
                     crate::claims::SessionLiveness::Unresolved
                 ));
-                let plain = witness_rec("plain-holder", "s-king");
+                let plain = witness_rec("plain-holder", "s-lead");
                 assert!(matches!(
                     witness(&plain),
                     crate::claims::SessionLiveness::Live(_)
@@ -2309,10 +2309,10 @@ mod tests {
             served: std::collections::HashMap::new(),
             rows: std::collections::HashMap::new(),
         }));
-        let gate = witness_rec("spawn-gate:36244:w-gate", "s-king");
+        let gate = witness_rec("spawn-gate:36244:w-gate", "s-lead");
         let (holder_session, dispatched_by) = holder_session_fields(&gate, &index);
         assert_eq!(holder_session.as_deref(), Some("s-worker"));
-        assert_eq!(dispatched_by.as_deref(), Some("s-king"));
+        assert_eq!(dispatched_by.as_deref(), Some("s-lead"));
         // A plain holder keeps today's shape: its own session, no dispatcher.
         let plain = witness_rec("target-session:s1", "s1");
         let (holder_session, dispatched_by) = holder_session_fields(&plain, &index);

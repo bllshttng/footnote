@@ -137,10 +137,10 @@ pub(super) fn arbitrate_codex_continuation(
     fire: &Fire,
     manifest: &str,
 ) -> GoalArbitration {
-    if driver != "king" {
+    if driver != "lead" {
         return GoalArbitration::None;
     }
-    let live = crate::reign_goal::read_codex_goal_for_stop(&fire.session_id);
+    let live = crate::lead_goal::read_codex_goal_for_stop(&fire.session_id);
     arbitrate_codex_continuation_from_reading(driver, fire, manifest, live)
 }
 
@@ -150,7 +150,7 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
     manifest: &str,
     live: Result<Option<crate::codex_thread::NativeGoal>, String>,
 ) -> GoalArbitration {
-    if driver != "king" {
+    if driver != "lead" {
         return GoalArbitration::None;
     }
     let Some(expected_session) = first_raw_field(manifest, &["harness_session_id"]) else {
@@ -183,12 +183,13 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
         );
     };
     let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
-        return GoalArbitration::Refusal("active Codex goal has no crown scope".into());
+        return GoalArbitration::Refusal("active Codex goal has no team scope".into());
     };
-    let expected_owner = format!("king:{}", scope.trim());
-    if owner != expected_owner {
+    let expected_owner = format!("lead:{}", scope.trim());
+    let legacy_owner = format!("lead:{}", scope.trim());
+    if owner != expected_owner && owner != legacy_owner {
         return GoalArbitration::Refusal(format!(
-            "active Codex goal owner must derive from crown scope: expected {expected_owner:?}, got {owner:?}"
+            "active Codex goal owner must derive from team scope: expected {expected_owner:?}, got {owner:?}"
         ));
     }
     if !crate::codex_thread::is_lead_objective(&live.objective, &scope) {
@@ -217,7 +218,11 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
     )
 }
 
-fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -> GoalArbitration {
+pub(super) fn arbitrate_goal_truth(
+    driver: &str,
+    manifest: &str,
+    goal: Option<GoalTruth>,
+) -> GoalArbitration {
     let Some(goal) = goal else {
         return GoalArbitration::None;
     };
@@ -233,13 +238,14 @@ fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -
             "active goal truth cannot be verified: manifest scope/node is missing".into(),
         );
     };
-    if goal.continuation_owner != expected_owner {
+    let legacy_owner = expected_owner.replacen("lead:", "lead:", 1);
+    if goal.continuation_owner != expected_owner && goal.continuation_owner != legacy_owner {
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected continuation owner {expected_owner:?}, got {:?}",
             goal.continuation_owner
         ));
     }
-    if driver == "king" {
+    if driver == "lead" {
         let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
             return GoalArbitration::Refusal(
                 "active goal truth cannot be verified: manifest scope is missing".into(),
@@ -263,7 +269,7 @@ fn expected_continuation_owner(driver: &str, manifest: &str) -> Option<String> {
     let scope = first_raw_field(manifest, &["scope", "crown_scope"]).unwrap_or_default();
     let node_id = first_raw_field(manifest, &["node_id", "fno_id"]).unwrap_or_default();
     match driver {
-        "king" if !scope.is_empty() => Some(format!("king:{scope}")),
+        "lead" if !scope.is_empty() => Some(format!("lead:{scope}")),
         "target" if !node_id.is_empty() => Some(format!("target:{node_id}")),
         _ => None,
     }

@@ -22,12 +22,12 @@ fn live_entry_for_address<'a>(
     }
 }
 
-fn crown_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
+fn team_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
     let level = row.crown_level?;
     let scope = row.crown_scope.as_deref().unwrap_or("?");
     let theme =
-        crate::crown_names::theme_for(&registry_path.with_file_name("crown_names.json"), scope);
-    Some(crate::crown_names::title(
+        crate::team_names::theme_for(&registry_path.with_file_name("team_names.json"), scope);
+    Some(crate::team_names::title(
         level as u32,
         scope,
         theme.as_deref(),
@@ -167,7 +167,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
         other => other,
     });
     let from_rank = if mode == "wrap" {
-        from_row.and_then(|row| crown_label(registry_path, row))
+        from_row.and_then(|row| team_label(registry_path, row))
     } else {
         attr(input, "from_rank").map(str::to_string)
     };
@@ -182,7 +182,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             to_session.or_else(|| to_row.and_then(|row| row.harness_session_id.as_deref())),
             registry.as_ref(),
         ) {
-            let fleet_is_crowned = registry.entries.iter().any(|row| {
+            let fleet_is_teamed = registry.entries.iter().any(|row| {
                 row.crown_level.is_some()
                     && !matches!(
                         row.status,
@@ -192,10 +192,10 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
                             | crate::AgentStatus::PermanentDead
                     )
             });
-            if fleet_is_crowned {
+            if fleet_is_teamed {
                 Some(
                     to_row
-                        .and_then(|row| crown_label(registry_path, row))
+                        .and_then(|row| team_label(registry_path, row))
                         .unwrap_or_else(|| "none".to_string()),
                 )
             } else {

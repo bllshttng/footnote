@@ -38,7 +38,7 @@ fn row_resume_disposition_unmeasured_names_the_absent_reading() {
 
 #[test]
 fn orphaned_row_with_a_fresh_dead_reading_resumes() {
-    let raw = r#"{"agents": [{"name": "king-4d9b-delivery", "cwd": "/w",
+    let raw = r#"{"agents": [{"name": "lead-4d9b-delivery", "cwd": "/w",
         "status": "orphaned", "harness": "codex",
         "harness_session_id": "01a09bcd-8b5f-7391-83f8-d9ed91b00ac5",
         "liveness": "dead", "liveness_measured_at": "2026-09-15T20:14:55Z",

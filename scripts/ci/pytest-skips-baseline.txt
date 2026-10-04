@@ -16,7 +16,7 @@ cli/tests/agents/test_codex_signal_handling.py::test_create_timeout_sigterms_cod
 cli/tests/agents/test_codex_signal_handling.py::test_wait_with_grace_killpg_terminates_subshells_after_turn_completed::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_codex_signal_handling.py::test_wait_with_grace_killpg_terminates_subshells_after_turn_completed::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_codex_thread_effort_journey.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/agents/test_crown.py::_prepare_crown_cli::pytest.skip  # the crown verbs need a fno-agents dev build for the lock-time identity match; the smoke pytest lanes delete the build by design (same contract as native_backlog_door)
+cli/tests/agents/test_crown.py::_prepare_crown_cli::pytest.skip  # the team verbs need a fno-agents dev build for the lock-time identity match; the smoke pytest lanes delete the build by design (same contract as native_backlog_door)
 cli/tests/agents/test_follow_signal.py::test_subprocess_follow_clean_sigint_exit::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_grok_spawn_journey.py::test_grok_spawn_journey_public_surface_reaches_a_live_row::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_handle_collisions.py::test_codex_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet

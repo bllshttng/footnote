@@ -84,6 +84,57 @@ pub fn is_gate_event(kind: &str) -> bool {
     GATE_EVENT_TYPES.contains(&kind)
 }
 
+/// The permanent old->new spellings of the role-event rename. Stored rows
+/// are never rewritten (events.db, rotated archives and exports are
+/// append-only history), so queries expand a kind to its old spelling and
+/// readers canonicalize the row type through [`event_type_alias`]. This
+/// table never shrinks.
+pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[
+    ("agent_crown_vacated", "agent_team_vacated"),
+    ("crown_succession_reverted", "team_succession_reverted"),
+    ("king_action", "lead_action"),
+    ("king_context_nudge", "lead_context_nudge"),
+    ("king_drain_reserve", "lead_drain_reserve"),
+    ("king_goal_resumed", "lead_goal_resumed"),
+    ("king_loop_check", "lead_loop_check"),
+    ("king_orphan_block", "lead_orphan_block"),
+    ("king_term", "lead_term"),
+    ("king_wake", "lead_wake"),
+    ("reign_armed", "lead_armed"),
+    ("reign_checkin", "lead_checkin"),
+    ("reign_dispatch_exception", "lead_dispatch_exception"),
+];
+
+/// The canonical (new) spelling of an event kind: an old stored spelling
+/// maps to its replacement, anything else is itself.
+pub fn event_type_alias(kind: &str) -> &str {
+    EVENT_TYPE_ALIASES
+        .iter()
+        .find(|(old, _)| *old == kind)
+        .map(|(_, new)| *new)
+        .unwrap_or(kind)
+}
+
+/// Every stored spelling a query for `types` must match: the asked kinds,
+/// their canonical forms, and each one's old aliases.
+fn query_types_with_aliases(types: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(types.len() * 2);
+    for asked in types {
+        let canonical = event_type_alias(asked);
+        for candidate in [asked.as_str(), canonical] {
+            if !out.iter().any(|t| t == candidate) {
+                out.push(candidate.to_string());
+            }
+        }
+        for (old, new) in EVENT_TYPE_ALIASES {
+            if *new == canonical && !out.iter().any(|t| t == *old) {
+                out.push((*old).to_string());
+            }
+        }
+    }
+    out
+}
+
 /// The retention class a kind belongs to: `ephemeral`, `gate`, or `durable`
 /// (the schema default).
 pub fn retention_class(kind: &str) -> &'static str {
@@ -835,7 +886,7 @@ fn map_row(line: &str, now_ms: i64) -> (i64, String, String, Option<String>, Opt
     let scope = data.get("scope").and_then(|s| s.as_str());
     if let Some(s) = scope {
         if !is_valid_event_scope(ty, data, s) {
-            return reject(ts_ms, ty, source, "scope is not a canonical crown scope");
+            return reject(ts_ms, ty, source, "scope is not a canonical team scope");
         }
     }
     (
@@ -847,10 +898,10 @@ fn map_row(line: &str, now_ms: i64) -> (i64, String, String, Option<String>, Opt
     )
 }
 
-/// A canonical crown scope is comma-joined sorted members, none blank, none
+/// A canonical team scope is comma-joined sorted members, none blank, none
 /// carrying whitespace (that is how the rendered-board corruption of
 /// 2026-09-14 is detectable at write time).
-fn is_canonical_crown_scope(s: &str) -> bool {
+fn is_canonical_team_scope(s: &str) -> bool {
     !s.is_empty()
         && canonical_scope(s) == s
         && s.split(',')
@@ -859,10 +910,10 @@ fn is_canonical_crown_scope(s: &str) -> bool {
 
 fn is_valid_event_scope(event_type: &str, _data: &serde_json::Value, scope: &str) -> bool {
     if !scope.is_empty() {
-        return is_canonical_crown_scope(scope);
+        return is_canonical_team_scope(scope);
     }
-    // A stop_decision with no crown scope remains an auditable event: the
-    // correlated session row is what king admission reads, and a fresh heir
+    // A stop_decision with no team scope remains an auditable event: the
+    // correlated session row is what lead admission reads, and a fresh heir
     // journals exactly there - before init writes the manifest that would
     // carry its scope.
     event_type == "stop_decision"
@@ -1001,7 +1052,7 @@ pub fn append_envelope(
         .ok_or_else(|| format!("{}: envelope has no ts", store.display()))?;
     let ts_ms = parse_rfc3339_ms(ts_str)
         .ok_or_else(|| format!("{}: envelope ts is not RFC3339: {ts_str}", store.display()))?;
-    // A canonical crown scope is validated at append time, the same rule
+    // A canonical team scope is validated at append time, the same rule
     // import applies: corruption is refused at the boundary, never stored.
     if let Some(s) = obj
         .get("data")
@@ -1010,7 +1061,7 @@ pub fn append_envelope(
     {
         if !is_valid_event_scope(&ty, obj.get("data").expect("data object checked above"), s) {
             return Err(format!(
-                "{}: data.scope is not a canonical crown scope: {s}",
+                "{}: data.scope is not a canonical team scope: {s}",
                 store.display()
             ));
         }
@@ -1209,8 +1260,9 @@ impl EventQuery {
         // The IN list is built before the push closure exists, so the two
         // never hold the arg vec at once.
         if !self.types.is_empty() {
+            let expanded = query_types_with_aliases(&self.types);
             let mut placeholders: Vec<String> = Vec::new();
-            for t in &self.types {
+            for t in &expanded {
                 args.push(Box::new(t.clone()));
                 placeholders.push("?".to_string());
             }
