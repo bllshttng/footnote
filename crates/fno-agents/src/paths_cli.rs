@@ -422,7 +422,20 @@ pub fn emit_paths_sh_live(cwd: &Path) -> Result<String, String> {
                     .into_owned()
             } else {
                 match cfg_str(cwd, &["project", "id"]).filter(|p| !p.is_empty()) {
-                    Some(pid) => format!("$STATE_DIR/handoffs/{pid}"),
+                    Some(pid) => {
+                        // The Python loader refuses any other project.id at
+                        // validation time; the raw read must refuse it too,
+                        // or the id interpolates into sourced shell code.
+                        if !pid
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                        {
+                            return Err(format!(
+                                "project.id {pid:?} contains invalid characters; only [A-Za-z0-9._-] are allowed"
+                            ));
+                        }
+                        format!("$STATE_DIR/handoffs/{pid}")
+                    }
                     None => return Ok(finish_live_stub(
                         cwd,
                         lines,
@@ -783,6 +796,15 @@ mod tests {
         let line = line_with(&stub, "export HANDOFFS_DIR=");
         let expected = format!("{}/internal/testproj/handoffs", fx.base.display());
         assert!(line.contains(&expected), "HANDOFFS_DIR: {line}");
+    }
+
+    #[test]
+    fn live_stub_refuses_unsafe_project_id() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("badpid", "[project]\nid = '$(touch /tmp/pwned)'\n");
+        let _env = EnvGuard::new(&fx.pins());
+        let err = emit_paths_sh_live(&fx.root).unwrap_err();
+        assert!(err.contains("invalid characters"), "error: {err}");
     }
 
     fn fx_shared_dir(tag: &str) -> PathBuf {
