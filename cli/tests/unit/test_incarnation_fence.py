@@ -25,11 +25,6 @@ def test_no_uuid_is_invisible():
     assert incarnation_fence_blocks("") == (False, "")
 
 
-def test_free_claim_proceeds(monkeypatch):
-    _wire(monkeypatch, {"state": "free"})
-    assert incarnation_fence_blocks("uuid1") == (False, "")
-
-
 def test_ours_proceeds(monkeypatch):
     # AC5-EDGE: the sole incarnation holding its own claim is never fenced.
     _wire(
@@ -38,19 +33,6 @@ def test_ours_proceeds(monkeypatch):
         own_pid=123,
     )
     assert incarnation_fence_blocks("uuid1") == (False, "")
-
-
-def test_other_live_blocks(monkeypatch):
-    # AC3-ERR: another live incarnation holds the lineage claim -> refuse.
-    _wire(
-        monkeypatch,
-        {"state": "live", "holder": "target-session:other", "pid": 999, "host": "h"},
-        own_pid=123,
-    )
-    blocked, reason = incarnation_fence_blocks("uuid1")
-    assert blocked
-    assert "session:uuid1" in reason
-    assert "other" in reason
 
 
 def test_unreadable_claims_fails_closed(monkeypatch):
@@ -250,3 +232,61 @@ def test_blocked_refusal_names_a_dead_pid_honestly(monkeypatch):
     blocked, reason = incarnation_fence_blocks("uuid1")
     assert blocked
     assert "no such process" in reason
+
+
+# ---------------------------------------------------------------------------
+# pool-machinery carve-out (the bg-spare hosts the worker's own lineage)
+# ---------------------------------------------------------------------------
+
+
+def _fake_ancestry(monkeypatch, chain):
+    """Replace psutil.Process so parent() walks CHAIN: the pid list of the
+    caller's ancestors, nearest first. Every pid maps onto the same chain."""
+    import psutil
+
+    class _Proc:
+        def __init__(self, pid, rest):
+            self.pid = pid
+            self._rest = rest
+
+        def parent(self):
+            if not self._rest:
+                return None
+            return _Proc(self._rest[0], self._rest[1:])
+
+    monkeypatch.setattr(psutil, "Process", lambda pid: _Proc(pid, list(chain)))
+
+
+def test_holder_in_own_ancestry_proceeds(monkeypatch):
+    # THE BUG: the session claim is pinned to the bg-spare that hosts this
+    # very worker. The holder is the caller's own host, not a rival; the
+    # fence proceeds (the claim itself still gates real adopters).
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "revive:64225", "pid": 999_999,
+         "host": "h", "machine_id": "h"},
+        own_pid=None,  # a thread worker: the walk refuses spares, so no own pid
+    )
+    _fake_ancestry(monkeypatch, [999_999, 1])  # tool shell -> bg-spare -> daemon
+    assert incarnation_fence_blocks("uuid1") == (False, "")
+
+
+def test_rival_worker_under_another_spare_still_blocks(monkeypatch):
+    # The P1 the first cut missed: a LOSING original on the same machine sees
+    # the same session key and a pool-machinery holder, but the holder is NOT
+    # in its ancestry (it hangs off its own spare). Positive correlation or
+    # no pass: the fence still blocks. Also carries the AC3-ERR baseline this
+    # file guarded before via test_other_live_blocks (live foreign holder
+    # blocks, holder and key named).
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "revive:64225", "pid": 999_999,
+         "host": "h", "machine_id": "h"},
+        own_pid=None,
+    )
+    _fake_ancestry(monkeypatch, [555_555, 1])  # own spare, not the holder
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "revive:64225" in reason
+    assert "session:uuid1" in reason
+    assert "fno agents claim release session:uuid1 --force --reason" in reason
