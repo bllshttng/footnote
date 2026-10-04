@@ -777,11 +777,7 @@ fn park_payload_inner(session_id: &str, payload: &str) -> Result<String, i32> {
         Err(_) => true,
     };
     if spawn {
-        let Ok(exe) = std::env::current_exe() else {
-            eprintln!("mail-hold: parked the payload but could not resolve this binary");
-            return Err(1);
-        };
-        let mut cmd = Command::new(exe);
+        let mut cmd = Command::new(runner_bin());
         cmd.args(["mail-hold", "--run-parked", "--session", session_id])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -805,19 +801,57 @@ fn park_payload_inner(session_id: &str, payload: &str) -> Result<String, i32> {
     Ok(park_receipt(session_id, first_line, &name))
 }
 
-/// One runner poll (C15): with the hold still live it does nothing and
-/// answers false; when the gate delivers, every parked file is sent oldest
-/// first through the normal raw door and deleted on exit 0. A failed send
-/// keeps its file, logs to stderr and stops the drain. The runner process
-/// wraps this in the 5 s poll / 24 h bound.
-fn drain_parked_once(session_id: &str) -> bool {
+/// The binary a spawned runner execs: `FNO_AGENTS_RUNNER_BIN` when declared,
+/// else this process's own executable. The override is a test seam: a suite
+/// that parks through the real gate pins a stub here so no detached runner
+/// escapes the sandbox.
+fn runner_bin() -> std::ffi::OsString {
+    if let Some(pin) = std::env::var_os("FNO_AGENTS_RUNNER_BIN").filter(|v| !v.is_empty()) {
+        return pin;
+    }
+    std::env::current_exe()
+        .map(|exe| exe.into_os_string())
+        .unwrap_or_else(|_| std::ffi::OsString::from("fno-agents"))
+}
+
+/// What one poll of the parked store did.
+enum DrainPoll {
+    /// The gate delivered and every payload went out.
+    Sent,
+    /// The hold is still live (or the store momentarily unreadable): sleep.
+    Waiting,
+    /// The gate said deliver but a send failed or a payload is unreadable,
+    /// so the same files will fail again until something changes.
+    Stalled,
+}
+
+/// Seconds between the runner's gate polls.
+const RUN_PARKED_POLL_S: u64 = 5;
+
+/// Consecutive stalled polls (the gate says deliver but the send keeps
+/// failing) before the runner gives up and leaves the files for the next
+/// park to re-arm over: about one minute of failing sends.
+const RUN_PARKED_STALL_POLLS: u32 = 12;
+
+/// The runner's absolute ceiling: a hold can legitimately last hours (a
+/// hand-stamped one may never lapse), so the runner keeps polling until its
+/// files drain, its session's row vanishes, or this bound fires.
+const RUN_PARKED_BOUND_S: u64 = 24 * 3600;
+
+/// One runner poll (C15): with the hold still live it answers
+/// [`DrainPoll::Waiting`]; when the gate delivers, every parked file is sent
+/// oldest first through the normal raw door and deleted on exit 0
+/// ([`DrainPoll::Sent`]). A failed send keeps its file, logs to stderr and
+/// answers [`DrainPoll::Stalled`], so the runner bounds the retries instead
+/// of spinning.
+fn drain_parked_once(session_id: &str) -> DrainPoll {
     let Some((matched, _, _)) = lookup_gate_row(session_id) else {
-        return false;
+        return DrainPoll::Waiting;
     };
     let handle = identity_key(&matched);
     let dir = parked_dir(&handle);
     let Ok(read_dir) = std::fs::read_dir(&dir) else {
-        return false;
+        return DrainPoll::Waiting;
     };
     let mut files: Vec<PathBuf> = read_dir
         .flatten()
@@ -826,19 +860,19 @@ fn drain_parked_once(session_id: &str) -> bool {
         .collect();
     files.sort();
     if files.is_empty() {
-        return false;
+        return DrainPoll::Waiting;
     }
     let now = chrono::Utc::now();
     if !gate(session_id, None, now).deliver {
-        return false;
+        return DrainPoll::Waiting;
     }
     for file in files {
         let Ok(payload) = std::fs::read_to_string(&file) else {
             eprintln!(
-                "mail-hold: parked payload {} unreadable; stopping",
+                "mail-hold: parked payload {} unreadable; leaving it parked",
                 file.display()
             );
-            return true;
+            return DrainPoll::Stalled;
         };
         let mut cmd = Command::new(crate::scrape::fno_py());
         cmd.args(["agents", "mail", "send", session_id, &payload, "--raw"]);
@@ -851,26 +885,32 @@ fn drain_parked_once(session_id: &str) -> bool {
                     "mail-hold: parked payload {} did not send ({other:?}); it stays parked",
                     file.display()
                 );
-                return true;
+                return DrainPoll::Stalled;
             }
         }
     }
-    true
+    DrainPoll::Sent
 }
 
-/// `--run-parked`: the detached runner body. Polls the gate every 5 s,
-/// drains parked files when the hold ends, and exits when the directory is
-/// empty or after 24 hours, leaving the files for the next park to pick up.
-fn run_parked(session_id: &str) -> i32 {
-    let Some((matched, _, _)) = lookup_gate_row(session_id) else {
-        return 3;
-    };
-    let dir = parked_dir(&identity_key(&matched));
-    let pid_file = dir.join("runner.pid");
-    let _ = std::fs::write(&pid_file, std::process::id().to_string());
+/// The poll loop behind [`run_parked`], with the constants as parameters so
+/// the stall bound is testable in milliseconds.
+fn run_parked_loop(
+    session_id: &str,
+    dir: &std::path::Path,
+    poll: std::time::Duration,
+    stall_limit: u32,
+    bound: std::time::Duration,
+) -> i32 {
     let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_secs(24 * 3600) {
-        let files = std::fs::read_dir(&dir)
+    let mut stalled = 0u32;
+    while start.elapsed() < bound {
+        // A row that vanishes mid-run (the session ended, or a test's home
+        // was torn down) leaves every parked file undeliverable: exit and
+        // leave the files for the next park to re-arm over.
+        if lookup_gate_row(session_id).is_none() {
+            break;
+        }
+        let files = std::fs::read_dir(dir)
             .map(|rd| {
                 rd.flatten()
                     .map(|e| e.path())
@@ -881,13 +921,45 @@ fn run_parked(session_id: &str) -> i32 {
         if files == 0 {
             break;
         }
-        if drain_parked_once(session_id) {
-            continue;
+        match drain_parked_once(session_id) {
+            DrainPoll::Sent => {
+                stalled = 0;
+                continue;
+            }
+            DrainPoll::Waiting => stalled = 0,
+            DrainPoll::Stalled => {
+                stalled += 1;
+                if stalled >= stall_limit {
+                    break;
+                }
+            }
         }
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::thread::sleep(poll);
     }
-    let _ = std::fs::remove_file(&pid_file);
     0
+}
+
+/// `--run-parked`: the detached runner body. Polls the gate every 5 s,
+/// drains parked files when the hold ends, and exits when the directory is
+/// empty, when the session's row is gone or unknown, after a minute of
+/// failing sends, or after 24 hours - always leaving undelivered files for
+/// the next park to pick up.
+fn run_parked(session_id: &str) -> i32 {
+    let Some((matched, _, _)) = lookup_gate_row(session_id) else {
+        return 3;
+    };
+    let dir = parked_dir(&identity_key(&matched));
+    let pid_file = dir.join("runner.pid");
+    let _ = std::fs::write(&pid_file, std::process::id().to_string());
+    let code = run_parked_loop(
+        session_id,
+        &dir,
+        std::time::Duration::from_secs(RUN_PARKED_POLL_S),
+        RUN_PARKED_STALL_POLLS,
+        std::time::Duration::from_secs(RUN_PARKED_BOUND_S),
+    );
+    let _ = std::fs::remove_file(&pid_file);
+    code
 }
 
 /// How far past its `until` a clock must sit before the sweep considers its
@@ -1947,7 +2019,7 @@ pub(crate) mod tests {
             std::fs::write(pdir.join("1-test.txt"), "/compact").unwrap();
 
             // Held: one poll drains nothing.
-            assert!(!drain_parked_once(SID));
+            assert!(matches!(drain_parked_once(SID), DrainPoll::Waiting));
             let logged = std::fs::read_to_string(&log).unwrap_or_default();
             assert!(
                 logged.is_empty(),
@@ -1956,7 +2028,7 @@ pub(crate) mod tests {
 
             // Hold ends: one poll sends the payload once and deletes the file.
             run_mail_hold(&["--session".into(), SID.into(), "--off".into()]);
-            assert!(drain_parked_once(SID));
+            assert!(matches!(drain_parked_once(SID), DrainPoll::Sent));
             let logged = std::fs::read_to_string(&log).unwrap_or_default();
             assert!(
                 logged.contains("agents mail send")
@@ -1974,7 +2046,10 @@ pub(crate) mod tests {
             // The guard snapshots BEFORE any set_var, so this test's values
             // cannot leak into a sibling test on the shared process env.
             let _g = env_guard(&["FNO_PY", "PARK_LOG", "PARK_FAIL"]);
-            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            // The row is unstamped so the gate delivers and the drain really
+            // attempts the send; a stamped row would answer Waiting before
+            // any send ran.
+            write_registry(dir, serde_json::json!([registry_row("worker", SID)]));
             let stub = write_stub_py(dir);
             let log = dir.join("fail.log");
             std::env::set_var("FNO_PY", stub.to_string_lossy().to_string());
@@ -1984,8 +2059,56 @@ pub(crate) mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(pdir.join("1-test.txt"), "/compact").unwrap();
 
-            assert!(!drain_parked_once(SID), "a failed send stops the drain");
+            assert!(
+                matches!(drain_parked_once(SID), DrainPoll::Stalled),
+                "a failed send stalls the drain"
+            );
             assert!(pdir.join("1-test.txt").exists(), "the payload stays parked");
+        });
+    }
+
+    #[test]
+    fn a_stalled_drain_ends_the_runner_at_the_stall_bound() {
+        with_hold_env(|dir| {
+            let _g = env_guard(&["FNO_PY", "PARK_LOG", "PARK_FAIL"]);
+            // The row is unstamped, so the gate delivers immediately and
+            // every send fails: the shape of a hold that ended while the
+            // transport is down. The old loop spun on that with no sleep
+            // until the 24 h bound.
+            write_registry(dir, serde_json::json!([registry_row("worker", SID)]));
+            let stub = write_stub_py(dir);
+            let log = dir.join("stall.log");
+            std::env::set_var("FNO_PY", stub.to_string_lossy().to_string());
+            std::env::set_var("PARK_LOG", log.to_string_lossy().to_string());
+            std::env::set_var("PARK_FAIL", "1");
+            let pdir = parked_dir_for(dir);
+            std::fs::create_dir_all(&pdir).unwrap();
+            std::fs::write(pdir.join("1-test.txt"), "/compact").unwrap();
+
+            let code = run_parked_loop(
+                SID,
+                &pdir,
+                std::time::Duration::ZERO,
+                3,
+                std::time::Duration::from_secs(60),
+            );
+            assert_eq!(code, 0);
+            assert!(pdir.join("1-test.txt").exists(), "the payload stays parked");
+            let attempts = std::fs::read_to_string(&log).unwrap().lines().count();
+            assert_eq!(attempts, 3, "exactly stall_limit send attempts");
+        });
+    }
+
+    #[test]
+    fn the_runner_answers_three_when_no_row_carries_the_session() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([]));
+            let started = std::time::Instant::now();
+            assert_eq!(run_parked(SID), 3);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "an unknown session never enters the poll loop"
+            );
         });
     }
 
