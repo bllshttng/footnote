@@ -96,20 +96,20 @@ fn paneless_row_with_no_parent_edge_stays_orphaned_but_emitted() {
     let rows = core.agent_rows();
     let row = rows.iter().find(|r| r.name == "think-thread").unwrap();
     assert_eq!(row.squad, None);
-    // x-cd47 1.5: same-project checkouts never read foreign. Canonical
+    // Same-project checkouts never read foreign. Canonical
     // beside worktree, either direction, and sibling worktrees are one
     // project; a genuinely different repo stays foreign.
     assert!(crate::server::row_set::same_project(
         "/repo/footnote/footnote",
-        "/wts/footnote/x-58f7"
+        "/wts/footnote/wt-a"
     ));
     assert!(crate::server::row_set::same_project(
-        "/wts/footnote/x-58f7",
+        "/wts/footnote/wt-a",
         "/repo/footnote/footnote"
     ));
     assert!(crate::server::row_set::same_project(
-        "/wts/footnote/x-58f7",
-        "/wts/footnote/x-cd47"
+        "/wts/footnote/wt-a",
+        "/wts/footnote/wt-b"
     ));
     assert!(!crate::server::row_set::same_project(
         "/repo/readyrule/regready",

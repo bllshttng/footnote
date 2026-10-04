@@ -82,7 +82,7 @@ pub(super) fn metric_cells(a: &AgentRow, now: u64) -> [MetricCell; 3] {
     ]
 }
 
-/// (x-cd47 1.3) The line-3 context cell's history: paint-time samples of
+/// The line-3 context cell's history: paint-time samples of
 /// `context_used_pct`, one per 5s the sideline paints the row, capped at 8,
 /// replacing the static sparkline once two samples exist. Sampled only under
 /// the spin clock (tests and snapshots stay on the static sparkline), keyed

@@ -9,10 +9,10 @@ use crate::proto::{AgentRow, AgentRowReceipt};
 
 use super::*;
 
-/// (x-cd47 1.5) Whether two cwd paths are checkouts of the SAME project:
+/// Whether two cwd paths are checkouts of the SAME project:
 /// equal leaves, equal parents (sibling fno worktrees,
 /// `<base>/<repo>/<name>`), or one path's parent carries the other's leaf
-/// (canonical `<...>/footnote` beside worktree `<...>/footnote/x-58f7`).
+/// (canonical `<...>/footnote` beside worktree `<...>/footnote/wt-a`).
 /// The leaf-vs-leaf compare read every worktree as foreign and stamped
 /// `(footnote)` on cards (the operator's 2026-10-04 report). Two unparseable
 /// paths (empty cwds) read same-project: neither can show a paren anyway.
@@ -72,7 +72,7 @@ impl Core {
                     .map(|d| (holder.as_str(), d.clone()))
             })
             .collect();
-        // (x-cd47 1.5) A squad-matched row's cwd_base is its FOREIGN-cwd
+        // A squad-matched row's cwd_base is its FOREIGN-cwd
         // signal, so a row working in another checkout of its own squad's
         // project (a worktree beside the canonical, or a sibling worktree)
         // carries none - leaf-vs-leaf stamped `(footnote)` on every card.
