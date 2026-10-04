@@ -8050,6 +8050,16 @@ event_types:
     sources: [loop, hook, test]
     data:
       required: []
+  - name: root_probe
+    description: "Shell-emission probe: the events library's cwd-independent resolver commits one row at the repo root from a nested cwd (the polling-emission test's opt-in control)."
+    sources: [target]
+    data:
+      required: []
+  - name: size_probe
+    description: "Shell-emission probe: one row whose data carries the value under the data size cap, so the cap refusal is what keeps an oversized row out of the journal."
+    sources: [target]
+    data:
+      required: [value]
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

@@ -2633,7 +2633,7 @@ mod tests {
         // AC4-HP
         let dir = tempfile::tempdir().unwrap();
         let journal = dir.path().join("events.jsonl");
-        let line = json!({"ts": "2026-09-17T12:00:00Z", "type": "blocked", "source": "agent",
+        let line = json!({"ts": "2026-09-17T12:00:00Z", "type": "blocked", "source": "test",
             "run": "run-1", "node": "x-1", "data": {"reason": "waiting on legal"}});
         crate::event_store::append_envelope(&journal, &line.to_string(), None).unwrap();
         let rows = read_blocked_rows(&journal).unwrap();

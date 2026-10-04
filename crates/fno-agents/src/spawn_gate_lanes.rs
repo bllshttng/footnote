@@ -2437,7 +2437,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("agents")).unwrap();
         let questions = dir.path().join("questions.jsonl");
         let row = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-gate-1", "question": "proceed?", "blocks": ["x-1"]}
         });
         crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();

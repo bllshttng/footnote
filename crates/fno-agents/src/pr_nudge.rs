@@ -2519,14 +2519,14 @@ mod tests {
         std::fs::create_dir_all(home.root()).unwrap();
         let decisions = dir.path().join("decisions.jsonl");
         let row = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "operator_decision", "source": "operator",
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_decision", "source": "test",
             "data": {"decision_id": "d-abcd0001", "subject": "merge-order:x-1:after:x-lead",
                      "decision": "hold x-1 until x-lead merges."}
         });
         crate::event_store::append_envelope(&decisions, &row.to_string(), None).unwrap();
         assert!(merge_order_hold(&home, "x-1"), "the live decision holds");
         let retraction = serde_json::json!({
-            "ts": "2026-09-17T13:00:00Z", "type": "decision_retracted", "source": "operator",
+            "ts": "2026-09-17T13:00:00Z", "type": "decision_retracted", "source": "test",
             "data": {"target_decision_id": "d-abcd0001", "reason": "superseded by chat"}
         });
         crate::event_store::append_envelope(&decisions, &retraction.to_string(), None).unwrap();

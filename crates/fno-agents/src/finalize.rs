@@ -4901,12 +4901,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         let old = serde_json::json!({
-            "ts": "2026-09-17T11:00:00Z", "type": "review_coverage", "source": "review",
+            "ts": "2026-09-17T11:00:00Z", "type": "review_coverage", "source": "test",
             "data": {"head_sha": "h0", "coverage": "covered", "reviewed_count": 0}
         })
         .to_string();
         let new = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "review",
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "test",
             "data": {"head_sha": "h1", "coverage": "covered", "reviewed_count": 3}
         })
         .to_string();

@@ -1531,7 +1531,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let space = crate::paths::space_dir(&cwd).join("events.jsonl");
         let ask = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-arm-1", "question": "ship?", "blocks": []}
         });
         crate::event_store::append_envelope(&space, &ask.to_string(), None).unwrap();
