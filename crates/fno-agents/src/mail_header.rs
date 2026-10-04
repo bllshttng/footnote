@@ -147,10 +147,6 @@ fn local_sent_time(value: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(value).ok()
-}
-
 fn unwrap_held_body(body: &str) -> String {
     let trimmed = body.trim();
     let Some(block) = paired_envelope_block(trimmed) else {
@@ -158,22 +154,27 @@ fn unwrap_held_body(body: &str) -> String {
     };
     if block != trimmed {
         return body.to_string();
-    }
+    };
     let Some(open_end) = block.find('>') else {
         return body.to_string();
     };
     block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
 }
 
-/// The body a reader sees: a whole-body paired `<fno_mail ...>...</fno_mail>`
-/// block yields its inner text, a leading delivered-header line is removed,
-/// a fence that wraps the whole body under the header (the pane lane's
+/// The held-release re-frame unwraps the released turn's legacy paired
+/// envelope the same way display once did; display itself no longer does.
+fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+/// The body a reader sees: a leading delivered-header line is removed, a
+/// fence that wraps the whole body under the header (the pane lane's
 /// framing) is stripped, and a header whose summary was also pasted as the
-/// body's own first line loses that repeat. Old mail that stored the
-/// envelope reads as its body; the stored bytes are never rewritten.
+/// body's own first line loses that repeat. A body still carrying the
+/// legacy paired envelope shows the raw tag - the visible prompt to run
+/// the one-time `chats migrate --envelopes`; display never rewrites bytes.
 pub fn display_body(body: &str) -> String {
-    let body = unwrap_held_body(body);
-    let (rest, header) = strip_leading_header(&body);
+    let (rest, header) = strip_leading_header(body);
     let rest = strip_body_fence(&rest).to_string();
     match header.as_deref().and_then(header_summary) {
         Some(summary) => strip_display_repeat(&rest, &summary),
@@ -974,11 +975,11 @@ mod tests {
         );
         assert_eq!(without_first_sentence("Ship it."), "Ship it.");
 
-        // Old envelope mail reads as its body at display time; the stored
-        // bytes never change (AC7-AC9-HP shape).
+        // An unmigrated legacy body shows the raw tag unchanged (no panic, no
+        // partial strip): the prompt to run the one-time store migration.
         assert_eq!(
             display_body("<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"),
-            "Ship it."
+            "<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"
         );
         assert_eq!(
             display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it. Then merge."),
