@@ -48,6 +48,13 @@ pub fn run_claim(args: &[String]) -> i32 {
         // contract.
         return crate::claim_cli::acquire::run(&args[1..]);
     }
+    if op == "release" {
+        // Wave 2 of the leaf port: the operator surface (plain, --lane,
+        // --force, and the do-row close/rollback) lives in claim_cli; goldens
+        // are the contract. The engine receipt core.release_claim parses
+        // rides --with-claim.
+        return crate::claim_cli::release::run(&args[1..]);
+    }
     if op == "lane-acquire" {
         return crate::claim_lanes_cli::run_lane_acquire(&args[1..]);
     }
@@ -149,48 +156,9 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
 
     match op {
-        // "acquire" dispatches to claim_cli::acquire above; the operator
-        // leaf owns the surface since the wave-1 port.
-        "release" => {
-            let Some(holder) = holder else {
-                eprintln!("fno-agents: claim release requires --holder");
-                return 2;
-            };
-            match crate::claims::release_with_receipt(
-                &key,
-                &holder,
-                opts.root.as_deref(),
-                opts.events_dir.as_deref(),
-            ) {
-                Ok(Some(claim)) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "released",
-                            "released": true,
-                            "key": key,
-                            "claim": claim,
-                        })
-                    );
-                    0
-                }
-                Ok(None) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "not_released",
-                            "released": false,
-                            "key": key,
-                        })
-                    );
-                    0
-                }
-                Err(error) => {
-                    eprintln!("fno-agents: claim release failed: {error}");
-                    2
-                }
-            }
-        }
+        // "acquire" and "release" dispatch to claim_cli above; the operator
+        // leaf owns the surface since the wave-1/2 ports ("release" keeps
+        // its engine receipt under --with-claim).
         "renew" => {
             let Some(holder) = holder else {
                 eprintln!("fno-agents: claim renew requires --holder");

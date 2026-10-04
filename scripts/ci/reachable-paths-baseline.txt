@@ -248,7 +248,6 @@ A	truth-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/f
 A	unreadable install receipt	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# CLASSIFY protocol|msg-twin|data
 A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno-agents/src/ledger_axes.rs|crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
-A	validation error: key is required (or use --lane <id>)	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY protocol|msg-twin|data
 A	warning: force flag set on advisory node {task_id} (reason: {reason}); no pr refs to check.	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	was superseded by {superseder}	py=cli/src/fno/graph/_contain.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	{brevity_marker}{brevity_instruction}{brevity_end_marker}	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# CLASSIFY protocol|msg-twin|data
@@ -263,7 +262,6 @@ A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agent
 A	{} file(s) (footnote {}) -> {}	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# CLASSIFY protocol|msg-twin|data
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# offender - carry a reason or fix in this PR
 A	--metadata must be a json object	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/mod.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: the python copy serves the unported leaves (release, status); retires leaf by leaf
-A	validation error: key is required (or use --lane <id>)	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: the python copy serves the unported release leaf; retires in its wave
 A	claim corrupted; cannot verify ownership (use `fno agents claim release --force`)	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: compare_and_rebind stays until the deletion wave retires it with its python test suite
 A	claim recovery mutex busy; retry the resume bind	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: compare_and_rebind stays until the deletion wave retires it with its python test suite
 A	decision probe: conflicting law rows for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# msg-twin: the draft guard's law read ports the coverage gate's three-state probe wording so a refused draft names the same fault in either runtime

@@ -1,0 +1,1 @@
+validation error: --force is the administrative drop and takes none of --strict/--stamp-do/--rollback-do (there is no owner to check and no do window to stamp)
