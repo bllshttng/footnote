@@ -1069,7 +1069,7 @@ fn spawn_flag_rows() {
             "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
-            "bg".to_string(),
+            "thread".to_string(),
             "--permission-mode".to_string(),
             "acceptEdits".to_string(),
         ],
@@ -1547,7 +1547,7 @@ fn substrate_flag_rows() {
         "--headless".to_string(),
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
-    assert_eq!(params["substrate"], "headless");
+    assert_eq!(params["substrate"], "thread");
 
     // x-6de8: -p mirrors the harnesses' own one-shot short. It takes NO value,
     // so a stray `-p codex` must leave `codex` a positional rather than
