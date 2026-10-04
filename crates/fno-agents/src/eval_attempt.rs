@@ -860,8 +860,14 @@ pub fn observe(payload: &Value) -> Value {
             fields["observed_session_id"] = json!(o.session_id);
             // A transcript stores the bare model, never the `[1m]` context
             // suffix the lane asked with, so the model sides compare by family.
+            // opencode reports `provider/model`; a lane that named the bare
+            // model compares against the bare model.
             let model_differs = !requested_model.is_empty()
                 && o.model.as_deref().is_none_or(|observed| {
+                    let observed = match observed.rsplit_once('/') {
+                        Some((_, bare)) if !requested_model.contains('/') => bare,
+                        _ => observed,
+                    };
                     crate::state::model_substitution(
                         Some(requested_model.as_str()),
                         Some(&json!(observed)),

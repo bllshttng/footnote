@@ -133,7 +133,7 @@
     "freeze": "no setting, image or environment changes mid-arm unless the machine is at risk"
   },
   "amendment_12": {
-    "declared_at": "2026-10-04T05:10:00Z",
+    "declared_at": "2026-10-04T04:56:24Z",
     "scope": "one retry for every Run 0 trial excluded under the 1302 rule, in every arm (user ruling: re-run the rate-limited trials before the results ship); no grade or decision rule changes",
     "first_results_commit": "71151e0a50",
     "excluded_1302": {"pi": 7, "claude-code": 27, "opencode": 7, "terminus-2": 13, "total": 54},

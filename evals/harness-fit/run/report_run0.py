@@ -3,7 +3,7 @@
 
   report_run0.py final   the record as it stands: every job directory in the run workspace
   report_run0.py first   the record before Amendment 12: each re-run trial swapped back
-                         for the original attempt set aside in aside-amendment-12/
+                         for the original attempt setaside_run0.py moved to aside-amendment-12/
 
 Prints JSON. The per-arm summary is score_run0's. Pairs are bootstrapped over tasks,
 4,000 resamples, seed 272. Run through `uv run --with pyyaml` from this directory.

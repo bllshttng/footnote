@@ -180,7 +180,8 @@ fn measured_cost_with_prices() {
             "graded",
             "ok",
             json!({"input": 1000000, "output": 1000000}),
-            "glm",
+            // opencode observes provider/model; the bare price key still prices it.
+            "zai/glm",
         )],
     );
     let rows = super::read_rows(&h, None, None);

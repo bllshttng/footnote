@@ -214,6 +214,14 @@ fn observe_opencode_reads_session_and_sums_tokens() {
     assert_eq!(out["usage"]["cache_read"], 6);
     assert_eq!(out["usage"]["cache_write"], 1);
     assert_eq!(out["usage_source"], "opencode-store");
+
+    // A lane that named the bare model is still the same model.
+    let lane = json!({"name": "glm", "harness": "opencode", "model": "glm-5.2", "effort": "high"});
+    let out = observe(&observe_payload(
+        lane,
+        json!({"opencode_dbs": [db.to_str().unwrap()]}),
+    ));
+    assert_eq!(out["lane_status"], "ok", "out: {out}");
 }
 
 #[test]
