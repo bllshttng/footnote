@@ -69,7 +69,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "loop-check",
     "loops",
     "mail-inject",
-    "mail-record",
     "manifest-eval",
     "manifest-for-session",
     "name-codes",
@@ -304,17 +303,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `mail-inject` is the one-shot LIVE-DELIVERY verb `fno agents mail send` calls to
-    // inject a turn into a live `claude --bg` session over the daemon control.sock
-    // (node). Binary-direct (Python `_deliver_live` subprocess), NOT a
-    // routable `fno agents` verb -- matched with `matches!` (like `version`) so the
-    // parity guard (test_rust_client_verbs_match_client_rs) does not see it and it
-    // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. Connects to an existing
-    // daemon; never lazy-starts one.
+    // inject a turn into a live `claude --bg` session over the daemon control.sock.
+    // Binary-direct (Python `_deliver_live` subprocess), NOT a routable `fno agents`
+    // verb -- matched with `matches!` (like `version`) so the parity guard does not
+    // see it. Connects to an existing daemon; never lazy-starts one.
     if matches!(verb, "mail-inject") {
-        // The control drain rides this action as a mode flag (law d-fe66560a
-        // allows no new client action): the PreToolUse hook calls it
-        // binary-direct at every tool boundary, and a frozen worker's freeze
-        // mail must land even when the daemon is the thing wedged.
+        // The control drain rides this action as a mode flag: the PreToolUse
+        // hook calls it binary-direct at every tool boundary, so a frozen
+        // worker's freeze mail lands even when the daemon is the thing wedged.
         if args.iter().skip(1).any(|a| a == "--control-drain") {
             let rest: Vec<String> = args[1..]
                 .iter()
@@ -326,8 +322,8 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
-    // `mail-record` is the same shape as `mail-inject`: the one-shot
-    // origin-record leaf `fno agents mail send/reply` calls binary-direct.
+    // `mail-record` is binary-direct like `mail-inject`: the origin-record
+    // leaf `fno agents mail send/reply` calls; unregistered (shrink-only list).
     if matches!(verb, "mail-record") {
         return fno_agents::decision_trace::run_mail_record(&args[1..]);
     }

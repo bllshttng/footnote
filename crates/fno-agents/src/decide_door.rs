@@ -6,6 +6,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::decision_trace::{emit_span_to, new_span_id, Trace};
 use crate::law_match::{
     all_decision_rows, attended_terminal, evidence_repo_root, is_retraction_row, mint_decision_id,
     now_iso, project_events_journal, text_cap, WAIVER_SUBJECT_PREFIX,
