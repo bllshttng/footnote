@@ -29,6 +29,7 @@ use crate::plan_doc::lock::PlanDocLock;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -298,6 +299,7 @@ fn default_spawn(
         .args(reader_argv(name, prompt, cwd, timeout_secs, model))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| e.to_string())?;
     // Poll-then-kill (the sandbox_probe shape): `--timeout` only rides argv
@@ -316,7 +318,13 @@ fn default_spawn(
             }
             None => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
+                    // The wrapper is not the whole tree: its `claude -p`
+                    // grandchild survives a wrapper-only kill and keeps
+                    // burning the lane, so signal the whole process group.
+                    // SAFETY: the pid is the child we just spawned; its
+                    // process group cannot be ours, so the signal cannot
+                    // reach this process.
+                    let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                     let out = child.wait_with_output().map_err(|e| e.to_string())?;
                     let err = String::from_utf8_lossy(&out.stderr).into_owned();
                     let named = format!(
@@ -693,7 +701,7 @@ fn judge_rows(
     lenses: &Lenses,
     spawn: Spawn,
     budget: u64,
-) -> (String, Vec<Value>, bool) {
+) -> (String, Vec<Value>, Option<String>) {
     let entries: Vec<Value> =
         crate::graph_store::read_rows(&default_graph_path()).unwrap_or_default();
     judge_rows_in(&entries, plan_text, node_id, cwd, lenses, spawn, budget)
@@ -708,19 +716,24 @@ fn judge_rows_in(
     lenses: &Lenses,
     spawn: Spawn,
     budget: u64,
-) -> (String, Vec<Value>, bool) {
+) -> (String, Vec<Value>, Option<String>) {
     let kind = node_kind(node_id, entries);
     let node_text = node_text_of(node_id, entries);
     let dimensions = dimensions_for(&kind);
     let started = std::time::Instant::now();
-    let mut budget_tripped = false;
+    let mut timeout_reason: Option<String> = None;
     let rows = dimensions
         .iter()
         .enumerate()
         .map(|(i, dimension)| {
             let elapsed = started.elapsed().as_secs();
-            if budget_tripped || elapsed >= budget {
-                budget_tripped = true;
+            if timeout_reason.is_some() || elapsed >= budget {
+                if timeout_reason.is_none() {
+                    timeout_reason = Some(format!(
+                        "budget exhausted: {elapsed}s of {budget}s before {dimension}; \
+                         likely model lane slow or provider wait"
+                    ));
+                }
                 return json!({
                     "dimension": dimension,
                     "verdict": Value::Null,
@@ -752,6 +765,12 @@ fn judge_rows_in(
                 READER_TIMEOUT_SECS.min(budget.saturating_sub(elapsed)),
                 spawn,
             );
+            // A reader that outlived its bound on the FINAL dimension has no
+            // next iteration to trip the pre-spawn check, so re-read the
+            // verdict here: a timeout row is a timeout run.
+            if verdict.is_none() && reason.contains("reader timed out") {
+                timeout_reason.get_or_insert(reason.clone());
+            }
             json!({
                 "dimension": dimension,
                 "verdict": verdict,
@@ -760,7 +779,14 @@ fn judge_rows_in(
             })
         })
         .collect();
-    (kind, rows, budget_tripped)
+    if timeout_reason.is_none() && started.elapsed().as_secs() >= budget {
+        timeout_reason = Some(format!(
+            "budget exhausted: {}s of {budget}s before the run finished; \
+             likely model lane slow or provider wait",
+            started.elapsed().as_secs()
+        ));
+    }
+    (kind, rows, timeout_reason)
 }
 
 /// Best-effort `judge: timed out (<reason>)` frontmatter stamp. The plan is
@@ -831,22 +857,15 @@ fn run_single_plan(
             return 1;
         }
     };
-    let (kind, rows, budget_tripped) = judge_rows(&plan_text, node_id, cwd, lenses, spawn, budget);
-    if budget_tripped {
-        let reason = rows
-            .iter()
-            .find_map(|r| {
-                r["reason"]
-                    .as_str()
-                    .filter(|s| s.starts_with("budget exhausted"))
-            })
-            .unwrap_or("budget exhausted");
-        stamp_judge_timeout(plan_path, reason);
+    let (kind, rows, timeout_reason) = judge_rows(&plan_text, node_id, cwd, lenses, spawn, budget);
+    let tripped = timeout_reason.is_some();
+    if let Some(reason) = timeout_reason {
+        stamp_judge_timeout(plan_path, &reason);
     } else {
         clear_judge_stamp(plan_path);
     }
     println!("{}", json!({"kind": kind, "rows": rows}));
-    if budget_tripped {
+    if tripped {
         3
     } else {
         0
@@ -1232,7 +1251,7 @@ mod tests {
         };
         let (kind, rows, tripped) = judge_rows("a plan", None, dir.path(), &lenses, &spawn, 0);
         assert_eq!(kind, "");
-        assert!(tripped);
+        assert!(tripped.is_some());
         assert_eq!(calls.get(), 0, "budget 0 spawns nobody");
         assert!(!rows.is_empty());
         for r in &rows {
@@ -1270,6 +1289,39 @@ mod tests {
             JUDGE_BUDGET_SECS,
         );
         assert_eq!(rc, 1);
+        // A reader timeout on a later dimension marks the run even though the
+        // wall clock never reached the budget: the pre-spawn check only fires
+        // when a NEXT dimension exists.
+        let calls = std::cell::Cell::new(0u32);
+        let lenses = (
+            String::new(),
+            JUDGE_DIMENSIONS
+                .iter()
+                .map(|d| (d.to_string(), "grade it".to_string()))
+                .collect(),
+        );
+        let spawn = |_: &str, _: &str, _: &Path, _: u64, _: &str| {
+            let first = calls.get() == 0;
+            calls.set(calls.get() + 1);
+            if first {
+                Ok((0, "VERDICT: pass".to_string(), String::new()))
+            } else {
+                Ok((
+                    124,
+                    String::new(),
+                    "reader timed out after 5s: model lane slow or provider wait".to_string(),
+                ))
+            }
+        };
+        let (kind, rows, tripped) = judge_rows("a plan", None, dir.path(), &lenses, &spawn, 600);
+        assert_eq!(kind, "");
+        assert!(
+            tripped
+                .clone()
+                .is_some_and(|r| r.contains("reader timed out")),
+            "a late reader timeout marks the run: {tripped:?}"
+        );
+        assert!(rows.iter().any(|r| r["verdict"].is_null()));
     }
 
     #[test]
@@ -1369,28 +1421,39 @@ mod tests {
     #[test]
     fn a_missing_source_spawns_nothing_and_names_the_gap() {
         let dir = tempfile::tempdir().unwrap();
-        let lenses = (
-            String::new(),
-            HashMap::from([("epic_fit".to_string(), "argue from the source".to_string())]),
-        );
         let calls = std::cell::Cell::new(0u32);
         let spawn = |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
             calls.set(calls.get() + 1);
             Ok((0, "VERDICT: fail".to_string(), String::new()))
         };
-        let (verdict, reason) = judge_plan(
-            "a plan",
-            "",
-            "epic_fit",
-            dir.path(),
-            &lenses,
-            None,
-            READER_TIMEOUT_SECS,
-            &spawn,
-        );
-        assert_eq!(calls.get(), 0, "no source, no spawn");
-        assert_eq!(verdict, None);
-        assert_eq!(reason, "no epic_fit source");
+        for (dimension, sections) in [
+            (
+                "epic_fit",
+                HashMap::from([("epic_fit".to_string(), "argue from the source".to_string())]),
+            ),
+            (
+                "competitive_fit",
+                HashMap::from([(
+                    "competitive_fit".to_string(),
+                    "argue from the source".to_string(),
+                )]),
+            ),
+        ] {
+            let lenses = (String::new(), sections);
+            let (verdict, reason) = judge_plan(
+                "a plan",
+                "",
+                dimension,
+                dir.path(),
+                &lenses,
+                None,
+                READER_TIMEOUT_SECS,
+                &spawn,
+            );
+            assert_eq!(calls.get(), 0, "no source, no spawn");
+            assert_eq!(verdict, None);
+            assert_eq!(reason, format!("no {dimension} source"));
+        }
     }
 
     #[test]
@@ -1730,35 +1793,5 @@ mod tests {
         );
         assert_eq!(verdict.as_deref(), Some("fail"));
         assert!(reason.contains("the alternative already does this"));
-    }
-
-    #[test]
-    fn competitive_fit_without_a_source_spawns_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let lenses = (
-            String::new(),
-            HashMap::from([(
-                "competitive_fit".to_string(),
-                "argue from the source".to_string(),
-            )]),
-        );
-        let calls = std::cell::Cell::new(0u32);
-        let spawn = |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
-            calls.set(calls.get() + 1);
-            Ok((0, "VERDICT: fail".to_string(), String::new()))
-        };
-        let (verdict, reason) = judge_plan(
-            "a plan",
-            "",
-            "competitive_fit",
-            dir.path(),
-            &lenses,
-            None,
-            READER_TIMEOUT_SECS,
-            &spawn,
-        );
-        assert_eq!(calls.get(), 0, "no source, no spawn");
-        assert_eq!(verdict, None);
-        assert_eq!(reason, "no competitive_fit source");
     }
 }
