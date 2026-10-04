@@ -8030,8 +8030,13 @@ async fn attach_and_run(
                         break Err(format!("draw: {e}"));
                     }
                 }
-                Ok(ServerMsg::PaneInputResult { request_id, pane_id, result }) => {
-                    messages_reply::input_result(&mut view, request_id, pane_id, result);
+                Ok(ServerMsg::PaneInputResult(result)) => {
+                    messages_reply::input_result(
+                        &mut view,
+                        result.request_id,
+                        result.pane_id,
+                        result.result,
+                    );
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }

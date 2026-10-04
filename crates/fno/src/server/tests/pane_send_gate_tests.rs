@@ -3,6 +3,7 @@
 //! resolves to nothing refuses an unaddressed send.
 //! Moved verbatim out of server.rs (file budget shrink). Parent helpers
 //! resolve through the glob.
+use super::super::client_input::PaneInputRequest;
 use super::*;
 #[test]
 fn pane_send_refuses_an_unreconciled_pane_and_names_the_label() {
@@ -158,21 +159,18 @@ fn pane_send_addresses_either_id_of_a_split_row() {
         passive: false,
         last_press: None,
     });
-    core.handle(CoreMsg::PaneInput {
+    core.handle(CoreMsg::PaneInput(PaneInputRequest {
         id: 1,
         request_id: 9,
         pane,
         expected_identity: harness_id.into(),
         bytes: b"reply\r".to_vec(),
         agents: Ok(vec![third]),
-    });
+    }));
     assert!(matches!(
         reply_rx.try_recv().unwrap(),
-        ServerMsg::PaneInputResult {
-            request_id: 9,
-            pane_id,
-            result: Ok(()),
-        } if pane_id == pane
+        ServerMsg::PaneInputResult(receipt)
+            if receipt.request_id == 9 && receipt.pane_id == pane && receipt.result == Ok(())
     ));
     let submit_rows = crate::event_store::query_events(
         &events_dir.join("events.jsonl"),

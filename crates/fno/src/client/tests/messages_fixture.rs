@@ -242,23 +242,17 @@ async fn messages_reply_board_contracts() {
     let request = crate::proto::read_msg::<_, crate::proto::ClientMsg>(&mut reply_reader)
         .await
         .unwrap();
-    let crate::proto::ClientMsg::PaneInput {
-        request_id,
-        pane,
-        expected_identity,
-        bytes,
-    } = request
-    else {
+    let crate::proto::ClientMsg::PaneInput(request) = request else {
         panic!("reply must address one pane and wait for its receipt")
     };
-    assert_eq!(pane, 7);
-    assert_eq!(expected_identity, "session-uuid");
-    assert!(bytes.ends_with(b"ok\r"));
+    assert_eq!(request.pane, 7);
+    assert_eq!(request.expected_identity, "session-uuid");
+    assert!(request.bytes.ends_with(b"ok\r"));
     assert_eq!(view.pending_reply_journals.len(), 1);
     super::super::messages_reply::input_result(
         &mut view,
-        request_id,
-        pane,
+        request.request_id,
+        request.pane,
         Err("pane exited before delivery".into()),
     );
     assert!(view.pending_reply_journals.is_empty());

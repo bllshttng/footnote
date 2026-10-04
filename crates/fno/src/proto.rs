@@ -364,15 +364,10 @@ fn default_true() -> bool {
 /// floor stays 58.
 /// v101: `PanePlacement.human` (serde default) carries the v99 exemption;
 /// `PaneRun.human` folds into it so the run keeps its shape; floor stays 58.
-/// v102: AgentRow gains the daemon-served running-cost pair (`session_cost_cents`,
-/// `session_tokens`), both optional; floor stays 58.
-/// v103: `PanePlacement.human` is removed as admission inverts: the
-/// default is admit and only the agent-spawn door opts into the machine
-/// gate, so no per-call-site human ask exists to carry. Serde reads an old
-/// peer's field as an unknown-key ignore; a new field's `#[serde(default)]`
-/// keeps old peers reading new placements. Floor stays 58.
-/// v104: `AgentRow` gains the optional daemon-served `compaction_count`; floor stays 58.
-/// v105: `ClientMsg::PaneInput` addresses user bytes to one pane and adds a delivery result; floor stays 58.
+/// v102: `AgentRow` adds optional `session_cost_cents`/`session_tokens`; floor stays 58.
+/// v103 removes `PanePlacement.human`: default admission leaves an opt-in machine gate
+/// for agent spawn; serde remains compatible with old and new placements. Floor stays 58.
+/// v104 adds `AgentRow.compaction_count`; v105 adds addressed pane input receipts; floor stays 58.
 pub const PROTO_VERSION: u32 = 105;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -403,6 +398,7 @@ pub mod err_code;
 pub mod agent_launch;
 pub use agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
 
+pub mod pane_input;
 pub mod pane_meta;
 
 /// Refuse frames larger than this. A full 500x500 styled grid serializes to a
@@ -445,7 +441,10 @@ pub enum ClientMsg {
     /// Raw keystroke bytes for the focused pane's PTY. Never dropped.
     Input(Vec<u8>),
     /// The client's CONTENT-AREA viewport changed.
-    Resize { rows: u16, cols: u16 },
+    Resize {
+        rows: u16,
+        cols: u16,
+    },
     /// Clean detach: the client is leaving; the server keeps the PTYs.
     Detach,
     /// A layout/tab/squad command from the client's prefix-key layer
@@ -483,7 +482,10 @@ pub enum ClientMsg {
     /// maps outer-terminal coords and never sends a chrome click here).
     /// Shift-modified events are the native-selection escape hatch and are
     /// never captured, so they never reach this variant (AC3-EDGE).
-    Mouse { pane: u64, event: MouseEvent },
+    Mouse {
+        pane: u64,
+        event: MouseEvent,
+    },
     /// (v56, hover affordance) Ask which cells of `pane` belong to the link
     /// under pane-local `(row, col)`, for the client's hover underline.
     /// Read-only and initiator-only: the reply is one
@@ -501,14 +503,22 @@ pub enum ClientMsg {
     /// (v8) Walk the pane's OSC 133 command blocks, moving the shared per-pane
     /// scroll so `dir`'s adjacent block anchors at the viewport top. A pane with
     /// no blocks replies with a `Notice` and no scroll change.
-    BlockJump { pane: u64, dir: BlockDir },
+    BlockJump {
+        pane: u64,
+        dir: BlockDir,
+    },
     /// (v8) Move the block-scoped selection to `dir`'s adjacent block (the whole
     /// command + output span), so the existing copy chain (prefix+y) yanks it.
-    BlockSelect { pane: u64, dir: BlockDir },
+    BlockSelect {
+        pane: u64,
+        dir: BlockDir,
+    },
     /// (v8) Re-send the selected (else newest) block's command line to the pane
     /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
     /// agent corrupts its composer (false-ready is the forbidden direction).
-    BlockRerun { pane: u64 },
+    BlockRerun {
+        pane: u64,
+    },
     /// (v11, x-dddd) "Grab work" (prefix+g): dispatch the next ready backlog
     /// node into a new pane in this session. Server-wide (no pane field): the
     /// server shells the Python porcelain off the core loop, and the outcome
@@ -541,18 +551,26 @@ pub enum ClientMsg {
     /// scan that matches every row). The reply is one [`ServerMsg::SearchResult`]
     /// to the initiator; co-viewers get the jump + highlight via the broadcast
     /// `Frame`. History text never crosses the wire.
-    SearchOpen { pane: u64, query: String },
+    SearchOpen {
+        pane: u64,
+        query: String,
+    },
     /// (v12) Walk the active search's match snapshot: `Prev` toward older,
     /// `Next` toward newer (reusing [`BlockDir`], whose doc semantics match n/N).
     /// Re-jumps + re-highlights and replies a fresh `SearchResult`. A pane with no
     /// active search no-ops with a `Notice`, never a panic.
-    SearchStep { pane: u64, dir: BlockDir },
+    SearchStep {
+        pane: u64,
+        dir: BlockDir,
+    },
     /// (v12) Clear the active search: drop the highlight (selection) and
     /// the per-pane search state, then broadcast a `Frame`. Idempotent: clearing
     /// with nothing active still clears + broadcasts (the client sends this on
     /// every search exit, and a no-match search_open has already dropped the
     /// state server-side).
-    SearchClear { pane: u64 },
+    SearchClear {
+        pane: u64,
+    },
     /// (v83, ) The sideline new-agent popup submits one typed launch
     /// request. The server validates pre-birth, shells canonical
     /// `fno agents spawn` OFF the core loop, and answers this client with
@@ -560,14 +578,7 @@ pub enum ClientMsg {
     /// `request_id`. Structured values only - the message rides stdin at
     /// the spawn door, never an argv element.
     AgentLaunch(crate::proto::agent_launch::AgentLaunchRequest),
-    /// (v105) User input addressed to one pane. The server replies with
-    /// [`ServerMsg::PaneInputResult`] only after that pane accepts the bytes.
-    PaneInput {
-        request_id: u64,
-        pane: u64,
-        expected_identity: String,
-        bytes: Vec<u8>,
-    },
+    PaneInput(pane_input::PaneInputRequest),
 }
 
 /// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
@@ -2204,7 +2215,10 @@ pub enum ServerMsg {
     /// siblings. `pane_id` lives on the variant, not in [`Frame`]: the VT
     /// grid (`vt::Pane`) does not know its mux pane id - the server's pane
     /// registry tags the frame at send time.
-    Frame { pane_id: u64, frame: Frame },
+    Frame {
+        pane_id: u64,
+        frame: Frame,
+    },
     /// The squad/tab catalog + computed rects for the receiving client's
     /// viewed tab, relative to the CONTENT AREA. The server sends rects,
     /// never the tree; the client never runs the layout algorithm. Reliable.
@@ -2259,13 +2273,19 @@ pub enum ServerMsg {
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
     /// Applied verbatim to the client TTY. Reliable, and ordered BEFORE the
     /// `Layout`/frames that assume those modes.
-    ModeSync { bytes: Vec<u8> },
+    ModeSync {
+        bytes: Vec<u8>,
+    },
     /// A one-line human-facing notice (refused command, failed split, ...)
     /// the client renders as transient feedback + BEL. Reliable.
-    Notice { text: String },
+    Notice {
+        text: String,
+    },
     /// The server is refusing or ending this connection; `reason` is
     /// human-facing (version skew, shutdown, session ended, ...).
-    Bye { reason: String },
+    Bye {
+        reason: String,
+    },
     /// The answer to a pre-Attach [`ClientMsg::Query`] (`fno mux ls`).
     ///
     /// Wire shape FROZEN forever: pre-Attach traffic bypasses the version
@@ -2278,7 +2298,9 @@ pub enum ServerMsg {
     },
     // -- v4 control-verb replies (one per Control connection, then close) --
     /// Answer to [`ControlVerb::PaneLs`].
-    PaneList { panes: Vec<PaneInfo> },
+    PaneList {
+        panes: Vec<PaneInfo>,
+    },
     /// (v78) Answer to [`ControlVerb::ServerStats`]: the in-memory
     /// human_touch emission-failure count with its measurement window
     /// (instance start + measured time); never an all-time fact.
@@ -2318,7 +2340,9 @@ pub enum ServerMsg {
     Ok,
     /// (v60) Answer to [`ControlVerb::WorkspaceRestore`]: one row per
     /// member, including every refusal with its reason.
-    WorkspaceRestored { rows: Vec<RestoreRow> },
+    WorkspaceRestored {
+        rows: Vec<RestoreRow>,
+    },
     /// (v71) Answer to [`ControlVerb::SquadReload`]: counts now held.
     SquadReloaded {
         squads: usize,
@@ -2345,16 +2369,23 @@ pub enum ServerMsg {
         skipped_typing: usize,
     },
     /// Answer to [`ControlVerb::PaneWait`].
-    WaitDone { outcome: WaitOutcome },
+    WaitDone {
+        outcome: WaitOutcome,
+    },
     /// A control verb failed (dead pane, spawn failure, version skew, ...).
     /// `code` is one of [`err_code`]; `msg` is one human line.
-    Err { code: u32, msg: String },
+    Err {
+        code: u32,
+        msg: String,
+    },
     /// (v7) Extracted selection text destined for the client's clipboard chain
     /// (brief Locked 5). Copy extraction happens server-side (history lives
     /// there); the client execs its local clipboard tool, else emits OSC 52,
     /// else reports the failure visibly. Reliable - a dropped copy is silent
     /// data loss, never acceptable.
-    Copy { text: String },
+    Copy {
+        text: String,
+    },
     /// (v45) A URL the user clicked, for the client to hand to the
     /// platform opener. Resolved server-side because the grid (and its OSC 8
     /// hyperlink state and scrollback) lives there; opened client-side because
@@ -2362,7 +2393,9 @@ pub enum ServerMsg {
     /// and its clipboard. Already filtered through `link::is_openable` by the
     /// server; the client checks again before exec rather than trusting the
     /// wire. Reliable - a dropped click is a dead-feeling button.
-    OpenLink { url: String },
+    OpenLink {
+        url: String,
+    },
     /// (v56, hover affordance) The initiator-only answer to a
     /// [`ClientMsg::LinkHover`]: the visible pane-local cells to underline for
     /// the requester's current pointer target. `cells` empty means no link (or
@@ -2403,12 +2436,18 @@ pub enum ServerMsg {
     AgentLaunch(crate::proto::agent_launch::AgentLaunchUpdate),
     // -- v41 (layout-api) control-verb replies --
     /// Answer to [`ControlVerb::TabLs`].
-    TabList { tabs: Vec<TabInfo> },
+    TabList {
+        tabs: Vec<TabInfo>,
+    },
     /// Answer to [`ControlVerb::LayoutGet`]: the nested tree + per-pane geometry
     /// for the requested scope (Locked Decision 5).
-    LayoutTree { squads: Vec<SquadLayout> },
+    LayoutTree {
+        squads: Vec<SquadLayout>,
+    },
     /// Answer to [`ControlVerb::AgentRowsGet`]: the row-set receipt.
-    AgentRowsReceipt { rows: Vec<AgentRowReceipt> },
+    AgentRowsReceipt {
+        rows: Vec<AgentRowReceipt>,
+    },
     /// Answer to [`ControlVerb::PaneWhere`]: where an `fno_id` lives right now.
     /// The multi-tab / multi-pane shape is mirroring-ready (one id can host
     /// several panes across tabs). Never emitted empty-but-successful.
@@ -2460,7 +2499,9 @@ pub enum ServerMsg {
     /// ids from the receipt (never predicts them). A top-level `Err` (arity /
     /// fit / unknown template) means nothing was mutated; a `LayoutApplied` with
     /// a `SpawnFailed` slot is a reported partial success.
-    LayoutApplied { results: Vec<SlotResult> },
+    LayoutApplied {
+        results: Vec<SlotResult>,
+    },
     /// (v44) Answer to [`ControlVerb::LayoutGraft`]: the committed
     /// anchor/squad/tab and one outcome per named slot. Graft is all-or-nothing,
     /// so every slot is filled on this receipt; a refusal is a top-level `Err`.
@@ -2499,12 +2540,7 @@ pub enum ServerMsg {
         pane_ids: Vec<u64>,
         forced: bool,
     },
-    /// (v105) Delivery result for one addressed [`ClientMsg::PaneInput`].
-    PaneInputResult {
-        request_id: u64,
-        pane_id: u64,
-        result: Result<(), String>,
-    },
+    PaneInputResult(pane_input::PaneInputResult),
 }
 
 /// One pane of a [`ServerMsg::TabLocation`] (v51): the pane id plus

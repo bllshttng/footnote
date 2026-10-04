@@ -250,12 +250,12 @@ pub(super) async fn keys(
                         // the server acknowledges this exact pane write.
                         write_msg(
                             sock,
-                            &ClientMsg::PaneInput {
+                            &ClientMsg::PaneInput(crate::proto::pane_input::PaneInputRequest {
                                 request_id,
                                 pane,
                                 expected_identity,
                                 bytes: input,
-                            },
+                            }),
                         )
                         .await
                         .map_err(|e| format!("reply input send failed: {e}"))?;

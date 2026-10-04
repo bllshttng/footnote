@@ -58,6 +58,7 @@ use crate::spawn_journal::{
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::{SquadSnapshot, StoredTabTree};
 
+use self::client_input::PaneInputRequest;
 use self::slot_capture::SlotCapture;
 use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
@@ -67,6 +68,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 pub(crate) mod agent_launch;
 mod agent_rows_join;
+mod client_input;
 mod client_read;
 mod drift_retire;
 mod grid_reconcile;
@@ -573,14 +575,7 @@ pub(crate) enum CoreMsg {
         id: u64,
         bytes: Vec<u8>,
     },
-    PaneInput {
-        id: u64,
-        request_id: u64,
-        pane: u64,
-        expected_identity: String,
-        bytes: Vec<u8>,
-        agents: Result<Vec<RegistryAgent>, &'static str>,
-    },
+    PaneInput(PaneInputRequest),
     Resize {
         id: u64,
         rows: u16,
@@ -9321,50 +9316,6 @@ impl Core {
         rerun_allowed(&self.agents, &self.session_name, pane)
     }
 
-    fn pane_input(
-        &mut self,
-        client_id: u64,
-        pane: u64,
-        expected_identity: &str,
-        bytes: &[u8],
-        agents: Result<Vec<RegistryAgent>, &'static str>,
-    ) -> Result<(), String> {
-        let visible = self
-            .client_view(client_id)
-            .and_then(|view| self.viewed_tab(view))
-            .is_some_and(|tab| crate::tree::leaves(&tab.root).contains(&pane));
-        if !visible {
-            return Err("pane is no longer in the current view".into());
-        }
-        if let Some(&holder) = self.claims.get(&pane) {
-            if pid_alive(holder) {
-                return Err("busy: relay".into());
-            }
-            self.claims.remove(&pane);
-        }
-        // This is direct user input, so it bypasses DND like keyboard input;
-        // the fresh identity check and relay claim still gate the write.
-        match self.pane_send(pane, bytes, false, Some(expected_identity), agents, true) {
-            ServerMsg::Ok => {
-                let scrolled = self.panes.get_mut(&pane).is_some_and(|entry| {
-                    if entry.vt.display_offset() == 0 {
-                        false
-                    } else {
-                        entry.vt.scroll_to_bottom();
-                        true
-                    }
-                });
-                if scrolled {
-                    self.broadcast_pane(pane);
-                }
-                self.input_tail(pane, bytes);
-                Ok(())
-            }
-            ServerMsg::Err { msg, .. } => Err(msg),
-            _ => Err("pane input failed".into()),
-        }
-    }
-
     /// Write `bytes` to `pane`'s PTY. When `guarded`, apply the same authority
     /// as the block-rerun path (idle badge FIRST, then the writer-claim
     /// interlock) immediately before the write - and because the core loop is
@@ -11508,7 +11459,6 @@ impl Core {
         // client); Detach/Gone/Query/etc. are not mutations and pass through.
         let mutating_sender = match &msg {
             CoreMsg::Input { id, .. }
-            | CoreMsg::PaneInput { id, .. }
             | CoreMsg::Command { id, .. }
             | CoreMsg::Mouse { id, .. }
             | CoreMsg::BlockNav { id, .. }
@@ -11526,6 +11476,7 @@ impl Core {
             // worker the same way, so it gates identically.
             | CoreMsg::DispatchNext { id, .. }
             | CoreMsg::AgentLaunch { id, .. } => Some(*id),
+            CoreMsg::PaneInput(request) => Some(request.id),
             _ => None,
         };
         if let Some(id) = mutating_sender {
@@ -11548,93 +11499,11 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::Input { id, bytes } => {
-                // Input routes to the SENDER's viewed tab's focused pane
-                // (Locked 4). Fail closed when there is no live view or
-                // focused pane: dropped, never a panic - a re-anchor already
-                // moved the view, or the exit signal is about to. A write
-                // error means the child just exited mid-keystroke - same
-                // policy.
-                let focus = self
-                    .client_view(id)
-                    .and_then(|view| self.viewed_tab(view))
-                    .map(|tab| tab.focus);
-                if let Some(focus) = focus {
-                    // Writer-claim interlock (4a-G3, AC3-UI): while the relay
-                    // holds an agent pane's claim, human keystrokes bounce
-                    // with a visible `busy: relay` notice (the client sounds
-                    // BEL for every Notice). In-memory lookup + one kill(0)
-                    // probe - a DEAD holder releases right here, so typing
-                    // resumes without any sweep or restart (AC3-FR). General
-                    // panes are never in `claims` (spawn-time opt-in).
-                    if let Some(&holder) = self.claims.get(&focus) {
-                        if pid_alive(holder) {
-                            self.notice(id, "busy: relay");
-                            return Flow::Continue;
-                        }
-                        self.claims.remove(&focus);
-                    }
-                    // A keystroke that will be delivered returns a scrolled pane
-                    // to the live bottom, so input always lands on the visible
-                    // line (AC1-ERR, Invariant). No-op when already live. One
-                    // lookup: broadcast after the mutable borrow ends.
-                    let mut scrolled = false;
-                    if let Some(e) = self.panes.get_mut(&focus) {
-                        if e.vt.display_offset() != 0 {
-                            e.vt.scroll_to_bottom();
-                            scrolled = true;
-                        }
-                    }
-                    if scrolled {
-                        self.broadcast_pane(focus);
-                    }
-                    if let Some(entry) = self.panes.get(&focus) {
-                        if let Err(crate::pty::PtyError::Write(e)) = entry.pty.write_input(&bytes) {
-                            // Disconnected = child just exited (the exit
-                            // signal follows; stay silent). Full = the
-                            // child stopped reading (^S, SIGSTOP): the
-                            // drop must not be invisible to the typist.
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                self.notice(id, "pane not accepting input; keys dropped");
-                            }
-                        }
-                    }
-                    // Touch telemetry, the attended hold, the submit witness.
-                    self.input_tail(focus, &bytes);
-                }
+                self.handle_input(id, bytes);
                 Flow::Continue
             }
-            CoreMsg::PaneInput {
-                id,
-                request_id,
-                pane,
-                expected_identity,
-                bytes,
-                agents,
-            } => {
-                let result = self.pane_input(id, pane, &expected_identity, &bytes, agents);
-                let failed = self
-                    .clients
-                    .iter()
-                    .find(|client| client.id == id)
-                    .is_some_and(|client| {
-                        let failed = client
-                            .reliable_tx
-                            .try_send(ServerMsg::PaneInputResult {
-                                request_id,
-                                pane_id: pane,
-                                result,
-                            })
-                            .is_err();
-                        if !failed {
-                            client.notify.notify_one();
-                        }
-                        failed
-                    });
-                if failed {
-                    eprintln!("fno mux: client {id} reliable channel wedged on PaneInputResult; dropping it");
-                    self.clients.retain(|client| client.id != id);
-                    self.push_layout(true);
-                }
+            CoreMsg::PaneInput(request) => {
+                self.handle_pane_input(request);
                 Flow::Continue
             }
             CoreMsg::Resize { id, rows, cols } => {
