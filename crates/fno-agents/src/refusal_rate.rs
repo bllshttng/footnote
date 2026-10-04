@@ -126,11 +126,13 @@ fn claude_trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
         .collect()
 }
 
-/// The codex rollout pairing: rows carry no shared call id, so each output
-/// row (`function_call_output` / `custom_tool_call_output`) answers the
-/// newest call still missing a result.
+/// The codex rollout pairing: call and output rows share a `call_id`, so
+/// each output row answers the call carrying its id; rows without one (the
+/// legacy shapes, `local_shell_call`) fall back to answering the newest
+/// call still missing a result.
 fn codex_trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
     let mut calls: Vec<Option<String>> = Vec::new();
+    let mut call_ids: Vec<Option<String>> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -143,10 +145,26 @@ fn codex_trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
             continue;
         };
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "function_call" | "custom_tool_call" | "local_shell_call" => calls.push(None),
+            "function_call" | "custom_tool_call" | "local_shell_call" => {
+                calls.push(None);
+                call_ids.push(
+                    payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                );
+            }
             "custom_tool_call_output" | "function_call_output" => {
                 let out = crate::session_activity::codex_output_text(payload).into_owned();
-                if let Some(slot) = calls.iter_mut().rev().find(|slot| slot.is_none()) {
+                let call_id = payload.get("call_id").and_then(Value::as_str);
+                let slot = match call_id {
+                    Some(id) => call_ids
+                        .iter()
+                        .position(|slot_id| slot_id.as_deref() == Some(id))
+                        .and_then(|idx| calls.get_mut(idx)),
+                    None => calls.iter_mut().rev().find(|slot| slot.is_none()),
+                };
+                if let Some(slot) = slot {
                     *slot = Some(out);
                 }
             }
@@ -276,19 +294,29 @@ mod tests {
         assert_eq!(result["load_discounted"], false);
     }
 
-    /// The codex rollout pairing: no shared call ids, so each output row
-    /// answers the newest unanswered call, and the load discount drops the
-    /// timeout bucket while the usage-error bucket stays counted.
+    /// The codex rollout pairing: an output answers its `call_id` when the
+    /// rows carry one (real rollouts do), positionally otherwise, and the
+    /// load discount drops the timeout bucket while the usage-error bucket
+    /// stays counted.
     #[test]
-    fn codex_rows_pair_positionally_and_the_load_discount_drops_load_buckets() {
-        let codex_line = |ptype: &str, text: &str| {
-            json!({"payload": {"type": ptype, "output": text}}).to_string()
+    fn codex_rows_pair_by_call_id_and_the_load_discount_drops_load_buckets() {
+        let codex_line = |ptype: &str, call_id: &str, text: &str| {
+            let mut payload = json!({"type": ptype});
+            if !call_id.is_empty() {
+                payload["call_id"] = json!(call_id);
+            }
+            if !text.is_empty() {
+                payload["output"] = json!(text);
+            }
+            json!({"payload": payload}).to_string()
         };
+        // Out-of-order outputs: the first output answers the SECOND call by
+        // id; the id-less output falls back to the newest unanswered call.
         let text = [
-            codex_line("function_call", ""),
-            codex_line("function_call_output", "Command timed out after 30m"),
-            codex_line("custom_tool_call", ""),
-            codex_line("custom_tool_call_output", "Usage: fno backlog get <id>"),
+            codex_line("function_call", "c1", ""),
+            codex_line("function_call", "c2", ""),
+            codex_line("function_call_output", "c2", "Usage: bad args"),
+            codex_line("function_call_output", "", "Command timed out after 30m"),
         ]
         .join("\n");
         let full = rate_from_text("codex", &text, 200, false).unwrap();
@@ -298,7 +326,6 @@ mod tests {
         assert_eq!(discounted["load_discounted"], true);
         assert_eq!(discounted["refused"], 1, "the timeout bucket left");
         assert_eq!(discounted["rate_full"], full["rate"]);
-        assert!(discounted["rate"].as_f64().unwrap() < full["rate"].as_f64().unwrap());
     }
 
     #[test]

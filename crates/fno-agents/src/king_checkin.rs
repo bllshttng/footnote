@@ -922,6 +922,14 @@ pub(crate) fn own_transcript() -> Result<OwnTranscript, String> {
 /// gate_refusal buckets leave the numerator); `rate_full` keeps the raw rate.
 fn r_refusal_rate() -> Result<Value, String> {
     match own_transcript() {
+        // The opencode render carries tool-use blocks without ids and no
+        // tool results, so a rate over it would read a silent zero percent.
+        Ok(OwnTranscript::Text {
+            harness: "opencode",
+            ..
+        }) => Ok(unmeasured_value(
+            "the opencode render carries no tool results a refusal rate can read",
+        )),
         Ok(OwnTranscript::Text { harness, text, .. }) => crate::refusal_rate::rate_from_text(
             harness,
             &text,
