@@ -1423,6 +1423,13 @@ fn derive_change(
                 .unwrap_or(0)
         ));
     }
+    if data
+        .get("posture_drifted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        attention.push("lead posture drifted from its crowned sandbox".into());
+    }
     // Attention outranks silence: a control plane failing for 30 minutes,
     // or a refusal rate climbing two beats running, is never journaled as
     // "no change", whatever the counts did.
@@ -1458,11 +1465,17 @@ fn derive_change(
 /// derived diff. The derivation always lands under `diff`, so a
 /// model-worded row still carries the machine's measurement.
 fn finish_change(derived: String, model: Option<&str>, data: &mut Map<String, Value>) -> String {
-    let change = model
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| derived.clone());
+    // A posture drift is never "no change", whatever the beat's override
+    // said: the derived attention text wins over that one masking phrase.
+    let drifted = data
+        .get("posture_drifted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let explicit = model.map(str::trim).filter(|t| !t.is_empty());
+    let change = match explicit {
+        Some(text) if !(drifted && text == "no change") => text.to_owned(),
+        _ => derived.clone(),
+    };
     data.insert("diff".into(), json!(derived));
     data.insert("change".into(), json!(change.clone()));
     change
@@ -4295,6 +4308,23 @@ mod tests {
         assert_eq!(change, "no change");
         assert_eq!(data.get("change"), Some(&json!("no change")));
         assert_eq!(data.get("diff"), Some(&json!("no change")));
+
+        // A posture drift is attention, and an explicit "no change"
+        // override cannot mask it; any other override still stands.
+        let mut data = Map::new();
+        data.insert("posture_drifted".into(), json!(true));
+        assert_eq!(
+            derive_change(None, &data, ""),
+            "attention: lead posture drifted from its crowned sandbox"
+        );
+        let change = finish_change(
+            "attention: lead posture drifted".into(),
+            Some("no change"),
+            &mut data,
+        );
+        assert_eq!(change, "attention: lead posture drifted");
+        let change = finish_change("derived".into(), Some("dispatched two workers"), &mut data);
+        assert_eq!(change, "dispatched two workers");
 
         let dir = tempfile::tempdir().unwrap();
         let rows = [

@@ -189,6 +189,13 @@ pub(super) fn gate_inside_leg_onto_row(
             {
                 notify = Some((body, true));
             }
+            // The same posture-preservation rule the direct store path
+            // runs: a report with no posture never erases the last
+            // observed one.
+            let mut rep = rep;
+            if rep.posture.is_none() {
+                rep.posture = e.inside_leg.as_ref().and_then(|r| r.posture.clone());
+            }
             e.inside_leg = Some(rep);
             e.screen_state = None;
         }

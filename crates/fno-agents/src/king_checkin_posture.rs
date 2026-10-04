@@ -36,8 +36,33 @@ pub(super) fn reading() -> Result<Value, String> {
     }
 }
 
+/// The server's camel policy-type spelling (`/result/sandbox/type`) in the
+/// CLI snake spelling the observed reports carry. `None` on anything else,
+/// so an unreadable resolved name falls back to the recorded request.
+fn policy_type_sandbox(raw: &str) -> Option<&'static str> {
+    match raw {
+        "readOnly" => Some("read-only"),
+        "workspaceWrite" => Some("workspace-write"),
+        "dangerFullAccess" => Some("danger-full-access"),
+        _ => None,
+    }
+}
+
+/// The drift baseline: the sandbox the reign actually ran under, the
+/// server-resolved name when the row carries one, else the spawn's recorded
+/// request. Comparing the observation against a `danger-full-access`
+/// REQUEST that resolved as `workspaceWrite` would report a drift that
+/// never happened.
+fn baseline_sandbox(row: &crate::state::RegistryEntry) -> Option<String> {
+    row.resolved_sandbox
+        .as_deref()
+        .and_then(policy_type_sandbox)
+        .map(str::to_string)
+        .or_else(|| row.sandbox_posture.clone())
+}
+
 /// The posture facts off one crowned row, pure so tests can drive it.
-/// `drifted` is provable only when BOTH the crowned sandbox and an observed
+/// `drifted` is provable only when BOTH the baseline and an observed
 /// sandbox exist and differ: a missing baseline or a missing observation
 /// reads unproven, never drifted.
 fn fold(row: &crate::state::RegistryEntry) -> Result<Value, String> {
@@ -46,14 +71,16 @@ fn fold(row: &crate::state::RegistryEntry) -> Result<Value, String> {
         .as_ref()
         .and_then(|report| report.posture.as_ref());
     let observed_sandbox = observed.map(|p| p.sandbox.as_str());
+    let baseline = baseline_sandbox(row);
     let drifted = matches! {
-        (row.sandbox_posture.as_deref(), observed_sandbox),
+        (baseline.as_deref(), observed_sandbox),
         (Some(crowned), Some(seen)) if crowned != seen
     };
     Ok(json!({
         "mode": row.requested_permission_mode,
         "sandbox": row.sandbox_posture,
         "resolved_sandbox": row.resolved_sandbox,
+        "baseline_sandbox": baseline,
         "observed": observed.map(|p| format!("{}:{}", p.sandbox, p.approval)),
         "observed_sandbox": observed_sandbox,
         "drifted": drifted,
@@ -79,7 +106,7 @@ pub(super) fn lines(readings: &[Reading]) -> Vec<String> {
         return vec![format!(
             "POSTURE DRIFT: crowned sandbox {}, observed {} - a lead's posture \
              is fixed for its reign, and only the user can re-pin or restore it",
-            part("sandbox"),
+            part("baseline_sandbox"),
             part("observed_sandbox"),
         )];
     }
@@ -113,12 +140,22 @@ mod tests {
 
     #[test]
     fn fold_judges_drift_only_from_both_halves_and_lines_print_both() {
-        // Drift is provable only when the crowned sandbox and an observed
-        // sandbox both exist and differ; either half missing reads unproven.
+        // Drift is provable only when the baseline and an observed sandbox
+        // both exist and differ; either half missing reads unproven. The
+        // baseline is the RESOLVED sandbox (server camel spelling,
+        // normalized) when the row carries one, else the recorded request.
         let mut row = crowned_row(Some("danger-full-access"), Some("yolo"));
         assert_eq!(fold(&row).unwrap()["drifted"], false);
         observed(&mut row, "workspace-write", "never");
         assert_eq!(fold(&row).unwrap()["drifted"], true);
+        // The same observation against a row whose request RESOLVED as
+        // workspace-write reads undrifted: the reign ran as crowned.
+        let mut resolved = crowned_row(Some("danger-full-access"), Some("yolo"));
+        resolved.resolved_sandbox = Some("workspaceWrite".to_string());
+        observed(&mut resolved, "workspace-write", "never");
+        let out = fold(&resolved).unwrap();
+        assert_eq!(out["drifted"], false);
+        assert_eq!(out["baseline_sandbox"], "workspace-write");
         let mut no_baseline = crowned_row(None, None);
         observed(&mut no_baseline, "workspace-write", "never");
         assert_eq!(fold(&no_baseline).unwrap()["drifted"], false);
