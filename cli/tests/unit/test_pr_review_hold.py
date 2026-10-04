@@ -94,6 +94,34 @@ def test_pr_worktree_resolution_from_canonical_subdir_uses_the_pr_branch(tmp_pat
     assert seen == [{"cwd": str(nested), "pr": 42}]
 
 
+def test_no_local_worktree_answers_empty_and_other_failures_still_raise(monkeypatch):
+    """Exit 3 "no local worktree" is an answer (""), never a blocker.
+
+    A PR pushed with no local worktree carries no worktree hold; the exit-3
+    refusal used to propagate as a traceback and block status and merge reads
+    on a PR that was simply not checked out here.
+    """
+    from fno.rust_binary import VerbUnavailable
+
+    def no_worktree(verb, payload, unavailable=None):
+        exc = VerbUnavailable(
+            "fno-agents pr-worktree exited 3: pr-worktree: "
+            "no local worktree on PR branch fix/some-branch"
+        )
+        exc.returncode = 3
+        raise exc
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", no_worktree)
+    assert _review_hold.resolve_pr_worktree(42, "/repo") == ""
+
+    def dead(verb, payload, unavailable=None):
+        raise VerbUnavailable("fno-agents pr-worktree failed: gh api exited 1")
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", dead)
+    with pytest.raises(VerbUnavailable):
+        _review_hold.resolve_pr_worktree(42, "/repo")
+
+
 def test_free_hold_and_no_worktree_is_clear(tmp_path: Path):
     activity = _review_hold.review_activity(
         "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE

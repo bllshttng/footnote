@@ -81,3 +81,50 @@ def test_hold_check_repo_option_from_canonical_uses_pr_worktree(
     assert result.exit_code == 0, result.exception
     assert resolver_calls == [(42, str(canonical))]
     assert hold_calls == [(42, feature)]
+
+
+def test_pr_commands_with_no_local_worktree_stay_in_the_caller_checkout(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    monkeypatch.chdir(canonical)
+    handler_calls = []
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: ""
+    )
+    monkeypatch.setattr(
+        "fno.pr.cli._forward_to_binary",
+        lambda *a, **k: handler_calls.append(Path.cwd()) or 0,
+    )
+    monkeypatch.setattr(sys, "argv", ["fno", "do", "pr", "status", "42"])
+
+    result = CliRunner().invoke(pr_app, ["status", "42"])
+
+    assert result.exit_code == 0, result.exception
+    assert handler_calls == [canonical]
+
+
+def test_hold_check_with_no_local_worktree_reads_no_hold(monkeypatch, tmp_path):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    monkeypatch.chdir(canonical)
+    hold_calls = []
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: ""
+    )
+    monkeypatch.setattr(
+        "fno.pr._hold.merge_hold_reason",
+        lambda pr, repo: hold_calls.append((pr, repo)) or "should never be asked",
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["fno", "do", "pr", "hold-check", "42", "--repo", str(canonical)]
+    )
+
+    result = CliRunner().invoke(
+        pr_app, ["hold-check", "42", "--repo", str(canonical)]
+    )
+
+    assert result.exit_code == 0, result.exception
+    assert hold_calls == []
+    assert "no plan dispatch hold" in result.output
