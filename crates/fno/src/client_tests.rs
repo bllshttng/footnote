@@ -1762,8 +1762,7 @@ fn link_hover_rows() {
 
     // A modal opened by KEYBOARD emits no pointer event, so the event-side
     // clear never runs; the compose-side suppression is what keeps the
-    // underline from painting beneath or around it. Control: the same
-    // accepted span paints the moment the modal closes.
+    // underline from painting beneath or around it.
     let mut view = two_pane_view();
     view.link_hover.accepted = Some((10, vec![(0, 0)]));
     view.keys_modal = Some(build_keys_modal());
