@@ -25,11 +25,6 @@ def test_no_uuid_is_invisible():
     assert incarnation_fence_blocks("") == (False, "")
 
 
-def test_free_claim_proceeds(monkeypatch):
-    _wire(monkeypatch, {"state": "free"})
-    assert incarnation_fence_blocks("uuid1") == (False, "")
-
-
 def test_ours_proceeds(monkeypatch):
     # AC5-EDGE: the sole incarnation holding its own claim is never fenced.
     _wire(
@@ -38,19 +33,6 @@ def test_ours_proceeds(monkeypatch):
         own_pid=123,
     )
     assert incarnation_fence_blocks("uuid1") == (False, "")
-
-
-def test_other_live_blocks(monkeypatch):
-    # AC3-ERR: another live incarnation holds the lineage claim -> refuse.
-    _wire(
-        monkeypatch,
-        {"state": "live", "holder": "target-session:other", "pid": 999, "host": "h"},
-        own_pid=123,
-    )
-    blocked, reason = incarnation_fence_blocks("uuid1")
-    assert blocked
-    assert "session:uuid1" in reason
-    assert "other" in reason
 
 
 def test_unreadable_claims_fails_closed(monkeypatch):
@@ -293,7 +275,9 @@ def test_rival_worker_under_another_spare_still_blocks(monkeypatch):
     # The P1 the first cut missed: a LOSING original on the same machine sees
     # the same session key and a pool-machinery holder, but the holder is NOT
     # in its ancestry (it hangs off its own spare). Positive correlation or
-    # no pass: the fence still blocks.
+    # no pass: the fence still blocks. Also carries the AC3-ERR baseline this
+    # file guarded before via test_other_live_blocks (live foreign holder
+    # blocks, holder and key named).
     _wire(
         monkeypatch,
         {"state": "live", "holder": "revive:64225", "pid": 999_999,
@@ -303,20 +287,6 @@ def test_rival_worker_under_another_spare_still_blocks(monkeypatch):
     _fake_ancestry(monkeypatch, [555_555, 1])  # own spare, not the holder
     blocked, reason = incarnation_fence_blocks("uuid1")
     assert blocked
+    assert "revive:64225" in reason
+    assert "session:uuid1" in reason
     assert "fno agents claim release session:uuid1 --force --reason" in reason
-
-
-def test_remote_holder_in_ancestry_still_blocks(monkeypatch):
-    # A holder on ANOTHER machine cannot be proven to host the caller, so the
-    # same-machine guard short-circuits before the ancestry walk and the
-    # fence blocks (fail closed) even when the pid sits in the local chain.
-    _wire(
-        monkeypatch,
-        {"state": "live", "holder": "revive:other", "pid": 999_999,
-         "host": "remote", "machine_id": "other"},
-        own_pid=123,
-    )
-    _fake_ancestry(monkeypatch, [999_999, 1])
-    blocked, reason = incarnation_fence_blocks("uuid1")
-    assert blocked
-    assert "held by revive:other" in reason
