@@ -44,14 +44,15 @@ def plan_codex_thread_crown(
     crown_scope: Optional[str],
     succession: bool,
     harness: str,
+    parent_edge: Optional[tuple],
 ) -> dict:
     """Decide the crown BEFORE the thread spawns and type the reign verb.
 
     Same fail-closed plan the claude bg branch runs inside its flock:
     authority and occupancy are decided before anything is created, so a
     refusal launches nothing and leaves the scope dispatchable. Raises
-    :class:`DispatchAskError` on a refused plan; returns the typed message,
-    the plan, and the caller name the settle and receipts need.
+    :class:`DispatchAskError` on a refused plan; returns everything the
+    settle needs, keyed for its one-dict call.
     """
     from fno.agents.dispatch import DispatchAskError
     from fno.agents.harness_map import normalize_command
@@ -71,6 +72,9 @@ def plan_codex_thread_crown(
         "reign_typed": reign_typed,
         "crown_plan": crown_plan,
         "crown_caller_name": crown_caller_name,
+        "crown_level": crown_level,
+        "crown_scope": crown_scope,
+        "parent_edge": parent_edge,
     }
 
 
@@ -80,9 +84,6 @@ def settle_codex_thread_crown(
     name: str,
     cwd: Path,
     session_id: str,
-    crown_level: int,
-    crown_scope: Optional[str],
-    parent_edge: Optional[tuple],
 ) -> None:
     """Carry the settled plan onto the codex thread row, after launch.
 
@@ -90,7 +91,9 @@ def settle_codex_thread_crown(
     just after; a row exists uncrowned briefly either way - the crown verb's
     own shape.
     """
-    crown_grantor_val = (parent_edge or _capture_parent_edge_now())[0] or "human"
+    crown_level: int = ask["crown_level"]
+    crown_scope: Optional[str] = ask["crown_scope"]
+    crown_grantor_val = (ask["parent_edge"] or _capture_parent_edge_now())[0] or "human"
     crown_outcome: Optional[str] = None
     crown_cleared: list = []
     king_loop_armed: Optional[bool] = None

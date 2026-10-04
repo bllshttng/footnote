@@ -2435,13 +2435,10 @@ def dispatch_spawn(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
-    # Crown eligibility, checked HERE rather than only at the CLI seam: this
-    # function is the in-process entry point too, and only the lanes below that
-    # name a crown carrier stamp the fields. Every other route builds its
-    # AgentEntry elsewhere and would drop the crown while reporting a successful
-    # spawn - a silently uncrowned king is the failure this refusal exists to
-    # make impossible. Fail closed before anything is created, so a refusal
-    # launches nothing and leaves the node dispatchable.
+    # Crown eligibility, checked HERE rather than only at the CLI seam: only
+    # the lanes below that name a crown carrier stamp the fields; every other
+    # route would drop the crown while reporting success. Fail closed before
+    # anything is created, so a refusal launches nothing.
     crown_problem = crown_validation_error(crown_level, crown_scope)
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
@@ -2521,7 +2518,7 @@ def dispatch_spawn(
             # Plan before launch (fail closed) and type the reign verb; the
             # settle runs over the lane's row once the receipt names it.
             ask = plan_codex_thread_crown(
-                message, crown_level, crown_scope, succession, harness
+                message, crown_level, crown_scope, succession, harness, parent_edge
             )
             message = ask["message"]
         session_id = _codex_thread_spawn(
@@ -2542,15 +2539,7 @@ def dispatch_spawn(
         if ask is not None:
             from fno.agents.crown_thread import settle_codex_thread_crown
 
-            settle_codex_thread_crown(
-                ask,
-                name=name,
-                cwd=cwd,
-                session_id=session_id,
-                crown_level=crown_level,
-                crown_scope=crown_scope,
-                parent_edge=parent_edge,
-            )
+            settle_codex_thread_crown(ask, name=name, cwd=cwd, session_id=session_id)
         _emit_ev(
             "agent_ask_done",
             stage="dispatch",
