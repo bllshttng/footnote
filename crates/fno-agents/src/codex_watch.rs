@@ -467,7 +467,7 @@ mod tests {
             &roster,
             &poll,
             &inject,
-            &EventEmitter::new(events.to_path_buf(), "test"),
+            &EventEmitter::new(events.to_path_buf(), "daemon"),
         )
         .unwrap();
     }
