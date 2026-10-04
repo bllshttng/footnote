@@ -9,7 +9,7 @@
 //! State that changes with no event reached nobody, which is how main went
 //! red on 2026-09-06 and no instrument reported it for forty minutes.
 //!
-//! The arm samples the king board queues and main CI's check runs, collapses
+//! The arm samples the lead board queues and main CI's check runs, collapses
 //! each signal on a token through the store, and emits one pointer notice per
 //! changed signal. The token IS the state; the tick is only a sample. A
 //! notice is a pointer to the durable queue, never a copy of it.
@@ -256,7 +256,7 @@ pub fn forget_at(path: &Path, key: &str) {
 }
 
 /// The seconds since the entry under `key` was first written, or `None` when
-/// the store holds none. The crown alarm's first-seen clock reads through
+/// the store holds none. The team alarm's first-seen clock reads through
 /// here: the store shapes stay private to this module.
 pub(crate) fn first_seen_age_s(path: &Path, key: &str, now: u64) -> Option<u64> {
     let store = load_store(path);
@@ -339,7 +339,7 @@ pub fn run_notify_watch(
         .filter(|k| signals.iter().any(|s| s == *k))
         .collect();
     if !board_keys.is_empty() {
-        let board = crate::king_board::read_board(&crate::king_board::BoardOpts::default());
+        let board = crate::org_board::read_board(&crate::org_board::BoardOpts::default());
         let queues: Map<String, Value> = board
             .get("queues")
             .and_then(Value::as_array)

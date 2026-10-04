@@ -25,7 +25,7 @@ def run_native(events_paths: list[Path], scope: str, as_json: bool) -> tuple[int
     binary = resolve_binary()
     if binary is None:
         refuse_without_binary("king history")
-    argv = [str(binary), "king-history", *(["--scope", scope] if scope.strip() else [])]
+    argv = [str(binary), "lead-history", *(["--scope", scope] if scope.strip() else [])]
     for path in events_paths:
         argv += ["--events-path", str(path)]
     if as_json:
@@ -41,7 +41,7 @@ def verdict_read(events_paths: "list[Path]", scope: "str | None", as_json: bool)
 
     argv = [
         str(resolve_binary() or refuse_without_binary("king verdict")),
-        "king-history",
+        "lead-history",
         "--verdict",
         "--cwd",
         str(Path.cwd()),

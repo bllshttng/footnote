@@ -22,7 +22,7 @@ pub fn node_primary_prs<'a>(
             .filter_map(|row| {
                 let id = row.get("id").and_then(Value::as_str)?;
                 wanted.contains(id).then(|| {
-                    let pr = crate::king_board::prs::node_pr_refs(row)
+                    let pr = crate::org_board::prs::node_pr_refs(row)
                         .first()
                         .map(|(n, _)| *n);
                     (id.to_string(), pr)

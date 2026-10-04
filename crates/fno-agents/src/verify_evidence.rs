@@ -523,7 +523,7 @@ const PREFLIGHT_BASE_SCOPE: [&str; 7] = [
 // Legs preflight adds when the tree calls for them: allowed, never required.
 const PREFLIGHT_OPTIONAL_SCOPE: [&str; 4] = [
     "file-budget:fno",
-    "reign-arms:fno",
+    "lead-arms:fno",
     "squads-leak-guard:fno",
     "tracker-gates:fno",
 ];
@@ -1246,7 +1246,7 @@ mod tests {
             "cargo-test:fno-unit",
             "cargo-test:fno-e2e",
             "file-budget:fno",
-            "reign-arms:fno",
+            "lead-arms:fno",
             "squads-leak-guard:fno",
             "tracker-gates:fno",
         ])));

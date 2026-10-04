@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_user_or_the_asking_crown_closes_a_question_asked_of_the_user() {
+    fn only_the_user_or_the_asking_team_closes_a_question_asked_of_the_user() {
         // (a) An agent answers the user's question: refused, nothing written.
         let tmp = tempfile::tempdir().unwrap();
         let mut req = request(&tmp, "q-gate", Some("C: set 400 here"));
@@ -638,22 +638,22 @@ mod tests {
             1
         );
 
-        // (d) A crowned session answers its own ask with --authority crown.
+        // (d) A teamed session answers its own ask with --authority team.
         let tmp = tempfile::tempdir().unwrap();
-        let mut req = request(&tmp, "q-crown", Some("C: do as asked"));
-        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "crown"});
-        req.caller.as_mut().unwrap().crowned = true;
-        seed_question(&req, &ask_from("q-crown", "01a0cbdd", "which lane?"));
+        let mut req = request(&tmp, "q-team", Some("C: do as asked"));
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "team"});
+        req.caller.as_mut().unwrap().teamed = true;
+        seed_question(&req, &ask_from("q-team", "01a0cbdd", "which lane?"));
         let result = run_clear(&req);
         assert_eq!(result.exit_code, 0, "{:?}", result.lines);
         let decisions = graph_decisions(&req);
         assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0]["authority_source"], "crown");
+        assert_eq!(decisions[0]["authority_source"], "team");
 
-        // (e) The same answer without a live crown: refused.
+        // (e) The same answer without a live team: refused.
         let tmp = tempfile::tempdir().unwrap();
         let mut req = request(&tmp, "q-uncrowned", Some("C: do as asked"));
-        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "crown"});
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "team"});
         seed_question(&req, &ask_from("q-uncrowned", "01a0cbdd", "which lane?"));
         let result = run_clear(&req);
         assert_eq!(result.exit_code, 3, "{:?}", result.lines);
@@ -663,11 +663,11 @@ mod tests {
             result.lines
         );
 
-        // (f) A crowned crown answering another session's ask: refused.
+        // (f) A teamed team answering another session's ask: refused.
         let tmp = tempfile::tempdir().unwrap();
         let mut req = request(&tmp, "q-other", Some("C: do as asked"));
-        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "crown"});
-        req.caller.as_mut().unwrap().crowned = true;
+        req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "team"});
+        req.caller.as_mut().unwrap().teamed = true;
         seed_question(&req, &ask_from("q-other", "49a80492", "which lane?"));
         let result = run_clear(&req);
         assert_eq!(result.exit_code, 3, "{:?}", result.lines);
@@ -692,15 +692,15 @@ mod tests {
             result.lines
         );
 
-        // (h) holds_crown reads the holder session's canonical handle.
-        let crown = crate::territory::Crown {
+        // (h) holds_team reads the holder session's canonical handle.
+        let team = crate::territory::Team {
             scope: "scope".to_string(),
             level: 1,
-            holder: "king".to_string(),
+            holder: "lead".to_string(),
             holder_session: Some("01a0cbdd-baed-4482-9135-37ba1cb0f0d2".to_string()),
         };
-        assert!(holds_crown(&[crown.clone()], "01a0cbdd"));
-        assert!(!holds_crown(&[crown], "49a80492"));
+        assert!(holds_team(&[team.clone()], "01a0cbdd"));
+        assert!(!holds_team(&[team], "49a80492"));
     }
 }
 use crate::backlog::api::{self, Store};
@@ -712,14 +712,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Who is at the clear door, resolved once per request. The gate reads the
-/// handle; the crown check is precomputed so a test can drive it without a
+/// handle; the team check is precomputed so a test can drive it without a
 /// registry on disk.
 #[derive(Clone, Debug, Default)]
 pub struct ClearCaller {
     /// The agent handle the Rust ancestry prover resolved in this process.
     pub ancestry_handle: Option<String>,
-    /// Whether the caller's handle holds a live crown.
-    pub crowned: bool,
+    /// Whether the caller's handle holds a live team.
+    pub teamed: bool,
 }
 
 #[derive(Deserialize)]
@@ -754,7 +754,7 @@ fn agent_handle(req: &ClearRequest, caller: &ClearCaller) -> Option<String> {
         .get("authority_source")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if matches!(authority, "agent" | "crown" | "beastmode") {
+    if matches!(authority, "agent" | "team" | "beastmode") {
         if let Some(decided_by) = req
             .provenance
             .get("decided_by")
@@ -768,7 +768,7 @@ fn agent_handle(req: &ClearRequest, caller: &ClearCaller) -> Option<String> {
 }
 
 /// The user's own answer outranks a coordination row an agent wrote (agent,
-/// crown or beastmode authority): without this, an agent's
+/// team or beastmode authority): without this, an agent's
 /// `decide --question-id` row makes the user's board answer refuse as "a
 /// different answer". A live operator or chat_attested row keeps today's
 /// refusal, and an agent caller never overrides.
@@ -786,12 +786,12 @@ fn override_coordination(
     }
     matches!(
         row.get("authority_source").and_then(Value::as_str),
-        Some("agent") | Some("crown") | Some("beastmode")
+        Some("agent") | Some("team") | Some("beastmode")
     )
 }
 
 /// Production caller resolution: the ambient prover for the handle, the
-/// registry for the crown. A registry read error reads as not crowned
+/// registry for the team. A registry read error reads as not teamed
 /// (fail closed).
 fn resolve_clear_caller(req: &ClearRequest) -> ClearCaller {
     let ancestry_handle = crate::identity::ambient_agent_handle();
@@ -799,30 +799,29 @@ fn resolve_clear_caller(req: &ClearRequest) -> ClearCaller {
         req,
         &ClearCaller {
             ancestry_handle: ancestry_handle.clone(),
-            crowned: false,
+            teamed: false,
         },
     );
-    let crowned = handle
+    let teamed = handle
         .as_deref()
         .map(|handle| {
-            crate::territory::live_crowns(&crate::paths::AgentsHome::from_env().registry_json())
-                .map(|crowns| holds_crown(&crowns, handle))
+            crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json())
+                .map(|teams| holds_team(&teams, handle))
                 .unwrap_or(false)
         })
         .unwrap_or(false);
     ClearCaller {
         ancestry_handle,
-        crowned,
+        teamed,
     }
 }
 
-/// Whether `handle` holds a live crown: the crown-name store binds by session
+/// Whether `handle` holds a live team: the team-name store binds by session
 /// id (law d-e952ed19), so the holder's canonical handle is what compares.
 /// Pure, so tests drive it without a registry.
-fn holds_crown(crowns: &[crate::territory::Crown], handle: &str) -> bool {
-    crowns.iter().any(|crown| {
-        crown
-            .holder_session
+fn holds_team(teams: &[crate::territory::Team], handle: &str) -> bool {
+    teams.iter().any(|team| {
+        team.holder_session
             .as_deref()
             .is_some_and(|session| crate::identity::canonical_handle(session) == handle)
     })
@@ -927,11 +926,11 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
             continue;
         };
         // The clear door is the user's answer lane: an agent session never
-        // answers or withdraws a question asked of the user, and a crown
-        // answers (with --authority crown) only a question it asked itself.
+        // answers or withdraws a question asked of the user, and a team
+        // answers (with --authority team) only a question it asked itself.
         // This gate runs before make_decision, so the only agent session that
-        // reaches operator_can_grant below is a crown on its own ask, whose
-        // authority crown already fails there.
+        // reaches operator_can_grant below is a team on its own ask, whose
+        // authority team already fails there.
         let asker = question_event
             .get("data")
             .and_then(|data| data.get("asker"))
@@ -945,8 +944,8 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
                         .provenance
                         .get("authority_source")
                         .and_then(Value::as_str)
-                        == Some("crown")
-                    && caller.crowned
+                        == Some("team")
+                    && caller.teamed
             } else {
                 own_ask
             };
@@ -954,7 +953,7 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
                 refused += 1;
                 answer.lines.push(if req.answer.is_some() {
                     format!(
-                        "outstanding: refused: {qid} asks the user, and this session is agent {agent}. Nothing was closed; the question stays open. The user answers it on the question board (fno-agents state path questions) or at their own terminal: fno inbox outstanding clear {qid} --answer \"<answer>\". A crown answers only a question it asked, with --authority crown."
+                        "outstanding: refused: {qid} asks the user, and this session is agent {agent}. Nothing was closed; the question stays open. The user answers it on the question board (fno-agents state path questions) or at their own terminal: fno inbox outstanding clear {qid} --answer \"<answer>\". A team answers only a question it asked, with --authority team."
                     )
                 } else {
                     let shown = if asker.is_empty() { "the user" } else { asker };
@@ -1348,7 +1347,7 @@ fn make_decision(
             decision.insert("rationale".into(), json!(answer));
         }
     }
-    if matches!(authority, "crown" | "agent" | "beastmode") {
+    if matches!(authority, "team" | "agent" | "beastmode") {
         if let Some(node) = node {
             let connection = crate::backlog::open(&req.graph)?;
             let exists: bool = connection

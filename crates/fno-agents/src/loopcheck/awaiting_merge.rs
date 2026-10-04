@@ -1,4 +1,4 @@
-//! The DoneAwaitingMerge classifier: main's red per workflow, and a crown's
+//! The DoneAwaitingMerge classifier: main's red per workflow, and a team's
 //! ruling hold, as two ways to prove a worker's merge is blocked by someone
 //! else's decision rather than its own breakage. Split out (the file-budget
 //! remedy) from the middle of `loopcheck.rs`, which is shrink-only.
@@ -195,7 +195,7 @@ pub(super) fn already_emitted_awaiting_merge(events_path: &Path, session_id: &st
     })
 }
 
-/// The crown's ruling on a node, if any: `dispatch_hold_verdict`'s reason
+/// The team's ruling on a node, if any: `dispatch_hold_verdict`'s reason
 /// when the hold is validly HELD. An invalid hold, an absent hold, or any
 /// read error (unreadable graph, no such node) returns `None` so the caller
 /// falls through to the main-red proof or blocks as today - a ruling is

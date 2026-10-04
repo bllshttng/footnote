@@ -7,7 +7,7 @@
 # Every
 # subprocess is bounded; the fixture is removed on exit. Exits zero only
 # after every named marker asserts:
-#   territory key, cap=4, kingless, and the cross-territory
+#   territory key, cap=4, leadless, and the cross-territory
 #   nominated-review row staying visible on the board.
 set -u
 
@@ -75,7 +75,7 @@ AGENTS_BIN="$ROOT/crates/fno-agents/target/debug/fno-agents"
 [ -x "$AGENTS_BIN" ] || AGENTS_BIN=$(command -v fno-agents) || fail "fno-agents binary required (cargo build -p fno-agents)"
 export FNO_AGENTS_BIN="$AGENTS_BIN"
 # The binary resolves the registry under FNO_AGENTS_HOME (Python resolves it
-# under the state dir); pin both to the fixture so the real machine's crown
+# under the state dir); pin both to the fixture so the real machine's team
 # registry cannot leak into the territory reads.
 export FNO_AGENTS_HOME="$FNO_HOME_DIR/agents"
 # Claims root must leave the machine before the fixture claims step writes.
@@ -122,7 +122,7 @@ locked_mutate_graph(pathlib.Path("$RESOLVED"), mutator)
 print("fixture graph written:", "$RESOLVED")
 PYEOF
 
-# --- fixture: registry cache (two live node-working rows, no crown) ---------
+# --- fixture: registry cache (two live node-working rows, no team) ---------
 # The rows carry the SCRIPT's pid ($$, via env: the quoted heredoc would not
 # expand it), which stays alive for every read below; a subprocess pid would
 # be dead by readout time.
@@ -178,10 +178,10 @@ targets = reading["targets"]
 assert isinstance(targets, list) and len(targets) == 1, targets
 t = targets[0]
 assert t["scope"] == "fno", t
-assert t["rung"] == 1 and t["kingless"] is True, t
+assert t["rung"] == 1 and t["leadless"] is True, t
 assert t["project"] == "fno", t
 print("MARKER territory-key: scope=fno rung=1 (resolver)")
-print("MARKER kingless: true (resolver)")
+print("MARKER leadless: true (resolver)")
 ' || fail "resolver markers"
 
 echo "== 4. territory readout =="
@@ -190,7 +190,7 @@ import json, sys
 rows = json.load(sys.stdin)
 assert isinstance(rows, list) and len(rows) == 1, rows
 r = rows[0]
-assert r["scope"] == "fno" and r["kingless"] is True, r
+assert r["scope"] == "fno" and r["leadless"] is True, r
 assert r["cap"] == 4, r
 assert r["live"] == 2, r
 print("MARKER cap: live=2 cap=4 (readout counts only this territory)")

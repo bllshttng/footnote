@@ -298,7 +298,7 @@ pub fn read_live(path: &Path) -> Result<Index, String> {
 
 /// A port of `_decision_lane(row) == "law"`: authority `operator` or
 /// `chat_attested`, `ts` at or after the cutover. Beastmode is the grant
-/// lane and agent/crown are coordination; neither is law.
+/// lane and agent/team are coordination; neither is law.
 pub fn is_law(row: &Value) -> bool {
     let authority = row
         .get("authority_source")

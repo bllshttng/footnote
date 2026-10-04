@@ -15,7 +15,7 @@
 # The claims/cli.py entries are the same shape, added 2026-08-19.
 # `fno agents claim status node:<id>` must answer "is a live worker on this
 # node" before it renders `free`, because `free` had two meanings and four
-# kings read the wrong one. Only the fleet roster can answer that, and
+# leads read the wrong one. Only the fleet roster can answer that, and
 # `fleet_rows` IS the roster, so like the two above it cannot move down. The
 # CORE stays clean: `reap_dead_claims` takes the probe as an injected
 # parameter and `fno.claims.core` imports nothing from the agents runtime.

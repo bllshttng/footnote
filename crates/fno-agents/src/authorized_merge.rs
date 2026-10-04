@@ -21,8 +21,8 @@ use std::process::Command;
 use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
 use crate::claims::{self, ClaimState};
-use crate::king_board::prs::{pr_binding_keys, retarget_binding_refusal};
 use crate::main_ci::main_ci_red_run;
+use crate::org_board::prs::{pr_binding_keys, retarget_binding_refusal};
 use crate::paths::canonical_repo_root;
 
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
@@ -405,7 +405,7 @@ pub trait Probes {
     fn live_lanes(&self, _cwd: &Path) -> usize {
         0
     }
-    /// The base branch `main`'s CI verdict, read by the king check-in's own
+    /// The base branch `main`'s CI verdict, read by the lead check-in's own
     /// reduction (`main_ci::main_ci_reading`, behind a short TTL row cache):
     /// a red object naming the failed workflow and head sha, or the
     /// `green`/`pending` word. `Err` = the read could not answer, which never
@@ -498,7 +498,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
 
     // The hold-while-red rule, mechanized: while main's latest settled run is
     // red, only a PR whose node is the declared main repair may merge. The
-    // king check-in's own reduction answers, never a check count; a pending
+    // lead check-in's own reduction answers, never a check count; a pending
     // main is not red, and an unreadable verdict never manufactures a red
     // (only a POSITIVE red holds, the checks gate's law).
     if facts.base_ref == "main" {
@@ -1122,7 +1122,7 @@ fn optional_reviews_blocker(value: Option<Option<i64>>) -> Option<Blocker> {
 /// Graph rows for the stub-manifest and plan-fidelity gates. An unreadable
 /// store degrades to None (the default hard merge path), as the Python did.
 fn walk_entries(cwd: &Path) -> Option<Vec<Value>> {
-    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = GraphStore::new(&graph_path);
     backlog_api::rows(&store).ok()
 }
@@ -2007,7 +2007,7 @@ fn node_carries_tag(entry: &Value, tag: &str) -> bool {
 /// The main-repair exemption probe over the live graph: `None` when this
 /// PR's node carries the [`MAIN_REPAIR_TAG`], else the repair-lane sentence.
 fn main_repair_hold_probe(cwd: &Path, facts: &PrFacts) -> Option<String> {
-    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = GraphStore::new(&graph_path);
     match backlog_api::rows(&store) {
         Err(e) => Some(format!(
@@ -2079,7 +2079,7 @@ fn main_repair_hold_from_entries(entries: &[Value], facts: &PrFacts) -> Option<S
 /// to and merges as before.
 fn node_binding_probe(cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
     let root = canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = GraphStore::new(&graph_path);
     match backlog_api::rows(&store) {
         Err(e) => ProbeOutcome::Inconclusive(format!(
@@ -2092,7 +2092,7 @@ fn node_binding_probe(cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
 
 /// The binding decision over already-read graph entries: the pure half of
 /// [`node_binding_probe`], so a unit test needs no filesystem. The three
-/// keys are the board classifier's own (`king_board::prs::pr_binding_keys`).
+/// keys are the board classifier's own (`org_board::prs::pr_binding_keys`).
 fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) -> ProbeOutcome {
     if detect_project(entries, &root.to_string_lossy()).is_none() {
         return ProbeOutcome::Clear;
@@ -2451,7 +2451,7 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     }
     // The freeze ops are the scoped merge freeze's transport, riding the same
     // payload the hold ops use: `{"op": "freeze-set"|"freeze-clear"|"freeze-check",
-    // ...}` writes and reads the crown's freeze record.
+    // ...}` writes and reads the team's freeze record.
     if payload
         .get("op")
         .and_then(Value::as_str)
@@ -3412,7 +3412,7 @@ mod tests {
             .insert(7, "green".to_string());
         fake.other_holds.borrow_mut().insert(
             7,
-            ProbeOutcome::Refused("dispatch_hold: held by the crown for a queued node".to_string()),
+            ProbeOutcome::Refused("dispatch_hold: held by the team for a queued node".to_string()),
         );
 
         let req8 = Request {
@@ -3750,7 +3750,7 @@ mod tests {
         // A repo-scoped PR with no binding key at all is the refusal, with
         // the bind remedy.
         let facts = PrFacts {
-            head_ref: "docs/crown-succeed-faq".to_string(),
+            head_ref: "docs/team-succeed-faq".to_string(),
             body: Some(String::new()),
             ..open_facts()
         };
@@ -3764,7 +3764,7 @@ mod tests {
         // No comparable url leaves the backref key unevaluable: Unknown, not
         // a refusal on a PR that may be bound through the back-pointer.
         let facts = PrFacts {
-            head_ref: "docs/crown-succeed-faq".to_string(),
+            head_ref: "docs/team-succeed-faq".to_string(),
             url: String::new(),
             body: Some(String::new()),
             ..open_facts()
@@ -4539,7 +4539,7 @@ mod tests {
     fn a_supplied_dispatch_hold_answer_rides_the_preview_without_a_probe() {
         // Held: the supplied reason becomes the blocker, no probe runs.
         let held = Request {
-            supplied_dispatch_hold: Some(Some("held by the crown".to_string())),
+            supplied_dispatch_hold: Some(Some("held by the team".to_string())),
             ..preview_request(8)
         };
         let codes: Vec<String> = preview_blockers(&clean(), &held)
@@ -4754,7 +4754,7 @@ mod tests {
         assert!(fake.gh_calls.borrow().is_empty());
     }
 
-    /// The king check-in's red token, stubbed: the run name and the sha it
+    /// The lead check-in's red token, stubbed: the run name and the sha it
     /// failed on. A stub verdict, never a live merge.
     fn red_main() -> Value {
         serde_json::json!({

@@ -1,7 +1,7 @@
 //! `evals-macro`: the failure-pattern leaderboard over the events journals,
 //! the native port of the Python `fno.evals.macro` fold.
 //!
-//! Same split as `king-history`: Python owns identity and paths - the
+//! Same split as `lead-history`: Python owns identity and paths - the
 //! `fno doctor evals macro` shell resolves `paths.event_journals()` and
 //! forwards the flags HERE - and the native side owns the fold, so the
 //! file-budget Python-tree ratchet holds. Daemon-free read, not a routable

@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn an_external_backend_refuses_the_default_store_but_not_an_explicit_one() {
-        // The shared env lock, not a private one: king_verdict_inputs' tests
+        // The shared env lock, not a private one: lead_verdict_inputs' tests
         // read FNO_TRACKER_BACKEND under `claims::test_env_lock`, and two
         // locks would let this flip land mid-read there.
         let _guard = crate::claims::test_env_lock();

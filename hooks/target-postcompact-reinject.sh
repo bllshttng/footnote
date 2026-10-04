@@ -14,7 +14,7 @@
 # CLAUDE_PLUGIN_ROOT), not from the event payload, so a lost or empty stdin cannot
 # silently downgrade Claude to a carrier the model never sees. That carrier choice
 # and the payload emission live in scripts/lib/postcompact-carrier.sh, shared with
-# hooks/king-postcompact-reinject.sh.
+# hooks/lead-postcompact-reinject.sh.
 set -uo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).

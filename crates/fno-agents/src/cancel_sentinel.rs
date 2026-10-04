@@ -1,7 +1,7 @@
 //! The cancel sentinel: is this run asked to stop?
 //!
 //! Two drivers, two sentinel families: a `/target` run reads the tombstone
-//! then the sentinel under the project's `.fno/`; the king reads only the
+//! then the sentinel under the project's `.fno/`; the lead reads only the
 //! `cancelled` twin of its own state file, so cancelling one lane never
 //! answers for the other.
 //!
@@ -22,8 +22,8 @@ pub(crate) enum CancelKind {
     /// The `.target-cancelled-final` tombstone. Never consumed here; it is
     /// keyed to a session and cleared by init.
     TargetTombstone,
-    /// The king's scoped `cancelled` twin. Never consumed here.
-    KingTwin,
+    /// The lead's scoped `cancelled` twin. Never consumed here.
+    LeadTwin,
 }
 
 pub(crate) struct CancelHit {
@@ -96,9 +96,9 @@ pub(crate) fn check_cancel_sentinel(
 ) -> Option<CancelHit> {
     let target_sentinel = cwd.join(".fno/.target-cancelled");
     let target_tombstone = cwd.join(".fno/.target-cancelled-final");
-    let king_sentinel = state_path.with_extension("cancelled");
-    let paths: Vec<(&Path, CancelKind)> = if driver == "king" {
-        vec![(king_sentinel.as_path(), CancelKind::KingTwin)]
+    let lead_sentinel = state_path.with_extension("cancelled");
+    let paths: Vec<(&Path, CancelKind)> = if driver == "lead" {
+        vec![(lead_sentinel.as_path(), CancelKind::LeadTwin)]
     } else {
         vec![
             (target_tombstone.as_path(), CancelKind::TargetTombstone),

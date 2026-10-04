@@ -211,7 +211,7 @@ async fn refusal_performs_zero_worker_effects() {
         },
     };
     let err = spawn(&req, &rt).await.expect_err("must refuse");
-    assert!(err.message().contains("mission or crown owner"), "{err}");
+    assert!(err.message().contains("mission or team owner"), "{err}");
     assert_eq!(journey.launches(), 0, "zero worker effects");
     assert!(
         journey

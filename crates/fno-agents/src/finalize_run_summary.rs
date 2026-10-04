@@ -53,7 +53,7 @@ pub(crate) fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u6
 
 /// True when this run already has a run_summary carrying `reason`. Finalize
 /// re-runs on every stop of a session parked at a non-ship terminal, and each
-/// fire used to emit + push a fresh copy (one king got 14 mails in 67 minutes
+/// fire used to emit + push a fresh copy (one lead got 14 mails in 67 minutes
 /// for a single DoneAwaitingMerge run). Keys on run PLUS reason so a session
 /// that hits Budget and then resumes to DoneAwaitingMerge still reports the
 /// new terminal. Committed rows are the record (the cutover stopped journal

@@ -407,9 +407,9 @@ fn run_client_resume(ctx: &Ctx, req: &Request, plan: &ConvertPlan, allow_new_id:
             plan.name
         ));
     };
-    // Read ONCE, before anything moves. A crown granted mid-transaction must
+    // Read ONCE, before anything moves. A team granted mid-transaction must
     // not change the verdict on a session that was already relaunched.
-    let crowned = crate::convert::client_resume::row_is_crowned(&entry);
+    let teamed = crate::convert::client_resume::row_is_teamed(&entry);
     let session_id = match entry.harness_session_id.clone() {
         Some(id) if !id.is_empty() => id,
         _ => {
@@ -508,7 +508,7 @@ fn run_client_resume(ctx: &Ctx, req: &Request, plan: &ConvertPlan, allow_new_id:
         &session_id,
         row.session_id.as_deref(),
         allow_new_id,
-        crowned,
+        teamed,
     );
     let new_id = match &verdict {
         crate::convert::client_resume::IdVerdict::Kept => session_id.clone(),

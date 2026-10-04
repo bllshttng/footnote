@@ -51,6 +51,15 @@ impl NodeSource {
             NodeSource::TranscriptLast => "transcript-last",
         }
     }
+
+    /// True when the source is a weak transcript witness: a mention,
+    /// never ownership. The dead-work gate keeps only on a strong source.
+    pub fn is_transcript(self) -> bool {
+        matches!(
+            self,
+            NodeSource::TranscriptFirst | NodeSource::TranscriptLast
+        )
+    }
 }
 
 /// The cascade verdict for one row: the node, which source answered, every

@@ -723,7 +723,7 @@ fn closure_claims_leg(
         Err(e) => return refused(format!("could not query PR #{pr_number}: {}", e.message)),
     };
     if ctx.state != "MERGED" {
-        let claims = crate::king_board::pr_closure::parse(&ctx.body);
+        let claims = crate::org_board::pr_closure::parse(&ctx.body);
         if !claims.is_empty() {
             return refused(format!(
                 "PR #{pr_number} is not merged (state={})",
@@ -732,7 +732,7 @@ fn closure_claims_leg(
         }
         return (Vec::new(), Vec::new(), None, Vec::new(), None);
     }
-    let claims = crate::king_board::pr_closure::parse(&ctx.body);
+    let claims = crate::org_board::pr_closure::parse(&ctx.body);
     if claims.is_empty() {
         return (Vec::new(), Vec::new(), None, ctx.changed_files, ctx.url);
     }
@@ -846,7 +846,7 @@ fn auto_discover_leg(
             continue;
         };
         supersession_files.insert(record.pr_number, ctx.changed_files.clone());
-        let claims = crate::king_board::pr_closure::parse(&ctx.body);
+        let claims = crate::org_board::pr_closure::parse(&ctx.body);
         if claims.is_empty() {
             continue;
         }

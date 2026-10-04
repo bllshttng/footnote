@@ -2792,6 +2792,7 @@ event_types:
         monitors:
           type: string
 
+  - {name: lead_armed, alias_of: reign_armed, sources: [loop, daemon]}
   - name: reign_checkin
     description: "One completed check-in body of a reign: indicators printed, levers pulled (if any). Carries canonical scope and change; crown_scope, crown, and result are refused aliases. The king stop hook writes a mechanical row when a beat is missed."
     sources: [loop, daemon, hook]
@@ -2804,6 +2805,7 @@ event_types:
         change:
           type: string
 
+  - {name: lead_checkin, alias_of: reign_checkin, sources: [loop, daemon, hook]}
   - name: reign_dispatch_exception
     description: "A reign spawned despite the no-dispatch rule, justified by a red dispatching arm in fno agents status. Names the arm and the node."
     sources: [loop, daemon]
@@ -2817,6 +2819,7 @@ event_types:
         scope:
           type: string
 
+  - {name: lead_dispatch_exception, alias_of: reign_dispatch_exception, sources: [loop, daemon]}
   - name: king_term
     description: "A crown's term was declared or extended via `fno agents king term <spec> [--reason]`, or the Stop-hook gate observed it reached. The receipt a reign's tenure bound leaves."
     sources: [loop, daemon, hook]
@@ -2836,6 +2839,7 @@ event_types:
         prior_state:
           type: string
 
+  - {name: lead_term, alias_of: king_term, sources: [loop, daemon, hook]}
   - name: event_payload_too_large
     description: "A Rust-emitted event payload exceeded limits.max_data_bytes (65536). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
     sources: [daemon, subagent]
@@ -2929,6 +2933,7 @@ event_types:
         cleared_rows:
           type: array
 
+  - {name: agent_team_vacated, alias_of: agent_crown_vacated, sources: [daemon]}
   - name: crown_succession_reverted
     description: "A succession whose heir died before binding reverted: the reap sweep restored the predecessor's session on the crown-name record past the revert window, with the heir's registry row removed or terminal as the evidence. The pending marker cleared; the regnal stays bumped as lineage."
     sources: [daemon]
@@ -2946,6 +2951,7 @@ event_types:
         evidence:
           type: string
 
+  - {name: team_succession_reverted, alias_of: crown_succession_reverted, sources: [daemon]}
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
@@ -7456,6 +7462,7 @@ event_types:
           description: "The crowned session's id."
     consumers: [operator]
 
+  - {name: lead_context_nudge, alias_of: king_context_nudge, sources: [hook]}
   - name: session_context_nudge
     description: "Emitted by hooks/context-nudge.sh (Stop) when any non-crowned session ends a turn past used_pct_trigger (default 50). The every-session generalization of king_context_nudge: the probe already ran for every session at the old crown gate and was discarded, so this stops wasting that reading. `fno doctor event audit` distinguishes a king nudge (king_context_nudge) from a general-session nudge."
     sources: [hook]
@@ -7492,6 +7499,7 @@ event_types:
           type: string
     consumers: [operator]
 
+  - {name: lead_orphan_block, alias_of: king_orphan_block, sources: [hook]}
   - name: carveout_resolved
     description: "Emitted by `fno backlog carveout resolve --reason`. A carve-out removed from the ledger with no node filed leaves no trace anywhere else, so the reason is the only record that the work was dispositioned rather than dropped. Required when the ledger row is retired without becoming tracked work: the backlog has no delete verb, so a junk node is permanent and a reasoned resolve is the cheaper correction."
     sources: [backlog]
@@ -7564,6 +7572,7 @@ event_types:
           description: "What the action was against: a node id, a claim key, or a PR number. The dry-fire counter keys on this, so it must identify the thing acted on, never the action."
     consumers: [operator]
 
+  - {name: lead_action, alias_of: king_action, sources: [target]}
   - name: king_loop_check
     description: "One king loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
     sources: [hook]
@@ -7589,6 +7598,7 @@ event_types:
           description: "Why a quiet Codex reign could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
     consumers: [operator]
 
+  - {name: lead_loop_check, alias_of: king_loop_check, sources: [hook]}
   - name: king_goal_resumed
     description: "An admitted Codex king wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
     sources: [loop]
@@ -7616,6 +7626,7 @@ event_types:
           description: "The Codex readback confirming objective, active status and continuation owner."
     consumers: [operator]
 
+  - {name: lead_goal_resumed, alias_of: king_goal_resumed, sources: [loop]}
   - name: king_drain_reserve
     description: "One king fire whose drain read spent at least half the reserve held back for it. The reserve is silent by design, so this row is the series that shows how close each fire's kill came: elapsed_ms near bound_ms means an expensive read, remaining_budget_ms near zero means a starved fire, and the pair separates the two."
     sources: [hook]
@@ -8136,6 +8147,7 @@ event_types:
       required: []
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
+  - {name: lead_drain_reserve, alias_of: king_drain_reserve, sources: [hook]}
 limits:
   max_data_bytes: 65536
   data_size_encoding: compact-json-ascii-v1

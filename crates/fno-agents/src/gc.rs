@@ -42,9 +42,9 @@ pub struct GcRow {
     /// The row's `origin` (state.rs): only `"operator"` protects, and only
     /// `"spawn"` retires; `None` is not the same fact as either.
     pub origin: Option<String>,
-    /// An orchestrator crown rides this row (US9). A crowned row is never
+    /// An orchestrator team rides this row (US9). A teamed row is never
     /// retired by a sweep.
-    pub crowned: bool,
+    pub teamed: bool,
     /// WORK-done through the reverse join: named on which nodes, and are they
     /// all `done`.
     pub work: WorkState,
@@ -154,6 +154,15 @@ pub struct GcRow {
     /// reaped as unattended while it holds one. `None` when
     /// the pass read no such claim (or the claims root read empty).
     pub live_claim: Option<String>,
+    /// The row's node resolved from a dispatch record (sessions, registry,
+    /// name), not a transcript mention: this session WORKED the node. A
+    /// transcript mention is a witness, never ownership, so it does not
+    /// qualify the row as the node's dead worker.
+    pub worked_node: bool,
+    /// A live or suspect `node:<id>` claim whose session is not this row:
+    /// another session owns the node, so this row must not resume it.
+    /// `None` when no such claim was read.
+    pub node_held_elsewhere: Option<String>,
 }
 
 impl GcRow {
@@ -204,8 +213,8 @@ pub const INACTIVE_NODE_STATUSES: [&str; 2] = ["deferred", "idea"];
 pub enum KeepReason {
     /// `origin: operator`: a human's row, never touched by a sweep.
     Operator,
-    /// A crowned orchestrator row.
-    Crowned,
+    /// A teamed orchestrator row.
+    Teamed,
     /// Origin is not `spawn` (adopted, or nothing recorded): only a row fno
     /// itself spawned retires, whatever the work state says.
     NotSpawn { origin: String },
@@ -259,9 +268,9 @@ pub enum KeepReason {
     OpenPr { node: String, pr: u64 },
     /// The node reads in_progress and the row's claude roster row is a
     /// stale pre-death row (non-terminal state, no pid): the worker died
-    /// with uncommitted work on the node (law d-71d03643: resumed, never
-    /// stranded). The keep holds the row so the nudge ladder's Resume rung
-    /// can run `fno agents resume` on it.
+    /// mid-node (law d-71d03643: resumed, never stranded). The keep holds
+    /// the row so the nudge ladder's Resume rung can run `fno agents
+    /// resume` on it.
     DeadOpenWork { node: String },
     /// A live or suspect work-claim names this session as its holder:
     /// the claim's holder process answered the pid probe, the strongest
@@ -275,7 +284,7 @@ impl KeepReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             KeepReason::Operator => "operator",
-            KeepReason::Crowned => "crowned",
+            KeepReason::Teamed => "teamed",
             KeepReason::NotSpawn { .. } => "not a spawn row",
             KeepReason::NoProvenance => {
                 "no provenance: no source resolved a node (sessions, registry, name, transcript)"
@@ -318,14 +327,14 @@ pub enum TreeAction {
 }
 
 /// The one row decision. Order matters and each gate names itself: operator,
-/// crown, provenance, open work, transcript, grace, retire. No boolean folds
+/// team, provenance, open work, transcript, grace, retire. No boolean folds
 /// two questions together.
 pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     if row.origin.as_deref() == Some("operator") {
         return (GcAction::Keep, Some(KeepReason::Operator));
     }
-    if row.crowned {
-        return (GcAction::Keep, Some(KeepReason::Crowned));
+    if row.teamed {
+        return (GcAction::Keep, Some(KeepReason::Teamed));
     }
     // Only a row fno itself spawned retires. An `adopted` row (a session the
     // operator took over) or a row with no origin recorded is someone else's
@@ -354,7 +363,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     }
     // The cascade's holds relay through here so every keep is named by the
     // policy: a conflict between witnesses, or PR evidence contradicting a
-    // done node. Gate order is unchanged - operator, crown and origin
+    // done node. Gate order is unchanged - operator, team and origin
     // outrank it, exactly as they outrank the provenance arm below.
     if let Some(hold) = &row.confirm_hold {
         return (GcAction::Keep, Some(hold.clone()));
@@ -446,6 +455,8 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // the successor this row must not double-drive.
             if status == "in_progress"
                 && row.process_gone
+                && row.worked_node
+                && row.node_held_elsewhere.is_none()
                 && row.superseded_by_live_peer.is_none()
                 && !row.node_merged
             {
@@ -1163,11 +1174,11 @@ pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_re
 
 /// The production roster sweep the retire arm runs: the real enumeration
 /// and removal, `dry_run` false, at the scope the caller resolved.
-/// The production dead-crown sweep the retire arm runs: apply on. The
-/// manual verb calls `crown_reap::sweep` itself so a dry run can report
+/// The production dead-team sweep the retire arm runs: apply on. The
+/// manual verb calls `team_reap::sweep` itself so a dry run can report
 /// without applying.
-pub fn production_crown_sweep(home: &AgentsHome, cwd: &Path) -> crate::crown_reap::CrownReap {
-    crate::crown_reap::production_sweep(home, cwd, true)
+pub fn production_team_sweep(home: &AgentsHome, cwd: &Path) -> crate::team_reap::TeamReap {
+    crate::team_reap::production_sweep(home, cwd, true)
 }
 
 pub fn production_roster_sweep(
@@ -1194,7 +1205,7 @@ pub fn maybe_retirement_sweep(
         i64,
         crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary,
-    crown_sweep: fn(&AgentsHome, &Path) -> crate::crown_reap::CrownReap,
+    team_sweep: fn(&AgentsHome, &Path) -> crate::team_reap::TeamReap,
 ) {
     if last_sweep.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
         return;
@@ -1208,10 +1219,10 @@ pub fn maybe_retirement_sweep(
         let grace_secs = crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
         let _ = state_file_sweep(&home, &emitter, &grace_cwd);
-        // The dead-crown sweep runs BEFORE the registry sweep: a vacated
-        // crown frees the territory this tick, so the registry pass reads a
+        // The dead-team sweep runs BEFORE the registry sweep: a vacated
+        // team frees the territory this tick, so the registry pass reads a
         // world that already answers for it.
-        let crowns = crown_sweep(&home, &grace_cwd);
+        let teams = team_sweep(&home, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         // Locked Decision 5: the nudge ladder rides the daemon's retire arm
         // only, after the sweep that classified the open-PR rows. A manual
@@ -1271,17 +1282,17 @@ pub fn maybe_retirement_sweep(
                 roster.refused.len()
             )
         };
-        let crowns_detail = if crowns.unread.is_some() {
-            "crowns=unreadable".to_string()
+        let teams_detail = if teams.unread.is_some() {
+            "teams=unreadable".to_string()
         } else {
             format!(
-                "crowns=vacated {} kept {}",
-                crowns.vacated.len(),
-                crowns.kept.len()
+                "teams=vacated {} kept {}",
+                teams.vacated.len(),
+                teams.kept.len()
             )
         };
         let detail = format!(
-            "roster={roster_detail} {mux_detail} {crowns_detail} {builds_detail} held={}",
+            "roster={roster_detail} {mux_detail} {teams_detail} {builds_detail} held={}",
             summary.holds.len()
         );
         // `acted` counts BOTH sweeps' retirements: the registry sweep's and
@@ -1363,10 +1374,10 @@ mod tests {
         crate::roster_reap::RosterReapSummary::default()
     }
 
-    /// Same stub for the crown seam: the arm wiring is under test, never
-    /// the dead-crown sweep body.
-    fn noop_crown_sweep(_home: &AgentsHome, _cwd: &Path) -> crate::crown_reap::CrownReap {
-        crate::crown_reap::CrownReap::default()
+    /// Same stub for the team seam: the arm wiring is under test, never
+    /// the dead-team sweep body.
+    fn noop_team_sweep(_home: &AgentsHome, _cwd: &Path) -> crate::team_reap::TeamReap {
+        crate::team_reap::TeamReap::default()
     }
 
     use super::*;
@@ -1466,7 +1477,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
-                noop_crown_sweep,
+                noop_team_sweep,
             );
             // A second tick inside the window is refused by the elapsed
             // check: no second run can start until the window closes.
@@ -1480,7 +1491,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
-                noop_crown_sweep,
+                noop_team_sweep,
             );
             let rows = wait_for_retire_row(&home.events_jsonl());
             assert_eq!(rows, 1, "two ticks in one window must yield one sweep");
@@ -1530,7 +1541,7 @@ mod tests {
                 interval,
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
-                noop_crown_sweep,
+                noop_team_sweep,
             );
             wait_for_retire_row(&home.events_jsonl());
             let row = crate::events::committed_journal_text(&home.events_jsonl())
@@ -1617,7 +1628,7 @@ mod tests {
                 Duration::from_secs(300),
                 tab_sweep,
                 roster_sweep,
-                noop_crown_sweep,
+                noop_team_sweep,
             );
             // The production seams probe staged rows through real
             // subprocesses; in a sandbox without a transcript store those
@@ -2008,7 +2019,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
-                noop_crown_sweep,
+                noop_team_sweep,
             );
             // The production age probe pays a real subprocess on this
             // fixture (two probes, seconds apiece under load), so the tick
@@ -2526,7 +2537,7 @@ mod tests {
     fn retiring() -> GcRow {
         GcRow {
             origin: Some("spawn".into()),
-            crowned: false,
+            teamed: false,
             work: WorkState::AllDone {
                 nodes: vec!["N1".into()],
             },
@@ -2552,6 +2563,8 @@ mod tests {
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
             live_claim: None,
+            worked_node: true,
+            node_held_elsewhere: None,
         }
     }
 
@@ -3300,7 +3313,7 @@ mod tests {
     }
 
     #[test]
-    fn ac3_edge_operator_crown_open_work_and_active_keep() {
+    fn ac3_edge_operator_team_open_work_and_active_keep() {
         let operator = GcRow {
             origin: Some("operator".into()),
             ..retiring()
@@ -3310,13 +3323,13 @@ mod tests {
             (GcAction::Keep, Some(KeepReason::Operator))
         );
 
-        let crowned = GcRow {
-            crowned: true,
+        let teamed = GcRow {
+            teamed: true,
             ..retiring()
         };
         assert_eq!(
-            gc_decide(&crowned, GRACE),
-            (GcAction::Keep, Some(KeepReason::Crowned))
+            gc_decide(&teamed, GRACE),
+            (GcAction::Keep, Some(KeepReason::Teamed))
         );
 
         // Only a spawn row retires: adopted (and an unrecorded origin) keep
@@ -3476,7 +3489,7 @@ mod tests {
     #[test]
     fn keep_reason_tags_name_their_gate() {
         assert_eq!(KeepReason::Operator.as_str(), "operator");
-        assert_eq!(KeepReason::Crowned.as_str(), "crowned");
+        assert_eq!(KeepReason::Teamed.as_str(), "teamed");
         assert_eq!(
             KeepReason::NoProvenance.as_str(),
             "no provenance: no source resolved a node (sessions, registry, name, transcript)"
@@ -3853,7 +3866,7 @@ mod tests {
     fn gc_keeps_synthesized_idle_row() {
         let row = GcRow {
             origin: Some("spawn".into()),
-            crowned: false,
+            teamed: false,
             work: WorkState::NoProvenance,
             transcript_age_s: Some(10_000),
             owns_worktree: true,
@@ -3877,6 +3890,8 @@ mod tests {
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
             live_claim: None,
+            worked_node: true,
+            node_held_elsewhere: None,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -3886,7 +3901,7 @@ mod tests {
     fn open_pr_row(node: &str, status: &str, pr: u64) -> GcRow {
         GcRow {
             origin: Some("spawn".into()),
-            crowned: false,
+            teamed: false,
             work: WorkState::Open {
                 node: node.into(),
                 status: status.into(),
@@ -3913,6 +3928,8 @@ mod tests {
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
             live_claim: None,
+            worked_node: true,
+            node_held_elsewhere: None,
         }
     }
 

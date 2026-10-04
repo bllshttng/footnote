@@ -272,7 +272,7 @@ pub(crate) enum WriteAction {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FacetPick {
     /// Index into the fixed facet list (project, epic, status, priority,
-    /// size, king).
+    /// size, lead).
     pub(crate) facet: usize,
     /// The facet-list cursor.
     pub(crate) sel: usize,
@@ -717,7 +717,7 @@ fn flow_line(flow: &Value) -> String {
 }
 
 /// The persistent filter bar's cells: Search, Status, Type, Priority,
-/// Milestone (the epic set), Labels, then Project and King when set.
+/// Milestone (the epic set), Labels, then Project and Lead when set.
 /// Cells join with ` │ ` and the caller wraps them by width. When no node
 /// carries a tag, the Labels cell says so.
 pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BLine> {
@@ -743,9 +743,9 @@ pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BL
     } else {
         cells.push(("Labels", labels));
     }
-    if !set("project").is_empty() || !set("king").is_empty() {
+    if !set("project").is_empty() || !set("lead").is_empty() {
         cells.push(("Project", set("project")));
-        cells.push(("King", set("king")));
+        cells.push(("Lead", set("lead")));
     }
     let mut lines: Vec<BLine> = Vec::new();
     let mut line = BLine::plain(String::new());
@@ -1202,7 +1202,7 @@ fn toggle_full(view: &mut View) {
 /// only the plain-byte chunks feed the board's own folder. Before this
 /// fix the prefix byte fell into the board's byte catch-all, so `^B C`
 /// toggled nothing and `^B ?` armed the board's own keys overlay behind the
-/// operator's back; the court fold could not be collapsed while the board
+/// operator's back; the org fold could not be collapsed while the board
 /// held the sideline.
 pub(crate) async fn route_board_keys(
     view: &mut View,
@@ -1292,7 +1292,7 @@ pub(crate) async fn board_keys(
 
             ModalKey::Byte(b'b') => dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => launch_target(view, sock_w).await?,
-            ModalKey::Byte(b'A') => ask_the_king(view, sock_w).await?,
+            ModalKey::Byte(b'A') => ask_the_lead(view, sock_w).await?,
             ModalKey::Byte(b'c') => open_colpick(view),
             ModalKey::Byte(b'?') => open_keys_overlay(view),
             ModalKey::Byte(b'\t') => toggle_view(view),
@@ -1768,25 +1768,25 @@ pub(crate) async fn launch_target(
     Ok(())
 }
 
-/// `A`: ask the king for a blueprint. The king is the model's
-/// `card.king`; none means a notice and no mail. Sent wrapped through
+/// `A`: ask the lead for a blueprint. The lead is the model's
+/// `card.lead`; none means a notice and no mail. Sent wrapped through
 /// `Command::MailAgent` (law d-f6570dc9: never `--raw`).
-pub(crate) async fn ask_the_king(
+pub(crate) async fn ask_the_lead(
     view: &mut View,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
-    let (id, king, title) = {
+    let (id, lead, title) = {
         let b = view.backlog_board.as_mut().expect("board open");
         let Some(id) = edit_target(b) else {
             return Ok(());
         };
-        let Some(king) = card_king_name(b, &id) else {
-            view.set_notice(format!("no king rules {id}, its epic or its project"));
+        let Some(lead) = card_lead_name(b, &id) else {
+            view.set_notice(format!("no lead rules {id}, its epic or its project"));
             return Ok(());
         };
         (
             id.clone(),
-            king,
+            lead,
             find_card(b, &id)
                 .map(|c| c.title.clone())
                 .unwrap_or_default(),
@@ -1800,16 +1800,16 @@ pub(crate) async fn ask_the_king(
     text.push_str(". Sent from the mux backlog view.");
     write_msg(
         sock_w,
-        &ClientMsg::Command(Command::MailAgent { name: king, text }),
+        &ClientMsg::Command(Command::MailAgent { name: lead, text }),
     )
     .await
-    .map_err(|e| format!("king mail send failed: {e}"))
+    .map_err(|e| format!("lead mail send failed: {e}"))
 }
 
-/// The target node's king name, from the model's card.
-fn card_king_name(b: &BoardView, id: &str) -> Option<String> {
+/// The target node's lead name, from the model's card.
+fn card_lead_name(b: &BoardView, id: &str) -> Option<String> {
     let card = find_card(b, id)?;
-    card.king.as_ref().map(|k| k.name.clone())
+    card.lead.as_ref().map(|k| k.name.clone())
 }
 
 /// Find a card by id anywhere on the board.
@@ -1902,7 +1902,7 @@ fn facet_keys(view: &mut View, bytes: &[u8]) {
 
 /// The fixed facet list, one row of the first-level popup.
 pub(crate) const FACET_NAMES: [&str; 8] = [
-    "project", "epic", "status", "type", "priority", "size", "king", "tag",
+    "project", "epic", "status", "type", "priority", "size", "lead", "tag",
 ];
 
 /// The facets this backend can answer and whose value list is not empty,
@@ -1979,7 +1979,7 @@ fn facet_values(board: &Board, facet: usize) -> Vec<(String, String)> {
             .collect(),
         6 => board
             .facets
-            .kings
+            .leads
             .iter()
             .map(|k| (k.clone(), k.clone()))
             .collect(),
@@ -2401,7 +2401,7 @@ fn board_keys_popup() -> Popup {
         pick_row("c columns (show, order, focus width)"),
         PopupRow::Header("write".into()),
         PopupRow::Rule,
-        pick_row("b blueprint - t target - A ask the king"),
+        pick_row("b blueprint - t target - A ask the lead"),
         pick_row("T top rank - K before - J after"),
     ];
     Popup::new(rows, Anchor::Center)

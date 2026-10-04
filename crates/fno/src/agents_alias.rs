@@ -64,7 +64,7 @@ fn old_spelling_notice(verb: &str) -> Option<String> {
 /// the web bridge writes nothing).
 #[cfg(not(test))]
 fn rundown_out_arg() -> Option<OsString> {
-    let (root, faithful) = crate::reign_root::reign_state_root();
+    let (root, faithful) = crate::org_root::lead_state_root();
     if !faithful {
         return None;
     }
