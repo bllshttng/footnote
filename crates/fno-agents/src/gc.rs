@@ -823,16 +823,23 @@ fn names_fno_py(args: &str) -> bool {
 }
 
 /// True when argv names a stdio MCP server in the codegraph family: the
-/// `serve --mcp` token pair that convention carries, or the `--liftoff-only`
-/// V8 flag the codegraph launcher prepends to its bundled workers. A server
+/// `serve --mcp` token pair that convention carries, or the codegraph
+/// launcher's `--liftoff-only` V8 flag beside a `codegraph` path token (the
+/// flag alone is generic V8, so only the pairing names this family). A server
 /// whose argv carries neither marker is invisible to the reap gate; a bare
 /// `--mcp` flag without the `serve` pair is not a match.
 fn names_stdio_mcp_server(args: &str) -> bool {
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    tokens
+    if tokens
         .windows(2)
         .any(|w| w[0] == "serve" && w[1] == "--mcp")
-        || tokens.iter().any(|t| *t == "--liftoff-only")
+    {
+        return true;
+    }
+    tokens.iter().any(|t| *t == "--liftoff-only")
+        && tokens
+            .iter()
+            .any(|t| t.rsplit('/').next().unwrap_or(t).contains("codegraph"))
 }
 
 /// True when argv names Claude Code pool machinery: the daemon's spare pool
@@ -2309,9 +2316,10 @@ mod tests {
 
     /// The argv clause matches a TOKEN, not a substring, in both reparable
     /// families: the fno-py entrypoint by basename, and stdio MCP servers by
-    /// the `serve --mcp` pair or the codegraph `--liftoff-only` launcher flag.
-    /// A flag that merely contains a marker string is not the family, and
-    /// killing on it would end somebody's foreground command.
+    /// the `serve --mcp` pair or the codegraph `--liftoff-only` launcher flag
+    /// paired with a codegraph path token. A flag that merely contains a
+    /// marker string is not the family, and killing on it would end
+    /// somebody's foreground command.
     #[test]
     fn the_argv_clause_matches_its_families_by_token() {
         assert!(!is_reapable_orphan(
@@ -2338,7 +2346,7 @@ mod tests {
         ));
         assert!(is_reapable_orphan(
             &orphan(
-                "node --liftoff-only /x/lib/dist/bin/codegraph.js serve --mcp",
+                "node --liftoff-only /x/lib/dist/bin/codegraph.js init -y",
                 1,
                 86_400
             ),
@@ -2346,9 +2354,13 @@ mod tests {
             &[]
         ));
         // Token-exact: `--mcp-config` and a bare `--mcp` without the `serve`
-        // pair name nothing this gate may end.
+        // pair name nothing this gate may end, and `--liftoff-only` without a
+        // codegraph path is generic V8, somebody else's daemonized node.
         assert!(!names_stdio_mcp_server("claude --mcp-config '{}' -p ok"));
         assert!(!names_stdio_mcp_server("node server.js --mcp"));
+        assert!(!names_stdio_mcp_server(
+            "node --liftoff-only /x/wasm-test/run.js"
+        ));
         // An MCP child of a live spare is MEASURED, never reaped: it may be
         // the server the spare's next adopted session uses.
         let table = vec![
