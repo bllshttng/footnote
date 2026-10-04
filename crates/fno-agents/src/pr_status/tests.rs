@@ -428,6 +428,32 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
         escape_refusal_remedy("secondary rate limit", "repos/x/y").is_none(),
         "another failure carries no remedy"
     );
+
+    // A row written before the strip carries raw ANSI and no gh call fixes
+    // it: the hit path normalizes it too.
+    let legacy_row = json!({"ts": 1.0, "log": "\u{1b}[31mstep failed, stopping (fail-fast): legacy-shard\u{1b}[0m\n"});
+    std::fs::write(
+        dir.path().join("job-Owner--Repo-4001.json"),
+        legacy_row.to_string(),
+    )
+    .unwrap();
+    let empty_fake = FakeGh {
+        raw: serde_json::json!({}),
+        log_reads: AtomicUsize::new(0),
+        log_args: std::sync::Mutex::new(Vec::new()),
+        pulls_fail: None,
+    };
+    let from_legacy = job_log(&empty_fake, cwd, "Owner--Repo", "Owner", "Repo", "4001").unwrap();
+    assert!(
+        !from_legacy.contains('\u{1b}'),
+        "a legacy row serves escape-free: {from_legacy:?}"
+    );
+    assert_eq!(failing_step(&from_legacy).as_deref(), Some("legacy-shard"));
+    assert_eq!(
+        empty_fake.log_reads.load(Ordering::SeqCst),
+        0,
+        "the hit spent no gh call"
+    );
 }
 
 /// The settled-marker rule: a cancelled run is red AND unsettled; an

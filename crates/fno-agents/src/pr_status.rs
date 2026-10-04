@@ -581,7 +581,9 @@ pub(crate) fn job_log<P: GhProbe>(
     if let Ok(row) = std::fs::read_to_string(&path) {
         if let Ok(parsed) = serde_json::from_str::<Value>(&row) {
             if let Some(log) = parsed.get("log").and_then(Value::as_str) {
-                return Ok(log.to_string());
+                // Rows written before the strip carry raw ANSI; the strip is
+                // idempotent, so normalizing the hit costs nothing on clean text.
+                return Ok(crate::claude_ask::strip_ansi_csi(log).into_owned());
             }
         }
     }
