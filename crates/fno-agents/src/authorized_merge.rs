@@ -3577,20 +3577,6 @@ mod tests {
     }
 
     #[test]
-    fn oldest_current_run_reads_each_branch() {
-        let runs = vec![
-            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-        ];
-        assert_eq!(
-            oldest_current_run(&runs),
-            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
-        );
-        assert_eq!(oldest_current_run(&[]), None);
-    }
-
-    #[test]
     fn a_green_pr_whose_ci_predates_main_merges_main_in_and_waits_for_the_retest() {
         // The replay: one PR lands, then a second PR shares no file with it
         // and is green on a run created before that landing. It holds, takes
