@@ -667,19 +667,19 @@ class TestParentEdgeNotice:
 
 class TestReignTyped:
     def test_crowned_spawn_payload_opens_with_the_verb(self):
-        from fno.agents.dispatch import _reign_typed_message
+        from fno.agents.crown_thread import reign_typed_message
 
-        message, typed = _reign_typed_message("run the territory", 2, "epic-x", False)
+        message, typed = reign_typed_message("run the territory", 2, "epic-x", False)
         assert typed is True
         assert message.splitlines()[0] == "/fno:lead epic-x"
         # The operator's brief follows the verb as the payload body.
         assert message.splitlines()[1] == "run the territory"
 
     def test_uncrowned_and_revived_spawns_keep_their_payload(self):
-        from fno.agents.dispatch import _reign_typed_message
+        from fno.agents.crown_thread import reign_typed_message
 
-        assert _reign_typed_message("brief", None, None, False) == ("brief", False)
-        assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
+        assert reign_typed_message("brief", None, None, False) == ("brief", False)
+        assert reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
 
 
 # ---------------------------------------------------------------------------

@@ -42,10 +42,10 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
 from fno.agents import launch_provenance
+from fno.agents.crown_thread import reign_typed_message as _reign_typed_message
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
-    _reign_typed_message,
     _report_unlinked_parent,
     build_spawn_provenance,
     _capture_spawn_trigger,
