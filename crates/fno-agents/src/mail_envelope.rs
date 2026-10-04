@@ -7,24 +7,19 @@ fn live_entry_for_address<'a>(
     address: Option<&str>,
 ) -> Option<&'a crate::state::RegistryEntry> {
     let address = address.filter(|s| !s.is_empty())?;
-    let mut matches = registry.entries.iter().filter(|entry| {
+    let keep = |entry: &crate::state::RegistryEntry| {
         !matches!(
             entry.status,
             crate::AgentStatus::Exited
                 | crate::AgentStatus::Orphaned
                 | crate::AgentStatus::Failed
                 | crate::AgentStatus::PermanentDead
-        ) && (entry.harness_session_id.as_deref() == Some(address)
-            || entry.related_session_id.as_deref() == Some(address)
-            || entry.name == address
-            || entry.short_id == address
-            || entry.aliases.iter().any(|alias| alias == address))
-    });
-    let row = matches.next()?;
-    if matches.next().is_some() {
-        return None;
+        )
+    };
+    match crate::agent_ref::resolve_address(&registry.entries, address, keep) {
+        crate::agent_ref::Join::One(row) => Some(row),
+        crate::agent_ref::Join::Ambiguous | crate::agent_ref::Join::None => None,
     }
-    Some(row)
 }
 
 fn crown_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {

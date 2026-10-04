@@ -2676,8 +2676,40 @@ where
     // false alarm. Within the accounting the receipt still precedes its own
     // event.
     account_for_removed_rows(path, &before_entries, &registry.entries);
+    project_identity(path, &registry.entries);
     let _ = lock.unlock();
     Ok(out)
+}
+
+/// The registry write projects identity into the store (ruling d-f9c59b68):
+/// each row's fno_id, harness and fleet name land on the agent_sessions
+/// parent keyed by its harness session id. A store open failure logs and
+/// never fails the registry write - the store catches up on a later write.
+fn project_identity(registry_path: &Path, entries: &[RegistryEntry]) {
+    let project = || -> Result<(), String> {
+        let state_root = registry_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| format!("{} has no state root", registry_path.display()))?;
+        let graph = crate::state_layout::place(state_root, "graph.json");
+        let connection = crate::backlog::open(&graph)?;
+        for entry in entries {
+            let Some(session_id) = entry.harness_session_id.as_deref() else {
+                continue;
+            };
+            crate::backlog::entities::upsert_identity(
+                &connection,
+                session_id,
+                Some(entry.harness_name()),
+                entry.fno_id.as_deref(),
+                Some(&entry.name),
+            )?;
+        }
+        Ok(())
+    };
+    if let Err(error) = project() {
+        eprintln!("registry identity projection skipped: {error}");
+    }
 }
 
 /// Rename a row's LABEL in one transaction, the verb's only implementation.

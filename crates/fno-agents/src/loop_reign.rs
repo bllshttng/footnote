@@ -50,24 +50,13 @@ pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
 /// name), match name or alias, and refuse when the name still matches more
 /// than one row - the first match of a duplicate name is a guess, and the
 /// callers below act on the row.
-pub(crate) enum NameJoin<'a> {
-    One(&'a RegistryEntry),
-    Ambiguous,
-    None,
-}
+pub(crate) type NameJoin<'a> = crate::agent_ref::Join<'a>;
 
 fn join_rows<'a, F>(rows: &'a [RegistryEntry], name: &str, keep: F) -> NameJoin<'a>
 where
     F: Fn(&RegistryEntry) -> bool,
 {
-    let mut matches = rows.iter().filter(|row| {
-        keep(row) && (row.name == name || row.aliases.iter().any(|alias| alias == name))
-    });
-    match (matches.next(), matches.next()) {
-        (Some(row), None) => NameJoin::One(row),
-        (None, _) => NameJoin::None,
-        (Some(_), Some(_)) => NameJoin::Ambiguous,
-    }
+    crate::agent_ref::resolve(rows, crate::agent_ref::Key::Name(name), keep)
 }
 
 /// The join over live rows: every terminal row is invisible to it.
