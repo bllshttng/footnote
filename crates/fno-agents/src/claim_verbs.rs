@@ -1044,7 +1044,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
             // live row still claims its name - session-capture races leave
             // rows briefly idless, so a claim without a unique sid behind it
             // is its own ambiguity.
-            if !crate::loop_reign::is_terminal(e) {
+            if !crate::lead_state::is_terminal(e) {
                 let claim = sid.map(str::to_string);
                 if !e.name.is_empty() {
                     note_name(&mut by_name, e.name.clone(), claim.clone());

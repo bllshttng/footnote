@@ -667,15 +667,15 @@ fn moved_helpers_still_answer() {
         lead_of(std::slice::from_ref(&lead), "x-1", Some("x-9"), None),
         Some(("kd".into(), 2))
     );
-    let mut node_crown = row(None);
-    node_crown.name = "node-lead".into();
-    node_crown.crown_level = Some(1);
-    node_crown.crown_scope = Some("x-9".into());
-    let mut project_crown = row(None);
-    project_crown.name = "project-lead".into();
-    project_crown.crown_level = Some(2);
-    project_crown.crown_scope = Some("fno".into());
-    let both = [project_crown, node_crown];
+    let mut node_team = row(None);
+    node_team.name = "node-lead".into();
+    node_team.crown_level = Some(1);
+    node_team.crown_scope = Some("x-9".into());
+    let mut project_team = row(None);
+    project_team.name = "project-lead".into();
+    project_team.crown_level = Some(2);
+    project_team.crown_scope = Some("fno".into());
+    let both = [project_team, node_team];
     assert_eq!(
         lead_of(&both, "x-9", None, Some("fno")),
         Some(("node-lead".into(), 1)),
