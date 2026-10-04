@@ -153,6 +153,10 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno doctor lint style ...`: the native style check, exec'd through
+    /// the sibling fno-agents `style-check` verb. Args from the check name
+    /// onward; Python keeps every other lint check until its port.
+    DoctorLintStyle(Vec<OsString>),
     /// `fno doctor update` and root `fno update`: the native updater (the
     /// Python leg is deleted in the same change). Args from the verb name
     /// onward.
@@ -271,6 +275,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    if let Some(rest) = fno::lint_cli::classify_doctor_lint_style(args) {
+        return Role::DoctorLintStyle(rest);
     }
     if let Some(rest) = fno::doctor_update::classify(args) {
         return Role::DoctorUpdate(rest);
@@ -490,6 +497,14 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::DoctorLintStyle(rest) => {
+            // The argv the sibling answers is the verb name plus the tail
+            // the classifier sliced: `style-check --stdin ...`.
+            let mut argv: Vec<OsString> = Vec::with_capacity(rest.len() + 1);
+            argv.push(OsString::from("style-check"));
+            argv.extend(rest);
+            bootstrap::forward_agents(&argv, "fno doctor lint style")
+        }
         Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),

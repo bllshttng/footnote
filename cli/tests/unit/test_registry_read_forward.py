@@ -5,13 +5,12 @@ process running ahead of the deployment raised the on-disk schema and every
 deployed reader refused it at once. Mail died fleet-wide with no announcement,
 and the symptom surfaced far from the cause.
 
-The shape that fixes it is read forward, refuse to write, and say so out loud:
+The shape that fixes it is read forward, delegate safe writes, and say so out loud:
 
 - READ a higher on-disk schema instead of raising, keeping the rows and fields
   this reader understands and ignoring the ones it does not.
-- REFUSE to write while the on-disk schema is higher, because reading forward
-  drops unknown fields in memory and a write from that state would erase rows
-  the reader never saw.
+- DELEGATE a skewed write to Rust, which merges the raw disk rows and unknown
+  fields back before publishing, while honoring the writer compatibility floor.
 - ANNOUNCE every degraded read on stderr, naming both versions. A silent
   read-forward makes a partial row indistinguishable from a complete one, so a
   routing or liveness decision taken on a truncated row would leave no trace.
@@ -211,41 +210,76 @@ def test_the_same_row_stays_fatal_at_our_own_schema(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# Write closed
+# Skewed writes
 # --------------------------------------------------------------------------
 
 
-def test_write_refuses_while_on_disk_schema_is_higher(tmp_path: Path) -> None:
-    """The write block is what makes read-forward safe, not an extra precaution."""
-    path = tmp_path / "registry.json"
-    ahead = reg.SCHEMA_VERSION + 1
-    row = _row()
-    row["a_field_from_the_future"] = "keep me"
-    _write_raw(path, ahead, [row])
+def test_newer_schema_write_refuses_when_registry_commit_door_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-forward writer stays byte-safe when its Rust door is unavailable."""
+    from fno import rust_binary
 
-    entries = reg.load_registry(path)
-    with pytest.raises(reg.RegistryVersionError) as exc:
-        reg.write_registry(entries, path)
-
-    assert str(ahead) in str(exc.value)
-    assert str(reg.SCHEMA_VERSION) in str(exc.value)
-
-
-def test_a_refused_write_leaves_the_newer_file_untouched(tmp_path: Path) -> None:
-    """The point of refusing is that the shared file survives intact."""
     path = tmp_path / "registry.json"
     row = _row()
     row["a_field_from_the_future"] = "keep me"
     _write_raw(path, reg.SCHEMA_VERSION + 1, [row])
-    before = path.read_text(encoding="utf-8")
+    before = path.read_bytes()
+    calls: list[tuple[str, dict]] = []
 
-    # Load OUTSIDE the raises block: inside it, a load that raised would satisfy
-    # the assertion without write_registry ever being reached.
-    entries = reg.load_registry(path)
-    with pytest.raises(reg.RegistryVersionError):
-        reg.write_registry(entries, path)
+    def unavailable(verb: str, payload: dict, **_kwargs: object) -> dict:
+        calls.append((verb, payload))
+        raise rust_binary.VerbUnavailable("registry-commit is unavailable")
 
-    assert path.read_text(encoding="utf-8") == before
+    monkeypatch.setattr(rust_binary, "verb_call", unavailable)
+    with pytest.raises(reg.RegistryVersionError, match="registry-commit"):
+        reg.update_registry(lambda entries: entries, path)
+
+    assert [verb for verb, _payload in calls] == ["registry-commit"]
+    assert calls[0][1]["path"] == str(path)
+    assert path.read_bytes() == before
+
+
+def test_newer_schema_write_delegates_its_payload_to_registry_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compatible Rust door owns the skewed write and receives Python's rows."""
+    from fno import rust_binary
+
+    path = tmp_path / "registry.json"
+    row = _row()
+    row["a_field_from_the_future"] = "keep me"
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [row])
+    calls: list[tuple[str, dict]] = []
+
+    def written(verb: str, payload: dict, **_kwargs: object) -> dict:
+        calls.append((verb, payload))
+        return {"status": "written"}
+
+    monkeypatch.setattr(rust_binary, "verb_call", written)
+    entries = reg.update_registry(
+        lambda current: [
+            *current,
+            reg.AgentEntry(
+                name="worker-2",
+                cwd="/Users/x/proj",
+                log_path="/Users/x/proj/.fno/log-2",
+                harness="claude",
+                harness_session_id="f1c9c02c-fdad-4666-a613-8616b3e9f42b",
+            ),
+        ],
+        path,
+    )
+
+    assert len(calls) == 1
+    verb, payload = calls[0]
+    assert verb == "registry-commit"
+    assert payload["path"] == str(path)
+    assert payload["schema_version"] == reg.SCHEMA_VERSION
+    assert payload["agents"][0]["name"] == "worker-1"
+    assert payload["agents"][1]["name"] == "worker-2"
+    assert "a_field_from_the_future" not in payload["agents"][0]
+    assert [entry.name for entry in entries] == ["worker-1", "worker-2"]
 
 
 def test_write_still_works_at_the_current_schema(tmp_path: Path) -> None:

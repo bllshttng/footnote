@@ -178,9 +178,14 @@ pub(crate) fn run_logs_with<P: GhProbe>(
             1,
             stdout,
             format!(
-                "fno do pr logs: could not fetch the log for {}: {}\n",
+                "fno do pr logs: could not fetch the log for {}: {}{}\n",
                 super::check_name(target),
-                gh_failure_reason(&why)
+                gh_failure_reason(&why),
+                super::escape_refusal_remedy(
+                    &why,
+                    &format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                )
+                .unwrap_or_default(),
             ),
         ),
         Ok(log) => {

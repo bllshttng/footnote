@@ -3,6 +3,7 @@
 
 use super::*;
 use fno_agents::client::{RestartError, RestartOutcome};
+use fno_agents::restart_run::rm_after_drift_repair;
 use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
 use std::path::Path;
 
@@ -262,6 +263,12 @@ fn schema_rows() {
         schema.get("event_kinds").is_some(),
         "missing 'event_kinds' key"
     );
+    assert!(
+        schema["envelope"]["properties"]["source"]["anyOf"][0]["enum"]
+            .as_array()
+            .is_some_and(|sources| sources.iter().any(|source| source.as_str() == Some("rust"))),
+        "Rust registry event source is absent from the emitted envelope"
+    );
 
     let schema = emit_schema_json();
     let s = serde_json::to_string(&schema).expect("schema must serialize");
@@ -437,8 +444,67 @@ fn stop_rows() {
 /// AC1-HP: stop fallback when short_id absent -> "stopped: <name>"
 
 /// A verified Claude cascade names both surfaces in the receipt.
-#[test]
-fn rm_flow_rows() {
+#[tokio::test]
+async fn rm_flow_rows() {
+    // Authoring gate: (1) protects the observable ordering that rm repairs a
+    // proven drift before issuing the RPC; (2) a regression that skips repair,
+    // repairs on Unknown, or calls rm after a failed repair breaks the counts;
+    // (3) existing rm formatting tests do not reach this lifecycle boundary;
+    // (4) the helper uses restart and RPC closures that production also needs
+    // to order the real operations, so this is not a test-only seam.
+    use fno_agents::client::RestartError;
+    use std::cell::Cell;
+
+    let drifted = DriftState::Drifted {
+        running: fno_agents::drift::ExeFingerprint {
+            path: "/old/fno-agents-daemon".into(),
+            mtime_nanos: 1,
+            size: 1,
+        },
+        on_disk: fno_agents::drift::ExeFingerprint {
+            path: "/new/fno-agents-daemon".into(),
+            mtime_nanos: 2,
+            size: 2,
+        },
+    };
+    for (state, should_restart) in [
+        (drifted.clone(), true),
+        (DriftState::Fresh, false),
+        (DriftState::DaemonDown, false),
+        (DriftState::Unknown, false),
+    ] {
+        let restart_calls = Cell::new(0);
+        let rm_calls = Cell::new(0);
+        let result = rm_after_drift_repair(
+            &state,
+            async {
+                restart_calls.set(restart_calls.get() + 1);
+                Ok::<(), RestartError>(())
+            },
+            async {
+                rm_calls.set(rm_calls.get() + 1);
+                "removed"
+            },
+        )
+        .await;
+        assert_eq!(result, Ok("removed"));
+        assert_eq!(restart_calls.get(), usize::from(should_restart));
+        assert_eq!(rm_calls.get(), 1);
+    }
+
+    let rm_calls = Cell::new(0);
+    let result = rm_after_drift_repair(
+        &drifted,
+        async { Err::<(), RestartError>(RestartError::StatusMissingPid) },
+        async {
+            rm_calls.set(rm_calls.get() + 1);
+            "removed"
+        },
+    )
+    .await;
+    assert_eq!(result, Err(()));
+    assert_eq!(rm_calls.get(), 0, "failed repair must not issue rm");
+
     let result = json!({
         "removed": true,
         "registry_removed": true,

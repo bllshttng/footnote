@@ -80,10 +80,13 @@ def test_shipped_defaults_pass_the_style_gate_that_sends_them() -> None:
     default, because the `/loop <interval> ` and `/goal ` prefixes are part of
     what the linter reads.
     """
-    from fno import style
+    from fno import rust_binary
     from fno.config import load_settings
 
     settings = load_settings()
     cap = settings.style.word_cap.mail
     interval = settings.king.checkin_interval
-    assert style.check(f"/loop {interval} {KING_CHECKIN_TEXT}", surface="mail", word_cap=cap) == []
+    err, receipt = rust_binary.style_receipt(
+        f"/loop {interval} {KING_CHECKIN_TEXT}", "mail", cap
+    )
+    assert not err and not receipt.get("violations")

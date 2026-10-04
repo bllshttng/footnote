@@ -9,6 +9,8 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,20 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph.store import read_graph_strict
+
+# The promise gate refuses a close whose plan is unreadable, so a rollup
+# fixture's plan_path must name a real, parseable plan. These fixtures test
+# the ledger rollup, never the gate; one readable plan per name keeps the
+# close on its normal path.
+_PLANS_DIR = tempfile.mkdtemp(prefix="done-tests-plans-")
+
+
+def _readable_plan(name: str = "p") -> str:
+    path = os.path.join(_PLANS_DIR, f"{name}.md")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write("---\nstatus: ready\n---\n# plan\n")
+    return path
 
 # The done shim drives CliRunner captures that break when a loaded xdist
 # worker interleaves them with unrelated files: the deprecation line leaks
@@ -419,12 +435,12 @@ def test_rollup_populates_cost_usd_from_ledger(tmp_graph, tmp_ledger, monkeypatc
         "title": "Rollup target",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/repo/plans/2026-04-22-thing",
+        "plan_path": _readable_plan("2026-04-22-thing"),
         "cost_usd": None,
         "cost_sessions": [],
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/repo/plans/2026-04-22-thing",
+        "plan_path": _readable_plan("2026-04-22-thing"),
         "sessions": ["sess-aaa", "sess-bbb"],
         "cost_usd": 9.50,
         "completed": "2026-04-22T19:00:00Z",
@@ -451,12 +467,12 @@ def test_rollup_session_id_from_latest_ledger_entry(tmp_graph, tmp_ledger, monke
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [
-        {"plan_path": "/p", "sessions": ["old-sid"], "cost_usd": 1.0,
+        {"plan_path": _readable_plan(), "sessions": ["old-sid"], "cost_usd": 1.0,
          "completed": "2026-04-20T12:00:00Z"},
-        {"plan_path": "/p", "sessions": ["mid-sid", "latest-sid"], "cost_usd": 2.0,
+        {"plan_path": _readable_plan(), "sessions": ["mid-sid", "latest-sid"], "cost_usd": 2.0,
          "completed": "2026-04-22T12:00:00Z"},
     ])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1)
@@ -475,10 +491,10 @@ def test_rollup_env_session_id_overrides_ledger(tmp_graph, tmp_ledger, monkeypat
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": ["ledger-sid"],
         "cost_usd": 1.0,
         "completed": "2026-04-22T12:00:00Z",
@@ -498,7 +514,7 @@ def test_rollup_empty_ledger_leaves_fields_null(tmp_graph, tmp_ledger, monkeypat
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/unknown-plan",
+        "plan_path": _readable_plan("unknown-plan"),
         "cost_usd": None,
         "cost_sessions": [],
         "points": None,
@@ -523,7 +539,7 @@ def test_rollup_preserves_existing_session_id(tmp_graph, tmp_ledger, monkeypatch
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     claims_root = tmp_graph.parent / "claims"
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
@@ -532,7 +548,7 @@ def test_rollup_preserves_existing_session_id(tmp_graph, tmp_ledger, monkeypatch
         "node:ab-pre00001", "target-session:sticky-session", root=claims_root
     )
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": ["would-overwrite"],
         "cost_usd": 1.0,
         "completed": "2026-04-22T12:00:00Z",
@@ -551,10 +567,10 @@ def test_rollup_cost_sessions_dedups_across_runs(tmp_graph, tmp_ledger, monkeypa
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": ["sess-one"],
         "cost_usd": 5.0,
         "completed": "2026-04-22T12:00:00Z",
@@ -576,10 +592,10 @@ def test_rollup_handles_ledger_entry_with_no_sessions(tmp_graph, tmp_ledger, mon
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": None,  # Some old ledger entries have this shape.
         "cost_usd": 3.0,
         "completed": "2026-04-22T12:00:00Z",
@@ -605,10 +621,10 @@ def test_backfill_single_node_fills_without_flipping_status(tmp_graph, tmp_ledge
         "status": "done",
         "completed_at": "2026-04-20T10:00:00Z",  # prior completion
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": ["sess-x"],
         "cost_usd": 7.5,
         "completed": "2026-04-22T12:00:00Z",
@@ -631,18 +647,18 @@ def test_backfill_sweep_all_done_nodes(tmp_graph, tmp_ledger, monkeypatch):
     """`fno done --backfill` with no id sweeps every node with status=done."""
     _seed(tmp_graph, [
         {"id": "ab-d1000001", "title": "done one", "status": "done",
-         "domain": "code", "plan_path": "/p1"},
+         "domain": "code", "plan_path": _readable_plan("p1")},
         {"id": "ab-d2000002", "title": "done two", "status": "done",
-         "domain": "code", "plan_path": "/p2"},
+         "domain": "code", "plan_path": _readable_plan("p2")},
         {"id": "ab-r1000003", "title": "not done", "status": "ready",
-         "domain": "code", "plan_path": "/p3"},
+         "domain": "code", "plan_path": _readable_plan("p3")},
     ])
     _seed_ledger(tmp_ledger, [
-        {"plan_path": "/p1", "sessions": ["s1"], "cost_usd": 1.0,
+        {"plan_path": _readable_plan("p1"), "sessions": ["s1"], "cost_usd": 1.0,
          "completed": "2026-04-22T12:00:00Z"},
-        {"plan_path": "/p2", "sessions": ["s2"], "cost_usd": 2.0,
+        {"plan_path": _readable_plan("p2"), "sessions": ["s2"], "cost_usd": 2.0,
          "completed": "2026-04-22T13:00:00Z"},
-        {"plan_path": "/p3", "sessions": ["s3"], "cost_usd": 3.0,
+        {"plan_path": _readable_plan("p3"), "sessions": ["s3"], "cost_usd": 3.0,
          "completed": "2026-04-22T14:00:00Z"},
     ])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1)
@@ -660,7 +676,7 @@ def test_backfill_no_done_nodes_noop(tmp_graph, tmp_ledger, monkeypatch):
     """Sweep with no done nodes reports cleanly and does not crash."""
     _seed(tmp_graph, [
         {"id": "ab-rd000001", "title": "ready", "status": "ready",
-         "domain": "code", "plan_path": "/p"},
+         "domain": "code", "plan_path": _readable_plan()},
     ])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1)
     result = runner.invoke(app, ["done", "--backfill"])
@@ -676,10 +692,10 @@ def test_backfill_reports_counts(tmp_graph, tmp_ledger, monkeypatch):
         "status": "done",
         "completed_at": "2026-04-20T00:00:00Z",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": ["s1"],
         "cost_usd": 1.5,
         "completed": "2026-04-22T12:00:00Z",
@@ -697,10 +713,10 @@ def test_rollup_tags_in_normal_output(tmp_graph, tmp_ledger, monkeypatch):
         "title": "T",
         "status": "ready",
         "domain": "code",
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
     }])
     _seed_ledger(tmp_ledger, [{
-        "plan_path": "/p",
+        "plan_path": _readable_plan(),
         "sessions": ["s1"],
         "cost_usd": 12.34,
         "completed": "2026-04-22T12:00:00Z",

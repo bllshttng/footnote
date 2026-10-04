@@ -68,6 +68,8 @@ Footnote reads no `~/.codex/config.toml` and writes none. The one key that sets 
 
 No default widens any existing posture. A configured `bypassPermissions` (a claude-only token) refused by name on a codex lane rather than degrading open to an unnamed posture. The machine-wide alternative - `sandbox_mode = "danger-full-access"` in `~/.codex/config.toml` - stays an open operator decision this project does not make for them.
 
+The one exception is the crown. A crowned codex spawn is a lead, and a lead must write the state root (`~/.fno`) to spawn, claim and journal. When nothing full-access is already named, the crown widens the default to `yolo` (rung `builtin.crown`). A crown spawn that names a bounded mode (`--permission-mode workspace-write:never`) refuses before launch instead of seating a lead that cannot govern. `-Y`/`--yolo` rides through unchanged. Workers keep the bounded default.
+
 ## Native subagent inheritance
 
 A Codex native subagent inherits the parent thread's current effective posture: there is no separate child knob upstream, so the parent's per-turn policy is what a child runs under. fno records the parent's effective policy on the row (`turn_policy_source` plus the resolved posture); when that reading is `unknown`, a child's inherited posture reads `unknown` too and is never reported as permitted. The roster names the parent thread id beside the inherited posture rather than deriving a second answer.
