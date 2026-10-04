@@ -215,9 +215,9 @@ def test_no_plan_path_passes():
 
 
 def test_unreadable_or_unparseable_plan_fails_closed(tmp_path: Path):
-    """x-ff06: an unreadable or unparseable delivery promise never reads as
+    """An unreadable or unparseable delivery promise never reads as
     complete. The refusal names the node, the path, the error, and the
-    --force remedy (the rule PR 3017 cites on the Rust side)."""
+    --force remedy (the rule the Rust close gate cites)."""
     from fno.graph._reconcile import resolve_promise_evidence
 
     missing = tmp_path / "nope.md"

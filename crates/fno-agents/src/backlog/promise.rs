@@ -443,18 +443,53 @@ pub(crate) fn declared_ships(fields: &crate::plan_doc::codec::Fields) -> Declare
     }
 }
 
-/// The reaper side of the same delivery rule the close gate runs
-/// (x-ff06): a recorded merge_status is the LAST ship, never the whole
-/// delivery. The plan completion stamp decides: no plan, or a single-ship
-/// promise, settles with the recorded merge; a multi-ship plan keeps its
-/// worker until recorded refs cover the promise; an unreadable or
-/// unparseable plan reads as unknown, and unknown keeps the row - unknown
-/// is never done. No network: recorded refs are an upper bound on merged
-/// refs, so a promise they cannot cover is unmet by construction. The
-/// close gate itself is [`resolve_promise_evidence`].
+/// The deduplicated MERGED ref count one graph row carries: the primary
+/// when its merge_status reads merged, plus every additional_prs entry
+/// recorded merged. A duplicate recording of the primary, or of an
+/// already-counted extra, never counts twice, and an unrecorded extra
+/// never inflates the count - this is the local confirmed-merged evidence
+/// the merged-lag delivery predicate reads, never a promise count.
+pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
+    let primary_merged = entry.get("merge_status").and_then(Value::as_str) == Some("merged");
+    let primary_number = entry.get("pr_number").and_then(Value::as_i64);
+    let mut merged = usize::from(primary_merged);
+    let mut seen: Vec<i64> = Vec::new();
+    for extra in entry
+        .get("additional_prs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if extra.get("merge_status").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        let number = extra.get("number").and_then(Value::as_i64);
+        if primary_merged && number.is_some() && number == primary_number {
+            continue;
+        }
+        if number.is_some_and(|n| seen.contains(&n)) {
+            continue;
+        }
+        if let Some(n) = number {
+            seen.push(n);
+        }
+        merged += 1;
+    }
+    merged
+}
+
+/// The reaper side of the same delivery rule the close gate runs: a
+/// recorded merge_status is the LAST ship, never the whole delivery. The
+/// plan completion stamp decides: no plan, or a single-ship promise,
+/// settles with the recorded merge; a multi-ship plan keeps its worker
+/// until MERGED refs cover the promise; an unreadable or unparseable plan
+/// reads as unknown, and unknown keeps the row - unknown is never done.
+/// No network: the count arrives deduplicated from the graph's recorded
+/// merge evidence, so a promise it cannot cover is unmet by construction.
+/// The close gate itself is [`resolve_promise_evidence`].
 pub(crate) fn merged_delivery_settled(
+    merged_refs: usize,
     plan_path: Option<&str>,
-    recorded_refs: usize,
     cwd: Option<&str>,
 ) -> bool {
     let Some(plan_path) = plan_path.filter(|p| !p.is_empty()) else {
@@ -484,7 +519,7 @@ pub(crate) fn merged_delivery_settled(
     match declared_ships(&frontmatter.fields) {
         DeclaredShips::Absent => true,
         DeclaredShips::Count(n) if n < 2 => true,
-        DeclaredShips::Count(n) => recorded_refs >= n as usize,
+        DeclaredShips::Count(n) => merged_refs >= n as usize,
         DeclaredShips::Unreadable => false,
     }
 }

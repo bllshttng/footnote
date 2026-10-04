@@ -2966,6 +2966,7 @@ mod tests {
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
             pr_number: HashMap::new(),
             plan_paths: HashMap::new(),
+            delivery_merged_refs: HashMap::new(),
             do_nodes: HashMap::new(),
             pr_reads: HashMap::new(),
         }));
@@ -3083,6 +3084,7 @@ mod tests {
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
             pr_number: HashMap::new(),
             plan_paths: HashMap::new(),
+            delivery_merged_refs: HashMap::new(),
             do_nodes: HashMap::new(),
             pr_reads: HashMap::new(),
         }));

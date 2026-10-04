@@ -786,7 +786,7 @@ class PromiseVerdict:
     so a node can never close through a second, ungated path. An absent
     ``plan_path`` promises nothing and passes; an unreadable or unparseable
     plan is a delivery promise that cannot be confirmed, so it fails CLOSED
-    (``promise_unmet``, x-ff06) with the remedy in the refusal - never as a
+    (``promise_unmet``) with the remedy in the refusal - never as a
     silent pass.
     """
 

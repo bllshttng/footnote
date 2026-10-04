@@ -111,6 +111,7 @@ pub(super) fn graph_read(
         pr_state,
         pr_number: std::collections::HashMap::default(),
         plan_paths: std::collections::HashMap::default(),
+        delivery_merged_refs: std::collections::HashMap::default(),
         do_nodes: std::collections::HashMap::default(),
         pr_reads: std::collections::HashMap::default(),
     })

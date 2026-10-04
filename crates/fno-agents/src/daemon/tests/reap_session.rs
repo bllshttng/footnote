@@ -312,6 +312,7 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
     node["sessions"][0]["ended_at"] = json!("2026-09-09T12:00:00Z");
     stage_graph(dir.path(), json!([node]));
     state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
         r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
     })
     .unwrap();
@@ -332,15 +333,16 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
     plain["merge_status"] = Value::Null;
     stage_graph(dir.path(), json!([plain]));
     state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
         r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
     })
     .unwrap();
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
     assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
-    // x-ff06: the recorded merge is the LAST ship, never the delivery. A
-    // nine-ship plan whose one recorded PR merged keeps its worker, here in
-    // the registry sweep; the roster sweep reads the same verdict field.
+    // The recorded merge is the LAST ship, never the delivery. A nine-ship
+    // plan whose one recorded PR merged keeps its worker, here in the
+    // registry sweep; the roster sweep reads the same verdict field.
     let plan = transcripts.path().join("nine.md");
     std::fs::write(
         &plan,
@@ -353,16 +355,86 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
     multi["plan_path"] = json!(plan.to_string_lossy());
     stage_graph(dir.path(), json!([multi]));
     state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
         r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
     })
     .unwrap();
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
     assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
-    // An unreadable plan is an unknown promise, and unknown keeps the row.
-    multi["plan_path"] = json!(transcripts.path().join("gone.md").to_string_lossy());
-    stage_graph(dir.path(), json!([multi]));
+    // An in-review node keeps its worker even on a settled single-ship
+    // delivery: review is live delivery, not merge lag.
+    let mut solo = x2774_open_node("N1", "in_review", &["s-lag"]);
+    solo["merge_status"] = json!("merged");
+    solo["pr_number"] = json!(2981);
+    stage_graph(dir.path(), json!([solo]));
     state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    // Nine promised, eight merged: the unsettled ninth ref never counts,
+    // so the row keeps under the count gate alone (in_progress, not the
+    // review hold above).
+    let merged_extras: Vec<Value> = (0..7)
+        .map(|i| json!({"number": 3001 + i, "merge_status": "merged"}))
+        .collect();
+    let mut almost = x2774_open_node("N1", "in_progress", &["s-lag"]);
+    almost["merge_status"] = json!("merged");
+    almost["pr_number"] = json!(3000);
+    almost["plan_path"] = json!(plan.to_string_lossy());
+    almost["additional_prs"] = json!(merged_extras
+        .into_iter()
+        .chain(std::iter::once(json!({"number": 3008})))
+        .collect::<Vec<_>>());
+    stage_graph(dir.path(), json!([almost]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    // Delivery complete opens the gate: two promised, two deduplicated
+    // merged refs (a duplicate recording of the primary and of an extra
+    // never inflate the count), and the row retires on the recorded merge.
+    let pair = transcripts.path().join("pair.md");
+    std::fs::write(
+        &pair,
+        "---\nstatus: in_review\nexpected_url_count: 2\n---\n# two ships\n",
+    )
+    .unwrap();
+    let mut settled = x2774_open_node("N1", "in_progress", &["s-lag"]);
+    settled["merge_status"] = json!("merged");
+    settled["pr_number"] = json!(3010);
+    settled["plan_path"] = json!(pair.to_string_lossy());
+    settled["additional_prs"] = json!([
+        {"number": 3010, "merge_status": "merged"},
+        {"number": 3011, "merge_status": "merged"},
+        {"number": 3011, "merge_status": "merged"}
+    ]);
+    stage_graph(dir.path(), json!([settled]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert_eq!(
+        summary.retired,
+        vec![(
+            "t-lag".to_string(),
+            "node N1 in_progress; recorded merge_status merged".to_string()
+        )],
+        "{summary:?}"
+    );
+    // An unreadable plan is an unknown promise, and unknown keeps the row.
+    settled["plan_path"] = json!(transcripts.path().join("gone.md").to_string_lossy());
+    stage_graph(dir.path(), json!([settled]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.retain(|e| e.short_id != "t-lag");
         r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
     })
     .unwrap();
