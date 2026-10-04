@@ -211,16 +211,34 @@ impl View {
         None
     }
 
+    /// The strip row's words at this panel's width. Below the width where
+    /// the full words would crowd the bell and density buttons off the row,
+    /// the tabs read `A  M` (x-9bfe) so both buttons keep their seat.
+    pub(super) fn top_row_words(&self) -> [(&'static str, crate::view_store::SidelineView); 2] {
+        // The full words end at column 19; the buttons need the bell label,
+        // the density glyph, and a gap past that, so the full form pays off
+        // only from here.
+        const FULL_WORDS_MIN_W: usize = 30;
+        let tw = self.sideline_paint_w().saturating_sub(1);
+        if tw >= FULL_WORDS_MIN_W {
+            [
+                ("Agents", crate::view_store::SidelineView::Agents),
+                ("Messages", crate::view_store::SidelineView::Messages),
+            ]
+        } else {
+            [
+                ("A", crate::view_store::SidelineView::Agents),
+                ("M", crate::view_store::SidelineView::Messages),
+            ]
+        }
+    }
+
     /// The strip row's words with their column spans, shared by the paint
     /// and the click map so the two cannot drift (R15).
     pub(super) fn top_row_spans(&self) -> Vec<(usize, usize, crate::view_store::SidelineView)> {
-        let words = [
-            ("Agents", crate::view_store::SidelineView::Agents),
-            ("Messages", crate::view_store::SidelineView::Messages),
-        ];
         let mut out = Vec::new();
         let mut c = 2usize;
-        for (word, view) in words {
+        for (word, view) in self.top_row_words() {
             let w = word.chars().count();
             out.push((c, w, view));
             c += w + 3;
@@ -232,9 +250,11 @@ impl View {
     /// current view's word bold.
     pub(super) fn paint_top_row(&self, cells: &mut [Cell], cols: usize, text_w: usize) {
         let limit = text_w.min(cols.saturating_sub(1));
-        for (start, _, view) in self.top_row_spans() {
+        for ((start, _, view), (word, _)) in
+            self.top_row_spans().into_iter().zip(self.top_row_words())
+        {
             let active = self.sideline_view == view;
-            for (i, ch) in format!("{view:?}").chars().enumerate() {
+            for (i, ch) in word.chars().enumerate() {
                 let col = start + i;
                 if col >= limit {
                     break;
@@ -1033,10 +1053,27 @@ impl View {
         };
         let spans = card_line::identity_spans(agent, text_w);
         if let (Some(node), Some(span)) = (agent.node.as_deref(), spans.node) {
+            let node_start = span.start;
             for (cell, ch) in line[span].iter_mut().zip(node.chars()) {
                 cell.c = ch;
                 cell.fg = status_fg;
                 cell.flags = cell_flags::BOLD;
+            }
+            // The name yields before the node: an ellipsis marks the cut
+            // and one space keeps the gap (x-9bfe). Under three columns
+            // there is no room for both, so the name side blanks past the
+            // glyph and the node stands alone.
+            if node_start >= 3 {
+                if line[node_start - 1].c != ' ' {
+                    line[node_start - 1].c = '…';
+                }
+                if line[node_start - 2].c != ' ' {
+                    line[node_start - 2].c = ' ';
+                }
+            } else {
+                for cell in line[1..node_start.max(1)].iter_mut() {
+                    cell.c = ' ';
+                }
             }
         }
         if let Some(span) = spans.separator {

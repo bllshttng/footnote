@@ -7883,7 +7883,7 @@ fn client_compose_agents_first_omits_tab_rows_and_highlights_squad() {
     let lines: Vec<&str> = text.lines().collect();
     // (x-cd67 US1; the strip row owns line 0 since R15) squad 1 leads line
     // 1, squad 2 follows on line 3.
-    assert!(lines[0].contains("Agents"), "{:?}", lines[0]);
+    assert!(lines[0].contains("A   M"), "{:?}", lines[0]);
     assert!(lines[1].contains("▾*footnote"), "{:?}", lines[1]);
     assert!(
         lines[3].contains("▸ notes"),
