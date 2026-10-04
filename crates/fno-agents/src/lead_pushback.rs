@@ -1,9 +1,9 @@
-//! The per-lead pushback reading: from the decision_span rows the x-98cf
-//! envelope already journals (ask, route, correction spans), how many asks
-//! reached this lead, how many routes it answered itself versus escalated,
-//! and how many of its route spans a later correction overturned. The score
-//! rides the check-in beside the refusal rate: the useful lead metric is
-//! worker pushback where the lead turned out wrong.
+//! The per-lead pushback reading: from the decision_span rows the traced
+//! decision envelope already journals (ask, route, correction spans), how
+//! many asks reached this lead, how many routes it answered itself versus
+//! escalated, and how many of its route spans a later correction
+//! overturned. The score rides the check-in beside the refusal rate: the
+//! useful lead metric is worker pushback where the lead turned out wrong.
 
 use serde_json::{json, Value};
 
@@ -15,18 +15,24 @@ pub(crate) fn reading() -> Result<Value, String> {
     let Some(session) = session else {
         return Err("no session id; cannot attribute pushback spans".into());
     };
-    let me = crate::identity::canonical_handle(&session);
     let journal = crate::law_match::project_events_journal();
+    // A repo with no events store yet has traced no decisions: zero rows is
+    // the true reading, not a read failure.
+    if !crate::event_store::store_path(&journal).exists() {
+        return Ok(fold(&[], &session));
+    }
     let rows = crate::event_store::query_events(
         &journal,
         &crate::event_store::EventQuery::of_types(&["decision_span"]),
     )?;
-    Ok(fold(&rows, &me))
+    Ok(fold(&rows, &session))
 }
 
-/// The count fold over journal rows for one canonical lead handle: pure, so
-/// tests build journal rows by hand instead of touching env or a store.
-fn fold(rows: &[crate::event_store::EventRow], me: &str) -> Value {
+/// The count fold over journal rows for one lead session id: pure, so tests
+/// build journal rows by hand instead of touching env or a store. The id
+/// canonicalizes here, the same read the journal's span rows get.
+fn fold(rows: &[crate::event_store::EventRow], session: &str) -> Value {
+    let me = crate::identity::canonical_handle(session);
     let mut asks = 0u64;
     let mut routes = 0u64;
     let mut answered_self = 0u64;
@@ -190,9 +196,8 @@ mod tests {
                     "actor_session": "sess-lead",
                     "actor_kind": "user",
                     "comms": "chat",
-                    "overturns": "s-r1",
                 }),
-                json!({}),
+                json!({"overturns": "s-r1"}),
             ),
         ];
         let folded = fold(&rows, "sess-lead");

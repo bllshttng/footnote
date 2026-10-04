@@ -852,7 +852,6 @@ pub(crate) enum OwnTranscript {
         path: Option<PathBuf>,
     },
     Unmeasured {
-        harness: String,
         reason: String,
     },
 }
@@ -913,7 +912,6 @@ pub(crate) fn own_transcript() -> Result<OwnTranscript, String> {
             })
         }
         other => Ok(OwnTranscript::Unmeasured {
-            harness: other.to_string(),
             reason: format!("no transcript store reader for harness {other}"),
         }),
     }
@@ -1424,12 +1422,11 @@ fn mark_refusal_rate_trend(
                     .unwrap_or(false),
             )
         });
-    let rising = match (current, previous_rate, second_previous_rate) {
-        (Some((c, cf)), Some((p1, f1)), Some((p2, f2))) => {
-            cf == f1 && f1 == f2 && c > p1 && p1 > p2
-        }
-        _ => false,
-    };
+    let rising = flags_match(current, previous_rate, second_previous_rate)
+        && match (current, previous_rate, second_previous_rate) {
+            (Some((c, _)), Some((p1, _)), Some((p2, _))) => c > p1 && p1 > p2,
+            _ => false,
+        };
     data.insert("refusal_rate_rising".into(), json!(rising));
     let unmeasured = current.is_some()
         && (previous_rate.is_none()
@@ -3994,10 +3991,13 @@ mod tests {
         // An unmeasured harness prints unmeasured, never a zero percent.
         let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut readings = readings;
-        readings.push(Reading::took(
-            "refusal_rate",
-            json!({"unmeasured": "no transcript store reader for harness pi"}),
-        ));
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "refusal_rate",
+                json!({"unmeasured": "no transcript store reader for harness pi"}),
+            ),
+        );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let line = lines

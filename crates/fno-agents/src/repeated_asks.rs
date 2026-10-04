@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(codex_folded["replies"], 3);
         assert_eq!(
             codex_folded["asks"],
-            json!([{"text":"should i merge pr 2558", "count":3}])
+            json!([{"text":"should i merge pr 2558?", "count":3}])
         );
         let unmeasured_row = Reading::took(
             "repeated_asks",
