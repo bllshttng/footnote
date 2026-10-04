@@ -179,8 +179,11 @@ fn merge(
 }
 
 fn matching_disk_row(row: &Value, disk: &[Value], consumed: &[bool]) -> Option<usize> {
-    let session_id = row.get("harness_session_id").and_then(Value::as_str);
-    if let Some(session_id) = session_id.filter(|value| !value.is_empty()) {
+    let session_id = row
+        .get("harness_session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    if let Some(session_id) = session_id {
         if let Some(index) = disk.iter().enumerate().position(|(index, candidate)| {
             !consumed[index]
                 && candidate.get("harness_session_id").and_then(Value::as_str) == Some(session_id)
@@ -189,8 +192,20 @@ fn matching_disk_row(row: &Value, disk: &[Value], consumed: &[bool]) -> Option<u
         }
     }
     let name = row.get("name").and_then(Value::as_str)?;
+    // A name collision cannot substitute for a different stable session id;
+    // leaving it unmatched lets the skewed row-loss guard refuse the write.
     disk.iter().enumerate().position(|(index, candidate)| {
-        !consumed[index] && candidate.get("name").and_then(Value::as_str) == Some(name)
+        if consumed[index] || candidate.get("name").and_then(Value::as_str) != Some(name) {
+            return false;
+        }
+        let disk_session_id = candidate
+            .get("harness_session_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        match (session_id, disk_session_id) {
+            (Some(payload_id), Some(disk_id)) => payload_id == disk_id,
+            _ => true,
+        }
     })
 }
 
@@ -258,6 +273,24 @@ mod tests {
             &payload,
             39,
             payload["agents"].as_array().unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error.0, "row_loss_under_skew");
+
+        let conflicting_identity = json!({
+            "schema_version": 41,
+            "min_writer_version": 39,
+            "agents": [{"name": "worker-2", "harness_session_id": "old-session", "future": "kept"}]
+        });
+        let new_session = json!({
+            "schema_version": 39,
+            "agents": [{"name": "worker-2", "harness_session_id": "new-session", "status": "idle"}]
+        });
+        let error = merge(
+            conflicting_identity,
+            &new_session,
+            39,
+            new_session["agents"].as_array().unwrap(),
         )
         .unwrap_err();
         assert_eq!(error.0, "row_loss_under_skew");
