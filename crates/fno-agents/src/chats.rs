@@ -495,12 +495,12 @@ fn open_index(db: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn migrated_at(conn: &Connection) -> Result<Option<String>, String> {
+fn meta_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
     let mut stmt = conn
-        .prepare("SELECT value FROM meta WHERE key = 'migrated_at'")
+        .prepare("SELECT value FROM meta WHERE key = ?1")
         .map_err(|e| format!("meta read: {e}"))?;
     let mut rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
+        .query_map([key], |r| r.get::<_, String>(0))
         .map_err(|e| format!("meta read: {e}"))?;
     Ok(rows
         .next()
@@ -508,14 +508,30 @@ fn migrated_at(conn: &Connection) -> Result<Option<String>, String> {
         .map_err(|e| format!("meta row: {e}"))?)
 }
 
-fn set_migrated_at(conn: &Connection, value: &str) -> Result<(), String> {
+fn set_meta_value(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO meta(key, value) VALUES('migrated_at', ?1)
+        "INSERT INTO meta(key, value) VALUES(?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [value],
+        [key, value],
     )
     .map_err(|e| format!("meta write: {e}"))?;
     Ok(())
+}
+
+fn migrated_at(conn: &Connection) -> Result<Option<String>, String> {
+    meta_value(conn, "migrated_at")
+}
+
+fn set_migrated_at(conn: &Connection, value: &str) -> Result<(), String> {
+    set_meta_value(conn, "migrated_at", value)
+}
+
+fn envelopes_migrated_at(conn: &Connection) -> Result<Option<String>, String> {
+    meta_value(conn, "envelopes_migrated_at")
+}
+
+fn set_envelopes_migrated_at(conn: &Connection, value: &str) -> Result<(), String> {
+    set_meta_value(conn, "envelopes_migrated_at", value)
 }
 
 fn has_any_chat_file(chats_dir: &Path) -> bool {
@@ -1013,6 +1029,126 @@ fn migrate_missing(chats_dir: &Path, db: &Path, bus: &Path) -> Result<MigrationR
     Ok(receipt)
 }
 
+/// The `migrate --envelopes` pass: rewrite every stored message body that
+/// reads as the legacy paired `<fno_mail ...>...</fno_mail>` envelope into
+/// the delivered-header form (sender and id from the tag, the inner text as
+/// the body). One-time: refused once the `envelopes_migrated_at` index stamp
+/// stands. A per-chat backup under `.backup-envelopes-<ts>/` holds the
+/// original bytes and any failed copy aborts with no rewrite; a row whose id
+/// or whole-body paired block does not resolve stays as it is and counts
+/// skipped.
+fn migrate_envelopes_at(chats_dir: &Path, db: &Path) -> Result<String, String> {
+    let conn = open_index(db)?;
+    if let Some(ts) = envelopes_migrated_at(&conn)? {
+        return Err(format!("already migrated (envelopes): stamp set at {ts}"));
+    }
+    let backup = chats_dir.join(format!(
+        ".backup-envelopes-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    ));
+    let mut touched: Vec<std::path::PathBuf> = Vec::new();
+    if chats_dir.is_dir() {
+        let rd = std::fs::read_dir(chats_dir).map_err(|e| format!("chats dir: {e}"))?;
+        for entry in rd.flatten() {
+            let src = entry.path().join("messages.jsonl");
+            if !src.is_file() {
+                continue;
+            }
+            let dst = backup.join(entry.file_name());
+            std::fs::create_dir_all(&dst).map_err(|e| format!("backup dir: {e}"))?;
+            std::fs::copy(&src, dst.join("messages.jsonl"))
+                .map_err(|e| format!("backup copy {}: {e}", src.display()))?;
+            touched.push(src);
+        }
+    }
+    let mut rewritten = 0usize;
+    let mut skipped = 0usize;
+    for src in &touched {
+        let Ok(text) = std::fs::read_to_string(src) else {
+            continue;
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut changed = false;
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                out.push(line.to_string());
+                continue;
+            };
+            let body = v.get("body").and_then(Value::as_str).unwrap_or("");
+            let is_legacy = v.get("type").and_then(Value::as_str) == Some("message")
+                && crate::mail_header::classify(body) == crate::mail_header::Framing::LegacyTag;
+            if !is_legacy {
+                out.push(line.to_string());
+                continue;
+            }
+            let rewrite = (|| {
+                let id = crate::mail_header::delivered_msg_id(body)?;
+                let block = crate::mail_header::paired_envelope_block(body)?;
+                if block != body.trim() {
+                    // The display path never unwrapped a partial block; a
+                    // body that holds prose around the envelope stays.
+                    return None;
+                }
+                let open_end = block.find('>')? + 1;
+                let inner = block[open_end..block.len() - "</fno_mail>".len()]
+                    .trim()
+                    .to_string();
+                let tags = crate::mail_header::legacy_tags(body);
+                let tag = tags
+                    .first()
+                    .and_then(|t| t.get("from"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let sender = tag
+                    .or_else(|| {
+                        v.get("from_name")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| v.get("from").and_then(Value::as_str))
+                    .unwrap_or("unknown")
+                    .to_string();
+                Some((
+                    crate::mail_header::render_header(
+                        crate::mail_header::HeaderForm::Mention,
+                        &sender,
+                        &id,
+                        &crate::mail_header::header_subject(None, &inner),
+                    ),
+                    crate::mail_header::delivered_body(None, &inner),
+                ))
+            })();
+            let Some((header, delivered)) = rewrite else {
+                skipped += 1;
+                out.push(line.to_string());
+                continue;
+            };
+            let mut rec = v.clone();
+            if let Value::Object(map) = &mut rec {
+                map.insert(
+                    "body".into(),
+                    serde_json::json!(format!("{header}\n{delivered}")),
+                );
+            }
+            out.push(rec.to_string());
+            changed = true;
+            rewritten += 1;
+        }
+        if changed {
+            let tmp = src.with_file_name("messages.jsonl.envelopes-tmp");
+            std::fs::write(&tmp, format!("{}\n", out.join("\n")))
+                .map_err(|e| format!("rewrite {}: {e}", src.display()))?;
+            std::fs::rename(&tmp, src).map_err(|e| format!("rename {}: {e}", src.display()))?;
+        }
+    }
+    set_envelopes_migrated_at(&conn, &crate::announce::now_iso())?;
+    let summary = rebuild_index_at(db, chats_dir)?;
+    Ok(format!(
+    "{{\"envelopes_migrated\":true,\"rewritten\":{rewritten},\"skipped\":{skipped},\"backup\":\"{}\",\"index\":\"{summary}\"}}",
+    backup.display()
+))
+}
+
 /// Stamp-preserving readiness check at explicit paths (the testable core).
 fn ensure_ready_at(chats_dir: &Path, db: &Path, bus: &Path) -> Result<(), String> {
     let conn = open_index(db)?;
@@ -1240,6 +1376,10 @@ fn usage() -> i32 {
     eprintln!(
         "usage: fno-agents chats <append|bus-append|migrate|rebuild|list|read|resolve|show> ..."
     );
+    eprintln!(
+        "  migrate --envelopes: one-time rewrite of stored legacy <fno_mail> bodies \
+         to the delivered-header form, with a backup; run once after upgrading"
+    );
     2
 }
 
@@ -1339,6 +1479,18 @@ pub fn run_chats(args: &[String]) -> i32 {
             }
         }
         "migrate" => {
+            if args.iter().any(|a| a == "--envelopes") {
+                return match migrate_envelopes_at(&dir, &index_path()) {
+                    Ok(receipt) => {
+                        println!("{receipt}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("chats migrate: {e}");
+                        1
+                    }
+                };
+            }
             if args.iter().any(|a| a == "--missing") {
                 return match migrate_missing(&dir, &index_path(), &bus_live_path()) {
                     Ok(receipt) => {
@@ -1642,7 +1794,9 @@ mod tests {
             "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
             "body": "<fno_mail from=\"quill\" id=\"fmail-1\">\nlegacy body text\n</fno_mail>"
         }));
-        assert!(!framed.contains("<fno_mail"), "{framed}");
+        // An unmigrated legacy body shows the raw tag: the visible prompt to
+        // run the one-time "chats migrate --envelopes".
+        assert!(framed.contains("<fno_mail"), "{framed}");
         // The recipient-key read resolves the registry through AgentsHome;
         // pin a declared test root or the home-fallback fence fires.
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2025,6 +2179,49 @@ mod tests {
         let full2 = resolve_prefix_at(&db, &chats, "msg-abc").unwrap().id;
         assert_eq!(full2, "msg-abcdef", "the index is never authoritative");
         let _ = std::fs::remove_dir_all(&root);
+
+        // --- envelope migration: one-time rewrite of stored legacy bodies
+        // into the header form, with a backup, and a stamp that refuses the
+        // second run (AC5-HP, AC5-ERR).
+        let root = temp_root("envelopes");
+        let chats = root.join("chats");
+        let db = root.join("db").join("chats.db");
+        let chat = chats.join(chat_id_for_pair("sess-a", "sess-b"));
+        std::fs::create_dir_all(&chat).unwrap();
+        let legacy_body = "<fno_mail from=\"candor\" id=\"msg-1\">Build green. Details.</fno_mail>";
+        let row = serde_json::json!({
+            "type": "message", "id": "msg-1", "from": "candor", "body": legacy_body,
+            "ts": "2026-10-01T19:00:00Z",
+        });
+        std::fs::write(chat.join("messages.jsonl"), format!("{row}\n")).unwrap();
+        let receipt = migrate_envelopes_at(&chats, &db).unwrap();
+        assert!(receipt.contains("\"rewritten\":1"), "{receipt}");
+        assert!(receipt.contains("\"skipped\":0"), "{receipt}");
+        let migrated = std::fs::read_to_string(chat.join("messages.jsonl")).unwrap();
+        let rec: Value = serde_json::from_str(migrated.trim()).unwrap();
+        assert_eq!(
+            rec["body"].as_str().unwrap(),
+            "`@candor \u{b7} msg-1 \u{b7} Build green.`\nDetails."
+        );
+        // The backup holds the original bytes.
+        let backup_dir = receipt
+            .split("\"backup\":\"")
+            .nth(1)
+            .unwrap()
+            .split("\",\"index\"")
+            .next()
+            .unwrap()
+            .to_string();
+        let original = std::fs::read_to_string(
+            std::path::Path::new(&backup_dir)
+                .join(chat.file_name().unwrap())
+                .join("messages.jsonl"),
+        )
+        .unwrap();
+        assert!(original.contains("<fno_mail"), "{original}");
+        // A second run refuses on the stamp.
+        let err = migrate_envelopes_at(&chats, &db).unwrap_err();
+        assert!(err.contains("already migrated"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
