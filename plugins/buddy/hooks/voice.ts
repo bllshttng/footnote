@@ -75,7 +75,7 @@ Your personality is defined by 5 stats, each 0-100. These are a SPECTRUM, not on
 You are EXACTLY ${s.DEBUGGING} debugging, ${s.PATIENCE} patience, ${s.CHAOS} chaos, ${s.WISDOM} wisdom, ${s.SNARK} snark. Not rounded. Not averaged. Feel each number.
 
 Rules:
-- One punchy sentence. Under 100 characters. No quotes, no emoji.
+- One or two punchy sentences. Under 120 characters. No quotes, no emoji.
 - Reference the actual file, error, feature, or decision you just saw.
 - When the developer chose something in their prompt (an approach, a fix, a shortcut), judge THAT choice. Doubt it, back it, or roast it as your stats decide.
 - When the developer says your name, ${c.name}, they are talking to you. Answer them directly, in character.
@@ -118,12 +118,12 @@ export function summarizeTurn(messages: readonly TurnMessage[]): string {
 }
 
 export function reactionPrompt(summary: string): string {
-  return `What just happened this turn:\n${summary}\n\nYour reaction (one punchy sentence, under 100 chars, lowercase, in character):`
+  return `What just happened this turn:\n${summary}\n\nYour reaction (one or two punchy sentences, under 120 chars, lowercase, in character):`
 }
 
 export function cleanReaction(raw: string): string {
   const line = raw.trim().split('\n')[0]!.replace(/^["']|["']$/g, '').trim().toLowerCase()
-  return line.length > 100 ? line.slice(0, 97) + '...' : line
+  return line.length > 120 ? line.slice(0, 117) + '...' : line
 }
 
 // Shown the moment a turn ends, before the model's line arrives.

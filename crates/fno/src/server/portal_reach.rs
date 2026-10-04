@@ -119,7 +119,7 @@ pub(super) fn rearm_held_portal_seats(
             }
             continue;
         }
-        core.portals.insert(
+        core.journal_portal_open(
             index,
             Portal {
                 row_key: row.clone(),
@@ -667,7 +667,7 @@ impl Core {
                 // blocking every later reach for this row.
                 None => {
                     self.reap_pane(other_seat);
-                    self.portals.remove(&other_idx);
+                    self.journal_portal_take(other_idx, "stale_seat");
                 }
             }
         }
@@ -715,11 +715,17 @@ impl Core {
         // Entry: take THIS portal, then verify against the live tree (the
         // diff-pane stale-id guard - a recorded pane closed by any other path
         // reads as closed and never wedges the portal). Only this index is
-        // removed; every other portal is untouched by this reach.
+        // removed; every other portal is untouched by this reach. The take
+        // is SILENT: a focus of the shown row and a failed retune both put
+        // the slot back, so the close half of the retune pair is journaled
+        // only where the channel truly changes hands.
         let slot = self.portals.remove(&portal_idx);
         // The seat's tab id, kept out of the stale-seat paths: a
         // fresh-open (below) prefers it when the tab still exists.
         let mut remembered_tab_id: Option<TabId> = None;
+        // The old channel, kept out of the by-value destructure below: the
+        // success paths journal the close half of the retune pair from it.
+        let taken_row = slot.as_ref().map(|p| p.row_key.clone());
         if let Some(Portal {
             row_key: slot_row,
             seat: pid,
@@ -851,7 +857,10 @@ impl Core {
                     // Reap-last: the displaced viewer dies, the session it
                     // showed keeps running daemon-hosted.
                     self.reap_pane(pid);
-                    self.portals.insert(
+                    if let Some(old_row) = &taken_row {
+                        self.journal_portal_channel_left(portal_idx, old_row, "retune");
+                    }
+                    self.journal_portal_open(
                         portal_idx,
                         Portal {
                             row_key: key.to_string(),
@@ -998,7 +1007,10 @@ impl Core {
         if let Some(id) = row.attach_id.clone() {
             self.attached.insert(id, pid);
         }
-        self.portals.insert(
+        if let Some(old_row) = &taken_row {
+            self.journal_portal_channel_left(portal_idx, old_row, "retune");
+        }
+        self.journal_portal_open(
             portal_idx,
             Portal {
                 row_key: key.to_string(),

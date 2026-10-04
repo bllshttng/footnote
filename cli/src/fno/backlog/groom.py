@@ -236,7 +236,14 @@ def _run_mechanical(age: int) -> dict[str, str]:
 
     results: dict[str, str] = {}
     for name, args in _mechanical_legs(age):
-        cmd = [*_subprocess_util.fno_py_cmd(), "backlog", *args]
+        # The reconcile leg is native: the Python verb retired with the port,
+        # and the fno mux binary serves the same argv at the native door.
+        prefix = (
+            _subprocess_util.fno_cmd()
+            if name == "reconcile"
+            else _subprocess_util.fno_py_cmd()
+        )
+        cmd = [*prefix, "backlog", *args]
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=_LEG_TIMEOUT_S

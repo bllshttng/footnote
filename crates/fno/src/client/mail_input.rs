@@ -9,6 +9,22 @@ use super::{
     MAX_MAIL_TEXT,
 };
 
+impl View {
+    /// Clear the read-only peek overlay and its escape carry. Called by
+    /// every modal `open_*` helper so a mouse-driven overlay open (the mouse
+    /// pre-pass runs before overlay routing) never leaves peek rendering on
+    /// top. The reply input lives inside peek; closing peek drops the memory
+    /// copy only. The persisted draft survives an overlay open, so a modal
+    /// over the composer cannot take the typed text. Only an Esc or a send
+    /// deletes the file.
+    pub(super) fn clear_peek(&mut self) {
+        self.peek = None;
+        self.peek_esc.clear();
+        self.peek_input = None;
+        self.peek_input_esc.clear();
+    }
+}
+
 /// One chunk of keys while the `m` reply input is open. Enter-with-text
 /// sends [`Command::MailAgent`] then closes the input, leaving peek open (the
 /// notice line is the feedback). The buffer caps at [`MAX_MAIL_TEXT`] chars so
@@ -30,7 +46,12 @@ pub(super) async fn peek_input_keys(
         match key {
             SearchKey::Esc => {
                 // Drop half-typed text; peek stays open underneath (AC parity
-                // with rename Esc).
+                // with rename Esc). Esc is the DELIBERATE end: the persisted
+                // draft is deleted with the memory copy, while an overlay
+                // open over the composer (clear_peek) keeps the file.
+                if let Some((name, _)) = view.peek_input.as_ref() {
+                    super::composer_draft::delete(name);
+                }
                 view.peek_input = None;
                 view.peek_input_esc.clear();
                 break;
@@ -49,6 +70,7 @@ pub(super) async fn peek_input_keys(
                             let _ = raw_out(b"\x07");
                         }
                         Some((name, text)) => {
+                            super::composer_draft::delete(&name);
                             view.peek_input = None;
                             view.peek_input_esc.clear();
                             write_msg(
@@ -83,6 +105,12 @@ pub(super) async fn peek_input_keys(
                 }
                 _ => {}
             },
+        }
+        // The buffer changed (pop, clear, or push): persist it so a portal
+        // close or a client death cannot take the typed text. The Esc and
+        // send arms above break before this line, so only real edits land.
+        if let Some((name, buf)) = view.peek_input.as_ref() {
+            super::composer_draft::save(name, buf);
         }
     }
     Ok(StdinFlow::Continue)

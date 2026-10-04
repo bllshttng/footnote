@@ -7,7 +7,7 @@
 # Per-prompt cost is bounded by three cheap guards ahead of the full hook: the
 # version stamp (installer already succeeded for this version), the announced
 # marker (this trigger already surfaced its note for this version), and
-# `command -v fno` (something named fno is on PATH, so the mux-probe verdict
+# the fno-bin resolver (something named fno resolves, so the mux-probe verdict
 # stays the SessionStart hook's per-session job - a per-prompt probe could pay
 # its 3s wedge cap on every prompt). SILENT unless it actually surfaces a note:
 # UserPromptSubmit exit-0 stdout is added to model context (not user chat), so
@@ -25,6 +25,7 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # UserPromptSubmit hook that names a daemon binary to carry the shared bound,
 # so the file sources it even though its own guards are pure builtins.
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+source "$HOOK_DIR/lib/fno-bin.sh" 2>/dev/null || true
 PLUGIN_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
 # Same dir, stamp and lock as the SessionStart hook: a Codex session carries no
 # CLAUDE_PLUGIN_DATA, so the data dir falls back to the XDG state dir.
@@ -37,7 +38,7 @@ if [[ -n "$VERSION" ]]; then
   [[ "$(cat "$STAMP" 2>/dev/null)" == "$VERSION" ]] && exit 0
   [[ "$(cat "$MARKER" 2>/dev/null)" == "$VERSION" ]] && exit 0
 fi
-command -v fno >/dev/null 2>&1 && exit 0
+[[ -n "$(fno_bin)" ]] && exit 0
 
 # The full hook owns the lock and the detached spawn; its output is the note.
 # It never waits on the installer (every descriptor is redirected), so the

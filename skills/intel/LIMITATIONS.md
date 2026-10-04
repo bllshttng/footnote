@@ -13,3 +13,4 @@
 - Line counts come from edit arguments, so a rejected edit still counts its lines, the same choice Claude's `/insights` makes.
 - The HTML scrub is pattern-based. A secret with no known shape under 40 characters, and paraphrased transcript text with no quotes, pass through. A quoted span outside `Operator corrections` is dropped, so a needed quote outside that section must move into it.
 - The HTML copy is a snapshot. When the markdown or the fold JSON changes, the copy does not update. Re-run `--render` to refresh it. The retention rule prunes stamped copies past the 12 newest. A hand-renamed HTML outside the stamp pattern is never pruned.
+- Two JSONs land per run. The raw sidecar (`.fold.json`) holds every session row. The judgment summary (`.json`) holds aggregates plus categories, no per-session rows. A report whose step 4 failed names the raw sidecar in `fold:` instead. The summary is small. The sidecar is not.

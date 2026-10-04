@@ -46,7 +46,7 @@ from typing import Callable, Optional
 
 import typer
 
-from fno._subprocess_util import fno_py_cmd
+from fno._subprocess_util import fno_cmd, fno_py_cmd
 from fno.agents.naming import mint_or_none
 from fno.agents.events import (
     emit_merge_cleanup_requested,
@@ -392,7 +392,8 @@ class Ritual:
         # mismatched; reconcile's own repo scoping still fails closed on a
         # bare-number match when this resolution comes up empty (never left
         # to cwd inference to guess).
-        argv = ["backlog", "reconcile", "--pr-number", str(self.ctx.pr), "--json"]
+        # The native door, not fno-py: the mux owns `fno backlog` outright.
+        argv = [*fno_cmd(), "backlog", "reconcile", "--pr-number", str(self.ctx.pr), "--json"]
         from fno.graph._reconcile import resolve_current_repo_slug
 
         repo = resolve_current_repo_slug(str(self.canon))
@@ -407,9 +408,16 @@ class Ritual:
             )
         try:
             # Above reconcile's 240s close-probe budget, same as the merge.
+            # The argv already carries the mux prefix; _sh would prepend
+            # fno-py in front of it.
             from fno.pr._merge import POST_MERGE_RECONCILE_TIMEOUT_S
 
-            r = self._sh(argv, timeout=POST_MERGE_RECONCILE_TIMEOUT_S)
+            r = self.runner(
+                argv,
+                cwd=str(self.canon),
+                timeout=POST_MERGE_RECONCILE_TIMEOUT_S,
+                start_new_session=True,
+            )
         except subprocess.TimeoutExpired:
             self._emit("reconcile", _FAILED, "timeout")
             return

@@ -1,0 +1,4 @@
+Usage: fno agents claim acquire [OPTIONS] [key]
+Try 'fno agents claim acquire --help' for help.
+
+Error: Invalid value: invalid TTL format: 'abc' (use '30m', '1h', '3600s')

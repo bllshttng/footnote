@@ -58,7 +58,6 @@ backlog view
 backlog status
 # L11 keep the board honest
 backlog groom
-backlog reconcile
 backlog maintain
 backlog rank
 backlog roadmap

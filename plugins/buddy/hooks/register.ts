@@ -1,13 +1,13 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, STAT_NAMES, embody, hatch, restore } from './companion'
+import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, embody, hatch, restore } from './companion'
 import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
 import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityPrompt, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
 const BUBBLE_MS = 30_000
 // After this long with nothing said, the buddy says a canned line (no model call).
-const IDLE_TALK_MS = 90_000
+const IDLE_TALK_MS = 45_000
 const PET_MS = 2_500
 const MIN_TURN_MS = 5_000
 const REACT_GAP_MS = 10_000
@@ -38,10 +38,11 @@ let feedSince = 0
 let feedOff = false
 let fleet = ''
 let home = ''
-// The buddy's files live in the fno state folder, never under the Claude config dir.
+// The buddy's files live in the fno state folder, or ~/.local/state/buddy without fno; never under the Claude config dir.
 let stateDir = ''
 let sessionId = ''
 let wrapped = false
+let deferred = false
 let lastFrame = ''
 let frameAt = -Infinity
 let unwrappedAt = -Infinity
@@ -57,7 +58,11 @@ async function load($: EngineInterface, now: number): Promise<void> {
     buddy = embody(saved)
     return
   }
-  let soul = null
+  let soul: Soul | null = await fromFno($)
+  if (soul) {
+    buddy = embody(soul)
+    return
+  }
   try {
     if (home) soul = restore(await $.fs.read(home + '/.claude.json'), now)
   } catch {
@@ -70,6 +75,50 @@ async function load($: EngineInterface, now: number): Promise<void> {
   buddy = embody(soul)
   say(welcome ?? `hi. i'm ${buddy.name}.`, now)
   if (fresh) void givePersonality($)
+}
+
+// An fno release from before the move still loads its own copy of the buddy, which stamps fno's
+// store every few minutes. While that copy runs, this one stays off so only one buddy shows.
+async function oldCopyLive($: EngineInterface, now: number): Promise<boolean> {
+  if (!home) return false
+  const dir = `${home}/.claude/plugins/store`
+  try {
+    for (const entry of await $.fs.list(dir)) {
+      if (!entry.name.startsWith('fno_') || !entry.name.endsWith('.json')) continue
+      const old = JSON.parse(await $.fs.read(`${dir}/${entry.name}`))
+      const at = Math.max(old?.fleet?.at ?? 0, old?.feed?.at ?? 0)
+      if (now - at < FLEET_MS + 60_000) return true
+    }
+  } catch {
+    // Nothing readable: no old copy to defer to.
+  }
+  return false
+}
+
+// The buddy used to load inside the fno plugin, whose store is a different file. Bring its soul,
+// reroll bank, and mute over once, so the same buddy comes back after the move.
+async function fromFno($: EngineInterface): Promise<Soul | null> {
+  if (!home) return null
+  const dir = `${home}/.claude/plugins/store`
+  try {
+    // The marketplace install (fno@footnote) wins over a local dev copy such as fno@inline.
+    const entries = (await $.fs.list(dir)).sort((a, b) => Number(b.name.startsWith('fno_footnote-')) - Number(a.name.startsWith('fno_footnote-')))
+    for (const entry of entries) {
+      if (!entry.name.startsWith('fno_') || !entry.name.endsWith('.json')) continue
+      const old = JSON.parse(await $.fs.read(`${dir}/${entry.name}`))
+      if (!old?.soul?.seed) continue
+      await $.store.set('soul', old.soul)
+      if (old.rerolls) await $.store.set('rerolls', old.rerolls)
+      if (old.muted === true) {
+        muted = true
+        await $.store.set('muted', true)
+      }
+      return old.soul as Soul
+    }
+  } catch {
+    // No fno store, or an unreadable one: hatch as usual.
+  }
+  return null
 }
 
 // A new buddy hatches with a placeholder; one model call then writes who it is, as the original did.
@@ -173,18 +222,19 @@ function isOurs(statusLine: any): boolean {
 }
 
 async function resolveStateDir($: EngineInterface): Promise<string> {
+  const fallback = home ? `${home}/.local` : ''
   try {
     const out = await $.process.run(['fno', 'config', 'get', 'state_dir'], { timeoutMs: 10_000 })
     const dir = out.exitCode === 0 ? out.stdout.split('\n')[0]!.trim() : ''
-    return dir.replace(/^~(?=\/|$)/, home).replace(/\/+$/, '')
+    return dir ? dir.replace(/^~(?=\/|$)/, home).replace(/\/+$/, '') : fallback
   } catch {
-    return ''
+    return fallback
   }
 }
 
 // Keeps a copy of the wrapper at a path that survives plugin updates, so statusLine never points into the plugin cache.
 async function installWrapper($: EngineInterface): Promise<void> {
-  const ours = await $.fs.read(`${$.plugin.root}/hooks/buddy/${WRAPPER}`)
+  const ours = await $.fs.read(`${$.plugin.root}/hooks/${WRAPPER}`)
   const target = `${buddyDir()}/${WRAPPER}`
   let theirs = ''
   try {
@@ -196,7 +246,7 @@ async function installWrapper($: EngineInterface): Promise<void> {
 }
 
 async function statuslineOn($: EngineInterface): Promise<string> {
-  if (!stateDir) return 'The status line needs the fno CLI on your PATH (fno config get state_dir).'
+  if (!stateDir) return 'The status line needs HOME to be set.'
   const settings = await readSettings($)
   if (!settings) return `${settingsPath()} does not parse, so I left it alone.`
   const current = settings.statusLine as any
@@ -240,7 +290,7 @@ async function react($: EngineInterface): Promise<void> {
     model: 'haiku',
     system: systemPrompt(buddy),
     prompt: reactionPrompt(summary),
-    maxTokens: 60,
+    maxTokens: 80,
     timeoutMs: 20_000,
   })
   const line = reply.isAnswered ? cleanReaction(reply.text) : ''
@@ -377,6 +427,8 @@ export function register(on: On) {
     home = (await $.env.get('HOME')) ?? ''
     sessionId = await $.session.id()
     await load($, now)
+    deferred = await oldCopyLive($, now)
+    if (deferred) muted = true
     // A buddy that is off runs nothing at start: no process, no settings read.
     if (!muted) {
       stateDir = await resolveStateDir($)
@@ -401,6 +453,7 @@ export function register(on: On) {
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
         if (wrapped && !was) await $.ui.close({ id: PANE_ID }).catch(() => {})
+        if (wrapped) $.ui.invalidate('ui.render')
       }
       if (wrapped) {
         drawnAt = at
@@ -423,6 +476,7 @@ export function register(on: On) {
     const now = await $.clock.now()
     const arg = e.args.trim().toLowerCase()
     if (!buddy) await load($, now)
+    if (deferred) return { text: 'Your fno plugin still runs its own buddy. Update fno (/plugin update fno@footnote), then start a new session.' }
     if (!stateDir) stateDir = await resolveStateDir($)
     if (arg === 'statusline') return { text: await statuslineOn($) }
     if (arg === 'bye') {
@@ -491,10 +545,15 @@ export function register(on: On) {
   // the buddy standing at the bottom and its words above it.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID || !buddy || muted) return next(e)
+    // One buddy on screen: a pane left open (a resumed session, a late open) closes once the status line has it.
+    if (wrapped) {
+      void $.ui.close({ id: PANE_ID }).catch(() => {})
+      return next(e)
+    }
     const now = await $.clock.now()
     drawnAt = paneDrawnAt = now
     const { Box, Text, Button } = $.ui.resolve(e)
-    const color = RARITY_COLORS[buddy.rarity]
+    const color = RARITY_THEME[buddy.rarity]
     const words = talking(now)
     return Box({
       flexDirection: 'column',
@@ -525,7 +584,7 @@ export function register(on: On) {
     const { Box, Text } = $.ui.resolve(e)
     const words = talking(now)
     const face = (now - pettedAt < PET_MS ? '♥ ' : '') + renderFace(buddy)
-    const ours = Text({ color: RARITY_COLORS[buddy.rarity], children: [words ? `${face} ${buddy.name}: ${words}` : `${face} ${buddy.name}`] })
+    const ours = Text({ children: [Text({ color: RARITY_THEME[buddy.rarity], children: [`${face} ${buddy.name}`] }), ...(words ? [`: ${words}`] : [])] })
     const theirs = await next(e)
     return theirs ? Box({ flexDirection: 'column', children: [ours, theirs] }) : ours
   })

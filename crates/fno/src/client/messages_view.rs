@@ -12,6 +12,9 @@ use crate::org_model::{OrgLead, OrgTree};
 use crate::view_store::SidelineView;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MESSAGES_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn seg(text: impl Into<String>, role: BRole) -> BSeg {
     BSeg {
@@ -55,6 +58,8 @@ pub(crate) struct MessagesBoard {
     pub(crate) sel_lead: Option<String>,
     pub(crate) sel_agent: Option<String>,
     pub(crate) sel_thread: Option<String>,
+    pending_message_id: Option<String>,
+    selected_message_id: Option<String>,
     pub(crate) collapsed: HashSet<String>,
     pub(crate) detail: Option<super::messages_detail::SessionDetail>,
     pub(crate) gen: u64,
@@ -74,6 +79,8 @@ impl MessagesBoard {
             sel_lead: None,
             sel_agent: None,
             sel_thread: None,
+            pending_message_id: None,
+            selected_message_id: None,
             collapsed: HashSet::new(),
             detail: None,
             gen,
@@ -516,6 +523,7 @@ impl MessagesBoard {
         }
         let mine = self.sel_agent.as_deref().unwrap_or("");
         for r in &rows {
+            let selected = self.selected_message_id.as_deref() == Some(text_of(r, "id"));
             let sys = text_of(r, "system") == "true";
             let name = if sys {
                 text_of(r, "from").to_string()
@@ -524,11 +532,13 @@ impl MessagesBoard {
             };
             let time = text_of(r, "ts").get(11..16).unwrap_or("");
             let badge = if sys { " SYS" } else { "" };
-            lines.push(BLine::of(&[
+            let mut header = BLine::of(&[
                 seg(name, BRole::Head),
                 seg(badge.to_string(), BRole::Meta),
                 seg(format!(" {time}"), BRole::Meta),
-            ]));
+            ]);
+            header.band = selected;
+            lines.push(header);
             let body = text_of(r, "body").to_string();
             let pad = w.saturating_sub(body.chars().count()).saturating_sub(2);
             let aligned = if text_of(r, "from_key") == mine {
@@ -537,7 +547,15 @@ impl MessagesBoard {
                 body
             };
             let bubble = BLine::of(&[seg(aligned, BRole::Body)]);
-            lines.extend(bubble.wrap(w.saturating_sub(2)));
+            lines.extend(
+                bubble
+                    .wrap(w.saturating_sub(2))
+                    .into_iter()
+                    .map(|mut line| {
+                        line.band = selected;
+                        line
+                    }),
+            );
         }
         lines
     }
@@ -606,23 +624,33 @@ pub(crate) fn paint(
         thread_w,
         body_h,
         &thread,
-        Some(thread.len().saturating_sub(1)),
+        Some(
+            thread
+                .iter()
+                .rposition(|line| line.band)
+                .unwrap_or_else(|| thread.len().saturating_sub(1)),
+        ),
         &view.theme,
     );
 }
 
 /// Lifecycle.
 pub(crate) fn open(view: &mut View) {
-    let gen = view
-        .messages_board
-        .as_ref()
-        .map(|b| b.gen.wrapping_add(1))
-        .unwrap_or(0);
+    let gen = NEXT_MESSAGES_GEN.fetch_add(1, Ordering::Relaxed);
     view.messages_board = Some(MessagesBoard::new(gen));
     view.backlog_board = None;
     view.org_board = None;
     view.region_owner = super::region_focus::RegionOwner::Board;
     super::backlog_board::set_sideline_view(view, SidelineView::Messages);
+}
+
+/// Open the Messages tab with a pending message id. The projection gather
+/// resolves it to a chat before the thread is selected.
+pub(crate) fn open_message(view: &mut View, id: String) {
+    open(view);
+    if let Some(board) = view.messages_board.as_mut() {
+        board.pending_message_id = Some(id);
+    }
 }
 
 /// Restore after launch: a persisted Messages sideline reopens it.
@@ -643,13 +671,77 @@ pub(crate) fn apply_gather(
         return;
     };
     b.inflight = false;
+    let mut notice = None;
     match mail {
-        Ok(v) => b.snapshot.apply(v),
+        Ok(v) => {
+            b.snapshot.apply(v);
+            if let Some(id) = b.pending_message_id.take() {
+                let target = b.projection().and_then(|projection| {
+                    let pair = projection
+                        .get("threads")?
+                        .as_array()?
+                        .iter()
+                        .find_map(|thread| {
+                            let rows = thread.get("rows")?.as_array()?;
+                            let row = rows.iter().find(|row| text_of(row, "id") == id)?;
+                            Some((
+                                text_of(thread, "chat_id").to_string(),
+                                Some(text_of(row, "to_key").to_string()),
+                            ))
+                        });
+                    if pair.is_some() {
+                        return pair;
+                    }
+                    let channel =
+                        projection
+                            .get("channels")?
+                            .as_array()?
+                            .iter()
+                            .find_map(|channel| {
+                                let rows = channel.get("rows")?.as_array()?;
+                                rows.iter().any(|row| text_of(row, "id") == id).then(|| {
+                                    (format!("channel:{}", text_of(channel, "scope")), None)
+                                })
+                            });
+                    if channel.is_some() {
+                        return channel;
+                    }
+                    projection
+                        .get("system")?
+                        .as_object()?
+                        .iter()
+                        .find_map(|(agent, rows)| {
+                            rows.as_array()?
+                                .iter()
+                                .any(|row| text_of(row, "id") == id)
+                                .then(|| (format!("system:{agent}"), Some(agent.clone())))
+                        })
+                });
+                if let Some((thread, agent)) = target.filter(|(thread, _)| !thread.is_empty()) {
+                    b.sel_thread = Some(thread.clone());
+                    if let Some(agent) = agent {
+                        b.sel_agent = Some(agent.clone());
+                        if let Some(i) = b.partner_rows(&agent).iter().position(
+                            |row| matches!(row, PartnerRow::Thread { chat_id, .. } if chat_id == &thread),
+                        ) {
+                            b.cursors[1] = i;
+                        }
+                    }
+                    b.selected_message_id = Some(id);
+                    b.col = Col::Thread;
+                } else {
+                    notice = Some(format!("message {id}: no conversation found"));
+                }
+            }
+        }
         Err(reason) => b.snapshot.fail(reason, board_now()),
     }
     match tree {
         Ok(t) => b.tree = Some(t),
         Err(reason) => b.tree_error = Some(reason),
+    }
+    if let Some(notice) = notice {
+        view.set_notice(notice);
     }
 }
 

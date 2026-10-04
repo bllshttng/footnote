@@ -1,6 +1,6 @@
 # Buddy: a companion beside your status line
 
-Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. The fno plugin ships it as a Claude Code mod. `/buddy` and `/bbb` (bring back buddy) are the same command.
+Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. It is a Claude Code mod in its own plugin, `buddy`, in the footnote marketplace. You do not need fno to use it. `/buddy` and `/bbb` (bring back buddy) are the same command.
 
 It needs Claude Code 2.1.287 or later. That is the first version that loads mods.
 
@@ -12,7 +12,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 ## Start
 
-1. Install the fno plugin. The buddy hatches at the next session start.
+1. Install the plugin: `/plugin install buddy@footnote`. The buddy hatches at the next session start.
 2. Type `/buddy` to see its card.
 3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
 4. If you want the buddy in a side pane, type `/buddy pane`.
@@ -30,7 +30,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 The buddy has three places. It uses the first place that is available.
 
-1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words show to its left. Below 100 columns it shows a one-line face, as the original did. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
+1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words wrap to its left, up to 30 columns wide, on the rows beside the art. Below 100 columns it shows a one-line face, as the original did. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
 2. **A narrow pane on the right.** Type `/buddy pane` to put the buddy here. The sprite stands at the bottom, and its words are above it. Claude Code shows this pane only in the fullscreen layout, at 110 columns or more. If you never typed `/buddy statusline`, the buddy opens this pane by itself at 144 columns or more.
 3. **One line above the prompt.** If the first two places are not available, the buddy shows a one-line face above the prompt.
 
@@ -78,15 +78,19 @@ If you hatched a buddy before Claude Code removed it, its name and personality a
 
 ## Cost and models
 
-Each model line is one call on your own plan, with a limit of 60 output tokens. `/buddy off` stops these calls for every session.
+Each model line is one call on your own plan, with a limit of 80 output tokens. `/buddy off` stops these calls for every session.
 
 The buddy asks for the `haiku` model through the API client of your session. On an Anthropic session, that is Claude Haiku. If your session uses a different endpoint, the `haiku` name goes to that endpoint. For example, a session with `ANTHROPIC_DEFAULT_HAIKU_MODEL` set to a GLM model gets GLM lines.
 
 ## Storage
 
 - The soul of the buddy (seed, name, personality) and the reroll bank are in the mod store under `~/.claude/plugins/store/`.
-- The status line files are in `state/buddy/` in the fno state folder (`~/.fno/` by default). They are the wrapper, your saved `statusLine`, and one frame file for each session. The wrapper erases a frame file one day after its last write.
+- The status line files are in `state/buddy/` in the fno state folder (`~/.fno/` by default). Without fno, they are in `~/.local/state/buddy/`. They are the wrapper, your saved `statusLine`, and one frame file for each session. The wrapper erases a frame file one day after its last write.
 
 ## Where the code is
 
-The mod is `hooks/buddy/`. The `modules` key of `hooks/hooks.json` names it. `claude plugin test` runs `hooks/buddy/buddy.test.ts`. The repo also has an opencode test file. Run the mod tests from a copy that has only `.claude-plugin/plugin.json`, `hooks/hooks.json`, and `hooks/buddy/`.
+The plugin is `plugins/buddy/` in the footnote repo. `plugins/buddy/hooks/hooks.json` names the mod, `register.ts`. Run its tests with `claude plugin test plugins/buddy`.
+
+## If you used the buddy inside fno
+
+Before this change, the fno plugin loaded the buddy. Now fno does not load it. Install `buddy@footnote` to get it back. The soul and the reroll bank are in the mod store, so the same buddy comes back.
