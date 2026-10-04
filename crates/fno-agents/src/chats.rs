@@ -256,16 +256,24 @@ fn message_line(line: &Value) -> Option<(String, Value)> {
                 .unwrap_or("unknown")
         })
         .to_string();
+    let to_key = if kind == "announce" {
+        String::new()
+    } else {
+        let to = line.get("to").and_then(Value::as_str).unwrap_or("");
+        recipient_key(to)
+    };
     let chat_id = if kind == "announce" {
         chat_id_for_channel(&scope_of(line))
     } else {
-        let to = line.get("to").and_then(Value::as_str).unwrap_or("");
-        chat_id_for_pair(&from_key, &recipient_key(to))
+        chat_id_for_pair(&from_key, &to_key)
     };
     let mut rec = line.clone();
     if let Value::Object(map) = &mut rec {
         map.insert("type".into(), json!("message"));
         map.insert("chat_id".into(), json!(chat_id));
+        if !to_key.is_empty() {
+            map.insert("to_key".into(), json!(to_key));
+        }
     }
     Some((chat_id, rec))
 }
@@ -1339,7 +1347,7 @@ pub fn run_chats(args: &[String]) -> i32 {
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--thread" => q.thread = true,
-                    "--json" => q.json = true,
+                    "-J" | "--json" => q.json = true,
                     "--all" => q.all = true,
                     "-n" | "--limit" => match it.next().and_then(|v| v.parse::<usize>().ok()) {
                         Some(n) => q.limit = n,
@@ -1779,6 +1787,41 @@ mod tests {
         assert!(stranger
             .unwrap_err()
             .contains("not addressed to or from the caller"));
+        // A send addressed to a registry name records the resolved session
+        // key as to_key, so the recipient reads their mail by their own
+        // session id.
+        std::fs::write(
+            home_pin.join("registry.json"),
+            r#"{"agents":[{"name":"rowan","session_id":"sess-b-uuid","harness":"claude"}]}"#,
+        )
+        .unwrap();
+        let named = bus_line("fmail-777777777777", "sess-a", "rowan", "send");
+        let Recorded::Message {
+            chat_id: named_chat,
+        } = record_at(&chats, &db, &bus, &named).unwrap()
+        else {
+            panic!("expected a message record");
+        };
+        assert_eq!(named_chat, chat_id_for_pair("sess-a", "sess-b-uuid"));
+        let stored = std::fs::read_to_string(chats.join(&named_chat).join("messages.jsonl"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let rec: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(rec["to_key"], "sess-b-uuid", "the resolved key is stored");
+        let shown = show_at(
+            &chats,
+            &db,
+            "fmail-777777777777",
+            &q(Some("sess-b-uuid"), false),
+        )
+        .unwrap();
+        assert!(
+            shown.contains("hello"),
+            "the recipient reads by id: {shown}"
+        );
         let ids_ts = [
             ("fmail-555555555553", "2026-10-03T19:03:00Z"),
             ("fmail-555555555551", "2026-10-03T19:01:00Z"),

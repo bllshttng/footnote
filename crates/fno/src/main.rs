@@ -198,11 +198,11 @@ fn exit_mux(code: i32) -> ! {
     std::process::exit(code)
 }
 
-/// The carried tail runs through the store's one owner from PATH: stdio
-/// inherited, the child's exit code returned. A missing binary is a refusal,
-/// never a silent empty read.
+/// The carried tail runs through the store's one owner: stdio inherited, the
+/// child's exit code returned. A missing binary is a refusal, never a silent
+/// empty read.
 fn mail_show_exec(rest: &[OsString]) -> i32 {
-    let mut cmd = std::process::Command::new("fno-agents");
+    let mut cmd = std::process::Command::new(fno::digest_overlay::fno_agents_bin());
     cmd.args(["chats", "show"]);
     cmd.args(rest);
     match cmd.status() {
@@ -244,12 +244,21 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
 /// The mail reader's lexical claim, in the shape of `agents_history::classify`:
 /// `show` is native (it runs `fno-agents chats show`, the store's one owner)
 /// and `view` is refused by name, because the rename ships no compat shell.
+/// The verb mounts at two paths -- `fno agents mail <verb>` and the hidden
+/// `fno mail <verb>` group -- and both spellings claim and refuse alike.
 fn classify_mail_show(args: &[OsString]) -> Option<Role> {
-    if args.len() < 3 || args[0].to_str()? != "agents" || args[1].to_str()? != "mail" {
+    let (verb, tail): (&str, &[OsString]) = if args.len() >= 3
+        && args[0].to_str() == Some("agents")
+        && args[1].to_str() == Some("mail")
+    {
+        (args[2].to_str()?, &args[3..])
+    } else if args.len() >= 2 && args[0].to_str() == Some("mail") {
+        (args[1].to_str()?, &args[2..])
+    } else {
         return None;
-    }
-    match args[2].to_str()? {
-        "show" => Some(Role::MailShow(args[3..].to_vec())),
+    };
+    match verb {
+        "show" => Some(Role::MailShow(tail.to_vec())),
         "view" => Some(Role::MailViewRenamed),
         _ => None,
     }
@@ -639,6 +648,19 @@ mod tests {
             decide_role(&os(&["agents", "mail", "view", "--all"]), false),
             Role::MailViewRenamed
         ));
+        // The hidden `fno mail <verb>` mount claims and refuses alike.
+        assert_eq!(
+            decide_role(&os(&["mail", "show", "fmail-x"]), false),
+            Role::MailShow(os(&["fmail-x"]))
+        );
+        assert!(matches!(
+            decide_role(&os(&["mail", "view"]), false),
+            Role::MailViewRenamed
+        ));
+        assert_eq!(
+            decide_role(&os(&["mail", "send", "a", "b"]), false),
+            Role::Forward
+        );
         assert_eq!(
             decide_role(&os(&["agents", "mail", "send", "a", "b"]), false),
             Role::Forward
