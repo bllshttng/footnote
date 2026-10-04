@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -208,6 +209,35 @@ def mint_fno_id() -> str:
             (proc.stderr or "fno-agents state mint-id answered nothing").strip()[:200]
         )
     return minted
+
+
+@lru_cache(maxsize=1)
+def delivered_terminals() -> frozenset:
+    """The delivered-terminal vocabulary, owned by Rust
+    (`TerminationReason::is_delivered` in loopcheck.rs) and served through one
+    fail-closed `fno-agents terminals` subprocess per process, like the roster.
+
+    The set counts a run DELIVERED for telemetry: DonePRGreen, DoneAdvisory,
+    DoneDelivery, DoneBatched. DoneAwaitingMerge and DoneUnreviewed are
+    deliberately absent (complete-but-unmerged and waiting are not landed).
+    Raises VerbUnavailable when the binary is missing or answers nothing; no
+    Python-side fallback exists, by the rule that keeps the vocabulary single.
+    """
+    error, payload = call_binary_json(
+        "terminals", timeout=15, binary=find_dev_binary() or resolve_binary()
+    )
+    if error is not None:
+        raise VerbUnavailable(
+            "the delivered-terminal vocabulary lives in the fno-agents binary"
+            " (loopcheck.rs TerminationReason::is_delivered) and the read"
+            f" failed: {error}; run `fno doctor update --rust` or set FNO_AGENTS_BIN"
+        )
+    names = payload.get("delivered") if isinstance(payload, dict) else None
+    if not names or not all(isinstance(n, str) and n for n in names):
+        raise VerbUnavailable(
+            f"fno-agents terminals answered no usable delivered list: {payload!r}"[:200]
+        )
+    return frozenset(names)
 
 
 def resolve_installed_binary() -> Optional[Path]:

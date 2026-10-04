@@ -94,6 +94,28 @@ pub enum TerminationReason {
     Aborted,
 }
 
+impl TerminationReason {
+    /// Whether a run ending on this reason counts as DELIVERED for telemetry.
+    /// The one vocabulary, so the ledger promotion gate and the scoreboard
+    /// fold cannot drift into two delivered sets. `DoneAwaitingMerge` is
+    /// deliberately absent: the work is complete but the PR is not merged
+    /// (human-gated), so counting it would inflate delivery metrics before
+    /// the work lands. `DoneUnreviewed` is absent for the same reason: it
+    /// means waiting, not landed. `DoneBatched` stays - it delivers via the
+    /// shared batch PR. Looser than the plan-graduate ship set
+    /// (DonePRGreen | DoneAdvisory): "delivered for telemetry" and "graduate
+    /// the plan" differ.
+    pub fn is_delivered(&self) -> bool {
+        matches!(
+            self,
+            TerminationReason::DonePRGreen
+                | TerminationReason::DoneAdvisory
+                | TerminationReason::DoneDelivery
+                | TerminationReason::DoneBatched
+        )
+    }
+}
+
 pub use crate::review_freshness::{
     freshness_rank, review_freshness, CodeDiffIdentity, Freshness, FreshnessFacts,
     FreshnessResolver,

@@ -2,9 +2,8 @@
 //!
 //! One decision about what a node's evidence means, so the main, provider,
 //! skill, efficiency, lane, calibration and fidelity views cannot drift into
-//! seven answers. The terminal vocabulary arrives from the caller (Python owns
-//! `fno.terminals`) or, when the caller sends no lists, from the default built
-//! beside [`classify`] out of [`TerminationReason`]; the decision lives here.
+//! seven answers. The terminal vocabulary is the exhaustive match over
+//! [`TerminationReason`] beside [`classify`]; the decision lives here.
 //! The `flow` section rides the same answer: the weekly delivery/cycle/waiting aggregates every board and
 //! view reads, so presentation layers never re-classify.
 //!
@@ -22,7 +21,7 @@ use std::collections::BTreeMap;
 
 /// Every [`TerminationReason`] variant, spelled through serde so a rename on
 /// the enum cannot drift from the wire names the ledger and Python carry.
-const ALL_TERMINALS: [TerminationReason; 14] = [
+pub(crate) const ALL_TERMINALS: [TerminationReason; 14] = [
     TerminationReason::DonePRGreen,
     TerminationReason::DoneAdvisory,
     TerminationReason::DoneDelivery,
@@ -39,13 +38,11 @@ const ALL_TERMINALS: [TerminationReason; 14] = [
     TerminationReason::Aborted,
 ];
 
-/// The delivered-terminal vocabulary when a caller sends no lists: one
-/// exhaustive match over every [`TerminationReason`] variant, so a new
-/// variant is a compile error until someone places it. `DoneAdvisory` is
-/// doc, `DoneDelivery` is delivery, `DonePRGreen` and `DoneBatched` are
-/// ship, every other variant is none - the same answer Python's
-/// `fno.terminals` passes today.
-fn default_terminal_lists() -> (Vec<String>, Vec<String>, Vec<String>) {
+/// The terminal vocabulary: one exhaustive match over every
+/// [`TerminationReason`] variant, so a new variant is a compile error until
+/// someone places it. `DoneAdvisory` is doc, `DoneDelivery` is delivery,
+/// `DonePRGreen` and `DoneBatched` are ship, every other variant is none.
+pub(crate) fn default_terminal_lists() -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut doc = Vec::new();
     let mut delivery = Vec::new();
     let mut ship = Vec::new();
@@ -71,6 +68,23 @@ fn default_terminal_lists() -> (Vec<String>, Vec<String>, Vec<String>) {
         }
     }
     (doc, delivery, ship)
+}
+
+/// Whether a wire terminal name proves a ROW shipped in the by-provider fold:
+/// the delivered set minus the doc and delivery terminals, whose rows prove a
+/// node delivered but are not a session's ship evidence. Unparseable names
+/// (a hand-edited row) are never a ship reason.
+pub(crate) fn is_ship_terminal(name: &str) -> bool {
+    match serde_json::from_value::<TerminationReason>(Value::String(name.to_string())) {
+        Ok(t) => {
+            t.is_delivered()
+                && !matches!(
+                    t,
+                    TerminationReason::DoneAdvisory | TerminationReason::DoneDelivery
+                )
+        }
+        Err(_) => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,8 +594,7 @@ pub fn classify_node(
 
 /// Classify every node in `entries` plus every row-referenced node id the
 /// graph does not carry. Params: `entries` (graph nodes), `rows` (ledger
-/// rows), `doc_terminals` / `delivery_terminals` / `ship_terminals`.
-/// Returns `{"by_node": {...}, "coverage": {...}}`. Pure; no file I/O.
+/// rows). Returns `{"by_node": {...}, "coverage": {...}}`. Pure; no file I/O.
 pub fn classify(params: &Value) -> Result<Value, String> {
     let empty = Vec::new();
     let all_entries = params
@@ -650,32 +663,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
             all_rows.iter().filter(|r| r.is_object()).cloned().collect(),
         ),
     };
-    let list = |key: &str| -> Vec<String> {
-        params
-            .get(key)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    // Explicit lists win, so the Python callers see no change. When none is
-    // an array, the default vocabulary answers - a Rust caller sends none.
-    let any_list_present = ["doc_terminals", "delivery_terminals", "ship_terminals"]
-        .iter()
-        .any(|k| params.get(*k).and_then(Value::as_array).is_some());
-    let (doc, delivery, ship) = if any_list_present {
-        (
-            list("doc_terminals"),
-            list("delivery_terminals"),
-            list("ship_terminals"),
-        )
-    } else {
-        default_terminal_lists()
-    };
+    let (doc, delivery, ship) = default_terminal_lists();
     let vocab = TerminalVocabulary {
         doc: &doc,
         delivery: &delivery,
@@ -896,9 +884,6 @@ mod tests {
                 {"graph_node_id": "x-old", "termination_reason": "DonePRGreen", "completed": "2026-09-01T10:00:00"},
                 {"graph_node_id": "x-new", "termination_reason": "DonePRGreen", "completed": "2026-09-20T10:00:00"}
             ],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "now": "2026-09-21T10:00:00",
             "followup_days": 14
         });
@@ -924,9 +909,6 @@ mod tests {
                 {"graph_node_id": "x-2", "termination_reason": "DonePRGreen", "cost_usd": 9.0, "project": "p2"},
                 {"completed": "2026-09-10T00:00:00Z", "termination_reason": "DonePRGreen", "cost_usd": 5.0}
             ],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "project": "p1"
         });
         let out = classify(&params).unwrap();
@@ -960,9 +942,6 @@ mod tests {
                 {"completed": "2026-09-10T00:00:00Z", "termination_reason": "DonePRGreen"},
                 {"completed": "2026-09-10T00:00:00Z", "termination_reason": "Budget", "graph_node_id": "x-2"},
             ],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
         });
         let out = classify(&params).unwrap();
         assert_eq!(out["by_node"]["x-1"]["class"], "merged");
@@ -987,9 +966,6 @@ mod tests {
                 {"graph_node_id": "d-1", "termination_reason": "DoneAdvisory", "completed": "2026-09-03T12:00:00"},
                 {"graph_node_id": "v-1", "termination_reason": "DoneDelivery", "completed": "2026-09-04T12:00:00"}
             ],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "now": "2026-09-09T12:00:00",
             "since_days": 28
         });
@@ -1017,77 +993,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_without_lists_answers_the_default_vocabulary() {
-        // AC3-HP: no terminal lists in, the default vocabulary counts a
-        // DonePRGreen merge exactly as the explicit lists do.
-        let entries = vec![
-            json!({"id": "x-1", "merge_status": "merged", "merged_at": "2026-09-02T12:00:00"}),
-            json!({"id": "d-1", "status": "done", "completed_at": "2026-09-02T12:00:00"}),
-        ];
-        let rows = vec![json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})];
-        let bare = json!({
-            "entries": entries,
-            "rows": rows,
-            "now": "2026-09-09T12:00:00",
-            "since_days": 28
-        });
-        let without = classify(&bare).unwrap();
-        let explicit = json!({
-            "entries": entries,
-            "rows": rows,
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DoneBatched", "DonePRGreen"],
-            "now": "2026-09-09T12:00:00",
-            "since_days": 28
-        });
-        let with = classify(&explicit).unwrap();
-        assert_eq!(
-            without["flow"]["deliveries"]["code"],
-            with["flow"]["deliveries"]["code"]
-        );
-        assert_eq!(
-            without["flow"]["deliveries"]["doc"],
-            with["flow"]["deliveries"]["doc"]
-        );
-        assert_eq!(
-            without["flow"]["deliveries"]["code"], 1,
-            "a merged DonePRGreen row is one confirmed code delivery"
-        );
-    }
-
-    #[test]
-    fn classify_explicit_lists_win_over_the_default() {
-        // AC4-EDGE: lists that leave DonePRGreen out keep it out - the
-        // default is not mixed in behind them. The observable is an inferred
-        // delivery: a node the graph lost, whose only evidence is the
-        // terminal's vocabulary membership.
-        let params = json!({
-            "entries": [],
-            "rows": [json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DoneBatched"],
-            "now": "2026-09-09T12:00:00",
-            "since_days": 28
-        });
-        let out = classify(&params).unwrap();
-        assert_eq!(
-            out["by_node"]["x-1"]["delivered"], false,
-            "explicit lists won: DonePRGreen is no vocabulary member"
-        );
-        // The same row under the default vocabulary (no lists) delivers.
-        let bare = json!({
-            "entries": [],
-            "rows": [json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})],
-            "now": "2026-09-09T12:00:00",
-            "since_days": 28
-        });
-        let out = classify(&bare).unwrap();
-        assert_eq!(out["by_node"]["x-1"]["delivered"], true);
-    }
-
-    #[test]
     fn flow_cycle_median_and_nearest_rank_p85() {
         // created_at is exactly n days before the merge, so elapsed days are
         // 1..=10: median 5.5, nearest-rank p85 the 9th sorted value.
@@ -1108,9 +1013,6 @@ mod tests {
         let params = json!({
             "entries": entries,
             "rows": [],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "now": "2026-09-09T12:00:00",
             "since_days": 28
         });
@@ -1131,9 +1033,6 @@ mod tests {
                  "pr_number": 404, "pr_url": "https://github.com/o/r/pull/404"},
                 {"completed": "2026-09-02T12:00:00", "termination_reason": "DonePRGreen"}
             ],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "now": "2026-09-09T12:00:00",
             "since_days": 28
         });
@@ -1158,9 +1057,6 @@ mod tests {
                  "created_at": "2026-08-20T12:00:00"}
             ],
             "rows": [],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "now": "2026-09-09T12:00:00",
             "since_days": 28
         });
@@ -1188,9 +1084,6 @@ mod tests {
                 {"completed": "2026-06-16T12:00:00", "termination_reason": "DonePRGreen",
                  "pr_number": 400}
             ],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": ["DonePRGreen", "DoneBatched"],
             "now": "2026-09-09T12:00:00",
             "since_days": 28
         });
@@ -1210,8 +1103,6 @@ mod tests {
         let params = json!({
             "entries": [node("x-1", Some("merged"))],
             "rows": [],
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
             "ship_terminals": ["DonePRGreen", "DoneBatched"]
         });
         let out = classify(&params).unwrap();

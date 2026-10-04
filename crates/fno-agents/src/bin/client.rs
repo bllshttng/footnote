@@ -204,6 +204,11 @@ fn main() {
     if args.first().map(String::as_str) == Some("harness-roster") {
         std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
     }
+    // `terminals`: the delivered-terminal vocabulary JSON read; Python's
+    // ledger promotion gate and scoreboard fold read it like the roster.
+    if args.first().map(String::as_str) == Some("terminals") {
+        std::process::exit(fno_agents::terminal_vocab::run_terminals(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
     }
