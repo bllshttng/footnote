@@ -85,7 +85,7 @@ fi
 if grep -qs '^ZAI_API_KEY=.' "$ENV_FILE"; then ok "ZAI_API_KEY in $ENV_FILE (0600)"; fi
 
 echo "== fno and this branch's fno-agents (Run 1)"
-have fno || run uv tool install fno
+have fno || run uv tool install --compile-bytecode fno
 bin="$REPO/crates/fno-agents/target/release/fno-agents"
 [ -x "$bin" ] || run cargo build --release --manifest-path "$REPO/crates/fno-agents/Cargo.toml"
 if [ "$CHECK" = 0 ] && ! grep -q '^FNO_AGENTS_BIN=' "$ENV_FILE"; then printf 'FNO_AGENTS_BIN=%s\n' "$bin" >> "$ENV_FILE"; fi
