@@ -78,11 +78,9 @@ impl TestJournal {
             prev.push((key, std::env::var_os(key)));
             std::env::remove_var(key);
         }
-        TEST_JOURNAL
-            .with(|j| {
-                *j.borrow_mut() =
-                    Some(crate::law_match::project_events_journal_in(root.path()));
-            });
+        TEST_JOURNAL.with(|j| {
+            *j.borrow_mut() = Some(crate::law_match::project_events_journal_in(root.path()));
+        });
         Self {
             root,
             _lock: lock,
@@ -145,11 +143,14 @@ fn trace_for(session: Option<String>, source: &str) -> Trace {
     }
 }
 
-fn write_span(span_kind: &str, trace: Trace, attrs: Map<String, Value>) {
+fn write_span(journal: &Path, span_kind: &str, trace: Trace, attrs: Map<String, Value>) {
+    // The journal argument is the CALLER's resolution (the request or record
+    // cwd), never the process cwd: a pr-watch drain merges for repositories
+    // other than its own checkout, and the span belongs to the PR's repo.
     let journal = match test_journal_target() {
         Some(j) => j,
         None if cfg!(test) => return,
-        None => crate::law_match::project_events_journal(),
+        None => journal.to_path_buf(),
     };
     if let Err(e) = decision_trace::emit_span_to(&journal, span_kind, &trace, &attrs) {
         eprintln!("fno merge provenance: span write failed: {e}");
@@ -190,7 +191,8 @@ pub fn record_outcome(request: &Request, facts: &PrFacts, outcome: &Outcome) {
     attrs.insert("head".into(), json!(facts.head_sha));
     attrs.insert("path".into(), json!(path));
     attrs.insert("grant".into(), json!(grant));
-    write_span(span_kind, trace_for(session, source), attrs);
+    let journal = crate::law_match::project_events_journal_in(&request.cwd);
+    write_span(&journal, span_kind, trace_for(session, source), attrs);
 }
 
 /// The merge intent in a gh argv: `Some(Some(n))` names the PR,
@@ -268,7 +270,16 @@ pub fn record_request(command: &[String], cwd: Option<&str>, path: &str) {
             .unwrap_or_else(|| "unknown-repo".into())),
     );
     attrs.insert("path".into(), json!(path));
-    write_span("merge_requested", trace_for(session, "verb"), attrs);
+    let journal = match cwd {
+        Some(c) if !c.is_empty() => crate::law_match::project_events_journal_in(Path::new(c)),
+        _ => crate::law_match::project_events_journal(),
+    };
+    write_span(
+        &journal,
+        "merge_requested",
+        trace_for(session, "verb"),
+        attrs,
+    );
 }
 
 /// Does the store already carry an fno merge record for this repo and PR?
@@ -304,7 +315,13 @@ pub fn has_record(journal: &Path, repo: &str, pr: u64) -> bool {
 /// The reconcile record: a node closes on a PR whose merge the journal
 /// never saw, so the merge happened outside fno (github.com, another
 /// machine, an untracked path).
-pub fn record_outside_merge(pr: u64, repo: &str, merged_at: Option<&str>, merge_sha: Option<&str>) {
+pub fn record_outside_merge(
+    journal: &Path,
+    pr: u64,
+    repo: &str,
+    merged_at: Option<&str>,
+    merge_sha: Option<&str>,
+) {
     if !recording_enabled() {
         return;
     }
@@ -315,7 +332,12 @@ pub fn record_outside_merge(pr: u64, repo: &str, merged_at: Option<&str>, merge_
     attrs.insert("merged_at".into(), json!(merged_at));
     attrs.insert("merge_sha".into(), json!(merge_sha));
     attrs.insert("path".into(), json!("reconcile"));
-    write_span("merged_outside_fno", trace_for(session, "verb"), attrs);
+    write_span(
+        journal,
+        "merged_outside_fno",
+        trace_for(session, "verb"),
+        attrs,
+    );
 }
 
 /// The `graph-get` stdin door arm (`{"merge_provenance": {"hook": <the

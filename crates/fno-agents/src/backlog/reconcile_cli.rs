@@ -1265,17 +1265,28 @@ fn close_leg(
         ));
         return None;
     }
-    Some(result.into_inner())
+    let result = result.into_inner();
+    for record in &result.actually_closed {
+        emit_outside_merge_label(record);
+    }
+    Some(result)
 }
 
-/// The close's own provenance: `closed_by.path` names the closer lane, and
-/// a merge the journal never saw is labelled `merged_outside_fno` so a
-/// later reader can tell an fno-verb merge from a github.com or
-/// foreign-machine one.
+/// The close's own provenance: `closed_by.path` names the closer lane. The
+/// row mutation rides the graph transaction; the journal emit runs after
+/// the publish (see [`emit_outside_merge_label`]) so a publish retry can
+/// never duplicate an irreversible row.
 fn close_provenance(entry: &mut Value, record: &MergeDriftRecord) {
     if let Some(closed_by) = entry.get_mut("closed_by").and_then(Value::as_object_mut) {
         closed_by.insert("path".into(), json!("reconcile"));
     }
+}
+
+/// A merge the journal never saw is labelled `merged_outside_fno` so a
+/// later reader can tell an fno-verb merge from a github.com or
+/// foreign-machine one. Called after the graph close published, so a
+/// retried publish finds its own earlier row through `has_record`.
+fn emit_outside_merge_label(record: &MergeDriftRecord) {
     let Some(repo) =
         crate::backlog::pr_link::repo_slug_from_url(record.pr_url.as_deref()).or_else(|| {
             record
@@ -1296,6 +1307,7 @@ fn close_provenance(entry: &mut Value, record: &MergeDriftRecord) {
         return;
     }
     crate::merge_provenance::record_outside_merge(
+        &journal,
         record.pr_number as u64,
         &repo,
         record.merged_at.as_deref(),
@@ -2607,6 +2619,7 @@ mod tests {
         apply_completion_fields(&mut entry, true);
         close_provenance(&mut entry, &record);
         assert_eq!(entry["closed_by"]["path"], "reconcile");
+        emit_outside_merge_label(&record);
         let rows = journal.rows();
         let outside: Vec<_> = rows
             .iter()
@@ -2630,7 +2643,7 @@ mod tests {
         apply_completion_fields(&mut entry, true);
         let mut record = record.clone();
         record.pr_number = 9;
-        close_provenance(&mut entry, &record);
+        emit_outside_merge_label(&record);
         let rows = journal.rows();
         let outside: Vec<_> = rows
             .iter()

@@ -397,6 +397,7 @@ fn clear_completion_fields(node: &mut Value, reason: &str, status: &str) {
     );
     obj.insert("reopened_reason".into(), Value::String(reason.into()));
     obj.remove("reopen_warning");
+    obj.insert("closed_by".into(), Value::Null);
     obj.insert("status".into(), Value::String(status.into()));
 }
 
