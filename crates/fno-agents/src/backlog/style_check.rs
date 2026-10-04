@@ -1309,7 +1309,9 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             "--diff-base" => diff_base = it.next().cloned(),
             "--fix" => fix_mode = true,
-            "--json" => json_mode = true,
+            // Both spellings: the json_output contract guard requires the
+            // short form beside the long one on every parsing verb.
+            "--json" | "-J" => json_mode = true,
             "--word-cap" => match it.next().map(|v| parse_word_cap(v)) {
                 Some(Ok(cap)) => word_cap = cap,
                 Some(Err(code)) => return code,

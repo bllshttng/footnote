@@ -26,6 +26,7 @@ question on the mux lane: both get "the row recording a pane IS the path."
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from functools import cache
@@ -50,6 +51,12 @@ def _run(args: list[str], env_extra: dict[str, str], tmp_path: Path):
         "PYTHONPATH": str(REPO_CLI / "src"),
         **env_extra,
     }
+    # The style gate rides the fno-agents binary; a sandboxed subprocess keeps
+    # the caller's pin so CI's smoke-provided binary stays resolvable.
+    for key in ("FNO_AGENTS_FRONT", "FNO_AGENTS_BIN"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
     proc = subprocess.run(
         [sys.executable, "-m", "fno.cli", "agents", "mail", "send", *args],
         capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120,

@@ -2103,8 +2103,17 @@ def cmd_encounter(
     if os.environ.get("FNO_STYLE_ENFORCE") != "0":
         cap = load_settings().style.word_cap.encounter
         err, receipt = rust_binary.style_receipt(evidence, "encounter", cap)
-        if err or (not receipt.get("exception") and receipt.get("violations")):
-            typer.echo(err or receipt.get("report") or "", err=True)
+        # receipt is None on a door error, and a degenerate (None, None) from a
+        # silent binary is one too: the dict shape is part of the check.
+        if err or not isinstance(receipt, dict) or (
+            not receipt.get("exception") and receipt.get("violations")
+        ):
+            typer.echo(
+                err
+                or (receipt.get("report") if isinstance(receipt, dict) else None)
+                or "style gate unreadable",
+                err=True,
+            )
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
