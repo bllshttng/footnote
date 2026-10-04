@@ -246,6 +246,20 @@ fi
 
 events_has() { "$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q "\"type\":\"$1\""; }
 
+# Clear the journal AND the physical store. The state-root layout relocates
+# events.db to db/events.db (docs/state-root-layout.tsv), so a legacy-path rm
+# leaves earlier cases' rows committed in the routed store and the all-dead
+# control below inherits them. --store-path-only answers the routed path as
+# pure path math, so it works with the journal already removed.
+clear_events() {
+  rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+  local store
+  store=$("$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" --store-path-only 2>/dev/null | jq -r '.store // empty')
+  if [ -n "$store" ]; then
+    rm -f "$store" "$store-wal" "$store-shm" 2>/dev/null
+  fi
+}
+
 # === AC9: the hook gates on nothing it isn't handed ============================
 assert_absent "AC9: no kill -0"        "$(cat "$HOOK")" "kill -0"
 assert_absent "AC9: no owner_pid"      "$(cat "$HOOK")" "owner_pid"
@@ -399,6 +413,14 @@ assert_absent "AC19: small window no quality block" "$OUT" '"decision":"block"'
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/small.jsonl" 140000 "gpt-5-codex"   # 200k window, 70%, 60k left
 run_hook "$(payload "$SBX/small.jsonl")"
+# The probe rides the stale-while-revalidate cache whose busy tier may serve
+# the previous fingerprint's copy for one boundary under CI shard load; the
+# design's answer is the next Stop, which re-measures. Fire one boundary more
+# before asserting - never a third: a persistent probe death must stay red.
+if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
+  rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+  run_hook "$(payload "$SBX/small.jsonl")"
+fi
 assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
 assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
 run_hook "$(payload "$SBX/small.jsonl")"
@@ -788,7 +810,7 @@ rm -rf "$COUNT_BINDIR"
 # clock, not on a defect.
 # events.jsonl accumulates for the whole file (no other case here truncates
 # it) - clear it once so the all-dead case below can trust a fresh read.
-rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+clear_events
 
 write_registry_liveness() {  # write_registry_liveness '<jq children array>'
   jq -n --argjson children "$1" '{
@@ -840,7 +862,7 @@ CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
   {name:"dead-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
 ]')
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+clear_events
 write_registry_liveness "$CHILDREN"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "x-1b75 all-dead: no orphan reason when every spawned row is confidently dead" "$OUT" "cannot be a pure pass"

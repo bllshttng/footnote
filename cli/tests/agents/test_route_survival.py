@@ -635,7 +635,7 @@ def test_cli_resume_gates_the_recorded_provider_before_dispatch(
             "--harness",
             "claude",
             "--substrate",
-            "bg",
+            "thread",
             "--resume",
             session_id,
         ],
@@ -743,7 +743,7 @@ def test_the_account_picker_never_fires_on_a_revive(tmp_path, monkeypatch, capsy
     )
 
     # Seam 1: the argv rewrite the CLI applies before either runtime.
-    args = ["spawn", "router", "--resume", "sess-1", "--substrate", "bg"]
+    args = ["spawn", "router", "--resume", "sess-1", "--substrate", "thread"]
     assert rr._pick_account_at_seam(args) == args
 
     # Seam 2: the in-process caller that bypasses argument parsing. The restore

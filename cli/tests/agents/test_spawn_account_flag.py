@@ -247,7 +247,7 @@ def test_account_plus_route_composes(monkeypatch, runner):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--account", "readyrule", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
@@ -287,7 +287,7 @@ def test_account_plus_role_composes(monkeypatch, runner):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--account", "readyrule", "--role", "tidy"],
     )
     assert result.exit_code == 0, result.output
@@ -331,7 +331,7 @@ def test_account_plus_route_composes_under_inherited_managed(monkeypatch, runner
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--account", "readyrule", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
@@ -371,7 +371,7 @@ def test_composed_receipt_names_live_credential_and_payer(monkeypatch, runner):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--account", "readyrule", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output

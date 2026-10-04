@@ -227,7 +227,7 @@ REAL_FNO
 
     FNO_CONFIG="$settings" SEED_TO="$handle" SEED_BODY="$body" \
       "$UV_BIN" run --project "$REPO_ROOT/cli" python -c \
-      'import os; from fno.bus.log import Envelope, append; append(Envelope.new(from_="sender", to=os.environ["SEED_TO"], kind="send", body=os.environ["SEED_BODY"]))'
+      'import os; from fno.bus.log import Envelope, bus_log_path, to_json_line; env = Envelope.new(from_="sender", to=os.environ["SEED_TO"], kind="send", body=os.environ["SEED_BODY"]); p = bus_log_path(); p.parent.mkdir(parents=True, exist_ok=True); open(p, "a").write(to_json_line(env) + "\n")'
 
     output="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
       "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \

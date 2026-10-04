@@ -32,6 +32,20 @@ def test_mint_node_name_is_the_source_less_manual_t_form(
     assert name == "t-84b2-ab-names-glm"
 
 
+def test_retired_bg_substrate_refuses_with_the_redirect(capsys):
+    """The bg spelling is retired, not deprecated: one line, the replacement,
+    exit 2. thread keeps working and canonicalizes to the internal selector."""
+    import pytest
+
+    from fno.agents.spawn_defaults import resolve_spawn_gates
+
+    with pytest.raises(SystemExit) as e:
+        resolve_spawn_gates("bg", None, once=False, harness="claude")
+    assert e.value.code == 2
+    assert "substrate 'bg' was retired" in capsys.readouterr().err
+    assert resolve_spawn_gates("thread", None, once=False, harness="claude") == "bg"
+
+
 def _pin_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str) -> Path:
     """The real path: this checkout's binary, one config, one journal."""
     from fno.rust_binary import find_dev_binary
@@ -54,7 +68,8 @@ def test_config_provider_injects_the_harness_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One config field, one binary round trip: the argv carries --harness,
-    stderr names the applied axis with its rung, and the journal row lands."""
+    stderr is quiet about the routing by default and names the applied axis
+    with its rung under --verbose, and the journal row lands."""
     journal = _pin_world(
         tmp_path, monkeypatch, '[agents.profiles.target]\nprovider = "codex"\n'
     )
@@ -63,11 +78,18 @@ def test_config_provider_injects_the_harness_end_to_end(
         ["spawn", "--name", "w", "/fno:target x-1"], stderr=err
     )
     assert out[out.index("--harness") + 1] == "codex"
-    assert "applied harness=codex (agents.profiles.target.provider)" in err.getvalue()
+    printed = err.getvalue()
+    assert ": applied " not in printed, printed
+    assert len([l for l in printed.splitlines() if l.strip()]) <= 2, printed
     rows = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
     applied = [r for r in rows if r.get("kind") == "spawn_defaults_applied"]
     assert applied, "exactly the compose wrote the row"
     assert applied[-1]["verb"] == "target"
+    err = io.StringIO()
+    sd.compose_spawn_argv(
+        ["spawn", "--name", "w", "--verbose", "/fno:target x-1"], stderr=err
+    )
+    assert "applied harness=codex (agents.profiles.target.provider)" in err.getvalue()
 
 
 @requires_rust

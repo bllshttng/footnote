@@ -120,5 +120,6 @@
       "/fno:lead x-aaaa"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

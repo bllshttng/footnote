@@ -40,7 +40,7 @@ A spawn with no `--substrate` seats a **thread** wherever the harness seats one.
 `--provider <vendor> --model <m>` (or the single-string `--route <vendor>,<m>`) points a claude worker at a different model endpoint. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
 
 ```bash
-fno agents spawn "fix the failing test" --name glm-worker --substrate bg --provider zai --model glm-5.2
+fno agents spawn "fix the failing test" --name glm-worker --substrate thread --provider zai --model glm-5.2
 ```
 
 Routing is claude-only and reaches the `bg` and `headless` substrates only. The route is applied by writing a `0600` claude `--settings` file and passing `--settings <path>`: a `claude --bg` session's serving process is forked by the claude daemon, which drops per-spawn `ANTHROPIC_*` env before the first model request, and a settings file is read by the session process itself so it survives that fork. `pane` is not a routed lane and is refused rather than silently running the primary model.

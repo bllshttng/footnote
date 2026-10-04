@@ -43,7 +43,7 @@ def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatc
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "-x", "left"],
+        ["spawn", "peer", "--harness", "claude", "--substrate", "thread", "-x", "left"],
     )
     assert res.exit_code == 2, res.output
     assert "--split/-x, --at, and --tab apply only to --substrate pane" in res.output
@@ -91,7 +91,7 @@ def test_cmd_spawn_tab_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "--tab", "name:x"],
+        ["spawn", "peer", "--harness", "claude", "--substrate", "thread", "--tab", "name:x"],
     )
     assert res.exit_code == 2, res.output
     assert "--split/-x, --at, and --tab apply only to --substrate pane" in res.output

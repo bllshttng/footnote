@@ -142,7 +142,7 @@ pub struct SpawnAxes {
     /// Per-spawn account selection
     #[arg(long)]
     pub account: Option<String>,
-    /// Session substrate (pane | thread | headless; bg is a deprecated alias)
+    /// Session substrate (pane | thread | headless)
     #[arg(long)]
     pub substrate: Option<String>,
 }

@@ -26,7 +26,8 @@ pub(crate) fn process_admission_gate() -> Result<(), Refusal> {
     match crate::machine_watch::brake_holds() {
         None => Ok(()),
         Some(hold) => {
-            eprintln!("refused: {hold}; no new agent spawn is admitted while it holds");
+            // One line: the verdict line carries the hold (reason, seconds
+            // left) as its detail figure; the exit code carries the class.
             Err(Refusal::code(EXIT_FLEET_STOP)
                 .ev("reason", serde_json::json!("machine-runaway"))
                 .ev("detail", serde_json::json!(hold)))

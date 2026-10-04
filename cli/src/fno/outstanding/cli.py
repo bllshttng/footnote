@@ -268,7 +268,10 @@ def ask(
             handle.write(json.dumps(event) + "\n")
         typer.echo(
             f"outstanding: the question-intake door is unavailable on this install; "
-            f"recorded {qid} in the project journal. Clear it once answered: "
+            f"recorded {qid} in the project journal. NOT VISIBLE: without the door's "
+            f"readiness gate this row can land not-ready and the mux will not show it "
+            f"(unknowns, reversible, meanwhile, per-option What happens next). "
+            f"Fix the fno-agents install and ask again. Clear it once answered: "
             f"fno outstanding clear {qid}",
             err=True,
         )

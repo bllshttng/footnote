@@ -1411,7 +1411,7 @@ def test_routing_pane_substrate_spawn_stays_python() -> None:
     assert _is_pane_substrate_spawn("spawn", ["spawn", "peer"])
     assert _is_pane_substrate_spawn("spawn", ["spawn", "peer", "--substrate", "pane"])
     assert _is_pane_substrate_spawn("spawn", ["spawn", "peer", "--substrate=pane"])
-    assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "--substrate", "bg"])
+    assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "--substrate", "thread"])
     assert not _is_pane_substrate_spawn(
         "spawn", ["spawn", "p", "--substrate=headless"]
     )
@@ -1423,7 +1423,7 @@ def test_routing_pane_substrate_spawn_stays_python() -> None:
     assert not _is_pane_substrate_spawn("ask", ["ask", "peer", "hi"])
     # The scan stops at --argv: payload tokens cannot masquerade as our flag.
     assert _is_pane_substrate_spawn(
-        "spawn", ["spawn", "p", "--argv", "--substrate", "bg"]
+        "spawn", ["spawn", "p", "--argv", "--substrate", "thread"]
     )
 
 
@@ -1436,7 +1436,7 @@ def test_routing_provenance_bearing_spawn_stays_python() -> None:
     assert _is_provenance_bearing_spawn("spawn", ["spawn", "p", "--node", "x-84a8"])
     assert _is_provenance_bearing_spawn("spawn", ["spawn", "p", "--node=x-84a8"])
     assert _is_provenance_bearing_spawn(
-        "spawn", ["spawn", "p", "--substrate", "bg", "--slug", "s"]
+        "spawn", ["spawn", "p", "--substrate", "thread", "--slug", "s"]
     )
     assert _is_provenance_bearing_spawn("spawn", ["spawn", "p", "--plan", "a.md"])
     assert not _is_provenance_bearing_spawn("spawn", ["spawn", "p"])
@@ -2936,7 +2936,7 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
 @pytest.mark.parametrize(
     "substrate_args",
     [
-        ["--substrate", "bg"],
+        ["--substrate", "thread"],
         ["--substrate", "headless"],
         ["--once"],
         ["--headless"],
@@ -4183,7 +4183,7 @@ def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> No
 
 
 @pytest.mark.parametrize("substrate_args", [
-    ["--substrate", "bg"],
+    ["--substrate", "thread"],
     ["--substrate", "headless"],
 ])
 def test_ac7_claude_off_pane_forwards_fenced_tokens(
@@ -4283,7 +4283,7 @@ def test_unanswered_run_with_no_matching_pane_refuses_cleanly(
 
     message = str(exc.value)
     assert "no pane was created" in message
-    assert "--substrate bg" in message
+    assert "--substrate thread" in message
     assert load_registry() == []
 
 
