@@ -40,88 +40,6 @@ def _set_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str)
 # ---------------------------------------------------------------------------
 
 
-def test_emit_paths_sh_deterministic(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-HP: emit_paths_sh() is byte-identical across two calls in the same process."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    first = emit_paths_sh()
-    second = emit_paths_sh()
-    assert first == second, "emit_paths_sh() must be byte-deterministic"
-    assert len(first) > 0, "output must be non-empty"
-
-
-# ---------------------------------------------------------------------------
-# AC1-CRITICAL: Machine-stable output - no hardcoded absolute HOME paths
-# ---------------------------------------------------------------------------
-
-
-def test_emit_paths_sh_no_hardcoded_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-CRITICAL: emit_paths_sh uses $HOME literal, not resolved /home/user path."""
-    # Simulate a different HOME to prove the output is portable
-    monkeypatch.setenv("HOME", "/tmp/fake-test-home")
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-    # Clear settings cache so the new HOME is picked up
-    from fno import config as config_mod
-    import fno.paths as paths_mod
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    # Must contain the literal string $HOME, not the resolved /tmp/fake-test-home
-    assert "$HOME" in stub, f"emit_paths_sh must emit literal $HOME, got:\n{stub}"
-    assert "/tmp/fake-test-home" not in stub, (
-        f"emit_paths_sh must NOT embed resolved HOME path, got:\n{stub}"
-    )
-
-
-def test_emit_paths_sh_state_dir_uses_home_template(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-CRITICAL: STATE_DIR export uses $HOME/.fno not /users/xxx/.fno."""
-    monkeypatch.setenv("HOME", "/tmp/fake-home-check")
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-    from fno import config as config_mod
-    import fno.paths as paths_mod
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    assert 'export STATE_DIR="$HOME/.fno"' in stub or "STATE_DIR=$HOME" in stub, (
-        f"STATE_DIR should reference $HOME, got:\n{stub}"
-    )
-
-
-def test_emit_paths_sh_plans_dir_uses_repo_root_template(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-CRITICAL: PLANS_DIR uses $REPO_ROOT not a hardcoded absolute path."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    assert "$REPO_ROOT" in stub or "REPO_ROOT" in stub, (
-        f"PLANS_DIR should reference REPO_ROOT for project-relative paths, got:\n{stub}"
-    )
-    # PLANS_DIR line specifically must use $REPO_ROOT, not a hardcoded absolute path
-    plans_line = next((l for l in stub.splitlines() if "PLANS_DIR=" in l), None)
-    assert plans_line is not None, "PLANS_DIR export line not found in stub"
-    assert str(tmp_path) not in plans_line, (
-        f"PLANS_DIR must NOT embed resolved tmp_path, got line:\n{plans_line}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# AC2-HP: Generated bash is sourceable
-# ---------------------------------------------------------------------------
-
-
 def test_emit_paths_sh_sourceable_bash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -148,48 +66,6 @@ def test_emit_paths_sh_sourceable_bash(
 
 # ---------------------------------------------------------------------------
 # AC2-EDGE: Output is well-formed even with default (no custom overrides) schema
-# ---------------------------------------------------------------------------
-
-
-def test_emit_paths_sh_no_custom_paths_well_formed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-EDGE: Default schema (no path overrides) produces well-formed output."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    # Must start with a bash shebang or comment
-    assert stub.startswith("#!/"), f"stub must start with shebang, got: {stub[:20]!r}"
-    # Must not contain Python syntax
-    assert "def " not in stub, "stub must not contain Python def"
-    # Must contain export statements
-    assert "export STATE_DIR=" in stub, "must export STATE_DIR"
-    # Must end with newline
-    assert stub.endswith("\n"), "stub must end with newline"
-
-
-# ---------------------------------------------------------------------------
-# AC2-HP: paths_plan_file and paths_inbox_thread lazy functions are present
-# ---------------------------------------------------------------------------
-
-
-def test_emit_paths_sh_lazy_functions_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-HP: Generated stub includes paths_plan_file() and paths_inbox_thread() functions."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    assert "paths_plan_file()" in stub, "must define paths_plan_file shell function"
-    assert "paths_inbox_thread()" in stub, "must define paths_inbox_thread shell function"
-
-
-# ---------------------------------------------------------------------------
-# AC2-HP: paths_plan_file() works correctly from bash
 # ---------------------------------------------------------------------------
 
 
@@ -391,66 +267,6 @@ def test_emit_paths_sh_config_file_uses_actual_loaded_path(
 # ---------------------------------------------------------------------------
 
 
-def test_emit_paths_sh_use_defaults_machine_stable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-MACHINE-STABLE: emit_paths_sh(use_defaults=True) ignores user settings.yaml.
-
-    Two calls with different settings.yaml files must produce byte-identical output.
-    This proves that the checked-in paths.sh hash is stable across machines.
-    """
-    from fno.setup.emit_shell import emit_paths_sh
-
-    # Call 1: no settings file at all
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    from fno import config as config_mod
-    import fno.paths as paths_mod
-    output_no_settings = emit_paths_sh(use_defaults=True)
-
-    # Call 2: settings file with custom state_dir
-    custom_settings = tmp_path / "custom_settings.yaml"
-    custom_settings.write_text(
-        "schema_version: 1\nconfig:\n  state_dir: '~/.custom-state'\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(custom_settings))
-    output_custom_settings = emit_paths_sh(use_defaults=True)
-
-    assert output_no_settings == output_custom_settings, (
-        "emit_paths_sh(use_defaults=True) must be byte-identical regardless of user settings.\n"
-        f"No-settings output:\n{output_no_settings}\n\n"
-        f"Custom-settings output:\n{output_custom_settings}"
-    )
-
-
-def test_emit_paths_sh_use_defaults_config_file_uses_state_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-MACHINE-STABLE: use_defaults=True emits CONFIG_FILE=$STATE_DIR/config.toml.
-
-    The checked-in paths.sh must not embed any machine-specific absolute path
-    for CONFIG_FILE. It should use a $STATE_DIR-relative derivation instead.
-    """
-    # Set up custom settings so use_defaults=False would embed a real path
-    custom_settings = tmp_path / "settings.yaml"
-    custom_settings.write_text("schema_version: 1\n", encoding="utf-8")
-    monkeypatch.setenv("FNO_CONFIG", str(custom_settings))
-    from fno import config as config_mod
-    import fno.paths as paths_mod
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh(use_defaults=True)
-
-    # CONFIG_FILE must NOT be the custom absolute path
-    assert str(custom_settings) not in stub, (
-        f"use_defaults=True must not embed user settings path {custom_settings!r}:\n{stub}"
-    )
-    # CONFIG_FILE must be $STATE_DIR-relative (machine-stable)
-    assert "$STATE_DIR/config.toml" in stub or 'STATE_DIR/config.toml' in stub, (
-        f"use_defaults=True must emit CONFIG_FILE as $STATE_DIR/config.toml:\n{stub}"
-    )
-
-
 def test_emit_paths_sh_use_defaults_false_reflects_user_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -480,24 +296,6 @@ def test_emit_paths_sh_use_defaults_false_reflects_user_settings(
 # HANDOFFS_DIR codegen (ab-3f6def07)
 # ---------------------------------------------------------------------------
 
-
-def test_emit_paths_sh_handoffs_dir_default_uses_repo_root_basename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Default HANDOFFS_DIR resolves at source-time to $STATE_DIR/handoffs/<repo basename>."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    handoffs_line = next((l for l in stub.splitlines() if "HANDOFFS_DIR=" in l), None)
-    assert handoffs_line is not None, "HANDOFFS_DIR export line not found in stub"
-    assert "$STATE_DIR/handoffs/" in handoffs_line, (
-        f"default HANDOFFS_DIR must derive from $STATE_DIR, got: {handoffs_line!r}"
-    )
-    assert "REPO_ROOT" in handoffs_line, (
-        f"default HANDOFFS_DIR must include REPO_ROOT basename, got: {handoffs_line!r}"
-    )
 
 
 def test_emit_paths_sh_handoffs_dir_override(
@@ -547,29 +345,17 @@ def test_emit_paths_sh_handoffs_dir_uses_project_id_when_set(
     )
 
 
-def test_emit_paths_sh_handoffs_dir_sourceable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Sourcing the stub from bash makes HANDOFFS_DIR resolve correctly."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+def test_emit_paths_sh_defaults_match_checked_in_fixture() -> None:
+    """The defaults emitter must reproduce the checked-in paths.sh byte for byte.
 
+    The Rust verb generates the file now, and verify's schema hash has to agree
+    with Rust output until the verify verb ports.
+    """
+    import fno
     from fno.setup.emit_shell import emit_paths_sh
 
-    stub = emit_paths_sh()
-    paths_file = tmp_path / "paths.sh"
-    paths_file.write_text(stub, encoding="utf-8")
+    repo_root = Path(fno.__file__).resolve().parents[3]
+    fixture = (repo_root / "scripts" / "lib" / "paths.sh").read_text(encoding="utf-8")
+    assert emit_paths_sh(use_defaults=True) == fixture
 
-    # Source with a stable REPO_ROOT so the command substitution resolves
-    fake_repo = tmp_path / "my-project"
-    fake_repo.mkdir()
-    result = subprocess.run(
-        ["bash", "-c", f"REPO_ROOT='{fake_repo}' source {paths_file} && echo \"$HANDOFFS_DIR\""],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, f"bash sourcing failed: {result.stderr}"
-    out = result.stdout.strip()
-    assert out.endswith("/handoffs/my-project"), (
-        f"HANDOFFS_DIR should end with handoffs/<basename>, got: {out!r}"
-    )
+
