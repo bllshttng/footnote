@@ -1990,8 +1990,7 @@ fn open_create_is_modal_over_keyboard_overlays() {
 fn chrome_hit_rows() {
     let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
                                 // (x-cd67 US1) The strip is scoped to the content area (origin
-                                // panel_w=28); the pinned Ｆ[no] mark leads it, so
-                                // " footnote "=36..45, " 1 "=46..48, the padded "[ 2 ]"=49..53,
+                                // panel_w=28): " footnote "=36..45, " 1 "=46..48, "[ 2 ]"=49..53,
                                 // " + "=54..56.
     assert_eq!(cmds(view.chrome_hit(0, 47)), vec![Command::SelectTab(0)]);
     assert_eq!(cmds(view.chrome_hit(0, 50)), vec![Command::SelectTab(1)]);
