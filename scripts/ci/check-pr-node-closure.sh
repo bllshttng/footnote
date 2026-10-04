@@ -39,6 +39,18 @@ source "${_script_dir}/../lib/node-id.sh"
 # `^${node_id_re}$` wrapping at the match site stays the single anchor.
 node_id_re="${_NODE_ID_CLOSURE_RE#^}"
 node_id_re="${node_id_re%\$}"
+# FNO_CLOSURE_ID_FAMILIES widens the dashed families for an install whose
+# config.backlog.id_prefix differs (CI reads no user config, so the default
+# covers only the families THIS repo mints): a fork minting xy-1234 sets
+# FNO_CLOSURE_ID_FAMILIES='x|ab|xy' in its workflow. Malformed values are
+# ignored, never guessed at.
+if [[ -n "${FNO_CLOSURE_ID_FAMILIES:-}" ]]; then
+  if [[ "${FNO_CLOSURE_ID_FAMILIES}" =~ ^[a-z0-9]+(\|[a-z0-9]+)*$ ]]; then
+    node_id_re="(${FNO_CLOSURE_ID_FAMILIES})-[0-9a-f]{4,8}|x[0-9a-f]{4,8}"
+  else
+    echo "check-pr-node-closure: FNO_CLOSURE_ID_FAMILIES must be |-separated lowercase families; ignoring '${FNO_CLOSURE_ID_FAMILIES}'." >&2
+  fi
+fi
 
 # Extract every delimiter-bounded candidate segment from the head ref. Split on
 # '/' FIRST, then on '-' inside each path component, so each candidate is

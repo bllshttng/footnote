@@ -145,6 +145,20 @@ run "fixes: x-aaaa" "feature/x-aaaa" \
   && pass "lowercase colonless-spelled fixes line passes" \
   || fail "lowercase fixes line should pass"
 
+# families override: an install whose configured prefix differs widens the
+# dashed families through FNO_CLOSURE_ID_FAMILIES, so its own branches stay
+# gated instead of silently skipping. A malformed value is ignored.
+if OUTPUT=$(PR_BODY="no trailer here" PR_HEAD_REF="feature/xy-1234-work" FNO_CLOSURE_ID_FAMILIES="x|ab|xy" bash "$GATE" 2>&1); then
+  fail "custom-prefix branch should be gated under the families override"
+else
+  printf '%s' "$OUTPUT" | grep -q "xy-1234" \
+    || fail "override refusal should name the custom-prefix candidate"
+  pass "families override gates a custom-prefix branch"
+fi
+run "no trailer here" "feature/xy-1234-work" \
+  && pass "custom-prefix branch skips under the default families" \
+  || fail "default families should not know foreign prefixes"
+
 # no-space-after-comma: the runtime parser treats a comma as equivalent to a
 # space (round-8 review fix: a second id right after a comma, with no space,
 # used to read as missing even though it binds fine at merge time).
