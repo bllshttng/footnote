@@ -78,6 +78,20 @@ BINDIR="$(mktemp -d)"
 # masked registry-json's Rust port entirely, taking four AC31 assertions
 # down with it before this line existed).
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
+# The native paths verbs answer in the Rust front door (production `fno`);
+# the Python surface retired them. When this checkout's front is built, the
+# shim forwards exactly those verbs so the real hook reaches the native lane
+# the way production does. The not-yet-ported paths verbs (verify, handoff)
+# stay on the Python CLI.
+# The native paths verbs answer in the Rust front door (production `fno`);
+# the Python surface retired them. When this checkout's front is built, the
+# shim forwards exactly those verbs so the real hook reaches the native lane
+# the way production does. The not-yet-ported paths verbs (verify, handoff)
+# stay on the Python CLI.
+RUST_FRONT="$REPO_ROOT/crates/fno/target/debug/fno"
+if [ -x "$RUST_FRONT" ]; then
+  printf '#!/usr/bin/env bash\nif [ "$1" = config ] && [ "$2" = paths ] && { [ "$3" = emit-shell ] || [ "$3" = shell-stub ]; }; then\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$RUST_FRONT" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
+fi
 # fno-py is the console script name; provide it too in case anything resolves it.
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
