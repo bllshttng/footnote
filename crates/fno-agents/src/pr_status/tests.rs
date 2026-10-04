@@ -18,6 +18,7 @@ fn load_fixture(name: &str) -> Value {
 struct FakeGh {
     raw: Value,
     log_reads: AtomicUsize,
+    log_args: std::sync::Mutex<Vec<String>>,
     /// Force the pulls read to fail with this stderr (refusal scenarios).
     pulls_fail: Option<String>,
 }
@@ -28,6 +29,7 @@ impl FakeGh {
         FakeGh {
             raw: fixture["inputs"]["raw"].clone(),
             log_reads: AtomicUsize::new(0),
+            log_args: std::sync::Mutex::new(Vec::new()),
             pulls_fail: None,
         }
     }
@@ -94,6 +96,7 @@ impl GhProbe for FakeGh {
         }
         if cmd.contains("/actions/jobs/") && cmd.ends_with("/logs") {
             self.log_reads.fetch_add(1, Ordering::SeqCst);
+            *self.log_args.lock().unwrap() = args.to_vec();
             let job = cmd
                 .rsplit("/jobs/")
                 .next()
@@ -362,6 +365,14 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
     std::env::set_var("FNO_PR_STATUS_CACHE_DIR", dir.path());
     let cwd = Path::new("/tmp");
     let first = job_log(&green, cwd, "Owner--Repo", "Owner", "Repo", "1001").unwrap();
+    assert!(
+        green
+            .log_args
+            .lock()
+            .unwrap()
+            .contains(&"--allow-escape-sequences".to_string()),
+        "job logs permit the escape sequences emitted by Actions"
+    );
     let second = job_log(&green, cwd, "Owner--Repo", "Owner", "Repo", "1001").unwrap();
     assert_eq!(first, second, "the same log both times");
     assert_eq!(

@@ -198,6 +198,13 @@ mod tests {
         assert_eq!(resolve(&canonical, "feature/pr-42").unwrap(), feature);
         assert_eq!(resolve(&nested, "feature/pr-42").unwrap(), feature);
         assert!(resolve(&canonical, "main").unwrap() == PathBuf::from(&canonical));
-        assert!(resolve(&canonical, "feature/missing").is_err());
+        // The Python caller matches this phrase to read the verb's exit 3 as
+        // "no local worktree" (fno.pr._review_hold resolve_pr_worktree); a
+        // reword here silently restores the traceback blocker there.
+        let err = resolve(&canonical, "feature/missing").unwrap_err();
+        assert!(
+            err.contains("no local worktree"),
+            "message the Python side matches: {err}"
+        );
     }
 }

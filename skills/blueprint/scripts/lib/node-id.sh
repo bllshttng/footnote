@@ -38,9 +38,15 @@
 # because the resolvers have a legacy fallback for environments where the fno
 # Python package is unavailable.
 _NODE_ID_FNO_RE='^[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}$'
-# The graphless closure gate recognizes dashed ids and the historical compact
-# x family only; other compact tokens can be ordinary branch words.
-_NODE_ID_CLOSURE_RE='^([a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})$'
+# The graphless closure gate recognizes only the id families this repo's
+# minter has ever minted - the configured prefix "x" (config.backlog.id_prefix),
+# the legacy "ab-" scheme, and the dash-less compact x ids - because CI has no
+# graph to confirm a candidate and no user config to read a prefix from. The
+# liberal FNO grammar above also matches ordinary branch words: the dashed
+# form read "pr-2809" on revert branch revert-pr-2809 as a node id and
+# demanded a Fixes line for it, which names no node, so the branch could
+# never pass.
+_NODE_ID_CLOSURE_RE='^((x|ab)-[0-9a-f]{4,8}|x[0-9a-f]{4,8})$'
 # Recognized external tracker shapes. Add a clause here when a new backend
 # ships; the sourcing resolvers need no other change.
 _NODE_ID_LINEAR_JIRA_RE='^[A-Z][A-Z0-9_]+-[0-9]+$'

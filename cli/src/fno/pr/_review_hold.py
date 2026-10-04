@@ -399,9 +399,23 @@ def _parse_worktree_list(stdout: str) -> list[dict]:
 
 
 def resolve_pr_worktree(pr_number: int, repo: str) -> str:
-    from fno.rust_binary import verb_call
+    """The PR's local worktree path, or ``""`` when the branch has none here.
 
-    return str(verb_call("pr-worktree", {"cwd": repo, "pr": pr_number})["worktree"])
+    ``""`` is an answer, not a failure: the verb's exit-3 refusal is a
+    successful enumeration of a PR that is simply not checked out locally,
+    and a PR with no local worktree carries no worktree hold. Callers read
+    it as "no hold" - staying in their own checkout, whose worktree list
+    still enumerates every worktree of the repo - never as a blocker. Any
+    other failure still raises: a dead instrument blocks.
+    """
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        return str(verb_call("pr-worktree", {"cwd": repo, "pr": pr_number})["worktree"])
+    except VerbUnavailable as exc:
+        if exc.returncode == 3 and "no local worktree" in str(exc):
+            return ""
+        raise
 
 
 def _worktree_probe(
