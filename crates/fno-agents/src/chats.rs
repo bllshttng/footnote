@@ -887,21 +887,50 @@ fn migrate_import(chats_dir: &Path, bus: &Path) -> Result<MigrationReceipt, Stri
 /// the row carries a mark. Rows already recorded are skipped and counted, so
 /// a second run imports 0 (AC3). Never touches the migrated stamp and never
 /// refuses: it runs against a store that migrated long ago.
+/// Every message id the store holds, from the index plus one pass over the
+/// chat files (the index is derived and may be stale; the JSONL is truth).
+fn known_message_ids(
+    chats_dir: &Path,
+    db: &Path,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut ids = std::collections::HashSet::new();
+    let conn = open_index(db)?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM messages")
+        .map_err(|e| format!("index query: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("index query: {e}"))?;
+    for r in rows {
+        ids.insert(r.map_err(|e| format!("index row: {e}"))?);
+    }
+    if chats_dir.is_dir() {
+        let rd = std::fs::read_dir(chats_dir).map_err(|e| format!("chats dir: {e}"))?;
+        for entry in rd.flatten() {
+            let (messages, _) = read_chat_lines(&entry.path().join("messages.jsonl"));
+            for m in messages {
+                if let Some(id) = m.get("id").and_then(Value::as_str) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
 fn migrate_missing(chats_dir: &Path, db: &Path, bus: &Path) -> Result<MigrationReceipt, String> {
     let rows = crate::announce::read_bus_segments(bus);
     let mut receipt = MigrationReceipt::default();
     let mut order: Vec<String> = Vec::new();
     let mut chats: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
-    let mut staged_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut known_ids = known_message_ids(chats_dir, db)?;
     for line in &rows {
         let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
         if !is_message_kind(kind) {
             continue;
         }
         let id = line.get("id").and_then(Value::as_str).unwrap_or("");
-        let known = !id.is_empty()
-            && (staged_ids.contains(id) || chat_of_message(chats_dir, db, id)?.is_some());
-        if known {
+        if !id.is_empty() && known_ids.contains(id) {
             receipt.skipped += 1;
             continue;
         }
@@ -912,7 +941,7 @@ fn migrate_missing(chats_dir: &Path, db: &Path, bus: &Path) -> Result<MigrationR
         if !chats.contains_key(&chat_id) {
             order.push(chat_id.clone());
         }
-        staged_ids.insert(id.to_string());
+        known_ids.insert(id.to_string());
         chats.entry(chat_id.clone()).or_default().push(rec);
         receipt.messages += 1;
         let delivery = line

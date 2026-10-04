@@ -626,7 +626,7 @@ mod tests {
             Role::Forward
         );
         // The mail reader claims its verb and refuses the renamed one by
-        // name; the send verb still forwards to Python (x-a3ee's port).
+        // name; the send verb still forwards to Python.
         assert_eq!(
             decide_role(&os(&["agents", "mail", "show", "fmail-x"]), false),
             Role::MailShow(os(&["fmail-x"]))
