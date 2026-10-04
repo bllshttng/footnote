@@ -9,6 +9,7 @@
 use crate::authorized_merge::{Effect, Outcome, PrFacts, Request};
 use crate::decision_trace::{self, Trace};
 use serde_json::{json, Map, Value};
+#[cfg(test)]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -78,7 +79,10 @@ impl TestJournal {
             std::env::remove_var(key);
         }
         TEST_JOURNAL
-            .with(|j| *j.borrow_mut() = Some(root.path().join(".fno").join("events.jsonl")));
+            .with(|j| {
+                *j.borrow_mut() =
+                    Some(crate::law_match::project_events_journal_in(root.path()));
+            });
         Self {
             root,
             _lock: lock,
@@ -88,7 +92,7 @@ impl TestJournal {
 
     /// The journal path under the temp root (the store sits beside it).
     pub(crate) fn journal(&self) -> PathBuf {
-        self.root.path().join(".fno").join("events.jsonl")
+        crate::law_match::project_events_journal_in(self.root.path())
     }
 
     /// The temp root, for fixtures that need the repo root as a cwd.
