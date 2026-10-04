@@ -1,13 +1,17 @@
-//! `fno config paths emit-shell`: generate scripts/lib/paths.sh natively.
+//! `fno config paths emit-shell` and `shell-stub`: generate paths.sh natively.
 //!
-//! One verb per PR (law d-450caaeb): this file serves `emit-shell`; the
-//! other three paths verbs still answer in Python (cli/src/fno/paths_cli.py)
-//! until their child nodes port. The defaults emitter reproduces the
-//! checked-in scripts/lib/paths.sh byte for byte; the include_bytes! parity
-//! test fails the build the moment the two drift.
+//! One verb per PR (law d-450caaeb): this file serves `emit-shell` and
+//! `shell-stub`; `verify` and `handoff` still answer in Python
+//! (cli/src/fno/paths_cli.py) until their child nodes port. The defaults
+//! emitter reproduces the checked-in scripts/lib/paths.sh byte for byte;
+//! the include_bytes! parity test fails the build the moment the two drift.
+//! The live emitter is the config-aware door: every call regenerates from
+//! the settings the caller resolves and prints a sourceable temp path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::plans_path::{expanduser, project_name, resolve_template, vault_root};
 
 /// The parity fixture: the checked-in stub this emitter must reproduce.
 const FIXTURE: &[u8] = include_bytes!(concat!(
@@ -145,27 +149,37 @@ pub fn emit_paths_sh_defaults() -> String {
         "export CONFIG_FILE={}",
         bash_quote("$STATE_DIR/config.toml")
     ));
-    lines.push(String::new());
-    lines.push("paths_plan_file() {".to_string());
-    lines.push("  local name=\"$1\"".to_string());
-    lines.push("  echo \"${PLANS_DIR}/${name}\"".to_string());
-    lines.push("}".to_string());
-    lines.push(String::new());
-    lines.push("paths_inbox_thread() {".to_string());
-    lines.push("  local thread=\"$1\"".to_string());
-    lines.push("  echo \"${INBOX_DIR}/${thread}\"".to_string());
-    lines.push("}".to_string());
-    lines.push(String::new());
-    lines.push("# Mirrors fno.paths.project_log(): <repo>/.fno/<name>, anchored to".to_string());
-    lines
-        .push("# $REPO_ROOT (never CWD). Hooks route ad-hoc .fno/ writes through this".to_string());
-    lines.push("# instead of hand-building \".fno/\" + name strings.".to_string());
-    lines.push("paths_project_log() {".to_string());
-    lines.push("  local name=\"$1\"".to_string());
-    lines.push("  echo \"${REPO_ROOT}/.fno/${name}\"".to_string());
-    lines.push("}".to_string());
+    lines.extend(functions_lines());
     lines.push(String::new());
     lines.join("\n")
+}
+
+/// The three lazy bash helpers every stub carries, prefaced by one blank
+/// line; the caller appends the trailing blank so the join ends in `\n`.
+fn functions_lines() -> Vec<String> {
+    [
+        "",
+        "paths_plan_file() {",
+        "  local name=\"$1\"",
+        "  echo \"${PLANS_DIR}/${name}\"",
+        "}",
+        "",
+        "paths_inbox_thread() {",
+        "  local thread=\"$1\"",
+        "  echo \"${INBOX_DIR}/${thread}\"",
+        "}",
+        "",
+        "# Mirrors fno.paths.project_log(): <repo>/.fno/<name>, anchored to",
+        "# $REPO_ROOT (never CWD). Hooks route ad-hoc .fno/ writes through this",
+        "# instead of hand-building \".fno/\" + name strings.",
+        "paths_project_log() {",
+        "  local name=\"$1\"",
+        "  echo \"${REPO_ROOT}/.fno/${name}\"",
+        "}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// The repo root, Python `resolve_repo_root` semantics: `FNO_REPO_ROOT` env
@@ -257,12 +271,258 @@ fn write_stub(out: &std::path::Path) -> i32 {
     0
 }
 
+/// Refuse what Python's SettingsModel validators refuse at load: no shell
+/// glob character survives into an emitted path value.
+fn glob_check(field: &str, raw: &str) -> Result<(), String> {
+    if raw.contains('*') || raw.contains('?') || raw.contains('[') {
+        Err(format!(
+            "{field} contains glob character(s); glob characters are not allowed in path values"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn cfg_str(cwd: &Path, keys: &[&str]) -> Option<String> {
+    crate::agents_config::config_lookup(cwd, keys).and_then(|v| v.as_str().map(str::to_string))
+}
+
+/// Python `paths.state_dir()`'s chain: `FNO_STATE_DIR` first, then the
+/// configured value through the template resolver.
+fn state_dir_resolved(cwd: &Path) -> Result<PathBuf, String> {
+    if let Some(carrier) = std::env::var_os("FNO_STATE_DIR").filter(|v| !v.is_empty()) {
+        return Ok(crate::paths::resolve_loose(&expanduser(
+            &carrier.to_string_lossy(),
+        )));
+    }
+    let raw = cfg_str(cwd, &["state_dir"]).unwrap_or_else(|| "~/.fno/".to_string());
+    resolve_template(raw.trim_end_matches('/'), None)
+}
+
+/// One `paths.<key>` override against its `$STATE_DIR/<sub>` default, the
+/// shape of Python `_state_subpath`: a `{template}` resolves at codegen
+/// time, a `~` value goes `$HOME`-relative, anything else passes through.
+fn state_subpath(override_: Option<String>, subdir: &str) -> Result<String, String> {
+    let Some(raw) = override_ else {
+        return Ok(format!("$STATE_DIR/{subdir}"));
+    };
+    glob_check("paths override", &raw)?;
+    let stripped = raw.trim_end_matches('/');
+    if has_template(stripped) {
+        Ok(resolve_template(stripped, None)?
+            .to_string_lossy()
+            .into_owned())
+    } else if stripped.starts_with('~') {
+        Ok(home_relative(stripped))
+    } else {
+        Ok(stripped.to_string())
+    }
+}
+
+/// The live-settings emitter (`use_defaults=False`): every path reflects
+/// the config the caller resolves, with `{vault}`/`{project}` templates
+/// resolved at codegen time so shell consumers never see raw template
+/// tokens. Byte-shape port of the live branch of Python `emit_paths_sh`.
+pub fn emit_paths_sh_live(cwd: &Path) -> Result<String, String> {
+    // STATE_DIR: home-relative or absolute; a template value resolves
+    // through the full state-dir chain.
+    let state_raw = cfg_str(cwd, &["state_dir"]).unwrap_or_else(|| "~/.fno/".to_string());
+    glob_check("path field", &state_raw)?;
+    let state_stripped = state_raw.trim_end_matches('/');
+    let state_tmpl = if has_template(state_stripped) {
+        state_dir_resolved(cwd)?.to_string_lossy().into_owned()
+    } else {
+        home_relative(state_stripped)
+    };
+
+    let mut lines = header_lines();
+    lines.push(String::new());
+    lines.push(format!("export STATE_DIR={}", bash_quote(&state_tmpl)));
+
+    for (name, key, sub) in [
+        ("LEDGER_JSON_PATH", "ledger_json", "ledger.json"),
+        ("BRIEFS_DIR", "briefs_dir", "briefs"),
+        ("FLEET_DIR", "fleet_dir", "fleet"),
+        ("POSTMORTEMS_DIR", "postmortems_dir", "postmortems"),
+        ("WORKTREES_BASE", "worktrees_base", "worktrees"),
+        ("MEMORY_DIR", "memory_dir", "memory"),
+        ("HOOK_LOGS_DIR", "hook_logs_dir", "hook-logs"),
+    ] {
+        let override_ = cfg_str(cwd, &["paths", key]);
+        if let Some(raw) = &override_ {
+            glob_check("paths override", raw)?;
+        }
+        let v = state_subpath(override_, sub)?;
+        lines.push(format!("export {name}={}", bash_quote(&v)));
+    }
+    // No config override: latches_dir() tracks state_dir by design.
+    lines.push(format!(
+        "export LATCHES_DIR={}",
+        bash_quote("$STATE_DIR/latches")
+    ));
+
+    // PLANS_DIR: project-relative by default.
+    let plans_raw = cfg_str(cwd, &["plans_dir"]).unwrap_or_else(|| ".fno/plans/".to_string());
+    glob_check("path field", &plans_raw)?;
+    let plans = plans_raw.trim_end_matches('/');
+    let plans_tmpl = if is_project_relative(plans) {
+        format!("$REPO_ROOT/{plans}")
+    } else if has_template(plans) {
+        resolve_template(plans, None)?
+            .to_string_lossy()
+            .into_owned()
+    } else if plans.starts_with('~') {
+        home_relative(plans)
+    } else {
+        plans.to_string()
+    };
+    lines.push(format!("export PLANS_DIR={}", bash_quote(&plans_tmpl)));
+
+    // INBOX_DIR: project-relative by default.
+    let inbox_tmpl = match cfg_str(cwd, &["paths", "inbox_dir"]) {
+        Some(raw) => {
+            glob_check("paths override", &raw)?;
+            let stripped = raw.trim_end_matches('/');
+            if has_template(stripped) {
+                resolve_template(stripped, None)?
+                    .to_string_lossy()
+                    .into_owned()
+            } else if stripped.starts_with('~') {
+                home_relative(stripped)
+            } else {
+                stripped.to_string()
+            }
+        }
+        None => "$REPO_ROOT/.fno/inbox".to_string(),
+    };
+    lines.push(format!("export INBOX_DIR={}", bash_quote(&inbox_tmpl)));
+
+    // HANDOFFS_DIR: override, else the vault placement, else the state-dir
+    // fallback -- mirrors paths.handoffs_dir() resolution.
+    let handoffs = match cfg_str(cwd, &["paths", "handoffs_dir"]) {
+        Some(raw) => {
+            glob_check("paths override", &raw)?;
+            let stripped = raw.trim_end_matches('/');
+            if has_template(stripped) {
+                resolve_template(stripped, None)?
+                    .to_string_lossy()
+                    .into_owned()
+            } else if stripped.starts_with('~') {
+                home_relative(stripped)
+            } else {
+                stripped.to_string()
+            }
+        }
+        None => {
+            let enabled = crate::agents_config::config_lookup(cwd, &["obsidian", "enabled"])
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let vault = cfg_str(cwd, &["obsidian", "vault"]);
+            if enabled {
+                match &vault {
+                    Some(v) => glob_check("obsidian.vault", v)?,
+                    None => {
+                        return Err(
+                            "obsidian.enabled is true but obsidian.vault is not set".to_string()
+                        )
+                    }
+                }
+                let root = vault_root(cwd)?;
+                let name = project_name(Some(cwd))?;
+                Path::new(&root)
+                    .join("internal")
+                    .join(name)
+                    .join("handoffs")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                match cfg_str(cwd, &["project", "id"]).filter(|p| !p.is_empty()) {
+                    Some(pid) => format!("$STATE_DIR/handoffs/{pid}"),
+                    None => return Ok(finish_live_stub(
+                        lines,
+                        "export HANDOFFS_DIR=\"$STATE_DIR/handoffs/$(basename \"$REPO_ROOT\")\"",
+                    )),
+                }
+            }
+        }
+    };
+    let handoffs_line = format!("export HANDOFFS_DIR={}", bash_quote(&handoffs));
+    Ok(finish_live_stub(cwd, lines, &handoffs_line))
+}
+
+/// Shared tail: the handoffs line (already formatted), the live CONFIG_FILE
+/// read (the file the caller's config actually loads), and the bash helpers.
+fn finish_live_stub(cwd: &Path, mut lines: Vec<String>, handoffs_line: &str) -> String {
+    lines.push(handoffs_line.to_string());
+    let config_file = crate::agents_config::config_candidates(cwd)
+        .into_iter()
+        .find(|p| {
+            std::fs::read_to_string(p)
+                .map(|c| c.parse::<toml::Table>().is_ok())
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| {
+            crate::agents_config::state_dir(cwd)
+                .unwrap_or_else(|| PathBuf::from("~/.fno"))
+                .join("config.toml")
+        });
+    lines.push(format!(
+        "export CONFIG_FILE={}",
+        bash_quote(&config_file.to_string_lossy())
+    ));
+    lines.push(String::new());
+    lines.extend(functions_lines());
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// `shell-stub`: write the live stub to a fresh temp file and print its
+/// path; bash callers `source "$(fno config paths shell-stub)"` and every
+/// call regenerates from the current settings.
+fn write_shell_stub(cwd: &Path) -> Result<PathBuf, String> {
+    let content = emit_paths_sh_live(cwd)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("fno-paths-{}-{nanos}.sh", std::process::id()));
+    std::fs::write(&path, &content).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+fn run_shell_stub() -> i32 {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("fno config paths shell-stub: no working directory: {e}");
+            return 1;
+        }
+    };
+    match write_shell_stub(&cwd) {
+        Ok(p) => {
+            println!("{}", p.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("fno config paths shell-stub: {e}");
+            1
+        }
+    }
+}
+
 /// Worker lane entry for `--paths-exec <verb> [args...]`.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("emit-shell") => run_emit_shell(&args[1..]),
+        Some("shell-stub") => {
+            if args.len() > 1 {
+                eprintln!("fno config paths shell-stub: takes no arguments");
+                return 2;
+            }
+            run_shell_stub()
+        }
         _ => {
-            eprintln!("usage: fno-agents-worker --paths-exec emit-shell [--output P]");
+            eprintln!("usage: fno-agents-worker --paths-exec <emit-shell|shell-stub> [args...]");
             2
         }
     }
@@ -309,5 +569,260 @@ mod tests {
     #[test]
     fn run_refuses_unknown_verb() {
         assert_eq!(run(&["bogus".to_string()]), 2);
+    }
+
+    // -- live emitter (shell-stub): contracts ported from the Python
+    //    shell-stub tests (Finding C) and the kept live-mode tests in
+    //    cli/tests/unit/test_emit_shell.py --
+
+    use crate::claims::test_env_lock;
+    use std::fs;
+
+    /// One temp config: `FNO_CONFIG` pins it as the sole candidate, the
+    /// state root pins inside the temp tree, and cwd stays a real dir.
+    struct LiveFx {
+        base: PathBuf,
+        config: PathBuf,
+        root: PathBuf,
+    }
+
+    impl LiveFx {
+        fn new(tag: &str, body: &str) -> Self {
+            let base =
+                std::env::temp_dir().join(format!("fno-paths-live-{}-{}", tag, std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let root = base.join("proj");
+            fs::create_dir_all(&root).unwrap();
+            let config = base.join("config.toml");
+            fs::write(&config, body).unwrap();
+            LiveFx { base, config, root }
+        }
+
+        fn body(&self, text: &str) {
+            fs::write(&self.config, text).unwrap();
+        }
+
+        fn pins(&self) -> Vec<(&'static str, String)> {
+            vec![
+                ("FNO_CONFIG", self.config.display().to_string()),
+                (
+                    "FNO_STATE_DIR",
+                    self.base.join("state").display().to_string(),
+                ),
+            ]
+        }
+    }
+
+    impl Drop for LiveFx {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new(pins: &[(&'static str, String)]) -> Self {
+            let saved = pins
+                .iter()
+                .map(|(k, _)| (*k, std::env::var_os(k)))
+                .collect();
+            for (k, v) in pins {
+                std::env::set_var(k, v);
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(old) => std::env::set_var(k, old),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    fn line_with<'a>(stub: &'a str, needle: &str) -> &'a str {
+        stub.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line containing {needle:?} in:\n{stub}"))
+    }
+
+    #[test]
+    fn shell_stub_prints_a_sourceable_temp_path() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("sourceable", "");
+        let _env = EnvGuard::new(&fx.pins());
+        assert_eq!(run(&["shell-stub".to_string()]), 0);
+        // The printed path is the only stdout line; find it from the temp dir.
+        let entries: Vec<_> = std::env::temp_dir()
+            .read_dir()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| {
+                        n.to_string_lossy()
+                            .starts_with(&format!("fno-paths-{}-", std::process::id()))
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(!entries.is_empty(), "shell-stub printed no temp path");
+        for p in entries {
+            let content = fs::read_to_string(&p).unwrap();
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(format!("source {} && echo $STATE_DIR", p.display()))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "bash source failed: {:?}", out.stderr);
+            let state = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                state.trim().contains('/'),
+                "STATE_DIR not absolute: {state:?}"
+            );
+            let _ = content;
+        }
+    }
+
+    #[test]
+    fn shell_stub_regenerates_from_current_settings() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("regen", "");
+        let _env = EnvGuard::new(&fx.pins());
+        assert_eq!(run(&["shell-stub".to_string()]), 0);
+        let before = std::env::temp_dir()
+            .read_dir()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("fno-paths-"))
+            .map(|e| (e.path(), fs::read_to_string(e.path()).unwrap_or_default()))
+            .collect::<Vec<_>>();
+        assert!(!before.is_empty());
+        let first_len = before[0].1.len();
+
+        fx.body("plans_dir = '.fno/my-custom-plans'\n");
+        assert_eq!(run(&["shell-stub".to_string()]), 0);
+        let after = fs::read_to_string(
+            std::env::temp_dir()
+                .read_dir()
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with("fno-paths-"))
+                .map(|e| e.path())
+                .max_by_key(|p| p.metadata().unwrap().modified().unwrap()),
+        )
+        .unwrap();
+        assert!(after.contains("my-custom-plans"), "stub:\n{after}");
+        assert!(after.len() != first_len || after != before[0].1);
+        for (p, _) in &before {
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn live_stub_reflects_custom_state_dir() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("state", "state_dir = '~/.my-custom-fno'\n");
+        let _env = EnvGuard::new(&fx.pins());
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        assert!(stub.contains("$HOME/.my-custom-fno"), "stub:\n{stub}");
+    }
+
+    #[test]
+    fn live_stub_resolves_vault_template_in_state_dir() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new(
+            "vault",
+            &format!(
+                "state_dir = '{{vault}}/state'\n[obsidian]\nenabled = true\nvault = '{}'\n",
+                fx.base.display()
+            ),
+        );
+        let _env = EnvGuard::new(&fx.pins());
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        let expected = format!("{}/state", fx.base.display());
+        assert!(stub.contains(&expected), "stub:\n{stub}");
+        assert!(!stub.contains("{vault}") && !stub.contains("{project}"));
+    }
+
+    #[test]
+    fn live_stub_rejects_glob_in_state_dir() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("glob", "state_dir = '/home/*/fno'\n");
+        let _env = EnvGuard::new(&fx.pins());
+        let err = emit_paths_sh_live(&fx.root).unwrap_err();
+        assert!(err.contains("glob"), "error: {err}");
+    }
+
+    #[test]
+    fn live_stub_config_file_is_the_loaded_path() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("conffile", "");
+        let _env = EnvGuard::new(&fx.pins());
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        let line = line_with(&stub, "export CONFIG_FILE=");
+        assert!(
+            line.contains(&fx.config.display().to_string()),
+            "CONFIG_FILE must name the loaded config: {line}"
+        );
+        assert!(!line.contains("$STATE_DIR"), "CONFIG_FILE: {line}");
+    }
+
+    #[test]
+    fn live_stub_handoffs_dir_override() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let shared = fx_shared_dir("handovr");
+        let fx = LiveFx::new(
+            "handovr",
+            &format!("paths.handoffs_dir = '{}'\n", shared.display()),
+        );
+        let _env = EnvGuard::new(&fx.pins());
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        assert!(
+            stub.contains(&shared.display().to_string()),
+            "explicit handoffs_dir override must appear: {stub}"
+        );
+    }
+
+    #[test]
+    fn live_stub_handoffs_uses_project_id() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("handpid", "[project]\nid = 'my-pinned-id'\n");
+        let _env = EnvGuard::new(&fx.pins());
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        let line = line_with(&stub, "export HANDOFFS_DIR=");
+        assert!(line.contains("my-pinned-id"), "HANDOFFS_DIR: {line}");
+        assert!(!line.contains("basename"), "HANDOFFS_DIR: {line}");
+    }
+
+    #[test]
+    fn live_stub_handoffs_vault_path() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new(
+            "handvault",
+            &format!(
+                "[project]\nid = 'testproj'\n[obsidian]\nenabled = true\nvault = '{}'\n",
+                fx.base.display()
+            ),
+        );
+        let _env = EnvGuard::new(&fx.pins());
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        let line = line_with(&stub, "export HANDOFFS_DIR=");
+        let expected = format!("{}/internal/testproj/handoffs", fx.base.display());
+        assert!(line.contains(&expected), "HANDOFFS_DIR: {line}");
+    }
+
+    fn fx_shared_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fno-paths-shared-{tag}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

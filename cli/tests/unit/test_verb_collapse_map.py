@@ -283,7 +283,8 @@ def test_map_covers_current_surface_once():
     # allocated their rows: 593 -> 595. The reconcile port retired the
     # `backlog reconcile` KEEP row with the verb: 595 -> 594. The emit-shell
     # port retires `paths emit-shell` from the Python surface: 594 -> 593.
-    assert len(mapped) == 593, (
+    # The shell-stub port retires `paths shell-stub` the same way: 593 -> 592.
+    assert len(mapped) == 592, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
