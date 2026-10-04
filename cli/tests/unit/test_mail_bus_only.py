@@ -53,6 +53,16 @@ def mailbox(tmp_path, monkeypatch):
     ):
         monkeypatch.setenv(env, str(empty))
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "daemon-empty"))
+    # The gate subprocess (the installed fno-agents on a dev machine) parks
+    # into the RUST state root and spawns a detached runner from the same
+    # binary. Pin the Rust leg (FNO_HOME) beside the Python one and point the
+    # runner at a stub, so a park inside a test touches nothing real and no
+    # runner outlives the run.
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno-home"))
+    runner_stub = tmp_path / "runner-stub.sh"
+    runner_stub.write_text("#!/bin/sh\nexit 0\n")
+    runner_stub.chmod(0o755)
+    monkeypatch.setenv("FNO_AGENTS_RUNNER_BIN", str(runner_stub))
     return tmp_path
 
 
@@ -196,11 +206,21 @@ def test_worker_without_policy_still_injects_live(runner, mailbox, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The raw lane: never queues durable, so a bus-only recipient is refused loud.
+# The raw lane: never queues durable - a held body parks with a receipt.
 # ---------------------------------------------------------------------------
 
 
 def test_raw_send_to_bus_only_is_refused_loud(runner, mailbox, monkeypatch):
+    """A hand-stamped bus-only hold has no deadline, so the gate never parks
+    for it: the receipt could not name a run-when, and the raw lane's
+    documented answer is the non-zero refusal. The dev binary is pinned when
+    it exists so the layer under the assertions does not drift with the
+    installed binary's age; the fallback refuses the same way."""
+    from fno import rust_binary
+
+    binary = rust_binary.find_dev_binary()
+    if binary is not None:
+        monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     _seed_registry({"name": "leader", "sid": BUS_SID,
                     "delivery_policy": "bus-only"})
     _boom_transport(monkeypatch)
