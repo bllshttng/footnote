@@ -128,9 +128,9 @@ def _write_event(events_path: Path, etype: str, session_id: str) -> None:
     emit_envelope(
         {
             "ts": "2026-07-24T%02d:%02d:00Z" % (_seq["n"] // 60, _seq["n"] % 60),
-            "source": "test",
+            "source": "backlog",
             "type": etype,
-            "data": {"session_id": session_id},
+            "data": {"session_id": session_id, "fu_id": "fu-test"},
         },
         events_path,
     )

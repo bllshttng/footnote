@@ -46,7 +46,7 @@ envelope:
       # (worker:<id>, stream-worker:<id>) are pattern sources, validated by
       # both the Python and bash validators via the `patterns` list below
       # (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli, pr-park]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli, pr-park, legacy]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -116,7 +116,7 @@ event_types:
 
   - name: phase_transition
     description: "A gate flipped to true (gate_bearing=true) OR an audit-only phase boundary crossed (gate_bearing=false)."
-    sources: [target, megawalk, fno-loop, hook]
+    sources: [target, megawalk, fno-loop, hook, legacy]
     data:
       required: [gate_bearing, phase, nonce, session_id]
       properties:
@@ -848,7 +848,7 @@ event_types:
 
   - name: phase_init
     description: "Existing event from emit-gate-transition.sh / events.sh::emit_event_raw. Retained for back-compat."
-    sources: [target, hook]
+    sources: [target, hook, legacy]
     data:
       required: [phase, nonce, session_id]
       properties:
@@ -1829,7 +1829,7 @@ event_types:
 
   - name: inbox_add
     description: "DEPRECATED, renamed capture_add: emitted only by pre-rename binaries; kept so append-only history always validates. An item was captured into the capture tier below idea nodes."
-    sources: [backlog, target, hook]
+    sources: [backlog, target, hook, test]
     data:
       required: [session_id, fu_id]
       properties:
@@ -4891,7 +4891,7 @@ event_types:
 
   - name: node_failed
     description: "Synthesized when a dispatched session exits without a TerminationReason event: either immediately by the per-unit watchdog, or when dead-row GC reaps a convention-named target/reconcile worker that never terminated. Group-2 walk and dispatcher policy count both toward the same consecutive-failure streak."
-    sources: [loop, daemon, agents]
+    sources: [loop, daemon]
     data:
       required: [session_id, unit_id, iteration, exit_code]
       properties:
@@ -6131,7 +6131,7 @@ event_types:
 
   - name: watchdog_verdict
     description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a stale row, a reroute, a wake candidate, or a report-only friction verdict. The basis names the measurement that decided it so a reader can falsify the call."
-    sources: [daemon]
+    sources: [daemon, legacy]
     data:
       required: [row_id, verdict]
       properties:
@@ -6207,7 +6207,7 @@ event_types:
 
   - name: watchdog_unfinished_work_scan
     description: "The unfinished-work report completed one scan. This is the freshness-bearing positive marker: it fires on every complete scan even when all four dimensions measured zero, because absence of findings is measured evidence, not a skipped read. An incomplete scan fires it with complete=false and names the unknown dimensions."
-    sources: [daemon]
+    sources: [daemon, legacy]
     data:
       required: [complete, finding_count]
       properties:
@@ -6238,7 +6238,7 @@ event_types:
 
   - name: watchdog_unfinished_work_finding
     description: "One actionable unfinished-work finding the report emitted. Session bookkeeping never reaches this stream: the kind is an outcome dimension, the subject is the exact node, worktree path, or PR, and the clearing command is the one verb that moves the finding out of its class. Emitted once per finding identity until the identity changes."
-    sources: [daemon]
+    sources: [daemon, legacy]
     data:
       required: [kind, subject, basis, clear_command]
       properties:
@@ -6300,7 +6300,7 @@ event_types:
 
   - name: provider_breaker_transition
     description: "The daemon observed a provider/account breaker state transition from durable quorum evidence."
-    sources: [daemon]
+    sources: [daemon, legacy]
     data:
       required: [outage_epoch, provider, account, phase, count]
       properties:
@@ -6916,7 +6916,7 @@ event_types:
 
   - name: startup_reconcile_done
     description: "The daemon's startup reconcile sweep completed successfully."
-    sources: [daemon]
+    sources: [daemon, test]
     data:
       required: []
       properties:
@@ -7926,6 +7926,96 @@ event_types:
     sources: [daemon, agents]
     data:
       required: []
+  - name: spawn_gate_refused
+    description: "Spawn gate: the gate refused a spawn and names the axis that decided, the readings it took first, and the one-word verdict per axis."
+    sources: [daemon, agents]
+    data:
+      required: []
+  - name: gate_written
+    description: "A target gate wrote its event: the legacy gates writer's counterpart of phase_init."
+    sources: [target, hook, legacy]
+    data:
+      required: [phase]
+  - name: agent_resumed
+    description: "A session resumed under an existing agent row: the resume leg's counterpart of agent_spawned."
+    sources: [hook, legacy]
+    data:
+      required: []
+  - name: account_switched
+    description: "The provider switch materialized one record's stored credential into the active slot."
+    sources: [agents]
+    data:
+      required: [provider, account_id]
+  - name: node_undeferred
+    description: "An operator undeferred a node: the reset boundary that lets maintain re-count failures from zero."
+    sources: [backlog, loop, hook, test]
+    data:
+      required: [unit_id]
+  - name: loop_check_unavailable_giveup
+    description: "Stop-hook adapter: the loop-check stayed unavailable for the full retry budget, so this stop is allowed with the ship gate off."
+    sources: [hook]
+    data:
+      required: []
+  - name: loop_check_settings_unparseable
+    description: "The loop-check could not parse the settings file at the named path and failed the login gate closed: the verdict rests on defaults, not the operator's file."
+    sources: [hook]
+    data:
+      required: [path, error]
+  - name: loop_check_nudge_post_failed
+    description: "The loop-check's review-bot nudge comment failed to post; the bot stays silent and the giveup clock keeps running."
+    sources: [hook]
+    data:
+      required: [session_id, pr, bot, handle]
+  - name: session_finalized
+    description: "Every finalize sub-step succeeded: the terminal event naming the termination reason, the ship receipt, and the auto-merge posture."
+    sources: [hook]
+    data:
+      required: [session_id, termination_reason]
+  - name: session_finalize_failed
+    description: "At least one finalize sub-step failed; a later fire retries the failed steps (each helper is idempotent)."
+    sources: [hook]
+    data:
+      required: [session_id, termination_reason, failed_steps]
+  - name: active_backlog_dispatched
+    description: "The active-backlog daemon dispatched (or recognized as in-flight) one member node after its worker terminated."
+    sources: [daemon]
+    data:
+      required: [node_id, termination]
+  - name: lock_seed
+    description: "Test fixture only: a minimal row appended to pin the store write lock while a test holds the sqlite connection. Never emitted in production."
+    sources: [test]
+    data:
+      required: []
+  - name: mutex_probe
+    description: "Loop-check test fixture probe row exercising the append mutex."
+    sources: [hook]
+    data:
+      required: []
+  - name: maintenance_handoff_probe
+    description: "Loop-check test fixture probe row exercising the maintenance handoff."
+    sources: [hook]
+    data:
+      required: []
+  - name: join_dispatched
+    description: "The wave orchestrator dispatched one join: the row carries the brief inputs the workers share."
+    sources: [agents]
+    data:
+      required: []
+  - name: join_refused
+    description: "The wave orchestrator refused a join before dispatch and names the reason."
+    sources: [agents]
+    data:
+      required: []
+  - name: context_flush_refused
+    description: "The Stop hook's flush check refused to read the tree's dirt as this session's: the process snapshot or agents registry was unreadable, or a live foreign writer is rooted in the repo. The row names the dirty-file count, whether the check was readable, and the foreign writers."
+    sources: [hook]
+    data:
+      required: [dirty_files, readable, writers, session_id]
+  - name: context_flush_nudge
+    description: "The Stop hook's flush check nudged: the tree holds dirty files that have not moved for several turn-ends, so the work exists only in this session's volatile state."
+    sources: [hook]
+    data:
+      required: [dirty_files, static_stops, session_id]
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

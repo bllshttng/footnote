@@ -9,7 +9,7 @@ use serde_json::json;
 
 fn attestation(repo: &str, head: &str, pr: i64) -> String {
     json!({"ts": "2026-09-17T12:00:00Z", "type": "review_attestation",
-        "source": "reviewer", "data": {"repo": repo, "head_sha": head,
+        "source": "test", "data": {"repo": repo, "head_sha": head,
         "pr": pr, "reviewer": "code-review", "verdict": "pass"}})
     .to_string()
 }

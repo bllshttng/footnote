@@ -147,6 +147,18 @@ def test_ac2_hp_budget_cap_at_boundary(tmp_path):
 
 # ---- subprocess failure surface (AC1-ERR, AC1-FR, AC1-EDGE, AC1-UI, AC1-HP-no-event) ----
 
+def _cost_probe_run(result):
+    """subprocess.run stand-in: the cost probe gets *result*; every other
+    caller (the events validator's door subprocess) runs for real."""
+    real_run = subprocess.run
+
+    def _run(argv, *a, **kw):
+        if isinstance(argv, list) and "fno.cost._session_cost" in map(str, argv):
+            return result
+        return real_run(argv, *a, **kw)
+
+    return _run
+
 def _make_failed_result(returncode: int, stderr: str) -> subprocess.CompletedProcess:
     """Build a fake subprocess.CompletedProcess representing script failure."""
     r = MagicMock(spec=subprocess.CompletedProcess)
@@ -182,7 +194,7 @@ def test_ac1_hp_no_stderr_no_event_on_success(tmp_path, capsys):
 
     # update() now runs `python3 -m fno.cost._session_cost`; patch subprocess.run
     # to simulate a clean rc=0 so the no-stderr/no-event path is exercised.
-    with patch("subprocess.run", return_value=ok_result):
+    with patch("subprocess.run", side_effect=_cost_probe_run(ok_result)):
         cost_update(
             session_id="sess-hp-001",
             tokens=100,
@@ -211,7 +223,7 @@ def test_ac1_err_subprocess_failure_surfaces_stderr_and_event(tmp_path, capsys):
     def fake_append(event, path=None, **kw):
         captured_events.append(event)
 
-    with patch("subprocess.run", return_value=failed_result), \
+    with patch("subprocess.run", side_effect=_cost_probe_run(failed_result)), \
          patch("fno.cost.append_event", side_effect=fake_append):
 
         cost_update(
@@ -250,7 +262,7 @@ def test_ac1_fr_unwritable_events_does_not_break_ledger(tmp_path, capsys):
     def raise_on_append(event, path=None, **kw):
         raise OSError("Permission denied: events.jsonl")
 
-    with patch("subprocess.run", return_value=failed_result), \
+    with patch("subprocess.run", side_effect=_cost_probe_run(failed_result)), \
          patch("fno.cost.append_event", side_effect=raise_on_append):
 
         result = cost_update(
@@ -283,7 +295,7 @@ def test_ac1_edge_empty_stderr_event_emitted_no_print(tmp_path, capsys):
     def fake_append(event, path=None, **kw):
         captured_events.append(event)
 
-    with patch("subprocess.run", return_value=failed_result), \
+    with patch("subprocess.run", side_effect=_cost_probe_run(failed_result)), \
          patch("fno.cost.append_event", side_effect=fake_append):
 
         cost_update(
@@ -311,7 +323,7 @@ def test_ac1_ui_stderr_prefix_exact(tmp_path, capsys):
 
     failed_result = _make_failed_result(returncode=1, stderr="non-empty error output")
 
-    with patch("subprocess.run", return_value=failed_result), \
+    with patch("subprocess.run", side_effect=_cost_probe_run(failed_result)), \
          patch("fno.cost.append_event"):
 
         cost_update(
@@ -349,8 +361,12 @@ def test_ac1_fr_subprocess_oserror_still_writes_ledger_and_event(tmp_path, capsy
     def fake_append(event, path=None, **kw):
         captured_events.append(event)
 
-    def _raise_oserror(*args, **kwargs):
-        raise OSError("text file busy")
+    real_run = subprocess.run
+
+    def _raise_oserror(argv, *args, **kwargs):
+        if isinstance(argv, list) and "fno.cost._session_cost" in map(str, argv):
+            raise OSError("text file busy")
+        return real_run(argv, *args, **kwargs)
 
     with patch("subprocess.run", side_effect=_raise_oserror), \
          patch("fno.cost.append_event", side_effect=fake_append):
@@ -403,7 +419,7 @@ def test_ac1_edge_multibyte_stderr_respects_4kb_byte_cap(tmp_path, capsys):
     def fake_append(event, path=None, **kw):
         captured_events.append(event)
 
-    with patch("subprocess.run", return_value=failed_result), \
+    with patch("subprocess.run", side_effect=_cost_probe_run(failed_result)), \
          patch("fno.cost.append_event", side_effect=fake_append):
 
         cost_update(

@@ -788,7 +788,10 @@ rm -rf "$COUNT_BINDIR"
 # clock, not on a defect.
 # events.jsonl accumulates for the whole file (no other case here truncates
 # it) - clear it once so the all-dead case below can trust a fresh read.
-rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+_evstore=$("$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" \
+    --store-path-only 2>/dev/null | jq -r .store 2>/dev/null)
+rm -f "$SBX/.fno/events.jsonl" "$_evstore" \
+    "$_evstore-wal" "$_evstore-shm" "$_evstore-journal" 2>/dev/null
 
 write_registry_liveness() {  # write_registry_liveness '<jq children array>'
   jq -n --argjson children "$1" '{
@@ -840,7 +843,10 @@ CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
   {name:"dead-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
 ]')
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+_evstore=$("$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" \
+    --store-path-only 2>/dev/null | jq -r .store 2>/dev/null)
+rm -f "$SBX/.fno/events.jsonl" "$_evstore" \
+    "$_evstore-wal" "$_evstore-shm" "$_evstore-journal" 2>/dev/null
 write_registry_liveness "$CHILDREN"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "x-1b75 all-dead: no orphan reason when every spawned row is confidently dead" "$OUT" "cannot be a pure pass"

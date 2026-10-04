@@ -247,11 +247,13 @@ fi
 # jq-free event writer (string interpolation, so it also runs on the jq-missing
 # give-up path). Fields are hook-internal and safe to interpolate.
 emit_event() {
-    local kind="$1" sid ts line
+    # $2 (optional): a pre-encoded JSON fragment appended into data, so a
+    # kind with schema-required fields can carry them without a second writer.
+    local kind="$1" extra="${2:-}" sid ts line
     sid=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null | head -1 \
         | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
-    line="{\"ts\":\"${ts}\",\"type\":\"${kind}\",\"source\":\"hook\",\"data\":{\"session_id\":\"${sid}\",\"harness\":\"agy\"}}"
+    line="{\"ts\":\"${ts}\",\"type\":\"${kind}\",\"source\":\"hook\",\"data\":{\"session_id\":\"${sid}\",\"harness\":\"agy\"${extra}}}"
     if ! declare -F _append_bounded_event >/dev/null 2>&1; then
         echo "agy stop-hook: event helper unavailable; skipping ${kind}" >&2
         return
@@ -481,7 +483,9 @@ else
     # anyway: two stop adapters that disagree about the same reply is how the
     # claude side shipped the bug this mirrors.
     if ! printf '%s' "$DECISION_JSON" | jq -e '.decision' >/dev/null 2>&1; then
-        emit_event "loop_check_gh_error"
+        stderr_tail=$(tail -n 2 "${SPACE_DIR}/agy-loop-check.stderr.log" 2>/dev/null \
+            | tr -d '\n' | sed 's/["\\]/\\&/g' || true)
+        emit_event "loop_check_gh_error" ",\"read\":\"verb\",\"stderr_tail\":\"${stderr_tail}\""
         echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / no decision)" >&2
         tail -n 5 "${SPACE_DIR}/agy-loop-check.stderr.log" >&2 2>/dev/null || true
         unavailable_continue_or_allow

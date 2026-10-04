@@ -777,6 +777,48 @@ fn small_enum_rules(
         field_enum_rule(type_name, data, spec, "dimension", &["dimension"])?;
         field_enum_rule(type_name, data, spec, "verdict", &["verdict"])?;
     }
+    if type_name == "decision_span" {
+        // span_kind/route/class drive the eval grouping (one decision path
+        // per trace_id), so a typo'd hop refuses here rather than landing as
+        // an unrecognized bucket. span_kind is always checked (the required
+        // check already refused a missing key); route and class only when
+        // present.
+        let allowed = enum_list(spec.enums.get("span_kind"));
+        let member = data.get("span_kind");
+        let mut ok = false;
+        if let Some(m) = member {
+            for e in allowed.iter() {
+                if e == m {
+                    ok = true;
+                }
+            }
+        }
+        if !ok {
+            return Err(format!(
+                "unknown decision_span data.span_kind: {} (allowed: {})",
+                py_repr(member.unwrap_or(&Value::Null)),
+                py_value_list(enum_list(spec.enums.get("span_kind"))),
+            ));
+        }
+        for field in ["route", "class"] {
+            if let Some(member) = data.get(field) {
+                let allowed = enum_list(spec.enums.get(field));
+                let mut ok = false;
+                for e in allowed.iter() {
+                    if e == member {
+                        ok = true;
+                    }
+                }
+                if !ok {
+                    return Err(format!(
+                        "unknown decision_span data.{field}: {} (allowed: {})",
+                        py_repr(member),
+                        py_value_list(allowed),
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

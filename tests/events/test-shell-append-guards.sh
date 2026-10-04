@@ -47,7 +47,7 @@ count_marker() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-LINE='{"ts":"2026-09-07T00:00:00Z","type":"context_nudge","source":"hook","data":{}}'
+LINE='{"ts":"2026-09-07T00:00:00Z","type":"session_context_nudge","source":"hook","data":{"used_pct":61,"trigger":50}}'
 
 # --- 1. opt-in local journal -------------------------------------------------
 
