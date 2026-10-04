@@ -433,6 +433,7 @@ const EVENTS_V2_COLUMNS: &str = "(\
         pr_number INTEGER, \
         head_sha TEXT, \
         repo TEXT, \
+        caused_by TEXT, \
         reject_reason TEXT, \
         line TEXT NOT NULL\
     )";
@@ -459,6 +460,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     let current = refuse_newer_schema(conn, store)?;
     let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
+        migrate_caused_by(conn)?;
         return stamp_coverage_epoch(conn, store);
     }
     let has_events: bool = conn
@@ -505,7 +507,30 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     }
     tx.commit()
         .map_err(|e| format!("{}: migration: {e}", store.display()))?;
+    migrate_caused_by(conn)?;
     stamp_coverage_epoch(conn, store)
+}
+
+/// The caused_by column on a store created before it existed. The ALTER is
+/// PRAGMA-guarded and idempotent; two first opens can race it and the loser
+/// tolerates the winner's duplicate-column answer.
+fn migrate_caused_by(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'caused_by'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has > 0 {
+        return Ok(());
+    }
+    if let Err(e) = conn.execute_batch("ALTER TABLE events ADD COLUMN caused_by TEXT") {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Stamp [`COVERAGE_EPOCH_KEY`] with the first-open moment of this build,
@@ -634,8 +659,9 @@ fn insert_v2_row(tx: &Transaction, table: &str, row: &RowInput) -> Result<usize,
         &format!(
             "INSERT OR IGNORE INTO {table}
              (event_id, row_hash, ts_ms, type, source, scope, retention_class,
-              session_id, node_id, pr_number, head_sha, repo, reject_reason, line)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+              session_id, node_id, pr_number, head_sha, repo, caused_by,
+              reject_reason, line)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
         ),
         params![
             row.event_id,
@@ -650,6 +676,7 @@ fn insert_v2_row(tx: &Transaction, table: &str, row: &RowInput) -> Result<usize,
             id.pr_number,
             id.head_sha,
             id.repo,
+            id.caused_by,
             row.reject_reason,
             row.line,
         ],
@@ -666,6 +693,9 @@ pub struct EventIdentity {
     pub pr_number: Option<i64>,
     pub head_sha: Option<String>,
     pub repo: Option<String>,
+    /// The causing event's id, when the envelope names one
+    /// (`data.caused_by`).
+    pub caused_by: Option<String>,
 }
 
 pub fn extract_identity(line: &str) -> EventIdentity {
@@ -694,6 +724,7 @@ pub fn extract_identity(line: &str) -> EventIdentity {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
     });
+    id.caused_by = get_str(&["caused_by"]);
     id
 }
 
@@ -1122,8 +1153,9 @@ pub fn append_envelope(
         .execute(
             "INSERT OR IGNORE INTO events
                  (event_id, row_hash, ts_ms, type, source, scope, retention_class,
-                  session_id, node_id, pr_number, head_sha, repo, reject_reason, line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13)",
+                  session_id, node_id, pr_number, head_sha, repo, caused_by,
+                  reject_reason, line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14)",
             params![
                 event_id,
                 row_hash,
@@ -1139,6 +1171,7 @@ pub fn append_envelope(
                 id.pr_number,
                 id.head_sha,
                 id.repo,
+                id.caused_by,
                 line,
             ],
         )

@@ -40,6 +40,63 @@ fn count_type(store: &Path, event_type: &str) -> i64 {
 }
 
 #[test]
+fn a_cause_stores_reads_back_and_migrates_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    let envelope = json!({
+        "ts": "2026-10-04T00:00:00Z",
+        "type": "agent_spawned",
+        "source": "test",
+        "data": {"caused_by": "evt:parent", "session_id": "s-1"},
+    })
+    .to_string();
+    let receipt = append_envelope(&journal, &envelope, None).unwrap();
+    assert!(receipt.inserted);
+    let caused: Option<String> = open_read(&store_path(&journal))
+        .unwrap()
+        .query_row(
+            "SELECT caused_by FROM events WHERE event_id = ?1",
+            params![receipt.event_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(caused.as_deref(), Some("evt:parent"));
+    // An envelope without a cause stores NULL, never an empty string.
+    let plain = append_envelope(
+        &journal,
+        &checkin("2026-10-04T00:00:01Z", "x", "c").to_string(),
+        None,
+    )
+    .unwrap();
+    let caused: Option<String> = open_read(&store_path(&journal))
+        .unwrap()
+        .query_row(
+            "SELECT caused_by FROM events WHERE event_id = ?1",
+            params![plain.event_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(caused.is_none());
+    // A store created before the column existed gains it in place.
+    let store = store_path(&journal);
+    {
+        let conn = open_store(&store).unwrap();
+        conn.execute_batch("ALTER TABLE events DROP COLUMN caused_by")
+            .unwrap();
+    }
+    let mut conn = rusqlite::Connection::open(&store).unwrap();
+    ensure_schema(&mut conn, &store).unwrap();
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'caused_by'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has, 1);
+}
+
+#[test]
 fn store_path_strips_generation_suffix() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");

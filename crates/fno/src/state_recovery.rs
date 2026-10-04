@@ -172,7 +172,14 @@ fn tables(c: &Connection, family: &str) -> Result<Vec<(String, Vec<String>, Vec<
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        if cols != EVENT_COLUMNS {
+        // caused_by rides the additive migration: a store the older writer
+        // made (the column not landed yet) recovers exactly the same way.
+        let without_cause: Vec<&str> = cols
+            .iter()
+            .map(String::as_str)
+            .filter(|name| *name != "caused_by")
+            .collect();
+        if without_cause != EVENT_COLUMNS {
             return Err("unsupported events columns".into());
         }
         return Ok(vec![("events".into(), cols, vec![0])]);

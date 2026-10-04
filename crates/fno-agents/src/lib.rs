@@ -51,6 +51,7 @@ pub mod additional_prs;
 pub(crate) mod adopt_carry;
 pub(crate) mod adopt_identity;
 mod agent_lock;
+pub mod agent_ref;
 pub mod agents_config;
 pub(crate) mod agents_event;
 pub mod agy_ask;
