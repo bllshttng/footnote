@@ -53,6 +53,16 @@ def mailbox(tmp_path, monkeypatch):
     ):
         monkeypatch.setenv(env, str(empty))
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "daemon-empty"))
+    # The gate subprocess (the installed fno-agents on a dev machine) parks
+    # into the RUST state root and spawns a detached runner from the same
+    # binary. Pin the Rust leg (FNO_HOME) beside the Python one and point the
+    # runner at a stub, so a park inside a test touches nothing real and no
+    # runner outlives the run.
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno-home"))
+    runner_stub = tmp_path / "runner-stub.sh"
+    runner_stub.write_text("#!/bin/sh\nexit 0\n")
+    runner_stub.chmod(0o755)
+    monkeypatch.setenv("FNO_AGENTS_RUNNER_BIN", str(runner_stub))
     return tmp_path
 
 
@@ -196,11 +206,22 @@ def test_worker_without_policy_still_injects_live(runner, mailbox, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The raw lane: never queues durable, so a bus-only recipient is refused loud.
+# The raw lane: never queues durable - a held body parks with a receipt.
 # ---------------------------------------------------------------------------
 
 
-def test_raw_send_to_bus_only_is_refused_loud(runner, mailbox, monkeypatch):
+def test_raw_send_to_a_held_session_parks_with_a_receipt(runner, mailbox, monkeypatch):
+    """The raw lane never queues durable: a held non-empty body parks through
+    the real gate (C15) and the receipt names the run-when. Pinned to the dev
+    binary because the answer differs by layer - with no gate binary at all
+    the in-process fallback still answers the plain refusal, which the
+    ``--check`` case below pins."""
+    from fno import rust_binary
+
+    binary = rust_binary.find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     _seed_registry({"name": "leader", "sid": BUS_SID,
                     "delivery_policy": "bus-only"})
     _boom_transport(monkeypatch)
@@ -209,9 +230,9 @@ def test_raw_send_to_bus_only_is_refused_loud(runner, mailbox, monkeypatch):
         app, ["mail", "send", BUS_SID, "/code-review", "--raw", "--from-name", "peer"]
     )
 
-    assert res.exit_code == 2, res.output
-    assert "bus-only" in res.output
-    assert "DND" in res.output
+    assert res.exit_code == 0, res.output
+    assert "runs on leader when the hold ends" in res.output
+    # Parked, not queued: a durable copy would double-deliver at the drain.
     assert "queued (durable)" not in res.output
 
 
