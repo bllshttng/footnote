@@ -48,7 +48,7 @@ pub(crate) fn read_closed_rung_facts(
     cwd: &Path,
     home: &AgentsHome,
 ) -> (Vec<(String, String)>, String) {
-    let graph = crate::king_board::graph_json_path(cwd);
+    let graph = crate::org_board::graph_json_path(cwd);
     let store = crate::backlog::api::Store::new(&graph);
     (statuses_of(&store), journals_raw(&fno_dir_of(home), cwd))
 }

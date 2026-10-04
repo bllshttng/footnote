@@ -2,7 +2,7 @@
 # canon-doc-marker.sh - the one reader for canon-doc marker blocks.
 #
 # hooks/precompact-canon-doc.sh fences blocks with `<!-- fno:<name> -->`
-# markers; king-postcompact-reinject.sh and the reign check-in body read
+# markers; lead-postcompact-reinject.sh and the lead check-in body read
 # them back. The parsing lives here so the three sites cannot drift.
 
 # canon_doc_extract_marker <file> <marker-name>

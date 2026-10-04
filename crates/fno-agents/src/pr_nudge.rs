@@ -25,7 +25,7 @@ use std::time::Duration;
 pub const MAX_ATTEMPTS: u32 = 3;
 
 const NUDGE_SENDER: &str = "fno/pr-nudge";
-const NUDGE_SENDER_LINE: &str = "Automatic retry from the fno daemon pr-nudge arm, not a person. A hold from your crown or the operator outranks it.";
+const NUDGE_SENDER_LINE: &str = "Automatic retry from the fno daemon pr-nudge arm, not a person. A hold from your team or the operator outranks it.";
 
 /// The bounded subprocess budget, shared by the PR-status read and every
 /// mail/resume/ask effect.
@@ -569,11 +569,22 @@ fn task_key(row: &OpenPrRow) -> String {
 }
 
 /// The nudge body for a dead-worker row (pr: None): the node's open work
-/// IS the message. No PR, no status read, no verdict to relay.
+/// IS the message. No PR, no status read, no verdict to relay. The text
+/// claims nothing it did not measure: no uncommitted-work assertion, and a
+/// canonical-checkout row is told to commit nothing there.
 fn dead_work_text(row: &OpenPrRow) -> String {
+    if crate::canonical_check::is_canonical_checkout(std::path::Path::new(&row.cwd)) {
+        return format!(
+            "{NUDGE_SENDER_LINE} continue: node {node} is in_progress and its session stopped \
+             in the canonical checkout {cwd}. Commit nothing there. Run \
+             `fno do target start {node}` and continue the node in its worktree.",
+            node = row.node,
+            cwd = row.cwd,
+        );
+    }
     format!(
-        "{NUDGE_SENDER_LINE} continue: node {node} is in_progress and its session died \
-         with uncommitted work in {cwd}. Commit what is there and drive the node to a PR.",
+        "{NUDGE_SENDER_LINE} continue: node {node} is in_progress and its session stopped. \
+         Read `git status` in {cwd}; commit only this node's files and drive the node to a PR.",
         node = row.node,
         cwd = row.cwd,
     )
@@ -1250,12 +1261,73 @@ mod tests {
         assert_eq!(calls[0][4], "--message");
         let text = &calls[0][5];
         assert!(text.contains("node x-node is in_progress"));
-        assert!(text.contains("uncommitted work in /tmp/wt"));
+        // /tmp/wt is not a git checkout, so the canonical read takes the
+        // safe side: the nudge must commit nothing there and route the
+        // worker to `fno do target start` instead.
+        assert!(text.contains("canonical checkout /tmp/wt"));
+        assert!(text.contains("fno do target start x-node"));
+        assert!(!text.contains("uncommitted work"));
         let saved = load_state(&home, &r.session_id);
         assert_eq!(saved.attempts, 1);
         let ev = last_event(&home, "pr_nudge_sent");
         assert_eq!(ev["data"]["pr"], serde_json::json!(null));
         assert_eq!(ev["data"]["action"], serde_json::json!("resume"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+
+        // A dead-work row whose cwd IS a linked worktree: the wording asks
+        // for a status read and only this node's files, never the
+        // canonical-checkout branch.
+        let repo = tempfile::tempdir().unwrap();
+        let wtdir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"], repo.path());
+        git(
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ],
+            repo.path(),
+        );
+        git(
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wtdir.path().to_str().unwrap(),
+            ],
+            repo.path(),
+        );
+        let wtrow = OpenPrRow {
+            cwd: wtdir.path().to_string_lossy().into_owned(),
+            ..dead_row()
+        };
+        let wt_text = dead_work_text(&wtrow);
+        assert!(wt_text.contains("git status"), "{wt_text}");
+        assert!(
+            wt_text.contains(wtdir.path().to_string_lossy().as_ref()),
+            "{wt_text}"
+        );
+        assert!(!wt_text.contains("canonical checkout"), "{wt_text}");
+        assert!(!wt_text.contains("uncommitted work"), "{wt_text}");
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
 
         // AC3-ERR: 3 undelivered resumes later, one operator question

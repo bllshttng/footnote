@@ -107,7 +107,7 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
     "source_model",
     "source_effort",
     "source_parent_session",
-    "source_crown",
+    "source_team",
     "source_node_id",
     "source_plan_path",
     "source_inbox_msg",

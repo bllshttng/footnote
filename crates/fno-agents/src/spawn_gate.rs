@@ -58,7 +58,7 @@ pub const EXIT_REVIEW_SESSION: i32 = 89;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
-pub const EXIT_KING_SHARE: i32 = 80;
+pub const EXIT_LEAD_SHARE: i32 = 80;
 pub const EXIT_REGISTRY_SCHEMA: i32 = 81;
 /// A durable fleet incident stop is active - refused before every
 /// bypass branch, `--force` and `FNO_SPAWN_GATE=0` included. In-flight
@@ -164,7 +164,7 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
         collect(obj, &mut figures);
     }
     if figures.is_empty() {
-        // A receipt-less refusal (king share, fleet incident) keeps its
+        // A receipt-less refusal (lead share, fleet incident) keeps its
         // measurements in the event; the verdict names them, or it names
         // no breach at all.
         collect(&r.event, &mut figures);
@@ -648,13 +648,13 @@ fn slot_refusal_line(
     )
 }
 
-/// The territory (key, member node ids, kingless) a node belongs to, or
+/// The territory (key, member node ids, leadless) a node belongs to, or
 /// `None` when the answer cannot be READ (unreadable graph, node absent,
-/// unreadable registry, uncompilable live crown). Membership is exclusive:
-/// the deepest live crown whose scope holds the node owns it, the lowest
+/// unreadable registry, uncompilable live team). Membership is exclusive:
+/// the deepest live team whose scope holds the node owns it, the lowest
 /// canonical scope on a tie (`territory::node_owners`); an unowned node
 /// counts for its project's loose territory, so one worker never consumes
-/// two territories' caps. `kingless` is false for a crown scope, true for
+/// two territories' caps. `leadless` is false for a team scope, true for
 /// the loose fallback.
 pub(crate) fn territory_of_node(
     config_cwd: &Path,
@@ -662,7 +662,7 @@ pub(crate) fn territory_of_node(
     node: &str,
     warnings: &mut Vec<String>,
 ) -> Option<(String, std::collections::HashSet<String>, bool)> {
-    use crate::king_board::project_map;
+    use crate::org_board::project_map;
 
     // Through the backend switch (`graph_store::read_rows_strict`): a cap
     // answered from a frozen sqlite mirror polices a territory the store
@@ -677,7 +677,7 @@ pub(crate) fn territory_of_node(
     if row.is_none() {
         return None;
     }
-    let crowns = match crate::territory::live_crowns(registry_path) {
+    let teams = match crate::territory::live_teams(registry_path) {
         Ok(c) => c,
         Err(e) => {
             warnings.push(format!("{e}; refusing"));
@@ -685,7 +685,7 @@ pub(crate) fn territory_of_node(
         }
     };
     let (owners, failures) = crate::territory::node_owners(
-        &crowns,
+        &teams,
         &entries,
         &Ok(project_map(config_cwd).unwrap_or_default()),
     );
@@ -693,7 +693,7 @@ pub(crate) fn territory_of_node(
         warnings.extend(
             failures
                 .iter()
-                .map(|(s, e)| format!("territory: crown {s} uncompilable: {e}")),
+                .map(|(s, e)| format!("territory: team {s} uncompilable: {e}")),
         );
         return None;
     }
@@ -738,7 +738,7 @@ pub(crate) fn check_territory_cap(
     for w in &warnings {
         eprintln!("{w}");
     }
-    let Some((scope, members, _kingless)) = state else {
+    let Some((scope, members, _leadless)) = state else {
         return Err(serde_json::json!({
             "status": "refused",
             "reason": "territory_unknown",
@@ -796,7 +796,7 @@ fn territory_refusal(receipt: &str) -> Refusal {
 /// names parse to verb `bp`; the territory axis counts the ones working the
 /// spawn's territory. Refuses, never queues, beside the machine cap - and
 /// `--force` does not excuse it, the same posture as the territory cap. The
-/// receipt names the live rows so a blocked king sees what holds the slot.
+/// receipt names the live rows so a blocked lead sees what holds the slot.
 pub(crate) fn check_blueprint_cap(
     config_cwd: &Path,
     registry_path: &Path,
@@ -841,7 +841,7 @@ pub(crate) fn check_blueprint_cap(
     for w in &warnings {
         eprintln!("{w}");
     }
-    let Some((scope, members, _kingless)) = state else {
+    let Some((scope, members, _leadless)) = state else {
         return Err(serde_json::json!({
             "status": "refused",
             "reason": "territory_unknown",
@@ -891,9 +891,9 @@ fn blueprint_refusal(receipt: &str) -> Refusal {
 }
 
 /// The verdict receipt for one node, from explicit paths - the counting leg
-/// `run_territory_verdict` serves and the tests pin. `kingless` rides every
+/// `run_territory_verdict` serves and the tests pin. `leadless` rides every
 /// readable verdict; `territory_unknown` stays without one, because an
-/// unreadable attribution has no territory and a `kingless` value there
+/// unreadable attribution has no territory and a `leadless` value there
 /// would be a guess wearing a boolean.
 fn territory_verdict_receipt(
     config_cwd: &Path,
@@ -913,7 +913,7 @@ fn territory_verdict_receipt(
             "node": node,
             "max_live_per_territory": cap,
         }),
-        Some((scope, members, kingless)) => {
+        Some((scope, members, leadless)) => {
             let live = live_rows(registry_path, &mut warnings);
             let count = live
                 .iter()
@@ -929,7 +929,7 @@ fn territory_verdict_receipt(
                     "verdict": "territory_cap",
                     "reason": "territory_cap",
                     "territory": scope,
-                    "kingless": kingless,
+                    "leadless": leadless,
                     "count": count,
                     "current_count": count,
                     "max_live_per_territory": cap,
@@ -938,7 +938,7 @@ fn territory_verdict_receipt(
                 serde_json::json!({
                     "verdict": "ok",
                     "territory": scope,
-                    "kingless": kingless,
+                    "leadless": leadless,
                     "current_count": count,
                     "max_live_per_territory": cap,
                 })
@@ -1485,7 +1485,7 @@ fn decide_gate(
             }
         }
         // The blueprint axis refuses under --force too: force speaks
-        // for the machine being busy, never for one king holding every
+        // for the machine being busy, never for one lead holding every
         // planning lane.
         {
             let mut warnings = Vec::new();
@@ -1680,7 +1680,7 @@ fn decide_gate(
                 }
             }
             if flags.force {
-                // Byte-twin with the Python gate: force also bypasses the king
+                // Byte-twin with the Python gate: force also bypasses the lead
                 // share here; the provider cap above stays enforced.
                 eprintln!(
                     "{NOTE} forced past cap, RAM floor, and CPU share ceiling \
@@ -1879,18 +1879,18 @@ fn decide_gate(
                             }
                             if replaced == 1 {
                                 axes_read.insert(
-                                    "king_share".into(),
-                                    serde_json::json!("skipped (crowned succession)"),
+                                    "lead_share".into(),
+                                    serde_json::json!("skipped (teamed succession)"),
                                 );
                             } else {
-                                check_king_share(
+                                check_lead_share(
                                     registry_path,
                                     cap,
                                     input.caller_session.as_deref(),
                                     &axes_read,
                                 )
                                 .inspect_err(|_| guard.release())?;
-                                axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                                axes_read.insert("lead_share".into(), serde_json::json!("ok"));
                             }
                             // The per-territory team cap: beside the machine cap,
                             // never instead of it. Refuses (never queues) - waiting cannot
@@ -2458,7 +2458,7 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
     if resolves_on_path("fno-footprint-cause") {
         return Some(vec!["fno-footprint-cause".to_string()]);
     }
-    let mut argv = crate::king_board::fno_py_cmd();
+    let mut argv = crate::org_board::fno_py_cmd();
     argv.extend(
         ["doctor", "footprint", "--json", "--cause-only"]
             .iter()
@@ -2678,13 +2678,13 @@ fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refu
     )
 }
 
-/// The king-share refusal (W4 / LD1): the share divides
-/// `max_live` by CROWNS; `held` counts the caller's own worker rows; a caller
+/// The lead-share refusal (W4 / LD1): the share divides
+/// `max_live` by TEAMS; `held` counts the caller's own worker rows; a caller
 /// with no resolved session is not share-checked; waiting cannot help, so
 /// this refuses like the provider cap. Every number comes from
 /// [`spawn_gate_lanes::share_reading`]: the count the gate refuses on and the
 /// count any readout prints are one value.
-/// The held-rows clause of the king-share refusal: the row names the caller
+/// The held-rows clause of the lead-share refusal: the row names the caller
 /// can act on, capped at five with an ellipsis like the unattributed suffix.
 pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
     match held_rows.filter(|r| !r.is_empty()) {
@@ -2700,7 +2700,7 @@ pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
     }
 }
 
-fn check_king_share(
+fn check_lead_share(
     registry_path: &Path,
     cap: usize,
     caller_session: Option<&str>,
@@ -2710,7 +2710,7 @@ fn check_king_share(
         return Ok(());
     };
     let reading = spawn_gate_lanes::share_reading(registry_path, cap, Some(caller));
-    let (Some(kings), Some(share), Some(held)) = (reading.kings, reading.share, reading.held)
+    let (Some(leads), Some(share), Some(held)) = (reading.leads, reading.share, reading.held)
     else {
         // An unreadable registry leaves every count unknown; nothing to
         // enforce and no zero to fail open on.
@@ -2720,7 +2720,7 @@ fn check_king_share(
         return Ok(());
     }
     let mut msg = format!(
-        "spawn-gate: king {} holds {held} of max_live {cap} across {kings} kings (share {share}); \
+        "spawn-gate: lead {} holds {held} of max_live {cap} across {leads} leads (share {share}); \
          refusing to spawn -- waiting cannot help while your own workers hold the share \
          (--force to bypass)",
         &caller[..caller.len().min(8)]
@@ -2738,13 +2738,13 @@ fn check_king_share(
         ));
     }
     eprintln!("{msg}");
-    Err(Refusal::code(EXIT_KING_SHARE)
-        .ev("reason", serde_json::json!("king_share"))
-        .ev("king", serde_json::json!(caller))
+    Err(Refusal::code(EXIT_LEAD_SHARE)
+        .ev("reason", serde_json::json!("lead_share"))
+        .ev("lead", serde_json::json!(caller))
         .ev("held", serde_json::json!(held))
         .ev("share", serde_json::json!(share))
         .ev("max_live", serde_json::json!(cap))
-        .ev("kings", serde_json::json!(kings))
+        .ev("leads", serde_json::json!(leads))
         .ev(
             "held_rows",
             serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
@@ -2981,16 +2981,16 @@ mod tests {
             "spawn-gate: refused on unknown (unknown, exit 82)"
         );
 
-        let refusal = Refusal::code(EXIT_KING_SHARE)
-            .ev("reason", serde_json::json!("king_share"))
-            .ev("king", serde_json::json!("abc12345"))
+        let refusal = Refusal::code(EXIT_LEAD_SHARE)
+            .ev("reason", serde_json::json!("lead_share"))
+            .ev("lead", serde_json::json!("abc12345"))
             .ev("held", serde_json::json!(5))
             .ev("share", serde_json::json!(3))
             .ev("max_live", serde_json::json!(15))
-            .ev("kings", serde_json::json!(2));
+            .ev("leads", serde_json::json!(2));
         assert_eq!(
             verdict_line(&refusal),
-            "spawn-gate: refused on king_share (king_share, exit 80): king=abc12345, held=5, share=3, max_live=15, kings=2"
+            "spawn-gate: refused on lead_share (lead_share, exit 80): lead=abc12345, held=5, share=3, max_live=15, leads=2"
         );
 
         let m = MemoryReading {
@@ -3916,7 +3916,7 @@ Swapouts: 3444531.\n";
     }
 
     /// AC5-HP: the --no-wait slot refusal carries the receipt naming every
-    /// counted row, so a king can act on rows instead of a bare number.
+    /// counted row, so a lead can act on rows instead of a bare number.
     #[test]
     fn no_wait_refusal_names_the_rows_it_counted() {
         let _g = claims::test_env_lock()
@@ -4120,7 +4120,7 @@ Swapouts: 3444531.\n";
     /// workers hold its full share refuses exit 80 even with fleet slots free,
     /// because waiting cannot help while the caller's own workers hold it.
     #[test]
-    fn king_share_refuses_when_the_caller_holds_its_full_share() {
+    fn lead_share_refuses_when_the_caller_holds_its_full_share() {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -4137,7 +4137,7 @@ Swapouts: 3444531.\n";
         // defaults, so this test's own config.toml never gets read.
         let prior_config = std::env::var_os("FNO_CONFIG");
         std::env::remove_var("FNO_CONFIG");
-        // Pin the CPU axis to an admit: the king share under test sits AFTER
+        // Pin the CPU axis to an admit: the lead share under test sits AFTER
         // the CPU axis in gate order, so a busy machine (or a CI runner with
         // no probe installed) would refuse with 79 before reaching it.
         let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
@@ -4160,21 +4160,21 @@ Swapouts: 3444531.\n";
                 r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"{spawned_by}"}}"#
             )
         };
-        let crowned = |name: &str, session: &str| {
+        let teamed = |name: &str, session: &str| {
             format!(
                 r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"{session}"}}"#
             )
         };
-        // 2 kings -> share 2; the caller holds its full share with 2 rows, so
-        // 2 slots remain fleet-wide and the king share still refuses.
+        // 2 leads -> share 2; the caller holds its full share with 2 rows, so
+        // 2 slots remain fleet-wide and the lead share still refuses.
         let reg = dir.join("registry.json");
         std::fs::write(
             &reg,
             format!(
                 r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
-                crowned("king-a", "session-aaaaaaaa"),
-                crowned("king-b", "session-bbbbbbbb"),
+                teamed("lead-a", "session-aaaaaaaa"),
+                teamed("lead-b", "session-bbbbbbbb"),
                 live("w1", "session-aaaaaaaa"),
                 live("w2", "session-aaaaaaaa"),
             ),
@@ -4209,14 +4209,14 @@ Swapouts: 3444531.\n";
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
         }
         let refusal = got.err().expect("the full share must refuse");
-        assert_eq!(refusal.exit_code, EXIT_KING_SHARE, "{refusal:?}");
+        assert_eq!(refusal.exit_code, EXIT_LEAD_SHARE, "{refusal:?}");
         assert_eq!(
             refusal.event.get("reason"),
-            Some(&serde_json::json!("king_share"))
+            Some(&serde_json::json!("lead_share"))
         );
         assert_eq!(refusal.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(refusal.event.get("share"), Some(&serde_json::json!(2)));
-        assert_eq!(refusal.event.get("kings"), Some(&serde_json::json!(2)));
+        assert_eq!(refusal.event.get("leads"), Some(&serde_json::json!(2)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4226,7 +4226,7 @@ Swapouts: 3444531.\n";
     /// The refusal event carries held_rows beside held, so the rows the
     /// count came from are readable back from the spawn_gate_refused event.
     #[test]
-    fn king_share_refusal_event_carries_the_held_rows() {
+    fn lead_share_refusal_event_carries_the_held_rows() {
         let dir = std::env::temp_dir().join(format!("fno-gate-held-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -4236,18 +4236,18 @@ Swapouts: 3444531.\n";
             format!(
                 r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
-                r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#,
+                r#"{"name":"lead-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#,
                 r#"{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
                 r#"{"name":"w2","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
             ),
         )
         .unwrap();
-        // One king -> share = cap = 2; the caller holds both rows, so the
+        // One lead -> share = cap = 2; the caller holds both rows, so the
         // share refuses and the event must name w1 and w2.
-        let err = check_king_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
+        let err = check_lead_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
             .err()
             .expect("the full share must refuse");
-        assert_eq!(err.exit_code, EXIT_KING_SHARE);
+        assert_eq!(err.exit_code, EXIT_LEAD_SHARE);
         assert_eq!(err.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(
             err.event.get("held_rows"),
@@ -4513,7 +4513,7 @@ Swapouts: 3444531.\n";
             )
             .unwrap();
             std::env::set_var("FNO_HOME", &dir);
-            // The registry: live workers (+ the crown row when the scenario has one).
+            // The registry: live workers (+ the team row when the scenario has one).
             let mut entries: Vec<String> = Vec::new();
             for row in sc["registry"].as_array().unwrap() {
                 let name = row["name"].as_str().unwrap();
@@ -4531,7 +4531,7 @@ Swapouts: 3444531.\n";
             }
             if !sc["crown_scope"].is_null() {
                 entries.push(format!(
-                    r#"{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":{}}}"#,
+                    r#"{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":{}}}"#,
                     sc["crown_scope"]
                 ));
             }
@@ -4551,7 +4551,7 @@ Swapouts: 3444531.\n";
             let live = live_rows(&reg, &mut warnings);
             let got = match territory_of_node(&dir, &reg, node, &mut warnings) {
                 None => "territory_unknown".to_string(),
-                Some((scope, members, _kingless)) => {
+                Some((scope, members, _leadless)) => {
                     let count = live
                         .iter()
                         .filter(|r| {
@@ -4608,18 +4608,18 @@ Swapouts: 3444531.\n";
         }
     }
 
-    /// AC9: `kingless` rides every readable verdict receipt. A node inside a
-    /// live crown's compiled scope reads false, a node in a project no crown
+    /// AC9: `leadless` rides every readable verdict receipt. A node inside a
+    /// live team's compiled scope reads false, a node in a project no team
     /// rules reads true, and an unreadable attribution stays the existing
-    /// territory_unknown shape with NO kingless key - a boolean there would
+    /// territory_unknown shape with NO leadless key - a boolean there would
     /// be a guess wearing a boolean.
     #[test]
-    fn territory_verdict_receipt_names_kingless_on_readable_verdicts() {
+    fn territory_verdict_receipt_names_leadless_on_readable_verdicts() {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let self_pid = std::process::id();
-        let base = std::env::temp_dir().join(format!("fno-verdict-kingless-{self_pid}"));
+        let base = std::env::temp_dir().join(format!("fno-verdict-leadless-{self_pid}"));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(&dir).unwrap();
@@ -4636,7 +4636,7 @@ Swapouts: 3444531.\n";
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":1,"entries":[{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
             ),
         )
         .unwrap();
@@ -4659,16 +4659,16 @@ Swapouts: 3444531.\n";
         let _env = EnvPin::take(&["FNO_HOME"]);
         std::env::set_var("FNO_HOME", &dir);
 
-        let crowned = territory_verdict_receipt(&dir, &reg, "x-1", 4);
-        assert_eq!(crowned["verdict"], "ok", "{crowned}");
-        assert_eq!(crowned["kingless"], false, "{crowned}");
+        let teamed = territory_verdict_receipt(&dir, &reg, "x-1", 4);
+        assert_eq!(teamed["verdict"], "ok", "{teamed}");
+        assert_eq!(teamed["leadless"], false, "{teamed}");
         let loose = territory_verdict_receipt(&dir, &reg, "x-out", 4);
         assert_eq!(loose["verdict"], "ok", "{loose}");
-        assert_eq!(loose["kingless"], true, "{loose}");
+        assert_eq!(loose["leadless"], true, "{loose}");
         let unknown = territory_verdict_receipt(&dir, &reg, "x-ghost", 4);
         assert_eq!(unknown["verdict"], "territory_unknown", "{unknown}");
         assert!(
-            unknown.get("kingless").is_none(),
+            unknown.get("leadless").is_none(),
             "an unreadable attribution must not guess a boolean: {unknown}"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -4676,16 +4676,16 @@ Swapouts: 3444531.\n";
 
     /// AC9: the two territory attributions on one branch - resolve_territories
     /// for the drain readout, territory_of_node for the cap - agree on
-    /// kingless for the same node. The fixture carries one epic crown and one
-    /// uncrowned workspace project, so both the crowned and the loose leg are
+    /// leadless for the same node. The fixture carries one epic team and one
+    /// uncrowned workspace project, so both the teamed and the loose leg are
     /// pinned: a divergence between the readers ships caught, not silent.
     #[test]
-    fn territory_of_node_and_resolve_territories_agree_on_kingless() {
+    fn territory_of_node_and_resolve_territories_agree_on_leadless() {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let self_pid = std::process::id();
-        let base = std::env::temp_dir().join(format!("fno-territory-agree-kingless-{self_pid}"));
+        let base = std::env::temp_dir().join(format!("fno-territory-agree-leadless-{self_pid}"));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(&dir).unwrap();
@@ -4702,7 +4702,7 @@ Swapouts: 3444531.\n";
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":1,"entries":[{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
             ),
         )
         .unwrap();
@@ -4722,36 +4722,36 @@ Swapouts: 3444531.\n";
         std::env::set_var("FNO_HOME", &dir);
 
         let mut warnings = Vec::new();
-        let crowned =
-            territory_of_node(&dir, &reg, "x-1", &mut warnings).expect("crowned node attributes");
+        let teamed =
+            territory_of_node(&dir, &reg, "x-1", &mut warnings).expect("teamed node attributes");
         let loose =
             territory_of_node(&dir, &reg, "x-out", &mut warnings).expect("loose node attributes");
         let territories =
             crate::territory::resolve_territories(&dir, &reg).expect("fixture resolves");
-        let crown_row = territories
+        let team_row = territories
             .iter()
             .find(|t| t.key == "x-epic")
-            .expect("crown territory resolves");
+            .expect("team territory resolves");
         let loose_row = territories
             .iter()
             .find(|t| t.key == "other")
             .expect("uncrowned workspace project resolves as a loose territory");
-        assert!(!crowned.2, "a live crown scope is not kingless");
-        assert!(loose.2, "a project no crown rules is kingless");
-        assert_eq!(crowned.2, crown_row.kingless, "crowned leg diverges");
-        assert_eq!(loose.2, loose_row.kingless, "loose leg diverges");
+        assert!(!teamed.2, "a live team scope is not leadless");
+        assert!(loose.2, "a project no team rules is leadless");
+        assert_eq!(teamed.2, team_row.leadless, "teamed leg diverges");
+        assert_eq!(loose.2, loose_row.leadless, "loose leg diverges");
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// AC6-HP: nested crowns split one project exclusively; an uncompilable
-    /// live crown blinds the whole read (None), the fail-closed posture.
+    /// AC6-HP: nested teams split one project exclusively; an uncompilable
+    /// live team blinds the whole read (None), the fail-closed posture.
     #[test]
-    fn territory_of_node_attributes_nested_crowns_exclusively() {
+    fn territory_of_node_attributes_nested_teams_exclusively() {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let self_pid = std::process::id();
-        let base = std::env::temp_dir().join(format!("fno-nested-crowns-{self_pid}"));
+        let base = std::env::temp_dir().join(format!("fno-nested-teams-{self_pid}"));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(dir.join(".fno")).unwrap();
@@ -4782,8 +4782,8 @@ Swapouts: 3444531.\n";
             &reg,
             format!(
                 r#"{{"schema_version":1,"entries":[{},{}]}}"#,
-                reg_row("king-fno", "fno", 1),
-                reg_row("king-epic", "x-epic", 2)
+                reg_row("lead-fno", "fno", 1),
+                reg_row("lead-epic", "x-epic", 2)
             ),
         )
         .unwrap();
@@ -4802,13 +4802,13 @@ Swapouts: 3444531.\n";
             "{:?}",
             root.1
         );
-        // One uncompilable live crown refuses every node-bearing read.
+        // One uncompilable live team refuses every node-bearing read.
         let reg_bad = dir.join("registry-bad.json");
         std::fs::write(
             &reg_bad,
             format!(
                 r#"{{"schema_version":1,"entries":[{}]}}"#,
-                reg_row("king-bad", "x-root", 2)
+                reg_row("lead-bad", "x-root", 2)
             ),
         )
         .unwrap();

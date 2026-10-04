@@ -3,7 +3,7 @@
 //! cache, so logs, heal and status spend one read per job.
 
 use super::cache::CountingProbe;
-use crate::king_board::prs::classify_check;
+use crate::org_board::prs::classify_check;
 use crate::pr_status_facts::{GhProbe, RealGhProbe};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -178,9 +178,14 @@ pub(crate) fn run_logs_with<P: GhProbe>(
             1,
             stdout,
             format!(
-                "fno do pr logs: could not fetch the log for {}: {}\n",
+                "fno do pr logs: could not fetch the log for {}: {}{}\n",
                 super::check_name(target),
-                gh_failure_reason(&why)
+                gh_failure_reason(&why),
+                super::escape_refusal_remedy(
+                    &why,
+                    &format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                )
+                .unwrap_or_default(),
             ),
         ),
         Ok(log) => {

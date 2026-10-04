@@ -45,7 +45,7 @@ TMP="$(mktemp -d -t edit-integrity-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Pin the verified binary first on PATH so the suite tests the shim, not
-# the operator's installed version (tests/hooks/test_king_delegation_guard.sh).
+# the operator's installed version (tests/hooks/test_lead_delegation_guard.sh).
 mkdir -p "$TMP/realbin"
 ln -s "$BIN" "$TMP/realbin/fno-agents"
 

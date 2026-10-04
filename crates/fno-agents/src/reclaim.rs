@@ -746,7 +746,7 @@ pub(crate) mod tests {
 
     /// Serializes the tests that repoint the process-global env: a concurrent
     /// reader can catch the root mid-flip and sweep the REAL temp dir (the
-    /// same ENV_LOCK shape king_board's HOME_LOCK uses). Shared with
+    /// same ENV_LOCK shape org_board's HOME_LOCK uses). Shared with
     /// cargo_build_dirs' tests, which mutate the same vars.
     pub(crate) static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
         std::sync::LazyLock::new(crate::claims::test_env_lock);

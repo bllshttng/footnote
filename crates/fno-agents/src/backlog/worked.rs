@@ -1062,7 +1062,7 @@ fn authority() -> Result<(Vec<Value>, Vec<(String, Vec<String>)>), String> {
 }
 
 /// The `--json` rows, in-process: the same payload `run --json` prints,
-/// without a process. The king board reads this directly because the Python
+/// without a process. The lead board reads this directly because the Python
 /// worked leg is a refusing tombstone.
 pub(crate) fn json_rows() -> Result<Vec<Value>, String> {
     let (entries, worked) = authority()?;

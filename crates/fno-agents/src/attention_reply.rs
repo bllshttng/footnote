@@ -3,10 +3,10 @@
 //! The mux records one durable `attention_answer` row and returns; this
 //! ladder is the delivery half. One beat step per item, a pure
 //! [`step`] decision over stored per-item state, and every effect (the
-//! clear, the resume, the crown mail) behind an injected runner, so tests
+//! clear, the resume, the team mail) behind an injected runner, so tests
 //! stage the world. Rungs: the clear's mail leg, a resume of an idle asker
-//! confirmed by content in its transcript, a wrapped mail to the crown over
-//! the asker's node, and `none` when no crown covers it.
+//! confirmed by content in its transcript, a wrapped mail to the team over
+//! the asker's node, and `none` when no team covers it.
 
 use crate::attention::AttentionItem;
 use serde_json::Value;
@@ -14,10 +14,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// How long the ladder waits for the resume to show up in the asker's
-/// transcript before it escalates to the crown.
+/// transcript before it escalates to the team.
 pub const CONFIRM_WINDOW_S: u64 = 300;
 
-/// The bound for one resume, mail or crown mail shellout.
+/// The bound for one resume, mail or team mail shellout.
 const RUN_TIMEOUT_S: u64 = 30;
 
 /// Per-item ladder state, one JSON file beside the settle state.
@@ -60,8 +60,8 @@ pub struct ReplyState {
     pub session_id: Option<String>,
     #[serde(default)]
     pub updated_at: u64,
-    /// The user handed the question to the agents: the crown over the
-    /// asker's node decides it, so the ladder mails the crown, never the asker.
+    /// The user handed the question to the agents: the team over the
+    /// asker's node decides it, so the ladder mails the team, never the asker.
     #[serde(default)]
     pub delegate: bool,
 }
@@ -90,9 +90,9 @@ pub enum Step {
     Resume,
     /// A note item has no clear, so the mail rung is this ladder's own send.
     MailNote,
-    /// Escalate: resolve the crown over the asker's node, mail it wrapped.
-    CrownNeeded,
-    /// No crown covered the node: undelivered.
+    /// Escalate: resolve the team over the asker's node, mail it wrapped.
+    TeamNeeded,
+    /// No team covered the node: undelivered.
     Fail { evidence: String },
     /// Nothing to do this beat.
     Idle,
@@ -107,16 +107,16 @@ pub struct Facts<'a> {
     pub session: Option<(&'a str, &'a str)>,
     pub confirmed: bool,
     pub now: u64,
-    /// The asker holds the crown over its own node (delegate states only).
-    pub asker_is_crown: bool,
+    /// The asker holds the team over its own node (delegate states only).
+    pub asker_is_team: bool,
 }
 
 /// The pure decision. Total over all inputs; never shells out.
 pub fn step(state: &ReplyState, facts: &Facts) -> Step {
-    // A delegated question goes to the crown: the clear's mail already told
-    // the asker, so only an asker that IS the crown is done at the mail rung.
-    if state.delegate && !(facts.mail_landed && facts.asker_is_crown) {
-        return Step::CrownNeeded;
+    // A delegated question goes to the team: the clear's mail already told
+    // the asker, so only an asker that IS the team is done at the mail rung.
+    if state.delegate && !(facts.mail_landed && facts.asker_is_team) {
+        return Step::TeamNeeded;
     }
     if facts.mail_landed {
         return Step::Deliver(Delivery {
@@ -133,12 +133,12 @@ pub fn step(state: &ReplyState, facts: &Facts) -> Step {
     if state.resumed_at.is_none() {
         return match facts.session {
             Some((sid, _)) if !sid.is_empty() => Step::Resume,
-            _ => Step::CrownNeeded,
+            _ => Step::TeamNeeded,
         };
     }
     // Resume phase.
     if state.resume_exit != Some(0) {
-        return Step::CrownNeeded;
+        return Step::TeamNeeded;
     }
     if facts.confirmed {
         return Step::Deliver(Delivery {
@@ -153,7 +153,7 @@ pub fn step(state: &ReplyState, facts: &Facts) -> Step {
         .resumed_at
         .is_some_and(|at| facts.now.saturating_sub(at) > CONFIRM_WINDOW_S)
     {
-        return Step::CrownNeeded;
+        return Step::TeamNeeded;
     }
     Step::Idle
 }
@@ -284,22 +284,22 @@ pub fn tick_answers(
                     .and_then(|i| i.asker.as_ref().map(|a| a.handle.clone()));
                 mail_note(state, asker, runner);
             }
-            Step::CrownNeeded => {
+            Step::TeamNeeded => {
                 let item = items.iter().find(|i| i.id == *item_id);
-                match item.and_then(|i| crown_holder(i, cwd).map(|h| (i, h))) {
+                match item.and_then(|i| team_holder(i, cwd).map(|h| (i, h))) {
                     Some((item, holder)) => {
                         let message = if state.delegate {
                             delegate_message(state, item)
                         } else {
                             resume_message(state)
                         };
-                        mail_crown(state, &holder, message, runner);
+                        mail_team(state, &holder, message, runner);
                     }
                     None => {
                         state.rung = "none".into();
                         state.outcome = "failed".into();
                         state.evidence = format!(
-                            "no live crown over {item_id} and the mail did not confirm landing"
+                            "no live team over {item_id} and the mail did not confirm landing"
                         );
                         emit_delivery(state);
                     }
@@ -341,10 +341,10 @@ fn step_of(state: &ReplyState, items: &[AttentionItem], now: u64, cwd: &Path) ->
         // confirmed this beat.
         false
     };
-    let asker_is_crown = state.delegate
+    let asker_is_team = state.delegate
         && item.is_some_and(|i| {
             let asker = i.asker.as_ref();
-            crown_holder(i, cwd).is_some_and(|h| {
+            team_holder(i, cwd).is_some_and(|h| {
                 asker.is_some_and(|a| a.handle == h || a.session_id.as_deref() == Some(&h))
             })
         });
@@ -354,7 +354,7 @@ fn step_of(state: &ReplyState, items: &[AttentionItem], now: u64, cwd: &Path) ->
         session: session.as_ref().map(|(s, h)| (s.as_str(), h.as_str())),
         confirmed,
         now,
-        asker_is_crown,
+        asker_is_team,
     };
     step(state, &facts)
 }
@@ -410,7 +410,7 @@ fn resume_message(state: &ReplyState) -> String {
     )
 }
 
-/// The crown's mail for a delegated question: decide a reversible call and
+/// The team's mail for a delegated question: decide a reversible call and
 /// record it, or ask the user again with the same options, naming the old id
 /// (the original closed when the delegation recorded).
 fn delegate_message(state: &ReplyState, item: &AttentionItem) -> String {
@@ -466,9 +466,9 @@ fn mail_note(
     }
 }
 
-/// The crown effect: one wrapped mail to the crown holder over the asker's
-/// node; the row records `crown/sent` on exit 0, `none/failed` otherwise.
-fn mail_crown(
+/// The team effect: one wrapped mail to the team holder over the asker's
+/// node; the row records `team/sent` on exit 0, `none/failed` otherwise.
+fn mail_team(
     state: &mut ReplyState,
     holder: &str,
     message: String,
@@ -489,22 +489,22 @@ fn mail_crown(
     let (code, _stdout, _stderr) = runner(&argv);
     state.session_id = state.session_id.clone().or(None);
     if code == 0 {
-        state.rung = "crown".into();
+        state.rung = "team".into();
         state.outcome = "sent".into();
-        state.evidence = format!("mailed the crown holder {holder}");
+        state.evidence = format!("mailed the team holder {holder}");
         state.holder = Some(holder.to_string());
     } else {
         state.rung = "none".into();
         state.outcome = "failed".into();
-        state.evidence = format!("the crown mail to {holder} failed");
+        state.evidence = format!("the team mail to {holder} failed");
     }
     emit_delivery(state);
 }
 
-/// The crown resolver: the live crown whose compiled territory names the
+/// The team resolver: the live team whose compiled territory names the
 /// asker's node (or its first block). Reuses the one resolver the drain
-/// and the court read: territory's node_owners over live_crowns.
-pub(crate) fn crown_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
+/// and the org read: territory's node_owners over live_teams.
+pub(crate) fn team_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
     // A literal `none` node is the projection's "no node"; fall through to
     // the blocks, which still name what the answer unblocks.
     let node = item
@@ -512,14 +512,13 @@ pub(crate) fn crown_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
         .as_deref()
         .filter(|n| !n.is_empty() && *n != "none")
         .or_else(|| item.blocks.first().map(String::as_str));
-    let crowns =
-        crate::territory::live_crowns(&crate::paths::AgentsHome::from_env().registry_json())
-            .ok()?;
+    let teams =
+        crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json()).ok()?;
     let entries = crate::territory::graph_entries(cwd).ok()?;
     let projects = Ok(crate::territory::workspace_paths(cwd));
-    let (owners, _failures) = crate::territory::node_owners(&crowns, &entries, &projects);
+    let (owners, _failures) = crate::territory::node_owners(&teams, &entries, &projects);
     node.and_then(|n| owners.get(n))
-        .and_then(|scope| crowns.iter().find(|c| c.scope == *scope))
+        .and_then(|scope| teams.iter().find(|c| c.scope == *scope))
         .map(|c| c.holder.clone())
 }
 
@@ -889,28 +888,28 @@ mod tests {
         assert!(j.contains("\"outcome\":\"landed\""), "{j}");
         assert!(j.contains("\"sink\":\"mux\""), "the answer row: {j}");
 
-        // A delegated answer skips the asker: the crown decides, unless the
-        // asker is the crown and the clear's mail already reached it.
+        // A delegated answer skips the asker: the team decides, unless the
+        // asker is the team and the clear's mail already reached it.
         let delegated = ReplyState {
             item_id: "q-hp".into(),
             delegate: true,
             ..Default::default()
         };
-        let facts = |mail_landed, asker_is_crown| Facts {
+        let facts = |mail_landed, asker_is_team| Facts {
             mail_landed,
             is_note: false,
             session: Some(("s1", "claude")),
             confirmed: false,
             now: 0,
-            asker_is_crown,
+            asker_is_team,
         };
         assert!(matches!(
             step(&delegated, &facts(true, false)),
-            Step::CrownNeeded
+            Step::TeamNeeded
         ));
         assert!(matches!(
             step(&delegated, &facts(false, true)),
-            Step::CrownNeeded
+            Step::TeamNeeded
         ));
         assert!(matches!(
             step(&delegated, &facts(true, true)),
@@ -1003,8 +1002,8 @@ mod tests {
     }
 
     #[test]
-    fn ac2_err_a_reassigned_resume_with_no_crown_reads_undelivered() {
-        let _root = crate::paths::DeclaredRoot::declare("reply_err_no_crown");
+    fn ac2_err_a_reassigned_resume_with_no_team_reads_undelivered() {
+        let _root = crate::paths::DeclaredRoot::declare("reply_err_no_team");
         let items = vec![ready_item("q-err", Some("claude"), Some("s-err"))];
         record_answer("q-err");
         let mut io = FakeIo {

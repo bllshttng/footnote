@@ -130,7 +130,7 @@ def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:
 
 def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
     """Crowns whose row is gone but whose manifest holds them: the Rust sweep
-    (`fno-agents court-orphans`) walks the spaces ROOT because a vanished row
+    (`fno-agents org-vacancies`) walks the spaces ROOT because a vanished row
     names no cwd. Returns ``(entries, ran)``: ``ran`` False means the sweep
     could not answer, so an empty list is an ABSENCE, never zero orphans."""
     import json
@@ -144,7 +144,7 @@ def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
         return [], False
     try:
         proc = subprocess.run(
-            [str(binary), "court-orphans", "--root", str(spaces_root())]
+            [str(binary), "org-vacancies", "--root", str(spaces_root())]
             + [part for scope in held for part in ("--held", scope)],
             capture_output=True, text=True, check=False, timeout=30,
         )
@@ -289,7 +289,7 @@ def gather_court(rows: Optional[list] = None, *, agree: Optional[bool] = True) -
 
 
 def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
-    """Fold each crown's scope onto its row via `fno-agents court-fold`; any
+    """Fold each crown's scope onto its row via `fno-agents org-fold`; any
     fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md).
 
     Returns the fold's own stuck verdict, computed beside the rows it judges
@@ -323,7 +323,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
         if binary is None:
             raise OSError("the fno-agents binary was not found")
         proc = subprocess.run(
-            [str(binary), "court-fold", "--graph", str(graph_json()),
+            [str(binary), "org-fold", "--graph", str(graph_json()),
              "--crowns-json", _json.dumps(payload), "--format", "json"],
             capture_output=True, text=True, check=False, timeout=120,
         )

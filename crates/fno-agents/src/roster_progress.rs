@@ -106,7 +106,7 @@ fn is_live_ish(status: AgentStatus) -> bool {
 }
 
 /// A live-looking row with zero commits well past a reasonable grace window
-/// is exactly the row a king must be able to see: process liveness and
+/// is exactly the row a lead must be able to see: process liveness and
 /// durable progress can now disagree, and today they render identically.
 /// Pure so it is testable without a registry file or a real clock.
 pub fn is_stale_despite_liveness(

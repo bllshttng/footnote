@@ -373,14 +373,14 @@ fn kind_from_reason(reason: &str) -> Provenance {
 /// The kind of an `isMeta` row, read from its text prefix so the fold has a
 /// counter for shapes `is_user_turn` drops today. They never count as
 /// operator either way. Measured 2026-09-16 over 60 transcripts: stop-hook
-/// feedback starts `Stop hook feedback:`, the loop self-wakeups say `reign
+/// feedback starts `Stop hook feedback:`, the loop self-wakeups say `lead
 /// check-in` or `Check in on your territory`, skill bodies start `Base
 /// directory for this skill`.
 pub(crate) fn meta_kind(text: &str) -> Provenance {
     let t = text.trim_start();
     if t.starts_with("Stop hook feedback:") {
         Provenance::Harness(HarnessKind::StopHook)
-    } else if t.starts_with("reign check-in") || t.starts_with("Check in on your territory") {
+    } else if t.starts_with("lead check-in") || t.starts_with("Check in on your territory") {
         Provenance::Harness(HarnessKind::LoopWakeup)
     } else if t.starts_with("Base directory for this skill") {
         Provenance::Harness(HarnessKind::SkillBody)
@@ -413,7 +413,7 @@ pub(crate) struct BusIndex {
 
 impl BusIndex {
     /// A join-free index: fixtures and readers with no bus join (the wake
-    /// meter classifies the king's own transcript without one).
+    /// meter classifies the lead's own transcript without one).
     pub(crate) fn empty() -> Self {
         BusIndex { rows: Vec::new() }
     }
@@ -779,6 +779,25 @@ pub(crate) struct CodexSource {
     pub(crate) roots: Option<Vec<PathBuf>>,
 }
 
+/// The user-shaped turns of one codex rollout's raw text, the free function
+/// behind [`CodexSource::turns`] so the check-in's transcript readers fold
+/// codex rows without constructing a source.
+pub(crate) fn codex_shaped_turns(raw: &str) -> Vec<Turn> {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(is_user_turn)
+        .map(|obj| {
+            let text = turn_text(&obj);
+            let ts_epoch = turn_ts_epoch(&obj);
+            Turn {
+                obj,
+                text,
+                ts_epoch,
+            }
+        })
+        .collect()
+}
+
 /// The rollout uuid: the 36-char id after the last `-` in
 /// `rollout-<ts>-<uuid>.jsonl`. A name that does not end in one falls back to
 /// the whole stem, which still sorts and reports, just unjoinable to mail.
@@ -846,19 +865,7 @@ impl TranscriptSource for CodexSource {
     }
 
     fn turns(&self, raw: &str) -> Vec<Turn> {
-        raw.lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(is_user_turn)
-            .map(|obj| {
-                let text = turn_text(&obj);
-                let ts_epoch = turn_ts_epoch(&obj);
-                Turn {
-                    obj,
-                    text,
-                    ts_epoch,
-                }
-            })
-            .collect()
+        codex_shaped_turns(raw)
     }
 
     fn tool_uses(&self, raw: &str) -> usize {
@@ -1016,7 +1023,7 @@ mod tests {
     fn meta_rows_map_to_harness_kinds_never_operator() {
         for (text, label) in [
             ("Stop hook feedback: continue working", "harness_stop_hook"),
-            ("reign check-in: scan the board", "harness_loop_wakeup"),
+            ("lead check-in: scan the board", "harness_loop_wakeup"),
             ("Check in on your territory", "harness_loop_wakeup"),
             ("Base directory for this skill: /x", "harness_skill_body"),
         ] {

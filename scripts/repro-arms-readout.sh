@@ -28,7 +28,7 @@ from fno.control_plane import emit_tick
 # Every interval-driven arm must tick, or its never-ticked row reads stale
 # and the green assert below is a false alarm. stop_hook is event-driven
 # (interval 0) and cannot read stale from quiet, so it is not emitted.
-for arm in ("king_wake", "watchdog", "pr_watch_merge", "active_backlog",
+for arm in ("lead_wake", "watchdog", "pr_watch_merge", "active_backlog",
             "auto_continue", "notify_watch", "reap", "retire"):
     assert emit_tick(arm, scheduler="probe", interval_s=600, acted=1), arm
 print("emitted 8 tick rows")

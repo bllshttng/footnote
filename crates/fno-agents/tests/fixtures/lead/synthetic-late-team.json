@@ -1,0 +1,9 @@
+{
+  "meta": {"lead_date": "synthetic", "skill": "fno:lead", "purpose": "AC4-EDGE: a coronation only AFTER the first ruling"},
+  "entries": [
+    {"index": 0, "kind": "tool_use", "tool": "Bash", "target": "fno do pr watch status --json"},
+    {"index": 1, "kind": "assistant_text", "text": "Team: level 0, scope fno. Issuing the first ruling now."},
+    {"index": 2, "kind": "tool_use", "tool": "Bash", "target": "fno agents mail send worker-1 \"Ruling: approved, proceed to blueprint\""},
+    {"index": 3, "kind": "tool_use", "tool": "Bash", "target": "fno agents team lead-synth --scope fno --level 0"}
+  ]
+}

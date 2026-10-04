@@ -104,13 +104,21 @@ def build_spawn_provenance(
     carried_origin = os.environ.get("FNO_SPAWN_ORIGIN")
     carried_owner = os.environ.get("FNO_SPAWN_OWNER")
     if carried_origin or carried_owner:
-        if not (carried_origin and carried_owner):
+        if carried_origin and not carried_owner:
             raise ValueError("FNO_SPAWN_ORIGIN and FNO_SPAWN_OWNER must be exported together")
         import json as _json
+        owner = _json.loads(carried_owner) if carried_owner else None
+        if carried_origin:
+            origin = _json.loads(carried_origin)
+            return build_spawn_provenance(explicit_origin=origin, explicit_owner=owner, cause=cause)
+        # Owner-only carrier: WHO ANSWERS rides; WHO CAUSED it is ambient.
+        from fno.claims.self_identity import resolve_self_identity
 
-        origin = _json.loads(carried_origin)
-        owner = _json.loads(carried_owner)
-        return build_spawn_provenance(explicit_origin=origin, explicit_owner=owner, cause=cause)
+        identity = resolve_self_identity()
+        if not (identity.session_id and identity.harness):
+            return None
+        parent = {"harness": identity.harness, "session_id": identity.session_id, "cwd": (os.environ.get("PWD") or os.getcwd()).strip()}
+        return {"origin": {"kind": "session", "parent": parent, "invocation": None}, "owner": owner}
 
     from fno.claims.self_identity import resolve_self_identity
 

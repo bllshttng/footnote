@@ -115,7 +115,7 @@ NODE_ID_ALLOWLIST=(
     # minted id is random hex, never one hex digit repeated, so these are
     # provably synthetic. They back the format examples and fixture literals
     # that live in non-test paths (worker-name grammar examples, plan-file
-    # name shapes, crown-scope examples). Add one only if it is obviously
+    # name shapes, team-scope examples). Add one only if it is obviously
     # non-real by the same argument.
     "x-dddd"
     "x-eeee"

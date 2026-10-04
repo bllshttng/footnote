@@ -72,7 +72,7 @@ def test_attestation_chain_reads_a_row_that_rotated_out(monkeypatch, tmp_path: P
     live.write_text(json.dumps(row) + "\n", encoding="utf-8")
     # Rotation's own order: the Rust ingest into the store, then the rename.
     subprocess.run(
-        [str(binary), "king-history", "--scope", "x-aaaa", "--events-path", str(live), "--json"],
+        [str(binary), "lead-history", "--scope", "x-aaaa", "--events-path", str(live), "--json"],
         check=True,
         capture_output=True,
     )
