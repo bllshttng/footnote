@@ -510,9 +510,17 @@ pub(crate) fn leg_facts(inp: &Inputs) -> LegFacts {
         &trace,
     );
     let is_watch = |arm: &str| arm == "pr_watch_merge" || arm == "pr_watch_sweep";
+    // A cut (timeout / starved) routes to the unhealthy branch below; it must
+    // not also read as a failure here, or a fresh watermark with one cut row
+    // renders `wedged` over a streak of zero broken ticks.
+    let is_cut = |r: &crate::tick_ledger::ArmStatus| {
+        matches!(r.skip_reason.as_deref(), Some("timeout") | Some("starved"))
+    };
     LegFacts {
         stale: rows.iter().any(|r| is_watch(&r.arm) && r.stale),
-        failing: rows.iter().any(|r| is_watch(&r.arm) && r.failing),
+        failing: rows
+            .iter()
+            .any(|r| is_watch(&r.arm) && r.failing && !is_cut(r)),
     }
 }
 
