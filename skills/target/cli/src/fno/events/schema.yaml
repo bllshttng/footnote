@@ -8140,6 +8140,16 @@ event_types:
     sources: [test, daemon, hook, loop]
     data:
       required: []
+  - name: footnote_index_record
+    description: "One content-free index row for one footnote-harness transcript record: the offset and length locating the record inside the session's record file, plus its seq, record id, turn and tool_call_uid. The record's own type rides in record_type. Written through the per-session footnote:<session_id> pattern source; no literal channel writes it."
+    sources: [test]
+    data:
+      required: [session_id, record_type, seq, record_id, offset, len]
+  - name: agent_lane_rebound
+    description: "One dead codex pane lane rebound to its thread: the registry ref that was cleared (mux, pid, pid start time) and the thread the lane now names. Written through the agents-events envelope, the same channel fno agents events emit uses."
+    sources: [agents]
+    data:
+      required: [name, session_id, from_session, from_pane_id, to]
   - name: test_events_path_pin
     description: "Test fixture only: the marker kind the journal-path pin test emits to prove an emit lands on the pinned journal and never the checkout's. Never emitted in production."
     sources: [target, test]

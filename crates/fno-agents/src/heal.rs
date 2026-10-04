@@ -1606,9 +1606,10 @@ fn emit_arm_row(a: &Args, acted: u8, skip_reason: Option<&str>, detail: &str) {
         },
         600,
     );
-    if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal")
-        .emit_fields("control_plane_tick", fields)
-    {
+    if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal").emit_fields(
+        "control_plane_tick",
+        fields.as_object().cloned().unwrap_or_default(),
+    ) {
         eprintln!("pr-heal: the control_plane_tick arm row did not land: {e}");
     }
 }
@@ -2136,7 +2137,13 @@ fn emit_tick_event(
     fields.insert("unknown".to_string(), serde_json::json!(unknown));
     fields.insert("dry_run".to_string(), serde_json::json!(dry_run));
     // Explicit defaults: the newest tick row must carry the keys the done
-    // probe asserts on even when a run acted on nothing.
+    // probe asserts on even when a run acted on nothing. The single-PR
+    // apply path calls with an empty counts map, so the required trio is
+    // defaulted here rather than trusted from the caller.
+    fields.insert(
+        "seen".to_string(),
+        serde_json::json!(counts.get("seen").copied().unwrap_or(0)),
+    );
     fields.insert(
         "rebased".to_string(),
         serde_json::json!(counts.get("rebased").copied().unwrap_or(0)),
