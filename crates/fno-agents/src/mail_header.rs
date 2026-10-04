@@ -526,6 +526,20 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// The header's sender when the store backs it: the first line must parse as
+/// a delivered header and the caller's lookup (the chats store) must hold the
+/// header's id under the sender the header names. A leading `@` does not
+/// distinguish the two spellings. `None` when the shape, the id or the
+/// sender does not match - the store is what makes a header trusted.
+pub fn verified_sender(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let line = text.trim_start().lines().next()?;
+    let (inner, _) = split_header_span(line.trim())?;
+    let (sender, id, _) = header_fields(inner)?;
+    let bare = sender.strip_prefix('@').unwrap_or(sender);
+    let stored = lookup(id)?;
+    (stored.strip_prefix('@').unwrap_or(&stored) == bare).then(|| bare.to_string())
+}
+
 /// ASCII-only case fold that preserves byte offsets, so a match position in
 /// the folded copy indexes the original.
 fn ascii_lower(text: &str) -> String {

@@ -418,6 +418,37 @@ fn scan_chat_files_for_id(chats_dir: &Path, id: &str) -> Result<Option<String>, 
     }
     Ok(None)
 }
+
+/// The sender name the store row for `id` carries: the bus envelope's
+/// `from_name` (the fleet name a delivered header shows) else its `from`
+/// address. `None` when no row holds the id or the row names no sender.
+pub(crate) fn message_sender_at(chats_dir: &Path, db: &Path, id: &str) -> Option<String> {
+    let chat_id = chat_of_message(chats_dir, db, id).ok()??;
+    let text = std::fs::read_to_string(chats_dir.join(&chat_id).join("messages.jsonl")).ok()?;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("message")
+            || v.get("id").and_then(Value::as_str) != Some(id)
+        {
+            continue;
+        }
+        let sender = v
+            .get("from_name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| v.get("from").and_then(Value::as_str))
+            .unwrap_or("");
+        return (!sender.is_empty()).then(|| sender.to_string());
+    }
+    None
+}
+
+/// The trust lookup against the live store paths ([`message_sender_at`]).
+pub(crate) fn message_sender(id: &str) -> Option<String> {
+    message_sender_at(&chats_dir(), &index_path(), id)
+}
 // ---------------------------------------------------------------------------
 // Index (derived; the JSONL is the only record)
 // ---------------------------------------------------------------------------
