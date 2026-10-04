@@ -7397,7 +7397,7 @@ def _reserve_send_budget(
     if not budget.is_control(message):
         return None
     try:
-        words = rust_binary.style_word_count_checked(message, budget.BudgetUnavailable)
+        words = rust_binary.style_word_count_checked(message)
         return budget.reserve_control(
             sender=sender, recipient=recipient, words=words, msg_id=msg_id
         )
@@ -7406,7 +7406,7 @@ def _reserve_send_budget(
             f"refused: control word budget for {exc.pair}: {exc.marker()}",
             exit_code=1,
         ) from exc
-    except budget.BudgetUnavailable as exc:
+    except (budget.BudgetUnavailable, budget.BudgetCountUnavailable) as exc:
         raise DispatchAskError(f"refused: {exc}", exit_code=1) from exc
 
 

@@ -417,7 +417,7 @@ def _reserve_control_budget(
     from fno.mail import budget
 
     try:
-        words = rust_binary.style_word_count_checked(body, budget.BudgetUnavailable)
+        words = rust_binary.style_word_count_checked(body)
         reservation = budget.reserve_control(
             sender=sender,
             recipient=recipient,
@@ -432,7 +432,7 @@ def _reserve_control_budget(
             file=sys.stderr,
         )
         raise typer.Exit(code=1) from exc
-    except budget.BudgetUnavailable as exc:
+    except (budget.BudgetUnavailable, budget.BudgetCountUnavailable) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
     print(

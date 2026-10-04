@@ -453,18 +453,18 @@ def test_a_malformed_active_ledger_refuses_rather_than_resetting():
 
 def test_the_enforcing_count_refuses_when_the_door_fails(monkeypatch):
     # A zero would read as unlimited traffic under the rolling cap, so the
-    # enforcing count raises the caller's unavailable, never answers 0.
+    # enforcing count raises, never answers 0.
     def _dead(*_a, **_kw):
         return ("fno-agents binary not found", None)
 
     monkeypatch.setattr(rust_binary, "call_binary_json", _dead)
-    with pytest.raises(budget.BudgetUnavailable) as exc:
-        rust_binary.style_word_count_checked("control: hold", budget.BudgetUnavailable)
+    with pytest.raises(budget.BudgetCountUnavailable) as exc:
+        rust_binary.style_word_count_checked("control: hold")
     assert "binary not found" in str(exc.value)
 
 
 def test_the_enforcing_count_reads_the_receipt():
-    assert rust_binary.style_word_count_checked(words(7), budget.BudgetUnavailable) == 7
+    assert rust_binary.style_word_count_checked(words(7)) == 7
 
 
 # --- the pane lane (x-4268): same style gate, control bodies only ----------

@@ -222,18 +222,18 @@ def style_word_count(text: str) -> int:
     return int(receipt.get("word_count") or 0)
 
 
-def style_word_count_checked(text: str, unavailable: type[BaseException]) -> int:
-    """Masked word count for an ENFORCING site: raises `unavailable` on a door
-    failure instead of answering a silent zero (a zero would read as unlimited
-    traffic under the control lane's rolling cap).
-
-    ``unavailable`` is the caller's own door-failure exception (for example
-    ``budget.BudgetUnavailable``), so each site keeps its established refusal
-    shape.
+def style_word_count_checked(text: str) -> int:
+    """Masked word count for an ENFORCING site: raises
+    ``budget.BudgetCountUnavailable`` on a door failure instead of answering a
+    silent zero (a zero would read as unlimited traffic under the control
+    lane's rolling cap). Imported lazily: budget.py never imports this module,
+    so there is no cycle.
     """
+    from fno.mail.budget import BudgetCountUnavailable
+
     err, receipt = call_binary_json("style-check", ["--stdin", "--json"], input_text=text)
     if err or not isinstance(receipt, dict):
-        raise unavailable(err or "no receipt")
+        raise BudgetCountUnavailable(f"style count unavailable: {err or 'no receipt'}")
     return int(receipt.get("word_count") or 0)
 
 

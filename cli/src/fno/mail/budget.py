@@ -94,6 +94,12 @@ class BudgetUnavailable(Exception):
         )
 
 
+class BudgetCountUnavailable(Exception):
+    """The style door could not count a control body, so the cap cannot
+    enforce and the send refuses. Message-only: a door failure has no ledger
+    pair to name, and the ledger-recovery advice would be wrong here."""
+
+
 @dataclass(frozen=True)
 class Reservation:
     """One charged message. Hold it until delivery is proven one way or other."""
