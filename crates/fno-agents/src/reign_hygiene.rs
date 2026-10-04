@@ -720,7 +720,7 @@ fn claude_entries(raw: &str, path: &Path) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
-fn message_text(content: &Value) -> String {
+pub(crate) fn message_text(content: &Value) -> String {
     if let Some(text) = content.as_str() {
         return text.to_string();
     }
