@@ -1,8 +1,11 @@
 //! The plan-promise gate: did the plan's declared work all ship? The
 //! resolve_promise_evidence twin, refusal texts intact, so the native close
-//! cannot bypass the gates the Python close ran. Fails open (outcome Ok) on
-//! an absent, unreadable or unparseable plan so a stale plan_path never
-//! wedges a close; the warning names the path.
+//! cannot bypass the gates the Python close ran. Fails closed (Unmet) on an
+//! unreadable or unparseable plan: unreadable promise data cannot clear a
+//! gate, and the fail-open here is what let a node whose frontmatter the
+//! parser rejected close with its promise gate skipped. Fails open only on
+//! an absent plan_path (no promise declared), so a plan-less node closes
+//! normally. `--force --reason` is the operator override.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -180,19 +183,35 @@ pub(crate) fn resolve_promise_evidence(
     }
     let text = match std::fs::read_to_string(&plan_file) {
         Ok(t) => t,
+        // Fail closed: an unreadable plan cannot prove its promises, and the
+        // old skip read as a clean pass on the daemon close path.
         Err(e) => {
-            return ok_verdict(Some(format!(
-                "promise gate could not read plan {plan_clean} ({e}); gate skipped for this close"
-            )))
+            return PromiseVerdict {
+                outcome: PromiseOutcome::Unmet,
+                reason: Some(format!(
+                    "{node_id}: promise gate cannot read plan {plan_clean} ({e}); \
+                     the plan's promises are unverified. Restore the plan or close \
+                     with --force --reason."
+                )),
+                warning: None,
+            };
         }
     };
 
     let frontmatter = match crate::plan_doc::codec::parse_frontmatter(&text) {
         Ok(parsed) => parsed,
+        // Fail closed: a rejected frontmatter must block the close, not
+        // skip the gate, whatever line of the plan the parser chokes on.
         Err(e) => {
-            return ok_verdict(Some(format!(
-                "promise gate skipped {plan_clean}; plan frontmatter would not parse ({e})"
-            )))
+            return PromiseVerdict {
+                outcome: PromiseOutcome::Unmet,
+                reason: Some(format!(
+                    "{node_id}: promise gate cannot parse plan {plan_clean} ({e}); \
+                     the plan's promises are unverified. Fix the frontmatter or close \
+                     with --force --reason."
+                )),
+                warning: None,
+            };
         }
     };
 
@@ -538,11 +557,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_plan_less_node_passes_without_gh_io() {
+    fn plan_promise_gate_reads_or_fails_closed() {
+        // No plan_path: nothing promised, the gate passes without gh io.
         let node = serde_json::json!({"id": "ab-1234abcd", "status": "in_progress"});
         let v = resolve_promise_evidence(&node, None, &[]);
         assert!(v.satisfied());
         assert!(v.warning.is_none());
+
+        // Unreadable plan: Unmet, naming the path and the force remedy.
+        let node = serde_json::json!({
+            "id": "ab-1234abcd",
+            "status": "in_progress",
+            "plan_path": "/nonexistent/plan-promise-test/plan.md",
+        });
+        let v = resolve_promise_evidence(&node, None, &[]);
+        assert!(!v.satisfied());
+        assert_eq!(v.exit_code(), 6);
+        let reason = v.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("cannot read plan"), "{reason}");
+        assert!(reason.contains("--force --reason"), "{reason}");
+
+        // Malformed frontmatter: Unmet, naming the parse error.
+        let dir = std::env::temp_dir().join(format!(
+            "promise-gate-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let plan = dir.join("bad-plan.md");
+        std::fs::write(
+            &plan,
+            "---\ntitle: t\n  orphan: continuation without a parent key\n---\nbody\n",
+        )
+        .expect("write test plan");
+        let node = serde_json::json!({
+            "id": "ab-1234abcd",
+            "status": "in_progress",
+            "plan_path": plan.to_string_lossy().into_owned(),
+        });
+        let v = resolve_promise_evidence(&node, None, &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!v.satisfied());
+        assert_eq!(v.exit_code(), 6);
+        let reason = v.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("cannot parse plan"), "{reason}");
+        assert!(reason.contains("Malformed frontmatter"), "{reason}");
     }
 
     #[test]

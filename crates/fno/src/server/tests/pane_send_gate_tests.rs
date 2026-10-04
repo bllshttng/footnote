@@ -3,6 +3,7 @@
 //! resolves to nothing refuses an unaddressed send.
 //! Moved verbatim out of server.rs (file budget shrink). Parent helpers
 //! resolve through the glob.
+use super::super::client_input::PaneInputRequest;
 use super::*;
 #[test]
 fn pane_send_refuses_an_unreconciled_pane_and_names_the_label() {
@@ -107,7 +108,7 @@ fn pane_send_addresses_either_id_of_a_split_row() {
         b"payload",
         false,
         Some(harness_id),
-        Ok(vec![row]),
+        Ok(vec![row.clone()]),
         false,
     ) {
         ServerMsg::Ok => {}
@@ -122,7 +123,7 @@ fn pane_send_addresses_either_id_of_a_split_row() {
         b"payload",
         false,
         Some("d4c0ffee-0000-4000-8000-000000000000"),
-        Ok(vec![third]),
+        Ok(vec![third.clone()]),
         false,
     ) {
         ServerMsg::Err { code, .. } => {
@@ -130,6 +131,59 @@ fn pane_send_addresses_either_id_of_a_split_row() {
         }
         other => panic!("a send naming a third id must refuse, got {other:?}"),
     }
+
+    let _guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let events_dir = std::env::temp_dir().join(format!(
+        "fno-pane-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&events_dir);
+    std::env::set_var("FNO_AGENTS_HOME", &events_dir);
+    core.agents = vec![third.clone()];
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(1);
+    core.clients.push(Client {
+        id: 1,
+        reliable_tx: reply_tx,
+        dirty: Default::default(),
+        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        synced_modes: Default::default(),
+        view: (1, 5),
+        visible: Default::default(),
+        dims: (24, 80),
+        passive: false,
+        last_press: None,
+    });
+    core.handle(CoreMsg::PaneInput(PaneInputRequest {
+        id: 1,
+        request_id: 9,
+        pane,
+        expected_identity: harness_id.into(),
+        bytes: b"reply\r".to_vec(),
+        agents: Ok(vec![third]),
+    }));
+    assert!(matches!(
+        reply_rx.try_recv().unwrap(),
+        ServerMsg::PaneInputResult(receipt)
+            if receipt.request_id == 9 && receipt.pane_id == pane && receipt.result == Ok(())
+    ));
+    let submit_rows = crate::event_store::query_events(
+        &events_dir.join("events.jsonl"),
+        &crate::event_store::EventQuery::of_types(&["operator_submit"]),
+    )
+    .unwrap();
+    assert_eq!(
+        submit_rows.len(),
+        1,
+        "addressed human input keeps its witness"
+    );
+    std::env::remove_var("FNO_AGENTS_HOME");
+    let _ = std::fs::remove_dir_all(&events_dir);
 }
 
 #[test]

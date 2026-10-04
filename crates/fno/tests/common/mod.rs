@@ -1172,6 +1172,8 @@ impl FakeClient {
             ServerMsg::ServerStats { .. } => {}
             // (v83) Launcher progress: recorded for the launcher suites.
             ServerMsg::AgentLaunch(u) => self.launch_updates.push(u),
+            // Addressed reply receipts are consumed by the interactive client.
+            ServerMsg::PaneInputResult(_) => {}
         }
     }
 

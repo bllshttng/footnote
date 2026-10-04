@@ -383,8 +383,13 @@ pub fn parse_frontmatter(content: &str) -> Result<Parsed, String> {
                     i += 1;
                     continue;
                 }
-                if !(child.starts_with(' ') || child.starts_with('\t')) {
-                    break; // de-indented = block ended; outer loop re-processes
+                let child_is_item = child.starts_with("- ");
+                // A bare key's list may sit at column zero (`key:` then
+                // `- item`), the shape YAML itself reads and plans write
+                // (kill_criteria). Only a de-indented NON-item line ends the
+                // block; the outer loop re-processes it.
+                if !(child.starts_with(' ') || child.starts_with('\t') || child_is_item) {
+                    break;
                 }
                 if child_stripped.starts_with('#') {
                     if is_raw {
@@ -750,6 +755,17 @@ mod tests {
             serialize_frontmatter(&parsed.fields),
             block[4..block.len() - 10].trim_end_matches('\n')
         );
+
+        // The same list at column zero is the shape real plans write; it
+        // must parse to Raw too, not error and not swallow the next key.
+        let block = "---\nkill_criteria:\n- name: stuck_test\n  predicate: same_test_failing_for >= 3\n  reason: Same test failing 3+ iterations\npriority: p1\nexpected_url_count: 9\n---\nbody\n";
+        let parsed = parse_frontmatter(block).unwrap();
+        assert!(matches!(
+            parsed.fields.get("kill_criteria"),
+            Some(Value::Raw(raw)) if raw.contains("predicate: same_test_failing_for >= 3")
+        ));
+        assert_eq!(get_str(&parsed.fields, "priority"), "p1");
+        assert_eq!(get_str(&parsed.fields, "expected_url_count"), "9");
     }
 
     #[test]

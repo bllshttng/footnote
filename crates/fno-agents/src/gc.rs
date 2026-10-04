@@ -797,9 +797,12 @@ pub struct ProcRow {
 /// The conjunction IS the gate, and every clause is load-bearing, because the
 /// cost of a false positive is killing a process a person is using:
 ///
-/// - **argv names the `fno-py` entrypoint.** Matched on the BASENAME of a
-///   whitespace-separated token, not as a substring: `--flag=fno-py-thing`
-///   contains the string and is not this.
+/// - **argv names a reparable family.** Either the `fno-py` entrypoint, or a
+///   stdio MCP server in the codegraph family (measured 2026-10-02: every
+///   `claude bg-spare` held one `codegraph serve --mcp` server plus a
+///   `--liftoff-only` worker, 24 servers at 5.6 GB, and after their session
+///   died they sat on init unreaped). Matched on whitespace-separated TOKENS,
+///   never substrings: `--mcp-config` contains the string and is not this.
 /// - **parent pid 1.** A live foreground `fno` has a real parent. Without this
 ///   clause the gate matches every ordinary command an operator is running.
 /// - **older than the threshold.** Without it the sweep races a child whose
@@ -811,12 +814,58 @@ pub fn is_reapable_orphan(row: &ProcRow, older_than: Duration, live_pids: &[u32]
         && row.age_secs >= older_than.as_secs()
         && !live_pids.contains(&row.pid)
         && row.pid != std::process::id()
-        && names_fno_py(&row.args)
+        && (names_fno_py(&row.args) || names_stdio_mcp_server(&row.args))
 }
 
 fn names_fno_py(args: &str) -> bool {
     args.split_whitespace()
         .any(|token| token.rsplit('/').next() == Some("fno-py"))
+}
+
+/// True when argv names a stdio MCP server in the codegraph family: the
+/// `serve --mcp` token pair that convention carries, or the codegraph
+/// launcher's `--liftoff-only` V8 flag beside a `codegraph` path token (the
+/// flag alone is generic V8, so only the pairing names this family). A server
+/// whose argv carries neither marker is invisible to the reap gate; a bare
+/// `--mcp` flag without the `serve` pair is not a match.
+fn names_stdio_mcp_server(args: &str) -> bool {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens
+        .windows(2)
+        .any(|w| w[0] == "serve" && w[1] == "--mcp")
+    {
+        return true;
+    }
+    tokens.iter().any(|t| *t == "--liftoff-only")
+        && tokens
+            .iter()
+            .any(|t| t.rsplit('/').next().unwrap_or(t).contains("codegraph"))
+}
+
+/// True when argv names Claude Code pool machinery: the daemon's spare pool
+/// (`claude bg-spare ...`) or its pty host (`claude bg-pty-host ...`). Same
+/// shapes `spawn_context::is_claude_pool_machinery` matches; mirrored here
+/// because the sweep reads its own flat [`ProcRow`] table, not the census.
+fn is_claude_spare(args: &str) -> bool {
+    args.split_whitespace()
+        .any(|a| a == "--bg-spare" || a == "--bg-pty-host")
+}
+
+/// How many rows of `table` are stdio MCP servers whose PARENT is a live
+/// spare. Pure count, no signal: an MCP child of a live spare may be the
+/// server its session adopts, so it is measured, never reaped here. The
+/// 2026-10-02 pile-up (21 spares, one server each) was invisible because
+/// nothing counted it; this number in the sweep event is the count.
+fn count_mcp_children_of_spares(table: &[ProcRow]) -> usize {
+    let spare_pids: std::collections::HashSet<u32> = table
+        .iter()
+        .filter(|row| is_claude_spare(&row.args))
+        .map(|row| row.pid)
+        .collect();
+    table
+        .iter()
+        .filter(|row| spare_pids.contains(&row.ppid) && names_stdio_mcp_server(&row.args))
+        .count()
 }
 
 /// Parse `ps -o etime=`: `[[DD-]HH:]MM:SS`.
@@ -960,6 +1009,7 @@ pub fn orphan_sweep(
             "reaped": reaped,
             "older_than_secs": older_than.as_secs(),
             "skipped": live_pids.is_none(),
+            "mcp_children_of_spares": count_mcp_children_of_spares(&table),
         }),
     );
     reaped
@@ -2264,11 +2314,14 @@ mod tests {
         ));
     }
 
-    /// The argv clause matches a BASENAME, not a substring. A flag that merely
-    /// contains the string is not the entrypoint, and killing on it would end
+    /// The argv clause matches a TOKEN, not a substring, in both reparable
+    /// families: the fno-py entrypoint by basename, and stdio MCP servers by
+    /// the `serve --mcp` pair or the codegraph `--liftoff-only` launcher flag
+    /// paired with a codegraph path token. A flag that merely contains a
+    /// marker string is not the family, and killing on it would end
     /// somebody's foreground command.
     #[test]
-    fn only_the_entrypoint_basename_counts_as_the_marker() {
+    fn the_argv_clause_matches_its_families_by_token() {
         assert!(!is_reapable_orphan(
             &orphan("/usr/bin/grep --include=fno-py-notes .", 1, 86_400),
             Duration::from_secs(5400),
@@ -2284,6 +2337,47 @@ mod tests {
             Duration::from_secs(5400),
             &[]
         ));
+        // An orphaned stdio MCP server (the 2026-10-02 pile-up left 24 of
+        // these on init at 5.6 GB) reads as reapable under the same clauses.
+        assert!(is_reapable_orphan(
+            &orphan("node /x/npm-shim.js serve --mcp", 1, 86_400),
+            Duration::from_secs(5400),
+            &[]
+        ));
+        assert!(is_reapable_orphan(
+            &orphan(
+                "node --liftoff-only /x/lib/dist/bin/codegraph.js init -y",
+                1,
+                86_400
+            ),
+            Duration::from_secs(5400),
+            &[]
+        ));
+        // Token-exact: `--mcp-config` and a bare `--mcp` without the `serve`
+        // pair name nothing this gate may end, and `--liftoff-only` without a
+        // codegraph path is generic V8, somebody else's daemonized node.
+        assert!(!names_stdio_mcp_server("claude --mcp-config '{}' -p ok"));
+        assert!(!names_stdio_mcp_server("node server.js --mcp"));
+        assert!(!names_stdio_mcp_server(
+            "node --liftoff-only /x/wasm-test/run.js"
+        ));
+        // An MCP child of a live spare is MEASURED, never reaped: it may be
+        // the server the spare's next adopted session uses.
+        let table = vec![
+            ProcRow {
+                pid: 100,
+                ppid: 1,
+                age_secs: 86_400,
+                args: "claude bg-spare --bg-spare /tmp/cc-daemon-501/ab/spare/s.claim.sock".into(),
+            },
+            orphan("node /x/npm-shim.js serve --mcp", 100, 3_600),
+        ];
+        assert!(!is_reapable_orphan(
+            &table[1],
+            Duration::from_secs(5400),
+            &[]
+        ));
+        assert_eq!(count_mcp_children_of_spares(&table), 1);
     }
 
     /// `etimes` does not exist on macOS, so the portable column is the

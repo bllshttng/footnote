@@ -37,8 +37,8 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     assert!(view.messages_board.is_some(), "the fixture opens the board");
 }
 
-#[test]
-fn messages_board_contracts() {
+#[tokio::test]
+async fn messages_reply_board_contracts() {
     use super::super::LayoutView;
     use serde_json::json;
     let mut view = View::new(
@@ -113,5 +113,165 @@ fn messages_board_contracts() {
     let mut rows2 = Vec::new();
     super::super::feed_detail::info_row("x", None, &mut rows2);
     assert!(rows2.is_empty());
+
+    // Audit gate: protects row navigation, receiver-first recipient choice,
+    // exact reply prefill, and the tap hit map plus no-pane refusal. A cursor,
+    // default, quote or wrapped-row regression can misroute a human reply;
+    // existing fixture coverage owns projection only, so these assertions extend
+    // that owner. It uses the real View/wire and needs no production seam.
+    b.col = Col::Partners;
+    b.cursors[1] = 1;
+    super::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(
+        view.messages_board.as_ref().unwrap().cursors[2],
+        1,
+        "opening a long thread shows the newest message"
+    );
+    super::keys(&mut view, b"k", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    super::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let choices = super::super::messages_reply::popup(&view).unwrap();
+    assert_eq!(choices.selected(), Some((2, 0)));
+    let labels = choices
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["first", "candor"]);
+    super::super::messages_reply::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let seed = super::super::messages_reply::popup(&view)
+        .unwrap()
+        .rows
+        .iter()
+        .find_map(|row| match row {
+            crate::popup::PopupRow::Input { text, .. } => Some(text.as_str()),
+            _ => None,
+        });
+    assert_eq!(seed, Some("re candor/m1: \"Ship it.\" "));
+    super::super::messages_reply::keys(&mut view, b"ok", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let (mut writer, mut reader) = tokio::io::duplex(256);
+    super::super::messages_reply::keys(&mut view, b"\r", &mut writer)
+        .await
+        .unwrap();
+    let mut bytes = [0; 256];
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            tokio::io::AsyncReadExt::read(&mut reader, &mut bytes),
+        )
+        .await
+        .is_err(),
+        "no wire bytes are sent without a live pane"
+    );
+    assert_eq!(
+        view.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("reply: first has no pane on screen; open a portal first")
+    );
+    super::super::messages_reply::keys(&mut view, b"\x1b", &mut writer)
+        .await
+        .unwrap();
+    view.notice = None;
+    view.layout.agents = vec![crate::proto::AgentRow {
+        name: "first".into(),
+        harness_session_id: Some("session-uuid".into()),
+        pane_id: Some(7),
+        ..Default::default()
+    }];
+    view.layout.panes = vec![(
+        7,
+        crate::tree::Rect {
+            x: 0,
+            y: 0,
+            rows: 1,
+            cols: 1,
+        },
+    )];
+    assert_eq!(
+        super::super::messages_reply::endpoint_pane(&view, "first", "s1"),
+        Some((7, "session-uuid".into())),
+        "a registry fno_id resolves through its unique participant name"
+    );
+    view.layout.agents.push(crate::proto::AgentRow {
+        name: "first".into(),
+        harness_session_id: Some("another-session".into()),
+        pane_id: Some(8),
+        ..Default::default()
+    });
+    view.layout.panes.push((
+        8,
+        crate::tree::Rect {
+            x: 1,
+            y: 0,
+            rows: 1,
+            cols: 1,
+        },
+    ));
+    assert_eq!(
+        super::super::messages_reply::endpoint_pane(&view, "first", "s1"),
+        None,
+        "ambiguous aliases must not resolve to an arbitrary session"
+    );
+    view.layout.agents.truncate(1);
+    view.layout.panes.truncate(1);
+    super::super::messages_reply::open(
+        &mut view,
+        json!({"id":"m1","from_key":"s-c","to_key":"s1","summary":"Ship it."}),
+    );
+    super::super::messages_reply::keys(&mut view, b"\r", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    super::super::messages_reply::keys(&mut view, b"ok", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let (mut reply_writer, mut reply_reader) = tokio::io::duplex(512);
+    super::super::messages_reply::keys(&mut view, b"\r", &mut reply_writer)
+        .await
+        .unwrap();
+    let request = crate::proto::read_msg::<_, crate::proto::ClientMsg>(&mut reply_reader)
+        .await
+        .unwrap();
+    let crate::proto::ClientMsg::PaneInput(request) = request else {
+        panic!("reply must address one pane and wait for its receipt")
+    };
+    assert_eq!(request.pane, 7);
+    assert_eq!(request.expected_identity, "session-uuid");
+    assert!(request.bytes.ends_with(b"ok\r"));
+    assert_eq!(view.pending_reply_journals.len(), 1);
+    super::super::messages_reply::input_result(
+        &mut view,
+        request.request_id,
+        request.pane,
+        Err("pane exited before delivery".into()),
+    );
+    assert!(view.pending_reply_journals.is_empty());
+    assert_eq!(
+        view.notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("reply not delivered: pane exited before delivery")
+    );
+    super::mouse(
+        &mut view,
+        crate::mouse::MouseReport {
+            kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+            row: 2,
+            col: 60,
+            shift: false,
+        },
+        &mut writer,
+    )
+    .await
+    .unwrap();
+    assert!(super::super::messages_reply::popup(&view).is_some());
     crate::view_store::clear_test_path();
 }
