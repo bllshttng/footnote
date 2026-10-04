@@ -34,6 +34,7 @@
             "daemon",
             "fno-loop",
             "hook",
+            "legacy",
             "loop",
             "megatron",
             "megawalk",

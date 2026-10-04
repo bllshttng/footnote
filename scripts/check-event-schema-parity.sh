@@ -415,6 +415,22 @@ dual_owner_kinds = {
     # side carries it in schema.yaml for the validator and `doctor event
     # find`, the way pr_watch_unparked above does.
     "agent_revived",
+    # The unified-judge cutover declared the daemon-lifecycle pair on every
+    # channel that writes it: the Rust daemon journals births and deaths
+    # (source daemon) while the Python daemon-envelope helpers and the
+    # agents emitter write the same kinds from the resume and dispatch
+    # paths (sources python / agents). One wire shape, two runtimes.
+    "agent_spawned",
+    "agent_spawn_accepted",
+    "agent_spawn_failed",
+    "agent_stopped",
+    "agent_stop_error",
+    "agent_stop_refused",
+    "agent_crown_vacated",
+    "agent_ask_done",
+    "agent_inconsistent",
+    "reconcile_done",
+    "startup_reconcile_done",
 }
 collisions -= dual_owner_kinds
 if collisions:
