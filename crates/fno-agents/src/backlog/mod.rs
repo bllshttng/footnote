@@ -73,8 +73,8 @@ use std::time::Duration;
 /// Schema 4 (see schema_v4.rs) is the shape every table is born in.
 pub const SCHEMA_VERSION: &str = "4";
 const SCHEMA_VERSION_NUMBER: u32 = 4;
-const OPEN_SETUP_VERSION: &str = "1";
-const OPEN_SETUP_VERSION_NUMBER: u32 = 1;
+const OPEN_SETUP_VERSION: &str = "2";
+const OPEN_SETUP_VERSION_NUMBER: u32 = 2;
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -325,6 +325,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         .map_err(|error| error.to_string())?;
     schema_v4::migrate_if_needed(&mut connection, graph)?;
     entities::ensure_table(&connection)?;
+    entities::migrate_identity(&connection)?;
     nodes::ensure_table(&connection)?;
     sessions::ensure_table(&connection)?;
     comments::ensure_table(&connection)?;

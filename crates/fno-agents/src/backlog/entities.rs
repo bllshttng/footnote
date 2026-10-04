@@ -21,8 +21,13 @@ pub fn ddl() -> String {
          );
          CREATE TABLE IF NOT EXISTS agent_sessions (
            id TEXT PRIMARY KEY CONSTRAINT agent_sessions_id_nonempty CHECK (id <> ''),
-           harness_id TEXT REFERENCES harnesses(id){}
-         );",
+           harness_id TEXT REFERENCES harnesses(id),
+           fno_id TEXT,
+           display_name TEXT,
+           links TEXT NOT NULL DEFAULT '[]'{}
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS agent_sessions_fno_id
+           ON agent_sessions(fno_id) WHERE fno_id IS NOT NULL;",
         stamps("harnesses"),
         stamps("models"),
         stamps("agent_sessions"),
@@ -147,6 +152,71 @@ pub fn ensure_table(connection: &Connection) -> Result<(), String> {
 pub fn ensure_triggers(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(&triggers())
+        .map_err(|error| error.to_string())
+}
+
+/// The identity columns (ruling d-f9c59b68: fno_id is the key, the name is
+/// display) on a store created before they existed. Column adds are
+/// PRAGMA-guarded and idempotent; two first opens can race one ALTER and
+/// the loser tolerates the winner's duplicate-column answer.
+pub fn migrate_identity(connection: &Connection) -> Result<(), String> {
+    let present: Vec<String> = {
+        let mut stmt = connection
+            .prepare("SELECT name FROM pragma_table_info('agent_sessions')")
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for (column, decl) in [
+        ("fno_id", "TEXT"),
+        ("display_name", "TEXT"),
+        ("links", "TEXT NOT NULL DEFAULT '[]'"),
+    ] {
+        if present.iter().any(|name| name == column) {
+            continue;
+        }
+        if let Err(error) = connection.execute_batch(&format!(
+            "ALTER TABLE agent_sessions ADD COLUMN {column} {decl};"
+        )) {
+            if !error.to_string().contains("duplicate column name") {
+                return Err(error.to_string());
+            }
+        }
+    }
+    connection
+        .execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS agent_sessions_fno_id
+               ON agent_sessions(fno_id) WHERE fno_id IS NOT NULL;",
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// The identity projection one registry row runs: its fno_id, harness and
+/// fleet name land on the agent_sessions parent keyed by its session id.
+/// The first harness and fno_id a session saw win (identity, not state);
+/// the display name follows the registry, so a rename re-renders here and
+/// never in the stored rows a join reads.
+pub fn upsert_identity(
+    connection: &Connection,
+    session_id: &str,
+    harness: Option<&str>,
+    fno_id: Option<&str>,
+    display_name: Option<&str>,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO agent_sessions(id, harness_id, fno_id, display_name)
+               VALUES (?1, ?2, ?3, ?4)
+               ON CONFLICT(id) DO UPDATE SET
+                 harness_id = COALESCE(agent_sessions.harness_id, excluded.harness_id),
+                 fno_id = COALESCE(agent_sessions.fno_id, excluded.fno_id),
+                 display_name = COALESCE(excluded.display_name, agent_sessions.display_name);",
+            rusqlite::params![session_id, harness, fno_id, display_name],
+        )
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -346,6 +416,86 @@ mod tests {
             })),
         );
         assert_eq!(harness_of(&connection, "abc"), Some("claude".into()));
+    }
+
+    fn column_names(connection: &Connection) -> Vec<String> {
+        let mut stmt = connection
+            .prepare("SELECT name FROM pragma_table_info('agent_sessions')")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn identity_row(connection: &Connection, session: &str) -> (Option<String>, Option<String>, Option<String>) {
+        connection
+            .query_row(
+                "SELECT harness_id, fno_id, display_name FROM agent_sessions WHERE id = ?1",
+                [session],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_pre_identity_store_gains_the_columns_in_place() {
+        let (_dir, connection) = store();
+        connection
+            .execute_batch(
+                "DROP TABLE agent_sessions;
+                 CREATE TABLE agent_sessions (
+                   id TEXT PRIMARY KEY, harness_id TEXT
+                 );
+                 INSERT INTO agent_sessions(id, harness_id) VALUES ('abc', 'claude');",
+            )
+            .unwrap();
+        crate::backlog::entities::migrate_identity(&connection).unwrap();
+        for column in ["fno_id", "display_name", "links"] {
+            assert!(column_names(&connection).iter().any(|name| name == column));
+        }
+        assert_eq!(identity_row(&connection, "abc"), (Some("claude".into()), None, None));
+        // Idempotent: a second pass changes nothing and raises nothing.
+        crate::backlog::entities::migrate_identity(&connection).unwrap();
+    }
+
+    #[test]
+    fn upsert_identity_sets_identity_and_follows_the_rename() {
+        let (_dir, connection) = store();
+        connection
+            .execute_batch("INSERT INTO harnesses(id) VALUES ('claude'), ('codex');")
+            .unwrap();
+        crate::backlog::entities::upsert_identity(
+            &connection, "abc", Some("claude"), Some("f-1"), Some("old"),
+        )
+        .unwrap();
+        // A rename: display_name follows; harness and fno_id are identity
+        // and keep their first values.
+        crate::backlog::entities::upsert_identity(
+            &connection, "abc", Some("codex"), Some("f-1"), Some("new"),
+        )
+        .unwrap();
+        assert_eq!(
+            identity_row(&connection, "abc"),
+            (Some("claude".into()), Some("f-1".into()), Some("new".into()))
+        );
+    }
+
+    #[test]
+    fn a_second_session_cannot_take_a_held_fno_id() {
+        let (_dir, connection) = store();
+        connection
+            .execute_batch("INSERT INTO harnesses(id) VALUES ('claude');")
+            .unwrap();
+        crate::backlog::entities::upsert_identity(
+            &connection, "abc", Some("claude"), Some("f-1"), Some("a"),
+        )
+        .unwrap();
+        let error = crate::backlog::entities::upsert_identity(
+            &connection, "def", Some("claude"), Some("f-1"), Some("b"),
+        )
+        .unwrap_err();
+        assert!(error.contains("UNIQUE"), "{error}");
     }
 
     #[test]
