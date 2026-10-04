@@ -411,11 +411,6 @@ fn awaiting_review_only_requires_every_other_conjunct() {
 }
 
 #[test]
-fn watch_idle_classifies_pending_ci() {
-    assert_eq!(async_wait_class(&watch_pr(), true, true), Some("ci"));
-}
-
-#[test]
 fn watch_expiry_gate_allows_daemon_routed_codex_idle() {
     // Supported interactive harnesses share the daemon expiry arm.
     assert!(harness_can_idle(Some("claude"), false));
@@ -440,10 +435,14 @@ fn watching_refusal_names_the_disqualifying_substrate() {
         watch_lease::watching_harness_refusal(Some("claude"), true),
         "watching ignored: loop-run child cannot idle"
     );
-    assert_eq!(
-        watch_lease::watching_harness_refusal(Some("codex"), false),
-        "watching ignored: harness codex cannot idle"
-    );
+    // A no-self-wake harness is told to stop, never to arm a watcher it
+    // cannot run: the old Claude-only ritual text is the loop the codex
+    // thread worker burned 13 turns in.
+    let text = watch_lease::watching_harness_refusal(Some("grok"), false);
+    assert!(text.contains("harness grok cannot idle"), "{text}");
+    assert!(text.contains("Do not arm a"), "{text}");
+    assert!(text.contains("stop instead"), "{text}");
+    assert!(!text.contains("Arm a harness-tracked watcher"), "{text}");
 }
 
 #[test]
@@ -464,6 +463,9 @@ fn watch_idle_classifies_awaiting_review() {
 
 #[test]
 fn watch_idle_rejects_ci_pending_with_a_failure() {
+    // The plain pending-ci positive arm of the same classifier line the
+    // failure shape refuses below (folded from watch_idle_classifies_pending_ci).
+    assert_eq!(async_wait_class(&watch_pr(), true, true), Some("ci"));
     // gemini finding: a check has ALREADY concluded red while others run.
     // The agent should debug now, not idle out the remaining pending checks.
     let pr = PrInfo {
@@ -1396,11 +1398,8 @@ fn watch_idle_rejects_unaddressed_finding() {
         ..watch_pr()
     };
     assert_eq!(async_wait_class(&pr, true, true), None);
-}
-
-#[test]
-fn watch_idle_rejects_open_operator_finding() {
-    // An open operator review_finding for the node also blocks idling.
+    // An open operator review_finding for the node blocks the same way: the
+    // second half of the same classifier OR, folded from its own test.
     assert_eq!(async_wait_class(&watch_pr(), false, true), None);
 }
 
