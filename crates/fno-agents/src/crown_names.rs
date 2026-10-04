@@ -64,6 +64,11 @@ pub struct CrownNameRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSuccession {
     pub heir_name: String,
+    /// The heir row's session id at settle time, so the revert's join keys
+    /// on identity and a rename between write and read cannot break it.
+    /// Absent on legacy records, which keep the name join.
+    #[serde(default)]
+    pub heir_session: Option<String>,
     pub predecessor_name: String,
     #[serde(default)]
     pub predecessor_session: Option<String>,
@@ -943,12 +948,20 @@ pub fn revert_stale_pending(
     let reg = crate::state::load_registry(registry_path)
         .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
     for (scope, pending) in stale {
-        let evidence = match crate::loop_reign::live_name_join(&reg.entries, &pending.heir_name) {
+        // Id-first: a record carrying heir_session resolves through the
+        // session id (a rename cannot break the join); a legacy record
+        // falls back to the name join and its ambiguity refusal, unchanged.
+        let join = match pending.heir_session.as_deref() {
+            Some(session) => crate::agent_ref::resolve(
+                &reg.entries,
+                crate::agent_ref::Key::Id(session),
+                |row| !crate::loop_reign::is_terminal(row),
+            ),
+            None => crate::loop_reign::live_name_join(&reg.entries, &pending.heir_name),
+        };
+        let evidence = match join {
             crate::loop_reign::NameJoin::One(row) => {
-                kept.push(format!(
-                    "{scope}: heir row {} still {:?}",
-                    pending.heir_name, row.status
-                ));
+                kept.push(format!("{scope}: heir row {} still {:?}", row.name, row.status));
                 continue;
             }
             crate::loop_reign::NameJoin::Ambiguous => {
@@ -959,12 +972,20 @@ pub fn revert_stale_pending(
                 continue;
             }
             crate::loop_reign::NameJoin::None => {
-                // No live row answers the heir name; the name's raw matches
-                // are all terminal by the join's construction, so the first
-                // names why the succession reverts.
-                match reg.entries.iter().find(|e| {
-                    e.name == pending.heir_name || e.aliases.iter().any(|a| *a == pending.heir_name)
-                }) {
+                // No live row answers the heir; the raw matches are all
+                // terminal by the join's construction, so the first names
+                // why the succession reverts.
+                let raw = match pending.heir_session.as_deref() {
+                    Some(session) => reg.entries.iter().find(|e| {
+                        e.harness_session_id.as_deref() == Some(session)
+                            || e.related_session_id.as_deref() == Some(session)
+                    }),
+                    None => reg.entries.iter().find(|e| {
+                        e.name == pending.heir_name
+                            || e.aliases.iter().any(|a| *a == pending.heir_name)
+                    }),
+                };
+                match raw {
                     None => "heir row removed".to_string(),
                     Some(row) => format!("heir row {:?}", row.status),
                 }
@@ -1899,6 +1920,7 @@ mod tests {
             title: None,
             pending_succession: Some(PendingSuccession {
                 heir_name: heir.into(),
+                heir_session: None,
                 predecessor_name: pred.into(),
                 predecessor_session: session.map(String::from),
                 ts: ts.into(),
@@ -1909,6 +1931,44 @@ mod tests {
 
     fn old_ts() -> &'static str {
         "2026-08-01T00:00:00Z"
+    }
+
+    #[test]
+    fn a_renamed_heir_still_keeps_through_heir_session() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The heir row was renamed after the succession carried: the
+        // session-keyed join still finds it, and the succession stays.
+        write_registry(
+            tmp.path(),
+            json!([crown_row("renamed-heir", "other", 1, "sess-heir")]),
+        );
+        let mut pending = pending_record("original-name", "king-old", Some("sess-old"), old_ts());
+        pending.pending_succession.as_mut().unwrap().heir_session = Some("sess-heir".into());
+        let store = store_path(tmp.path());
+        write(
+            &store,
+            &Store {
+                version: 1,
+                crowns: BTreeMap::from([("fno".into(), pending)]),
+            },
+        )
+        .unwrap();
+        let (reverted, kept) = revert_stale_pending(
+            &store,
+            &registry_path(tmp.path()),
+            chrono::Utc::now(),
+            3_600,
+            true,
+        )
+        .unwrap();
+        assert!(reverted.is_empty(), "{reverted:?}");
+        assert!(
+            kept.iter()
+                .any(|k| k.contains("renamed-heir") && k.contains("still")),
+            "{kept:?}"
+        );
+        let dump = snapshot(&store).unwrap();
+        assert!(dump["crowns"]["fno"]["pending_succession"].is_object());
     }
 
     #[test]

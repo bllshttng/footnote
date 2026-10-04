@@ -733,7 +733,7 @@ fn r_crown() -> Result<Value, String> {
                     let reading = match registry_read
                         .as_ref()
                         .ok()
-                        .map(|r| crate::loop_reign::terminal_name_join(&r.entries, &s.row))
+                        .map(|r| crate::crown_split::terminal_join(&r.entries, s))
                     {
                         Some(crate::loop_reign::NameJoin::One(e)) => {
                             crate::crown_split::dead_call(e, boot)
@@ -4763,6 +4763,7 @@ mod tests {
             }],
             stale: vec![crate::crown_split::StaleCrown {
                 row: "king-dead".into(),
+                session: None,
                 scope: "shared".into(),
                 stored_status: "orphaned".into(),
             }],
@@ -4800,6 +4801,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::crown_split::StaleCrown {
                 row: "king-fno-g6".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],
@@ -4824,6 +4826,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::crown_split::StaleCrown {
                 row: "king-gone".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],

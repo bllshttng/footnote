@@ -896,11 +896,13 @@ fn resolve_subject_session(
     match holder_worker_name(&rec.holder) {
         Some(worker) => {
             load_session_registry_index(index);
-            index
-                .borrow()
-                .as_ref()
-                .and_then(|i| i.by_name.get(worker).cloned())
-                .flatten()
+            index.borrow().as_ref().and_then(|i| {
+                i.by_name
+                    .get(worker)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| i.by_fno_id.get(worker).cloned())
+            })
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
     }
@@ -975,6 +977,11 @@ struct SessionRegistryIndex {
     /// two live rows claim: the caller answers Unresolved, never a guessed
     /// session. Terminal rows never join.
     by_name: std::collections::HashMap<String, Option<String>>,
+    /// The id tier of the same join: fno_id to session id, for a holder
+    /// minted after the id change. A legacy name holder resolves through
+    /// `by_name` first, exactly as before; fno_id is unique per row, so
+    /// the first row wins.
+    by_fno_id: std::collections::HashMap<String, String>,
     /// The row's served `liveness` word and its measurement stamp, keyed by
     /// session id. No pid requirement: 33 of 33 thread rows carry pid None,
     /// and the served pair is the only liveness evidence they carry.
@@ -1017,6 +1024,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     }
     let mut by_session = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
+    let mut by_fno_id = std::collections::HashMap::new();
     let mut served = std::collections::HashMap::new();
     let mut rows = std::collections::HashMap::new();
     let path = crate::paths::AgentsHome::from_env().registry_json();
@@ -1054,6 +1062,14 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
                         note_name(&mut by_name, alias.clone(), claim.clone());
                     }
                 }
+                if let (Some(fno), Some(sid)) = (
+                    e.fno_id.as_deref().filter(|v| !v.is_empty()),
+                    sid,
+                ) {
+                    by_fno_id
+                        .entry(fno.to_string())
+                        .or_insert_with(|| sid.to_string());
+                }
             }
         }
     }
@@ -1061,6 +1077,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
         known,
         by_session,
         by_name,
+        by_fno_id,
         served,
         rows,
     });
@@ -2239,6 +2256,48 @@ mod tests {
     }
 
     #[test]
+    fn a_handover_holder_resolves_through_fno_id_and_a_name_still_resolves() {
+        // The id tier: a holder minted after the id change names the
+        // worker's fno_id and resolves even after a rename.
+        with_registry(
+            serde_json::json!([{
+                "name": "renamed-worker", "status": "live", "cwd": "/w",
+                "created_at": "2026-10-04T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "s-worker",
+                "fno_id": "f-worker",
+            }]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:f-worker", "s-king");
+                assert_eq!(
+                    resolve_subject_session(&rec, &index).as_deref(),
+                    Some("s-worker")
+                );
+            },
+        );
+        // The legacy name tier, unchanged.
+        with_registry(
+            serde_json::json!([{
+                "name": "w-legacy", "status": "live", "cwd": "/w",
+                "created_at": "2026-10-04T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "s-legacy",
+            }]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:w-legacy", "s-king");
+                assert_eq!(
+                    resolve_subject_session(&rec, &index).as_deref(),
+                    Some("s-legacy")
+                );
+            },
+        );
+    }
+
+    #[test]
     fn gate_payload_splits_the_dispatcher_like_a_handover() {
         let index = std::cell::RefCell::new(Some(SessionRegistryIndex {
             known: true,
@@ -2246,6 +2305,7 @@ mod tests {
             by_name: [("w-gate".to_string(), Some("s-worker".to_string()))]
                 .into_iter()
                 .collect(),
+            by_fno_id: std::collections::HashMap::new(),
             served: std::collections::HashMap::new(),
             rows: std::collections::HashMap::new(),
         }));

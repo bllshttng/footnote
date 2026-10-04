@@ -127,10 +127,24 @@ fn succession_pending(payload: &Value) -> Option<crate::crown_names::PendingSucc
         .next()?;
     Some(crate::crown_names::PendingSuccession {
         heir_name: heir.to_string(),
+        heir_session: heir_session(heir),
         predecessor_name: name,
         predecessor_session: session,
         ts: crate::daemon::now_rfc3339_like(),
     })
+}
+
+/// The heir row's session id at settle time, so the succession revert's
+/// join keys on identity. A row not yet in the registry (a settle racing
+/// the spawn row's write, or a test with no declared home) carries no
+/// session; the revert then falls back to the name join as before.
+fn heir_session(heir: &str) -> Option<String> {
+    let home = crate::paths::AgentsHome::from_env_opt()?;
+    let registry = crate::state::try_load_registry(&home.registry_json()).ok()??;
+    match crate::loop_reign::live_name_join(&registry.entries, heir) {
+        crate::loop_reign::NameJoin::One(row) => row.harness_session_id.clone(),
+        _ => None,
+    }
 }
 
 fn resolve_with_projects(
