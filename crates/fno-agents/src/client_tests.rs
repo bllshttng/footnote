@@ -445,6 +445,7 @@ async fn rm_flow_rows() {
     // (3) existing rm formatting tests do not reach this lifecycle boundary;
     // (4) the helper uses restart and RPC closures that production also needs
     // to order the real operations, so this is not a test-only seam.
+    use fno_agents::client::RestartError;
     use std::cell::Cell;
 
     let drifted = DriftState::Drifted {
@@ -471,7 +472,7 @@ async fn rm_flow_rows() {
             &state,
             async {
                 restart_calls.set(restart_calls.get() + 1);
-                0
+                Ok::<(), RestartError>(())
             },
             async {
                 rm_calls.set(rm_calls.get() + 1);
@@ -485,12 +486,16 @@ async fn rm_flow_rows() {
     }
 
     let rm_calls = Cell::new(0);
-    let result = rm_after_drift_repair(&drifted, async { 7 }, async {
-        rm_calls.set(rm_calls.get() + 1);
-        "removed"
-    })
+    let result = rm_after_drift_repair(
+        &drifted,
+        async { Err::<(), RestartError>(RestartError::StatusMissingPid) },
+        async {
+            rm_calls.set(rm_calls.get() + 1);
+            "removed"
+        },
+    )
     .await;
-    assert_eq!(result, Err(7));
+    assert_eq!(result, Err(()));
     assert_eq!(rm_calls.get(), 0, "failed repair must not issue rm");
 
     let result = json!({

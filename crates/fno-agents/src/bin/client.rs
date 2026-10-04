@@ -272,16 +272,15 @@ fn main() {
 
 async fn rm_after_drift_repair<T>(
     state: &DriftState,
-    restart: impl std::future::Future<Output = i32>,
+    restart: impl std::future::Future<Output = Result<(), fno_agents::client::RestartError>>,
     call: impl std::future::Future<Output = T>,
-) -> Result<T, i32> {
-    match state {
-        DriftState::Drifted { .. } => match restart.await {
-            0 => Ok(call.await),
-            code => Err(code).inspect_err(|code| eprintln!("rm refused: restart exit {code}")),
-        },
-        _ => Ok(call.await),
+) -> Result<T, ()> {
+    if matches!(state, DriftState::Drifted { .. }) {
+        restart.await.map_err(|error| {
+            eprintln!("rm refused: daemon-only restart failed: {error}");
+        })?;
     }
+    Ok(call.await)
 }
 
 async fn run(args: Vec<String>) -> i32 {
@@ -1671,7 +1670,7 @@ async fn run(args: Vec<String>) -> i32 {
     let call_result = if verb_owned == "rm" {
         let Ok(result) = rm_after_drift_repair(
             &check_daemon_drift(&home).await,
-            fno_agents::restart_run::run_restart(false, false, true, false),
+            fno_agents::restart_run::restart_daemon_for_rm(),
             call(&home, &daemon_bin, &req),
         )
         .await
