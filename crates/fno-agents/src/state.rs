@@ -2676,16 +2676,39 @@ where
     // false alarm. Within the accounting the receipt still precedes its own
     // event.
     account_for_removed_rows(path, &before_entries, &registry.entries);
-    project_identity(path, &registry.entries);
     let _ = lock.unlock();
+    // The store projection runs WITHOUT the registry flock: a slow or
+    // fenced graph.db must never stall the fleet's registry writes behind
+    // it, and rows whose identity did not change project nothing.
+    project_identity(path, &before_entries, &registry.entries);
     Ok(out)
 }
 
 /// The registry write projects identity into the store (ruling d-f9c59b68):
 /// each row's fno_id, harness and fleet name land on the agent_sessions
 /// parent keyed by its harness session id. A store open failure logs and
-/// never fails the registry write - the store catches up on a later write.
-fn project_identity(registry_path: &Path, entries: &[RegistryEntry]) {
+/// never fails the registry write. A row whose (session id, fno_id, name)
+/// triple the write did not change is skipped: its identity is already in
+/// the store, and a store that lost it (an old binary's writes) backfills
+/// when that row next changes, not on every quiet write.
+fn project_identity(
+    registry_path: &Path,
+    before: &[RegistryEntry],
+    entries: &[RegistryEntry],
+) {
+    let changed: Vec<&RegistryEntry> = entries
+        .iter()
+        .filter(|entry| {
+            !before.iter().any(|b| {
+                b.harness_session_id == entry.harness_session_id
+                    && b.fno_id == entry.fno_id
+                    && b.name == entry.name
+            })
+        })
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
     let project = || -> Result<(), String> {
         let state_root = registry_path
             .parent()
@@ -2693,7 +2716,7 @@ fn project_identity(registry_path: &Path, entries: &[RegistryEntry]) {
             .ok_or_else(|| format!("{} has no state root", registry_path.display()))?;
         let graph = crate::state_layout::place(state_root, "graph.json");
         let connection = crate::backlog::open(&graph)?;
-        for entry in entries {
+        for entry in changed {
             let Some(session_id) = entry.harness_session_id.as_deref() else {
                 continue;
             };
