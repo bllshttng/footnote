@@ -186,8 +186,11 @@ pub(crate) fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
 /// placeholder beat. Takes the directory and scope rather than `Ctx` so the
 /// stop gate's stale-doc resolver calls the same one.
 pub(crate) fn team_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathBuf, String> {
-    let key = format!("team-{}", sanitize_scope_key(scope));
-    if key == "team-" {
+    // The FILENAME key keeps the crown- spelling: the docs on disk and both
+    // writers (the retired Python verb, the native handoff verb) mint
+    // crown-, so a reader keying team- would find nothing, ever.
+    let key = format!("crown-{}", sanitize_scope_key(scope));
+    if key == "crown-" {
         return Err("empty scope names no canon doc".into());
     }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -3028,6 +3031,21 @@ mod tests {
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
         assert_eq!(sanitize_scope_key("a, b"), "a-b");
+    }
+
+    #[test]
+    fn team_handoff_doc_reads_the_crown_keyed_writer() {
+        // The persisted FILENAME key is crown- (both writers mint it); the
+        // crown->team rename must never split the reader from the docs.
+        let base = std::env::temp_dir().join(format!("fno-checkin-dockey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("handoffs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("20261001-crown-fno-x-aaaa.md");
+        std::fs::write(&doc, "x").unwrap();
+        let got = team_handoff_doc(&dir, "fno-x-aaaa").unwrap();
+        assert_eq!(got, doc);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A repo fixture whose escalations dir resolves deterministically through

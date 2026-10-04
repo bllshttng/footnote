@@ -1452,7 +1452,8 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 ///   4. vault-derived `<vault>/internal/<project>/handoffs/` when
 ///      `obsidian.enabled` + `obsidian.vault` are set (placement rule,
 ///      ab-f063 Wave 2 - mirrors `paths.handoffs_dir()` in the Python CLI)
-///   5. fallback `~/.fno/handoffs/<project>`
+///   5. fallback `<state_dir>/handoffs/<project>` where state_dir is
+///      `FNO_STATE_DIR`, else the config's `state_dir`, else `~/.fno`
 ///
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
@@ -1492,10 +1493,15 @@ pub(crate) fn resolve_handoffs_dir(
             }
         }
     }
-    let base = home
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| cwd.to_path_buf());
-    base.join(".fno/handoffs").join(project)
+    // Python parity: the fallback base is state_dir() (FNO_STATE_DIR, then
+    // the config's state_dir, then ~/.fno), so an isolated lane's handoffs
+    // land in its own state root, never beside the operator's.
+    let base = crate::agents_config::state_dir(cwd).unwrap_or_else(|| {
+        home.map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.to_path_buf())
+            .join(".fno")
+    });
+    base.join("handoffs").join(project)
 }
 
 /// One file's `obsidian:` block, keyed per-field so a caller can merge across
