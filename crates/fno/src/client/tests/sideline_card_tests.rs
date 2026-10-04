@@ -610,8 +610,8 @@ fn chosen_card_fills_all_three_lines_with_the_accent_and_a_left_bar() {
         );
     }
     // A resting neighbor keeps the plain ground: no zebra, no fill.
-    let (king_agent_i, king_detail_i) = card_rows_for(&v, "king-a");
-    for display_i in [king_agent_i, king_detail_i, king_detail_i + 1] {
+    let (lead_agent_i, lead_detail_i) = card_rows_for(&v, "lead-a");
+    for display_i in [lead_agent_i, lead_detail_i, lead_detail_i + 1] {
         let row = display_i - offset + 1;
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, Color::Default, "no zebra and no fill next door");
