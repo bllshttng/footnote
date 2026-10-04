@@ -113,6 +113,7 @@ mod tests {
         let reg = crate::state::Registry {
             schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
             entries: vec![],
+            ..Default::default()
         };
 
         let entry =

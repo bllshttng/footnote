@@ -12,6 +12,15 @@ the keeper disagree.
 from __future__ import annotations
 
 
+def delivered_stub() -> frozenset:
+    """The delivered vocabulary as the reference stub knows it. Fixtures pin
+    the vocabulary seam with this so the fold stays hermetic on binary-less
+    boxes; a Rust vocabulary change that a fold test needs shows up as a
+    stub disagreement, which is the failure this test-side mirror exists
+    to surface."""
+    return frozenset({"DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneBatched"})
+
+
 def reference_deliveries(
     graph_nodes: list[dict],
     rows: list[dict],
@@ -20,8 +29,9 @@ def reference_deliveries(
 ) -> dict:
     from datetime import datetime
 
-    from fno.terminals import DELIVERED_TERMINALS
+    from fno.rust_binary import delivered_terminals
 
+    delivered = delivered_terminals()
     doc = {"DoneAdvisory"}
     delivery = {"DoneDelivery"}
     followup_days = 14
@@ -64,7 +74,7 @@ def reference_deliveries(
         if not isinstance(nid, str) or not nid:
             continue  # junk never crashes the fold, mirroring the keeper
         tr = r.get("termination_reason")
-        if not isinstance(tr, str) or tr not in DELIVERED_TERMINALS:
+        if not isinstance(tr, str) or tr not in delivered:
             continue
         if nid not in best_kind:
             best_kind[nid] = "doc" if tr in doc else "delivery" if tr in delivery else "ship"

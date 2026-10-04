@@ -56,6 +56,33 @@ fn restart_gate(state: &DriftState) -> bool {
     matches!(state, DriftState::Drifted { .. })
 }
 
+/// Bring only the daemon onto the installed build before `rm`. The public
+/// restart verb also cycles mux servers, store keepers, the Codex app-server,
+/// and pr-watch; those fleet-wide legs do not belong on a row-removal path.
+pub async fn restart_daemon_for_rm() -> Result<(), RestartError> {
+    let home = AgentsHome::from_env();
+    if !restart_gate(&check_daemon_drift(&home).await) {
+        return Ok(());
+    }
+    restart_daemon(&home, &resolve_daemon_bin(), false)
+        .await
+        .map(|_| ())
+}
+
+/// Order the daemon-only drift repair before the `rm` RPC.
+pub async fn rm_after_drift_repair<T>(
+    state: &DriftState,
+    restart: impl std::future::Future<Output = Result<(), RestartError>>,
+    call: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    if matches!(state, DriftState::Drifted { .. }) {
+        restart.await.map_err(|error| {
+            eprintln!("rm refused: daemon-only restart failed: {error}");
+        })?;
+    }
+    Ok(call.await)
+}
+
 /// Render the codex upgrade outcome into (stdout lines, stderr lines,
 /// failed). Pure and unit-tested: `failed` ONLY on [`UpgradeOutcome::Failed`]
 /// - a held or refused upgrade is reported and NOT failed, because the

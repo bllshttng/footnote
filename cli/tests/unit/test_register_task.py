@@ -745,5 +745,18 @@ def _run_standalone() -> int:
     return failed
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def hermetic_vocabulary(monkeypatch):
+    """The promotion gate reads the delivered vocabulary through a fail-closed
+    binary door; the smoke shard deletes the binary, so the file-loaded
+    register module's own binding pins to the stub (the true set)."""
+    from tests._delivery_reference import delivered_stub
+
+    monkeypatch.setattr(register_task, "_delivered_terminals", delivered_stub)
+
+
 if __name__ == "__main__":
     sys.exit(_run_standalone())

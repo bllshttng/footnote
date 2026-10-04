@@ -13,6 +13,7 @@ Two claims, tested two ways:
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,12 @@ def _run(args: list[str], env_extra: dict[str, str], tmp_path: Path):
         "PYTHONPATH": str(REPO_CLI / "src"),
         **env_extra,
     }
+    # The style gate rides the fno-agents binary; a sandboxed subprocess keeps
+    # the caller's pin so CI's smoke-provided binary stays resolvable.
+    for key in ("FNO_AGENTS_FRONT", "FNO_AGENTS_BIN"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
     return subprocess.run(
         [sys.executable, "-m", "fno.cli", "mail", "send", *args],
         capture_output=True,

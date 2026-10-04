@@ -14,12 +14,6 @@ const UNKNOWN: &str = "unknown";
 /// `_SURVIVAL_FOLLOWUP_DAYS` (fold.py:123): a caused_by fix inside the
 /// window bounces the node; an un-time-boundable fix counts against it.
 const FOLLOWUP_DAYS: i64 = 14;
-/// The same terminal lists `request_scoreboard_classify` sends
-/// (cli/src/fno/graph/store.py): Python's vocabulary stays authoritative.
-const DOC_TERMINALS: [&str; 1] = ["DoneAdvisory"];
-const DELIVERY_TERMINALS: [&str; 1] = ["DoneDelivery"];
-/// sorted(DELIVERED_TERMINALS - {DoneAdvisory, DoneDelivery}), fno/terminals.py.
-const SHIP_TERMINALS: [&str; 2] = ["DoneBatched", "DonePRGreen"];
 
 pub(crate) fn view(params: &Value) -> Result<Value, String> {
     let empty = Vec::new();
@@ -82,9 +76,6 @@ fn build(
     let cls = crate::scoreboard::classify(&json!({
         "entries": entries,
         "rows": rows,
-        "doc_terminals": DOC_TERMINALS,
-        "delivery_terminals": DELIVERY_TERMINALS,
-        "ship_terminals": SHIP_TERMINALS,
     }))?;
     let empty_map = Map::new();
     let by_node = cls
@@ -294,7 +285,7 @@ fn row_shipped(row: &Value, by_node: &Map<String, Value>) -> bool {
         .unwrap_or("");
     let is_backstop =
         tr == "reconcile-backstop" && row.get("pr_number").map_or(false, |v| !v.is_null());
-    if !SHIP_TERMINALS.contains(&tr) && !is_backstop {
+    if !crate::scoreboard::is_ship_terminal(tr) && !is_backstop {
         return false;
     }
     match row

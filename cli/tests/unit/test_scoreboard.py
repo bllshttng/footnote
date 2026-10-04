@@ -25,7 +25,7 @@ from fno.scoreboard.fold import (
     read_jsonl_events_with_coverage,
     render_context_trace_field_docs,
 )
-from tests._delivery_reference import reference_deliveries
+from tests._delivery_reference import delivered_stub, reference_deliveries
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -37,6 +37,7 @@ def hermetic_deliveries(monkeypatch):
     # The fold tests here run the real graph reads in a subprocess CLI or
     # none at all; the classifier seam stays hermetic either way.
     monkeypatch.setattr(fold, "classify_deliveries", reference_deliveries)
+    monkeypatch.setattr("fno.rust_binary.delivered_terminals", delivered_stub)
 
 
 def _snapshot_event(session_id: str, context_bytes: int, ts: str) -> dict:

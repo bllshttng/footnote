@@ -777,7 +777,7 @@ pub fn run_reign_term(args: &[String]) -> i32 {
     if (already_declared || reached) && reason.is_none() {
         eprintln!(
             "refusing to replace a declared or reached term without --reason: the extension is \
-             the receipt. Hand off instead: fno agents spawn --promote {scope} --succeed"
+             the receipt. Hand off instead: fno agents spawn --crown {scope} --succeed"
         );
         return 1;
     }

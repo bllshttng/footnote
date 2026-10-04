@@ -18,7 +18,7 @@ fn king_and_worker() -> Vec<AgentRow> {
     king.crown_scope = Some("fno".into());
     king.harness_session_id = Some("sess-king".into());
     let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
-    w1.harness = Some("codex".into());
+    w1.harness = Some("claude".into());
     w1.pr = Some(42);
     w1.tail = Some("**one message**".into());
     w1.lineage_kind = Some("child".into());
@@ -214,8 +214,14 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     let over_window = frame_text(&over_frame);
     assert!(over_window.contains("▄▅▆▇ 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
+    v.layout.agents[1].compaction_count = None;
+    v.layout.agents[1].session_cost_cents = None;
+    v.layout.agents[1].session_tokens = None;
     let unmeasured = frame_text(&v.compose());
-    assert!(unmeasured.contains("???? ? · ?c · ?"), "{unmeasured:?}");
+    assert!(
+        unmeasured.contains("░░░░░░░░ · ░░░ · ░░░░░░ · ░░░░░░░░"),
+        "a claude card whose fold has not landed pulses every field: {unmeasured:?}"
+    );
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
     assert!(text.contains("opus · Lead of mux"), "{text:?}");
@@ -223,12 +229,46 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▄▅ 26% · 3c · ~$0.42 · 12,345 tok · one message"),
+        text.contains("▂▃▄▅ 26% · 3c · ~$0.42 · 12.3k tok · one message"),
         "the compact sparkline line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
     // A worker names its lead, and a crowned row names its role.
     assert!(text.contains("gpt-6.1-sol · king-a"), "{text:?}");
+    // Classification contract, beyond the w1 paint above: a bare pane (no
+    // harness) has nothing that could ever land, so every field hides; a
+    // crowned lead never prices; a claude row's unserved fields are loading
+    // skeletons, never `?`.
+    let hidden = |c: &card_line::MetricCell| matches!(c, card_line::MetricCell::Hidden);
+    let mut bare = agent_row("w9", 6, Some(AgentBadge::Working), false);
+    assert!(card_line::metric_cells(&bare).iter().all(hidden));
+    bare.harness = Some("claude".into());
+    bare.harness_session_id = Some("sess-w9".into());
+    bare.crown_level = Some(2);
+    bare.context_used_pct = Some(26);
+    bare.session_tokens = Some(999);
+    bare.session_cost_cents = Some(77);
+    let cells = card_line::metric_cells(&bare);
+    assert!(matches!(cells[0], card_line::MetricCell::Value(_)));
+    assert!(
+        hidden(&cells[2]),
+        "a crowned lead never prices, served or not"
+    );
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
+    // A codex row keeps the populated-paint contract off its unreportable
+    // fields: context and compactions hide even when the wire carries them,
+    // while its cost and tokens still arrive.
+    let mut cx = agent_row("w10", 7, Some(AgentBadge::Working), false);
+    cx.harness = Some("codex".into());
+    cx.harness_session_id = Some("sess-w10".into());
+    cx.context_used_pct = Some(40);
+    cx.session_tokens = Some(500);
+    let cells = card_line::metric_cells(&cx);
+    assert!(
+        hidden(&cells[0]) && hidden(&cells[1]),
+        "codex never reports context or compactions"
+    );
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "500 tok"));
 }
 
 #[test]
