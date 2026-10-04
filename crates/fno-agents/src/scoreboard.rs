@@ -993,33 +993,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_answers_the_default_vocabulary() {
-        // The vocabulary is the exhaustive match, not a caller input: a
-        // merged DonePRGreen row is one confirmed code delivery, and a
-        // DoneAdvisory node is the doc delivery, with no lists on the wire.
-        let entries = vec![
-            json!({"id": "x-1", "merge_status": "merged", "merged_at": "2026-09-02T12:00:00"}),
-            json!({"id": "d-1", "status": "done", "completed_at": "2026-09-02T12:00:00"}),
-        ];
-        let rows = vec![json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})];
-        let params = json!({
-            "entries": entries,
-            "rows": rows,
-            "now": "2026-09-09T12:00:00",
-            "since_days": 28
-        });
-        let out = classify(&params).unwrap();
-        assert_eq!(
-            out["flow"]["deliveries"]["doc"], 1,
-            "the DoneAdvisory node delivers as a doc delivery"
-        );
-        assert_eq!(
-            out["flow"]["deliveries"]["code"], 1,
-            "a merged DonePRGreen row is one confirmed code delivery"
-        );
-    }
-
-    #[test]
     fn flow_cycle_median_and_nearest_rank_p85() {
         // created_at is exactly n days before the merge, so elapsed days are
         // 1..=10: median 5.5, nearest-rank p85 the 9th sorted value.

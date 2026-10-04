@@ -51,15 +51,23 @@ fn run_rust() -> (i32, String) {
 
 /// The Python leg's answer to the same question. Only invoked in capture mode.
 fn run_python() -> (i32, String) {
-    let cli_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // The leg is stdlib-only, so it loads BY FILE PATH: importing the package
+    // would drag fno/__init__ and every dependency, and the oracle needs a
+    // bare interpreter to answer on any box.
+    let leg = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("cli")
-        .join("src");
-    let script = "import sys; sys.path.insert(0, {src:?}); \
-                  from fno.terminals import DELIVERED_TERMINALS; \
-                  print('\\n'.join(sorted(DELIVERED_TERMINALS)))"
-        .replace("{src}", &cli_src.display().to_string());
+        .join("src")
+        .join("fno")
+        .join("terminals.py");
+    let script = format!(
+        "import importlib.util; \
+         spec = importlib.util.spec_from_file_location('terminals_leg', {:?}); \
+         m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); \
+         print('\\n'.join(sorted(m.DELIVERED_TERMINALS)))",
+        leg
+    );
     let out = Command::new("python3")
         .args(["-c", &script])
         .output()

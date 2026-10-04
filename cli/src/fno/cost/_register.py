@@ -632,43 +632,45 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
                     old_reason = existing.get("termination_reason")
                     new_reason = entry.get("termination_reason")
                     if isinstance(new_reason, str) and new_reason in _delivered_terminals():
-                        if isinstance(old_reason, str) and old_reason in _delivered_terminals():
-                            continue
-                        promoted = dict(existing)
-                        promoted.update(
-                            {key: value for key, value in entry.items() if value is not None}
-                        )
-                        aliases = []
-                        for values in (existing.get("sessions"), entry.get("sessions")):
-                            if not isinstance(values, list):
-                                continue
-                            for value in values:
-                                if value not in aliases:
-                                    aliases.append(value)
-                        if aliases:
-                            promoted["sessions"] = aliases
-                        data["entries"][index] = promoted
-                        # Promotion bypasses the append path below, so apply
-                        # the same collapse rule: a promoted full-fidelity row
-                        # must never coexist with the node's backstop row.
-                        promoted_node = promoted.get("graph_node_id")
-                        if promoted_node:
-                            data["entries"] = [
-                                e
-                                for j, e in enumerate(data["entries"])
-                                if j == index
-                                or not (
-                                    e.get("backstop")
-                                    and e.get("graph_node_id") == promoted_node
-                                )
-                            ]
-                        _write_ledger_data(tasks_path, data)
-                        print(
-                            f"Promoted target fno_id {new_scalar} "
-                            f"from {old_reason} to {new_reason}",
-                            file=sys.stderr,
-                        )
-                        return
+                        if not (
+                            isinstance(old_reason, str)
+                            and old_reason in _delivered_terminals()
+                        ):
+                            promoted = dict(existing)
+                            promoted.update(
+                                {key: value for key, value in entry.items() if value is not None}
+                            )
+                            aliases = []
+                            for values in (existing.get("sessions"), entry.get("sessions")):
+                                if not isinstance(values, list):
+                                    continue
+                                for value in values:
+                                    if value not in aliases:
+                                        aliases.append(value)
+                            if aliases:
+                                promoted["sessions"] = aliases
+                            data["entries"][index] = promoted
+                            # Promotion bypasses the append path below, so apply
+                            # the same collapse rule: a promoted full-fidelity row
+                            # must never coexist with the node's backstop row.
+                            promoted_node = promoted.get("graph_node_id")
+                            if promoted_node:
+                                data["entries"] = [
+                                    e
+                                    for j, e in enumerate(data["entries"])
+                                    if j == index
+                                    or not (
+                                        e.get("backstop")
+                                        and e.get("graph_node_id") == promoted_node
+                                    )
+                                ]
+                            _write_ledger_data(tasks_path, data)
+                            print(
+                                f"Promoted target fno_id {new_scalar} "
+                                f"from {old_reason} to {new_reason}",
+                                file=sys.stderr,
+                            )
+                            return
                     print(
                         f"Skipping duplicate entry for target fno_id: {new_scalar}",
                         file=sys.stderr,

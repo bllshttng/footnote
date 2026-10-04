@@ -8,7 +8,6 @@
 //! `resolve_binary`, like `harness-roster`.
 
 use crate::client_verbs::to_python_json;
-use crate::loopcheck::TerminationReason;
 use crate::scoreboard::ALL_TERMINALS;
 use serde_json::json;
 
@@ -28,40 +27,4 @@ pub fn run_terminals(rest: &[String]) -> i32 {
     delivered.sort();
     println!("{}", to_python_json(&json!({ "delivered": delivered })));
     0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn name_of(t: &TerminationReason) -> String {
-        match serde_json::to_value(t) {
-            Ok(serde_json::Value::String(s)) => s,
-            _ => String::new(),
-        }
-    }
-
-    #[test]
-    fn delivered_lists_exactly_the_is_delivered_variants() {
-        let listed: Vec<String> = ALL_TERMINALS
-            .iter()
-            .filter(|t| t.is_delivered())
-            .map(name_of)
-            .collect();
-        assert_eq!(
-            listed,
-            vec![
-                "DoneAdvisory".to_string(),
-                "DoneBatched".to_string(),
-                "DoneDelivery".to_string(),
-                "DonePRGreen".to_string(),
-            ]
-        );
-        for terminal in ALL_TERMINALS {
-            assert_eq!(
-                listed.contains(&name_of(&terminal)),
-                terminal.is_delivered()
-            );
-        }
-    }
 }

@@ -210,6 +210,8 @@ fn main() {
         std::process::exit(fno_agents::terminal_vocab::run_terminals(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("pending-session-row") {
+        std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
+    }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
