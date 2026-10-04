@@ -30,6 +30,11 @@ use crate::watch_expiry::{self, Evidence, Watch};
 /// one PR cost one network read.
 const INTERVAL: Duration = Duration::from_secs(60);
 
+/// Settle wakes stand down this close to expiry: the timeout wake owns the
+/// boundary, and the grace keeps the two arms' evidence reads from
+/// straddling the expiry line inside one inject round trip.
+const EXPIRY_GRACE_MS: i64 = 90 * 1000;
+
 /// The arm state: cadence stamp + one-in-flight gate, the shape every
 /// FleetArms member keeps.
 #[derive(Default)]
@@ -194,6 +199,14 @@ pub(crate) fn run_pass_with(
         }
         // Only a ci watch has an early wake; the expiry arm owns the rest.
         if w.blocker != "ci" {
+            continue;
+        }
+        // Grace before expiry belongs to the timeout wake: inside it the two
+        // arms' evidence reads can straddle the expiry line before either
+        // receipt lands, and both would inject. The bound is longer than one
+        // inject round trip, so a receipt always precedes the expiry arm's
+        // read.
+        if w.expires_at_ms - now_ms < EXPIRY_GRACE_MS {
             continue;
         }
         // The expiry arm's eligibility rule, shared: a wake goes only to a
