@@ -2286,6 +2286,108 @@ def _revival_answer(name: str, harness: str, resume_session_id: str) -> Optional
     return parsed if answer is None and isinstance(parsed, dict) else None
 
 
+def _settle_codex_thread_crown(
+    *, name: str, cwd: Path, session_id: str, crown_level: int,
+    crown_scope: Optional[str], crown_plan: Optional[dict],
+    crown_caller_name: Optional[str], parent_edge: Optional[tuple],
+    reign_typed: bool,
+) -> None:
+    """Carry a pre-planned spawn crown onto a codex thread row, after launch.
+
+    The Rust lane mints the row uncrowned, so this stamps an EXISTING row:
+    settle_spawn_crown resolves the plan, this write stamps or strips the
+    heir's fields, and the king manifest arms here. A row exists uncrowned
+    briefly either way - the crown verb's own shape.
+    """
+    crown_grantor_val = (parent_edge or _capture_parent_edge())[0] or "human"
+    crown_outcome: Optional[str] = None
+    crown_cleared: list = []
+    king_loop_armed: Optional[bool] = None
+    king_unarmed_reason = ""
+    heir_found = False
+
+    def _stamp_heir(entries: list) -> list:
+        nonlocal crown_outcome, crown_cleared, king_loop_armed, king_unarmed_reason
+        nonlocal heir_found
+        assert crown_plan is not None  # set by the pre-launch plan_spawn_crown call
+        entries, crown_outcome, crown_cleared = settle_spawn_crown(
+            entries, scope=crown_scope or "", plan=crown_plan,
+            heir=name, heir_harness="codex", heir_session=session_id,
+            heir_cwd=str(cwd),
+        )
+        level, scope_v, grantor_v = (
+            (None, None, None)
+            if crown_outcome == "declined"
+            else (crown_level, crown_scope, crown_grantor_val)
+        )
+        entries = [
+            replace(e, crown_level=level, crown_scope=scope_v, crown_grantor=grantor_v)
+            if e.name == name else e
+            for e in entries
+        ]
+        heir = next((e for e in entries if e.name == name), None)
+        heir_found = heir is not None and crown_outcome != "declined"
+        if heir is not None and heir.crown_level is not None and heir.crown_scope:
+            from fno.king.state import arm_king_manifest
+
+            try:
+                king_loop_armed = arm_king_manifest(
+                    heir.crown_scope, heir.harness_session_id or "", row=heir,
+                ) is not None
+            except ValueError as exc:
+                king_loop_armed = False
+                king_unarmed_reason = str(exc)
+        return entries
+
+    try:
+        update_registry(_stamp_heir)
+        journal_spawn_crown(
+            crown_outcome, crown_cleared,
+            name=name, level=crown_level, scope=crown_scope, grantor=crown_grantor_val,
+        )
+        if crown_outcome == "declined":
+            print(
+                f"spawn: crown declined (scope {crown_scope!r} already held by a "
+                "live row); the worker launched without a crown.",
+                file=sys.stderr,
+            )
+        elif crown_outcome == "succeeded":
+            vacated = sorted({row.name for row, cause in crown_cleared if cause == "succession"})
+            noted = crown_caller_name in vacated
+            print(
+                f"spawn: crown over {crown_scope!r} transferred from {', '.join(vacated)} "
+                f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
+                file=sys.stderr,
+            )
+        if crown_scope and crown_outcome != "declined" and not heir_found:
+            print(
+                f"spawn: crown over {crown_scope!r} NOT applied: no registry row "
+                f"named {name!r}; grant it with `fno agents crown`",
+                file=sys.stderr,
+            )
+        elif crown_scope and crown_outcome != "declined" and king_loop_armed is False:
+            why = f": {king_unarmed_reason}" if king_unarmed_reason else "; king loop disabled"
+            print(
+                f"spawn: crown over {crown_scope!r} recorded, but the king loop "
+                f"manifest was NOT armed{why}",
+                file=sys.stderr,
+            )
+        if crown_scope and heir_found:
+            print(
+                f"spawn: crown over {crown_scope!r} recorded; "
+                + ("reign typed" if reign_typed else "reign NOT typed"),
+                file=sys.stderr,
+            )
+    except (OSError, ValueError, RegistryVersionError) as exc:
+        # The worker is ALIVE (the Rust lane supervises it); only the crown
+        # failed to land, so the spawn still succeeds.
+        print(
+            f"spawn: crown settlement failed after launch: {exc}; {name!r} runs "
+            "UNCROWNED. Grant it with `fno agents crown` once it self-identifies.",
+            file=sys.stderr,
+        )
+
+
 def dispatch_spawn(
     name: str,
     message: str,
@@ -2450,12 +2552,12 @@ def dispatch_spawn(
     emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
     # Crown eligibility, checked HERE rather than only at the CLI seam: this
-    # function is the in-process entry point too, and only the claude bg branch
-    # below reaches `_claude_create_path`, the one route that stamps the fields.
-    # Every other route builds its AgentEntry elsewhere and would drop the crown
-    # while reporting a successful spawn - a silently uncrowned king is the
-    # failure this refusal exists to make impossible. Fail closed before anything
-    # is created, so a refusal launches nothing and leaves the node dispatchable.
+    # function is the in-process entry point too, and only the lanes below that
+    # name a crown carrier stamp the fields. Every other route builds its
+    # AgentEntry elsewhere and would drop the crown while reporting a successful
+    # spawn - a silently uncrowned king is the failure this refusal exists to
+    # make impossible. Fail closed before anything is created, so a refusal
+    # launches nothing and leaves the node dispatchable.
     crown_problem = crown_validation_error(crown_level, crown_scope)
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
@@ -2471,10 +2573,10 @@ def dispatch_spawn(
                 "exits after one answer. Use the pane or bg substrate.",
                 exit_code=2,
             )
-        if harness != "claude":
+        if harness not in ("claude", "codex"):
             raise DispatchAskError(
-                f"--crown on the bg substrate is claude-only; got harness "
-                f"{harness!r}. Use --substrate pane, which maps every harness.",
+                f"--crown on the bg substrate has no carrier on the {harness!r} "
+                f"thread row yet. Use --substrate pane, which maps every harness.",
                 exit_code=2,
             )
 
@@ -2528,6 +2630,22 @@ def dispatch_spawn(
                 "silently spawning a fresh session.",
                 exit_code=2,
             )
+        reign_typed = False
+        if crown_level is not None:
+            # Same fail-closed plan the claude bg branch runs inside its flock:
+            # authority and occupancy are decided BEFORE anything is created,
+            # so a refusal launches nothing and leaves the scope dispatchable.
+            crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
+            crown_refusal, crown_plan = plan_spawn_crown(
+                crown_scope or "", caller_row, succession,
+            )
+            if crown_refusal is not None:
+                raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
+            # The king's first turn is the reign verb itself, the same typing
+            # _claude_create_path does for the claude bg lane.
+            message, reign_typed = _reign_typed_message(
+                message, crown_level, crown_scope, revive=False
+            )
         session_id = _codex_thread_spawn(
             name=name,
             message=message,
@@ -2543,6 +2661,18 @@ def dispatch_spawn(
             account_env=account_env,
             route_env=route_env,
         )
+        if crown_level is not None:
+            _settle_codex_thread_crown(
+                name=name,
+                cwd=cwd,
+                session_id=session_id,
+                crown_level=crown_level,
+                crown_scope=crown_scope,
+                crown_plan=crown_plan,
+                crown_caller_name=crown_caller_name,
+                parent_edge=parent_edge,
+                reign_typed=reign_typed,
+            )
         _emit_ev(
             "agent_ask_done",
             stage="dispatch",

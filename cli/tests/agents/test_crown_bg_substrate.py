@@ -304,25 +304,83 @@ def test_refusal_does_not_claim_bg_is_unsupported(bg_home) -> None:
 # --- in-process callers get the same guards ----------------------------------
 
 
-def test_dispatch_spawn_refuses_a_crown_it_cannot_stamp(tmp_path: Path, monkeypatch) -> None:
-    """The guard lives in dispatch_spawn, not only at the CLI seam: only the
-    claude bg branch reaches the stamping helper, so any other provider would
-    drop the crown while reporting success. A guard on one of N reachable paths
-    is decorative."""
+def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
+    """The crown is legal on a codex thread: the Rust lane mints the row
+    uncrowned, so the settlement must stamp the EXISTING row and arm the king
+    manifest. A silent drop here would report a successful spawn for an
+    uncrowned king. END-TO-END on purpose, same reason the bg tests are: the
+    original defect was a refusal sitting in front of unplumbed params."""
+    import json as _json
+    import subprocess as _subprocess
+    import uuid as _uuid
+
+    import fno.king.state as king_state
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents")
+    )
+    session_uuid = str(_uuid.uuid4())
+
+    def fake_run(argv, capture_output, text, timeout, env):
+        # The Rust lane's registry write, simulated: the row exists BEFORE the
+        # Python settlement runs, with all three crown fields unset.
+        update_registry(
+            lambda rows: rows
+            + [
+                AgentEntry(
+                    name="king-codex",
+                    cwd=str(bg_home),
+                    log_path="",
+                    harness="codex",
+                    harness_session_id=session_uuid,
+                    short_id="codexk1",
+                    status="busy",
+                )
+            ]
+        )
+        return _subprocess.CompletedProcess(
+            argv, 0, stdout=_json.dumps({"harness_session_id": session_uuid}) + "\n",
+            stderr="",
+        )
+
+    import fno.agents.dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
+
+    result = _spawn(
+        "spawn", "--name", "king-codex", "-H", "codex", "reign",
+        "--substrate", "thread", "--cwd", str(bg_home), "--crown", "epic-x",
+    )
+    assert result.exit_code == 0, result.output
+
+    row = _row("king-codex")
+    assert row.crown_level == 2, "an epic is a Director"
+    assert row.crown_scope == "epic-x"
+    assert row.crown_grantor == "human"
+    manifest = Path(row.cwd) / ".fno" / "kings" / "epic-x.md"
+    assert manifest.exists(), "the king loop manifest armed"
+
+
+def test_dispatch_spawn_refuses_a_crown_no_lane_carries(tmp_path: Path, monkeypatch) -> None:
+    """The guard lives in dispatch_spawn, not only at the CLI seam: claude bg
+    and codex thread carry the crown, every other harness's thread row has no
+    crown fields, so the spawn refuses rather than reporting success for an
+    uncrowned king. A guard on one of N reachable paths is decorative."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
 
     with pytest.raises(DispatchAskError) as exc:
         dispatch_spawn(
-            name="codex-king",
+            name="opencode-king",
             message="reign",
-            harness="codex",
+            harness="opencode",
             cwd=tmp_path,
             crown_level=1,
             crown_scope="epic-x",
         )
     assert exc.value.exit_code == 2
-    assert "claude-only" in str(exc.value)
+    assert "no carrier" in str(exc.value)
 
 
 def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch) -> None:
