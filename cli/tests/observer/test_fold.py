@@ -363,3 +363,13 @@ def test_unreadable_graph_store_fails_isolation_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "read_graph_strict", lambda _path: (_ for _ in ()).throw(RuntimeError()))
     result = isolation.check_isolation({"eval-leak"}, {"graph_json": tmp_path / "graph.json"})
     assert result.verdict == "violated"
+
+
+@pytest.fixture(autouse=True)
+def hermetic_vocabulary(monkeypatch):
+    """The fold's shipped-reason check reads the delivered vocabulary through
+    a fail-closed binary door; the smoke shard deletes the binary, so the
+    seam pins to the stub (the true set) like the scoreboard fixtures do."""
+    from tests._delivery_reference import delivered_stub
+
+    monkeypatch.setattr("fno.rust_binary.delivered_terminals", delivered_stub)
