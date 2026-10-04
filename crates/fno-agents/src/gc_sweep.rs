@@ -1620,7 +1620,7 @@ pub(crate) fn run_with_release(
         .iter()
         .filter_map(|rec| {
             let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
-            (!sid.is_empty()).then(|| format!("{} (holder {})", rec.key, rec.holder))
+            (!sid.is_empty()).then_some((sid, format!("{} (holder {})", rec.key, rec.holder)))
         })
         .collect();
     // The node-claim view of the same records: `node:<id>` -> holding session.
