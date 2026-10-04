@@ -1462,13 +1462,16 @@ def test_legacy_think_spawn_substrate_remains_a_compatibility_fallback(
 def test_shared_dispatch_substrate_overrides_legacy_compatibility_key(
     monkeypatch, tmp_path
 ):
+    """The legacy [dispatch] key's retired bg value fails loud, redirect attached."""
+    from fno.agents.harness_map import DispatchResolveError
+
     _write_config(
         tmp_path,
         '[think_spawn]\nsubstrate = "headless"\n\n[dispatch]\nsubstrate = "bg"\n',
     )
-    cap = _capture_spawn_cmd(monkeypatch)
-    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
-    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "thread"
+    _capture_spawn_cmd(monkeypatch)
+    with pytest.raises(DispatchResolveError, match="retired"):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
 
 
 def test_a_garbage_dispatch_substrate_fails_loud(monkeypatch, tmp_path):

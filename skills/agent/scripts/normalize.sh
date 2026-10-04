@@ -238,7 +238,8 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
       yolo|auto)           YOLO=1; _end=$_i ;;
       merge)               ALLOW_MERGE=1; _end=$_i ;;
       interactive|drive)   [[ "$MODE" == "exec" ]] && MODE="interactive"; _end=$_i ;;
-      bg|headless)         [[ -z "$SUBSTRATE" ]] && set_substrate "$_lt"; _end=$_i ;;
+      bg)                  [[ -z "$SUBSTRATE" ]] && set_substrate "thread"; _end=$_i ;;
+      headless)            [[ -z "$SUBSTRATE" ]] && set_substrate "$_lt"; _end=$_i ;;
       as)                  emit_error "'as' is a name keyword with no name after it; write 'as <name>' or drop it" ;;
       model)               emit_error "'model' is a keyword with no name after it; write 'model <name>' or drop it" ;;
       effort)              emit_error "'effort' is a keyword with no value after it; write 'effort <value>' or drop it" ;;

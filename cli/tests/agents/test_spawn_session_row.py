@@ -311,7 +311,7 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
 
 
 def test_spawn_prompt_two_ids_cannot_bypass_review_session(
-    workdir_claude, resolvable_uuid
+    workdir_claude, resolvable_uuid, capfd
 ) -> None:
     """Two node ids do not turn an external prompt into a local review session."""
     from fno.agents.cli import agents_app
@@ -319,11 +319,12 @@ def test_spawn_prompt_two_ids_cannot_bypass_review_session(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "thread",
-         "--json", f"/review {NODE} then x-4ab2"],
+         f"/review {NODE} then x-4ab2"],
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
-    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    # The transport's verdict line bypasses CliRunner's stream swap; read the fd.
+    assert "review_session" in capfd.readouterr().err
     assert _node_rows() == []
 
 
