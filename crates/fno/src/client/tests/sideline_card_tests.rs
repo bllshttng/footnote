@@ -215,7 +215,10 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(over_window.contains("▄▅▆▇ 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
     let unmeasured = frame_text(&v.compose());
-    assert!(unmeasured.contains("???? ? · ?c · ?"), "{unmeasured:?}");
+    assert!(
+        unmeasured.contains("░░░░░░ · ░░░░░░░░"),
+        "a codex card hides its unreportable fields and pulses the rest: {unmeasured:?}"
+    );
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
     assert!(text.contains("opus · Lead of mux"), "{text:?}");
@@ -223,12 +226,28 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▄▅ 26% · 3c · ~$0.42 · 12,345 tok · one message"),
+        text.contains("▂▃▄▅ 26% · 3c · ~$0.42 · 12.3k tok · one message"),
         "the compact sparkline line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
     // A worker names its lead, and a crowned row names its role.
     assert!(text.contains("gpt-6.1-sol · king-a"), "{text:?}");
+    // Classification contract, beyond the w1 paint above: a bare pane (no
+    // harness) has nothing that could ever land, so every field hides; a
+    // crowned lead never prices; a claude row's unserved fields are loading
+    // skeletons, never `?`.
+    let hidden = |c: &card_line::MetricCell| matches!(c, card_line::MetricCell::Hidden);
+    let mut bare = agent_row("w9", 6, Some(AgentBadge::Working), false);
+    assert!(card_line::metric_cells(&bare).iter().all(hidden));
+    bare.harness = Some("claude".into());
+    bare.harness_session_id = Some("sess-w9".into());
+    bare.crown_level = Some(2);
+    bare.context_used_pct = Some(26);
+    bare.session_tokens = Some(999);
+    let cells = card_line::metric_cells(&bare);
+    assert!(matches!(cells[0], card_line::MetricCell::Value(_)));
+    assert!(hidden(&cells[2]), "a crowned lead never prices");
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
 }
 
 #[test]
