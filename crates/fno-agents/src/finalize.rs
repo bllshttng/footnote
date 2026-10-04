@@ -1475,6 +1475,12 @@ pub(crate) fn resolve_handoffs_dir(
     }
     let project = resolve_project_name(settings_override, home, cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // FNO_CONFIG is an explicit per-invocation pin (Python `_settings` reads
+    // it first); the ambient global config is deliberately NOT a candidate -
+    // that read broke every hermetic fixture on a machine pinning state_dir.
+    if let Some(cfg) = env_dir_unless_null("FNO_CONFIG") {
+        candidates.push(cfg);
+    }
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }
@@ -2963,6 +2969,12 @@ fn resolve_postmortems_dir(
     }
     let project = resolve_project_name(settings_override, home, cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // FNO_CONFIG is an explicit per-invocation pin (Python `_settings` reads
+    // it first); the ambient global config is deliberately NOT a candidate -
+    // that read broke every hermetic fixture on a machine pinning state_dir.
+    if let Some(cfg) = env_dir_unless_null("FNO_CONFIG") {
+        candidates.push(cfg);
+    }
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }

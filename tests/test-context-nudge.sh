@@ -78,6 +78,25 @@ BINDIR="$(mktemp -d)"
 # masked registry-json's Rust port entirely, taking four AC31 assertions
 # down with it before this line existed).
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
+# The handoff verb answers natively (crates/fno-agents/src/paths_cli.rs behind
+# crates/fno/src/paths_route.rs), so `config paths` routes through the built
+# Rust front + worker exactly like the installed surface, while every other
+# verb keeps the worktree Python front this suite pins. Without the routing,
+# `config paths handoff` dies on the retired Python leg and the canon ask
+# names no doc (AC5). Spell target/debug/fno contiguously: the smoke runner
+# greps this file for `target/debug/fno-agents` when it selects the harness's
+# cargo build step, and a split spelling selects the harness without its
+# build (the red this comment prevents).
+FRONT_BIN="$REPO_ROOT/crates/fno/target/debug/fno"
+WORKER_BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents-worker"
+if [ ! -x "$FRONT_BIN" ] || [ ! -x "$WORKER_BIN" ]; then
+  echo "FAIL: the native paths lane needs both built:" >&2
+  echo "      $FRONT_BIN" >&2
+  echo "      $WORKER_BIN" >&2
+  echo "      Fix: (cd crates/fno && cargo build --bin fno) && (cd crates/fno-agents && cargo build --bins)" >&2
+  exit 1
+fi
+printf '#!/usr/bin/env bash\nif [ "$1" = "config" ] && [ "$2" = "paths" ]; then\n  export FNO_AGENTS_WORKER="%s"\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$WORKER_BIN" "$FRONT_BIN" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
 # fno-py is the console script name; provide it too in case anything resolves it.
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"

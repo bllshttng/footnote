@@ -286,21 +286,48 @@ fn handoff_out(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<Strin
     let mut slug: Option<String> = None;
     let mut scope: Option<String> = None;
     let mut name_only = false;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
+    // Attached `--flag=value` spellings split here: the retired Click command
+    // accepted them, so a port matching only the separated spelling would
+    // refuse callers that never were wrong.
+    let split: Vec<(String, Option<String>)> = args
+        .iter()
+        .map(|a| match a.split_once('=') {
+            Some((flag @ ("--session-id" | "--slug" | "--scope"), v)) => {
+                (flag.to_string(), Some(v.to_string()))
+            }
+            _ => (a.clone(), None),
+        })
+        .collect();
+    let mut it = split.into_iter();
+    while let Some((a, attached)) = it.next() {
         match a.as_str() {
-            "--session-id" => match it.next() {
-                Some(v) => session_id = Some(v.clone()),
-                None => return Err("--session-id needs a value".into()),
-            },
-            "--slug" => match it.next() {
-                Some(v) => slug = Some(v.clone()),
-                None => return Err("--slug needs a value".into()),
-            },
-            "--scope" => match it.next() {
-                Some(v) => scope = Some(v.clone()),
-                None => return Err("--scope needs a value".into()),
-            },
+            "--session-id" => {
+                session_id = Some(match attached {
+                    Some(v) => v,
+                    None => it
+                        .next()
+                        .map(|(v, _)| v)
+                        .ok_or_else(|| "--session-id needs a value".to_string())?,
+                })
+            }
+            "--slug" => {
+                slug = Some(match attached {
+                    Some(v) => v,
+                    None => it
+                        .next()
+                        .map(|(v, _)| v)
+                        .ok_or_else(|| "--slug needs a value".to_string())?,
+                })
+            }
+            "--scope" => {
+                scope = Some(match attached {
+                    Some(v) => v,
+                    None => it
+                        .next()
+                        .map(|(v, _)| v)
+                        .ok_or_else(|| "--scope needs a value".to_string())?,
+                })
+            }
             "--name-only" => name_only = true,
             "--help" | "-h" => {
                 return Ok(
@@ -351,6 +378,14 @@ fn handoff_out(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<Strin
     let Some(session_id) = session_id else {
         return Err("a session id is required (--session-id), or a crown scope (--scope)".into());
     };
+    // A shell expanding an unset value hands us Some(""); the retired command
+    // rejected it (`if not session_id`) rather than render the shared
+    // `<date>-.md` name, and a blank --slug fell back to the handle
+    // (`key = slug or canonical_handle(...)`).
+    if session_id.trim().is_empty() {
+        return Err("--session-id needs a value".into());
+    }
+    let slug = slug.filter(|s| !s.trim().is_empty());
     let key = slug.unwrap_or_else(|| canonical_handle(session_id.trim()));
     let filename = format!("{}-{key}.md", local_date());
     Ok(render_handoff(&directory, &filename, name_only))
@@ -625,6 +660,53 @@ mod tests {
         assert!(out.ends_with(".md") && out.contains("-crown-x-"), "{out}");
         assert!(!out.contains(',') && !out.contains(' '), "{out}");
         assert!(!out.contains("--"), "{out}");
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_accepts_attached_option_values() {
+        // The retired Click command accepted --session-id=<id>; the port must
+        // too, or it refuses callers that never were wrong.
+        let (cwd, home) = handoff_fixture("attached");
+        let out = handoff_out(
+            &[
+                "--session-id=c35abbca-bd2d-4407-8365-cf468baa7eea".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with("-c35abbca.md"), "{out}");
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_empty_session_refuses_and_blank_slug_falls_back() {
+        let (cwd, home) = handoff_fixture("empty-args");
+        // A shell expanding an unset value hands us Some(""); the shared
+        // `<date>-.md` name must never render.
+        assert!(handoff_out(
+            &["--session-id".into(), "".into(), "--name-only".into()],
+            &cwd,
+            Some(&home),
+        )
+        .is_err());
+        // A blank --slug falls back to the canonical handle (Python
+        // `key = slug or canonical_handle(...)`).
+        let out = handoff_out(
+            &[
+                "--session-id".into(),
+                SID.into(),
+                "--slug".into(),
+                "".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with("-c35abbca.md"), "{out}");
         let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
     }
 }
