@@ -192,7 +192,7 @@ fn append_verdict(closing: &mut String, verdict: &str, scope: Option<&str>, read
             .unwrap_or_else(|| "<scope>".to_owned());
         closing.push_str(&format!(
             " Verdict {verdict}. To hand this team to a fresh-context \
-             successor, run fno agents spawn --promote {handoff} --succeed."
+             successor, run fno agents spawn --team {handoff} --succeed."
         ));
     } else if name == "unreadable" {
         let detail = verdict
@@ -561,7 +561,7 @@ mod tests {
         ));
         assert!(text.starts_with(&format!("[{MARKER}:{KEY}]")));
         assert!(text.contains("Verdict stalled 16, 13, 10: undelivered is not falling."));
-        assert!(text.contains("run fno agents spawn --promote x-bbbb --succeed"));
+        assert!(text.contains("run fno agents spawn --team x-bbbb --succeed"));
     }
 
     #[test]
@@ -572,7 +572,7 @@ mod tests {
             Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict degraded 2 bounds breached."));
-        assert!(text.contains("--promote x-bbbb --succeed"));
+        assert!(text.contains("--team x-bbbb --succeed"));
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod tests {
             Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict unknown."));
-        assert!(text.contains("--promote x-bbbb --succeed"));
+        assert!(text.contains("--team x-bbbb --succeed"));
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
             "stalled undelivered 9",
             None,
         ));
-        assert!(text.contains("--promote x-bbbb,x-1111 --succeed"));
+        assert!(text.contains("--team x-bbbb,x-1111 --succeed"));
     }
 
     #[test]
@@ -603,7 +603,7 @@ mod tests {
             "stalled undelivered 9",
             None,
         ));
-        assert!(text.contains("--promote <scope> --succeed"));
+        assert!(text.contains("--team <scope> --succeed"));
     }
 
     #[test]

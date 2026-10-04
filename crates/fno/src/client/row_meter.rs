@@ -34,14 +34,25 @@ pub(super) fn ctx_cell(pct: Option<u8>) -> String {
 }
 
 /// A four-cell context sparkline whose ramp shifts with the measured load.
-pub(super) fn ctx_sparkline(pct: Option<u8>) -> &'static str {
-    match pct.map(|p| p.min(100)) {
-        None => "????",
-        Some(0..=12) => "▁▁▂▂",
-        Some(13..=32) => "▂▃▄▅",
-        Some(33..=65) => "▃▄▅▆",
-        Some(_) => "▄▅▆▇",
+pub(super) fn ctx_sparkline(pct: u8) -> &'static str {
+    match pct.min(100) {
+        0..=12 => "▁▁▂▂",
+        13..=32 => "▂▃▄▅",
+        33..=65 => "▃▄▅▆",
+        _ => "▄▅▆▇",
     }
+}
+
+/// The loading skeleton's breathe: one shade step up and back down, every
+/// unserved cell on the shared spin clock so the column pulses together.
+/// `None` (reduced motion, or the clock never started) holds the lightest.
+const BREATHE: [char; 4] = ['░', '▒', '▓', '▒'];
+
+pub(super) fn skeleton_cell(width: usize, elapsed_ms: Option<u64>) -> String {
+    let frame = elapsed_ms.map_or(0, |ms| {
+        (ms / crate::lattice::SPIN_FRAME_MS) as usize % BREATHE.len()
+    });
+    BREATHE[frame].to_string().repeat(width)
 }
 
 /// The card's context meter, padded to [`CTX_BAR_W`] so the cost and node
@@ -56,35 +67,36 @@ pub(super) fn ctx_bar(pct: Option<u8>) -> String {
     format!("{:<CTX_BAR_W$}", ctx_meter_text(pct, CTX_BAR_CELLS))
 }
 
-/// A priced dollar amount or an unknown marker; never a token substitute.
-pub(super) fn cost_cell(cents: Option<u64>) -> String {
-    cents.map_or_else(
-        || "?".into(),
-        |c| {
-            if c >= 100_000 {
-                format!("~${:.1}k", c as f64 / 100_000.0)
-            } else if c % 100 == 0 {
-                format!("~${}", c / 100)
-            } else {
-                format!("~${}.{:02}", c / 100, c % 100)
-            }
-        },
-    )
+/// A priced dollar amount. The `~` marks LIST price: cents price the base
+/// catalog rates, so a tiered model's doubled top band and a subscription's
+/// actual bill both read lower.
+pub(super) fn cost_cell(cents: u64) -> String {
+    if cents >= 100_000 {
+        format!("~${:.1}k", cents as f64 / 100_000.0)
+    } else if cents % 100 == 0 {
+        format!("~${}", cents / 100)
+    } else {
+        format!("~${}.{:02}", cents / 100, cents % 100)
+    }
 }
 
-pub(super) fn token_cell(tokens: Option<u64>) -> String {
-    let Some(tokens) = tokens else {
-        return "? tok".into();
+/// A compact token count: `1.4B`, `367M`, `12.3k`, never a grouped digit run.
+pub(super) fn token_cell(tokens: u64) -> String {
+    let (div, suffix) = if tokens >= 1_000_000_000 {
+        (1_000_000_000.0, "B")
+    } else if tokens >= 1_000_000 {
+        (1_000_000.0, "M")
+    } else if tokens >= 1_000 {
+        (1_000.0, "k")
+    } else {
+        return format!("{tokens} tok");
     };
-    let digits = tokens.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
+    let v = tokens as f64 / div;
+    if (v * 10.0).round() % 10.0 == 0.0 {
+        format!("{v:.0}{suffix} tok")
+    } else {
+        format!("{v:.1}{suffix} tok")
     }
-    format!("{grouped} tok")
 }
 
 /// The name column's width at a panel text width: the fixed cells and a
@@ -130,21 +142,27 @@ impl View {
 
 #[cfg(test)]
 mod tests {
-    use super::{cost_cell, ctx_sparkline, name_w, token_cell};
+    use super::{cost_cell, ctx_sparkline, name_w, skeleton_cell, token_cell};
     #[test]
-    fn cost_is_dollars_or_unknown() {
-        assert_eq!(cost_cell(Some(42)), "~$0.42");
-        assert_eq!(cost_cell(Some(4497)), "~$44.97");
-        assert_eq!(cost_cell(Some(13_400)), "~$134");
-        assert_eq!(cost_cell(Some(120_000)), "~$1.2k");
-        assert_eq!(cost_cell(Some(0)), "~$0");
-        assert_eq!(cost_cell(None), "?");
-        assert_eq!(token_cell(Some(12_345)), "12,345 tok");
-        assert_eq!(token_cell(None), "? tok");
-        assert_eq!(ctx_sparkline(Some(10)), "▁▁▂▂");
-        assert_eq!(ctx_sparkline(Some(16)), "▂▃▄▅");
-        assert_eq!(ctx_sparkline(Some(49)), "▃▄▅▆");
-        assert_eq!(ctx_sparkline(None), "????");
+    fn cost_is_dollars_and_tokens_compact() {
+        assert_eq!(cost_cell(42), "~$0.42");
+        assert_eq!(cost_cell(4497), "~$44.97");
+        assert_eq!(cost_cell(13_400), "~$134");
+        assert_eq!(cost_cell(120_000), "~$1.2k");
+        assert_eq!(cost_cell(0), "~$0");
+        assert_eq!(token_cell(12_345), "12.3k tok");
+        assert_eq!(token_cell(999), "999 tok");
+        assert_eq!(token_cell(367_000_000), "367M tok");
+        assert_eq!(token_cell(1_416_159_173), "1.4B tok");
+        assert_eq!(token_cell(1_000_000_000), "1B tok");
+        assert_eq!(ctx_sparkline(10), "▁▁▂▂");
+        assert_eq!(ctx_sparkline(16), "▂▃▄▅");
+        assert_eq!(ctx_sparkline(49), "▃▄▅▆");
+        assert_eq!(ctx_sparkline(129), "▄▅▆▇");
+        assert_eq!(skeleton_cell(3, None), "░░░");
+        assert_eq!(skeleton_cell(2, Some(0)), "░░");
+        assert_eq!(skeleton_cell(2, Some(250)), "▒▒");
+        assert_eq!(skeleton_cell(2, Some(1000)), "░░");
     }
 
     // The unit test the plan names: 50, 80, 120, 200 and 320 columns, both

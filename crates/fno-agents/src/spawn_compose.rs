@@ -863,6 +863,24 @@ fn is_seed_verb(seed: &Option<String>) -> bool {
         .is_some_and(|tok| crate::provider::parse_verb_token(tok).is_some())
 }
 
+/// Whether the argv names a crown (`-k` in all three Click spellings, or
+/// `--crown`) before the `--argv` boundary or a bare `--` fence (fenced
+/// tokens are prompt text) - the same boundary rule Python's
+/// `_has_permission_mode` applies, and the same short-form spellings the
+/// Python routing detector accepts.
+fn argv_has_crown(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
+        .any(|t| {
+            t == "--crown"
+                || t.starts_with("--crown=")
+                || t == "-k"
+                || t.starts_with("-k=")
+                || (t.starts_with("-k") && t.len() > 2 && !t.starts_with("--"))
+        })
+}
+
 /// An overlay table (or lane args) can carry the ONLY value this spawn
 /// injects, so an empty harness-blind read must not end composition early.
 fn overlays_present(stage: &Stage) -> bool {
@@ -1298,6 +1316,33 @@ fn mechanical_axes(stage: &mut Stage, seam: &mut Seam) {
     // Python's prov: explicit -H, then the config field read, then ambient
     // inference - the cached resolved_harness, never the grid pick.
     let prov = resolved_harness(stage).unwrap_or_default();
+    // A crowned codex spawn is a lead, and a lead must write the state root
+    // (~/.fno) to spawn, claim and journal. The builtin and the config rungs
+    // name claude words codex maps to workspace-write, so the crown widens
+    // the default to yolo; a crowned codex spawn that names a bounded mode
+    // refuses before launch.
+    if prov == "codex" && argv_has_crown(&stage.inputs.argv) {
+        if !has_permission {
+            let full = crate::codex_posture::resolve_thread_posture(None, Some(&permission.0))
+                .map(|p| p.is_full_access())
+                .unwrap_or(false);
+            if !full {
+                permission = Field("yolo".into(), Some("builtin.crown".into()));
+            }
+        } else if let Some(mode) = stage.scan.permission_value.as_deref() {
+            if let Ok(posture) = crate::codex_posture::resolve_thread_posture(None, Some(mode)) {
+                if !posture.is_full_access() {
+                    seam.refuse(format!(
+                        "fno agents spawn: a codex lead needs danger-full-access: a crowned \
+                         session must write the state root (~/.fno) to spawn, claim and \
+                         journal, and {mode} cannot. Pass -Y/--yolo or drop --permission-mode."
+                    ));
+                    set_fields(stage, effort, substrate, permission);
+                    return;
+                }
+            }
+        }
+    }
     let substrate_unknown = !substrate.0.is_empty() && !SUBSTRATES.contains(&substrate.0.as_str());
     let substrate_ok = !prov.is_empty()
         && !substrate.0.is_empty()

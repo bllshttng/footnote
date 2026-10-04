@@ -2409,6 +2409,7 @@ fn canonical_name_in_resolves_all_three_address_forms() {
     let reg = crate::state::Registry {
         schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
         entries: vec![row],
+        ..Default::default()
     };
     assert_eq!(canonical_name_in(&reg, "billing"), "billing"); // by name
     assert_eq!(canonical_name_in(&reg, "a1b2c3d4"), "billing"); // by stored short
@@ -2432,6 +2433,7 @@ async fn lifecycle_name_resolution_never_falls_back_on_ambiguity() {
     let reg = crate::state::Registry {
         schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
         entries: vec![named, short],
+        ..Default::default()
     };
 
     let error = entry_for_lifecycle(

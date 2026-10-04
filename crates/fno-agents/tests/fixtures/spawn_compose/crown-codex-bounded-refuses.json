@@ -1,0 +1,77 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w41",
+    "-H",
+    "codex",
+    "--crown",
+    "x-aaaa",
+    "--permission-mode",
+    "workspace-write:never",
+    "/fno:lead x-aaaa"
+  ],
+  "config_toml": "",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--name",
+      "w41",
+      "-H",
+      "codex",
+      "--crown",
+      "x-aaaa",
+      "--permission-mode",
+      "workspace-write:never",
+      "/fno:lead x-aaaa"
+    ],
+    "exit": 2,
+    "journal": null,
+    "stderr": [
+      "fno agents spawn: a codex lead needs danger-full-access: a crowned session must write the state root (~/.fno) to spawn, claim and journal, and workspace-write:never cannot. Pass -Y/--yolo or drop --permission-mode."
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": "codex",
+    "explicit_route": false,
+    "explicit_substrate": null,
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": true,
+    "has_model": false,
+    "has_permission": true,
+    "model_value": null,
+    "name": "w41",
+    "permission_value": "workspace-write:never",
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:lead x-aaaa",
+    "seed_form": "positional",
+    "seed_index": 9,
+    "spawn_tokens": [
+      "--name",
+      "w41",
+      "-H",
+      "codex",
+      "--crown",
+      "x-aaaa",
+      "--permission-mode",
+      "workspace-write:never",
+      "/fno:lead x-aaaa"
+    ],
+    "tab_flag_present": false
+  }
+}

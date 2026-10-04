@@ -567,6 +567,7 @@ mod tests {
             serde_json::to_vec(&crate::state::Registry {
                 schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
                 entries: vec![agy_row()],
+                ..Default::default()
             })
             .unwrap(),
         )
@@ -817,6 +818,7 @@ mod tests {
             serde_json::to_vec(&crate::state::Registry {
                 schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
                 entries: vec![mutated],
+                ..Default::default()
             })
             .unwrap(),
         )

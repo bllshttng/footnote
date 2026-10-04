@@ -142,7 +142,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
 
     // Self re-scope from here on. A team is stamped by a grantor, never
     // self-declared: an edit that neither adds nor drops anything is the
-    // succession shape, and succession runs through `spawn --promote`.
+    // succession shape, and succession runs through `spawn --crown`.
     if added.is_empty() && dropped.is_empty() {
         return Ok(refused(Some(&format!(
             "refusing to team {name:?}: that is this session, and a team is stamped by a \

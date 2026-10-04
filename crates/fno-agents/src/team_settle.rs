@@ -341,8 +341,8 @@ fn plan_with_projects(
         ),
         Caller::Agent(_) => format!(
             "scope {scope:?} is held by live row(s) {holders:?}, not by this session, so \
-             this session cannot hand it down. Only the holder (spawn --promote --succeed \
-             from its own session) or an attended shell (spawn --promote --succeed) can \
+             this session cannot hand it down. Only the holder (spawn --crown --succeed \
+             from its own session) or an attended shell (spawn --crown --succeed) can \
              transfer it."
         ),
     };
