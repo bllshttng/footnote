@@ -354,8 +354,11 @@ fn prior_row_replays_failures_by_job_id_with_no_log_reads() {
 }
 
 /// A log read lands in the job cache and the second read never spends a gh
-/// call; a failed log read is never cached. One test, one tempdir: the env
-/// override is process-global, and cargo runs tests in parallel threads.
+/// call; a failed log read is never cached. An escape-laden log comes back
+/// stripped, so the scan reads the name the color codes hid, and the refusal
+/// that fires on a gh without the flag names the file-redirect remedy. One
+/// test, one tempdir: the env override is process-global, and cargo runs
+/// tests in parallel threads.
 #[test]
 fn job_log_caches_one_attempt_and_never_a_failure() {
     let _guard = super::cache_env_lock();
@@ -393,39 +396,38 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
         !dir.path().join("job-Owner--Repo-2003.json").exists(),
         "a failed read writes no cache row"
     );
-}
 
-/// The fetched log is stripped of the ANSI escapes Actions colors every line
-/// with, before the scan and the cache row see it: a failing step named
-/// through color codes reads as its bare name.
-#[test]
-fn a_colored_log_is_stripped_before_the_scan_sees_it() {
-    let _guard = super::cache_env_lock();
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("FNO_PR_STATUS_CACHE_DIR", dir.path());
     let colored = format!(
         "2026-10-03T18:00:00.0000000Z {}step failed, stopping (fail-fast):{} cargo-test-shard{}\n",
         "\u{1b}[31;1m", "\u{1b}[0m", "\u{1b}[K"
     );
-    let fake = FakeGh {
+    let colored_fake = FakeGh {
         raw: serde_json::json!({ "job_logs": { "3001": colored } }),
         log_reads: AtomicUsize::new(0),
         log_args: std::sync::Mutex::new(Vec::new()),
         pulls_fail: None,
     };
-    let log = job_log(
-        &fake,
-        Path::new("/tmp"),
-        "Owner--Repo",
-        "Owner",
-        "Repo",
-        "3001",
+    let stripped = job_log(&colored_fake, cwd, "Owner--Repo", "Owner", "Repo", "3001").unwrap();
+    assert!(!stripped.contains('\u{1b}'), "escape-free: {stripped:?}");
+    assert_eq!(failing_step(&stripped).as_deref(), Some("cargo-test-shard"));
+    let colored_row =
+        std::fs::read_to_string(dir.path().join("job-Owner--Repo-3001.json")).unwrap();
+    assert!(
+        !colored_row.contains('\u{1b}'),
+        "the cache row is escape-free"
+    );
+
+    let remedy = escape_refusal_remedy(
+        "the response contains terminal escape sequences; pass \
+         --allow-escape-sequences to output it anyway",
+        "repos/Owner/Repo/actions/jobs/3001/logs",
     )
-    .unwrap();
-    assert!(!log.contains('\u{1b}'), "escape-free: {log:?}");
-    assert_eq!(failing_step(&log).as_deref(), Some("cargo-test-shard"));
-    let cached = std::fs::read_to_string(dir.path().join("job-Owner--Repo-3001.json")).unwrap();
-    assert!(!cached.contains('\u{1b}'), "the cached row is escape-free");
+    .expect("the escape refusal names its remedy");
+    assert!(remedy.contains("> ci-log.txt"), "{remedy}");
+    assert!(
+        escape_refusal_remedy("secondary rate limit", "repos/x/y").is_none(),
+        "another failure carries no remedy"
+    );
 }
 
 /// The settled-marker rule: a cancelled run is red AND unsettled; an

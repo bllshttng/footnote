@@ -619,6 +619,19 @@ pub(crate) fn job_log<P: GhProbe>(
     Ok(log)
 }
 
+/// The escape refusal's remedy, for the one caller class that still meets
+/// it: a gh build without `--allow-escape-sequences` refuses escape-laden
+/// log output on stdout, and the raw bytes only reach such a caller through
+/// the flag or a file redirect.
+pub(crate) fn escape_refusal_remedy(stderr: &str, endpoint: &str) -> Option<String> {
+    if !stderr.to_lowercase().contains("terminal escape sequences") {
+        return None;
+    }
+    Some(format!(
+        " fetch the raw log to a file: gh api {endpoint} --allow-escape-sequences > ci-log.txt"
+    ))
+}
+
 /// Detail entries for the failing rollup rows, loudest facts first. The log
 /// answers first; the job object's steps[] only when the log cannot. A row
 /// that is not an Actions job is named with no log claim; a fetch failure
@@ -651,7 +664,13 @@ pub(crate) fn collect_failures<P: GhProbe>(
         let log_text = job_log(probe, cwd, slug_key, &owner, &repo, &job_id);
         match log_text {
             Err(why) => {
-                entry["detail"] = json!(format!("log unavailable: {}", truncate(&why, 160)));
+                let remedy = escape_refusal_remedy(
+                    &why,
+                    &format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                )
+                .unwrap_or_default();
+                entry["detail"] =
+                    json!(format!("log unavailable: {}{remedy}", truncate(&why, 160)));
             }
             Ok(log) if log.is_empty() => {
                 // No log text (an empty log): the job object still names WHICH
