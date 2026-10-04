@@ -2002,7 +2002,7 @@ fn chrome_hit_rows() {
     // Rows (x-cd67 US1; the strip owns terminal row 0 since R15): the strip
     // word at row 0, then [squad 1 (terminal 1), Blank (2), squad 2 (3)].
     let view = two_pane_view();
-    assert!(matches!(view.chrome_hit(0, 4), Some(ChromeHit::TopRow(_))));
+    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
     assert_eq!(cmds(view.chrome_hit(3, 4)), vec![Command::SelectSquad(2)]);
     // The Blank spacer row is inert.
     assert!(view.chrome_hit(2, 4).is_none());
@@ -3089,7 +3089,7 @@ fn caret_rows() {
     // (x-cd67 US1 owns row 0; US3 Blank spacer at line 1; the strip row
     // owns line 0 since R15): the strip is line 0, squad 1 leads line 1,
     // the spacer is line 2, squad 2 follows on line 3.
-    assert!(lines[0].contains("Agents"), "{:?}", lines[0]);
+    assert!(lines[0].contains("A   M"), "{:?}", lines[0]);
     assert!(lines[1].contains("▾*empty"), "{:?}", lines[1]);
     assert!(lines[3].contains("▸ notes"), "no tab rows in between");
 }

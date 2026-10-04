@@ -213,7 +213,7 @@ impl View {
 
     /// The strip row's words at this panel's width. Below the width where
     /// the full words would crowd the bell and density buttons off the row,
-    /// the tabs read `A  M` (x-9bfe) so both buttons keep their seat.
+    /// the tabs read `A  M` so both buttons keep their seat.
     pub(super) fn top_row_words(&self) -> [(&'static str, crate::view_store::SidelineView); 2] {
         // The full words end at column 19; the buttons need the bell label,
         // the density glyph, and a gap past that, so the full form pays off
@@ -1060,7 +1060,7 @@ impl View {
                 cell.flags = cell_flags::BOLD;
             }
             // The name yields before the node: an ellipsis marks the cut
-            // and one space keeps the gap (x-9bfe). Under three columns
+            // and one space keeps the gap. Under three columns
             // there is no room for both, so the name side blanks past the
             // glyph and the node stands alone.
             if node_start >= 3 {
