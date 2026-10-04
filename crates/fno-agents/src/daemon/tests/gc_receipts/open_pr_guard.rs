@@ -9,9 +9,52 @@ use super::*;
 /// survives with `reap-keep` filed and `worker_reap_refused` emitted, while
 /// the terminated session on an open-PR node still reaps with `reap-alert`
 /// filed. Both nodes carry `pr_number` with no recorded merge, so the
-/// recorded-graph PR read answers open for both.
+/// recorded-graph PR read answers open for both. The same fixture pins the
+/// liveness sweeps' busy read beside the guard it extends: a node
+/// the session names, with a recorded `pr_number` and no recorded merge,
+/// holds the row; a recorded terminal state (merged, or closed unmerged) or
+/// a PR-less node does not, and a headless one-shot row is never held.
 #[test]
 fn gc_sweep_keeps_the_open_pr_driver_without_a_termination_and_alerts_a_terminated_reap() {
+    {
+        let mut g = graph_read(&[("sess-hold", "N1", "in_review")], &[]).unwrap();
+        g.pr_number.insert("N1".into(), Some(4242));
+        let e = RegistryEntry::new(
+            Some("sess-hold".into()),
+            crate::state::Lineage::unproven("row-has-open-pr"),
+        );
+        assert!(
+            crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
+            "a recorded pr_number with no recorded merge holds the row"
+        );
+        g.pr_state
+            .insert("N1".into(), (Some("closed".into()), 0, 0));
+        assert!(
+            !crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
+            "a recorded closed PR is terminal: the row settles"
+        );
+        g.pr_state
+            .insert("N1".into(), (Some("merged".into()), 0, 0));
+        assert!(
+            !crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
+            "a recorded merge releases the row"
+        );
+        g.pr_state.insert("N1".into(), (None, 0, 0));
+        g.pr_number.insert("N1".into(), None);
+        assert!(
+            !crate::gc_open_pr_guard::row_has_open_pr(&g, &e),
+            "a node with no recorded PR never holds"
+        );
+        let mut headless = RegistryEntry::new(
+            Some("sess-hold".into()),
+            crate::state::Lineage::unproven("row-has-open-pr"),
+        );
+        headless.substrate = Some("headless".into());
+        assert!(
+            !crate::gc_open_pr_guard::row_has_open_pr(&g, &headless),
+            "a headless one-shot row is never held, even with an open PR"
+        );
+    }
     let sandbox = tmp_home("gc-open-pr-guard");
     let home = AgentsHome::at(sandbox.root().join("agents"));
     home.ensure_root().unwrap();

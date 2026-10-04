@@ -3334,6 +3334,7 @@ fn sweep_serves_liveness_over_a_stale_status_ac7_edge() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Unknown,
         true,
     );
