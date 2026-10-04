@@ -2386,7 +2386,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             "use --substrate pane"
         };
         eprintln!(
-            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
+            "--permission-mode is not supported for harness {} on --substrate thread/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
             py_repr(provider),
         );
         return Some(2);
@@ -2545,8 +2545,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ) {
             Ok(g) => Some(g),
             Err(refusal) => {
-                if let Some(receipt) = &refusal.receipt {
-                    println!("{receipt}");
+                // One line by default; the receipt rides --json.
+                if params.get("json_out").and_then(Value::as_bool) == Some(true) {
+                    if let Some(receipt) = &refusal.receipt {
+                        println!("{receipt}");
+                    }
                 }
                 return Some(refusal.exit_code);
             }
@@ -3839,11 +3842,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("progress".into(), str_arg(&mut it, "--progress")?);
             }
             "--json" | "-J" => {
-                // Task 3.1: --json is a client-side rendering flag. We recognize it
-                // here so it is not rejected as "unknown flag". It is NOT forwarded
-                // to the daemon as a param. The caller captures it separately.
-                // -J is the global-register short for --json.
+                // Client-side rendering flag; never forwarded to the daemon.
+                // On spawn the gate refusal's receipt prints only with it.
+                if verb == "spawn" {
+                    params.insert("json_out".into(), Value::Bool(true));
+                }
             }
+            "--verbose" => {}
             "--all" | "-A" => {
                 params.insert("all".into(), Value::Bool(true));
             }
@@ -3992,14 +3997,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                         params.insert("substrate".into(), v);
                     }
                     Some("bg") => {
-                        eprintln!(
-                            "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                        return Err(
+                            "substrate 'bg' was retired; use --substrate thread".to_string()
                         );
-                        params.insert("substrate".into(), Value::String("thread".into()));
                     }
                     other => {
                         return Err(format!(
-                            "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {})",
+                            "--substrate must be one of: pane, thread, headless (got {})",
                             other.unwrap_or("")
                         ));
                     }
@@ -4137,13 +4141,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if sx == "pane" || sx == "thread" || sx == "headless" {
                 params.insert("substrate".into(), Value::String(sx.clone()));
             } else if sx == "bg" {
-                eprintln!(
-                    "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
-                );
-                params.insert("substrate".into(), Value::String("thread".into()));
+                return Err("substrate 'bg' was retired; use --substrate thread".to_string());
             } else {
                 return Err(format!(
-                    "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {sx})"
+                    "--substrate must be one of: pane, thread, headless (got {sx})"
                 ));
             }
         }

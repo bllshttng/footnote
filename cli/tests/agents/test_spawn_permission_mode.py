@@ -279,16 +279,16 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
 @pytest.mark.parametrize(
     "extra_args",
     [
-        # explicit non-bg substrate: a bare --resume now IMPLIES bg (x-f76e),
-        # so the guard is exercised by pinning a non-bg lane explicitly.
+        # explicit non-thread substrate: a bare --resume now IMPLIES thread,
+        # so the guard is exercised by pinning a non-thread lane explicitly.
         ["--substrate", "pane"],
-        ["--substrate", "bg", "--harness", "codex"],  # bg but non-claude
+        ["--substrate", "thread", "--harness", "codex"],  # thread but non-claude
     ],
 )
 def test_resume_requires_claude_bg(runner, monkeypatch, extra_args):
-    """US4: --resume continues a claude --bg transcript, so it is rejected on any
-    non-(claude, bg) lane with exit 2 before dispatch. The resume value must be a
-    real session uuid: the x-f76e front-door normalizer validates the shape first."""
+    """US4: --resume continues a claude thread transcript, so it is rejected on any
+    non-(claude, thread) lane with exit 2 before dispatch. The resume value must be a
+    real session uuid: the front-door normalizer validates the shape first."""
     _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
@@ -298,7 +298,7 @@ def test_resume_requires_claude_bg(runner, monkeypatch, extra_args):
          "6501096a-1111-2222-3333-444455556666", *extra_args],
     )
     assert result.exit_code == 2
-    assert "--resume requires --substrate bg" in result.output
+    assert "--resume requires --substrate thread" in result.output
 
 
 def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
@@ -353,7 +353,7 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 0, result.output
@@ -391,7 +391,7 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg", "--yolo"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread", "--yolo"],
     )
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.splitlines()[0])
@@ -424,7 +424,7 @@ def test_codex_yolo_receipt_names_yolo_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg", "--yolo"],
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "thread", "--yolo"],
     )
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.splitlines()[0])
@@ -436,7 +436,7 @@ def test_codex_yolo_receipt_names_yolo_via_python(runner, monkeypatch):
     monkeypatch.setenv("CODEX_THREAD_ID", "t-env-codex")
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w2", "hi", "--substrate", "bg", "--yolo"],
+        ["spawn", "--name", "w2", "hi", "--substrate", "thread", "--yolo"],
     )
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.splitlines()[0])

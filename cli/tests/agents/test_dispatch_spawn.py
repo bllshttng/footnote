@@ -331,7 +331,7 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "myagent-c", "-H", "claude", "hello", "--substrate", "bg"],
+        ["spawn", "--name", "myagent-c", "-H", "claude", "hello", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -377,7 +377,7 @@ def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) ->
         agents_app,
         [
             "spawn", "--name", "command-c", "-H", "claude",
-            "/fno:ship pr check 7", "--substrate", "bg",
+            "/fno:ship pr check 7", "--substrate", "thread",
         ],
         catch_exceptions=False,
     )
@@ -417,7 +417,7 @@ def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) ->
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "moved-c", "-H", "claude", "hello", "--substrate", "bg"],
+        ["spawn", "--name", "moved-c", "-H", "claude", "hello", "--substrate", "thread"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -443,7 +443,7 @@ def test_spawn_claude_receipt_cwd_json_encoded(workdir_claude, monkeypatch) -> N
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "bs-c", "-H", "claude", "hello", "--substrate", "bg"],
+        ["spawn", "--name", "bs-c", "-H", "claude", "hello", "--substrate", "thread"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -500,7 +500,7 @@ def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> Non
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "ptagent", "-H", "codex", "hello", "--substrate", "bg"],
+        ["spawn", "--name", "ptagent", "-H", "codex", "hello", "--substrate", "thread"],
     )
 
     assert result.exit_code == 87, (
@@ -1007,7 +1007,7 @@ def test_spawn_opencode_bg_delegates_to_serve_lane(workdir, monkeypatch) -> None
             "-H",
             "opencode",
             "--substrate",
-            "bg",
+            "thread",
             "--node",
             "x-abcd",
             "--cwd",
@@ -1045,7 +1045,7 @@ def test_spawn_opencode_bg_once_refused(workdir) -> None:
             "-H",
             "opencode",
             "--substrate",
-            "bg",
+            "thread",
             "--once",
             "--cwd",
             str(workdir),
@@ -1086,7 +1086,7 @@ def test_spawn_opencode_bg_role_demotes_to_pane(workdir, monkeypatch) -> None:
             "-H",
             "opencode",
             "--substrate",
-            "bg",
+            "thread",
             "--role",
             "archer",
             "--cwd",
@@ -1117,7 +1117,7 @@ def test_spawn_opencode_bg_resume_refused(workdir) -> None:
             "-H",
             "opencode",
             "--substrate",
-            "bg",
+            "thread",
             "--resume",
             "ses_old123",
             "--cwd",

@@ -2923,7 +2923,7 @@ def dispatch_spawn(
                         raise DispatchAskError(
                             "opencode one-shot spawns run through the Rust "
                             "runtime's headless lane; the Python path carries "
-                            "--substrate bg only",
+                            "--substrate thread only",
                             exit_code=2,
                         )
                     if resume_session_id:
