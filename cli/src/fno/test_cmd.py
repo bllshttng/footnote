@@ -654,7 +654,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         "-m 'not slow_e2e' "
         "--ignore=tests/unit/test_ambient_canary.py",
     ),
-    ("paths.sh hash gate", "cli", "fno config paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
     ("frontend-craft gate harness", ".",
      "bash tests/lib/test_frontend_surface.sh\n"
@@ -716,6 +715,15 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # Pin the classic layout, the same spell smoke-setup uses.
     ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents",
      'CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build'),
+    # The hash gate needs the Rust front door, and a fresh CI runner has no
+    # global `fno` on PATH (see the fno-on-PATH family above): build both
+    # binaries with the classic layout smoke-setup pins, then invoke the front
+    # by path with the worker env-pinned (env outranks PATH in resolve_binary).
+    ("Build the fno front door (for the hash gate)", "crates/fno",
+     'CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build --quiet --bin fno'),
+    ("paths.sh hash gate", ".",
+     'FNO_AGENTS_WORKER="$PWD/crates/fno-agents/target/debug/fno-agents-worker" '
+     'crates/fno/target/debug/fno config paths verify scripts/lib/paths.sh'),
     # The debug binary is present here, so the @requires_rust parity suites run
     # instead of skipping. Stub the provider CLIs on PATH (test_rust_verb_parity
     # presence-checks them without faking); per-test fakes still win where a
