@@ -53,6 +53,8 @@ fn home_relative(raw: &str) -> String {
 
 /// True for a bare relative path (no `~`, `/`-root, `$`, or `{` template
 /// anywhere -- `plans/{project}` is NOT project-relative).
+/// Test-only until the shell-stub port needs it live.
+#[cfg(test)]
 fn is_project_relative(raw: &str) -> bool {
     let stripped = raw.trim();
     if stripped.is_empty() {
@@ -66,6 +68,8 @@ fn is_project_relative(raw: &str) -> bool {
 
 /// True when the raw value carries a `{template}` variable (a `{{` escape
 /// never counts, mirroring the Python regex's lookarounds).
+/// Test-only until the shell-stub port needs it live.
+#[cfg(test)]
 fn has_template(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     for i in 0..bytes.len() {
