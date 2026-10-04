@@ -107,7 +107,6 @@ def build_spawn_provenance(
         if carried_origin and not carried_owner:
             raise ValueError("FNO_SPAWN_ORIGIN and FNO_SPAWN_OWNER must be exported together")
         import json as _json
-
         owner = _json.loads(carried_owner) if carried_owner else None
         if carried_origin:
             origin = _json.loads(carried_origin)
