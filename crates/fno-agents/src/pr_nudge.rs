@@ -1074,7 +1074,7 @@ mod tests {
     fn pause_after_a_durable_nudge_preserves_its_delivery_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let home = AgentsHome::at(tmp.path());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let row = row(true);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             if argv.contains(&"do".to_string()) {
@@ -1163,7 +1163,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-mail"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1216,7 +1216,7 @@ mod tests {
             }
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-resume"));
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1243,7 +1243,7 @@ mod tests {
         let r = dead_row();
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dead"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1349,7 +1349,7 @@ mod tests {
         let esc_root = std::env::temp_dir().join("fno-pn-dead-esc");
         let _ = std::fs::remove_dir_all(&esc_root);
         let home = AgentsHome::at(esc_root.join("agents"));
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(&home, &emitter, &r, &spent, false, 900, 1900, &mut runner);
         let ev = last_event(&home, "pr_nudge_escalated");
         assert_eq!(ev["data"]["pr"], serde_json::json!(null));
@@ -1383,7 +1383,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-refused"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1446,7 +1446,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-durable"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1495,7 +1495,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-already-queued"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1530,7 +1530,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-reason"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1572,7 +1572,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-fallback"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1608,7 +1608,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-landed"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1653,7 +1653,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-busy"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1718,7 +1718,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-empty"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1755,7 +1755,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-nonzero"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1793,7 +1793,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-undelivered"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1834,7 +1834,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-appended"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1959,7 +1959,7 @@ mod tests {
                 (0, String::new(), String::new())
             }
         };
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -1996,7 +1996,7 @@ mod tests {
             }
             (0, String::new(), String::new())
         };
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(&home, &emitter, &r, &spent, false, 900, 1900, &mut runner);
         let escalated = LadderState {
             attempts: 3,
@@ -2057,7 +2057,7 @@ mod tests {
         let mut runner = |_argv: &[String], _cwd: &str| -> (i32, String, String) {
             (0, String::new(), String::new())
         };
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         apply(
             &home,
             &emitter,
@@ -2151,7 +2151,7 @@ mod tests {
         let r = row(true);
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unread-retry"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let mut first_calls = Vec::new();
         let mut first_runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             first_calls.push(argv.to_vec());
@@ -2216,7 +2216,7 @@ mod tests {
         let pending = status_payload("pending", false, "0123456789abcdef");
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unsettled"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let mut calls = Vec::new();
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             calls.push(argv.to_vec());
@@ -2294,6 +2294,24 @@ mod tests {
         // AC1-HP: an escalated, quiet row reads a settled red on an OPEN
         // PR and gets one wake naming the failing checks. The state and
         // the event both carry the head.
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct RestoreClaimsRoot(Option<std::ffi::OsString>);
+        impl Drop for RestoreClaimsRoot {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("FNO_CLAIMS_ROOT", value);
+                } else {
+                    std::env::remove_var("FNO_CLAIMS_ROOT");
+                }
+            }
+        }
+        let _restore_claims_root = RestoreClaimsRoot(std::env::var_os("FNO_CLAIMS_ROOT"));
+        let temp = tempfile::tempdir().unwrap();
+        let claims_root = temp.path().join("claims-root");
+        std::fs::create_dir_all(&claims_root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         let r = row(true);
         let out = status_with_failures(
             "red",
@@ -2314,7 +2332,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-red-wake"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let st = LadderState {
             attempts: 3,
             escalated: true,
@@ -2387,7 +2405,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-red-head-b"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let st = LadderState {
             attempts: 3,
             escalated: true,
@@ -2419,7 +2437,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unsettled"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let st = LadderState {
             attempts: 3,
             escalated: true,
@@ -2450,7 +2468,7 @@ mod tests {
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dry-run"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
         save_state(&home, &r.session_id, &LadderState::default());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let mut plan_calls = 0;
         let mut plan_runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             plan_calls += 1;
@@ -2508,7 +2526,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-red-hold"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let st = LadderState {
             attempts: 3,
             escalated: true,
@@ -2535,7 +2553,7 @@ mod tests {
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-reassigned"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
-        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let st = LadderState {
             attempts: 1,
             escalated: true,
@@ -2599,7 +2617,7 @@ mod tests {
         assert!(merge_order_hold(&home, "x-1"), "the live decision holds");
         let retraction = serde_json::json!({
             "ts": "2026-09-17T13:00:00Z", "type": "decision_retracted", "source": "test",
-            "data": {"target_decision_id": "d-abcd0001", "reason": "superseded by chat"}
+            "data": {"retraction_id": "d-abcd0002", "target_decision_id": "d-abcd0001", "subject": "merge-order:x-1:after:x-lead", "reason": "superseded by chat"}
         });
         crate::event_store::append_envelope(&decisions, &retraction.to_string(), None).unwrap();
         assert!(!merge_order_hold(&home, "x-1"), "the retraction releases");
