@@ -481,6 +481,22 @@ pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
     merged
 }
 
+/// The one plan-path resolver: `~/` expands against `$HOME`, a relative
+/// path joins the close or sweep cwd, and an unresolvable path is None -
+/// the caller decides what None reads as. One resolver so two readers can
+/// never resolve the same plan_path to two different files.
+pub(crate) fn resolve_plan_path(plan_path: &str, cwd: Option<&str>) -> Option<std::path::PathBuf> {
+    let path = match plan_path.strip_prefix("~/") {
+        Some(rest) => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(rest),
+        None => PathBuf::from(plan_path),
+    };
+    if path.is_relative() {
+        Some(Path::new(cwd?).join(path))
+    } else {
+        Some(path)
+    }
+}
+
 /// The reaper side of the same delivery rule the close gate runs: a
 /// recorded merge_status is the LAST ship, never the whole delivery. The
 /// plan completion stamp decides: no plan, or a single-ship promise,
@@ -498,20 +514,8 @@ pub(crate) fn merged_delivery_settled(
     let Some(plan_path) = plan_path.filter(|p| !p.is_empty()) else {
         return true;
     };
-    let path = match plan_path.strip_prefix("~/") {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(home) => std::path::PathBuf::from(home).join(rest),
-            Err(_) => return false,
-        },
-        None => PathBuf::from(plan_path),
-    };
-    let path = if path.is_relative() {
-        match cwd {
-            Some(cwd) => Path::new(cwd).join(path),
-            None => return false,
-        }
-    } else {
-        path
+    let Some(path) = resolve_plan_path(plan_path, cwd) else {
+        return false;
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
         return false;
