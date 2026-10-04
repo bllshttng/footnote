@@ -95,6 +95,12 @@ if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
     exit \$?
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "doctor event emit-envelope" ]]; then
+    # The validate-only door reads one envelope on stdin and answers with its
+    # verdict; the stub accepts every row the scenarios feed it.
+    if [[ "\\$*" == *--validate-only* ]]; then
+        cat >/dev/null
+        exit 0
+    fi
     events=''
     shift 3
     while [[ \$# -gt 0 ]]; do

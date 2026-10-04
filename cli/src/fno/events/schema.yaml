@@ -7938,7 +7938,7 @@ event_types:
       required: [phase]
   - name: agent_resumed
     description: "A session resumed under an existing agent row: the resume leg's counterpart of agent_spawned."
-    sources: [hook, legacy]
+    sources: [hook, legacy, agents]
     data:
       required: []
   - name: account_switched
