@@ -92,6 +92,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "plugin-install",
     "recover",
     "registry-json",
+    "registry-commit",
     "reentry-plan",
     "rename",
     "reign-shape",
@@ -199,13 +200,15 @@ fn main() {
     ) {
         std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
-    // `harness-roster`: the one-roster JSON read; Python's
-    // fno.harness_names transports here through resolve_binary.
+    // `harness-roster`: Python's fno.harness_names one-roster JSON read.
     if args.first().map(String::as_str) == Some("harness-roster") {
         std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("registry-commit") {
+        std::process::exit(fno_agents::registry_commit::run(&args[1..]));
     }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {

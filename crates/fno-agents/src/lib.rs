@@ -342,6 +342,7 @@ pub mod reclaim;
 pub mod reentry;
 pub mod refusal_rate;
 pub mod refusal_trend;
+pub mod registry_commit;
 pub mod registry_guard;
 pub mod registry_json;
 pub mod reign_eval;

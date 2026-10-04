@@ -779,15 +779,6 @@ fn state_update_registry_allows_retired_suffix_collision() {
 }
 
 #[test]
-fn missing_registry_loads_empty() {
-    let dir = tmpdir("missing");
-    let reg = load_registry(&dir.join("registry.json")).unwrap();
-    assert_eq!(reg.schema_version, REGISTRY_SCHEMA_VERSION);
-    assert!(reg.entries.is_empty());
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
 fn python_written_registry_loads_via_typed_path() {
     // Regression for ab-e5a57efa: the typed daemon read path
     // (`load_registry`, used by list/stop/rm/reconcile/status) must parse a
@@ -1522,6 +1513,11 @@ fn empty_registry_file_loads_default_but_corrupt_file_errors() {
     let dir = tmpdir("corrupt-registry");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
+
+    // Missing and empty registries both load as the default roster.
+    let missing = load_registry(&path).unwrap();
+    assert_eq!(missing.schema_version, REGISTRY_SCHEMA_VERSION);
+    assert!(missing.entries.is_empty());
 
     // Empty file -> empty registry, no error.
     std::fs::write(&path, "   \n").unwrap();

@@ -2538,12 +2538,11 @@ where
             reader_rev: env!("FNO_AGENTS_GIT_REV").into(),
         });
     }
-    // The other direction of the same comparison. The check above stops
-    // a stale writer erasing fields it cannot see; this one stops a SOURCE-run
-    // writer creating those stale readers, by refusing the bump at line
-    // `registry.schema_version = REGISTRY_SCHEMA_VERSION` below. Inside the lock
-    // and before `write_json_atomic`, for the reason the comment above already
-    // argues: a racing writer must not slip past.
+    // The other direction of the same comparison. The check above stops a
+    // stale writer erasing fields it cannot see; this one stops a SOURCE-run
+    // writer publishing a schema bump to the shared registry before it merges.
+    // Keep it inside the lock and before the atomic write so a racing writer
+    // cannot slip past either guard.
     refuse_source_ahead_schema_bump(path, registry.schema_version)?;
     // The rows themselves, not just their signatures: a receipt for a removed
     // row must be built from the row the closure is about to drop, and the
