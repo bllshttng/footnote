@@ -1186,8 +1186,9 @@ fn parse_bool(v: &str) -> Option<bool> {
 
 /// Resolve the `fno-agents` binary: `$FNO_AGENTS_BIN`, else a sibling of the
 /// running `fno` binary (the installed layout, mirroring `resolve_daemon_bin`),
-/// else bare `fno-agents` on PATH. Crate-visible: the server's claim-sweep
-/// shell-out resolves the same binary the same way.
+/// else bare `fno-agents` on PATH. Public: the front door's `mail show` exec
+/// and the server's claim-sweep shell-out resolve the same binary the same
+/// way.
 /// The cargo profile dir (`…/target/debug`) of a running binary's directory,
 /// when that binary is a dev-build artifact: `exe_dir` itself for a plain
 /// binary, its parent for a TEST binary (cargo links those one level deeper,
@@ -1269,7 +1270,7 @@ pub(crate) fn paired_bin(env_var: &str, name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-pub(crate) fn fno_agents_bin() -> PathBuf {
+pub fn fno_agents_bin() -> PathBuf {
     paired_bin("FNO_AGENTS_BIN", "fno-agents")
 }
 

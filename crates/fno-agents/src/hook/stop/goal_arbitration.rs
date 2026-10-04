@@ -186,14 +186,14 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
         return GoalArbitration::Refusal("active Codex goal has no team scope".into());
     };
     let expected_owner = format!("lead:{}", scope.trim());
-    let legacy_owner = format!("king:{}", scope.trim());
+    let legacy_owner = format!("lead:{}", scope.trim());
     if owner != expected_owner && owner != legacy_owner {
         return GoalArbitration::Refusal(format!(
             "active Codex goal owner must derive from team scope: expected {expected_owner:?}, got {owner:?}"
         ));
     }
-    let expected_objective = crate::codex_thread::lead_objective(&scope);
     if !crate::codex_thread::is_lead_objective(&live.objective, &scope) {
+        let expected_objective = crate::codex_thread::lead_objective(&scope);
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected objective {expected_objective:?}, got {:?}",
             live.objective
@@ -238,7 +238,7 @@ pub(super) fn arbitrate_goal_truth(
             "active goal truth cannot be verified: manifest scope/node is missing".into(),
         );
     };
-    let legacy_owner = expected_owner.replacen("lead:", "king:", 1);
+    let legacy_owner = expected_owner.replacen("lead:", "lead:", 1);
     if goal.continuation_owner != expected_owner && goal.continuation_owner != legacy_owner {
         return GoalArbitration::Refusal(format!(
             "conflicting goal truth: expected continuation owner {expected_owner:?}, got {:?}",
@@ -251,8 +251,8 @@ pub(super) fn arbitrate_goal_truth(
                 "active goal truth cannot be verified: manifest scope is missing".into(),
             );
         };
-        let expected = crate::codex_thread::lead_objective(&scope);
         if !crate::codex_thread::is_lead_objective(&goal.objective, &scope) {
+            let expected = crate::codex_thread::lead_objective(&scope);
             return GoalArbitration::Refusal(format!(
                 "conflicting goal truth: expected objective {expected:?}, got {:?}",
                 goal.objective

@@ -473,15 +473,17 @@ def test_what_the_producer_writes_always_satisfies_the_gate(head_ref):
 
 
 def test_a_branch_naming_no_real_node_still_fails_the_gate():
-    # The other half of the property, and NOT a bug. On `fix-dead-code` the
-    # only candidate is `fix-dead`, which the graph does not carry, so the
+    # The other half of the property, and NOT a bug. On `feature/x-dead-code`
+    # the only candidate is `x-dead`, which the graph does not carry, so the
     # producer writes no trailer and the gate correctly demands a real claim.
-    # The author names the real node or takes the documented hatch.
+    # The author names the real node or takes the documented hatch. (The gate
+    # reads only the families the repo mints, so an ordinary English pair like
+    # `fix-dead` is a branch word now, not a candidate.)
     # Without this case the parity test above reads as "the producer can always
     # satisfy the gate", which is false and would justify deleting the gate.
-    body = ensure_closure_trailer("Summary.", "fix-dead-code", known_ids=KNOWN)
+    body = ensure_closure_trailer("Summary.", "feature/x-dead-code", known_ids=KNOWN)
     assert "Backlog-Closure" not in body
-    assert _gate(body, "fix-dead-code") != 0
+    assert _gate(body, "feature/x-dead-code") != 0
 
 
 def test_the_gate_still_fails_a_body_that_claims_nothing():

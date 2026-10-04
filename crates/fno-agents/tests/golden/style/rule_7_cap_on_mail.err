@@ -1,0 +1,18 @@
+style: inspected 1 line(s) across 1 input(s).
+message blocked by the style rules.
+
+rule 1 (length): sentence 1 is 81 words. The cap is 25. "word word word word word word word word word word word word ..."
+
+rule 7 (wordcap): this message runs 81 words. The cap is 80 words. "word word word word word word word word word word word word ..."
+
+Cut articles, filler, pleasantries, hedges. Fragments work. Keep technical terms exact.
+
+Status: X. Why Y. Done at Z.
+
+Approval: Problem X. Options Y or Z. I recommend Z because A. Your call?
+
+Put findings on the node and link it.
+
+add a style-exception line with a reason, or pass --style-exception.
+
+run "fno doctor lint style --stdin --surface mail" to check a rewrite first. Fewer words.

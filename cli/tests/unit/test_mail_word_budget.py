@@ -13,7 +13,7 @@ import time
 import pytest
 import typer
 
-from fno import style
+from fno import rust_binary
 from fno.mail import budget
 
 
@@ -27,7 +27,7 @@ def isolated_bus(tmp_path, monkeypatch):
 def words(n: int) -> str:
     """A body of exactly ``n`` masked words, verified through Rule 7's counter."""
     text = " ".join(f"word{i}" for i in range(n))
-    assert style.word_count(text) == n
+    assert rust_binary.style_word_count(text) == n
     return text
 
 
@@ -47,19 +47,21 @@ def test_rule_seven_and_budget_share_one_count():
     body = "Ship the fix. See `cli/src/fno/mail/budget.py` and --flag now."
     # Rule 7 reports the same number in its own violation detail.
     long_body = " ".join([body] * 40)
-    violations = style.check(long_body, surface="mail")
-    seven = [v for v in violations if v.rule == 7]
+    err, receipt = rust_binary.style_receipt(long_body, "mail")
+    assert not err
+    seven = [v for v in receipt["violations"] if v["rule"] == 7]
     assert seven, "rule 7 must fire on a body over the cap"
-    assert str(style.word_count(long_body)) in seven[0].detail
+    assert str(receipt["word_count"]) in seven[0]["detail"]
 
 
 def test_masking_holds_for_the_budget():
     # A pasted log masks to near nothing; the cap covers prose, not a dump.
-    assert style.word_count("```\n" + "\n".join(str(i) for i in range(200)) + "\n```") == 0
+    assert rust_binary.style_word_count("```\n" + "\n".join(str(i) for i in range(200)) + "\n```") == 0
 
 
 def test_identifier_masking_preserves_snake_case():
-    assert style._mask_inline("foo_bar foo_bar_baz") == "x x"
+    # An underscore identifier masks to one token: two identifiers, two words.
+    assert rust_binary.style_word_count("foo_bar foo_bar_baz") == 2
 
 
 # --- AC1-HP: an ordinary pair window does not exist -------------------------
@@ -296,13 +298,21 @@ def test_control_lane_keys_colliding_codex_siblings_separately():
 
 
 def test_control_body_skips_the_style_check(monkeypatch):
-    from fno import style
+    from fno import rust_binary
     from fno.mail import cli
 
-    def _violation(text, **_kw):
-        return [style.Violation(rule=1, sentence_index=0, sentence=text, detail="flagged")]
+    def _violating(text, surface, word_cap=None):
+        return (
+            None,
+            {
+                "exception": None,
+                "word_count": 0,
+                "violations": [{"rule": 1}],
+                "report": "flagged",
+            },
+        )
 
-    monkeypatch.setattr(style, "check", _violation)
+    monkeypatch.setattr(rust_binary, "style_receipt", _violating)
     with pytest.raises(typer.Exit):
         cli._enforce_style(words(10))
     cli._enforce_style("control: HOLD all spawns now. Load 219 on 12 cores.")
@@ -441,6 +451,22 @@ def test_a_malformed_active_ledger_refuses_rather_than_resetting():
     assert str(path) in str(exc.value), "the refusal names the recovery path"
 
 
+def test_the_enforcing_count_refuses_when_the_door_fails(monkeypatch):
+    # A zero would read as unlimited traffic under the rolling cap, so the
+    # enforcing count raises, never answers 0.
+    def _dead(*_a, **_kw):
+        return ("fno-agents binary not found", None)
+
+    monkeypatch.setattr(rust_binary, "call_binary_json", _dead)
+    with pytest.raises(budget.BudgetCountUnavailable) as exc:
+        rust_binary.style_word_count_checked("control: hold")
+    assert "binary not found" in str(exc.value)
+
+
+def test_the_enforcing_count_reads_the_receipt():
+    assert rust_binary.style_word_count_checked(words(7)) == 7
+
+
 # --- the pane lane (x-4268): same style gate, control bodies only ----------
 
 def _pane_prepare(body: str, *extra: str):
@@ -492,5 +518,5 @@ def _clean_body(n_words: int) -> str:
         " ".join(words[i : i + 5]) + "." for i in range(0, n_words, 5)
     ]
     text = " ".join(sentences)
-    assert style.word_count(text) == n_words
+    assert rust_binary.style_word_count(text) == n_words
     return text

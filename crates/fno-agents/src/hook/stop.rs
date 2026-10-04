@@ -1510,6 +1510,28 @@ mod tests {
             ),
             GoalArbitration::Delegated
         );
+        // The canonical lead spelling delegates beside the legacy lead
+        // objective above; a wrong scope refuses with the lead objective
+        // named.
+        let mut lead = active.clone();
+        lead.objective = crate::codex_thread::lead_objective("scope-a");
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading("lead", &fire, manifest, Ok(Some(lead))),
+            GoalArbitration::Delegated
+        );
+        let mut wrong_scope = active.clone();
+        wrong_scope.objective = crate::codex_thread::lead_objective("scope-z");
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "lead",
+                &fire,
+                manifest,
+                Ok(Some(wrong_scope))
+            ),
+            GoalArbitration::Refusal(reason)
+                if reason.contains("conflicting goal truth")
+                    && reason.contains(crate::codex_thread::lead_objective("scope-a").as_str())
+        ));
         let conflicting_owner = format!("{manifest}continuation_owner: lead:scope-b\n");
         assert!(matches!(
             arbitrate_codex_continuation_from_reading(
@@ -1620,7 +1642,7 @@ mod tests {
             GoalArbitration::Delegated
         ));
         assert!(matches!(
-            arbitrate(truth("$fno:reign fno", "king:fno")),
+            arbitrate(truth("$fno:lead fno", "lead:fno")),
             GoalArbitration::Delegated
         ));
         assert!(matches!(

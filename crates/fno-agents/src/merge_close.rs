@@ -165,8 +165,10 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
 }
 
 /// The production runner: the bare sweep, cwd-free (the graph is one store).
+/// The native door, not the wheel: the Python verb is deleted, and the arm's
+/// JSON contract lives in the Rust arm now.
 fn run_reconcile() -> Result<String, String> {
-    let output = std::process::Command::new(crate::scrape::fno_py())
+    let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(["backlog", "reconcile", "--json"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -177,7 +179,12 @@ fn run_reconcile() -> Result<String, String> {
 /// Classify a run from its bytes. Exit 0 is the payload. Exit 4 is the
 /// verb's documented partial status: its JSON is already complete on stdout
 /// and holds the failures, so it is kept instead of discarded for the
-/// stderr tail. Anything else keeps only the last stderr line.
+/// stderr tail. Anything else keeps the stderr lines that diagnose it. The
+/// last line alone was a dead end: a Rust panic spends its first line on
+/// the location, its second on the message, and its last on the
+/// `RUST_BACKTRACE` hint, so the tick read "exit 101: note: run with..."
+/// and the diagnosis was thrown away. Carry the first two lines and the
+/// last; the hint is worth nothing without the panic above it.
 fn reconcile_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
     if code == Some(0) {
         return Ok(String::from_utf8_lossy(stdout).into_owned());
@@ -187,12 +194,18 @@ fn reconcile_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<S
     {
         return Ok(String::from_utf8_lossy(stdout).into_owned());
     }
-    let last = stderr
+    let lines: Vec<String> = stderr
         .split(|b| *b == b'\n')
-        .rfind(|l| !l.is_empty())
+        .filter(|l| !l.is_empty())
         .map(|l| String::from_utf8_lossy(l).into_owned())
-        .unwrap_or_default();
-    Err(format!("exit {}: {last}", code.unwrap_or(-1)))
+        .collect();
+    let mut keep: Vec<&str> = lines.iter().take(2).map(String::as_str).collect();
+    if let Some(last) = lines.last() {
+        if !keep.contains(&last.as_str()) {
+            keep.push(last);
+        }
+    }
+    Err(format!("exit {}: {}", code.unwrap_or(-1), keep.join(" | ")))
 }
 
 /// One pass of the arm body: the pause gate, then the run, then exactly one
@@ -420,8 +433,13 @@ mod tests {
         let got = reconcile_result(Some(4), stdout.as_bytes(), b"skipping\n");
         assert_eq!(got.unwrap(), stdout);
 
+        // A two-line stderr keeps head and tail; a panic's message lives on
+        // line two, and the last line is the backtrace hint.
         let got = reconcile_result(Some(4), b"", b"noise\nsync catch-up: gh unavailable\n");
-        assert_eq!(got.unwrap_err(), "exit 4: sync catch-up: gh unavailable");
+        assert_eq!(
+            got.unwrap_err(),
+            "exit 4: noise | sync catch-up: gh unavailable"
+        );
 
         // Only exit 4 is a partial; a crash keeps the stderr tail.
         let got = reconcile_result(Some(1), br#"{"closed": []}"#, b"boom\n");
@@ -429,6 +447,22 @@ mod tests {
 
         let got = reconcile_result(None, b"", b"");
         assert_eq!(got.unwrap_err(), "exit -1: ");
+
+        // The daemon arm's real panic bytes: the old last-line-only rule
+        // kept the hint and threw away the diagnosis.
+        let panic_stderr = b"thread 'main' panicked at src/backlog/drift_scan.rs:247:39:\n\
+             RefCell already borrowed\n\
+             stack backtrace:\n\
+             0: __rustc::rust_begin_unwind\n\
+             note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\n";
+        let got = reconcile_result(Some(101), b"", panic_stderr);
+        let err = got.unwrap_err();
+        assert!(
+            err.contains("RefCell already borrowed"),
+            "panic message lost: {err}"
+        );
+        assert!(err.contains("drift_scan.rs:247"), "panic site lost: {err}");
+        assert!(err.contains("RUST_BACKTRACE=full"), "hint line lost: {err}");
     }
 
     #[test]

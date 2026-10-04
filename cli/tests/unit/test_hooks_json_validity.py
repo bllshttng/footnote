@@ -21,13 +21,6 @@ HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 CODEX_HOOKS_JSON = REPO_ROOT / "hooks" / "codex-hooks.json"
 
 
-def test_hooks_json_is_valid_json() -> None:
-    """A malformed hooks.json means every hook silently no-ops at runtime."""
-    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-    assert "hooks" in data, "expected top-level 'hooks' key"
-
-
 def test_hooks_json_no_distill_references() -> None:
     """Phase 02 removed skills/distill/ and hooks/distill-task-signal.sh."""
     text = HOOKS_JSON.read_text(encoding="utf-8")
@@ -53,10 +46,21 @@ def test_hooks_json_no_distill_references() -> None:
 
 
 def test_hooks_json_command_paths_resolve() -> None:
-    """Every command: path under ${CLAUDE_PLUGIN_ROOT}/... must exist on disk."""
+    """Every declared module and plugin-rooted command path must exist on disk."""
     data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    assert "hooks" in data, "expected top-level 'hooks' key"
     placeholder = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT(:-[^}]*)?\}")
     failures: list[str] = []
+    modules = data.get("modules", [])
+    assert isinstance(modules, list), "expected top-level 'modules' to be a list"
+    for module in modules:
+        if not isinstance(module, str) or not module:
+            failures.append(f"invalid module path {module!r}")
+            continue
+        path = (HOOKS_JSON.parent / module).resolve()
+        if not path.is_file():
+            failures.append(f"missing module path {path}")
     for event, registrations in data.get("hooks", {}).items():
         for reg in registrations:
             for hook in reg.get("hooks", []):

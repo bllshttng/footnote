@@ -56,6 +56,7 @@ from typing import Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
+from fno.rust_binary import call_binary_json
 from fno.agents.naming import dispatch_agent_name
 from fno.harness_identity import env_marks_unattended, resolve_harness_identity
 from fno.provenance.resolver import resolve_transcript
@@ -1040,85 +1041,55 @@ def _stamp_forward(
 def on_node_born(
     node: dict,
     *,
-    project_root: Optional[Path] = None,
-    run_state: Optional[RunState] = None,
     graph_path: Optional[Path] = None,
-    persisted: bool = False,
-    quiet: bool = False,
 ) -> Optional[ThinkSpawnResult]:
-    """Single post-persist birth hook: every node-creation path routes here.
-
-    : this call never results in a real spawn (the module docstring's
-    "unforced birth" case) - the worst outcome is a durable ``think_offered``
-    event, never an unplanned worker. Callers do not need to reason about
-    presence or config here; that decision is centralized in
-    :func:`maybe_spawn_think`.
-
-    Before v2 only ``cmd_idea`` called :func:`maybe_spawn_think` inline, so a
-    retro-harvest / intake / decompose birth carried no why forward (the
- / gap). This wrapper gives every birth path the SAME gated,
-    bounded, non-fatal dispatch.
-
-    Three responsibilities the callers must NOT each re-implement:
-
-      * **Gate-first.** Resolve the gate before any other I/O so a default-OFF
-        install pays nothing (no graph re-read, no settings churn beyond the
-        single gate read).
-      * **Durable re-read.** ``store.ensure_slugs`` may re-slug a node inside
-        the store write lock, so the seed + worker name must read the node
-        back by id post-persist (Domain Pitfall: slug re-read after persist).
-        Falls back to the passed-in node when the re-read can't find it. A
-        caller that ALREADY holds the persisted, slugged node (decompose's
-        ``by_id`` map, intake's re-read) passes ``persisted=True`` to skip the
-        redundant read.
-      * **Strictly non-fatal.** Any failure here resolves to ``None`` and never
-        raises into the node-birth path that called it (additive, opt-in).
-
-    Bulk paths (decompose children, a retro batch) thread ONE ``run_state`` so
-    the blast-radius cap bounds the whole run, not each node.
-
-    ``project_root`` is honored as-given and is NOT auto-derived from the node's
-    cwd: ``maybe_spawn_think`` uses it for BOTH the settings gate AND presence
-    classification, and presence must key off the *originating* session's cwd
-    (where its ``target-state.md`` lives), which for a worktree-born node is the
-    running cwd, not the node's durable canonical cwd. Defaulting to the node
-    cwd would make an autonomous worktree session's away-manifest invisible and
-    misclassify it as attended (codex P2). Left as ``None`` it inherits
-    proven ambient behavior; a caller may still pass an explicit root to scope
-    the gate.
+    """Forward the unforced birth hook to its one native owner, the
+    `fno-agents backlog birth-hook` door. The ladder lives in
+    crates/fno-agents/src/backlog/birth.rs; law d-e11b2b3e: the live Python
+    twin is deleted (2026-10-03), the door is the seam. Strictly non-fatal: a
+    missing or failing binary answers None, and the worst case is a missing
+    ``think_offered`` event, never a broken birth path. The offer line and
+    offer/skip events land inside the door process; the return value is
+    informational.
     """
+    node_id = (node or {}).get("id")
     try:
-        node_id = (node or {}).get("id")
-
-        # Gate-first: off => zero further I/O (the slug re-read below is wasted
-        # work for the default-OFF install, which is every un-opted-in install).
-        if not node_id or not think_spawn_enabled(project_root=project_root):
+        # The gate is read twice: here (so a default-OFF install pays nothing)
+        # and inside the door, which re-resolves the same config/env ladder
+        # natively before any other I/O.
+        if not node_id or not think_spawn_enabled():
             return None
+        if graph_path is None:
+            from fno.paths import graph_json
 
-        if persisted:
-            durable = node
-        else:
-            # Guarded metadata read: the think-spawn dispatch reads the born
-            # node's footnote-minted fields (title/project/cwd pins), which no
-            # external backend carries; an external selection skips the spawn
-            # through the existing additive except below.
-            from fno.tracker.metadata import read_entries
-
-            if graph_path is not None:
-                from fno.graph.api import wire_rows
-
-                gp_entries: list[dict] = wire_rows(path=graph_path)
-            else:
-                gp_entries = read_entries("provenance.spawn_think")
-            # ponytail: linear scan per born node. Bounded by the
-            # blast cap (default 5) and gated OFF by default; callers holding the
-            # durable node already pass persisted=True to skip this.
-            durable = next(
-                (e for e in gp_entries if e.get("id") == node_id),
-                node,
+            graph_path = graph_json()
+        error, result = call_binary_json(
+            "backlog",
+            [
+                "birth-hook",
+                "--graph", str(graph_path),
+                "--node-id", str(node_id),
+                "--events-path", str(_events_path(None)),
+            ],
+        )
+        if error or not isinstance(result, dict):
+            return None
+        if result.get("kind") == "offered":
+            # The door's stderr offer line is captured (and dropped) by the
+            # door call; re-render it here so the operator still sees it.
+            print(
+                f"spawn_think: OFFER PENDING (nothing spawned). "
+                f"Ask {display_name()} whether to run `{result.get('offer_line')}` now, or skip.",
+                file=sys.stderr,
             )
-        return maybe_spawn_think(
-            durable, project_root=project_root, run_state=run_state, quiet=quiet
+        return ThinkSpawnResult(
+            decision=result.get("kind", "noop"),
+            event=result.get("event"),
+            reason=result.get("reason"),
+            node_id=result.get("node_id"),
+            presence=result.get("presence"),
+            resolved=result.get("resolved"),
+            offer_line=result.get("offer_line"),
         )
     except Exception as exc:  # noqa: BLE001 - additive; never wedge node birth
         _LOG.debug("on_node_born: non-fatal dispatch failure: %s", exc)
@@ -1340,6 +1311,14 @@ def maybe_spawn_think(
     if not node_id:
         return skip("no-node-id")
 
+    # 1b. An UNFORCED birth trigger must never dispatch a worker: a node born
+    #     while nobody is deciding gets one durable offer, never a bg /think.
+    #     That ladder is the native `fno-agents backlog birth-hook` door now
+    #     (crates/fno-agents/src/backlog/birth.rs); this guard keeps a direct
+    #     reason=birth call from falling through to the auto-spawn tail.
+    if reason == REASON_BIRTH and not chain_blueprint:
+        return skip("unforced-birth-native")
+
     # 2. Eligibility: bulk roadmap/vision intake is excluded (Locked Decision 6).
     if node.get("roadmap_id") or node.get("vision_path"):
         return skip("bulk-intake")
@@ -1405,21 +1384,14 @@ def maybe_spawn_think(
     #    the operator opted in via config.think_spawn.attended: spawn (AC4-HP, B).
     #    Default 'offer' is byte-for-byte.
     #
-    # an UNFORCED birth trigger (reason==birth, no explicit consent)
-    #    must never silently auto-spawn, in ANY presence and regardless of the
-    #    attended-mode config - a node born while the originating session
-    #    classifies as away previously fired a real bg /think with nobody
-    #    deciding that (the near-miss this closes: ~20 nodes filed in one
-    #    session with the gate armed, each three seconds from an unplanned
-    #    worker). `chain_blueprint=True` is the existing, already-tested signal
-    #    a caller uses to mark a REASON_BIRTH-tagged call as consented (the
-    #    decompose `needs_think`/wave0 fan-out forces it, alongside its own
-    #    env override); an organic on_node_born call never sets it, so this
-    #    check alone separates "nobody decided" from "a human/king flagged
-    #    this child for design."
-    unforced_birth = reason == REASON_BIRTH and not chain_blueprint
+    # The UNFORCED birth trigger (reason==birth, no consent) no longer runs
+    # through here: its ladder is the native `fno-agents backlog birth-hook`
+    # door (crates/fno-agents/src/backlog/birth.rs), which an organic birth
+    # reaches through on_node_born. `chain_blueprint=True` stays the signal a
+    # REASON_BIRTH-tagged call is consented (the decompose needs_think/wave0
+    # fan-out forces it, alongside its own env override).
     attended_offer = presence == "attended" and _attended_mode(project_root, env=environ) == "offer"
-    if unforced_birth or attended_offer:
+    if attended_offer:
         # quiet: a machine-mode caller (e.g. `decompose --json`) suppresses the
         # human-facing offer print so it can't pollute a captured JSON stream; the
         # durable EVENT_OFFERED below still fires, so the offer survives for

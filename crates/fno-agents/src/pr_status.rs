@@ -585,11 +585,17 @@ pub(crate) fn job_log<P: GhProbe>(
             }
         }
     }
+    let endpoint = format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
     let args = vec![
         "api".to_string(),
-        format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+        "--allow-escape-sequences".to_string(),
+        endpoint.clone(),
     ];
-    let (ok, stdout, stderr) = probe.run_gh(cwd, &args)?;
+    let (mut ok, mut stdout, mut stderr) = probe.run_gh(cwd, &args)?;
+    if !ok && stderr.to_lowercase().contains("unknown flag") {
+        let plain = vec!["api".to_string(), endpoint];
+        (ok, stdout, stderr) = probe.run_gh(cwd, &plain)?;
+    }
     if !ok {
         return Err(if stderr.trim().is_empty() {
             "gh error".to_string()

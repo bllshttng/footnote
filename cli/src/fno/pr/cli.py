@@ -44,9 +44,13 @@ def _select_pr_worktree(ctx: typer.Context) -> None:
         from fno.pr._review_hold import resolve_pr_worktree
 
         try:
-            os.chdir(resolve_pr_worktree(int(pr), os.getcwd()))
+            worktree = resolve_pr_worktree(int(pr), os.getcwd())
         except Exception as exc:
             raise typer.BadParameter(str(exc)) from exc
+        # "" = no local worktree on the PR branch: nothing to select, and the
+        # command's own checkout lists every worktree of the repo anyway.
+        if worktree:
+            os.chdir(worktree)
 
 
 class VerifyKind(str, enum.Enum):
@@ -715,7 +719,12 @@ def hold_check(
     """Refuse a PR whose bound plan ancestry carries an active or unreadable hold."""
     from fno.pr import _hold, _review_hold
 
-    reason = _hold.merge_hold_reason(pr_number, _review_hold.resolve_pr_worktree(pr_number, repo or os.getcwd()))
+    worktree = _review_hold.resolve_pr_worktree(pr_number, repo or os.getcwd())
+    # "" = no local worktree on the PR branch. The hold reader is
+    # graph-resident and runs from the caller's checkout (its cwd only
+    # resolves the canonical root), so an empty path hands it that checkout -
+    # a graph-bound hold still gates a PR that is not checked out here.
+    reason = _hold.merge_hold_reason(pr_number, worktree or repo or os.getcwd())
     if reason:
         typer.echo(reason, err=True)
         raise typer.Exit(code=3)

@@ -148,6 +148,13 @@
 #      level of each config dir (CLAUDE_CONFIG_DIR, else ~/.claude, plus the
 #      roster's isolated account roots). It removes only dead-pid temp files
 #      Claude Code itself created; footnote stores nothing there.
+#      setup_autowire.rs belongs here for the same site integration.py is
+#      listed for: its claude skills-dir fallback probes and clones the
+#      plugin drop into Claude Code's OWN ~/.claude/skills/fno, where
+#      Claude Code loads it as fno@skills-dir - the harness's plugin store,
+#      not footnote state (the Rust leg of the wizard adapter,
+#      dual-implementation-inventory 2026-10-02). Its test builds the same
+#      tree under temp_dir as a fixture and asserts on that.
 #      claude-config-write-guard.sh is the PreToolUse write guard for the
 #      same dir: the config dir IS the thing being guarded, so every token
 #      it matches (the ambient root, CLAUDE_CONFIG_DIR, the regex-quoted
@@ -317,6 +324,8 @@ cli/src/fno/setup_cli.py
 cli/src/fno/setup/cli_hooks.py
 cli/src/fno/setup/doctor.py
 cli/src/fno/setup/integration.py
+crates/fno/src/setup_autowire.rs
+crates/fno/src/setup_autowire_tests.rs
 cli/src/fno/setup/recommended_rules.py
 cli/src/fno/setup/test_recommended_rules.py
 cli/src/fno/target_cli.py

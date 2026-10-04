@@ -49,6 +49,7 @@ pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
 pub(crate) mod adopt_carry;
+pub(crate) mod adopt_identity;
 mod agent_lock;
 pub mod agents_config;
 pub(crate) mod agents_event;
@@ -84,6 +85,7 @@ pub mod cargo_build_dirs;
 pub mod census;
 pub mod chats;
 pub mod check_supersession;
+pub mod claim_cli;
 pub mod claim_lanes_cli;
 pub mod claim_queue;
 pub mod claim_store;
@@ -122,6 +124,7 @@ pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
+pub mod codex_watch;
 pub mod compaction;
 mod completion_output;
 pub mod component_update;
@@ -198,10 +201,25 @@ pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
 pub mod intel_insights;
+pub mod intel_rollup;
 pub mod interrupt_classify;
 pub mod json_output;
 pub(crate) mod keeper_revival;
 pub mod kill_criteria;
+pub mod lead_answers;
+pub mod lead_board;
+pub mod lead_checkin;
+pub mod lead_checkin_blueprint;
+pub mod lead_checkin_lineup;
+pub mod lead_checkin_machine;
+pub mod lead_escalation;
+pub mod lead_history;
+pub mod lead_ledger;
+pub mod lead_mail;
+pub mod lead_settle;
+pub mod lead_term;
+pub mod lead_termination;
+pub mod lead_verdict_inputs;
 pub mod lane_heal;
 pub mod lanes;
 pub mod launch_workdir;
@@ -245,6 +263,7 @@ pub mod mail_envelope;
 pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod mail_threads;
 pub mod main_ci;
 pub mod main_ci_proof;
 pub mod manifest;
@@ -349,6 +368,7 @@ pub mod resume_wake;
 pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod revival_check;
 pub mod revive_proof;
 pub mod rm_receipt;
 pub mod rm_tombstone;
@@ -376,6 +396,7 @@ pub(crate) mod served_liveness;
 pub mod session_activity;
 pub mod session_backfill;
 pub mod session_cost;
+pub mod session_join;
 pub mod session_names_fold;
 pub mod session_report;
 pub mod session_start_bytes;
@@ -425,6 +446,7 @@ pub mod team_settle;
 pub mod team_split;
 pub mod team_widen;
 pub mod terminal_stop;
+pub mod terminal_vocab;
 pub mod territory;
 pub mod test_delta;
 pub mod test_hold;
@@ -716,6 +738,38 @@ pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
     PATH_TEST_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Point `FNO_AGENTS_HOME` at `path` for the rest of the scope. Serialized by
+/// [`crate::claims::test_env_lock`], so every test that resolves the agents
+/// home shares one lane, and the previous value is restored on drop, panic
+/// included.
+#[cfg(test)]
+pub(crate) struct AgentsHomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl AgentsHomeEnvGuard {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", path);
+        Self { previous, _lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AgentsHomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+    }
 }
 
 /// The process `PATH` with `dir` in front. PREPEND, never replace: PATH is
@@ -1396,6 +1450,10 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // Reconcile's post-close emits (the Python twins declared both in
+    // events/schema.yaml; session_satisfied carries the pr_merge data source).
+    "session_satisfied",
+    "human_touch",
     // The pr-watch sweep flipped an open fno-bound draft PR back to ready
     // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
     "pr_watch_draft_flip",
@@ -1415,6 +1473,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // A launch the spawn gate or the dispatch door refused before any
     // worker existed; the feed projects it so a refused launch shows.
     "agent_spawn_refused",
+    // A reaped session came back (client-emitted): one event per revive
+    // naming the verb, the actor session, the prior name and the session id.
+    "agent_revived",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
@@ -1430,6 +1491,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",
     "agent_exited",
+    // The sweep's observed lifecycle word for an owned row: one row per
+    // applied status transition (exit or restart) with its evidence cause
+    // (ruling d-e096c669), so an exit or a restart is never silent again.
+    "row_lifecycle_observed",
     "agent_removed",
     // Served facts (daemon-emitted): the sweep is the only writer of the
     // registry's measured surfaces, so each of these announces a change that

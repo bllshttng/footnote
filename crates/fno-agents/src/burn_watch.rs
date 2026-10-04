@@ -1461,6 +1461,7 @@ mod tests {
             event_id: "watch-1".into(),
             seq: 1,
             session_id: "s-1".into(),
+            pr: None,
             node: "x-1".into(),
             blocker: "local".into(),
             task_id: Some("task-7".into()),

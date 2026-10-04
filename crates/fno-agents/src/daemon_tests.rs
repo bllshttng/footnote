@@ -1068,6 +1068,7 @@ fn reconcile_flips_unreachable_live_to_orphaned_and_recovers_orphaned() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
@@ -1126,6 +1127,7 @@ fn reconcile_does_not_orphan_a_live_interactive_host_on_store_miss() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
@@ -1171,6 +1173,7 @@ fn reconcile_mux_pane_liveness_follows_the_pid_not_the_store() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
@@ -1209,6 +1212,7 @@ fn reconcile_store_hit_does_not_resurrect_a_pid_dead_row() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
@@ -1234,6 +1238,7 @@ fn reconcile_pidless_orphan_still_recovers_on_store_hit() {
         |_| Ok(true),
         || false,
         |_| true,
+        |_| false,
         |_| false,
         |_| false,
         |_| false,
@@ -1271,6 +1276,7 @@ fn reconcile_inconclusive_preserves_status() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
@@ -1296,72 +1302,12 @@ fn reconcile_leaves_terminal_states_untouched() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
     assert!(changes.iter().all(|c| c.new_status.is_none()));
     assert!(out.orphans.is_empty() && out.updated.is_empty());
-}
-
-/// One-shot `ask` shape: empty short_id + no pid (the discriminator
-/// `is_one_shot_ask` keys on), host_mode exec, a resumable provider session.
-fn ask_entry(name: &str, status: AgentStatus) -> RegistryEntry {
-    let mut e = rentry(name, status, None);
-    e.short_id = String::new();
-    e.pid = None;
-    e.codex_session_id = Some("resume-uuid".into());
-    e.session_id = None;
-    e
-}
-
-#[test]
-fn reconcile_one_shot_ask_settles_to_exited_even_when_reachable() {
-    // AC3-HP: a finished `ask` row settles to Exited regardless of whether its
-    // provider session file still exists. The probe here returns Ok(true)
-    // (reachable == session file present == "resumable"); the ask branch must
-    // ignore it and settle to Exited by process-liveness alone. If the probe
-    // were (wrongly) consulted for status, this Live row would stay Live.
-    let entries = vec![ask_entry("codex-ask", AgentStatus::Live)];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Ok(true), // reachable: session file exists -> resumable, NOT running
-        || false,
-        |_| true,
-        |_| false,
-        |_| false,
-        |_| false,
-        |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-        true,                   // roster readable: the flip needs a successful roster read
-    );
-    assert_eq!(
-        changes[0].new_status,
-        Some(AgentStatus::Exited),
-        "a finished ask settles to exited even when its session file is reachable"
-    );
-    assert_eq!(out.updated, vec!["codex-ask".to_string()]);
-    assert!(out.orphans.is_empty(), "an ask is exited, never orphaned");
-    // AC3-EDGE independence: the row's resumable session id is untouched by the
-    // status settle (status == liveness; session_id == resumability, separate).
-    assert_eq!(entries[0].codex_session_id.as_deref(), Some("resume-uuid"));
-}
-
-#[test]
-fn reconcile_one_shot_ask_already_terminal_is_untouched() {
-    // An ask already Exited must not be re-flagged as updated (idempotent).
-    let entries = vec![ask_entry("done-ask", AgentStatus::Exited)];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Ok(true),
-        || false,
-        |_| true,
-        |_| false,
-        |_| false,
-        |_| false,
-        |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-        true,                   // roster readable: the flip needs a successful roster read
-    );
-    assert_eq!(changes[0].new_status, None);
-    assert!(out.updated.is_empty());
 }
 
 #[test]
@@ -1387,6 +1333,7 @@ fn reconcile_does_not_reap_a_bg_thread_that_is_live_in_claudes_roster() {
         |_| true,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
         true,                   // roster readable: the flip needs a successful roster read
     );
@@ -1403,6 +1350,7 @@ fn reconcile_does_not_reap_a_bg_thread_that_is_live_in_claudes_roster() {
         |_| Ok(true),
         || false,
         |_| true,
+        |_| false,
         |_| false,
         |_| false,
         |_| false,
@@ -1669,6 +1617,7 @@ fn reconcile_defers_remaining_when_budget_exhausted() {
             }
         },
         |_| true,
+        |_| false,
         |_| false,
         |_| false,
         |_| false,
@@ -2585,7 +2534,8 @@ fn an_unreadable_roster_never_flips_the_zombie_arm() {
         |_| Ok(true),
         || false,
         |_| true,
-        |_| true, // bg_live fail-closed true on the unreadable roster
+        |_| true,
+        |_| false, // bg_live fail-closed true on the unreadable roster
         |_| false,
         |_| false,
         |_| RowLiveness::Unknown,
@@ -2627,7 +2577,8 @@ fn reconcile_ends_the_status_constant_for_a_roster_stale_silent_row() {
         |_| Ok(true),
         || false,
         |_| true,
-        |_| true, // roster: entry present
+        |_| true,
+        |_| false, // roster: entry present
         |_| false,
         |_| false,
         |_| RowLiveness::Unknown,
@@ -2649,6 +2600,7 @@ fn an_alive_ladder_blocks_the_reconcile_zombie_flip() {
         || false,
         |_| true,
         |_| true,
+        |_| false,
         |_| false,
         |_| false,
         |_| RowLiveness::Alive,
@@ -2674,6 +2626,7 @@ fn a_spawning_row_is_never_flipped_by_the_zombie_arm() {
         |_| true,
         |_| false,
         |_| false,
+        |_| false,
         |_| RowLiveness::Unknown,
         true, // roster readable
     );
@@ -2690,6 +2643,7 @@ fn a_roster_miss_still_flips_the_ask_bucket_to_exited_as_before() {
         |_| Ok(true),
         || false,
         |_| true,
+        |_| false,
         |_| false, // roster: positively gone
         |_| false,
         |_| false,

@@ -2,18 +2,28 @@
 //!
 //! The breaker's doors stop NEW test runs; this module reaches the ones
 //! already running. While the machine-wide record holds `tests`, every cargo
-//! test, nextest and pytest run under a live registry row gets SIGSTOP with
-//! its whole process subtree, and the paused incarnations are recorded in
-//! `agents/test-pause.json`. When the hold lifts, exactly those incarnations
-//! get SIGCONT and the file goes. The first pass of a hold announces it on
-//! the bus; the lift announces the all-clear under the same subject, so the
-//! all-clear supersedes the standing hold line.
+//! test, nextest and pytest run under a live registry row is killed
+//! (SIGKILL) with its whole process subtree. A hold must not pause a run:
+//! a SIGSTOPped cargo stays alive, so the pid-anchored claims it holds
+//! (`build:cargo`, its `test:cargo-run:N` slot) stay Live and every build
+//! queues behind a run that cannot progress (two paused runs once held
+//! all three for 2.5h and the canonical fno update stalled behind them).
+//! Tests are CI-gated (changed-file runs locally, the whole suite on every
+//! PR), so a held run ends instead of waiting. The first pass of a hold
+//! announces it on the bus; the lift
+//! announces the all-clear under the same subject, so the all-clear
+//! supersedes the standing hold line.
+//!
+//! `agents/test-pause.json` keeps recording what an OLDER build paused, and
+//! a lift still SIGCONTs exactly those incarnations, so a hold armed before
+//! an upgrade resumes cleanly. Kills need no resume record.
 //!
 //! [`reconcile`] is idempotent and is the one entry. The incident verb runs
 //! it after every machine-wide transition, and the daemon's machine tick
-//! runs it every interval, so an expired TTL still resumes the paused
-//! processes and a bare pytest started mid-hold (no door gates it) pauses at
-//! the next tick. An unreadable breaker changes nothing in either direction.
+//! runs it every interval, so an expired TTL still resumes what an older
+//! build paused and a bare pytest started mid-hold (no door gates it) ends
+//! at the next tick. An unreadable breaker changes nothing in either
+//! direction.
 //!
 //! Registry rows are the fleet: spawn writes the row, so a test under one is
 //! a test a fleet worker started. The user's own terminal is never a row.
@@ -43,6 +53,7 @@ struct PauseState {
 pub struct Outcome {
     pub paused: usize,
     pub resumed: usize,
+    pub killed: usize,
     pub announced: Option<String>,
     pub announce_error: Option<String>,
 }
@@ -51,12 +62,16 @@ impl Outcome {
     pub fn line(&self) -> Option<String> {
         if self.paused == 0
             && self.resumed == 0
+            && self.killed == 0
             && self.announced.is_none()
             && self.announce_error.is_none()
         {
             return None;
         }
-        let mut line = format!("tests: paused {}, resumed {}", self.paused, self.resumed);
+        let mut line = format!(
+            "tests: paused {}, resumed {}, killed {}",
+            self.paused, self.resumed, self.killed
+        );
         match (&self.announced, &self.announce_error) {
             (Some(id), _) => line.push_str(&format!("; announced {id}")),
             (None, Some(error)) => line.push_str(&format!("; announcement failed: {error}")),
@@ -171,6 +186,74 @@ fn signal(pid: u32, sig: libc::c_int) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
 }
 
+/// True when the pid still is the incarnation the scan picked: the same
+/// birth token it carried then. A pid that exited and was reused must never
+/// be signaled.
+fn same_incarnation(pid: u32, birth: u64) -> bool {
+    crate::daemon::process_start_time(pid) == Some(birth)
+}
+
+/// End one picked run, birth-verified. SIGKILL, not SIGSTOP: a stopped pid
+/// stays alive and every pid-anchored claim it holds reads Live, so builds
+/// queue behind a run that cannot progress until the TTL lifts. SIGKILL
+/// lands on a stopped process and frees the claims at once.
+///
+/// A run that leads its own process group (every run the test-run wrapper
+/// spawned does) takes the group kill, which reaches a compile forked after
+/// the scan: an orphaned child reparents to ppid 1 and the fleet walk stops
+/// there, so a per-pid kill would leave it compiling. Any other run is
+/// frozen first so it forks nothing new, its live descendants are read and
+/// killed, then the run itself; the stop is transient and never resumed.
+fn end_run(pid: u32, birth: u64) -> bool {
+    if !same_incarnation(pid, birth) {
+        return false;
+    }
+    let group_leader =
+        unsafe { libc::getpgid(pid as libc::pid_t) } == pid as libc::pid_t && pid > 1;
+    if group_leader && unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+        return true;
+    }
+    // Freeze before the second read so the subtree closes under us.
+    signal(pid, libc::SIGSTOP);
+    let mut ended = false;
+    for child in frozen_descendants(pid) {
+        // A birth read beside the signal is the liveness proof: a pid that
+        // already exited reads no start time and is skipped.
+        if crate::daemon::process_start_time(child).is_none() {
+            continue;
+        }
+        if signal(child, libc::SIGKILL) {
+            ended = true;
+        }
+    }
+    if signal(pid, libc::SIGKILL) {
+        ended = true;
+    }
+    ended
+}
+
+/// Every live pid under `pid` right now: one fresh table read, the frozen
+/// root's post-scan forks included. Zombies are skipped: a signal to one is
+/// a no-op and its parent reaps it.
+fn frozen_descendants(pid: u32) -> Vec<u32> {
+    let (table, _) = crate::census::process_table();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for row in &table {
+        children.entry(row.ppid).or_default().push(row.pid);
+    }
+    let mut found = Vec::new();
+    let mut stack = vec![pid];
+    while let Some(current) = stack.pop() {
+        for kid in children.get(&current).into_iter().flatten() {
+            if table.iter().any(|r| r.pid == *kid && r.state != 'Z') {
+                found.push(*kid);
+                stack.push(*kid);
+            }
+        }
+    }
+    found
+}
+
 fn read_state(path: &Path) -> Option<PauseState> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -190,8 +273,8 @@ fn announce(outcome: &mut Outcome, body: &str) {
     }
 }
 
-/// Make the running tests follow the machine-wide record: paused while it
-/// holds `tests`, resumed once it does not.
+/// Make the running tests follow the machine-wide record: killed while it
+/// holds `tests`, resumed once it does not (only what an older build paused).
 pub fn reconcile(home: &AgentsHome) -> Result<Outcome, String> {
     let path = home.test_pause_json();
     let lock_path = path.with_extension("json.lock");
@@ -254,12 +337,14 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
         }
         for pid in fresh {
             done.insert(pid);
+            // The scan-time birth token travels with the pid: end_run
+            // re-proves it before every signal, so a pid reused in between
+            // is never touched.
             let Some(birth) = crate::daemon::process_start_time(pid) else {
                 continue;
             };
-            if signal(pid, libc::SIGSTOP) {
-                state.paused.push((pid, birth));
-                outcome.paused += 1;
+            if end_run(pid, birth) {
+                outcome.killed += 1;
             }
         }
     }
@@ -268,7 +353,7 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
         // stop names who held the tests and why.
         let lead = if record.changed_by == fleet_incident::MACHINE_ORIGIN {
             format!(
-                "{}. Tests are paused until it cools down. New workers pause too if it stays this busy.",
+                "{}. Running fleet tests end now (CI covers them) until it cools down. New workers pause too if it stays this busy.",
                 record.reason
             )
         } else {
@@ -288,7 +373,7 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
 }
 
 /// The machine arm's first move on a runaway: arm a `tests`-only stop that
-/// expires after `ttl_secs` and pause the running tests. `Ok(None)` when a
+/// expires after `ttl_secs` and end the running tests. `Ok(None)` when a
 /// stop is already armed or unreadable; the arm then brakes spawns as before.
 pub fn hold_for_runaway(
     home: &AgentsHome,
@@ -313,8 +398,8 @@ pub fn hold_for_runaway(
     )?;
     let outcome = reconcile(home)?;
     Ok(Some(format!(
-        "tests held first (generation {}, {} paused)",
-        record.generation, outcome.paused
+        "tests held first (generation {}, {} ended)",
+        record.generation, outcome.killed
     )))
 }
 
@@ -323,8 +408,17 @@ mod tests {
     use super::*;
     use crate::census::test_proc_row as row;
 
+    /// A held fleet test run ends (SIGKILL, not SIGSTOP) within one
+    /// reconcile pass, and the pid-anchored claims it held (`build:cargo`,
+    /// a run slot) admit a waiting build at once. The selection matrix the
+    /// hold kills on (root detection, subtree, spare) travels with it: one
+    /// end-to-end pass over the surface, nothing unguarded.
     #[test]
-    fn a_hold_pauses_fleet_test_subtrees_and_spares_the_rest() {
+    fn a_hold_ends_fleet_test_subtrees_and_frees_their_claims() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // The selection matrix the kill runs on: root detection, whole
+        // subtree, the spare set.
         assert!(is_test_root("/Users/u/.cargo/bin/cargo test -p fno-agents"));
         assert!(is_test_root("cargo +nightly nextest run"));
         assert!(is_test_root("/venv/bin/python3 /venv/bin/pytest cli/tests"));
@@ -346,5 +440,119 @@ mod tests {
         assert_eq!(pick(&table, &fleet, &HashSet::new()), vec![12, 13, 14, 30]);
         let spare: HashSet<u32> = [30].into();
         assert_eq!(pick(&table, &fleet, &spare), vec![12, 13, 14]);
+
+        let root = std::env::temp_dir().join(format!("fno-test-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        // A real binary named `cargo` that naps. A shebang script will not
+        // do: the process table shows the interpreter's argv (`/bin/sh
+        // <path>/cargo test ...`), which `is_test_root` never matches.
+        let shim = root.join("bin/cargo");
+        let source = root.join("bin/shim.rs");
+        std::fs::write(
+            &source,
+            "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+        )
+        .unwrap();
+        let built = std::process::Command::new("rustc")
+            .arg("-o")
+            .arg(&shim)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "rustc failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let mut child = std::process::Command::new(&shim)
+            .args(["test", "-p", "held-crate"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+
+        let _home = crate::AgentsHomeEnvGuard::set(&root);
+        let home = crate::paths::AgentsHome::from_env();
+        let mut visible = false;
+        for _ in 0..50 {
+            let (table, _) = crate::census::process_table();
+            if table
+                .iter()
+                .any(|r| r.pid == pid && is_test_root(&r.command))
+            {
+                visible = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(visible, "the shim never surfaced as a fleet test root");
+
+        let mut entry = crate::state::RegistryEntry::default();
+        entry.name = "held-run-worker".into();
+        entry.status = crate::AgentStatus::Busy;
+        entry.pid = Some(pid);
+        entry.pid_start_time = crate::daemon::process_start_time(pid);
+        entry.harness_session_id = Some("held-run-sess".into());
+        crate::state::update_registry(&home.registry_json(), |r| r.entries.push(entry)).unwrap();
+
+        crate::fleet_incident::write_transition_with_metadata(
+            &fleet_incident::fleet_stop_path(&home),
+            "stopped",
+            Some("machine overloaded"),
+            Some(fleet_incident::MACHINE_ORIGIN),
+            vec!["tests".to_string()],
+            fleet_incident::RecordMetadata {
+                origin: Some(fleet_incident::MACHINE_ORIGIN.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // The run's slots, anchored to its pid exactly as the admission
+        // doors write them.
+        let holder = format!("cargo:{}:{}", pid, root.display());
+        let opts = |reason: &'static str| crate::claims::AcquireOpts {
+            pid: Some(pid),
+            reason: Some(reason.into()),
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            crate::claims::acquire("build:cargo", &holder, opts("held build")),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert!(matches!(
+            crate::claims::acquire("test:cargo-run:0", &holder, opts("held slot")),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+
+        let outcome = reconcile(&home).unwrap();
+        assert_eq!(outcome.paused, 0, "a hold must never pause: {outcome:?}");
+        let status = child.wait().unwrap();
+        // This pass or the machine's own watcher may have ended the run; the
+        // contract under test is that a held run ends by SIGKILL and its
+        // slots free, not which process delivered the signal.
+        assert!(
+            outcome.killed >= 1 || status.signal() == Some(libc::SIGKILL),
+            "the hold must end the run: {outcome:?} status {status:?}"
+        );
+
+        // The reaped pid frees its no-TTL claims: a waiting build admits at
+        // once instead of queueing behind the corpse.
+        for key in ["build:cargo", "test:cargo-run:0"] {
+            let mut next = opts("waiting build");
+            next.pid = Some(std::process::id());
+            assert!(
+                matches!(
+                    crate::claims::acquire(key, "cargo:next", next),
+                    crate::claims::AcquireOutcome::Acquired(_)
+                ),
+                "{key} did not free within one tick"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

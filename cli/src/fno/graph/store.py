@@ -884,18 +884,14 @@ def request_scoreboard_classify(
     since_days: int | None = None,
 ) -> dict:
     """The delivery classifier (scoreboard.rs) over client-shipped rows.
-    Terminal vocabulary stays Python's (fno.terminals); ``now`` rides as ISO.
-    ``since_days`` only feeds the flow section; the decision is window-free."""
-    from fno.terminals import DELIVERED_TERMINALS
-
+    The terminal vocabulary is the classifier's own exhaustive match;
+    ``now`` rides as ISO. ``since_days`` only feeds the flow section; the
+    decision is window-free."""
     return _client_for(GRAPH_JSON).request(
         "scoreboard_classify",
         {
             "entries": entries,
             "rows": rows,
-            "doc_terminals": ["DoneAdvisory"],
-            "delivery_terminals": ["DoneDelivery"],
-            "ship_terminals": sorted(DELIVERED_TERMINALS - {"DoneAdvisory", "DoneDelivery"}),
             "project": project,
             "now": now.isoformat() if now is not None else None,
             "since_days": since_days,

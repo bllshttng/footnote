@@ -7,51 +7,41 @@ description: Cancel an active target pipeline
 
 Cancels a target pipeline. Behavior depends on whether a state file exists:
 
-- **Live session (`target-state.md` present):** assert the `.target-cancelled`
-  signal and let the stop hook author `status: BLOCKED` on the next stop. This
-  is the sanctioned cancel path (`has_external_cancel_signal` in
-  `scripts/lib/cancel-signal.sh`) and is independent of the transcript-id match
-  and the "latest user turn" check, so it works whether a human types the
-  command or the assistant invokes the skill. The state file is NOT removed:
-  removing it re-arms the orphan detector (the transcript permanently records
-  the `/fno:target` invocation), which re-blocks exit on every stop.
-  Leaving it lets the hook write `BLOCKED` as a durable terminal record
-  (postmortem + ledger + the backlog node returning to `ready`); the next
-  `fno do target init` archives that terminal state cleanly.
+- **Live session (manifest present):** assert the `.target-cancelled` signal and let the stop hook author `status: BLOCKED` on the next stop. This is the sanctioned cancel path. The reader is `check_cancel_sentinel` in `crates/fno-agents/src/cancel_sentinel.rs`. It is independent of the transcript-id match and the "latest user turn" check. A human typing the command and an assistant invoking the skill both work. The state file is NOT removed. Removing it re-arms the orphan detector, and the transcript permanently records the `/fno:target` invocation. That re-blocks exit on every stop. Leaving it lets the hook write `BLOCKED` as a durable terminal record. That record carries the postmortem, the ledger entry, and the backlog node returning to `ready`. The next `fno do target init` archives that terminal state cleanly.
 
   The `ready` return is the claim's doing. The cancel terminal releases the run's `node:<id>` claim. That release closes the `execute` row that was pinning the status.
 
-- **Orphan (no state file):** the session was driven off-ceremony (init
-  skipped) or a prior cancel removed the file. Clearing the orphan block
-  requires a genuine human-typed `/fno:target cancel` (the anti-forgery
-  factor the assistant cannot satisfy by invoking this skill itself). The skill
-  writes a session-keyed tombstone so a human's command is honored; the
-  orphan block is bounded (it self-terminates after a few stops and records the
-  bypass) so an unattended loop cannot burn credits indefinitely.
+- **Orphan (no manifest):** the session was driven off-ceremony (init skipped) or a prior cancel removed the manifest. Clearing the orphan block requires a genuine human-typed `/fno:target cancel`. That human input is the anti-forgery factor an assistant cannot satisfy by invoking this skill itself. The skill writes a session-keyed tombstone so a human's command is honored. The orphan block is bounded and records the bypass. It self-terminates after a few stops, so an unattended loop cannot burn credits indefinitely.
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
 STATE_DIR="$REPO_ROOT/.fno"
-STATE_FILE="$STATE_DIR/target-state.md"
+# The manifest resolves through the one-owner path verb (state_path.rs):
+# the live manifest sits in the repo's space dir, not at <repo>/.fno/, and
+# only the verb's fallback leg still names the checkout path. Guessing
+# <repo>/.fno/target-state.md here sent every worktree session's cancel down
+# the orphan branch. When fno-agents is absent entirely, the checkout path
+# is the honest guess.
+MANIFEST="$(fno-agents state path target-state 2>/dev/null || echo "$STATE_DIR/target-state.md")"
 SENTINEL="$STATE_DIR/.target-cancelled"
 TOMBSTONE="$STATE_DIR/.target-cancelled-final"
 
-if [[ -f "$STATE_FILE" ]]; then
+if [[ -f "$MANIFEST" ]]; then
   echo "Current target state:"
-  grep -E "^(status|current_phase|iteration):" "$STATE_FILE" || true
+  grep -E "^(status|current_phase|iteration):" "$MANIFEST" || true
   echo ""
   # Only an IN_PROGRESS session is cancellable. The hook's cancel writer runs
   # BEFORE the terminal-state case and rewrites any non-BLOCKED status to
   # BLOCKED, so touching the sentinel on a COMPLETE/ABORTED session would
   # downgrade a finished run and re-run its claim/backlog handling as a cancel
   # (Codex P2 on PR #391). Gate on status, not mere file existence.
-  _cs_status=$(grep -E '^status:' "$STATE_FILE" | head -1 \
+  _cs_status=$(grep -E '^status:' "$MANIFEST" | head -1 \
     | sed -e 's/^status:[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")
   if [[ "$_cs_status" != "IN_PROGRESS" ]]; then
     echo "Target session is already '${_cs_status:-unknown}' (terminal) - nothing to cancel."
   else
-    # Assert the sanctioned cancel signal. has_external_cancel_signal() honors a
-    # .target-cancelled whose mtime is at or after the state file's created_at.
+    # Assert the sanctioned cancel signal. check_cancel_sentinel honors a
+    # .target-cancelled whose mtime is at or after the manifest's created_at.
     # The hook then writes status: BLOCKED itself and exits cleanly on the next
     # stop. We deliberately keep the state file. The payload names the author
     # and reason so the resulting Interrupted line explains the cancel; a bare
@@ -68,7 +58,7 @@ if [[ -f "$STATE_FILE" ]]; then
     echo "  The stop hook will write status: BLOCKED and exit on the next stop."
   fi
 else
-  # No state file: orphan / off-ceremony session. Write the session-keyed
+  # No manifest: orphan / off-ceremony session. Write the session-keyed
   # tombstone so that, when a HUMAN types /fno:target cancel, the orphan
   # detector honors it (the assistant invoking this skill cannot self-clear an
   # orphan - that is the anti-forgery factor). Key the tombstone to
@@ -98,7 +88,7 @@ else
 fi
 ```
 
-On the next stop, for a live session the hook reads `.target-cancelled` via `has_external_cancel_signal`, writes `status: BLOCKED`, generates a postmortem, returns the backlog node to `ready`, and allows a clean exit.
+On the next stop, for a live session the hook reads `.target-cancelled` via `check_cancel_sentinel`. It writes `status: BLOCKED`, generates a postmortem, and returns the backlog node to `ready`. Then it allows a clean exit.
 
 The `Interrupted` finalize releases the run's `node:<id>` claim with `--stamp-do`. The release closes the `do` row that was pinning the status.
 

@@ -406,6 +406,7 @@ pub(crate) struct BusRow {
 /// (or the `FNO_BUS_DIR` override, the one path bus readers share). An
 /// unreadable or absent bus is an empty index: the join then matches nothing
 /// and every row falls through to the text rules, which is today's behavior.
+#[derive(Clone)]
 pub(crate) struct BusIndex {
     rows: Vec<BusRow>,
 }
@@ -544,6 +545,13 @@ pub(crate) trait TranscriptSource {
     /// parser returns `None`, and its report fields read null, never 0.
     fn activity(&self, _raw: &str) -> Option<crate::session_activity::Activity> {
         None
+    }
+
+    /// Whether this source's token counts are one running total (a codex
+    /// token_count row replaces the previous total) instead of a per-pass
+    /// sum a rollup merges additively.
+    fn tokens_cumulative(&self) -> bool {
+        false
     }
 }
 
@@ -870,6 +878,10 @@ impl TranscriptSource for CodexSource {
     fn activity(&self, raw: &str) -> Option<crate::session_activity::Activity> {
         Some(crate::session_activity::codex_activity(raw))
     }
+
+    fn tokens_cumulative(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -922,6 +934,12 @@ mod tests {
         assert_eq!(classify("   "), Err("no_user_text"));
         // Header-framed and held-release turns read injected too.
         assert_eq!(classify("`@folio · msg-1 · hi`\nthe body"), Err("fno_mail"));
+        // The transcript's one-line delivered form (header, " ⏎ ", body)
+        // reads injected too.
+        assert_eq!(
+            classify("`@folio · fmail-abc123def456 · hi` ⏎ the body"),
+            Err("fno_mail")
+        );
         assert_eq!(
             classify("2 held messages · sent 17:24 to 18:23 · held 9m\n`@a · msg-1 · hi`"),
             Err("fno_mail")

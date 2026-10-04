@@ -1,0 +1,4 @@
+Usage: fno agents claim acquire [OPTIONS] [key]
+Try 'fno agents claim acquire --help' for help.
+
+Error: Invalid value: --metadata must be a JSON object

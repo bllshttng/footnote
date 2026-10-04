@@ -58,6 +58,7 @@ use crate::spawn_journal::{
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::{SquadSnapshot, StoredTabTree};
 
+use self::client_input::PaneInputRequest;
 use self::slot_capture::SlotCapture;
 use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
@@ -67,17 +68,20 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 pub(crate) mod agent_launch;
 mod agent_rows_join;
+mod client_input;
 mod client_read;
 mod drift_retire;
 mod grid_reconcile;
 mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
+mod open_link;
 mod pane_close;
 mod pane_identity;
 mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
+mod portal_journal;
 mod portal_reach;
 mod restore_route_gate;
 mod resume_argv;
@@ -571,6 +575,7 @@ pub(crate) enum CoreMsg {
         id: u64,
         bytes: Vec<u8>,
     },
+    PaneInput(PaneInputRequest),
     Resize {
         id: u64,
         rows: u16,
@@ -9133,27 +9138,6 @@ impl Core {
         }
     }
 
-    /// Ship a clicked URL to the client that clicked it, mirroring
-    /// [`Self::send_copy`]: only the requesting client, over the reliable
-    /// channel. Re-checks the scheme allowlist so a future caller cannot reach
-    /// the client's opener with an unvetted URL - `link_at` already filters, and
-    /// this is the second lock on the same door.
-    fn send_open_link(&mut self, client_id: u64, url: String) {
-        if !(crate::link::is_openable(&url) || crate::link::is_sender_uri(&url)) {
-            return;
-        }
-        let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
-            return;
-        };
-        if c.reliable_tx.try_send(ServerMsg::OpenLink { url }).is_err() {
-            eprintln!(
-                "fno mux: client {client_id} reliable channel wedged on OpenLink; dropping it"
-            );
-            self.clients.retain(|c| c.id != client_id);
-            self.push_layout(true);
-        }
-    }
-
     /// (v56, hover affordance) One link-span lookup for the requesting client
     /// only: resolve the link under pane-local `(row, col)` and reply with its
     /// visible cells. The guards mirror the click path's ownership rule: the
@@ -10467,19 +10451,17 @@ impl Core {
                     // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
                     // and resurfaces watch-only (external-lifecycle - viewport moved, nothing killed).
                     self.reap_pane(focus);
-                    // An explicit open-here onto a portal seat
-                    // repurposed its geometry for an ordinary attach: that
-                    // portal no longer describes what the pane shows. Drop it
-                    // so a later reach opens fresh instead of trusting an
-                    // entry that names the wrong row. Only the portal
-                    // seated on THIS pane is dropped; the rest are untouched.
+                    // An explicit open-here onto a portal seat repurposed
+                    // its geometry for an ordinary attach: the portal no
+                    // longer describes what the pane shows. Drop it so a
+                    // later reach opens fresh; the rest are untouched.
                     if let Some(idx) = self
                         .portals
                         .iter()
                         .find(|(_, portal)| portal.seat == focus)
                         .map(|(idx, _)| *idx)
                     {
-                        self.portals.remove(&idx);
+                        self.journal_portal_take(idx, "displaced");
                     }
                     // Persist B as a member of the viewed squad so it survives a
                     // restart pane-hosted (US2); the take-over already succeeded.
@@ -11494,6 +11476,7 @@ impl Core {
             // worker the same way, so it gates identically.
             | CoreMsg::DispatchNext { id, .. }
             | CoreMsg::AgentLaunch { id, .. } => Some(*id),
+            CoreMsg::PaneInput(request) => Some(request.id),
             _ => None,
         };
         if let Some(id) = mutating_sender {
@@ -11516,59 +11499,11 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::Input { id, bytes } => {
-                // Input routes to the SENDER's viewed tab's focused pane
-                // (Locked 4). Fail closed when there is no live view or
-                // focused pane: dropped, never a panic - a re-anchor already
-                // moved the view, or the exit signal is about to. A write
-                // error means the child just exited mid-keystroke - same
-                // policy.
-                let focus = self
-                    .client_view(id)
-                    .and_then(|view| self.viewed_tab(view))
-                    .map(|tab| tab.focus);
-                if let Some(focus) = focus {
-                    // Writer-claim interlock (4a-G3, AC3-UI): while the relay
-                    // holds an agent pane's claim, human keystrokes bounce
-                    // with a visible `busy: relay` notice (the client sounds
-                    // BEL for every Notice). In-memory lookup + one kill(0)
-                    // probe - a DEAD holder releases right here, so typing
-                    // resumes without any sweep or restart (AC3-FR). General
-                    // panes are never in `claims` (spawn-time opt-in).
-                    if let Some(&holder) = self.claims.get(&focus) {
-                        if pid_alive(holder) {
-                            self.notice(id, "busy: relay");
-                            return Flow::Continue;
-                        }
-                        self.claims.remove(&focus);
-                    }
-                    // A keystroke that will be delivered returns a scrolled pane
-                    // to the live bottom, so input always lands on the visible
-                    // line (AC1-ERR, Invariant). No-op when already live. One
-                    // lookup: broadcast after the mutable borrow ends.
-                    let mut scrolled = false;
-                    if let Some(e) = self.panes.get_mut(&focus) {
-                        if e.vt.display_offset() != 0 {
-                            e.vt.scroll_to_bottom();
-                            scrolled = true;
-                        }
-                    }
-                    if scrolled {
-                        self.broadcast_pane(focus);
-                    }
-                    if let Some(entry) = self.panes.get(&focus) {
-                        if let Err(crate::pty::PtyError::Write(e)) = entry.pty.write_input(&bytes) {
-                            // Disconnected = child just exited (the exit
-                            // signal follows; stay silent). Full = the
-                            // child stopped reading (^S, SIGSTOP): the
-                            // drop must not be invisible to the typist.
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                self.notice(id, "pane not accepting input; keys dropped");
-                            }
-                        }
-                    }
-                    // Touch telemetry, the attended hold, the submit witness.
-                    self.input_tail(focus, &bytes);
-                }
+                self.handle_input(id, bytes);
+                Flow::Continue
+            }
+            CoreMsg::PaneInput(request) => {
+                self.handle_pane_input(request);
                 Flow::Continue
             }
             CoreMsg::Resize { id, rows, cols } => {

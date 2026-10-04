@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -456,34 +455,6 @@ def successors_owing_verification(entries: list[dict]) -> dict[str, dict]:
     return owed
 
 
-def settle_blocked_by_edges(entries: list[dict]) -> dict:
-    """The blocked_by edge settlement via the ported store verb (the
-    write-side twin of the read path's chase): prune done blockers, rewire
-    superseded to their live successor, hold deferred and missing with a
-    receipt; the caller persists under the graph lock."""
-    from fno.graph.store import settle_blocked_by_edges_via_store
-
-    return settle_blocked_by_edges_via_store(entries)
-
-
-def apply_edge_settlement(entries: list[dict], settlement: dict) -> list[dict]:
-    """Apply the settlement's ``blocked_by`` map to rows in place; receipts."""
-    for node in entries:
-        if isinstance(node, dict) and node.get("id") in settlement.get("blocked_by", {}):
-            node["blocked_by"] = settlement["blocked_by"][node["id"]]
-    return settlement.get("receipts") or []
-
-
-def summarize_edge_settlement(receipts: list[dict]) -> str:
-    """One line for the sweep report; held edges name why they stay."""
-    counts = Counter(r["kind"] for r in receipts)
-    return (
-        f"blocked_by edges settled: {counts.get('blocked_by_pruned', 0)} pruned, "
-        f"{counts.get('blocked_by_rewired', 0)} rewired, "
-        f"{counts.get('blocked_by_held', 0)} held (a deferred or missing blocker stays)"
-    )
-
-
 def node_is_open(node: dict) -> bool:
     """A node is open when it is neither done nor superseded.
 
@@ -659,20 +630,6 @@ def bind_pr_rows(
     return PrRowBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)
 
 
-def node_cwd_in_repo(entry: dict, our_root: str) -> bool:
-    """Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    raw_cwd = entry.get("cwd")
-    if not isinstance(raw_cwd, str) or not raw_cwd:
-        return True
-    our_root = os.path.normpath(our_root)
-    our_root_prefix = our_root.rstrip(os.sep) + os.sep
-    norm = os.path.normpath(os.path.expanduser(raw_cwd))
-    return norm == our_root or norm.startswith(our_root_prefix)
-
-
 # The exit-code contract, owned here so no verb can fork it. The loop runtime
 # keys on 5 for AwaitingMerge, so these numbers are load-bearing: do not renumber.
 REFUSAL_EXIT_CODES = {"awaiting_merge": 5, "outage": 4, "refused": 3}
@@ -826,17 +783,19 @@ class PromiseVerdict:
     Sibling to :class:`MergeEvidence`: the merge gate asks "is a PR merged" (a
     fact about an artifact); this asks "did the plan's declared work all ship".
     One verdict, three callers (``cmd_done``, ``cmd_reconcile``, ``done_command``)
-    so a node can never close through a second, ungated path. Fails open
-    (``outcome="ok"``) on an absent/unreadable/unparseable plan so a stale
-    ``plan_path`` never wedges a close; the warning names the path.
+    so a node can never close through a second, ungated path. An absent
+    ``plan_path`` promises nothing and passes; an unreadable or unparseable
+    plan is a delivery promise that cannot be confirmed, so it fails CLOSED
+    (``promise_unmet``) with the remedy in the refusal - never as a
+    silent pass.
     """
 
     outcome: Literal["ok", "promise_unmet", "promise_unknown"]
     reason: Optional[str] = None  # multi-line refusal text; None when ok
-    # Why a fail-open happened (unreadable plan, unparseable frontmatter), naming
-    # the path. Returned, not printed: the close verbs emit it on stderr, but a
-    # raw stderr write here would pollute the `reconcile --json` stream (JSON on
-    # stdout) and break the JSON-only contract of that path.
+    # Why a degraded read passed anyway (today only the prove-it verdict
+    # reader). Returned, not printed: the close verbs emit it on stderr, but
+    # a raw stderr write here would pollute the `reconcile --json` stream
+    # (JSON on stdout) and break the JSON-only contract of that path.
     warning: Optional[str] = None
 
     @property
@@ -983,10 +942,12 @@ def resolve_promise_evidence(
         text = plan_file.read_text(encoding="utf-8")
     except OSError as exc:
         return PromiseVerdict(
-            outcome="ok",
-            warning=(
-                f"promise gate could not read plan {plan_path_clean} ({exc}); "
-                f"gate skipped for this close"
+            outcome="promise_unmet",
+            reason=(
+                f"{node_id or '(unknown)'}: the promise gate could not read plan "
+                f"{plan_path_clean} ({exc}). An unreadable delivery promise is "
+                f"never a complete one. Fix or restore the plan, then close; "
+                f"or close with --force --reason."
             ),
         )
 
@@ -999,10 +960,12 @@ def resolve_promise_evidence(
         frontmatter = _parse_frontmatter(yaml_text) if yaml_text.strip() else {}
     except FrontmatterError as exc:
         return PromiseVerdict(
-            outcome="ok",
-            warning=(
-                f"promise gate skipped {plan_path_clean}; plan frontmatter "
-                f"would not parse ({exc})"
+            outcome="promise_unmet",
+            reason=(
+                f"{node_id or '(unknown)'}: plan frontmatter would not parse "
+                f"({exc}) in {plan_path_clean}. An unparseable delivery promise "
+                f"never reads as complete. Fix the frontmatter, then close; "
+                f"or close with --force --reason."
             ),
         )
 
@@ -1536,19 +1499,6 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     if not head_ref or not node_id:
         return False
     return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
-
-
-def stamp_reopen_warning(parent: dict, child: object, node_id: str) -> None:
-    """Stamp which child reopened this done-on-its-own-evidence parent, and when.
-
-    The reopen stderr warning is gone the moment that
-    terminal closes; this survives on the graph node instead. ``child`` is
-    ``cur`` at the call site (falls back to ``node_id`` when not a dict, same
-    as before this was extracted). Cleared by
-    :func:`clear_reopen_warning_if_child_matches` or a direct reopen.
-    """
-    child_id = child.get("id") if isinstance(child, dict) else node_id
-    parent["reopen_warning"] = {"child": child_id, "at": datetime.now(timezone.utc).isoformat()}
 
 
 def clear_reopen_warning_if_child_matches(parent: dict, child: object) -> None:
@@ -2427,33 +2377,6 @@ def scan_merge_drift(
     )
 
     return records
-
-
-def write_retro_sentinel(record: MergeDriftRecord, *, sentinel_dir: Path) -> Path:
-    """Drop a per-node retro sentinel naming a node closed by reconcile.
-
-    The sentinel hands the judgment half (follow-up capture via inbox/triage)
-    to a later session's LLM/human pass. Reconcile must NOT auto-create inbox
-    lines or backlog nodes - that stays explicit. Overwrites an existing
-    sentinel for the same node (idempotent).
-
-    Only ever called with a closeable (resolved-merged) record; the assertion
-    catches misuse (e.g. handing it an error record) in tests and dev.
-    """
-    assert record.closeable, f"refusing to write sentinel for non-closeable {record.node_id}"
-    sentinel_dir.mkdir(parents=True, exist_ok=True)
-    path = sentinel_dir / f"{record.node_id}.json"
-    payload = {
-        "node_id": record.node_id,
-        "pr_number": record.pr_number,
-        "pr_url": record.pr_url,
-        "merged_at": record.merged_at,
-        "plan_path": record.plan_path,
-        "closed_by": "backlog-reconcile",
-        "closed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return path
 
 
 def _owning_state_path(record: MergeDriftRecord) -> Optional[Path]:

@@ -1700,8 +1700,10 @@ event_types:
     # 'backlog' added: cli/src/fno/graph/_reconcile.py's
     # emit_session_satisfied_for_record stamps envelope source "backlog" for
     # the post-merge reconcile path (trigger=pr_merge), a real live producer
-    # the earlier declaration missed.
-    sources: [target, megawalk, fno-loop, hook, backlog]
+    # the earlier declaration missed. 'daemon' added: the native twin
+    # (crates/fno-agents/src/backlog/drift_emit.rs) stamps it from the
+    # scheduled reconcile context.
+    sources: [target, megawalk, fno-loop, hook, backlog, daemon]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
@@ -2313,6 +2315,12 @@ event_types:
           type: [string, "null"]
         to:
           type: string
+
+  - name: agent_revived
+    description: "A reaped session came back: one per revive naming the verb, the actor session, the prior name and the session id; the revived row reads origin=revived."
+    sources: [agents, daemon]
+    data:
+      required: [verb, prior_name, name, harness, harness_session_id]
 
   - name: session_aliases_merged
     description: "The reconcile sweep folded legible aliases onto registry rows (the session-names overlay, plus default aliases minted for rows that had none). Count-only: the row is the name store, this says how many addresses moved."
@@ -3096,7 +3104,7 @@ event_types:
           type: string
 
   - name: loop_check_watch_expiry_wake
-    description: "The daemon delivered or durably queued one wake for an expired watch, after confirming its session still owns the same live node claim. It never kills the watched task; a repeat is suppressed by watch_event_id."
+    description: "The daemon disposed of one watch: it delivered or durably queued a wake for an expired watch, or the codex waker accepted a settle inject, or the watch was dropped because its thread left the roster - after confirming the session still owns the same live node claim. It never kills the watched task; a repeat is suppressed by watch_event_id."
     sources: [daemon]
     data:
       required: [session_id, node, watch_event_id, blocker, task_id, expires_at_ms, delivered, via, reason]
@@ -3118,7 +3126,7 @@ event_types:
           type: boolean
         via:
           type: string
-          enum: [mail, resume, durable]
+          enum: [mail, resume, durable, codex_daemon]
         reason:
           type: string
 
@@ -3599,7 +3607,7 @@ event_types:
           description: "Optional (done-path fires). Count of blocking inline findings (codex P1 / gemini critical|high) whose thread lacks a qualifying ack."
         watch_refusal:
           type: string
-          enum: [no_claim, gone, held_by_other, stale, contended, write_failed, harness, not_async]
+          enum: [no_claim, gone, held_by_other, stale, contended, write_failed, harness, not_async, codex_unroutable, emit_failed]
           description: "Optional. Set ONLY when the fire carried a watching intent and the idle was refused: why the watch lease or the idle posture refused. 'no_claim' = the manifest recorded no claim pair at init; 'gone'/'held_by_other'/'stale' are permanent for the session (arming another watcher cannot help); 'contended'/'write_failed' can succeed on retry; 'harness'/'not_async' = the idle posture itself refused before any lease read."
     consumers: [operator]
 
@@ -3643,7 +3651,7 @@ event_types:
           description: "Actions this tick (wakes, dispatches, merges); 0 when it skipped."
         skip_reason:
           type: string
-          description: "Optional. One token for why nothing was done (no_crowned_target, watchdog_off, wake_disabled, disabled, gate:disabled, drain_disabled, config_unreadable, bad_interval, project_disabled, no_workspace_path, env_broken, lock_held, quota, never). Absent or null when the arm acted."
+          description: "Optional. One token naming why no action occurred. Examples: grant_queue_timeout, disabled, or no_crowned_target. Null when the arm acted."
         detail:
           type: string
           description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live). A failed run carries the whole refusal text, bounded at 4000 chars, so the cause is recoverable from the row alone."
@@ -4618,6 +4626,75 @@ event_types:
           description: "How many panes the server held at exit."
     consumers: [operator]
 
+  - name: portal_opened
+    retention: durable
+    description: "A portal index entered the mux server's portals map: a reach open, a reseat, or a restore re-arm. A retune emits a closed-and-open pair for the same index (the channel moved, the window stayed), so the journal answers which door opened a portal and when."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, portal, row_key, seat]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name."
+        portal:
+          type: integer
+          description: "The portal index that opened."
+        row_key:
+          type: string
+          description: "The channel the portal tuned to: the row key the portal seat shows."
+        seat:
+          type: integer
+          description: "The pane id the portal seats."
+    consumers: [operator]
+
+  - name: portal_closed
+    retention: durable
+    description: "A portal index left the mux server's portals map: the operator's close gesture, a death whose parked screen could not take the seat, a displaced seat, a stale half-created seat, or a retune. Closes are the portal-outlives-viewer contract's paper trail."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, portal, row_key, cause]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name."
+        portal:
+          type: integer
+          description: "The portal index that closed."
+        row_key:
+          type: string
+          description: "The channel the portal last showed."
+        cause:
+          enum: [operator, viewer_died, displaced, stale_seat, retune]
+          description: "The door's word for why the entry left the map."
+    consumers: [operator]
+
+  - name: row_lifecycle_observed
+    retention: durable
+    description: "The reconcile sweep's observed lifecycle word for a row fno owns: one row per applied status transition (an exit or a restart) with its evidence cause, so an exit or a restart is never silent again. The pane_closed row stays the pane-level fact; this is the row-level one."
+    sources: [daemon]
+    data:
+      required: [row, from, to, cause]
+      properties:
+        row:
+          type: string
+          description: "The registry row's name."
+        harness:
+          type: [string, "null"]
+          description: "The row's harness axis. Null when the row carries none."
+        harness_session:
+          type: [string, "null"]
+          description: "The row's harness session id. Null when the row carries none."
+        from:
+          type: string
+          description: "The status word before the write."
+        to:
+          type: string
+          description: "The status word after the write."
+        cause:
+          enum: [pid_proven, revival, probe_inferred]
+          description: "The evidence word: the row's own dead pid, a guarded crown revival, or the probe's inference."
+    consumers: [operator]
+
   - name: composer_shell_ran
     retention: durable
     description: "The composer's bang mode ran one shell line: a leading ! turned the input into a shell prompt and Enter sent the line through PaneRun. One row per run, naming the project cwd, the resolved login shell, the line and the pane that hosts it."
@@ -4756,6 +4833,15 @@ event_types:
         lease_ms:
           type: integer
           description: "The claim-lease window (ms) the fire renewed to cover the watch: declared timeout clamped to [5m,2h] plus slack."
+        harness:
+          type: string
+          description: "Optional. The authoring session's harness. Codex only parks when this arm's consumer can reach the thread (routability gate); the codex waker arm reads it to select watches."
+        cwd:
+          type: string
+          description: "The fire's working dir; the codex waker polls the PR from it (slug resolution) without re-resolving from the registry."
+        codex_thread_id:
+          type: [string, "null"]
+          description: "The codex thread id the daemon injects turn/start into; null for non-codex idles. On codex the event IS the watch registration."
     consumers: [operator]
 
   - name: loop_advisory_mode

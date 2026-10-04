@@ -94,6 +94,28 @@ pub enum TerminationReason {
     Aborted,
 }
 
+impl TerminationReason {
+    /// Whether a run ending on this reason counts as DELIVERED for telemetry.
+    /// The one vocabulary, so the ledger promotion gate and the scoreboard
+    /// fold cannot drift into two delivered sets. `DoneAwaitingMerge` is
+    /// deliberately absent: the work is complete but the PR is not merged
+    /// (human-gated), so counting it would inflate delivery metrics before
+    /// the work lands. `DoneUnreviewed` is absent for the same reason: it
+    /// means waiting, not landed. `DoneBatched` stays - it delivers via the
+    /// shared batch PR. Looser than the plan-graduate ship set
+    /// (DonePRGreen | DoneAdvisory): "delivered for telemetry" and "graduate
+    /// the plan" differ.
+    pub fn is_delivered(&self) -> bool {
+        matches!(
+            self,
+            TerminationReason::DonePRGreen
+                | TerminationReason::DoneAdvisory
+                | TerminationReason::DoneDelivery
+                | TerminationReason::DoneBatched
+        )
+    }
+}
+
 pub use crate::review_freshness::{
     freshness_rank, review_freshness, CodeDiffIdentity, Freshness, FreshnessFacts,
     FreshnessResolver,
@@ -198,7 +220,8 @@ use gh_read::is_no_pr_stderr;
 use gh_read::{
     attestation_in_scope, git_head_branch, git_head_sha, graphql_exhausted_reason, head_is_shipped,
     internal_gh_adapter, pr_head_oid, probe_graphql_quota, read_pr_head_oid, read_pr_view,
-    refusal_is_secondary, stderr_smells_rate_limit, stderr_tail, GraphqlQuota,
+    refusal_is_secondary, stderr_is_unauthenticated, stderr_smells_rate_limit, stderr_tail,
+    GraphqlQuota,
 };
 pub(crate) use gh_read::{coverage_adapter, is_graphql_read};
 use intent::{detect_intent, extract_last_assistant_message, Intent};
@@ -248,6 +271,7 @@ pub(crate) use settings::{parse_settings, value_as_probe_list};
 use settings::{scalar_as_singleton, MALFORMED_REVIEWERS_SENTINEL, UNPARSEABLE_SETTINGS_SENTINEL};
 pub(crate) use settings::{scan_manifest_field, session_cost_from_ledger, Settings};
 use watch_lease::{harness_can_idle, watch_target, watch_window_ms, CONTINUE_WORKING};
+use watch_lease::{CODEX_UNROUTABLE_REFUSAL, EMIT_FAILED_REFUSAL};
 
 /// The fno binary every loop-check surface shells, resolved through the same
 /// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
@@ -482,6 +506,14 @@ pub(crate) fn decide_with_payload(
     let repo_slug = inputs.repo_slug;
     let settings = inputs.settings;
     let author_harness = inputs.author_harness;
+    // A thread worker's stop hook can carry no env marker, so the ambient
+    // resolution reads unknown and every harness-gated branch misfires (the
+    // measured codex-thread refusal read "harness unknown"). The manifest
+    // names the run's harness at init; trust it as the fallback. The env
+    // marker still leads when present: it is the proof of this process.
+    let author_harness = author_harness
+        .or_else(|| scan_manifest_field(&manifest_content, "harness"))
+        .filter(|h| !h.is_empty() && h != "unknown");
     let required_bots = inputs.required_bots;
     let mut required_reviewers = inputs.required_reviewers;
     let optional_bots = inputs.optional_bots;
@@ -830,6 +862,12 @@ pub(crate) fn decide_with_payload(
     // blocker behind its own dead watch - never a dead watch, never a blind
     // one.
     let mut watching_fell_through = false;
+    // US6a: the codex path's fall-through cause, decided here where the
+    // thread id and the inject channel are read once, and consumed in the
+    // refusal composition below. `Some` always beats the generic lease
+    // re-derivation: the cause is known, never re-derived by a second
+    // socket read.
+    let mut watching_codex_refusal: Option<(&'static str, &'static str)> = None;
     if let Intent::Watching {
         ref reason,
         ref timeout,
@@ -839,54 +877,94 @@ pub(crate) fn decide_with_payload(
     {
         let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
         let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
+        // US6a: a codex session parks only when its thread is inject-routable
+        // (the daemon's waker must be able to reach it); the thread id rides
+        // the idle event so the daemon's consumer never re-resolves it. A
+        // non-codex session has no codex gate. `Ok(false)` (daemon up, thread
+        // unloaded) and `Err` (daemon absent or unreachable) both keep
+        // today's block behavior: status quo, never a dead watch (AC4-EDGE).
+        let codex_thread = watch_lease::codex_watch_target(
+            author_harness.as_deref(),
+            &manifest_content,
+            &session_id,
+        );
+        let routable = match &codex_thread {
+            Some(thread) => crate::codex_inject::thread_loaded(thread),
+            None => Ok(true),
+        };
         let window_ms = watch_window_ms(timeout.as_deref());
         let claim = watch_lease::claim_pair(&manifest_content);
         let renew_outcome = claim
             .as_ref()
             .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
         let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
-        if can_idle && renewed {
+        if can_idle && renewed && routable == Ok(true) {
             let (blocker, pr_number) = watch_target(reason, pr.as_deref());
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis()
                 .min(i64::MAX as u128) as i64;
-            emit(
-                "loop_check_watch_idle",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "pr": pr_number,
-                    "blocker": blocker,
-                    "task_id": task_id,
-                    "expires_at_ms": watch_lease::watch_expiry_ms(timeout.as_deref(), now_ms),
-                    "declared_timeout": timeout.clone().unwrap_or_default(),
-                    "reason": reason,
-                    "lease_ms": window_ms
-                }),
-            );
-            emit(
-                "loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "allow",
-                    "intent": "watching",
-                    "intent_source": intent_source,
-                    "pr_state": last_pr_state,
-                    "ci": last_ci,
-                    "reviewed": false,
-                    "fp_read_failed": false
-                }),
-            );
-            return terminal(
-                "allow",
-                None,
-                "watching: idling until the watcher fires; this fire read no PR state",
-            );
+            let idle_row = serde_json::json!({
+                "session_id": session_id,
+                "pr": pr_number,
+                "blocker": blocker,
+                "task_id": task_id,
+                "expires_at_ms": watch_lease::watch_expiry_ms(timeout.as_deref(), now_ms),
+                "declared_timeout": timeout.clone().unwrap_or_default(),
+                "reason": reason,
+                "lease_ms": window_ms,
+                "harness": author_harness,
+                "cwd": &cwd,
+                "codex_thread_id": codex_thread,
+            });
+            // On codex the event IS the daemon's watch registration, so the
+            // idle only stands when the registration landed (AC4-ERR); a
+            // claude watcher is agent-armed and needs no registration.
+            let emit_ok = match &codex_thread {
+                Some(_) => fire_history::emit_to_both_checked(
+                    &project_events,
+                    &global_events,
+                    "loop_check_watch_idle",
+                    idle_row,
+                )
+                .is_ok(),
+                None => {
+                    emit("loop_check_watch_idle", idle_row);
+                    true
+                }
+            };
+            if emit_ok {
+                emit(
+                    "loop_check",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "fingerprint": fingerprint,
+                        "fires": this_fire,
+                        "consecutive_unchanged": consecutive_after,
+                        "streak_window_secs": streak_window,
+                        "decision": "allow",
+                        "intent": "watching",
+                        "intent_source": intent_source,
+                        "pr_state": last_pr_state,
+                        "ci": last_ci,
+                        "reviewed": false,
+                        "fp_read_failed": false
+                    }),
+                );
+                return terminal(
+                    "allow",
+                    None,
+                    "watching: idling until the watcher fires; this fire read no PR state",
+                );
+            }
+            watching_codex_refusal = Some((EMIT_FAILED_REFUSAL, "emit_failed"));
+        } else if can_idle && renewed && routable != Ok(true) {
+            // A codex session that could idle except for the channel: the
+            // routability refusal, not the generic harness text. Only when
+            // the lease ALSO failed does the generic path keep the more
+            // actionable lease cause.
+            watching_codex_refusal = Some((CODEX_UNROUTABLE_REFUSAL, "codex_unroutable"));
         }
         // Not idlable, or the lease declined: the refusal is composed after
         // done() has named the real blocker, so the block keeps the
@@ -1831,35 +1909,42 @@ pub(crate) fn decide_with_payload(
                 // blocker and finding count exist: the message keeps both the
                 // refusal and the actionable reason (never a blind block).
                 let watching_refusal = if watching_fell_through {
-                    let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
-                    let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
-                    let blocker = if can_idle { observed_async_wait } else { None };
-                    let claim = watch_lease::claim_pair(&manifest_content);
-                    let mut lease_cause: Option<watch_lease::RenewCause> = None;
-                    if can_idle && blocker.is_some() {
-                        let tag_timeout = match &intent {
-                            Intent::Watching { timeout, .. } => timeout.clone(),
-                            _ => None,
-                        };
-                        let window_ms = watch_window_ms(tag_timeout.as_deref());
-                        let renew_outcome = claim.as_ref().map(|(key, holder)| {
-                            crate::claims::renew(key, holder, window_ms, None)
-                        });
-                        if !matches!(renew_outcome.as_ref(), Some(Ok(true))) {
-                            lease_cause =
-                                watch_lease::declined_cause(claim.as_ref(), renew_outcome.as_ref());
+                    if let Some((reason, kind)) = watching_codex_refusal {
+                        Some((reason.to_string(), kind))
+                    } else {
+                        let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
+                        let can_idle =
+                            harness_can_idle(author_harness.as_deref(), is_loop_run_child);
+                        let blocker = if can_idle { observed_async_wait } else { None };
+                        let claim = watch_lease::claim_pair(&manifest_content);
+                        let mut lease_cause: Option<watch_lease::RenewCause> = None;
+                        if can_idle && blocker.is_some() {
+                            let tag_timeout = match &intent {
+                                Intent::Watching { timeout, .. } => timeout.clone(),
+                                _ => None,
+                            };
+                            let window_ms = watch_window_ms(tag_timeout.as_deref());
+                            let renew_outcome = claim.as_ref().map(|(key, holder)| {
+                                crate::claims::renew(key, holder, window_ms, None)
+                            });
+                            if !matches!(renew_outcome.as_ref(), Some(Ok(true))) {
+                                lease_cause = watch_lease::declined_cause(
+                                    claim.as_ref(),
+                                    renew_outcome.as_ref(),
+                                );
+                            }
                         }
+                        let r = watch_lease::idle_refusal(
+                            can_idle,
+                            author_harness.as_deref(),
+                            is_loop_run_child,
+                            blocker.is_none(),
+                            pr_info.unaddressed_findings.len(),
+                            claim.is_some(),
+                            lease_cause.as_ref(),
+                        );
+                        Some((r.reason, r.kind))
                     }
-                    let r = watch_lease::idle_refusal(
-                        can_idle,
-                        author_harness.as_deref(),
-                        is_loop_run_child,
-                        blocker.is_none(),
-                        pr_info.unaddressed_findings.len(),
-                        claim.is_some(),
-                        lease_cause.as_ref(),
-                    );
-                    Some((r.reason, r.kind))
                 } else {
                     None
                 };
@@ -1919,6 +2004,48 @@ pub(crate) fn decide_with_payload(
             Err(read_err) => {
                 let failed_read = read_err.read.clone();
                 let failed_stderr = read_err.stderr_tail.clone();
+                // An unauthenticated gh cannot recover inside the loop - no
+                // fire logs in - so the block-and-retry below would re-wake
+                // the session on every stop until a cap, each wake failing
+                // identically. Park as HeldOnQuestion instead: the operator
+                // answers (logs in), a later run ships. The termination event
+                // is what the cross-session loop runtime reads to stop
+                // re-dispatching the exited session; the JSON termination
+                // reason is what the stop hook treats as terminal.
+                if stderr_is_unauthenticated(&failed_stderr) {
+                    let reason = format!(
+                        "gh is not authenticated: the loop's PR read '{failed_read}' cannot \
+                         succeed until the login lands, so the run is parked instead of \
+                         re-waking on every stop. Run `gh auth login` (and `gh auth setup-git` \
+                         if pushes fail), then `/target --resume`."
+                    );
+                    emit(
+                        "loop_check_gh_error",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "read": failed_read,
+                            "outcome": read_err.outcome(),
+                            "stderr_tail": failed_stderr,
+                            "parked": true
+                        }),
+                    );
+                    term_row("HeldOnQuestion", &reason);
+                    fire_row(
+                        "allow",
+                        if intent == Intent::Promise {
+                            "promise"
+                        } else {
+                            "none"
+                        },
+                        true,
+                        serde_json::json!({
+                            "pr_state": "unknown",
+                            "ci": "unknown",
+                            "reviewed": false
+                        }),
+                    );
+                    return terminal("allow", Some(TerminationReason::HeldOnQuestion), &reason);
+                }
                 // US4 (locked decision 6, REVERSES the wedge's behavior): a
                 // gh-errored done() read NEVER terminates NoProgress, even
                 // with the backstop tripped - a healthy session must not be

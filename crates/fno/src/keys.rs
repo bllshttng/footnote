@@ -508,15 +508,8 @@ pub enum Event {
     /// mode (text filter, Tab state pane focus, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
-    /// Toggle the questions sideline block on/off (prefix+q). Hidden means
-    /// fully gone (zero rows); the choice persists in the view store.
-    ToggleQuestionsBlock,
-    /// Grow/shrink the questions block by a row (prefix+} / prefix+{).
-    /// The height persists; the block never crowds the last agent row out.
-    ResizeQuestionsBlock(i8),
-    /// Show/hide answered and done questions in the block (prefix+X).
-    /// Hidden (default): at most one dim count line.
-    ToggleQuestionsDone,
+    /// Open or close the notifications bell panel (prefix+q).
+    ToggleBell,
     /// Open the settings modal (prefix+S). The same surface the sideline
     /// menu's `settings` row opens, reached from the keyboard. Case pair
     /// with `s` (toggle-status), the h/H focus/resize convention.
@@ -1284,31 +1277,10 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         b(
             b'q',
-            "toggle-questions-block",
-            ToggleQuestionsBlock,
+            "notifications-bell",
+            ToggleBell,
             Global,
-            "toggle the questions block",
-        ),
-        b(
-            b'}',
-            "grow-questions-block",
-            ResizeQuestionsBlock(1),
-            Global,
-            "grow the questions block",
-        ),
-        b(
-            b'{',
-            "shrink-questions-block",
-            ResizeQuestionsBlock(-1),
-            Global,
-            "shrink the questions block",
-        ),
-        b(
-            b'X',
-            "questions-show-done",
-            ToggleQuestionsDone,
-            Global,
-            "show/hide answered questions",
+            "open notifications for questions and announcements",
         ),
         b(
             b'O',

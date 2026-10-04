@@ -3050,3 +3050,64 @@ def test_doctor_component_stale_renders_repair_and_gates_exit(
     assert result.exit_code != 0
     assert "component fno-agents-daemon: stale" in result.stdout
     assert "repair: cargo install --path /src/crates/fno-agents --bins" in result.stdout
+
+
+def test_live_tool_env_scan_filters_and_names_in_stale_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Full chain over a fake ps: the scanner walks from the installed package
+    dir (the real depth, <tool>/fno/lib/pythonX.Y/site-packages/fno) up to the
+    ancestor named fno, drops its own ps/awk lines and the doctor process
+    itself, returns [] on an unfamiliar layout, and the stale verdict names
+    what survived (gap audit blocker 3: the repair replaces that env in
+    place)."""
+    pkg = tmp_path / "fno" / "lib" / "python3.11" / "site-packages" / "fno"
+    pkg.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: pkg)
+    root = str(tmp_path / "fno")
+    me_pid = os.getpid()
+    ps_out = "\n".join(
+        [
+            f"  77 {root}/bin/fno-py backlog capture",
+            f"{me_pid:6} {root}/bin/fno-py doctor --fix",
+            f"  99 awk -v td={root} index($0, td)",
+            "  55 /usr/sbin/syslogd",
+        ]
+    )
+
+    class FakeProc:
+        stdout = ps_out
+
+    def fake_run(*args, **kwargs):
+        return FakeProc()
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    live = doctor._live_tool_env_processes()
+    assert live == [f"77 {root}/bin/fno-py backlog capture"], live
+
+    # An unfamiliar layout (no ancestor named fno) degrades to empty.
+    other = tmp_path / "elsewhere" / "lib" / "python3.11" / "site-packages" / "fno"
+    other.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "_installed_pkg_dir", lambda: other)
+    assert doctor._live_tool_env_processes() == []
+
+    # Restore real subprocess for the CLI collectors and pin the scanner's
+    # output: the stale verdict must name the surviving process.
+    monkeypatch.setattr(subprocess, "run", real_run)
+    monkeypatch.setattr(
+        doctor,
+        "_live_tool_env_processes",
+        lambda: [f"77 {root}/bin/fno-py backlog capture"],
+    )
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="bbb222",
+        capture_present="present",
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    assert "1 live process(es) run from the installed tool env" in result.stdout
+    assert f"{root}/bin/fno-py backlog capture" in result.stdout

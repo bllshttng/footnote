@@ -1487,33 +1487,7 @@ mod tests {
         }
     }
 
-    struct AgentsHomeEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl AgentsHomeEnvGuard {
-        fn set(path: &Path) -> Self {
-            let lock = crate::claims::test_env_lock()
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let previous = std::env::var_os("FNO_AGENTS_HOME");
-            std::env::set_var("FNO_AGENTS_HOME", path);
-            Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for AgentsHomeEnvGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("FNO_AGENTS_HOME", value),
-                None => std::env::remove_var("FNO_AGENTS_HOME"),
-            }
-        }
-    }
+    use crate::AgentsHomeEnvGuard;
 
     fn write_target_for_test(
         home: &crate::paths::AgentsHome,

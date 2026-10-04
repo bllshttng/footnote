@@ -158,6 +158,12 @@ pub struct AttentionItem {
     pub missing: Vec<String>,
     /// `open | answered | withdrawn`.
     pub state: String,
+    /// True when the fact the question waits on has resolved while the row
+    /// is still open: its node, or any blocks id, reads `done` or
+    /// `superseded`. Computed by the `needs --items` read against the graph;
+    /// an unreadable graph marks nothing, so a sink never invents it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
 }
 
 /// Every defect, so the asker fixes the row instead of a sink dropping it
@@ -408,6 +414,7 @@ fn item_from_question_row(row: &Value, ts: &str) -> Option<AttentionItem> {
         ready: false,
         missing: vec![],
         state: "open".to_string(),
+        settled: false,
     };
     item.priority = if item.blocks.is_empty() && item.class.is_none() {
         "normal"
@@ -475,6 +482,7 @@ fn item_from_note(slug: &str, text: &str) -> Option<AttentionItem> {
         ready: false,
         missing: vec![],
         state: "open".to_string(),
+        settled: false,
     };
     item.seal_readiness();
     Some(item)
@@ -529,6 +537,7 @@ fn mine_items(lane_text: &str) -> Vec<AttentionItem> {
             ready: true,
             missing: vec![],
             state: "open".to_string(),
+            settled: false,
         });
     }
     out

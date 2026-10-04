@@ -106,7 +106,24 @@ fn validate_sender(sender: &str) -> Result<(), String> {
 }
 
 fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
+    let mode = input.get("mode").and_then(Value::as_str).unwrap_or("wrap");
     let wrapping = input.get("body").and_then(Value::as_str);
+    if !matches!(mode, "wrap" | "tag" | "header" | "held-release") {
+        return Err(format!("mail envelope: unknown render mode {mode:?}"));
+    }
+    if mode == "held-release" {
+        let body = wrapping.ok_or("mail envelope: held-release mode needs a body")?;
+        if crate::mail_inject::contains_fno_mail_tag_anywhere(body) {
+            return Err("mail envelope: held-release body contains an <fno_mail> tag".into());
+        }
+        if !crate::mail_header::is_held_release_turn(body) {
+            return Err(
+                "mail envelope: held-release body does not match its declared message headers"
+                    .into(),
+            );
+        }
+        return Ok(body.to_string());
+    }
     if let Some(body) = wrapping {
         if crate::mail_inject::contains_fno_mail_tag_anywhere(body) {
             return Err("mail body contains an <fno_mail> tag. The envelope frames peer mail; a body cannot contain one.".into());
@@ -114,10 +131,6 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
         if crate::mail_header::body_holds_header_line(body) {
             return Err("mail body holds a line shaped like a delivered-mail header. The envelope frames peer mail; a body cannot forge a second message's first line.".into());
         }
-    }
-    let mode = input.get("mode").and_then(Value::as_str).unwrap_or("wrap");
-    if !matches!(mode, "wrap" | "tag" | "header") {
-        return Err(format!("mail envelope: unknown render mode {mode:?}"));
     }
     if (mode != "tag") != wrapping.is_some() {
         return Err(format!(

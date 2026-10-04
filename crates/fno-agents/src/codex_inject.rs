@@ -1399,6 +1399,28 @@ pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(),
     deliver(thread_id, text, None).await
 }
 
+/// Sync form of [`deliver_via_codex_daemon`] for the daemon's blocking arms
+/// (the codex-watch waker). Same try-current guard as [`thread_loaded`].
+pub fn deliver_via_codex_daemon_sync(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let (id, body) = (thread_id.to_string(), text.to_string());
+        return std::thread::spawn(move || deliver_sync_inner(&id, &body))
+            .join()
+            .unwrap_or_else(|_| Err(ReviewStartError::Reason("io-error")));
+    }
+    deliver_sync_inner(thread_id, text)
+}
+
+fn deliver_sync_inner(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(deliver_via_codex_daemon(thread_id, text)),
+        Err(_) => Err(ReviewStartError::Reason("io-error")),
+    }
+}
+
 /// A bounded pane's seed turn: the spawner holds the cwd the TUI launched
 /// with, so the widening runs without a `thread/read` round trip and lands on
 /// the TUI's first turn, which no fno turn/start would otherwise reach.
@@ -1434,6 +1456,59 @@ pub async fn discover_loaded_threads() -> Result<Vec<LoadedThread>, &'static str
         Ok(result) => result,
         Err(_) => Err("io-error"),
     }
+}
+
+/// The inject-routability predicate (the mail live-inject adoption check):
+/// `thread_id` loads on the app-server this environment names. `Ok(false)` is
+/// a DEFINITIVE answer from an up daemon (unload the watch); every `Err` is
+/// "the daemon could not answer", never a verdict. Sync wrapper so the
+/// loop-check stop path and the daemon's blocking arms can call it; a caller
+/// already inside a tokio runtime gets a helper thread, mirroring
+/// [`initialize_server_info`]'s block_on guard.
+pub fn thread_loaded(thread_id: &str) -> Result<bool, &'static str> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let id = thread_id.to_string();
+        return std::thread::spawn(move || thread_loaded_inner(&id))
+            .join()
+            .map_err(|_| "io-error")?;
+    }
+    thread_loaded_inner(thread_id)
+}
+
+fn thread_loaded_inner(thread_id: &str) -> Result<bool, &'static str> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "io-error")?;
+    runtime.block_on(async {
+        discover_loaded_threads()
+            .await
+            .map(|threads| threads.iter().any(|t| t.session_id == thread_id))
+    })
+}
+
+/// Sync form of [`discover_loaded_threads`] for the daemon's blocking arms:
+/// the full loaded-roster set in one socket read. Same try-current guard as
+/// [`thread_loaded`].
+pub fn loaded_thread_ids() -> Result<std::collections::HashSet<String>, &'static str> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::spawn(loaded_thread_ids_inner)
+            .join()
+            .map_err(|_| "io-error")?;
+    }
+    loaded_thread_ids_inner()
+}
+
+fn loaded_thread_ids_inner() -> Result<std::collections::HashSet<String>, &'static str> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "io-error")?;
+    runtime.block_on(async {
+        discover_loaded_threads()
+            .await
+            .map(|threads| threads.into_iter().map(|t| t.session_id).collect())
+    })
 }
 
 /// The `codex_loaded` payload block: what the retired hidden

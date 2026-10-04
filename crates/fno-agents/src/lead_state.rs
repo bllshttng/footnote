@@ -45,6 +45,43 @@ pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
     )
 }
 
+/// The one name join `mail_envelope.rs` renders addresses with: filter the
+/// rows by a liveness side first (dead twins must never answer for a live
+/// name), match name or alias, and refuse when the name still matches more
+/// than one row - the first match of a duplicate name is a guess, and the
+/// callers below act on the row.
+pub(crate) enum NameJoin<'a> {
+    One(&'a RegistryEntry),
+    Ambiguous,
+    None,
+}
+
+fn join_rows<'a, F>(rows: &'a [RegistryEntry], name: &str, keep: F) -> NameJoin<'a>
+where
+    F: Fn(&RegistryEntry) -> bool,
+{
+    let mut matches = rows.iter().filter(|row| {
+        keep(row) && (row.name == name || row.aliases.iter().any(|alias| alias == name))
+    });
+    match (matches.next(), matches.next()) {
+        (Some(row), None) => NameJoin::One(row),
+        (None, _) => NameJoin::None,
+        (Some(_), Some(_)) => NameJoin::Ambiguous,
+    }
+}
+
+/// The join over live rows: every terminal row is invisible to it.
+pub(crate) fn live_name_join<'a>(rows: &'a [RegistryEntry], name: &str) -> NameJoin<'a> {
+    join_rows(rows, name, |row| !is_terminal(row))
+}
+
+/// The join over terminal rows: the caller already knows the row it wants is
+/// dead (a stale-team reading), so a live twin of the same name must never
+/// answer for it.
+pub(crate) fn terminal_name_join<'a>(rows: &'a [RegistryEntry], name: &str) -> NameJoin<'a> {
+    join_rows(rows, name, is_terminal)
+}
+
 /// One read of who is leading, over what, in what shape, and is it live.
 /// Field names mirror the Python dataclass the JSON client deserializes into.
 #[derive(Debug, Default, Serialize)]
@@ -632,7 +669,7 @@ pub fn set_manifest_shape(
     shape: &str,
     expect_session: Option<&str>,
 ) -> Result<String, String> {
-    if shape != "pass" && shape != "org" && shape != "court" {
+    if shape != "pass" && shape != "org" && shape != "org" {
         return Err(format!("shape must be pass or org, got {shape:?}"));
     }
     set_manifest_fields(root, scope, &[("shape", shape)], expect_session)?;
@@ -1761,6 +1798,35 @@ mod tests {
             state.registry_session.as_deref(),
             Some("bbbb2222-0000-4000-8000-000000000002")
         );
+        // The mail_envelope join contract, on both liveness sides: a
+        // dead twin never answers a live name, a live twin never answers
+        // a terminal name, and a side that still matches two rows refuses.
+        let dir = tmp("name-join");
+        let rows = [
+            row("heir", "s-1", None, AgentStatus::Live),
+            row("heir", "s-2", None, AgentStatus::Exited),
+            row("lead", "s-3", None, AgentStatus::Orphaned),
+            row("lead", "s-4", None, AgentStatus::Exited),
+        ];
+        registry_file(&dir, &rows);
+        let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+        assert!(matches!(
+            live_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            live_name_join(&reg.entries, "lead"),
+            NameJoin::None
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "lead"),
+            NameJoin::Ambiguous
+        ));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

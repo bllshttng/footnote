@@ -207,6 +207,11 @@ fn main() {
     if args.first().map(String::as_str) == Some("harness-roster") {
         std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
     }
+    // `terminals`: the delivered-terminal vocabulary JSON read; Python's
+    // ledger promotion gate and scoreboard fold read it like the roster.
+    if args.first().map(String::as_str) == Some("terminals") {
+        std::process::exit(fno_agents::terminal_vocab::run_terminals(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
     }
@@ -406,6 +411,12 @@ async fn run(args: Vec<String>) -> i32 {
     // stays binary-direct because it only folds a local diff and needs no daemon.
     if matches!(verb, "test-delta") {
         return fno_agents::test_delta::run_test_delta(&args[1..]);
+    }
+
+    // The style gate's hidden binary-direct door (mail, encounters, markdown);
+    // matched with `matches!` so the routable-verb parity sets never see it.
+    if matches!(verb, "style-check") {
+        return fno_agents::backlog::style_check::run_cli(&args[1..]);
     }
 
     // `component-verdict` is the HIDDEN decision verb for deployed-component
@@ -670,6 +681,14 @@ async fn run(args: Vec<String>) -> i32 {
     // the daemon is wedged, and the read doors back the thread read model.
     if verb == "chats" {
         return fno_agents::chats::run_chats(&args[1..]);
+    }
+
+    // `mail-threads`: the mux Messages tab's thread read model (see
+    // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
+    // read must work when the daemon is wedged. Hidden from help and from
+    // ALL_CLIENT_ACTIONS, like court-fold.
+    if verb == "mail-threads" {
+        return fno_agents::mail_threads::run_mail_threads(&args[1..]);
     }
 
     // `update-journal`: the `fno doctor update` lifecycle's one Rust door
@@ -985,6 +1004,16 @@ async fn run(args: Vec<String>) -> i32 {
     // Starts nothing, so the Stop hook's never-lazy-start promise holds.
     if verb == "registry-json" {
         return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
+    }
+    // sessions-map: the daemon-free session-to-node join the top view reads
+    // (graph sessions rows + node claims, claim precedence). Starts nothing.
+    if verb == "sessions-map" {
+        return fno_agents::session_join::run_sessions_map(&AgentsHome::from_env());
+    }
+    // revival-check: whether a spawn --resume revives an existing row instead
+    // of forking. Starts nothing.
+    if verb == "revival-check" {
+        return fno_agents::revival_check::run_revival_check(&args[1..], &AgentsHome::from_env());
     }
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);

@@ -413,11 +413,11 @@ mod tests {
                 .any(|c| c.c == '✗' && c.flags & cell_flags::INVERSE == cell_flags::INVERSE)
         };
         assert!(
-            has_stamp(&agent_row_cells(1)),
+            has_stamp(&agent_row_cells(2)),
             "the agent row carries the ✗ stamp"
         );
         assert!(
-            !has_stamp(&agent_row_cells(0)),
+            !has_stamp(&agent_row_cells(1)),
             "the pinned header row never carries the stamp"
         );
     }
@@ -437,7 +437,7 @@ mod tests {
         });
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let row = &frame.cells[cols..cols * 2];
+        let row = &frame.cells[cols * 2..cols * 3];
         assert!(row.iter().any(|c| c.c == '✗'), "the stamp still renders");
         let lead = row[0];
         assert!(

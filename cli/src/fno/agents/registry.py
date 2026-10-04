@@ -316,9 +316,8 @@ class AgentEntry:
     - ``mcp_channel_id`` is the server-generated UUIDv4 the fno
       MCP sidecar uses to route inbound pokes to the session that was
       launched with ``--channels fno``. ``None`` for legacy
-      (US2/socket-only) sessions; ``str`` for MCP-backed sessions. Only
-      ``register_mcp_channel`` (dispatch.py) writes this field; no other
-      code path mutates it (spec invariant).
+      (US2/socket-only) sessions; ``str`` for MCP-backed sessions. No
+      code path mutates it after creation (spec invariant).
     """
 
     name: str
@@ -879,8 +878,9 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     """The matching core over an already-loaded entry list (the Rust mirror).
 
     A full session id is explicit and resolves first. Every shorter address form
-    shares one namespace: exact name, stored transport short id, canonical
-    handle, and legacy prefix matches are unioned before uniqueness is decided.
+    shares one namespace: exact name, the row's own ``fno_id``, stored transport
+    short id, canonical handle, and legacy prefix matches are unioned before
+    uniqueness is decided.
     UUID-family identity matching is case-insensitive; OpenCode identity matching
     preserves case.
 
@@ -899,6 +899,7 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
 
     categories = (
         ("name", [e for e in entries if getattr(e, "name", None) == token]),
+        ("fno_id", [e for e in entries if getattr(e, "fno_id", None) == token]),
         ("alias", [e for e in entries if token in (getattr(e, "aliases", None) or [])]),
         ("short_id", [e for e in entries if getattr(e, "short_id", None) == token]),
         ("canonical_handle", [e for e in entries if _session_tier(e, token) == 1]),

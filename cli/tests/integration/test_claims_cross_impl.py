@@ -52,8 +52,10 @@ if RUST_BIN is None:
 def rust(op: str, key: str, root: Path, cwd: Path, *extra: str) -> subprocess.CompletedProcess:
     """Run the Rust side of the protocol via the hidden debug verb."""
     assert RUST_BIN is not None
+    # --json: since the wave-1 leaf port the acquire verb prints the human
+    # line by default; rust_json below parses the record payload.
     return subprocess.run(
-        [str(RUST_BIN), "claim", op, key, "--root", str(root), *extra],
+        [str(RUST_BIN), "claim", op, key, "--root", str(root), "--json", *extra],
         capture_output=True,
         text=True,
         cwd=cwd,  # no env=, so the FNO_EVENTS_PATH pin below reaches this child too

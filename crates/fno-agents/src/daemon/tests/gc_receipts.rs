@@ -110,6 +110,8 @@ pub(super) fn graph_read(
         statuses,
         pr_state,
         pr_number: std::collections::HashMap::default(),
+        plan_paths: std::collections::HashMap::default(),
+        delivery_merged_refs: std::collections::HashMap::default(),
         do_nodes: std::collections::HashMap::default(),
         pr_reads: std::collections::HashMap::default(),
     })
@@ -3331,6 +3333,7 @@ fn sweep_serves_liveness_over_a_stale_status_ac7_edge() {
         |_| Ok(true),
         || false,
         |_| true,
+        |_| false,
         |_| false,
         |_| false,
         |_| false,

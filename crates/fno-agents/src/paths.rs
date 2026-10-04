@@ -305,8 +305,9 @@ impl AgentsHome {
         self.root.join("fleet-stop.json")
     }
 
-    /// The running tests a `tests` hold paused, as `(pid, birth)` pairs, so
-    /// the lift resumes exactly them; see [`crate::test_hold`].
+    /// The running tests a `tests` hold ended, as legacy `(pid, birth)` pairs
+    /// an OLDER build paused and its lift still resumes; new holds record
+    /// nothing here. See [`crate::test_hold`].
     pub fn test_pause_json(&self) -> PathBuf {
         self.root.join("test-pause.json")
     }

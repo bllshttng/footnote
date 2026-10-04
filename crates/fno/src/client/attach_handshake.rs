@@ -119,6 +119,7 @@ pub(super) async fn read_preamble<R: tokio::io::AsyncRead + Unpin>(
                 | ServerMsg::OpenLink { .. }
                 | ServerMsg::SearchResult { .. }
                 | ServerMsg::LinkHover { .. }
+                | ServerMsg::PaneInputResult(_)
                 // PeekBody answers a post-attach PeekAgent: impossible
                 // in the preamble, ignore rather than desync.
                 | ServerMsg::PeekBody { .. }

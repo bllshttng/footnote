@@ -472,6 +472,32 @@ def _installed_pkg_dir() -> Optional[Path]:
         return None
 
 
+def _live_tool_env_processes() -> list[str]:
+    """ps argv lines of live processes running from the installed fno tool env
+    (the ancestor of the package dir named ``fno``). The stale verdict's
+    proposed repair replaces that env in place - the 2026-10-02 study clobber
+    (gap audit blockers 1/3) - so the verdict names them first; an unfamiliar
+    layout or unreadable process table reads [] (skip).
+    """
+    pkg = _installed_pkg_dir()
+    if pkg is None:
+        return []
+    try:  # the package dir sits at <tool>/fno/lib/*/site-packages/fno
+        env_root = pkg.parents[[p.name for p in pkg.parents].index("fno")]
+    except ValueError:
+        return []
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=False, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    root, me = str(env_root), f"{os.getpid()} "
+    return [
+        s
+        for line in out.splitlines()
+        if (s := line.strip()) and root in s and not s.startswith(me) and " awk -" not in s and " ps -" not in s
+    ]
+
+
 def _pkg_py_fingerprint(pkg_dir: Path) -> Optional[dict[str, str]]:
     """Map each ``.py`` under ``pkg_dir`` to its content sha256, keyed by relpath.
 
@@ -2278,6 +2304,10 @@ def _emit_human(
                     "Run fno doctor update (or fno doctor --fix); the component "
                     "lines below name which one."
                 )
+        # The proposed repair replaces the tool env in place; name anything
+        # still running from it (gap audit blocker 3, the study clobber).
+        if live := _live_tool_env_processes():
+            out(f"fno doctor: {len(live)} live process(es) run from the installed tool env, e.g. {live[0][:160]}. The repair above would replace them mid-run; stop them first.")
     elif (
         result.get("content_indeterminate")
         and result.get("installed_rev") is not None

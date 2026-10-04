@@ -40,7 +40,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     h.wait_screen(15, |s| s.contains("filters"));
 
     // leg 1: `^B V` (cycle sideline view) still resolves while the
-    // board holds the keyboard. Org is the next view in the three-view cycle.
+    // board holds the keyboard. Org is the next view from the board.
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE leg1 org-after-V");
     h.wait_screen(15, |s| s.contains("Tree │ Table │ Graph"));
@@ -68,6 +68,11 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     h.wait_screen(15, |s| {
         s.contains("+ new workspace") && !s.contains("Keybindings")
     });
+
+    // The cycle now runs through Messages (the new view after Agents) ...
+    h.type_bytes(&[PREFIX, b'V']);
+    eprintln!("STAGE roundtrip messages-after-third-V");
+    h.wait_screen(15, |s| s.contains("Partners"));
 
     // ... and the chord round-trips the view back to the board.
     h.type_bytes(&[PREFIX, b'V']);

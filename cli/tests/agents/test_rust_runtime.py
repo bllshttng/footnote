@@ -901,6 +901,10 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # reply resolver shell it through verb_call with a stdin JSON
             # payload, never an argv route.
             "chats",
+            # `mail-threads` is the messages tab's projection over the chats
+            # store: the fno client's gather and details door shell it
+            # directly, never an argv route.
+            "mail-threads",
         }
     )
 

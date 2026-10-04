@@ -25,9 +25,6 @@ pub(super) async fn route(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Option<Result<StdinFlow, String>> {
-    if view.selector.is_none() {
-        view.questions_block.cursor = None;
-    }
     if view.digest.is_some() {
         // any key dismisses the catch-up digest into the normal view.
         // Same whole-chunk swallow as the key-table overlay below. A flush
@@ -106,6 +103,10 @@ pub(super) async fn route(
     if view.question_detail.is_some() {
         return Some(questions::detail_keys(view, bytes, sock_w).await);
     }
+    if view.bell.open {
+        bell::keys(view, bytes);
+        return Some(Ok(StdinFlow::Continue));
+    }
     if view.answers.is_some() {
         return Some(answer_keys(view, bytes, sock_w).await);
     }
@@ -158,6 +159,11 @@ pub(super) async fn route(
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
     }
+    if view.messages_board.is_some() {
+        // The Messages tab is a full-surface view: it owns the keyboard
+        // unconditionally while open, the same rule a full-screen board keeps.
+        return Some(messages_view::route_keys(view, scanner, bytes, sock_w).await);
+    }
     if view.org_board.is_some()
         && (view.board_full || view.input_owner() == super::region_focus::RegionOwner::Board)
     {
@@ -195,6 +201,10 @@ pub(super) async fn flush_released_chord(
             return super::agent_launcher::launcher_keys(view, chunk, sock_w)
                 .await
                 .map(|_| ());
+        }
+    } else if view.messages_board.is_some() {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return messages_view::keys(view, chunk, sock_w).await.map(|_| ());
         }
     } else if view.org_board.is_some()
         && view.input_owner() == super::region_focus::RegionOwner::Board

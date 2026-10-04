@@ -26,6 +26,9 @@ impl View {
     /// A full-screen board owns unconditionally: it covers every cell, so no
     /// pane is reachable to hold the keyboard under it.
     pub(crate) fn input_owner(&self) -> RegionOwner {
+        if self.messages_board.is_some() {
+            return RegionOwner::Board;
+        }
         if self.board_full && (self.backlog_board.is_some() || self.org_board.is_some()) {
             return RegionOwner::Board;
         }
@@ -138,6 +141,23 @@ pub(super) async fn mouse_pre_pass(
         if view.question_detail.is_some() {
             continue;
         }
+        if view.bell.open {
+            if bell::button_at(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                continue;
+            }
+            if let Some(hit) = bell::hit(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, hit, sock_w).await?;
+                }
+                continue;
+            }
+            if !matches!(rep.kind, MouseKind::Move) {
+                bell::close(view);
+            }
+        }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
@@ -166,6 +186,18 @@ pub(super) async fn mouse_pre_pass(
         // report routes to the sideline's own handlers - the dock first,
         // then the hit path a normal-mode sideline click runs (clamped into
         // the panel's column space) - and no byte ever reaches a pane.
+        if view.messages_board.is_some() {
+            if view.launcher.is_some() && agent_launcher::launcher_mouse(view, rep, sock_w).await? {
+                continue;
+            }
+            if modal_mouse(view, rep) {
+                continue;
+            }
+            view.hover_pending = None;
+            view.hover_row = None;
+            messages_view::mouse(view, rep, sock_w).await?;
+            continue;
+        }
         if view.org_board.is_some() && view.board_full {
             if view.launcher.is_some() && agent_launcher::launcher_mouse(view, rep, sock_w).await? {
                 continue;
@@ -551,6 +583,25 @@ pub(super) async fn mouse_pre_pass(
         {
             view.hover_pending = None;
             view.hover_row = None;
+            if rep.row == 0 {
+                // The strip row: only its words act (R15); the rest of the
+                // row is dead.
+                if bell::button_range(view, view.panel_w().saturating_sub(1) as usize)
+                    .contains(&(rep.col as usize))
+                {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                for (start, w, v) in view.top_row_spans() {
+                    if (rep.col as usize) >= start && (rep.col as usize) < start + w {
+                        apply_hit(view, ChromeHit::TopRow(v), sock_w).await?;
+                    }
+                }
+                continue;
+            }
+            let rep = crate::mouse::MouseReport {
+                row: rep.row - 1,
+                ..rep
+            };
             org_board::mouse(view, rep, sock_w).await?;
             continue;
         }

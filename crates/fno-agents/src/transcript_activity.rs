@@ -141,7 +141,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn head_sample(path: &Path, len: u64) -> Option<String> {
+pub(crate) fn head_sample(path: &Path, len: u64) -> Option<String> {
     let mut f = std::fs::File::open(path).ok()?;
     let mut buf = vec![0u8; len.min(HEAD_SAMPLE_BYTES) as usize];
     let mut filled = 0;

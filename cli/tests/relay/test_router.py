@@ -69,8 +69,23 @@ def test_default_node_resolver_tolerates_graph_read_failure(monkeypatch):
 
 def test_resolve_name():
     assert resolve("bob", index=_idx()).session_id == "B"
+    # A dead twin never answers for the name; the live twin routes.
+    reg = {
+        "DEAD": RegistryEntry(session_id="DEAD", provider="claude", pid=1,
+                              name="bob", status="exited"),
+        "B": RegistryEntry(session_id="B", provider="claude", pid=42,
+                           inject_handle="pty:42", name="bob"),
+    }
+    assert resolve("bob", index=reg).session_id == "B"
+    # Two live rows answering one name never route: first-match could
+    # deliver mail to the wrong session.
+    dup = dict(reg)
+    dup["B2"] = RegistryEntry(session_id="B2", provider="codex", pid=7, name="bob")
+    with pytest.raises(Unroutable, match="relay_ambiguous"):
+        resolve("bob", index=dup)
 
 
 def test_resolve_unknown_name_is_unroutable():
     with pytest.raises(Unroutable):
         resolve("nobody", index=_idx())
+

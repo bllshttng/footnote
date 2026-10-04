@@ -27,6 +27,9 @@ pub(crate) struct LeadManifest {
     /// The written reason for a declared/reached term's replacement; absent
     /// on the first declaration.
     pub(crate) term_reason: Option<String>,
+    /// The on-deck queue in seat order, recorded by `org checkin --queue`;
+    /// empty on manifests written before the field existed.
+    pub(crate) queue: Vec<String>,
 }
 
 pub(crate) fn parse_lead_manifest(content: &str) -> Option<LeadManifest> {
@@ -61,6 +64,14 @@ pub(crate) fn parse_lead_manifest(content: &str) -> Option<LeadManifest> {
             "shape" => out.shape = value,
             "term" => out.term = Some(value),
             "term_reason" => out.term_reason = Some(value),
+            "queue" => {
+                out.queue = raw
+                    .split(',')
+                    .map(|id| id.trim().trim_matches('"'))
+                    .filter(|id| !id.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;
@@ -603,6 +614,23 @@ mod tests {
         let manifest = parse_lead_manifest("---\nfno_id: k\nharness_session_id: null\n---\n")
             .expect("manifest parses");
         assert!(manifest.harness_session_id.is_none());
+
+        let manifest =
+            parse_king_manifest("---\nfno_id: k\nqueue: x-aaaa, x-bbbb\n---\n").expect("parses");
+        assert_eq!(
+            manifest.queue,
+            vec!["x-aaaa".to_string(), "x-bbbb".to_string()]
+        );
+        let manifest =
+            parse_king_manifest("---\nfno_id: k\nqueue: \"x-aaaa,x-bbbb\"\n---\n").expect("parses");
+        assert_eq!(
+            manifest.queue,
+            vec!["x-aaaa".to_string(), "x-bbbb".to_string()]
+        );
+        let manifest = parse_king_manifest("---\nfno_id: k\nqueue: , ,\n---\n").expect("parses");
+        assert!(manifest.queue.is_empty());
+        let manifest = parse_king_manifest("---\nfno_id: k\n---\n").expect("parses");
+        assert!(manifest.queue.is_empty());
     }
 
     fn board_with_queues(queues: Value) -> Value {

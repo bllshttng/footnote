@@ -168,6 +168,8 @@ pub(crate) fn served_word(
     }
 }
 
+use crate::events::EventEmitter;
+
 /// A status change reconcile decided for one probed entry. `new_status: None`
 /// means "probed, status unchanged" — its `last_reconciled_at` is still bumped
 /// so the fairness ordering rotates.
@@ -227,12 +229,13 @@ pub(crate) struct ReconcileOutcome {
 /// `liveness` is the shared reader, injected like `probe` so the
 /// ladder is deterministically stageable in tests.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn plan_reconcile<P, D, L, B, H, R, V>(
+pub(crate) fn plan_reconcile<P, D, L, B, W, H, R, V>(
     entries: &[RegistryEntry],
     mut probe: P,
     mut budget_exhausted: D,
     mut pid_live: L,
     mut bg_live: B,
+    mut pr_hold: W,
     mut thread_hosted: H,
     mut rollout_exists: R,
     mut liveness: V,
@@ -243,6 +246,7 @@ where
     D: FnMut() -> bool,
     L: FnMut(&RegistryEntry) -> bool,
     B: FnMut(&RegistryEntry) -> bool,
+    W: FnMut(&RegistryEntry) -> bool,
     H: FnMut(&RegistryEntry) -> bool,
     R: FnMut(&RegistryEntry) -> bool,
     V: FnMut(&RegistryEntry) -> RowLiveness,
@@ -271,9 +275,22 @@ where
             let hosted = thread_hosted(entry);
             let measured = liveness(entry);
             let alive = hosted || measured == RowLiveness::Alive;
+            // a row whose node still carries an open PR is waiting on
+            // a CI run or a merge; its quiet rollout is the watching posture,
+            // never idle death. The flip would strand the PR and free the
+            // lane a duplicate spawn takes, so silence settles nothing here,
+            // and a row stamped Orphaned under an earlier sweep recovers.
+            let held = pr_hold(entry);
             let new_status = if hosted {
                 None
             } else if measured == RowLiveness::Alive {
+                if entry.status == AgentStatus::Orphaned {
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Live)
+                } else {
+                    None
+                }
+            } else if held {
                 if entry.status == AgentStatus::Orphaned {
                     out.updated.push(entry.name.clone());
                     Some(AgentStatus::Live)
@@ -333,7 +350,18 @@ where
             // healthy row, so the served word kept a stale stored value
             // standing forever (measured: 0 of 35 claude rows read alive).
             let measured = liveness(entry);
-            let new_status = if is_non_terminal(entry.status) && !bg_live(entry) {
+            // the same PR-busy hold the codex-thread arm takes. A
+            // worker watching a named PR or merge idles by protocol - zero
+            // turns while its watcher polls - so neither roster absence nor
+            // a quiet ladder may settle it. A row stamped Orphaned under an
+            // earlier sweep recovers its seat, which the spawn gate counts.
+            let held = pr_hold(entry);
+            let new_status = if held && entry.status == AgentStatus::Orphaned {
+                out.updated.push(entry.name.clone());
+                Some(AgentStatus::Live)
+            } else if held {
+                None
+            } else if is_non_terminal(entry.status) && !bg_live(entry) {
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Exited)
             } else if matches!(
@@ -707,25 +735,79 @@ pub(crate) fn persist_reconcile_changes(
             // The running session cost: absorb the transcript's appended
             // bytes and remember the reading under the session id (law
             // d-e952ed19), never in the registry.
-            if let (Some(sid), Some(path)) =
-                (entry.harness_session_id.as_deref(), transcript.as_deref())
-            {
-                crate::model_price::measure_session_cost(
-                    &crate::model_price::state_dir(),
-                    sid,
-                    path,
-                    entry.model.as_deref(),
-                    entry.provider.as_deref(),
-                    now,
-                );
+            if let Some(sid) = entry.harness_session_id.as_deref() {
+                if let Some(path) = transcript.as_deref() {
+                    crate::model_price::measure_session_cost(
+                        &crate::model_price::state_dir(),
+                        sid,
+                        path,
+                        entry.model.as_deref(),
+                        entry.provider.as_deref(),
+                        now,
+                    );
+                } else {
+                    crate::model_price::mark_session_transcript_unavailable(sid, now);
+                }
             }
             measure_worker(entry, transcript.as_deref(), bus_dir, msgs.as_deref())
         })
         .collect();
-    state::update_registry(&home.registry_json(), |r| {
-        apply_reconcile_changes(r, entries, changes, titles, mode, now);
+    let mut applied = Vec::new();
+    let wrote = state::update_registry(&home.registry_json(), |r| {
+        applied = apply_reconcile_changes(r, entries, changes, titles, mode, now);
         apply_worker_readings(r, &readings, now);
-    })
+    });
+    // Only a landed write journals: the closure can populate `applied`
+    // before a guard or the atomic rename fails, and an event for a
+    // transition that never reached the registry is a lie.
+    if wrote.is_ok() {
+        // Every applied transition is one observed process fact for a row
+        // fno owns, journaled with its evidence word (ruling d-e096c669):
+        // an exit and a restart stop being silent.
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        for t in &applied {
+            let _ = emitter.emit(
+                "row_lifecycle_observed",
+                &serde_json::json!({
+                    "row": t.row,
+                    "harness": t.harness,
+                    "harness_session": t.harness_session,
+                    "from": t.from,
+                    "to": t.to,
+                    "cause": t.cause,
+                }),
+            );
+        }
+    }
+    wrote
+}
+
+/// One observed lifecycle transition of an owned row: the journal fuel for
+/// `row_lifecycle_observed` (ruling d-e096c669). `cause` is the evidence
+/// word: `pid_proven` (the row's own dead pid), `revival` (a guarded crown
+/// revival), or `probe_inferred` (the reachability probe's word).
+pub(crate) struct AppliedTransition {
+    pub(crate) row: String,
+    pub(crate) harness: Option<String>,
+    pub(crate) harness_session: Option<String>,
+    pub(crate) from: &'static str,
+    pub(crate) to: &'static str,
+    pub(crate) cause: &'static str,
+}
+
+fn status_word(s: AgentStatus) -> &'static str {
+    match s {
+        AgentStatus::Spawning => "spawning",
+        AgentStatus::Ready => "ready",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Busy => "busy",
+        AgentStatus::Live => "live",
+        AgentStatus::Restarting => "restarting",
+        AgentStatus::Orphaned => "orphaned",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Exited => "exited",
+        AgentStatus::PermanentDead => "permanent_dead",
+    }
 }
 
 /// The one batched registry write both modes share: apply every planned
@@ -740,7 +822,8 @@ pub(crate) fn apply_reconcile_changes(
     titles: &std::collections::HashMap<String, Option<String>>,
     mode: &SweepMode,
     now: &str,
-) {
+) -> Vec<AppliedTransition> {
+    let mut applied: Vec<AppliedTransition> = Vec::new();
     for ch in changes {
         // Keyed on the probed row's identity read off the same snapshot the
         // sweep planned from, so a row replaced under the same label between
@@ -771,7 +854,26 @@ pub(crate) fn apply_reconcile_changes(
             } else {
                 None
             };
+            let from = e.status;
             apply_reconcile_change(e, status, ch.new_liveness, now);
+            if let Some(to) = status {
+                if from != to {
+                    applied.push(AppliedTransition {
+                        row: e.name.clone(),
+                        harness: e.harness.clone(),
+                        harness_session: e.harness_session_id.clone(),
+                        from: status_word(from),
+                        to: status_word(to),
+                        cause: if ch.crown_revive {
+                            "revival"
+                        } else if ch.pid_proven {
+                            "pid_proven"
+                        } else {
+                            "probe_inferred"
+                        },
+                    });
+                }
+            }
         }
     }
     // Apply the batch's title readings in the SAME lock window: the row's
@@ -782,6 +884,7 @@ pub(crate) fn apply_reconcile_changes(
     // readers that cannot link fno-agents read the edge kind as a served
     // fact instead of re-deriving it.
     crate::spawn_edge::stamp_lineage_kinds(r);
+    applied
 }
 
 /// One tick's gate decision: due only past the cadence AND with the previous
@@ -837,6 +940,131 @@ mod tests {
         });
         e.pid = pid;
         e
+    }
+
+    /// A claude `--substrate bg` thread row: harness claude, a recorded job
+    /// short id, no pid, no pane - the exact `is_one_shot_ask` shape.
+    fn bg_thread(name: &str) -> RegistryEntry {
+        let mut e = state::RegistryEntry::default();
+        e.name = name.to_string();
+        e.harness = Some("claude".into());
+        e.short_id = "shortjob1".to_string();
+        e
+    }
+
+    /// A finished one-shot `ask` row (codex shellout shape: empty short id).
+    fn ask_row(name: &str, status: AgentStatus) -> RegistryEntry {
+        let mut e = state::RegistryEntry::default();
+        e.name = name.to_string();
+        e.codex_session_id = Some("resume-uuid".into());
+        e.status = status;
+        e
+    }
+
+    #[test]
+    fn reconcile_one_shot_ask_settles_to_exited_even_when_reachable() {
+        // A finished `ask` row settles to Exited regardless of whether its
+        // provider session file still exists. The probe here returns
+        // Ok(true) (reachable == session file present == "resumable"); the
+        // ask branch must ignore it and settle to Exited by process-liveness
+        // alone. If the probe were (wrongly) consulted for status, this Live
+        // row would stay Live.
+        let entries = vec![ask_row("codex-ask", AgentStatus::Live)];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true), // reachable: session file exists -> resumable, NOT running
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true, // roster readable: the flip needs a successful roster read
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a finished ask settles to exited even when its session file is reachable"
+        );
+        assert_eq!(out.updated, vec!["codex-ask".to_string()]);
+        assert!(out.orphans.is_empty(), "an ask is exited, never orphaned");
+        // The row's resumable session id is untouched by the status settle
+        // (status == liveness; session_id == resumability, separate).
+        assert_eq!(entries[0].codex_session_id.as_deref(), Some("resume-uuid"));
+    }
+
+    #[test]
+    fn reconcile_one_shot_ask_already_terminal_is_untouched() {
+        // An ask already Exited must not be re-flagged as updated (idempotent).
+        let entries = vec![ask_row("done-ask", AgentStatus::Exited)];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true, // roster readable: the flip needs a successful roster read
+        );
+        assert_eq!(changes[0].new_status, None);
+        assert!(out.updated.is_empty());
+    }
+
+    #[test]
+    fn a_worker_waiting_on_its_open_pr_is_not_reaped_by_silence() {
+        // A worker whose node carries an open PR is waiting on a CI run or a
+        // merge, and its silence is the watching protocol: zero turns while
+        // its watcher polls. Two hours idle with a pending check settles
+        // nothing; the flip would strand the PR and free the lane the
+        // duplicate spawn takes. A row stamped Orphaned under an earlier
+        // sweep recovers its seat, which the spawn gate counts again.
+        let waiter = bg_thread("ci-waiter");
+        let mut stamped = bg_thread("ci-stamped");
+        stamped.status = AgentStatus::Orphaned;
+        let merged = bg_thread("shipped");
+        let entries = vec![waiter, stamped, merged];
+        assert!(
+            entries.iter().all(|e| e.is_one_shot_ask()),
+            "the hold rides the bg-thread lane, or this test proves nothing"
+        );
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,               // roster absent: the watchers ended their turns
+            |e| e.name != "shipped", // the open-PR hold, read from the graph rows
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown, // 2h idle: the ladder answers Unknown
+            true,                     // roster readable
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "an open-PR row is never settled by roster absence or a quiet ladder"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Live),
+            "a row orphaned while PR-busy recovers its seat"
+        );
+        assert_eq!(
+            changes[2].new_status,
+            Some(AgentStatus::Exited),
+            "the sibling whose PR is recorded merged takes today's path"
+        );
+        assert_eq!(out.orphans, Vec::<String>::new());
+        assert!(
+            changes[0]
+                .new_status
+                .map(|s| crate::spawn_gate::status_is_liveish(&s))
+                .unwrap_or(true),
+            "the held row's settled status stays liveish: no spawn takes its lane"
+        );
     }
 
     #[test]
@@ -1036,12 +1264,15 @@ mod tests {
         // `Exited` with `pid_proven`, even when the store probe answers
         // `Ok(true)` - the served word already read `dead`, and status now
         // agrees with it. The 60s tick may write a pid-proven status.
-        let entries = vec![pane_entry("recycled-pane", Some(4243))];
+        let mut entry = pane_entry("recycled-pane", Some(4243));
+        entry.status = AgentStatus::Live;
+        let entries = vec![entry];
         let changes = plan_reconcile(
             &entries,
             |_| Ok(true),
             || false,
             |e: &RegistryEntry| e.pid != Some(4243),
+            |_| false,
             |_| false,
             |_| false,
             |_| false,
@@ -1066,7 +1297,7 @@ mod tests {
         reg.entries = entries.clone();
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        crate::liveness_sweep::apply_reconcile_changes(
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
             &mut reg,
             &entries,
             &changes,
@@ -1074,6 +1305,11 @@ mod tests {
             &SweepMode::ServeOnly,
             "2026-09-10T12:00:00Z",
         );
+        assert_eq!(applied.len(), 1, "the exit is one observed transition");
+        assert_eq!(applied[0].row, "recycled-pane");
+        assert_eq!(applied[0].from, "live");
+        assert_eq!(applied[0].to, "exited");
+        assert_eq!(applied[0].cause, "pid_proven");
         let row = reg.find_mut("recycled-pane").unwrap();
         assert_eq!(
             row.status,
@@ -1099,6 +1335,7 @@ mod tests {
             |_| false,
             |_| false,
             |_| false,
+            |_| false,
             |_| RowLiveness::Unknown,
             true,
         )
@@ -1111,7 +1348,7 @@ mod tests {
         reg.entries = entries.clone();
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        crate::liveness_sweep::apply_reconcile_changes(
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
             &mut reg,
             &entries,
             &changes,
@@ -1126,6 +1363,10 @@ mod tests {
             "a store miss still cannot retire a live pane from the tick"
         );
         assert_eq!(row.pid, Some(4242));
+        assert!(
+            applied.is_empty(),
+            "a probe inference plans no observed transition"
+        );
     }
 
     #[test]
@@ -1173,6 +1414,7 @@ mod tests {
             |_| Ok(false), // all store-miss
             || false,
             |e| e.pid.map_or(true, |_| e.name == "live-tui"),
+            |_| false,
             |_| false,
             |_| false,
             |_| false,
@@ -1225,6 +1467,7 @@ mod tests {
             },
             || false,
             |e| e.name == "live-pane" || e.name == "interactive-live",
+            |_| false,
             |_| false,
             |_| false,
             |_| false,
@@ -1455,6 +1698,23 @@ mod tests {
             AgentStatus::Exited,
             "a succession that moved the scope is not revived onto the old row"
         );
+        // A landed revival is one observed transition with the revival
+        // cause word, so a restart stops being silent.
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let applied = crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &[mk_change()],
+            &titles,
+            &SweepMode::Full,
+            "2026-09-10T12:00:00Z",
+        );
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].row, "king");
+        assert_eq!(applied[0].from, "exited");
+        assert_eq!(applied[0].to, "live");
+        assert_eq!(applied[0].cause, "revival");
 
         // The row re-bound to a different session between plan and write:
         // the keyed lookup misses and the name fallback is refused.

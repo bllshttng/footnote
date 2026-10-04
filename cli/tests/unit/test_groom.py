@@ -611,6 +611,13 @@ def test_every_mechanical_leg_exists_on_the_real_cli():
     ctx = click.Context(root)
 
     for name, args in G._mechanical_legs(14):
+        if name == "reconcile":
+            # Retired python leaf: the native door serves the leg's argv.
+            from tests._native_door import run_native
+
+            code, out, err = run_native("backlog", args[0], "--help")
+            assert code == 0, f"`fno backlog {args[0]}` does not exist natively ({name} leg)"
+            continue
         cmd = root.get_command(ctx, args[0])
         assert cmd is not None, f"`fno backlog {args[0]}` does not exist ({name} leg)"
 

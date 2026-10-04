@@ -37,7 +37,7 @@ struct Resolved<'a> {
 /// Native auxiliary vocabulary: commands the dispatcher routes by engine
 /// contract that the Python catalog never carried (the note corpus/history
 /// reader rode the folded `backlog-notes` action, not a catalog command).
-const NATIVE_AUX: &[&str] = &["notes", "target-binding"];
+const NATIVE_AUX: &[&str] = &["notes", "target-binding", "birth-hook"];
 
 /// Resolve the head of `args` to a legacy command. Grouped spelling first
 /// (`<group> <action>`, only when the second token IS one of that group's
@@ -142,6 +142,10 @@ pub fn run(args: &[String]) -> i32 {
         // Internal: target init/start and the init hook ask which node a run
         // may bind. Not a catalog command, so it adds nothing to the menu.
         "target-binding" => super::target_binding::run(resolved.tail),
+        // Internal: the Python birth forwarder execs the one birth hook here
+        // (law d-e11b2b3e: the twin is gone, the door is the seam). Not a
+        // catalog command, so it adds nothing to the menu.
+        "birth-hook" => super::birth::run_birth_hook(resolved.tail),
         // The folded note action. A leading `--graph` is the engine door's
         // shape (bridge, passthrough, status fanout); the plain public
         // shape still carries Python-owned legs (evidence, identity,
@@ -224,6 +228,10 @@ pub fn run(args: &[String]) -> i32 {
         // The selection door: native on the graph backend; the external
         // joined candidates still ride the python wheel from inside the arm.
         "next" => super::next::run(resolved.tail),
+        // The drift closer is native end to end: scan, promise gate, one
+        // locked close, the self-heals, and the shelled legs (auto-continue
+        // rides the wheel until the advance port).
+        "reconcile" => super::reconcile_cli::run(resolved.tail),
         // The parallel fill: native selection over the lane world (peer
         // slots, domain annotation, the file-collision gate).
         "lane-fill" => super::advance_fill::run_lane_fill(resolved.tail),

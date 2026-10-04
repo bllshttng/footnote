@@ -39,12 +39,13 @@ fn the_org_block_shrinks_the_sideline_and_yields_when_too_short() {
     assert_eq!(view.org_block_rows(), expanded);
     assert_eq!(view.sideline_visible_rows(), full - expanded);
 
-    // Too short: the block drops, the rows never do.
+    // Too short: the block drops, the rows never do. The strip still owns
+    // its row, so a 3-row terminal leaves one row less.
     view.term = (3, 100);
     assert_eq!(view.org_block_rows(), 0);
     assert_eq!(
         view.sideline_visible_rows(),
-        3 - view.bottom_row_is_chrome() as usize
+        3 - 1 - view.bottom_row_is_chrome() as usize
     );
 }
 
@@ -86,13 +87,8 @@ fn the_org_fold_holds_no_rows_in_the_board_view() {
         "the expanded fold holds no rows under the board"
     );
     assert_eq!(
-        view.questions_block_rows(),
-        0,
-        "same for the questions block"
-    );
-    assert_eq!(
         view.sideline_visible_rows(),
-        24 - view.bottom_row_is_chrome() as usize,
+        24 - 1 - view.bottom_row_is_chrome() as usize,
         "the full column is the list region again"
     );
 }

@@ -197,20 +197,18 @@ struct StoreFile {
     org_mode: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     org_sessions: Option<serde_json::Value>,
-    /// The questions sideline block's visibility. Default absent = shown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    questions_block: Option<serde_json::Value>,
-    /// The questions block's height in rows. Default absent = 4 (header plus
-    /// three rows: small, so session rows keep their share).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    questions_height: Option<serde_json::Value>,
-    /// Whether the block also shows answered and done questions. Default
-    /// absent = hidden (one dim count line instead).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    questions_show_done: Option<serde_json::Value>,
     /// The questions view's list pane width, in percent. Default absent = 45.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions_split: Option<serde_json::Value>,
+    /// The Messages tab's per-thread read marks: chat id -> the ts of the
+    /// last row the user opened (a ts, not a row id: fmail ids are random
+    /// hex, so only a ts answers "rows newer than the mark"). Persisted like
+    /// every other pref; absent reads as all-unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    messages_read_marks: Option<serde_json::Value>,
+    /// Newest fleet announcement timestamp seen in the notifications panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bell_seen_at: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -221,6 +219,7 @@ struct StoreFile {
 pub enum SidelineView {
     #[default]
     Agents,
+    Messages,
     Backlog,
     Org,
 }
@@ -301,6 +300,44 @@ pub fn save_sideline_view(v: SidelineView) {
     });
 }
 
+/// The Messages tab's read marks, keyed by chat id, valued by the ts of the
+/// last row the user opened. Corrupt or absent reads as all-unread.
+pub fn load_messages_read_marks() -> std::collections::BTreeMap<String, String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return Default::default();
+    }
+    read_raw()
+        .messages_read_marks
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Record one thread as read: the chat id's mark moves to `ts`. Best-effort.
+pub fn save_messages_read_mark(chat_id: &str, ts: &str) {
+    mutate(|file| {
+        let mut marks = load_messages_read_marks();
+        marks.insert(chat_id.to_string(), ts.to_string());
+        file.messages_read_marks = serde_json::to_value(marks).ok();
+    });
+}
+
+pub fn load_bell_seen_at() -> Option<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .bell_seen_at
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
+pub fn save_bell_seen_at(ts: &str) {
+    mutate(|file| {
+        file.bell_seen_at = serde_json::to_value(ts).ok();
+    });
+}
+
 /// Read the board full-screen pref. Absent or corrupt reads as `false`.
 pub fn load_board_full() -> bool {
     #[cfg(test)]
@@ -317,54 +354,6 @@ pub fn load_board_full() -> bool {
 pub fn save_board_full(full: bool) {
     mutate(|file| {
         file.board_full = serde_json::to_value(full).ok();
-    });
-}
-
-/// Read the questions block's visibility. Absent or corrupt reads as `true`:
-/// the block ships visible, and the toggle key persists a clean value.
-pub fn load_questions_block() -> bool {
-    #[cfg(test)]
-    if TEST_PATH.with(|c| c.borrow().is_none()) {
-        return true;
-    }
-    read_raw()
-        .questions_block
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-}
-
-/// Persist the questions block's visibility. Best-effort like every other
-/// write.
-pub fn save_questions_block(visible: bool) {
-    mutate(|file| {
-        file.questions_block = serde_json::to_value(visible).ok();
-    });
-}
-
-/// The questions block's shipped height: the header plus three body rows.
-pub const QUESTIONS_DEFAULT_HEIGHT: u16 = 4;
-
-/// Read the questions block's height pref. Absent, corrupt, or out of range
-/// reads as the shipped default; a resize persists a clamped clean value.
-pub fn load_questions_height() -> u16 {
-    #[cfg(test)]
-    if TEST_PATH.with(|c| c.borrow().is_none()) {
-        return QUESTIONS_DEFAULT_HEIGHT;
-    }
-    read_raw()
-        .questions_height
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u16::try_from(v).ok())
-        .filter(|h| (2..=60).contains(h))
-        .unwrap_or(QUESTIONS_DEFAULT_HEIGHT)
-}
-
-/// Persist the questions block's height, clamped to the legal range.
-/// Best-effort like every other write.
-pub fn save_questions_height(height: u16) {
-    let clamped = height.clamp(2, 60);
-    mutate(|file| {
-        file.questions_height = serde_json::to_value(clamped).ok();
     });
 }
 
@@ -391,28 +380,6 @@ pub fn save_questions_split(pct: u8) {
     let clamped = pct.clamp(20, 80);
     mutate(|file| {
         file.questions_split = serde_json::to_value(clamped).ok();
-    });
-}
-
-/// Read the questions block's show-answered pref. Absent or corrupt reads as
-/// `false`: done and answered questions stay hidden behind one dim count
-/// line until the key shows them.
-pub fn load_questions_show_done() -> bool {
-    #[cfg(test)]
-    if TEST_PATH.with(|c| c.borrow().is_none()) {
-        return false;
-    }
-    read_raw()
-        .questions_show_done
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-/// Persist the questions block's show-answered pref. Best-effort like every
-/// other write.
-pub fn save_questions_show_done(show: bool) {
-    mutate(|file| {
-        file.questions_show_done = serde_json::to_value(show).ok();
     });
 }
 
@@ -998,44 +965,42 @@ mod tests {
         }
         save_sideline_view(SidelineView::Agents);
         assert_eq!(load_sideline_view(), SidelineView::Agents);
+        // The Messages read marks: absent reads all-unread, save/load
+        // round-trips, and a second mark leaves the first standing.
+        assert!(load_messages_read_marks().is_empty(), "absent = unread");
+        save_messages_read_mark("chat-a", "2026-10-01T09:05:00Z");
+        save_messages_read_mark("chat-b", "2026-10-01T10:00:00Z");
+        let marks = load_messages_read_marks();
+        assert_eq!(
+            marks.get("chat-a").map(String::as_str),
+            Some("2026-10-01T09:05:00Z")
+        );
+        assert_eq!(
+            marks.get("chat-b").map(String::as_str),
+            Some("2026-10-01T10:00:00Z")
+        );
+        save_messages_read_mark("chat-a", "2026-10-01T11:00:00Z");
+        let marks = load_messages_read_marks();
+        assert_eq!(
+            marks.get("chat-a").map(String::as_str),
+            Some("2026-10-01T11:00:00Z")
+        );
+        assert_eq!(
+            marks.get("chat-b").map(String::as_str),
+            Some("2026-10-01T10:00:00Z")
+        );
+        assert_eq!(marks.len(), 2);
     }
 
-    // The questions block prefs: absent reads shipped defaults (visible,
-    // height 4, answered hidden), a corrupt value reads the default, and
-    // save/load round-trips; the height clamps to its legal range.
+    // The questions detail split defaults cleanly and clamps invalid values.
     #[test]
-    fn questions_block_prefs_absent_corrupt_and_round_trip() {
-        let _s = Scratch::new("questions-block");
-        assert!(load_questions_block(), "absent reads visible");
-        assert_eq!(
-            load_questions_height(),
-            QUESTIONS_DEFAULT_HEIGHT,
-            "absent reads the shipped height"
-        );
-        assert!(!load_questions_show_done(), "absent reads hidden");
-        std::fs::write(
-            view_path(),
-            r#"{"questions_block":"sure","questions_height":99,"questions_show_done":3,"questions_split":95}"#,
-        )
-        .unwrap();
-        assert!(load_questions_block(), "corrupt reads visible");
-        assert_eq!(
-            load_questions_height(),
-            QUESTIONS_DEFAULT_HEIGHT,
-            "corrupt height reads the default"
-        );
-        assert!(!load_questions_show_done(), "corrupt reads hidden");
+    fn questions_split_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("questions-split");
+        assert_eq!(load_questions_split(), QUESTIONS_DEFAULT_SPLIT);
+        std::fs::write(view_path(), r#"{"questions_split":95}"#).unwrap();
         assert_eq!(load_questions_split(), QUESTIONS_DEFAULT_SPLIT);
         save_questions_split(95);
         assert_eq!(load_questions_split(), 80, "an out-of-range save clamps");
-        save_questions_block(false);
-        save_questions_height(12);
-        save_questions_show_done(true);
-        assert!(!load_questions_block());
-        assert_eq!(load_questions_height(), 12);
-        assert!(load_questions_show_done());
-        save_questions_height(500);
-        assert_eq!(load_questions_height(), 60, "an out-of-range save clamps");
     }
 
     // The board layout pref: absent reads the shipped default (every model
@@ -1243,7 +1208,9 @@ mod tests {
     // ----: density + sort preferences ----
 
     #[test]
-    fn prefs_default_then_round_trip() {
+    // One persistence surface, folded from three fns (test-delta cap 0):
+    // every assert below ran in its own fn before the fold.
+    fn prefs_width_and_preset_persist_together() {
         let _s = Scratch::new("prefs-roundtrip");
         // AC7-FR: a missing file is not an error, it is the defaults. The
         // default sort is attention (evidence of neglect first); only a stored
@@ -1255,10 +1222,8 @@ mod tests {
             (Density::Extended, AgentSort::Squad, None),
             "save_prefs leaves width untouched"
         );
-    }
+        // ----: width coexists with prefs
 
-    #[test]
-    fn width_round_trips_and_coexists_with_prefs() {
         // US1: a dragged width persists, and shares the file with
         // density/sort without either clobbering the other (one locked RMW).
         let _s = Scratch::new("width-roundtrip");
@@ -1280,10 +1245,8 @@ mod tests {
             load_prefs(),
             (Density::Extended, AgentSort::Squad, Some(60))
         );
-    }
+        // ----: the preset writes mode and width together
 
-    #[test]
-    fn save_preset_writes_mode_and_width_together() {
         // A preset is one choice of both fields; save_preset persists them in one
         // mutation so a reader never sees a mode paired with a stale width.
         let _s = Scratch::new("preset-atomic");

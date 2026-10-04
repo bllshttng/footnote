@@ -119,7 +119,7 @@ fn read(path: &Path) -> Result<Store, String> {
             // One release of dual-read: a store the daemon-start move has
             // not reached yet still lives under the pre-rename name.
             if path.file_name().and_then(|n| n.to_str()) == Some("team_names.json") {
-                let legacy = path.with_file_name("crown_names.json");
+                let legacy = path.with_file_name("team_names.json");
                 if let Ok(bytes) = std::fs::read(&legacy) {
                     return decode(&bytes, &legacy);
                 }
@@ -148,13 +148,13 @@ fn decode(bytes: &[u8], path: &Path) -> Result<Store, String> {
     Ok(store)
 }
 
-/// One-shot move at daemon start: the pre-rename `crown_names.json`
+/// One-shot move at daemon start: the pre-rename `team_names.json`
 /// beside the registry becomes `team_names.json`. Best effort (a second
 /// daemon racing the same rename loses cleanly), taken before any reader
 /// runs; readers dual-read the legacy name until every machine has
 /// restarted once.
 pub fn move_legacy_store(home_root: &Path) {
-    let legacy = home_root.join("crown_names.json");
+    let legacy = home_root.join("team_names.json");
     let current = home_root.join("team_names.json");
     if legacy.exists() && !current.exists() {
         let _ = std::fs::rename(&legacy, &current);
@@ -963,17 +963,31 @@ pub fn revert_stale_pending(
     let reg = crate::state::load_registry(registry_path)
         .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
     for (scope, pending) in stale {
-        let evidence = match reg.entries.iter().find(|e| e.name == pending.heir_name) {
-            None => "heir row removed".to_string(),
-            Some(row) if crate::lead_state::is_terminal(row) => {
-                format!("heir row {:?}", row.status)
-            }
-            Some(row) => {
+        let evidence = match crate::loop_lead::live_name_join(&reg.entries, &pending.heir_name) {
+            crate::loop_lead::NameJoin::One(row) => {
                 kept.push(format!(
                     "{scope}: heir row {} still {:?}",
                     pending.heir_name, row.status
                 ));
                 continue;
+            }
+            crate::loop_lead::NameJoin::Ambiguous => {
+                kept.push(format!(
+                    "{scope}: heir row {} name ambiguous; revert refused",
+                    pending.heir_name
+                ));
+                continue;
+            }
+            crate::loop_lead::NameJoin::None => {
+                // No live row answers the heir name; the name's raw matches
+                // are all terminal by the join's construction, so the first
+                // names why the succession reverts.
+                match reg.entries.iter().find(|e| {
+                    e.name == pending.heir_name || e.aliases.iter().any(|a| *a == pending.heir_name)
+                }) {
+                    None => "heir row removed".to_string(),
+                    Some(row) => format!("heir row {:?}", row.status),
+                }
             }
         };
         if apply {
@@ -1899,6 +1913,22 @@ mod tests {
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
                 team_row("heir-live", "other", 1, "sess-l"),
+                json!({
+                    "name": "heir-dup", "status": "live", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-d1",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                json!({
+                    "name": "heir-dup", "status": "live", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-d2",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                json!({
+                    "name": "heir-twin", "status": "failed", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-tw1",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+                team_row("heir-twin", "other", 1, "sess-tw2"),
             ]),
         );
         let store = store_path(tmp.path());
@@ -1923,6 +1953,14 @@ mod tests {
                         "x-yyyy".into(),
                         pending_record("young-heir", "lead-four", Some("sess-4"), &now_stamp()),
                     ),
+                    (
+                        "x-dupd".into(),
+                        pending_record("heir-dup", "lead-five", Some("sess-5"), old_ts()),
+                    ),
+                    (
+                        "x-twin".into(),
+                        pending_record("heir-twin", "lead-six", Some("sess-6"), old_ts()),
+                    ),
                 ]),
             },
         )
@@ -1941,8 +1979,16 @@ mod tests {
         assert_eq!(reverted[0].evidence, "heir row removed");
         assert_eq!(reverted[1].scope, "x-tttt");
         assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
-        assert_eq!(kept.len(), 1, "{kept:?}");
-        assert!(kept[0].contains("heir-live"), "{kept:?}");
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert!(kept.iter().any(|k| k.contains("heir-live")), "{kept:?}");
+        // A name two live rows answer is ambiguous: keep, never guess.
+        assert!(
+            kept.iter()
+                .any(|k| k.contains("heir-dup") && k.contains("ambiguous")),
+            "{kept:?}"
+        );
+        // A dead twin never answers for the live heir.
+        assert!(kept.iter().any(|k| k.contains("heir-twin")), "{kept:?}");
         let dump = snapshot(&store).unwrap();
         // Reverted records name the predecessor again, marker gone.
         assert_eq!(dump["teams"]["fno"]["holder_session"], json!("sess-old"));
@@ -1957,6 +2003,16 @@ mod tests {
         assert_eq!(
             dump["teams"]["x-yyyy"]["pending_succession"]["heir_name"],
             json!("young-heir")
+        );
+        // The ambiguous and twin records keep too.
+        assert_eq!(dump["teams"]["x-dupd"]["holder_session"], json!(null));
+        assert_eq!(
+            dump["teams"]["x-dupd"]["pending_succession"]["heir_name"],
+            json!("heir-dup")
+        );
+        assert_eq!(
+            dump["teams"]["x-twin"]["pending_succession"]["heir_name"],
+            json!("heir-twin")
         );
 
         // The dry run reports the same revert and writes nothing.

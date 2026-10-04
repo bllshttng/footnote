@@ -10,11 +10,13 @@ crossing	crates/fno-agents/src/attach.rs	let output = std::process::Command::new
 crossing	crates/fno-agents/src/authorized_merge.rs	let out = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	let out = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/backlog/decisions_cli.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/backlog/drift_emit.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/bin/client.rs	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	return match Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/blueprint_judge.rs	let out = Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/crown_alarm.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/daemon.rs	let mut child = match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon/fleet_arms.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
@@ -48,6 +50,7 @@ crossing	crates/fno-agents/src/loopcheck/review_coverage_verb.rs	let fno_bin = l
 crossing	crates/fno-agents/src/machine_load.rs	let bin = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/machine_mail.rs	let mut command = Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/mail_inject.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+crossing	crates/fno-agents/src/merge_close.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/pane_stop.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
@@ -113,7 +116,6 @@ resolver	crates/fno-agents/src/loop_dispatch.rs	pub(crate) fn fno_cmd(fno_bin: &
 resolver	crates/fno-agents/src/loopcheck.rs	pub(crate) fn loopcheck_fno_bin() -> String {
 resolver	crates/fno-agents/src/loops_pause.rs	fn fno_cli_binary() -> PathBuf {
 resolver	crates/fno-agents/src/opencode_install.rs	fn resolve_source(cwd: &Path) -> Result<PathBuf, String> {
-resolver	crates/fno-agents/src/plugin_install.rs	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
 resolver	crates/fno-agents/src/plugin_install.rs	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
 resolver	crates/fno-agents/src/reclaim.rs	fn fno_plugin_dir(root: &Path) -> PathBuf {
 resolver	crates/fno-agents/src/scrape.rs	pub fn fno_bin() -> std::ffi::OsString {
@@ -126,6 +128,7 @@ resolver	crates/fno/src/doctor_update.rs	fn install_mux_front_door(source: &Path
 resolver	crates/fno/src/doctor_update.rs	fn resolve_fno_py() -> PathBuf {
 resolver	crates/fno/src/doctor_update.rs	fn verify_uv_install() -> bool {
 resolver	crates/fno/src/doctor_update.rs	fn has_shipped_pyc(td: &Path) -> bool {
+resolver	crates/fno/src/doctor_update.rs	fn live_tool_env_processes() -> Vec<String> {
 resolver	crates/fno/src/doctor_update.rs	fn read_source_wire(source: &Path) -> Option<u32> {
 resolver	crates/fno/src/mux_cli.rs	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {

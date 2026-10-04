@@ -124,10 +124,11 @@ def _raw_payload_at_word_cap() -> str:
         tokens[-1] += "."
         sentences.append(" ".join(tokens))
     payload = " ".join(sentences)
-    from fno import style
+    from fno import rust_binary
 
-    assert style.word_count(payload) == 80
-    assert style.check(payload, surface="mail") == []
+    assert rust_binary.style_word_count(payload) == 80
+    err, receipt = rust_binary.style_receipt(payload, "mail")
+    assert not err and not receipt.get("violations")
     return payload
 
 
@@ -1430,7 +1431,7 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
     assert receipt == "injected"
     assert injected == [(SID_CLAUDE, "/code-review <level> --comment --fix", None)]
     assert not durable, "AC18: --raw never writes durable on any transport result"
-    from fno import style
+    from fno import rust_binary
     from fno.bus.log import iter_messages
 
     rows = list(iter_messages(warn=False))
@@ -1438,7 +1439,7 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
     assert rows[0].id.startswith("fmail-")
     assert rows[0].delivery == "hosted"
     assert rows[0].body == "/code-review <level> --comment --fix"
-    assert rows[0].word_count == style.word_count(rows[0].body)
+    assert rows[0].word_count == rust_binary.style_word_count(rows[0].body)
 
 
 def test_raw_review_emits_started_transport_observation_with_literal_receipt(
@@ -1555,13 +1556,13 @@ def test_raw_check_writes_nothing_and_does_not_reserve(
 def test_raw_style_exception_permits_overage_and_writes_no_ledger(
     runner, mailbox, monkeypatch
 ):
-    from fno import style
+    from fno import rust_binary
     from fno.bus.log import iter_messages
     from fno.mail import budget
 
     _seed_claude(mailbox, monkeypatch)
     payload = _raw_payload_at_word_cap() + " extra."
-    assert style.word_count(payload) == 81
+    assert rust_binary.style_word_count(payload) == 81
 
     result = runner.invoke(
         app,

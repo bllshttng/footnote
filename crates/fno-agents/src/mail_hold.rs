@@ -956,6 +956,8 @@ pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono:
 /// With `--park-on-hold`, a held non-empty body is also parked (C15) and
 /// the verdict comes back `parked` with the park receipt; a failed park
 /// falls through to the plain hold verdict.
+/// `--render-digest` reads the held-release JSON payload from stdin and
+/// writes the Rust-rendered delivery body to stdout; it needs no session id.
 /// `--park` / `--run-parked` (C15): a raw send to a held session parks the
 /// payload in the hold store; one detached runner polls the gate every 5 s
 /// and replays it through the normal raw door when the hold ends.
@@ -963,6 +965,7 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut session: Option<&String> = None;
     let mut off = false;
     let mut gate_mode = false;
+    let mut render_digest = false;
     let mut iter = args.iter();
     let mut park = false;
     let mut park_on_hold = false;
@@ -972,6 +975,7 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             "--session" => session = iter.next(),
             "--off" => off = true,
             "--gate" => gate_mode = true,
+            "--render-digest" => render_digest = true,
             "--park" => park = true,
             "--park-on-hold" => park_on_hold = true,
             "--run-parked" => run_parked_mode = true,
@@ -980,6 +984,30 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
                 return 2;
             }
         }
+    }
+    if render_digest {
+        let mut input = String::new();
+        if std::io::stdin().read_to_string(&mut input).is_err() {
+            eprintln!("mail-hold: could not read held-mail render input");
+            return 2;
+        }
+        let release = match serde_json::from_str::<crate::mail_header::HeldRelease>(&input) {
+            Ok(release) => release,
+            Err(error) => {
+                eprintln!("mail-hold: invalid held-mail render input: {error}");
+                return 2;
+            }
+        };
+        use std::io::Write as _;
+        return match std::io::stdout()
+            .write_all(crate::mail_header::render_held_release(&release).as_bytes())
+        {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("mail-hold: could not write held-mail render: {error}");
+                1
+            }
+        };
     }
     let Some(session_id) = session else {
         eprintln!("mail-hold: --session <session-id> is required");

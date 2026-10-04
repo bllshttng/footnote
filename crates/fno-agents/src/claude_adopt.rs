@@ -253,6 +253,10 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 let prev = reg.entries[i].clone();
                 reg.entries[i] = entry;
                 reg.entries[i].delivery_policy = policy;
+                // The name is the row's birth label (law d-0a0d988c: a label,
+                // never a lookup key): a re-adopt or a refresh keeps the name
+                // the row was born with, never the synthesized short id.
+                reg.entries[i].name = prev.name.clone();
                 if reg.entries[i].node.is_none() {
                     reg.entries[i].node = node;
                 }

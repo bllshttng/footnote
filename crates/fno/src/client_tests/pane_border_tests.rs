@@ -9,11 +9,12 @@ fn client_compose_places_panes_divider_and_chrome() {
     assert!(frame.geometry_ok());
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
-    // Tab strip: scoped to the content columns on row 0, so line 0 carries
-    // both the sideline's squad-1 row (cols 0..27) and the strip (cols 28+).
+    // Tab strip: scoped to the content columns on row 0; the sideline's
+    // strip row shares row 0 (R15) and its squad list starts at line 1.
     assert!(lines[0].contains("[ 2 ]"), "{:?}", lines[0]);
-    assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
-    assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
+    assert!(lines[0].contains("Agents"), "{:?}", lines[0]);
+    assert!(lines[1].contains("▾*footnote"), "{:?}", lines[1]);
+    assert!(lines[3].contains("▸ notes"), "{:?}", lines[3]);
     // Content row 1 is the pane FRAMES' top edge: each pane wears a rounded
     // border with its name; the pty content blits one cell in, and the gap
     // between the frames paints blank.

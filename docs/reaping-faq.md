@@ -32,6 +32,20 @@ rg '"type":"retire_holds"' ~/.fno/agents/events.jsonl
 
 A tick with zero holds writes no `retire_holds` row, so silence is the zero-reading.
 
+## Who decides a session is live
+
+**fno's rows decide. The vendor only checks.** Ruling d-e096c669 (2026-10-01) set the order. fno holds the provenance, so every attach, restore, liveness, and reap path reads fno's own evidence first. A vendor surface can confirm a decided verdict or raise a drift event. It never decides alone, and its silence never blocks fno.
+
+**The one door is `crates/fno-agents/src/row_verdict.rs`.** `fno_verdict` reads fno's evidence in this order:
+
+- a terminal registry status or finalize outcome
+- an `inside_leg` report inside its TTL
+- a recorded pid the ESRCH probe proves gone
+- a live pid
+- else `Unknown`
+
+`reconcile` folds a vendor word in. A vendor word turns an `Unknown` into a verdict. A word that disagrees with a decided verdict keeps fno's verdict and names the disagreement. The reentry revive gate, the gc and rm death proofs, the liveness sweep, and the worked fold read through it (`reentry.rs`, `gc_sweep.rs`, `daemon/roster_death.rs`, `liveness_sweep.rs`, `backlog/worked.rs`). The Python legs in `advance.py` and `watchdog.py` read fno's truth probe and registry spine, with the vendor roster demoted to a state column.
+
 ## Why is my finished worker still on the roster
 
 Three keeps used to hold finished rows with no way out. Each now reads a live reason, and each keeps refusing a specific wrong answer.
@@ -57,7 +71,7 @@ Ten programs stop, retire, or remove a session or one of its parts. A reader who
 | 7 | `fno agents rm` | `daemon.rs` `handle_rm` and `handle_rm_with` | a person, the post-merge ritual, or the watchdog sandbox lane | the row, the native session, the pane, and a reapable tree | the transcript | not read; rm reads no node state |
 | 8 | Post-merge ritual row removal | `cli/src/fno/pr/_ritual.py` (the archive leg, and the `reap-rows` leg when `self_reap` is on) | `/fno:ship pr merged` after `gh` reads `MERGED` | rows through `fno agents rm` | the transcript and the branch | merged by construction; additional PRs are not read |
 | 9 | Watchdog and recovery lanes | lane sets `watchdog.py` `LANES`, apply `watchdog.py` `apply_verdict`, gate `watchdog.py` `_gate_reason`; keeper `keeper_lane.py` `reap_keepers`; stop-then-respawn `recovery.py` `recovery_sweep`, `_redispatch`, `_respawn_bg_resume`, `_revive_bg_thread` | the pr_watch tick when `recovery.watchdog.enabled`; keeper and recovery legs have their own gates | wake and silence remove nothing (they resume); the sandbox lane force-rms a codex row; a keeper reap group-kills; a recovery leg stops a stale worker and respawns one in the same tree | a live claim or owner keeps the row; a failed spawn after a stop can leave the node driverless | checks only that the node is not done; it does not read the PR |
-| 10 | Orphan process sweeps | fno-py orphans in the retire arm (`gc.rs` `unowned_sweeps`); test binaries `orphan_reap.rs` `maybe_sweep` on a 300 s cadence; keeper registry sweep at daemon start (`daemon.rs` `keeper_registry_sweep`); manual `fno agents orphans --reap` | daemon cadences or a person | the process: ppid 1, age past its floor, pid not in the registry | a registry pid is excluded, so a tracked worker is safe; dead keepers' sockets are unlinked | not read |
+| 10 | Orphan process sweeps | fno-py orphans and orphaned stdio MCP servers (the codegraph family: a `serve --mcp` argv pair, or the codegraph `--liftoff-only` launcher flag paired with a codegraph path token) in the retire arm (`gc.rs` `unowned_sweeps`); test binaries `orphan_reap.rs` `maybe_sweep` on a 300 s cadence; keeper registry sweep at daemon start (`daemon.rs` `keeper_registry_sweep`); manual `fno agents orphans --reap` | daemon cadences or a person | the process: ppid 1, age past its floor, pid not in the registry | a registry pid is excluded, so a tracked worker is safe; dead keepers' sockets are unlinked | not read |
 
 The manual verb and the registry arm run the same sweep body (`client.rs` `run_reap`, `gc.rs` `gc_sweep`). The registry arm runs one sweep at a time behind a one-in-flight gate (`gc.rs` `maybe_retirement_sweep`). A slow sweep holds the next request, so the effective cadence is not the interval. Run `fno-agents status` to read the arms table. The roster dry run reports each row's `class` as `fleet`, `unmarked`, `owned`, or `contested`.
 
