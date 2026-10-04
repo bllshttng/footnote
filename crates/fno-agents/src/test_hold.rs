@@ -8,8 +8,9 @@
 //! (`build:cargo`, its `test:cargo-run:N` slot) stay Live and every build
 //! queues behind a run that cannot progress (two paused runs once held
 //! all three for 2.5h and the canonical fno update stalled behind them).
-//! Tests are CI-gated (law d-50986bf8), so a held run ends instead of
-//! waiting. The first pass of a hold announces it on the bus; the lift
+//! Tests are CI-gated (changed-file runs locally, the whole suite on every
+//! PR), so a held run ends instead of waiting. The first pass of a hold
+//! announces it on the bus; the lift
 //! announces the all-clear under the same subject, so the all-clear
 //! supersedes the standing hold line.
 //!
@@ -185,20 +186,72 @@ fn signal(pid: u32, sig: libc::c_int) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
 }
 
-/// End one picked pid: SIGKILL, or SIGKILL to its whole process group when
-/// it leads one. SIGKILL, not SIGSTOP: a stopped pid stays alive and every
-/// pid-anchored claim it holds reads Live, so builds queue behind a run that
-/// cannot progress until the TTL lifts. SIGKILL lands on a stopped process
-/// and frees the claims at once. The group kill reaches a compile the run
-/// forked after the scan: an orphaned child reparents to ppid 1 and the
-/// fleet walk stops there, so a per-pid kill would leave it compiling.
-fn end_run(pid: u32) -> bool {
+/// True when the pid still is the incarnation the scan picked: the same
+/// birth token it carried then. A pid that exited and was reused must never
+/// be signaled.
+fn same_incarnation(pid: u32, birth: u64) -> bool {
+    crate::daemon::process_start_time(pid) == Some(birth)
+}
+
+/// End one picked run, birth-verified. SIGKILL, not SIGSTOP: a stopped pid
+/// stays alive and every pid-anchored claim it holds reads Live, so builds
+/// queue behind a run that cannot progress until the TTL lifts. SIGKILL
+/// lands on a stopped process and frees the claims at once.
+///
+/// A run that leads its own process group (every run the test-run wrapper
+/// spawned does) takes the group kill, which reaches a compile forked after
+/// the scan: an orphaned child reparents to ppid 1 and the fleet walk stops
+/// there, so a per-pid kill would leave it compiling. Any other run is
+/// frozen first so it forks nothing new, its live descendants are read and
+/// killed, then the run itself; the stop is transient and never resumed.
+fn end_run(pid: u32, birth: u64) -> bool {
+    if !same_incarnation(pid, birth) {
+        return false;
+    }
     let group_leader =
         unsafe { libc::getpgid(pid as libc::pid_t) } == pid as libc::pid_t && pid > 1;
     if group_leader && unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) } == 0 {
         return true;
     }
-    signal(pid, libc::SIGKILL)
+    // Freeze before the second read so the subtree closes under us.
+    signal(pid, libc::SIGSTOP);
+    let mut ended = false;
+    for child in frozen_descendants(pid) {
+        // A birth read beside the signal is the liveness proof: a pid that
+        // already exited reads no start time and is skipped.
+        if crate::daemon::process_start_time(child).is_none() {
+            continue;
+        }
+        if signal(child, libc::SIGKILL) {
+            ended = true;
+        }
+    }
+    if signal(pid, libc::SIGKILL) {
+        ended = true;
+    }
+    ended
+}
+
+/// Every live pid under `pid` right now: one fresh table read, the frozen
+/// root's post-scan forks included. Zombies are skipped: a signal to one is
+/// a no-op and its parent reaps it.
+fn frozen_descendants(pid: u32) -> Vec<u32> {
+    let (table, _) = crate::census::process_table();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for row in &table {
+        children.entry(row.ppid).or_default().push(row.pid);
+    }
+    let mut found = Vec::new();
+    let mut stack = vec![pid];
+    while let Some(current) = stack.pop() {
+        for kid in children.get(&current).into_iter().flatten() {
+            if table.iter().any(|r| r.pid == *kid && r.state != 'Z') {
+                found.push(*kid);
+                stack.push(*kid);
+            }
+        }
+    }
+    found
 }
 
 fn read_state(path: &Path) -> Option<PauseState> {
@@ -284,7 +337,13 @@ fn reconcile_locked(home: &AgentsHome, path: &Path) -> Result<Outcome, String> {
         }
         for pid in fresh {
             done.insert(pid);
-            if end_run(pid) {
+            // The scan-time birth token travels with the pid: end_run
+            // re-proves it before every signal, so a pid reused in between
+            // is never touched.
+            let Some(birth) = crate::daemon::process_start_time(pid) else {
+                continue;
+            };
+            if end_run(pid, birth) {
                 outcome.killed += 1;
             }
         }
