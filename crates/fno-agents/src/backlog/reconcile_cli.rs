@@ -1276,7 +1276,7 @@ fn close_leg(
 /// row mutation rides the graph transaction; the journal emit runs after
 /// the publish (see [`emit_outside_merge_label`]) so a publish retry can
 /// never duplicate an irreversible row.
-fn close_provenance(entry: &mut Value, record: &MergeDriftRecord) {
+fn close_provenance(entry: &mut Value, _record: &MergeDriftRecord) {
     if let Some(closed_by) = entry.get_mut("closed_by").and_then(Value::as_object_mut) {
         closed_by.insert("path".into(), json!("reconcile"));
     }
