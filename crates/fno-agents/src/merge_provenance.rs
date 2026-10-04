@@ -121,34 +121,11 @@ impl Drop for TestJournal {
     }
 }
 
-/// The RAII half of reading the journal through a record cwd: the daemon
-/// cwd is no repo (x-b59f), so the caller hands the record repo root and
-/// the canonical-root resolver honors it for one call.
-pub(crate) struct RepoRootGuard(Option<OsString>);
-
-impl RepoRootGuard {
-    pub(crate) fn set(root: &str) -> Self {
-        let prior = std::env::var_os("FNO_REPO_ROOT");
-        std::env::set_var("FNO_REPO_ROOT", root);
-        Self(prior)
-    }
-}
-
-impl Drop for RepoRootGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(v) => std::env::set_var("FNO_REPO_ROOT", v),
-            None => std::env::remove_var("FNO_REPO_ROOT"),
-        }
-    }
-}
-
-/// The journal a node repo resolves to: the record cwd as `FNO_REPO_ROOT`
-/// for one canonical-root read.
+/// The journal a node repo resolves to: the canonical-root walk run from
+/// the record cwd, no process-wide pin.
 pub(crate) fn journal_for(cwd: Option<&str>) -> Option<PathBuf> {
     let cwd = cwd.filter(|c| !c.is_empty())?;
-    let _root = RepoRootGuard::set(cwd);
-    Some(crate::law_match::project_events_journal())
+    Some(crate::law_match::project_events_journal_in(Path::new(cwd)))
 }
 
 fn trace_for(session: Option<String>, source: &str) -> Trace {
@@ -385,17 +362,38 @@ mod tests {
         let journal = TestJournal::opt_in();
         // The argv grammar: pr merge and the REST merge endpoint, the bare
         // `pr merge` (gh resolves the number), and strangers.
-        assert_eq!(merge_request_pr(&argv(&["gh", "pr", "merge", "7"])), Some(7));
-        assert_eq!(merge_request_pr(&argv(&["pr", "merge", "7", "--squash"])), Some(7));
         assert_eq!(
-            merge_request_pr(&argv(&["gh", "api", "-X", "PUT", "repos/o/r/pulls/7/merge"])),
+            merge_request_pr(&argv(&["gh", "pr", "merge", "7"])),
             Some(7)
         );
         assert_eq!(
-            merge_request_pr(&argv(&["gh", "api", "--method", "PUT", "repos/o/r/pulls/9/merge"])),
+            merge_request_pr(&argv(&["pr", "merge", "7", "--squash"])),
+            Some(7)
+        );
+        assert_eq!(
+            merge_request_pr(&argv(&[
+                "gh",
+                "api",
+                "-X",
+                "PUT",
+                "repos/o/r/pulls/7/merge"
+            ])),
+            Some(7)
+        );
+        assert_eq!(
+            merge_request_pr(&argv(&[
+                "gh",
+                "api",
+                "--method",
+                "PUT",
+                "repos/o/r/pulls/9/merge"
+            ])),
             Some(9)
         );
-        assert_eq!(merge_request_pr(&argv(&["gh", "api", "repos/o/r/pulls/7/merge"])), None);
+        assert_eq!(
+            merge_request_pr(&argv(&["gh", "api", "repos/o/r/pulls/7/merge"])),
+            None
+        );
         assert_eq!(merge_request_pr(&argv(&["gh", "pr", "list"])), None);
         assert_eq!(
             merge_request_pr(&argv(&["cd", "/x", "&&", "gh", "pr", "merge", "9"])),

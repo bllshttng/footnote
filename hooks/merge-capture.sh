@@ -12,15 +12,15 @@ set -uo pipefail
 PAYLOAD="$(cat 2>/dev/null || true)"
 [ -n "$PAYLOAD" ] || exit 0
 
-# The door payload embeds the hook payload as a JSON string value.
+# The payload is embedded as an OBJECT (the door reads .hook.tool_input),
+# so it is validated as JSON first and passed through verbatim.
 if command -v jq >/dev/null 2>&1; then
-    WRAPPED="$(printf '%s' "$PAYLOAD" | jq -Rs .)"
+    printf '%s' "$PAYLOAD" | jq -e . >/dev/null 2>&1 || exit 0
 elif command -v python3 >/dev/null 2>&1; then
-    WRAPPED="$(PAYLOAD_ENV="$PAYLOAD" python3 -c 'import json,os,sys; sys.stdout.write(json.dumps(os.environ["PAYLOAD_ENV"]))' 2>/dev/null || true)"
+    printf '%s' "$PAYLOAD" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1 || exit 0
 else
     exit 0
 fi
-[ -n "$WRAPPED" ] || exit 0
 
 for candidate in \
     "$(command -v fno-agents 2>/dev/null || true)" \
@@ -29,7 +29,7 @@ for candidate in \
     "$PWD/crates/fno-agents/target/debug/fno-agents"; do
     [ -n "$candidate" ] || continue
     [ -x "$candidate" ] || continue
-    printf '{"merge_provenance":{"hook":%s}}' "$WRAPPED" \
+    printf '{"merge_provenance":{"hook":%s}}' "$PAYLOAD" \
         | "$candidate" graph-get >/dev/null 2>&1
     rc=$?
     [ "$rc" -le 1 ] && exit 0
