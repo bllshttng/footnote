@@ -143,7 +143,7 @@ pub(super) fn endpoint_pane(
         let pane = agent
             .pane_id
             .filter(|id| view.layout.panes.iter().any(|(visible, _)| visible == id))?;
-        Some((pane, agent.effective_identity()?.to_string()))
+        Some((pane, agent.harness_session_id.as_deref()?.to_string()))
     };
     let mut exact = view
         .layout
