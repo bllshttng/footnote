@@ -2841,8 +2841,8 @@ event_types:
 
   - {name: lead_term, alias_of: king_term, sources: [loop, daemon, hook]}
   - name: event_payload_too_large
-    description: "A Rust-emitted event payload exceeded limits.max_data_bytes (65536). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
-    sources: [daemon, subagent]
+    description: "A Rust-emitted event payload exceeded limits.max_data_bytes (65536). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors. Any emitter can overflow, so the meta-event carries every literal channel; pattern sources pass the kind gate by the shared pattern rule."
+    sources: [active-backlog, agents, approvals, backlog, bash, cli, config, daemon, fno-loop, hook, loop, megatron, megawalk, migration, observer, pr-heal, pr-park, python, rust, skill_diff, subagent, target, test]
     data:
       required: []
       properties:

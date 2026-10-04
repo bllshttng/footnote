@@ -348,6 +348,11 @@ collisions = python_types & rust_kinds
 # is owned by tick_ledger.rs; Rust daemon arms and the Python arms (until they
 # port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
+    # event_payload_too_large: the oversize meta-event both emitters write
+    # when a payload exceeds limits.max_data_bytes; every channel can
+    # overflow, so the kind carries every literal source and both halves
+    # own it by construction.
+    "event_payload_too_large",
     # graph_write_gate: the keeper emits the five-minute window rows (Rust)
     # and the single-row mutation path emits the per-write rows (Rust) with
     # the Python schema declaring both sources.
