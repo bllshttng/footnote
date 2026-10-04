@@ -1530,7 +1530,7 @@ pub(crate) fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
 // Verbs: acquire / release / status
 // ---------------------------------------------------------------------------
 
-fn validate_inputs(
+pub(crate) fn validate_inputs(
     key: &str,
     holder: &str,
     ttl_ms: Option<i64>,

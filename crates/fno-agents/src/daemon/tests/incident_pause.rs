@@ -179,6 +179,7 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
         |_| false,
         |_| false,
         |_| false,
+        |_| false,
         |_| crate::client_verbs::RowLiveness::Unknown,
         true,
     );

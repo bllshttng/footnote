@@ -1,0 +1,1 @@
+{"schema_version": 1, "key": "session:par-free", "holder": "pty:par", "pid": "PID", "has_ttl": false, "machine_id": true, "reason": null, "pid_provenance": "ambient", "metadata": null}

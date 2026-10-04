@@ -112,34 +112,35 @@ pub fn decide(
         };
         return ("runaway".into(), reason);
     }
-    if let Some(issues) = sample
-        .mux_issues
-        .as_ref()
-        .and_then(|value| value.as_array())
-        .filter(|issues| !issues.is_empty())
-    {
-        return (
-            "hot".into(),
-            format!("mux owner/socket issue: {} finding(s)", issues.len()),
-        );
-    }
+    // Load is a queue, not work: macOS load counts short-lived process
+    // churn, so only confirmed CPU busy makes a verdict hot.
     let busy_hot = sample.busy_fraction.is_some_and(|value| value > busy_band);
-    let load_hot = sample
-        .load_15m
-        .zip(sample.cores)
-        .is_some_and(|(load, cores)| cores > 0.0 && load / cores > load_band);
     let busy_readable = sample.busy_fraction.is_some() && sample.cores.is_some();
     let load_readable = sample.load_15m.is_some() && sample.cores.is_some();
-    let verdict = if busy_hot || load_hot {
+    let verdict = if busy_hot {
         "hot"
     } else if busy_readable && load_readable {
         "calm"
     } else {
         "unreadable"
     };
-    let busy = sample
-        .busy_fraction
-        .map_or_else(|| "unavailable".into(), |v| format!("{:.1}%", v * 100.0));
+    if verdict != "hot" {
+        if let Some(issues) = sample
+            .mux_issues
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .filter(|issues| !issues.is_empty())
+        {
+            // A mux finding is its own incident, not resource pressure: it
+            // pages through its own verdict, never feeds the hot streak the
+            // runaway brake escalates from, and never masks a hot reading.
+            return (
+                "mux".into(),
+                format!("mux owner/socket issue: {} finding(s)", issues.len()),
+            );
+        }
+    }
+    let busy = busy_text(sample);
     let cores = sample
         .cores
         .map_or_else(|| "unknown".into(), |v| format!("{v:.0}"));
@@ -224,10 +225,16 @@ pub fn tick_machine_watch_with_thresholds(
     let load_band = sample.load_band_per_core.unwrap_or(LOAD_PER_CORE_BAND);
     let (mut verdict, mut reason) = decide(sample, busy_band, load_band, baseline);
     let mut forced_escalation = false;
-    let absolute_load_hot = sample
-        .load_1m
-        .zip(sample.cores)
-        .is_some_and(|(load, cores)| cores > 0.0 && load / cores > thresholds.load_per_core);
+    // The brake needs both: load per core over the threshold AND real CPU
+    // busy over the busy band. macOS load counts process churn, so load
+    // alone overstates pressure (2026-10-03: load 37-45 on 12 cores, about
+    // 5 cores busy, 1115 short-lived processes).
+    let cpu_confirms = sample.busy_fraction.is_some_and(|value| value > busy_band);
+    let absolute_load_hot = cpu_confirms
+        && sample
+            .load_1m
+            .zip(sample.cores)
+            .is_some_and(|(load, cores)| cores > 0.0 && load / cores > thresholds.load_per_core);
     if absolute_load_hot {
         let since = state.absolute_load_since.get_or_insert(now);
         let elapsed = now.saturating_duration_since(*since);
@@ -235,17 +242,21 @@ pub fn tick_machine_watch_with_thresholds(
             verdict = "runaway".into();
             forced_escalation = true;
             reason = format!(
-                "Machine overloaded: about {} jobs per core waiting (fine is under {}) for {}",
+                "Machine overloaded: about {} jobs per core waiting (fine is under {}) and CPU {} busy across {} cores (brake needs over {:.0}%) for {}",
                 num(sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0)),
                 num(thresholds.load_per_core),
+                busy_text(sample),
+                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
+                busy_band * 100.0,
                 span(elapsed),
             );
         } else {
             verdict = "hot".into();
             reason = format!(
-                "Machine busy: about {} jobs per core waiting (fine is under {}) for {}; tests pause at {}",
+                "Machine busy: about {} jobs per core waiting (fine is under {}) and CPU {} busy for {}; tests pause at {}",
                 num(sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0)),
                 num(thresholds.load_per_core),
+                busy_text(sample),
                 span(elapsed),
                 span(thresholds.load_hold),
             );
@@ -320,6 +331,11 @@ pub fn tick_machine_watch_with_thresholds(
                 };
             }
             emit_notice(state, sample, &reason, now, HOT_TITLE, "hot", &mut notify)
+        }
+        "mux" => {
+            state.calm_streak = 0;
+            state.hot_streak = 0;
+            emit_notice(state, sample, &reason, now, HOT_TITLE, "mux", &mut notify)
         }
         _ => WatchOutcome {
             acted: 0,
@@ -589,6 +605,13 @@ fn top_session_id(sample: &MachineSample) -> Option<String> {
 
 fn opt(value: Option<f64>) -> String {
     value.map_or_else(|| "unmeasured".into(), |v| format!("{v:.1}"))
+}
+/// The busy fraction a person reads: `95.0%`, or `unavailable` when the
+/// host ticks gave nothing.
+fn busy_text(sample: &MachineSample) -> String {
+    sample
+        .busy_fraction
+        .map_or_else(|| "unavailable".into(), |v| format!("{:.1}%", v * 100.0))
 }
 /// A reading in plain words: whole numbers lose the `.0`.
 fn num(value: f64) -> String {
@@ -880,19 +903,146 @@ mod tests {
     }
 
     #[test]
-    fn load_can_make_machine_hot() {
-        let (verdict, reason) = decide(&sample(Some(0.487), Some(363.0)), 0.9, 10.0, None);
+    fn load_can_make_machine_hot_only_when_cpu_confirms() {
+        let (verdict, reason) = decide(&sample(Some(0.95), Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "hot");
         assert!(
             reason.contains("about 30.2 jobs per core waiting (fine is under 10)"),
             "{reason}"
         );
-        // An unreadable reading never reads as calm.
+        // Churn-inflated load with idle cores reads calm, never hot.
+        let (verdict, reason) = decide(&sample(Some(0.4), Some(363.0)), 0.9, 10.0, None);
+        assert_eq!(verdict, "calm");
+        assert!(
+            reason.contains("about 30.2 jobs per core waiting"),
+            "{reason}"
+        );
+        // An unreadable reading never reads as calm, and load alone with
+        // unreadable busy cannot read hot.
         let (verdict, _) = decide(&sample(None, Some(2.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "unreadable");
+        let (verdict, _) = decide(&sample(None, Some(363.0)), 0.9, 10.0, None);
+        assert_eq!(verdict, "unreadable");
 
+        // A mux finding is its own verdict: it pages through the notice
+        // throttle, never brakes, and never feeds the hot streak the brake
+        // escalates from.
+        let mut muxed = sample(Some(0.4), Some(150.0));
+        muxed.load_1m = Some(96.0);
+        muxed.mux_issues = Some(serde_json::json!([{ "kind": "duplicate-server" }]));
+        let (verdict, reason) = decide(&muxed, 0.9, 10.0, None);
+        assert_eq!(verdict, "mux");
+        assert!(reason.contains("mux owner/socket issue"), "{reason}");
+        let mut mux_state = MachineWatchState::default();
+        let mux_start = Instant::now();
+        let mut mux_notices = 0;
+        let mut mux_brakes = 0;
+        for elapsed in [0, 1803] {
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut mux_state,
+                Ok(&muxed),
+                |_, _| {
+                    mux_notices += 1;
+                    true
+                },
+                mux_start + Duration::from_secs(elapsed),
+                |_, _| mux_brakes += 1,
+                Thresholds::default(),
+            );
+            assert_eq!(outcome.verdict, "mux", "tick at {elapsed}s");
+        }
+        assert_eq!(mux_notices, 2, "mux pages through the notice throttle");
+        assert_eq!(mux_brakes, 0, "a mux finding never arms the brake");
+
+        // Saturation outranks the mux page: a hot reading with a mux
+        // finding stays hot, so the brake clock keeps running.
+        let mut hot_and_muxed = sample(Some(0.95), Some(150.0));
+        hot_and_muxed.mux_issues = Some(serde_json::json!([{ "kind": "duplicate-server" }]));
+        let (verdict, _) = decide(&hot_and_muxed, 0.9, 10.0, None);
+        assert_eq!(verdict, "hot");
+
+        // hot -> mux -> hot: the mux tick resets the streak, so the
+        // isolated hot sample debounces instead of notifying on one reading.
+        let mut seq_state = MachineWatchState::default();
+        let seq_start = Instant::now();
+        let mut seq_notifies = 0;
+        let mut last_skip = String::new();
+        let mux_sample = || {
+            let mut s = sample(Some(0.4), Some(150.0));
+            s.load_1m = Some(96.0);
+            s.mux_issues = Some(serde_json::json!([{ "kind": "duplicate-server" }]));
+            s
+        };
+        for elapsed in [0, 300, 600] {
+            let sample_at = if elapsed == 300 {
+                mux_sample()
+            } else {
+                sample(Some(0.95), Some(1.0))
+            };
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut seq_state,
+                Ok(&sample_at),
+                |_, _| {
+                    seq_notifies += 1;
+                    true
+                },
+                seq_start + Duration::from_secs(elapsed),
+                |_, _| {},
+                Thresholds::default(),
+            );
+            last_skip = outcome.skip_reason.unwrap_or_default();
+        }
+        assert_eq!(seq_notifies, 1, "only the mux tick pages");
+        assert_eq!(last_skip, "debouncing", "the isolated hot sample debounces");
+
+        // Churn walk: sustained load with idle busy never brakes. The
+        // 2026-10-03 shape: 8 jobs per core waiting, about 5 of 12 cores
+        // busy, all of it short-lived process churn.
         let mut state = MachineWatchState::default();
-        let mut absolute = sample(Some(0.0), Some(1.0));
+        let churn = || {
+            let mut s = sample(Some(0.4), Some(150.0));
+            s.load_1m = Some(96.0);
+            s
+        };
+        let start = Instant::now();
+        let mut brakes = 0;
+        for elapsed in [0, 300, 603, 903, 1803] {
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut state,
+                Ok(&churn()),
+                |_, _| true,
+                start + Duration::from_secs(elapsed),
+                |_, _| brakes += 1,
+                Thresholds::default(),
+            );
+            assert_eq!(outcome.verdict, "calm", "tick at {elapsed}s");
+            assert_eq!(outcome.acted, 0, "tick at {elapsed}s");
+        }
+        // A busy tick reopens the window; the next churn tick closes it, so
+        // the hold never accumulates across mixed samples.
+        let confirmed = || {
+            let mut s = sample(Some(0.95), Some(150.0));
+            s.load_1m = Some(96.0);
+            s
+        };
+        for (elapsed, busy_now) in [(2103, true), (2403, false), (2703, true), (3003, false)] {
+            let sample_at = if busy_now { confirmed() } else { churn() };
+            let outcome = tick_machine_watch_with_thresholds(
+                &mut state,
+                Ok(&sample_at),
+                |_, _| true,
+                start + Duration::from_secs(elapsed),
+                |_, _| brakes += 1,
+                Thresholds::default(),
+            );
+            assert_ne!(outcome.verdict, "runaway", "tick at {elapsed}s");
+        }
+        assert_eq!(brakes, 0, "no brake without confirmed busy");
+
+        // Confirmed escalation walk: the same load with busy confirmed still
+        // escalates after the hold, and the page names both numbers.
+        let mut state = MachineWatchState::default();
+        let mut absolute = sample(Some(0.95), Some(1.0));
         absolute.load_1m = Some(96.0); // 8 per core, above the absolute 4 band.
         let start = Instant::now();
         let mut notices = 0;
@@ -915,11 +1065,11 @@ mod tests {
                 assert_eq!(outcome.verdict, "runaway");
             }
         }
-        // The page a person reads: plain words, the scale built in.
+        // The page a person reads: plain words, both numbers, the scale built in.
         assert_eq!(last.0, RUNAWAY_TITLE);
         assert!(
             last.1.starts_with(
-                "Machine overloaded: about 8 jobs per core waiting (fine is under 4) for 10 minutes"
+                "Machine overloaded: about 8 jobs per core waiting (fine is under 4) and CPU 95.0% busy across 12 cores (brake needs over 90%) for 10 minutes"
             ),
             "{}",
             last.1

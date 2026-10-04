@@ -54,26 +54,11 @@ def test_acquire_json_output(cwd_tmp):
 
 
 def test_acquire_conflict_exits_1(cwd_tmp):
-    runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
-    result = runner.invoke(cli, ["acquire", "k", "--holder", "h2"])
+    pid = str(os.getpid())
+    runner.invoke(cli, ["acquire", "k", "--holder", "h1", "--pid", pid])
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h2", "--pid", pid])
     assert result.exit_code == 1
     assert "held by" in result.output
-
-
-def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
-    """acquire_claim's contention-retry-exhaustion ClaimContended must be
-    caught and mapped to exit 1 (same "retry later" code as
-    ClaimHeldByOther), not escape as an uncaught traceback."""
-    import fno.claims.core as claims_core
-
-    def _raise(*args, **kwargs):
-        raise ClaimContended("acquire_claim gave up after 5 contention retries on 'k'")
-
-    monkeypatch.setattr(claims_core, "acquire_claim", _raise)
-    result = runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
-    assert result.exit_code == 1
-    assert "contention error" in result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
@@ -145,17 +130,20 @@ def test_acquire_with_ttl(cwd_tmp):
     assert parsed["pid_unavailable"] is True
 
 
-def test_acquire_omitted_pid_defaults_to_session_ancestor(cwd_tmp, monkeypatch):
-    # ponytail hardening: an omitted --pid anchors to the durable session
-    # (nearest agent ancestor), not the transient acquiring process. os.getppid()
-    # is a real, live, DISTINCT pid so this proves the wiring (not the old
-    # os.getpid() default).
-    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid",
-                        lambda from_pid=None: os.getppid())
+def test_acquire_omitted_pid_records_an_anchor(cwd_tmp):
+    # An omitted --pid records a process anchor: the durable session walk's
+    # answer when a harness ancestor exists, the calling process otherwise
+    # (the documented degrade). The walk-proven case is characterized in
+    # crates/fno-agents/tests/claim_acquire_parity.rs; the suite runs
+    # harness-neutral, so here the anchor is simply present and the claim
+    # never reads pid-unavailable without the flag.
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
-    assert parsed["pid"] == os.getppid() and parsed["pid"] != os.getpid()
+    assert parsed["pid"] is not None
+    # to_yaml_dict omits the flag when False; a pid-anchored record must not
+    # carry it at all.
+    assert "pid_unavailable" not in parsed
 
 
 def test_acquire_omitted_pid_with_ttl_is_explicitly_unavailable(cwd_tmp, monkeypatch):
@@ -283,7 +271,7 @@ def test_status_colonless_garbage_refuses(cwd_tmp):
 
 
 def test_status_live(cwd_tmp):
-    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    runner.invoke(cli, ["acquire", "k", "--holder", "h", "--pid", str(os.getpid())])
     result = runner.invoke(cli, ["status", "k", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
@@ -298,8 +286,9 @@ def test_list_empty(cwd_tmp):
 
 
 def test_list_with_prefix(cwd_tmp):
-    runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h"])
-    runner.invoke(cli, ["acquire", "fleet:m1", "--holder", "h"])
+    pid = str(os.getpid())
+    runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h", "--pid", pid])
+    runner.invoke(cli, ["acquire", "fleet:m1", "--holder", "h", "--pid", pid])
     result = runner.invoke(cli, ["list", "--prefix", "node:", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
@@ -324,7 +313,9 @@ def test_list_no_prefix_sees_global_claims_from_different_cwd(tmp_path, monkeypa
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
     monkeypatch.chdir(repo)
 
-    acquired = runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h"])
+    acquired = runner.invoke(
+        cli, ["acquire", "node:ab-1", "--holder", "h", "--pid", str(os.getpid())]
+    )
     assert acquired.exit_code == 0
     # Sanity: the claim landed under the global root, not the repo-local one.
     assert (home / ".fno" / "claims" / "node%3Aab-1.lock").exists()
@@ -339,7 +330,7 @@ def test_list_no_prefix_sees_global_claims_from_different_cwd(tmp_path, monkeypa
 def test_list_prefix_node_scans_global_root_once(cwd_tmp):
     """An explicit global --prefix still resolves the global root directly;
     the merge in list_cmd must not duplicate its rows."""
-    runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h"])
+    runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h", "--pid", str(os.getpid())])
     result = runner.invoke(cli, ["list", "--prefix", "node:", "--json"])
     assert result.exit_code == 0
     keys = [r["key"] for r in json.loads(result.output)]
@@ -450,7 +441,7 @@ def test_a_flag_from_another_mode_is_refused_not_ignored(cwd_tmp):
 
 
 def test_refresh_pid_liveness_is_noop(cwd_tmp):
-    runner.invoke(cli, ["acquire", "k", "--holder", "h"])  # PID-liveness
+    runner.invoke(cli, ["acquire", "k", "--holder", "h", "--pid", str(os.getpid())])  # PID-liveness
     result = runner.invoke(cli, ["refresh", "k", "--holder", "h"])
     assert result.exit_code == 0
     assert "no-op" in result.output or "PID-liveness" in result.output
@@ -573,10 +564,10 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
 
-    g = tmp_path / "graph.json"
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
+    g = tmp_path / "state" / "db" / "graph.json"
     seed_graph(g, '{"entries": [{"id": "ab-hotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
-    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
     # The spawn side takes the launch-window claim, then the worker names it back.
     acquire_claim(key="node:ab-hotest", holder="spawn-handover:t-worker",
@@ -641,10 +632,10 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
 
-    g = tmp_path / "graph.json"
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
+    g = tmp_path / "state" / "db" / "graph.json"
     seed_graph(g, '{"entries": [{"id": "ab-acqtest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
-    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
     acq = runner.invoke(
         cli, ["acquire", "node:ab-acqtest", "--holder", "target-session:s", "--ttl", "1h"]
@@ -677,10 +668,10 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
 
-    g = tmp_path / "graph.json"
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
+    g = tmp_path / "state" / "db" / "graph.json"
     seed_graph(g, '{"entries": [{"id": "ab-acqrel", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
-    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
     acq = runner.invoke(
         cli, ["acquire", "node:ab-acqrel", "--holder", "target-session:s", "--ttl", "1h"]
@@ -710,12 +701,12 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
     for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
-    g = tmp_path / "graph.json"
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
+    g = tmp_path / "state" / "db" / "graph.json"
     seed_graph(
         g,
         [{"id": node_id, "title": "t", "domain": "code", "project": "p"}],
     )
-    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
     return g
 
 

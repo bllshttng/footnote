@@ -34,7 +34,6 @@ from .core import (
     ClaimContended,
     ClaimCorrupted,
     ClaimGoneAway,
-    ClaimHeldByOther,
     ClaimValidationError,
     ClaimVerdictError,
     ClaimVerdictUnavailable,
@@ -184,182 +183,79 @@ def acquire(
     is the same operation against a different claim space; it was a separate
     ``lane-acquire`` verb whose name was its own flag.
     """
+    return _forward_acquire(
+        key, holder, lane, max_lanes, reason, ttl, metadata, pid,
+        pid_unavailable, json_output, verbose, harness, handover_from,
+    )
+
+
+def _forward_acquire(
+    key, holder, lane, max_lanes, reason, ttl, metadata, pid,
+    pid_unavailable, json_output, verbose, harness, handover_from,
+) -> None:
+    """Forward to the bundled fno-agents binary, binary-direct.
+
+    The wave-1 port moved the leaf's logic (validations, lane slot, the
+    handover rebind, the do stamp, output and exit codes) into
+    `crates/fno-agents/src/claim_cli/acquire.rs`; Python owns transport only,
+    per the dual-implementation protocol.
+    """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    argv = []
+    if key is not None:
+        argv.append(key)
+    if holder:
+        argv.extend(("--holder", holder))
     if lane is not None:
-        if key is not None or max_lanes is None or holder:
-            typer.echo(
-                "validation error: --lane takes no KEY and no --holder, and "
-                "requires --max-lanes (a lane slot is acquired by lane id, not "
-                "by claim key)",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        _acquire_lane(lane=lane, max_lanes=max_lanes, ttl=ttl, json_output=json_output)
-        return
-    # --max-lanes is meaningless without --lane, and silently ignoring it is how
-    # someone migrating off `lane-acquire` gets an ordinary claim with the cap
-    # not enforced and nothing on stderr to say so.
+        argv.extend(("--lane", lane))
+    # A lone --max-lanes forwards too: the leaf owns the refusal (the cap
+    # flag without its lane mode must exit 2, never be silently dropped).
     if max_lanes is not None:
-        typer.echo(
-            "validation error: --max-lanes is the lane-slot cap and requires --lane <id>",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if key is None:
-        typer.echo("validation error: KEY is required (or use --lane <id>)", err=True)
-        raise typer.Exit(code=2)
-    if not holder:
-        typer.echo("validation error: --holder is required", err=True)
-        raise typer.Exit(code=2)
-    if pid_unavailable and pid is not None:
-        typer.echo(
-            "validation error: --pid and --pid-unavailable are mutually exclusive",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    parsed_ttl = _parse_ttl(ttl)
-    # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
-    # (a one-shot `fno agents claim acquire` from a shell dies ~1s later, so the claim went
-    # instantly STALE -- the footgun). Default instead to the durable session
-    # (nearest harness ancestor: claude/codex/gemini/opencode/agy) when one
-    # exists; degrade to the prior os.getpid() default when not (standalone use,
-    # plain-shell, no agent session). Reuses the exact walk init-target-state.sh
-    # already runs via `fno agents claim session-pid`.
-    if pid is None and not pid_unavailable:
-        try:
-            from .session_pid import resolve_session_pid
-
-            pid = resolve_session_pid()
-        except Exception:
-            pid = None  # degrade to acquire_claim's os.getpid() default
-        if pid is None and parsed_ttl is not None:
-            pid_unavailable = True
-    if pid_unavailable and parsed_ttl is None:
-        typer.echo("validation error: --pid-unavailable requires --ttl", err=True)
-        raise typer.Exit(code=2)
-    # A handover MOVES a live worker's claim, so it must not land on this
-    # CLI's transient pid: compare_and_rebind would anchor the node to a
-    # process that exits seconds later and the claim reads STALE, reopening
-    # the exact pid-ambiguity gap the marker scheme closes. The plain
-    # acquire below keeps its documented os.getpid() fallback for standalone
-    # use; only the handover refuses.
-    if handover_from and key and pid is None and not pid_unavailable:
-        typer.echo(
-            "validation error: --handover-from needs a durable pid (run from "
-            "a harness session) or --pid-unavailable with --ttl; the transient "
-            "CLI pid would leave the claim STALE the moment it exits",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    # The handover runs FIRST and is strictly additive: it either moves a claim
-    # whose prior holder the caller named exactly, or it declines and the
-    # ordinary acquire below runs unchanged. Declining covers every case that is
-    # not this handover - no claim on disk, a free key, a different holder - and
-    # acquire then applies its own rules, including refusing a live foreign
-    # claim. So a wrong or stale --handover-from never widens what can be taken.
-    if handover_from and key:
-        from .core import RebindRefused, compare_and_rebind
-
-        try:
-            claim, mode = compare_and_rebind(
-                key,
-                handover_from,
-                new_holder=holder,
-                # The claim changes OWNER, so it must stop describing the
-                # spawner. The init hook passes a PROVEN harness precisely so a
-                # session that inherited a foreign marker does not mislabel its
-                # claim, and silently keeping the spawner's tag would defeat it.
-                new_reason=reason or None,
-                new_harness=harness,
-                # --metadata means the same thing on both acquire paths. It was
-                # silently dropped here, so one flag behaved differently
-                # depending on on-disk state the caller cannot see.
-                new_metadata=_parse_metadata(metadata) or None,
-                new_pid=pid,
-                ttl_ms=parsed_ttl,
-                new_pid_unavailable=pid_unavailable,
-                root=_node_aware_root(key),
-            )
-        except RebindRefused as refused:
-            # The fall-through is the design; the silence was not. A declined
-            # handover used to surface only as the ordinary acquire's "held
-            # by <holder>", so a worker could not tell its own handover claim
-            # from a foreign one.
-            typer.echo(f"handover declined: {refused.reason}", err=True)
-        else:
-            # The MODE decides, not the absence of an exception. A rebind that
-            # declined the rename returns `idempotent` with the prior holder
-            # still on the claim, and reporting that as `acquired` exits 0 while
-            # somebody else holds the key. Fall through to the ordinary acquire,
-            # which applies its own rules and refuses a live foreign claim.
-            if mode == "handover":
-                # STAMP HERE TOO. The stamp below sits at what its own comment
-                # calls the one choke point every acquire path reaches, and this
-                # return was a second path around it. It is now the DEFAULT path
-                # for every `fno agents spawn --node` worker, so without this a
-                # worker killed mid-phase leaves no do row at all - the exact
-                # loss the acquire-side stamp exists to prevent.
-                if key.startswith("node:"):
-                    _stamp_do_on_acquire(key, claim, holder)
-                typer.echo(
-                    # to_yaml_dict, matching the ordinary acquire below. One
-                    # --json flag must not return two schemas chosen by on-disk
-                    # state the caller cannot see, and this is now the default
-                    # path for every node-driven spawn.
-                    json.dumps(claim.to_yaml_dict())
-                    if json_output
-                    else f"acquired {key} (handover from {handover_from})"
-                )
-                return
-    try:
-        claim = _claims_core.acquire_claim(
-            key=key,
-            holder=holder,
-            reason=reason or None,
-            ttl_ms=parsed_ttl,
-            metadata=_parse_metadata(metadata),
-            pid=pid,
-            pid_unavailable=pid_unavailable,
-            harness=harness,
-            root=_node_aware_root(key),
-        )
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
-    except ClaimHeldByOther as exc:
-        typer.echo(
-            f"claim {key!r} held by {exc.holder} (pid={exc.pid}, host={exc.host})",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    except (ClaimCorrupted, ClaimGoneAway) as exc:
-        typer.echo(f"transient error: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
-        typer.echo(f"native verdict unavailable: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except ClaimContended as exc:
-        # acquire_claim's own contention-retry-exhaustion guard: same
-        # "caller should retry later" semantic as ClaimHeldByOther, so it
-        # gets the same exit code rather than an uncaught traceback.
-        typer.echo(f"contention error: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-    # execute provenance opens at acquire - the one choke point a session killed
-    # mid-phase still reaches (release/finalize fire only on a clean terminal).
-    # started_at from this claim's own acquire time; ended_at stays open for the
-    # release path to fill. Best-effort and node-keyed, mirroring the release
-    # stamp's contract. A caller that acquires as a serialization step before
-    # its own validation (init's post-claim check-contained) can still be
-    # refused after this row is open, so it rolls the row back on that path via
-    # `release --rollback-do` - the stamp stays here, at the one choke point
-    # every acquire path reaches, rather than being deferred per caller.
-    if key.startswith("node:"):
-        _stamp_do_on_acquire(key, claim, holder)
-
+        argv.extend(("--max-lanes", str(max_lanes)))
+    if reason:
+        argv.extend(("--reason", reason))
+    if ttl:
+        argv.extend(("--ttl", ttl))
+    argv.extend(("--metadata", metadata))
+    if pid is not None:
+        argv.extend(("--pid", str(pid)))
+    if pid_unavailable:
+        argv.append("--pid-unavailable")
     if json_output:
-        typer.echo(json.dumps(claim.to_yaml_dict()))
-    else:
-        typer.echo(f"acquired: {key} (holder={holder}, pid={claim.pid})")
+        argv.append("--json")
+    if verbose:
+        argv.append("--verbose")
+    if harness is not None:
+        argv.extend(("--harness", harness))
+    if handover_from is not None:
+        argv.extend(("--handover-from", handover_from))
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno agents claim acquire: the fno-agents binary was not found. "
+            "It ships in the `pip install fno` wheel and with the plugin; "
+            "reinstall fno or run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    # Captured and re-emitted through typer: the leaf's output IS the
+    # operator surface, and a CliRunner-hosted caller (the tests) must see it.
+    result = subprocess.run(
+        [str(binary), "claim", "acquire", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        typer.echo(result.stdout.rstrip("\n"))
+    if result.stderr:
+        typer.echo(result.stderr.rstrip("\n"), err=True)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 @cli.command()
