@@ -1,8 +1,9 @@
-//! `fno config paths emit-shell`: the one paths verb answered natively.
+//! `fno config paths emit-shell` and `shell-stub`: the paths verbs answered
+//! natively.
 //!
-//! One verb per PR (law d-450caaeb): `emit-shell` landed first; `shell-stub`,
-//! `verify` and `handoff` still forward to the Python paths group until their
-//! child nodes port. The route execs the worker's `--paths-exec` lane
+//! One verb per PR (law d-450caaeb): `emit-shell` and `shell-stub` landed;
+//! `verify` and `handoff` still forward to the Python paths group until
+//! their child nodes port. The route execs the worker's `--paths-exec` lane
 //! (worker_binary resolution like the law door), argv and exit code
 //! pass through unchanged.
 
@@ -10,8 +11,8 @@ use std::ffi::OsString;
 use std::process::Command;
 
 /// The verbs the native lane serves. One per PR (law d-450caaeb):
-/// emit-shell landed first; the rest forward to Python.
-pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell"];
+/// emit-shell and shell-stub landed; the rest forward to Python.
+pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell", "shell-stub"];
 
 /// Classify the paths verb for the front door: `fno config paths <v> ...`
 /// and its deprecated top-level spelling `fno paths <v> ...` both route
@@ -75,13 +76,20 @@ mod tests {
 
     #[test]
     fn classify_leaves_other_verbs_to_python() {
-        for verb in ["shell-stub", "verify", "handoff", "bogus"] {
+        for verb in ["verify", "handoff", "bogus"] {
             assert!(classify(&oss(&["config", "paths", verb])).is_none());
             assert!(classify(&oss(&["paths", verb])).is_none());
         }
         assert!(classify(&oss(&["config", "setup", "auto-wire"])).is_none());
         assert!(classify(&oss(&["paths"])).is_none());
         assert!(classify(&oss(&["config", "paths"])).is_none());
+    }
+
+    #[test]
+    fn classify_claims_shell_stub() {
+        let rest = classify(&oss(&["config", "paths", "shell-stub"])).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0], OsString::from("shell-stub"));
     }
 
     #[test]

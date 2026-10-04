@@ -309,7 +309,7 @@ fn collapse_dashes(s: &str) -> String {
 /// Python `_resolve`: expand `$VAR`, then `{vault}`/`{project}` templates
 /// (unknown template errors), unescape `{{`/`}}`, expand `~`, anchor a
 /// relative remainder at the project root, resolve loose.
-fn resolve_template(raw: &str, project_root: Option<&Path>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_template(raw: &str, project_root: Option<&Path>) -> Result<PathBuf, String> {
     let mut substituted = expandvars(raw);
     substitute_fields(&mut substituted, |field| match field {
         "vault" => vault_root(project_root.unwrap_or(Path::new("."))).map(Some),
@@ -328,7 +328,7 @@ fn resolve_template(raw: &str, project_root: Option<&Path>) -> Result<PathBuf, S
 
 /// The Obsidian vault root: `obsidian.vault` (bare name -> `~/<name>`,
 /// absolute or `~`-prefixed as-is) when `obsidian.enabled`.
-fn vault_root(anchor: &Path) -> Result<String, String> {
+pub(crate) fn vault_root(anchor: &Path) -> Result<String, String> {
     let enabled = config_lookup(anchor, &["obsidian", "enabled"])
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -353,7 +353,7 @@ fn vault_root(anchor: &Path) -> Result<String, String> {
 
 /// The stable project-folder name: `project.id` -> git-remote slug ->
 /// checkout basename, rejecting anything that could escape its subtree.
-fn project_name(project_root: Option<&Path>) -> Result<String, String> {
+pub(crate) fn project_name(project_root: Option<&Path>) -> Result<String, String> {
     let root = project_root.unwrap_or(Path::new("."));
     let pid = config_lookup(root, &["project", "id"])
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -442,7 +442,7 @@ fn expandvars(raw: &str) -> String {
 }
 
 /// Leading `~`/`~/` expansion against `$HOME`.
-fn expanduser(raw: &str) -> PathBuf {
+pub(crate) fn expanduser(raw: &str) -> PathBuf {
     if raw == "~" {
         if let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home);

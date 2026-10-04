@@ -18,32 +18,6 @@ app = typer.Typer(
 )
 
 
-@app.command(name="shell-stub")
-def shell_stub() -> None:
-    """Generate a fresh paths.sh from current settings and print its path.
-
-    Bash callers use: source "$(fno config paths shell-stub)".
-
-    Each invocation regenerates a temp file from the current settings.yaml so
-    shell hooks always reflect the user's current config rather than the
-    checked-in static snapshot.  The checked-in scripts/lib/paths.sh remains
-    available as a fallback for callers where fno is not on PATH.
-    """
-    import tempfile
-    from fno.setup.emit_shell import emit_paths_sh
-
-    content = emit_paths_sh(use_defaults=False)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".sh",
-        prefix="fno-paths-",
-        delete=False,
-        encoding="utf-8",
-    ) as f:
-        f.write(content)
-        print(f.name)
-
-
 @app.command(name="verify")
 def verify_cmd(
     paths_sh: Optional[Path] = typer.Argument(

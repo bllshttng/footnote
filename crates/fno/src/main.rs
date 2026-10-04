@@ -170,9 +170,9 @@ enum Role {
     /// `fno agents mail view`: refused by name; the verb is now `show`
     /// (no compat shell, the same rule as a removed mux verb).
     MailViewRenamed,
-    /// `fno config paths emit-shell`: the native paths verb. Args from the
+    /// `fno config paths <native-verb>`: the native paths verb. Args from the
     /// verb name onward; the worker's --paths-exec lane answers, the other
-    /// three paths verbs still forward to Python (one verb per PR,
+    /// paths verbs still forward to Python (one verb per PR,
     /// d-450caaeb).
     PathsCli(Vec<OsString>),
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
