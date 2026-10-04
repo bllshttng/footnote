@@ -421,7 +421,9 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
         r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
     })
     .unwrap();
-    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    // A live release, not a dry run: a dry run does not promise a stop it
+    // cannot prove, so the would-be retirement holds instead of listing.
+    let summary = x2774_sweep(&home, &emitter, 900, false, picks, no_agents());
     assert_eq!(
         summary.retired,
         vec![(
