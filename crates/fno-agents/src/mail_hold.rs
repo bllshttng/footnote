@@ -683,11 +683,13 @@ fn gate_parked_line(verdict: &GateVerdict, session_id: &str, body: &str) -> Opti
     if body.trim().is_empty() || typable {
         return None;
     }
-    // The receipt promises a run-when, so only a hold with a deadline may
-    // park: a hand-stamped hold (until: null or no clock) never lapses, the
+    // The receipt promises a run-when, so a hold with no deadline never
+    // parks: a hand-stamped hold (until: null or no clock) never lapses, the
     // runner would sit on the payload to its 24 h bound, and the raw lane's
-    // documented answer for that case is the non-zero refusal.
-    if verdict.until.is_none() {
+    // documented answer for that case is the non-zero refusal. A
+    // control-prefixed body carries a deliver verdict with no until and
+    // parks as typed text, so only the held-and-undated shape refuses.
+    if !verdict.deliver && verdict.until.is_none() {
         return None;
     }
     let receipt = park_payload_inner(session_id, body).ok()?;
