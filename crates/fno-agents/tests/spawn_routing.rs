@@ -1182,7 +1182,7 @@ fn client_spawn_substrate_bg_codex_uses_thread_lane() {
             "--harness",
             "codex",
             "--substrate",
-            "bg",
+            "thread",
         ])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -1266,7 +1266,7 @@ fn client_spawn_permission_mode_and_yolo_mutually_exclusive() {
             "--harness",
             "claude",
             "--substrate",
-            "bg",
+            "thread",
             "--yolo",
             "--permission-mode",
             "plan",
@@ -1359,7 +1359,7 @@ fn client_spawn_substrate_bg_opencode_routes_to_serve_lane() {
             "--harness",
             "opencode",
             "--substrate",
-            "bg",
+            "thread",
         ])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -1408,7 +1408,7 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
             "--harness",
             "agy",
             "--substrate",
-            "bg",
+            "thread",
         ])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1")
@@ -1472,8 +1472,8 @@ fn client_spawn_substrate_bg_gemini_names_the_deprecation_not_a_missing_lane() {
         "gemini --substrate bg must exit 2; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("deprecated") && stderr.contains("agy"),
-        "gemini's refusal must name the deprecation and its successor: {stderr}"
+        stderr.contains("retired") && stderr.contains("thread"),
+        "gemini --substrate bg must hit the retirement redirect: {stderr}"
     );
     assert!(
         !stderr.contains("keeper lane spawn arm") && !stderr.contains("never a harness limitation"),
@@ -1511,7 +1511,7 @@ fn client_spawn_bg_no_provider_infers_harness() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = std::process::Command::new(&bin)
         .envs(fno_agents::test_run::self_owner_env())
-        .args(["spawn", "myagent", "hello", "--substrate", "bg"])
+        .args(["spawn", "myagent", "hello", "--substrate", "thread"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
@@ -1628,7 +1628,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
             "--harness",
             "claude",
             "--substrate",
-            "bg",
+            "thread",
         ])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -1710,7 +1710,7 @@ fn client_spawn_bg_claude_bootstraps_the_first_daemon_worker() {
             "--harness",
             "claude",
             "--substrate",
-            "bg",
+            "thread",
         ])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1")

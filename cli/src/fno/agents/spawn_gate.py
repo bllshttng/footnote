@@ -1106,7 +1106,7 @@ def qos_demote_pid(pid: int) -> None:
 
 
 def qos_demote_bg_worker(job_id: str, *, poll_s: float = 10.0) -> None:
-    """After a ``--substrate bg`` dispatch, poll the roster briefly for the
+    """After a ``--substrate thread`` dispatch, poll the roster briefly for the
     new worker's pid and demote it post-hoc. ``job_id`` is the claude bg jobId
     (the registry ``short_id``). Bounded; one warning on miss."""
     if not job_id or not _qos_enabled():

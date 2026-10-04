@@ -676,6 +676,9 @@ mod probe {
         // Accepted: the readings that admitted it, a trigger is only
         // actionable beside its reading.
         out.insert("verdict".into(), json!("accepted"));
+        // The gate's advisory notes (the unattributed-stamp registry hygiene
+        // among them) ride the answer; the spawn path no longer prints them.
+        out.insert("warnings".into(), json!(warnings));
         out.insert("lanes".into(), lanes.clone());
         out.insert("live_workers".into(), json!(slots));
         out.insert("max_live".into(), json!(cap));

@@ -68,6 +68,10 @@ fn inputs_from(case: &Value, config: &toml::Table) -> fno_agents::spawn_compose:
         facts: case["facts"].clone(),
         node: case["node"].as_str().map(str::to_string),
         node_row: case.get("node_row").filter(|v| v.is_object()).cloned(),
+        verbose: case
+            .get("verbose")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
