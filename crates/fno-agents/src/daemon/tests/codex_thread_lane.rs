@@ -726,8 +726,9 @@ async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
         "the recorded roots must survive the write-back: {:?}",
         after.granted_writable_roots
     );
-    // AC6: the v35 columns are stamped.
-    assert_eq!(after.turn_policy_source.as_deref(), Some("requested"));
+    // AC6: the v35 columns are stamped. The fake answers a sandbox, so the
+    // turn policy echoes the server posture, not the replayed request.
+    assert_eq!(after.turn_policy_source.as_deref(), Some("resolved"));
 
     // The other half of the freeze: `unknown` is no baseline, so a real
     // fresh read replaces it at the first resume.
