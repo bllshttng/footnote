@@ -3,6 +3,7 @@
 
 use super::*;
 use fno_agents::client::{RestartError, RestartOutcome};
+use fno_agents::restart_run::rm_after_drift_repair;
 use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
 use std::path::Path;
 

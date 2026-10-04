@@ -69,6 +69,20 @@ pub async fn restart_daemon_for_rm() -> Result<(), RestartError> {
         .map(|_| ())
 }
 
+/// Order the daemon-only drift repair before the `rm` RPC.
+pub async fn rm_after_drift_repair<T>(
+    state: &DriftState,
+    restart: impl std::future::Future<Output = Result<(), RestartError>>,
+    call: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    if matches!(state, DriftState::Drifted { .. }) {
+        restart.await.map_err(|error| {
+            eprintln!("rm refused: daemon-only restart failed: {error}");
+        })?;
+    }
+    Ok(call.await)
+}
+
 /// Render the codex upgrade outcome into (stdout lines, stderr lines,
 /// failed). Pure and unit-tested: `failed` ONLY on [`UpgradeOutcome::Failed`]
 /// - a held or refused upgrade is reported and NOT failed, because the
