@@ -431,6 +431,7 @@ pub mod sync_canonical;
 pub mod system_sender;
 pub mod task_context;
 pub mod terminal_stop;
+pub mod terminal_vocab;
 pub mod territory;
 pub mod test_delta;
 pub mod test_hold;

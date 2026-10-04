@@ -22,7 +22,7 @@ from pathlib import Path
 
 from fno import paths as _paths
 from fno.graph._constants import NODE_ID_BODY
-from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
+from fno.rust_binary import delivered_terminals as _delivered_terminals
 
 # The recorded value when no harness session id resolves. A row that omits
 # `sessions` is indistinguishable from a run that had no session at all; this
@@ -631,14 +631,9 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
                 if (existing.get("fno_id") or existing.get("session_id")) == new_scalar:
                     old_reason = existing.get("termination_reason")
                     new_reason = entry.get("termination_reason")
-                    if (
-                        isinstance(new_reason, str)
-                        and new_reason in _DELIVERED_TERMINALS
-                        and not (
-                            isinstance(old_reason, str)
-                            and old_reason in _DELIVERED_TERMINALS
-                        )
-                    ):
+                    if isinstance(new_reason, str) and new_reason in _delivered_terminals():
+                        if isinstance(old_reason, str) and old_reason in _delivered_terminals():
+                            continue
                         promoted = dict(existing)
                         promoted.update(
                             {key: value for key, value in entry.items() if value is not None}

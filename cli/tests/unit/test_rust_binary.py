@@ -354,3 +354,33 @@ def test_verb_call_attaches_returncode_with_passthrough_stderr(monkeypatch) -> N
         rust_binary.verb_call("spawn-axes", {}, passthrough_stderr=True)
     assert excinfo.value.returncode == -9
     assert "exited -9" in str(excinfo.value)
+
+
+def test_delivered_terminals_reads_once_and_refuses_closed(monkeypatch) -> None:
+    """The vocabulary door resolves once per process and names the remedy on
+    a failed read, like the roster door it mirrors.
+
+    Folded under the test-delta declaration cap: one function carries the
+    three contracts (content, cache identity, fail-closed refusal)."""
+    import pytest
+
+    from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(
+        rust_binary,
+        "call_binary_json",
+        lambda verb, **k: (None, {"delivered": ["DonePRGreen", "DoneBatched"]}),
+    )
+    rust_binary.delivered_terminals.cache_clear()
+    assert rust_binary.delivered_terminals() == frozenset({"DonePRGreen", "DoneBatched"})
+    assert rust_binary.delivered_terminals() is rust_binary.delivered_terminals()
+
+    monkeypatch.setattr(
+        rust_binary,
+        "call_binary_json",
+        lambda verb, **k: ("fno-agents binary not found", None),
+    )
+    rust_binary.delivered_terminals.cache_clear()
+    with pytest.raises(VerbUnavailable, match="fno doctor update"):
+        rust_binary.delivered_terminals()
+    rust_binary.delivered_terminals.cache_clear()

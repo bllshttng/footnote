@@ -10,9 +10,10 @@ changed-smoke and pip-only boxes have no worker binary.
 import pytest
 
 from fno.scoreboard import fold
-from tests._delivery_reference import reference_deliveries
+from tests._delivery_reference import delivered_stub, reference_deliveries
 
 
 @pytest.fixture(autouse=True)
 def hermetic_deliveries(monkeypatch):
     monkeypatch.setattr(fold, "classify_deliveries", reference_deliveries)
+    monkeypatch.setattr("fno.rust_binary.delivered_terminals", delivered_stub)
