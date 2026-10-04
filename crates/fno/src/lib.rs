@@ -56,6 +56,7 @@ pub mod pane_argv;
 pub mod pane_border;
 pub mod pane_cwd;
 mod pane_send_audit;
+pub mod paths_route;
 pub mod popup;
 pub mod process_admission;
 pub mod product_boundary;

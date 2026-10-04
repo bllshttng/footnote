@@ -23,6 +23,11 @@
 //!   door's code. The front's `fno inbox law` verbs spawn it, because the
 //!   mux never links the runtime (product boundary). Callers build this
 //!   argv; humans never type it.
+//! - `--paths-exec`: the one-shot paths lane (paths_cli.rs). Serves ONE
+//!   `config paths` verb argv (emit-shell first; siblings still answer in
+//!   Python) and exits with the verb's code. The front's
+//!   `fno config paths emit-shell` spawns it. Callers build this argv;
+//!   humans never type it.
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
 //! terminal going away) cannot take it - and therefore the PTY child -
@@ -97,13 +102,18 @@ fn main() {
         }
         return;
     }
+    if let Some(idx) = args.iter().position(|a| a == "--paths-exec") {
+        let rest: Vec<String> = args[idx + 1..].to_vec();
+        std::process::exit(fno_agents::paths_cli::run(&rest));
+    }
     if !args.iter().any(|a| a == "--stream") {
         eprintln!(
             "fno-agents-worker: pass a lane: --keeper (alias --pane), --stream \
              (claude stream-json adoption), --store-keeper (graph store), \
              --store-exec (one store request), --law-exec (one law request on \
              stdin), or --law-exec-arg <request> (one law request by argv, \
-             stdin inherited)"
+             stdin inherited), or --paths-exec <verb> [args...] (one paths \
+             verb, e.g. emit-shell)"
         );
         std::process::exit(2);
     }
