@@ -363,15 +363,12 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         return
 
     err, receipt = rust_binary.style_receipt(body, "mail", load_settings().style.word_cap.mail)
-    # A door failure refuses like a violation: the gate never silently vanishes.
-    # receipt is None on a door error, and a degenerate (None, None) answer from
-    # a silent binary is a door error too, so the dict shape is part of the check.
-    if err or not isinstance(receipt, dict) or (
-        not receipt.get("exception") and receipt.get("violations")
-    ):
+    # A door error, a violation, or a silent binary (no dict) refuses: the gate never vanishes.
+    clean = isinstance(receipt, dict) and (receipt.get("exception") or not receipt.get("violations"))
+    if not clean:
         if isinstance(receipt, dict) and receipt.get("violations"):
             _emit_style_refusal(receipt["violations"])
-        print(err or receipt.get("report") or "", file=sys.stderr)
+        print(err or (receipt or {}).get("report") or "", file=sys.stderr)
         raise typer.Exit(code=1)
 
 
