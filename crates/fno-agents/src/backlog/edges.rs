@@ -223,8 +223,20 @@ mod tests {
     #[test]
     fn close_touches_only_its_own_endpoints() {
         let (_dir, connection) = store();
-        append(&connection, &EntityRef::agent("p-1"), &EntityRef::agent("c-1"), EdgeKind::Spawn).unwrap();
-        append(&connection, &EntityRef::agent("p-2"), &EntityRef::agent("c-2"), EdgeKind::Spawn).unwrap();
+        append(
+            &connection,
+            &EntityRef::agent("p-1"),
+            &EntityRef::agent("c-1"),
+            EdgeKind::Spawn,
+        )
+        .unwrap();
+        append(
+            &connection,
+            &EntityRef::agent("p-2"),
+            &EntityRef::agent("c-2"),
+            EdgeKind::Spawn,
+        )
+        .unwrap();
         let closed = close(
             &connection,
             &EntityRef::agent("p-1"),

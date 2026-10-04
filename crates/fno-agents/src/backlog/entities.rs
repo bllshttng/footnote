@@ -428,7 +428,10 @@ mod tests {
             .unwrap()
     }
 
-    fn identity_row(connection: &Connection, session: &str) -> (Option<String>, Option<String>, Option<String>) {
+    fn identity_row(
+        connection: &Connection,
+        session: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         connection
             .query_row(
                 "SELECT harness_id, fno_id, display_name FROM agent_sessions WHERE id = ?1",
@@ -454,7 +457,10 @@ mod tests {
         for column in ["fno_id", "display_name", "links"] {
             assert!(column_names(&connection).iter().any(|name| name == column));
         }
-        assert_eq!(identity_row(&connection, "abc"), (Some("claude".into()), None, None));
+        assert_eq!(
+            identity_row(&connection, "abc"),
+            (Some("claude".into()), None, None)
+        );
         // Idempotent: a second pass changes nothing and raises nothing.
         crate::backlog::entities::migrate_identity(&connection).unwrap();
     }
@@ -466,18 +472,30 @@ mod tests {
             .execute_batch("INSERT INTO harnesses(id) VALUES ('claude'), ('codex');")
             .unwrap();
         crate::backlog::entities::upsert_identity(
-            &connection, "abc", Some("claude"), Some("f-1"), Some("old"),
+            &connection,
+            "abc",
+            Some("claude"),
+            Some("f-1"),
+            Some("old"),
         )
         .unwrap();
         // A rename: display_name follows; harness and fno_id are identity
         // and keep their first values.
         crate::backlog::entities::upsert_identity(
-            &connection, "abc", Some("codex"), Some("f-1"), Some("new"),
+            &connection,
+            "abc",
+            Some("codex"),
+            Some("f-1"),
+            Some("new"),
         )
         .unwrap();
         assert_eq!(
             identity_row(&connection, "abc"),
-            (Some("claude".into()), Some("f-1".into()), Some("new".into()))
+            (
+                Some("claude".into()),
+                Some("f-1".into()),
+                Some("new".into())
+            )
         );
     }
 
@@ -488,11 +506,19 @@ mod tests {
             .execute_batch("INSERT INTO harnesses(id) VALUES ('claude');")
             .unwrap();
         crate::backlog::entities::upsert_identity(
-            &connection, "abc", Some("claude"), Some("f-1"), Some("a"),
+            &connection,
+            "abc",
+            Some("claude"),
+            Some("f-1"),
+            Some("a"),
         )
         .unwrap();
         let error = crate::backlog::entities::upsert_identity(
-            &connection, "def", Some("claude"), Some("f-1"), Some("b"),
+            &connection,
+            "def",
+            Some("claude"),
+            Some("f-1"),
+            Some("b"),
         )
         .unwrap_err();
         assert!(error.contains("UNIQUE"), "{error}");

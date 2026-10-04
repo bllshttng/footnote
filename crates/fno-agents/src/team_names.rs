@@ -979,16 +979,19 @@ pub fn revert_stale_pending(
         // session id (a rename cannot break the join); a legacy record
         // falls back to the name join and its ambiguity refusal, unchanged.
         let join = match pending.heir_session.as_deref() {
-            Some(session) => crate::agent_ref::resolve(
-                &reg.entries,
-                crate::agent_ref::Key::Id(session),
-                |row| !crate::lead_state::is_terminal(row),
-            ),
+            Some(session) => {
+                crate::agent_ref::resolve(&reg.entries, crate::agent_ref::Key::Id(session), |row| {
+                    !crate::lead_state::is_terminal(row)
+                })
+            }
             None => crate::lead_state::live_name_join(&reg.entries, &pending.heir_name),
         };
         let evidence = match join {
             crate::lead_state::NameJoin::One(row) => {
-                kept.push(format!("{scope}: heir row {} still {:?}", row.name, row.status));
+                kept.push(format!(
+                    "{scope}: heir row {} still {:?}",
+                    row.name, row.status
+                ));
                 continue;
             }
             crate::lead_state::NameJoin::Ambiguous => {
@@ -1960,7 +1963,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         // The heir row was renamed after the succession carried: the
         // session-keyed join still finds it, and the succession stays.
-        write_registry(tmp.path(), json!([team_row("renamed-heir", "other", 1, "sess-heir")]));
+        write_registry(
+            tmp.path(),
+            json!([team_row("renamed-heir", "other", 1, "sess-heir")]),
+        );
         let mut pending = pending_record("original-name", "lead-old", Some("sess-old"), old_ts());
         pending.pending_succession.as_mut().unwrap().heir_session = Some("sess-heir".into());
         let store = store_path(tmp.path());

@@ -119,7 +119,10 @@ mod tests {
             resolve(&rows, Key::Id("sess-2"), |_| true),
             Join::One(_)
         ));
-        assert!(matches!(resolve(&rows, Key::Id("nobody"), |_| true), Join::None));
+        assert!(matches!(
+            resolve(&rows, Key::Id("nobody"), |_| true),
+            Join::None
+        ));
     }
 
     #[test]
@@ -141,7 +144,10 @@ mod tests {
             "sess-1",
             serde_json::json!({"aliases": ["old"], "short_id": "abcd1234"}),
         )];
-        assert!(matches!(resolve(&rows, Key::Name("old"), |_| true), Join::One(_)));
+        assert!(matches!(
+            resolve(&rows, Key::Name("old"), |_| true),
+            Join::One(_)
+        ));
         assert!(matches!(
             resolve(&rows, Key::Name("abcd1234"), |_| true),
             Join::One(_)
@@ -154,8 +160,12 @@ mod tests {
             entry("dupe", "sess-1", serde_json::json!({})),
             entry("dupe", "sess-2", serde_json::json!({"status": "exited"})),
         ];
-        let got = resolve(&rows, Key::Name("dupe"), |row| row.status != AgentStatus::Exited);
-        assert!(matches!(got, Join::One(row) if row.harness_session_id.as_deref() == Some("sess-1")));
+        let got = resolve(&rows, Key::Name("dupe"), |row| {
+            row.status != AgentStatus::Exited
+        });
+        assert!(
+            matches!(got, Join::One(row) if row.harness_session_id.as_deref() == Some("sess-1"))
+        );
     }
 
     #[test]
@@ -165,7 +175,10 @@ mod tests {
             resolve_address(&one, "sess-1", |_| true),
             Join::One(_)
         ));
-        assert!(matches!(resolve_address(&one, "king", |_| true), Join::One(_)));
+        assert!(matches!(
+            resolve_address(&one, "king", |_| true),
+            Join::One(_)
+        ));
         let twin = vec![
             entry("x", "sess-1", serde_json::json!({})),
             entry("y", "x", serde_json::json!({})),

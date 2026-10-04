@@ -1062,10 +1062,8 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
                         note_name(&mut by_name, alias.clone(), claim.clone());
                     }
                 }
-                if let (Some(fno), Some(sid)) = (
-                    e.fno_id.as_deref().filter(|v| !v.is_empty()),
-                    sid,
-                ) {
+                if let (Some(fno), Some(sid)) = (e.fno_id.as_deref().filter(|v| !v.is_empty()), sid)
+                {
                     by_fno_id
                         .entry(fno.to_string())
                         .or_insert_with(|| sid.to_string());

@@ -2691,11 +2691,7 @@ where
 /// triple the write did not change is skipped: its identity is already in
 /// the store, and a store that lost it (an old binary's writes) backfills
 /// when that row next changes, not on every quiet write.
-fn project_identity(
-    registry_path: &Path,
-    before: &[RegistryEntry],
-    entries: &[RegistryEntry],
-) {
+fn project_identity(registry_path: &Path, before: &[RegistryEntry], entries: &[RegistryEntry]) {
     let changed: Vec<&RegistryEntry> = entries
         .iter()
         .filter(|entry| {
