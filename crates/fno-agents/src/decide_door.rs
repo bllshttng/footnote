@@ -855,10 +855,14 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     // The row is durable: now the hops it parents. Emitting here keeps a
     // failed decision write from leaving orphan spans behind it.
     if let Some((trace, attrs)) = pending_route {
-        emit_span_to(&journal, "route", &trace, &attrs);
+        if let Err(e) = emit_span_to(&journal, "route", &trace, &attrs) {
+            eprintln!("decide: route span skipped: {e}");
+        }
     }
     if let Some(trace) = pending_correction {
-        emit_span_to(&journal, "correction", &trace, &Map::new());
+        if let Err(e) = emit_span_to(&journal, "correction", &trace, &Map::new()) {
+            eprintln!("decide: correction span skipped: {e}");
+        }
     }
     // Recall second: the machine-wide decision index. The event id names the
     // recovery, because re-running would mint a second id for one ruling.

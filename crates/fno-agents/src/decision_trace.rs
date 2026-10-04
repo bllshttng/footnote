@@ -273,21 +273,25 @@ fn run_mail_record_with(
     // A sweep-origin send (scheduler, recovery) replays text, it does not
     // ask, so it records the origin row alone.
     if body_is_ask(body) && kind != "sweep" {
-        let trace = Trace {
-            trace_id: trace_id.clone(),
-            span_id: new_span_id(),
-            parent_span_id: None,
-            actor_session: args.sender.clone(),
-            actor_kind: kind,
-            comms: "mail",
-            recipient_session: args.target_session.clone(),
-            recipient_kind: None,
-        };
-        let mut attrs = Map::new();
         let key = ask_key(args.sender.as_deref(), args.target_session.as_deref(), body);
-        attrs.insert("ask_key".to_string(), json!(key));
-        if let Err(e) = emit_span_to(journal, "ask", &trace, &attrs) {
-            eprintln!("mail-record: ask span skipped: {e}");
+        // One ask, one span: a resend of an identical ask (a retry, a quoted
+        // replay) joins the span the first send already minted.
+        if find_ask_span_id(journal, &key).is_none() {
+            let trace = Trace {
+                trace_id: trace_id.clone(),
+                span_id: new_span_id(),
+                parent_span_id: None,
+                actor_session: args.sender.clone(),
+                actor_kind: kind,
+                comms: "mail",
+                recipient_session: args.target_session.clone(),
+                recipient_kind: None,
+            };
+            let mut attrs = Map::new();
+            attrs.insert("ask_key".to_string(), json!(key));
+            if let Err(e) = emit_span_to(journal, "ask", &trace, &attrs) {
+                eprintln!("mail-record: ask span skipped: {e}");
+            }
         }
     }
     run_mail_record_route(journal, args, &trace_id, kind);
