@@ -1618,7 +1618,8 @@ mod tests {
         assert_eq!(row["re_pulled"], 1);
         assert_eq!(row["pr"], 5);
         // The priority lane was taken and released: no live hold left.
-        let (state, _) = crate::claims::status(crate::test_run::PRIORITY_KEY, None);
+        let (state, _) =
+            crate::claims::status(crate::test_run::PRIORITY_KEY, Some(claims_root.path()));
         assert!(!matches!(
             state,
             crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
