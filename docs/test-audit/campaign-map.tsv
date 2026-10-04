@@ -269,7 +269,6 @@ K10	cli/tests/unit/test_do_cli.py	py	4
 K10	cli/tests/unit/test_docs_and_examples.py	py	4
 K10	cli/tests/unit/test_docs_fences.py	py	3
 K10	cli/tests/unit/test_drain_dedup.py	py	7
-K10	cli/tests/unit/test_emit_shell.py	py	20
 K10	cli/tests/unit/test_enumerated_scope.py	py	17
 K10	cli/tests/unit/test_epic_kickoff.py	py	32
 K10	cli/tests/unit/test_epic_status.py	py	19

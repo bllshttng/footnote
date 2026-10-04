@@ -654,7 +654,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         "-m 'not slow_e2e' "
         "--ignore=tests/unit/test_ambient_canary.py",
     ),
-    ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
+    ("paths.sh hash gate", "cli", "fno config paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
     ("frontend-craft gate harness", ".",
      "bash tests/lib/test_frontend_surface.sh\n"
