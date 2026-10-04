@@ -344,12 +344,19 @@ fn run_force(a: &LeafArgs, key: &str) -> i32 {
 /// `others`): the global root and the default root, deduped, minus the path
 /// just read, kept only when the file exists.
 fn other_roots(key: &str, taken: &Path) -> Vec<(Option<PathBuf>, PathBuf)> {
+    let encoded = crate::claims::encode_key(key);
     let mut out = Vec::new();
     let mut seen: Vec<PathBuf> = vec![taken.to_path_buf()];
-    for raw in [crate::claims_root::global_claims_root(), None] {
-        let Ok(file) = crate::claims::claim_path(key, raw.as_deref()) else {
-            continue;
-        };
+    let mut roots: Vec<(Option<PathBuf>, PathBuf)> = Vec::new();
+    if let Some(global) = crate::claims_root::global_claims_root() {
+        let dir = global.join(crate::claims::CLAIMS_DIRNAME);
+        roots.push((Some(global), dir));
+    }
+    if let Some(dir) = default_claims_dir() {
+        roots.push((None, dir));
+    }
+    for (raw, dir) in roots {
+        let file = dir.join(format!("{encoded}.lock"));
         if seen.iter().any(|p| p == &file) {
             continue;
         }
@@ -359,4 +366,17 @@ fn other_roots(key: &str, taken: &Path) -> Vec<(Option<PathBuf>, PathBuf)> {
         }
     }
     out
+}
+
+/// The python `claims_dir(None)` for the others scan: the override, else the
+/// repo space. KEY-AGNOSTIC on purpose - `claim_path`'s prefix routing would
+/// fold a global key's "other" root into the one just read, and the scan is
+/// exactly about naming the root the resolved path did not read.
+fn default_claims_dir() -> Option<PathBuf> {
+    let override_root = std::env::var_os("FNO_CLAIMS_ROOT").filter(|v| !v.is_empty());
+    if let Some(root) = override_root {
+        return Some(PathBuf::from(root).join(crate::claims::CLAIMS_DIRNAME));
+    }
+    let cwd = std::env::current_dir().ok()?;
+    Some(crate::paths::space_dir(&cwd).join("claims"))
 }
