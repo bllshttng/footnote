@@ -1422,10 +1422,7 @@ mod tests {
             );
             // A re-scope that lands on an L1 row drops the theme: a Head
             // takes no theme, and its title recomputes from the project.
-            write_registry(
-                tmp.path(),
-                json!([team_row("kestrel", "fno", 1, "sess-k")]),
-            );
+            write_registry(tmp.path(), json!([team_row("kestrel", "fno", 1, "sess-k")]));
             keep_from(&store, &registry, "x-cccc", "fno").unwrap();
             let dump = snapshot(&store).unwrap();
             assert!(dump["teams"]["fno"].get("theme").is_none());

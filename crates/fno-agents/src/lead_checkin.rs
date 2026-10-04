@@ -23,9 +23,9 @@
 //!
 //! rc 0 a completed beat, 3 when an asked-for row was not journalled or
 //! stdout could not be written, 2 usage failure.
+use crate::lead_history::LEAD_CHECKIN;
+use crate::org_board::{read_board, BoardOpts};
 use crate::org_fold::org_fold;
-use crate::king_board::{read_board, BoardOpts};
-use crate::lead_history::REIGN_CHECKIN;
 use crate::provenance::TranscriptSource;
 use crate::scrape::fno_bin;
 use serde_json::{json, Map, Value};
