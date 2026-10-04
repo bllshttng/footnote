@@ -3149,6 +3149,29 @@ mod tests {
             .collect()
     }
 
+    /// Pins `FNO_CONFIG` to an empty file and restores the prior value on
+    /// drop. A worktree under `~/.fno` walks into the operator's real config
+    /// otherwise, and the walk then reads its lanes instead of the fixture's.
+    struct ConfigPin(Option<std::ffi::OsString>);
+
+    impl ConfigPin {
+        fn empty(dir: &std::path::Path) -> Self {
+            std::fs::write(dir.join("config.toml"), "").unwrap();
+            let prior = std::env::var_os("FNO_CONFIG");
+            std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
+            ConfigPin(prior)
+        }
+    }
+
+    impl Drop for ConfigPin {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("FNO_CONFIG", v),
+                None => std::env::remove_var("FNO_CONFIG"),
+            }
+        }
+    }
+
     /// Pins `FNO_EVENTS_PATH` for one test and restores the prior value on
     /// drop; the claims lock serializes env access across the suite.
     struct EventsPin(Option<std::ffi::OsString>);
@@ -3186,6 +3209,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
+        let _config = ConfigPin::empty(dir.path());
         let journal = dir.path().join("events.jsonl");
         let _pin = EventsPin::at(&journal);
 
@@ -3252,6 +3276,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
+        let _config = ConfigPin::empty(dir.path());
         let journal = dir.path().join("events.jsonl");
         let _pin = EventsPin::at(&journal);
 

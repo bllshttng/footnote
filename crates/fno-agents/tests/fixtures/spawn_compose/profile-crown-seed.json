@@ -105,5 +105,6 @@
       "reign over the fleet"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

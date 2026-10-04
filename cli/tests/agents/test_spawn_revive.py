@@ -144,7 +144,7 @@ def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -169,7 +169,7 @@ def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) ->
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", OTHER_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 2, result.output
@@ -188,7 +188,7 @@ def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> 
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "rev-agent", "-H", "claude", "--substrate", "bg", "hi"],
+        ["spawn", "--name", "rev-agent", "-H", "claude", "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 2, result.output
@@ -210,7 +210,7 @@ def test_spawn_resume_onto_another_named_row_renames_it(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-f8b81903", "-H", "claude", "--resume", DEAD_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -238,7 +238,7 @@ def test_spawn_resume_fork_explicit_node_wins(workdir_claude, monkeypatch) -> No
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-pinned", "-H", "claude", "--resume", DEAD_UUID,
-         "--node", "x-256d", "--substrate", "bg", "/fix hi"],
+         "--node", "x-256d", "--substrate", "thread", "/fix hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -286,7 +286,7 @@ def test_spawn_resume_fork_carries_provider_and_model_axes(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-axes", "-H", "claude", "--resume", DEAD_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -346,7 +346,7 @@ def test_spawn_resume_fork_substitution_names_observed_model(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-sub", "-H", "claude", "--resume", DEAD_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -381,7 +381,7 @@ def test_spawn_resume_refused_when_session_claim_held(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 11, result.output
@@ -456,7 +456,7 @@ def _spawn_resume() -> object:
     return CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
 

@@ -54,7 +54,7 @@ def _refusing_run_gate(calls: list, reason: str):
 def test_wait_retries_a_waitable_reason_until_the_deadline(monkeypatch):
     calls: list = []
     monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "ram_floor"))
-    result = _spawn("spawn", "-H", "claude", "--substrate", "bg", "--wait", "0.05s", "hi")
+    result = _spawn("spawn", "-H", "claude", "--substrate", "thread", "--wait", "0.05s", "hi")
     assert result.exit_code == EXIT_LOAD_REFUSED
     assert len(calls) >= 2, "a --wait shorter than the retry sleep still retries at least once"
     assert "ram_floor" in result.stderr
@@ -63,15 +63,15 @@ def test_wait_retries_a_waitable_reason_until_the_deadline(monkeypatch):
 def test_wait_exits_at_once_on_an_unrelated_reason(monkeypatch):
     calls: list = []
     monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "king_share"))
-    result = _spawn("spawn", "-H", "claude", "--substrate", "bg", "--wait", "5m", "hi")
+    result = _spawn("spawn", "-H", "claude", "--substrate", "thread", "--wait", "5m", "hi")
     assert result.exit_code == EXIT_LOAD_REFUSED
     assert len(calls) == 1, "a policy refusal is not waitable; retrying it is a hang"
-    assert "king_share" in result.output, "the receipt still lands for the caller"
+    assert '"king_share"' not in result.output, "a refusal prints once; the receipt rides the native route only"
 
 
 def test_wait_with_no_wait_refuses_usage(monkeypatch):
     result = _spawn(
-        "spawn", "-H", "claude", "--substrate", "bg", "--wait", "5m", "--no-wait", "hi"
+        "spawn", "-H", "claude", "--substrate", "thread", "--wait", "5m", "--no-wait", "hi"
     )
     assert result.exit_code == 2
     assert "mutually exclusive" in result.stderr
@@ -82,7 +82,7 @@ def test_wait_retries_the_gates_own_no_wait_refusal(monkeypatch):
     refusals surface as no_wait receipts; the CLI deadline still bounds them."""
     calls: list = []
     monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "no_wait"))
-    result = _spawn("spawn", "-H", "claude", "--substrate", "bg", "--wait", "0.05s", "hi")
+    result = _spawn("spawn", "-H", "claude", "--substrate", "thread", "--wait", "0.05s", "hi")
     assert result.exit_code == EXIT_LOAD_REFUSED
     assert len(calls) >= 2
 

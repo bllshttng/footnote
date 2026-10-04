@@ -790,7 +790,7 @@ def test_a_resume_registry_failure_never_took_the_reservation(monkeypatch, tmp_p
         agents_app,
         [
             "spawn", "--name", "w1", "/fix hi",
-            "--harness", "claude", "--substrate", "bg",
+            "--harness", "claude", "--substrate", "thread",
             "--node", "x-abcd", "--resume", "11111111-2222-3333-4444-555555555555",
         ],
     )
@@ -820,7 +820,7 @@ def test_a_resume_route_without_a_provider_never_took_the_reservation(
         agents_app,
         [
             "spawn", "--name", "w1", "/fix hi",
-            "--harness", "claude", "--substrate", "bg",
+            "--harness", "claude", "--substrate", "thread",
             "--node", "x-abcd", "--resume", "11111111-2222-3333-4444-555555555555",
         ],
     )

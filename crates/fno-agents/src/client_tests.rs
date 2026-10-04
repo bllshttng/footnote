@@ -1069,7 +1069,7 @@ fn spawn_flag_rows() {
             "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
-            "bg".to_string(),
+            "thread".to_string(),
             "--permission-mode".to_string(),
             "acceptEdits".to_string(),
         ],
@@ -1189,7 +1189,7 @@ fn parse_rows() {
         "--harness".to_string(),
         "claude".to_string(),
         "--substrate".to_string(),
-        "bg".to_string(),
+        "thread".to_string(),
         "--force".to_string(),
         "--no-wait".to_string(),
     ];
@@ -1461,9 +1461,9 @@ fn substrate_rows() {
     assert_eq!(params["substrate"], "pane");
     assert_eq!(params["host_mode"], "interactive");
 
-    // thread (with deprecated bg alias) + headless are client-side lanes:
-    // no host_mode, no mint.
-    for sub in ["thread", "bg", "headless"] {
+    // thread + headless are client-side lanes: no host_mode, no mint. The
+    // retired bg spelling refuses with the redirect (substrate_rows covers it).
+    for sub in ["thread", "headless"] {
         let args = vec![
             "wk".to_string(),
             "--harness".to_string(),
@@ -1472,11 +1472,25 @@ fn substrate_rows() {
             sub.to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
-        let expected = if sub == "bg" { "thread" } else { sub };
-        assert_eq!(params["substrate"], expected);
+        assert_eq!(params["substrate"], sub);
         assert!(params.get("host_mode").is_none(), "{sub}: no host_mode");
         assert!(params.get("session_id").is_none(), "{sub}: no mint");
     }
+    let err = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--harness".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("substrate 'bg' was retired"),
+        "the retired spelling redirects to thread: {err}"
+    );
 }
 
 #[test]
@@ -1497,7 +1511,7 @@ fn substrate_flag_rows() {
         "--harness".to_string(),
         "claude".to_string(),
         "--substrate".to_string(),
-        "bg".to_string(),
+        "thread".to_string(),
         "--once".to_string(),
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
@@ -1529,7 +1543,7 @@ fn substrate_flag_rows() {
         "--harness".to_string(),
         "claude".to_string(),
         "--substrate".to_string(),
-        "bg".to_string(),
+        "thread".to_string(),
         "--headless".to_string(),
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
@@ -1663,7 +1677,7 @@ fn harness_flag_rows() {
             "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
-            "bg".to_string(),
+            "thread".to_string(),
             flag.to_string(),
             "opus".to_string(),
         ];

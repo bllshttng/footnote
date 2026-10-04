@@ -18,7 +18,7 @@ An interactive agent used to be a daemon-owned PTY worker (`fno-agents-worker`),
 
 ## Spawn substrates after the migration
 
-`fno agents spawn --substrate <pane|bg|headless>` names where an off-thread agent runs:
+`fno agents spawn --substrate <pane|thread|headless>` names where an off-thread agent runs:
 
 - **`pane`** (default) — a mux-hosted PTY pane. The spawn front half is reused; only the hosting call changed. Python owns this back half (`fno.agents.mux_spawn`).
 - **`bg`** — a detached `claude --bg` thread. Crash-isolated from the mux (survives a mux server crash). claude-only.
