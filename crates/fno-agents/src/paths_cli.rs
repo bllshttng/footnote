@@ -12,7 +12,7 @@ use std::process::Command;
 
 use crate::finalize::resolve_handoffs_dir;
 use crate::identity::canonical_handle;
-use crate::king_checkin::sanitize_scope_key;
+use crate::lead_checkin::sanitize_scope_key;
 
 /// The parity fixture: the checked-in stub this emitter must reproduce.
 const FIXTURE: &[u8] = include_bytes!(concat!(
