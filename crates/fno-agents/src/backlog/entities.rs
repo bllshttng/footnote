@@ -25,9 +25,7 @@ pub fn ddl() -> String {
            fno_id TEXT,
            display_name TEXT,
            links TEXT NOT NULL DEFAULT '[]'{}
-         );
-         CREATE UNIQUE INDEX IF NOT EXISTS agent_sessions_fno_id
-           ON agent_sessions(fno_id) WHERE fno_id IS NOT NULL;",
+         );",
         stamps("harnesses"),
         stamps("models"),
         stamps("agent_sessions"),
@@ -435,11 +433,25 @@ mod tests {
                  PRAGMA foreign_keys=ON;",
             )
             .unwrap();
+        // The ensure DDL must not assume the columns: the index it once
+        // carried failed every existing store's first open with the new
+        // binary, before the migration could add them.
+        crate::backlog::entities::ensure_table(&connection).unwrap();
         crate::backlog::entities::migrate_identity(&connection).unwrap();
         for column in ["fno_id", "display_name", "links"] {
             assert!(column_names(&connection).iter().any(|name| name == column));
         }
         crate::backlog::entities::migrate_identity(&connection).unwrap();
+        // The unique index exists after the migration pass.
+        let indexes: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
+                   AND name = 'agent_sessions_fno_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 1);
         crate::backlog::entities::upsert_identity(
             &connection,
             "abc",
