@@ -162,6 +162,11 @@ test('delivered sender and message buttons resolve the canonical session and thr
   on('ui.render', ($, e) => ({ type: 'Text', props: {}, children: [String(e.props?.text ?? 'original message')] }))
 
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const plain = await $.ui.mount(userMessage('ordinary prompt without a mail id', 'user-plain'))
+  expect(await plain.find({ type: 'Button' })).toBeUndefined()
+  expect(commands.filter(argv => argv[0] === 'fno-agents' && argv[1] === 'mail-envelope')).toHaveLength(0)
+  await plain.unmount()
+
   const messageText = `${HEADER}\noriginal mail body\n\`@old-label · ${SECOND_MESSAGE_ID} · second header\`\nsecond mail body`
   const message = await $.ui.mount(userMessage(messageText))
   const senderKey = `mail-sender-${REQUEST_ID}-${MESSAGE_ID}`

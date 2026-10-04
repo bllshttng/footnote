@@ -521,7 +521,8 @@ export function registerMailPane(on) {
   on('ui.render', { component: 'UserMessage' }, async ($, event, next) => {
     if (!enabled || muxPane) return next(event)
     const text = typeof event.props?.text === 'string' ? event.props.text : ''
-    if (!text) return next(event)
+    // This candidate check avoids a process for ordinary prompts; Rust still decides whether it is mail.
+    if (!text.includes('fmail-')) return next(event)
 
     let turns
     try {
