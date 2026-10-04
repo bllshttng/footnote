@@ -2121,7 +2121,7 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     let frame = view.compose();
     let cols = frame.cols as usize;
     // Row 0 in the sideline columns is the strip: the words right-align now,
-    // so the Agents word reads at its span. The squad-1 caret moved to row 1.
+    // so the Agents word reads at its span.
     let agents_start = view.top_row_spans()[0].0;
     assert_eq!(
         frame.cells[agents_start].c, 'A',
@@ -2140,19 +2140,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     );
     // A row-0 click on the Agents word switches views; the squad-header
     // click moved to row 1.
-    assert!(matches!(
-        view.chrome_hit(0, agents_start as u16),
-        Some(ChromeHit::TopRow(_))
-    ));
+    let hit = view.chrome_hit(0, agents_start as u16);
+    assert!(matches!(hit, Some(ChromeHit::TopRow(_))));
     assert!(matches!(
         view.chrome_hit(1, 2),
         Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
     ));
 }
-
-// A left click on an inactive sideline squad row switches to it; the
-// already-active squad row toggles its caret locally instead of the old
-// silent SelectSquad no-op (x-2f99, AC3-HP/AC4-HP).
 
 // ---- x-2f99: active-squad visibility ----
 
