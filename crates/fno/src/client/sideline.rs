@@ -142,16 +142,15 @@ impl View {
     /// and `reveal_focus_row` inherit the shrunk window without a second
     /// fix.
     pub(super) fn sideline_visible_rows(&self) -> usize {
-        // The questions block and the sticky menu footer both come off the
-        // region before the scroll math runs (h): scrolling to the end lands
-        // the last row above the footer, never under the block. The footer
+        // The sticky menu footer comes off the region before the scroll math
+        // runs (h): scrolling to the end lands the last row above the footer.
+        // The footer
         // only reserves a row it can spare - a region down to its last row
         // keeps that row as list, never as chrome (the court rule).
         let rows = (self.term.0 as usize)
             .saturating_sub(1) // the strip row
             .saturating_sub(self.bottom_row_is_chrome() as usize)
-            .saturating_sub(self.court_block_rows())
-            .saturating_sub(self.questions_block_rows());
+            .saturating_sub(self.court_block_rows());
         let pinned = self.painted_rows().len() > rows && rows >= 2;
         rows.saturating_sub(pinned as usize)
     }
@@ -188,7 +187,7 @@ impl View {
             return None;
         }
         // The sticky menu footer (h): when the rows overflow, the
-        // menu/add-workspace row pins directly above the questions block, so
+        // menu/add-workspace row pins directly above the court block, so
         // a click or hover there is the footer's row even though its display
         // row has scrolled away. Checked ahead of the offset path: the
         // covered display row must never win. The pinned test reads the same
@@ -196,8 +195,7 @@ impl View {
         // exactly fits never reads as pinned here.
         let list_rows = (self.term.0 as usize)
             .saturating_sub(1) // the strip row
-            .saturating_sub(self.court_block_rows())
-            .saturating_sub(self.questions_block_rows());
+            .saturating_sub(self.court_block_rows());
         let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
         let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
         if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(2) {
@@ -213,16 +211,34 @@ impl View {
         None
     }
 
+    /// The strip row's words at this panel's width. Below the width where
+    /// the full words would crowd the bell and density buttons off the row,
+    /// the tabs read `A  M` so both buttons keep their seat.
+    pub(super) fn top_row_words(&self) -> [(&'static str, crate::view_store::SidelineView); 2] {
+        // The full words end at column 19; the buttons need the bell label,
+        // the density glyph, and a gap past that, so the full form pays off
+        // only from here.
+        const FULL_WORDS_MIN_W: usize = 30;
+        let tw = self.sideline_paint_w().saturating_sub(1);
+        if tw >= FULL_WORDS_MIN_W {
+            [
+                ("Agents", crate::view_store::SidelineView::Agents),
+                ("Messages", crate::view_store::SidelineView::Messages),
+            ]
+        } else {
+            [
+                ("A", crate::view_store::SidelineView::Agents),
+                ("M", crate::view_store::SidelineView::Messages),
+            ]
+        }
+    }
+
     /// The strip row's words with their column spans, shared by the paint
     /// and the click map so the two cannot drift (R15).
     pub(super) fn top_row_spans(&self) -> Vec<(usize, usize, crate::view_store::SidelineView)> {
-        let words = [
-            ("Agents", crate::view_store::SidelineView::Agents),
-            ("Messages", crate::view_store::SidelineView::Messages),
-        ];
         let mut out = Vec::new();
         let mut c = 2usize;
-        for (word, view) in words {
+        for (word, view) in self.top_row_words() {
             let w = word.chars().count();
             out.push((c, w, view));
             c += w + 3;
@@ -234,9 +250,11 @@ impl View {
     /// current view's word bold.
     pub(super) fn paint_top_row(&self, cells: &mut [Cell], cols: usize, text_w: usize) {
         let limit = text_w.min(cols.saturating_sub(1));
-        for (start, _, view) in self.top_row_spans() {
+        for ((start, _, view), (word, _)) in
+            self.top_row_spans().into_iter().zip(self.top_row_words())
+        {
             let active = self.sideline_view == view;
-            for (i, ch) in format!("{view:?}").chars().enumerate() {
+            for (i, ch) in word.chars().enumerate() {
                 let col = start + i;
                 if col >= limit {
                     break;
@@ -249,6 +267,7 @@ impl View {
                 };
             }
         }
+        bell::paint_button(self, cells, limit, cols);
     }
 
     pub(super) fn draw_sideline(
@@ -349,16 +368,14 @@ impl View {
         // active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
         let (block_rows, block_lines) = self.court_block_layout(rows);
-        let q_block = questions::block_rows(self, rows);
-        let q_rows = q_block.as_ref().map_or(0, |b| b.n);
-        let list_rows = rows.saturating_sub(block_rows).saturating_sub(q_rows);
+        let list_rows = rows.saturating_sub(block_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
         // the terminal minus the bottom chrome row; the widget area must
         // answer to the same height, or the render-time scroll lands the
         // selected row under the chrome that paints over it.
         let table_rows_n = list_rows.saturating_sub(chrome_rows).saturating_sub(1); // strip row
                                                                                     // The sticky menu row (h): when the rows overflow the region, the
-                                                                                    // menu/add-workspace footer pins directly above the questions block
+                                                                                    // menu/add-workspace footer pins directly above the court block
                                                                                     // and the widget area gives up its last row, so the footer is never
                                                                                     // covered and the rows scroll to their true end above it. A region
                                                                                     // down to one row keeps that row as list, never as footer. The pinned
@@ -677,12 +694,9 @@ impl View {
         // list already stopped above it; the block renders DIM so it reads as
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
-        // The questions block just above the court block: the row list
-        // stopped above both; the open rows render normal, the not-ready and
-        // answered rows DIM. The sticky menu footer rides directly above the
-        // block when the rows overflow (h). The pinned copy yields while the
-        // in-list NewSquad row is inside the visible window: one instance of
-        // the label in every scroll state.
+        // The sticky menu footer rides directly above the court block when
+        // the rows overflow (h). Its pinned copy yields while the in-list
+        // NewSquad row is inside the visible window.
         let new_squad_visible = display
             .iter()
             .skip(off)
@@ -691,10 +705,7 @@ impl View {
         if sticky_footer && !new_squad_visible {
             self.paint_new_squad_footer(cells, list_rows - 1, cols, text_w, panel_w);
         }
-        if let Some(b) = q_block {
-            questions::paint_block(b, cells, list_rows, (rows, cols, text_w), &self.theme);
-        }
-        court_block::paint_court_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
+        court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - US1.
         //
@@ -1042,10 +1053,27 @@ impl View {
         };
         let spans = card_line::identity_spans(agent, text_w);
         if let (Some(node), Some(span)) = (agent.node.as_deref(), spans.node) {
+            let node_start = span.start;
             for (cell, ch) in line[span].iter_mut().zip(node.chars()) {
                 cell.c = ch;
                 cell.fg = status_fg;
                 cell.flags = cell_flags::BOLD;
+            }
+            // The name yields before the node: an ellipsis marks the cut
+            // and one space keeps the gap. Under three columns
+            // there is no room for both, so the name side blanks past the
+            // glyph and the node stands alone.
+            if node_start >= 3 {
+                if line[node_start - 1].c != ' ' {
+                    line[node_start - 1].c = '…';
+                }
+                if line[node_start - 2].c != ' ' {
+                    line[node_start - 2].c = ' ';
+                }
+            } else {
+                for cell in line[1..node_start.max(1)].iter_mut() {
+                    cell.c = ' ';
+                }
             }
         }
         if let Some(span) = spans.separator {

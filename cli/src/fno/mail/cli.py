@@ -353,21 +353,21 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         return
     if allow_reason and allow_reason.strip():
         return
-    from fno import style
+    from fno import rust_binary
     from fno.config import load_settings
     from fno.mail import budget
 
     if budget.is_control(body):
-        # A control body is terse operational fragments, and refusing it for
-        # prose style re-creates the wall the lane exists to remove.
+        # A control body is terse operational fragments; refusing it re-creates the wall the lane removes.
         return
 
-    if style.has_exception(body):
-        return
-    violations = style.check(body, surface="mail", word_cap=load_settings().style.word_cap.mail)
-    if violations:
-        _emit_style_refusal(violations)
-        print(style.format_violations(violations, surface="mail"), file=sys.stderr)
+    err, receipt = rust_binary.style_receipt(body, "mail", load_settings().style.word_cap.mail)
+    # A door error, a violation, or a silent binary (no dict) refuses: the gate never vanishes.
+    clean = isinstance(receipt, dict) and (receipt.get("exception") or not receipt.get("violations"))
+    if not clean:
+        if isinstance(receipt, dict) and receipt.get("violations"):
+            _emit_style_refusal(receipt["violations"])
+        print(err or (receipt or {}).get("report") or "", file=sys.stderr)
         raise typer.Exit(code=1)
 
 
@@ -386,27 +386,22 @@ def _reserve_budget(
     An ordinary body reserves nothing: rule 7 is its only word gate, so the
     return is ``(None, words)`` and callers release unconditionally.
     """
-    from fno import style
+    from fno import rust_binary
     from fno.mail import budget
 
-    words = style.word_count(body)
-    if budget.is_control(body):
-        return _reserve_control_budget(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            sender_key=sender_key,
-            recipient_key=recipient_key,
-        )
-    return None, words
+    if not budget.is_control(body):
+        return None, rust_binary.style_word_count(body)
+    return _reserve_control_budget(
+        sender=sender, recipient=recipient, body=body, msg_id=msg_id,
+        sender_key=sender_key, recipient_key=recipient_key,
+    )
 
 
 def _reserve_control_budget(
     *,
     sender: str,
     recipient: str,
-    words: int,
+    body: str,
     msg_id: str,
     sender_key: str | None = None,
     recipient_key: str | None = None,
@@ -415,11 +410,14 @@ def _reserve_control_budget(
 
     The stderr note is the receipt's lane marker, in one place, for every
     lane that routes through here; it reads RESERVED because delivery is
-    proven later, by the lane's own receipt.
+    proven later, by the lane's own receipt. The word count arrives from the
+    checked door: the cap enforces, so a door failure refuses the send.
     """
+    from fno import rust_binary
     from fno.mail import budget
 
     try:
+        words = rust_binary.style_word_count_checked(body)
         reservation = budget.reserve_control(
             sender=sender,
             recipient=recipient,
@@ -434,7 +432,7 @@ def _reserve_control_budget(
             file=sys.stderr,
         )
         raise typer.Exit(code=1) from exc
-    except budget.BudgetUnavailable as exc:
+    except (budget.BudgetUnavailable, budget.BudgetCountUnavailable) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
     print(
@@ -465,7 +463,7 @@ def _emit_style_refusal(violations: list) -> None:
 
         data: dict = {
             "surface": "mail",
-            "rule_ids": sorted({v.rule for v in violations}),
+            "rule_ids": sorted({v["rule"] for v in violations}),
             "violation_count": len(violations),
         }
         ident = resolve_self_identity()
@@ -1291,87 +1289,6 @@ def cmd_migrate_bus(
         f"migrated {res.migrated} message(s) from {res.threads_scanned} thread(s) "
         f"across {len(res.recipients)} recipient(s)"
     )
-
-
-def _envelope_to_dict(env) -> dict:
-    """Project a bus envelope to a JSON-able dict.
-
-    Enriched address fields are included only when present, so the projection
-    stays clean and is forward-compatible: unknown future fields on a line are
-    simply not surfaced (LD11 additive read), never echoed or crashed on.
-    """
-    out = {
-        "id": env.id, "ts": env.ts, "thread": env.thread,
-        "from": env.from_, "to": env.to, "kind": env.kind, "body": env.body,
-    }
-    for key, val in (
-        ("from_harness", env.from_harness), ("to_harness", env.to_harness),
-        ("from_session", env.from_session), ("from_model", env.from_model),
-        ("to_kind", env.to_kind), ("in_reply_to", env.in_reply_to),
-        ("delivery", env.delivery),
-    ):
-        if val:
-            out[key] = val
-    return out
-
-
-def _names_in_project(project: str) -> set[str]:
-    """Registry names whose cwd resolves to ``project`` (best-effort scoping)."""
-    try:
-        from fno.agents.registry import load_registry
-        from fno.agents.discover import resolve_project_for_cwd
-        return {
-            e.name for e in load_registry()
-            if resolve_project_for_cwd(e.cwd) == project
-        }
-    except Exception:  # noqa: BLE001 - scoping is best-effort; fall back to project name
-        return set()
-
-
-@mail_app.command("view")
-def cmd_view(
-    all_projects: bool = typer.Option(
-        False, "--all", "-A", help="Operator view: messages across all projects"
-    ),
-    limit: int = typer.Option(50, "--limit", "-n", help="Show the most recent N messages"),
-    json_out: bool = typer.Option(False, "--json", "-J", help="Output as JSON"),
-    from_project: Optional[str] = typer.Option(
-        None, "--from", help="Project to view (overrides settings.yaml)"
-    ),
-) -> None:
-    """Render the JSONL bus (the source of record) as an inbox view.
-
-    The bus log is the source of truth; this is a read-only projection. Default
-    scope is this project's traffic (to/from the project or an agent in it) so a
-    cross-project body is not leaked; ``--all`` is the explicit operator view.
-    """
-    from fno.bus.log import iter_messages
-
-    project = None if all_projects else _resolve_from(from_project)
-    msgs = list(iter_messages())
-    if project is not None:
-        names = _names_in_project(project) | {project}
-        msgs = [m for m in msgs if m.to in names or m.from_ in names]
-    if limit and limit > 0:
-        msgs = msgs[-limit:]
-
-    if json_out:
-        typer.echo(json.dumps([_envelope_to_dict(m) for m in msgs]))
-        return
-    if not msgs:
-        typer.echo("no messages" if all_projects else f"no messages for {project}")
-        return
-    for m in msgs:
-        who_from = m.from_ + (f"/{m.from_model}" if m.from_model else "")
-        kindtag = f" [{m.to_kind}]" if m.to_kind else ""
-        body1 = (m.body or "").strip().replace("\n", " ")
-        if len(body1) > 80:
-            body1 = body1[:77] + "..."
-        delivery = f"/{m.delivery}" if m.delivery else ""
-        typer.echo(
-            f"{m.ts}  {who_from} -> {m.to}{kindtag} "
-            f"({m.kind}{delivery}): {body1}"
-        )
 
 
 @mail_app.command("status")

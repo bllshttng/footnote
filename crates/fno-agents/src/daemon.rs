@@ -2020,10 +2020,9 @@ async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state
 fn state_error_code(e: &state::StateError) -> ErrorCode {
     match e {
         state::StateError::Cancelled(_) => ErrorCode::ShuttingDown,
-        // Both halves of the schema comparison answer the same way: the write
-        // was refused because two fno builds disagree about the schema, which a
-        // client must be able to tell apart from an internal daemon fault.
+        // Schema mismatches are distinct from internal faults for clients.
         state::StateError::UnsupportedSchemaVersion { .. }
+        | state::StateError::WriterTooOld { .. }
         | state::StateError::SourceAheadSchemaBump { .. } => ErrorCode::SchemaMismatch,
         _ => ErrorCode::Internal,
     }
@@ -6430,10 +6429,9 @@ pub(crate) fn run_reconcile_sweep(
 ) -> Result<ReconcileSweepResult, String> {
     use crate::provider::ReachabilityProbeError;
 
-    // Late bind (task 2), before the registry snapshot below is taken,
-    // so a row bound this tick is already visible to the probe/reconcile pass
-    // that follows. Serve-only skips it: the tick re-measures, it does not
-    // re-bind identities.
+    // Late bind (task 2) before the registry snapshot, so a row bound this
+    // tick is already visible to the probe pass that follows; serve-only
+    // skips it (the tick re-measures, it does not re-bind identities).
     if matches!(mode, SweepMode::Full) {
         late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout)?;
     }
@@ -6452,10 +6450,9 @@ pub(crate) fn run_reconcile_sweep(
     entries.sort_by(|a, b| a.last_reconciled_at.cmp(&b.last_reconciled_at));
 
     let probe = |e: &RegistryEntry| -> Result<bool, ReachabilityProbeError> {
-        // Fast path: a reachable worker socket is authoritative, PID-reuse-immune
-        // liveness for a PTY-managed agent — no provider probe (and no 250ms
-        // cost) needed. A sync connect is fine: reconcile runs on the blocking
-        // pool (Codex P1: do not trust a possibly-stale registry pid).
+        // Fast path: a reachable worker socket is authoritative, PID-reuse-
+        // immune liveness; no provider probe cost (reconcile runs on the
+        // blocking pool, so never trust a possibly-stale registry pid).
         if std::os::unix::net::UnixStream::connect(home.worker_sock(&e.short_id)).is_ok() {
             return Ok(true);
         }
@@ -6505,11 +6502,9 @@ pub(crate) fn run_reconcile_sweep(
         .into_iter()
         .map(|(h, p)| (h, p.harness_title))
         .collect();
-    // Title diff, computed off the SAME snapshot the write below
-    // applies to: the harness's own name for the session against the row's
-    // last-seen value. `name` is NEVER written from it - the label is fno's,
-    // the title is the harness's - and the emit rides the successful write,
-    // so a failed write never announces a rename it did not persist.
+    // Title diff off the SAME snapshot the write applies to. `name` is NEVER
+    // written from it (the label is fno's, the title is the harness's), and
+    // the emit rides the successful write: a failed write announces nothing.
     let renames = title_changes(&entries, &titles);
     // The shared reads are built HERE, before the clock: the socket index
     // and the codex rollout index serve every probed row, and their lazy
@@ -6520,10 +6515,9 @@ pub(crate) fn run_reconcile_sweep(
         crate::client_verbs::sessions_socket_index(&crate::claude_ask::ClaudeHome::from_env()),
         codex_index.clone(),
     );
-    // The sweep budget starts HERE, after the truth batch and the
-    // roster load: those reads serve every verb, and charging them to the
-    // probe loop's 5s window was why 79 rows went unprobed every sweep
-    // (24s wall, 0 probed). The probe loop and the roster-progress loop
+    // The sweep budget starts HERE, after the truth batch and roster load:
+    // charging them to the probe loop's 5s window is why 79 rows went
+    // unprobed every sweep. The probe loop and the roster-progress loop
     // below share this one clock.
     let start = Instant::now();
     // The reboot arm plans FIRST, before `prober` moves into plan_reconcile:
@@ -6540,12 +6534,23 @@ pub(crate) fn run_reconcile_sweep(
     } else {
         (Vec::new(), Vec::new())
     };
+    // The PR-busy hold: one graph read per sweep answers whether a node the
+    // row is named on still carries an open PR; a hold keeps the settle arms
+    // from flipping the row, so a stalled main neither reaps the session
+    // watching it nor frees its lane. An unreadable graph holds nothing.
+    let pr_graph = crate::gc_sweep::read_graph_entries(home);
+    let pr_hold = |e: &RegistryEntry| {
+        pr_graph
+            .as_ref()
+            .is_some_and(|g| crate::gc_open_pr_guard::row_has_open_pr(g, e))
+    };
     let (mut changes, mut outcome) = plan_reconcile(
         &entries,
         probe,
         || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
         pid_live,
         |e| witness.bg_live(e),
+        pr_hold,
         thread_hosted,
         rollout_exists,
         prober,
@@ -6555,12 +6560,10 @@ pub(crate) fn run_reconcile_sweep(
     witness.serve_listing(&entries, &mut changes);
     outcome.recovered.extend(revived);
 
-    // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
-    // Exited that still carries an inside-leg report, publish its completion
-    // BEFORE the write below clears the report. Publishing first is the
-    // contract: list/waiters see the final state before the badge goes blank.
-    // Gated on the same predicate the applier uses, so a ServeOnly tick that
-    // writes a pid-proven exit also publishes its completion.
+    // Ordered exit teardown (E3.3, AC-X2-4): publish the inside-leg
+    // completion for every row flipping to Exited BEFORE the write clears
+    // the report, so waiters see the final state first. The same predicate
+    // gates a ServeOnly tick that writes a pid-proven exit.
     for ch in &changes {
         if liveness_sweep::mode_writes_status(&mode, ch)
             && matches!(ch.new_status, Some(AgentStatus::Exited))
@@ -6603,18 +6606,13 @@ pub(crate) fn run_reconcile_sweep(
     }
 
     // Roster-progress refresh (SECOND HALF): the same per-tick set the
-    // reconcile sweep just probed - but this loop's own git/gh subprocess
-    // calls are NOT covered by the probe loop's budget check above (that one
-    // stops feeding `plan_reconcile` new entries; it does not bound what runs
-    // after). Re-check the SAME `start`/`RECONCILE_SWEEP_BUDGET` clock here so
-    // a large changed-row set cannot extend a sweep that runs synchronously at
-    // daemon startup and blocks `accept()` on every `reconcile` RPC. Remaining
-    // rows are simply deferred to the next tick, the same fairness the probe
-    // loop itself relies on. Best-effort and non-fatal otherwise: an I/O
-    // failure here must never fail the sweep that already wrote the registry.
-    // Full-only: the serve-only tick runs every 60s, and per-minute git/gh
-    // subprocess churn for a stamp the tick does not serve is load the
-    // measurement never asked for.
+    // reconcile sweep just probed. These git/gh subprocesses are not covered
+    // by the probe loop's budget, so re-check the SAME
+    // `start`/`RECONCILE_SWEEP_BUDGET` clock: a large changed-row set must
+    // not extend a sweep that runs synchronously at daemon startup. Deferred
+    // rows land on the next tick; an I/O failure here never fails the sweep
+    // that already wrote the registry. Full-only: the serve-only tick runs
+    // every 60s and does not serve this stamp.
     if matches!(mode, SweepMode::Full) {
         let progress_path = home.roster_progress_json();
         for ch in &changes {

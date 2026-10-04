@@ -1105,7 +1105,7 @@ pub(crate) fn create_node(
         }
     }
     // Born-with-why, gate-first and strictly non-fatal.
-    let _ = birth::on_node_born(&graph, &node);
+    let _ = birth::on_node_born(&graph, &node, None);
     // Repaint the new child's ancestors so a parent rollup reflects the
     // birth immediately (a plan-less idea still counts toward children_total).
     if let Some(parent) = node.get("parent").and_then(Value::as_str) {

@@ -14,6 +14,7 @@ use crate::chats::chats_dir;
 use crate::paths::AgentsHome;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Senders the read model drops (R8): the mail-hold digest is a delivery,
@@ -107,10 +108,17 @@ fn scope_of(line: &Value) -> String {
 /// True while an announce row still stands: no usable `expires`, or one in
 /// the future.
 fn standing(line: &Value, now: u64) -> bool {
-    match line.get("expires").and_then(Value::as_str) {
+    match expires_at(line) {
         Some(e) => crate::state::rfc3339_like_to_secs(e).is_none_or(|t| t > now),
         None => true,
     }
+}
+
+fn expires_at(line: &Value) -> Option<&str> {
+    line.get("meta")
+        .and_then(|meta| meta.get("expires_at"))
+        .and_then(Value::as_str)
+        .or_else(|| line.get("expires").and_then(Value::as_str))
 }
 
 /// The projection of one chats store. `now` decides which announcements
@@ -184,6 +192,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                     v.get("body").and_then(Value::as_str).unwrap_or(""),
                 ),
                 "body": v.get("body").and_then(Value::as_str).unwrap_or(""),
+                "expires": expires_at(&v),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
                 "delivery": v.get("delivery").and_then(Value::as_str),
                 "system": system_row,
@@ -379,11 +388,157 @@ pub fn run_mail_threads(args: &[String]) -> i32 {
             0
         }
         "details" => run_details(&args[1..]),
+        "journal-reply" => run_journal_reply(&args[1..]),
         _ => {
-            eprintln!("usage: fno-agents mail-threads [--format json | details --session <id>]");
+            eprintln!("usage: fno-agents mail-threads [--format json | details --session <id> | journal-reply --to <name> --to-session <id> --in-reply-to <msg-id>]");
             2
         }
     }
+}
+
+fn run_journal_reply(args: &[String]) -> i32 {
+    let value = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+    };
+    let (Some(to), Some(to_session), Some(parent)) =
+        (value("--to"), value("--to-session"), value("--in-reply-to"))
+    else {
+        eprintln!("mail-threads journal-reply: --to, --to-session and --in-reply-to are required");
+        return 2;
+    };
+    let mut body = String::new();
+    if let Err(error) = std::io::stdin().read_to_string(&mut body) {
+        eprintln!("mail-threads journal-reply: stdin: {error}");
+        return 1;
+    }
+    let bus = journal_bus_path();
+    match journal_reply_at(&bus, to, to_session, parent, &body) {
+        Ok(id) => {
+            println!("{id}");
+            0
+        }
+        Err(error) => {
+            eprintln!("mail-threads journal-reply: {error}");
+            1
+        }
+    }
+}
+
+fn journal_bus_path() -> std::path::PathBuf {
+    let home = AgentsHome::from_env();
+    let dot_fno = home.root().parent().unwrap_or_else(|| home.root());
+    crate::intel::bus_log_path(dot_fno)
+}
+
+fn journal_reply_at(
+    bus: &Path,
+    to: &str,
+    to_session: &str,
+    parent: &str,
+    body: &str,
+) -> Result<String, String> {
+    let (chat, parent_row) = find_chat_for_message(&crate::chats::chats_dir(), parent)?;
+    let thread = parent_row
+        .get("thread")
+        .and_then(Value::as_str)
+        .filter(|thread| !thread.is_empty())
+        .unwrap_or(parent);
+    let id = crate::announce::new_msg_id();
+    let reply = json!({
+        "v": 1,
+        "id": id,
+        "ts": crate::announce::now_iso(),
+        "thread": thread,
+        "from": "user",
+        "to": to,
+        "kind": "send",
+        "to_kind": "session",
+        "delivery": "typed",
+        "in_reply_to": parent,
+        "meta": {"lane": "mux-reply", "to_session": to_session},
+        "word_count": body.split_whitespace().count(),
+        "body": body,
+    });
+    crate::announce::append_line(bus, &reply)?;
+    append_projected_reply(
+        &chat,
+        &reply,
+        parent_row.get("chat_id").and_then(Value::as_str),
+    )
+    .map_err(|error| format!("reply {id} is on the bus, but chat projection failed: {error}"))?;
+    Ok(id)
+}
+
+fn find_chat_for_message(chats: &Path, id: &str) -> Result<(std::path::PathBuf, Value), String> {
+    let entries = std::fs::read_dir(chats)
+        .map_err(|error| format!("read chats {}: {error}", chats.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file = path.join("messages.jsonl");
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if row.get("id").and_then(Value::as_str) == Some(id) {
+                return Ok((path, row));
+            }
+        }
+    }
+    Err(format!("parent message {id:?} has no chat projection"))
+}
+
+fn append_projected_reply(
+    chat: &Path,
+    reply: &Value,
+    parent_chat_id: Option<&str>,
+) -> Result<(), String> {
+    let file = chat.join("messages.jsonl");
+    let lock_path = std::path::PathBuf::from(format!("{}.lock", file.display()));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("chat lock open {}: {error}", lock_path.display()))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("chat lock: {error}")),
+        }
+    }
+    let mut row = reply.clone();
+    let object = row
+        .as_object_mut()
+        .ok_or_else(|| "reply is not an object".to_string())?;
+    object.insert("type".into(), json!("message"));
+    object.insert(
+        "chat_id".into(),
+        json!(parent_chat_id.unwrap_or_else(|| chat
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""))),
+    );
+    let mut line = serde_json::to_string(&row).map_err(|error| format!("serialize: {error}"))?;
+    line.push('\n');
+    let mut output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .map_err(|error| format!("chat file open {}: {error}", file.display()))?;
+    output
+        .write_all(line.as_bytes())
+        .map_err(|error| format!("chat append: {error}"))
 }
 
 fn now_secs() -> u64 {
@@ -592,8 +747,16 @@ mod tests {
                 json!({
                     "type": "message", "kind": "announce", "v": 1,
                     "id": "fmail-666666666666", "ts": "2026-10-01T09:01:00Z",
-                    "from": "fno/fleet-incident", "to": "fleet:fno", "meta": {"scope": "fno"},
+                    "from": "fno/fleet-incident", "to": "fleet:fno",
+                    "meta": {"scope": "fno", "expires_at": "2026-10-03T12:00:00Z"},
                     "body": "Heavy benchmark running.",
+                }),
+                json!({
+                    "type": "message", "kind": "announce", "v": 1,
+                    "id": "fmail-999999999999", "ts": "2026-10-01T09:01:30Z",
+                    "from": "fno/fleet-incident", "to": "fleet:fno",
+                    "meta": {"scope": "fno", "expires_at": "2026-10-01T10:00:00Z"},
+                    "body": "expired incident",
                 }),
                 json!({
                     "type": "message", "kind": "announce", "v": 1,
@@ -666,10 +829,106 @@ mod tests {
             ann[0].get("id").and_then(Value::as_str),
             Some("fmail-666666666666")
         );
+        assert_eq!(
+            ann[0].get("expires").and_then(Value::as_str),
+            Some("2026-10-03T12:00:00Z")
+        );
         // The hold digest never appears (R8) and the broken line counts (AC1-ERR).
         let bodies = serde_json::to_string(&projection).unwrap();
         assert!(!bodies.contains("digest line"), "hold dropped: {bodies}");
         assert_eq!(projection.get("unreadable"), Some(&json!(1)));
+
+        let state = temp_root("journal-reply");
+        let state_root = state.join(".fno");
+        let agents_root = state_root.join("agents");
+        std::fs::create_dir_all(&agents_root).unwrap();
+        let prior_state = std::env::var_os("FNO_STATE_DIR");
+        let prior_agents = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_bus_dir = std::env::var_os("FNO_BUS_DIR");
+        std::env::set_var("FNO_STATE_DIR", &state_root);
+        std::env::set_var(crate::paths::HOME_ENV, &agents_root);
+        let custom_bus = state.join("custom-bus");
+        std::env::set_var("FNO_BUS_DIR", &custom_bus);
+        assert_eq!(
+            journal_bus_path(),
+            custom_bus.join("messages.jsonl"),
+            "journal replies follow the configured live bus"
+        );
+        let bus = custom_bus.join("messages.jsonl");
+        // The chat projection can outlive rotated bus segments; a reply keeps
+        // the parent's original thread and uses the canonical meta address.
+        let parent = json!({
+            "v": 1, "id": "fmail-aaaaaaaaaaaa", "ts": "2026-10-02T11:00:00Z",
+            "type": "message", "chat_id": "chat-aaaaaaaaaaaaaaaa",
+            "thread": "fmail-root-thread", "from": "s-sender", "to": "receiver",
+            "kind": "send", "body": "parent message",
+        });
+        let chats = crate::chats::chats_dir();
+        write_chat(&chats, "chat-aaaaaaaaaaaaaaaa", &[parent.clone()]);
+        assert!(journal_reply_at(
+            &bus,
+            "receiver",
+            "s-receiver",
+            "fmail-ffffffffffff",
+            "re: cannot append",
+        )
+        .is_err());
+        assert!(!bus.exists(), "unknown parent leaves the bus unchanged");
+
+        let id = journal_reply_at(
+            &bus,
+            "receiver",
+            "s-receiver",
+            "fmail-aaaaaaaaaaaa",
+            "re: user reply",
+        )
+        .unwrap();
+        let bus_rows = crate::announce::read_bus_segments(&bus);
+        let reply = bus_rows
+            .iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .unwrap();
+        assert_eq!(reply["from"], "user");
+        assert_eq!(reply["to"], "receiver");
+        assert_eq!(reply["meta"]["to_session"], "s-receiver");
+        assert_eq!(reply["kind"], "send");
+        assert_eq!(reply["to_kind"], "session");
+        assert_eq!(reply["delivery"], "typed");
+        assert_eq!(reply["in_reply_to"], "fmail-aaaaaaaaaaaa");
+        assert_eq!(reply["thread"], "fmail-root-thread");
+        assert_eq!(reply["meta"]["lane"], "mux-reply");
+        assert_eq!(reply["word_count"], 3);
+        assert_eq!(reply["body"], "re: user reply");
+        let journaled = project_at(
+            &crate::chats::chats_dir(),
+            &[],
+            crate::state::rfc3339_like_to_secs("2026-10-02T12:00:00Z").unwrap(),
+        );
+        let projected = journaled["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|thread| thread["rows"].as_array().unwrap())
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .unwrap();
+        assert_eq!(projected["from"], "user");
+        assert_eq!(projected["in_reply_to"], "fmail-aaaaaaaaaaaa");
+        if let Some(value) = prior_state {
+            std::env::set_var("FNO_STATE_DIR", value);
+        } else {
+            std::env::remove_var("FNO_STATE_DIR");
+        }
+        if let Some(value) = prior_agents {
+            std::env::set_var(crate::paths::HOME_ENV, value);
+        } else {
+            std::env::remove_var(crate::paths::HOME_ENV);
+        }
+        if let Some(value) = prior_bus_dir {
+            std::env::set_var("FNO_BUS_DIR", value);
+        } else {
+            std::env::remove_var("FNO_BUS_DIR");
+        }
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&state);
     }
 }

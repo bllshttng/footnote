@@ -18,6 +18,7 @@ fn load_fixture(name: &str) -> Value {
 struct FakeGh {
     raw: Value,
     log_reads: AtomicUsize,
+    log_args: std::sync::Mutex<Vec<String>>,
     /// Force the pulls read to fail with this stderr (refusal scenarios).
     pulls_fail: Option<String>,
 }
@@ -28,6 +29,7 @@ impl FakeGh {
         FakeGh {
             raw: fixture["inputs"]["raw"].clone(),
             log_reads: AtomicUsize::new(0),
+            log_args: std::sync::Mutex::new(Vec::new()),
             pulls_fail: None,
         }
     }
@@ -94,6 +96,7 @@ impl GhProbe for FakeGh {
         }
         if cmd.contains("/actions/jobs/") && cmd.ends_with("/logs") {
             self.log_reads.fetch_add(1, Ordering::SeqCst);
+            *self.log_args.lock().unwrap() = args.to_vec();
             let job = cmd
                 .rsplit("/jobs/")
                 .next()
@@ -351,8 +354,11 @@ fn prior_row_replays_failures_by_job_id_with_no_log_reads() {
 }
 
 /// A log read lands in the job cache and the second read never spends a gh
-/// call; a failed log read is never cached. One test, one tempdir: the env
-/// override is process-global, and cargo runs tests in parallel threads.
+/// call; a failed log read is never cached. An escape-laden log comes back
+/// stripped, so the scan reads the name the color codes hid, and the refusal
+/// that fires on a gh without the flag names the file-redirect remedy. One
+/// test, one tempdir: the env override is process-global, and cargo runs
+/// tests in parallel threads.
 #[test]
 fn job_log_caches_one_attempt_and_never_a_failure() {
     let _guard = super::cache_env_lock();
@@ -362,6 +368,14 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
     std::env::set_var("FNO_PR_STATUS_CACHE_DIR", dir.path());
     let cwd = Path::new("/tmp");
     let first = job_log(&green, cwd, "Owner--Repo", "Owner", "Repo", "1001").unwrap();
+    assert!(
+        green
+            .log_args
+            .lock()
+            .unwrap()
+            .contains(&"--allow-escape-sequences".to_string()),
+        "job logs permit the escape sequences emitted by Actions"
+    );
     let second = job_log(&green, cwd, "Owner--Repo", "Owner", "Repo", "1001").unwrap();
     assert_eq!(first, second, "the same log both times");
     assert_eq!(
@@ -381,6 +395,64 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
     assert!(
         !dir.path().join("job-Owner--Repo-2003.json").exists(),
         "a failed read writes no cache row"
+    );
+
+    let colored = format!(
+        "2026-10-03T18:00:00.0000000Z {}step failed, stopping (fail-fast):{} cargo-test-shard{}\n",
+        "\u{1b}[31;1m", "\u{1b}[0m", "\u{1b}[K"
+    );
+    let colored_fake = FakeGh {
+        raw: serde_json::json!({ "job_logs": { "3001": colored } }),
+        log_reads: AtomicUsize::new(0),
+        log_args: std::sync::Mutex::new(Vec::new()),
+        pulls_fail: None,
+    };
+    let stripped = job_log(&colored_fake, cwd, "Owner--Repo", "Owner", "Repo", "3001").unwrap();
+    assert!(!stripped.contains('\u{1b}'), "escape-free: {stripped:?}");
+    assert_eq!(failing_step(&stripped).as_deref(), Some("cargo-test-shard"));
+    let colored_row =
+        std::fs::read_to_string(dir.path().join("job-Owner--Repo-3001.json")).unwrap();
+    assert!(
+        !colored_row.contains('\u{1b}'),
+        "the cache row is escape-free"
+    );
+
+    let remedy = escape_refusal_remedy(
+        "the response contains terminal escape sequences; pass \
+         --allow-escape-sequences to output it anyway",
+        "repos/Owner/Repo/actions/jobs/3001/logs",
+    )
+    .expect("the escape refusal names its remedy");
+    assert!(remedy.contains("> ci-log.txt"), "{remedy}");
+    assert!(
+        escape_refusal_remedy("secondary rate limit", "repos/x/y").is_none(),
+        "another failure carries no remedy"
+    );
+
+    // A row written before the strip carries raw ANSI and no gh call fixes
+    // it: the hit path normalizes it too.
+    let legacy_row = json!({"ts": 1.0, "log": "\u{1b}[31mstep failed, stopping (fail-fast): legacy-shard\u{1b}[0m\n"});
+    std::fs::write(
+        dir.path().join("job-Owner--Repo-4001.json"),
+        legacy_row.to_string(),
+    )
+    .unwrap();
+    let empty_fake = FakeGh {
+        raw: serde_json::json!({}),
+        log_reads: AtomicUsize::new(0),
+        log_args: std::sync::Mutex::new(Vec::new()),
+        pulls_fail: None,
+    };
+    let from_legacy = job_log(&empty_fake, cwd, "Owner--Repo", "Owner", "Repo", "4001").unwrap();
+    assert!(
+        !from_legacy.contains('\u{1b}'),
+        "a legacy row serves escape-free: {from_legacy:?}"
+    );
+    assert_eq!(failing_step(&from_legacy).as_deref(), Some("legacy-shard"));
+    assert_eq!(
+        empty_fake.log_reads.load(Ordering::SeqCst),
+        0,
+        "the hit spent no gh call"
     );
 }
 

@@ -384,11 +384,11 @@ fn sync_model_tiers() {
     write_if_different(&cli_copy, &bytes);
 }
 
-/// Render the registry schema version from its single owner and project the
-/// Python copy.
+/// Render the registry schema version and writer floor from their single owner,
+/// then project the Python copy.
 ///
-/// `src/registry_schema.toml` holds `version` alone. `state.rs` `include!`s
-/// the generated constant, and registry.py reads the projected byte copy
+/// `src/registry_schema.toml` owns both values. `state.rs` `include!`s
+/// the generated constants, and registry.py reads the projected byte copy
 /// `cli/src/fno/agents/registry_schema.toml` as package data, so a bump is
 /// one edit in one file. This replaces the parity script that compared two
 /// independent literals; the rust-ci generated-copies dirty-tree step is the
@@ -397,17 +397,27 @@ fn sync_registry_schema() {
     println!("cargo:rerun-if-changed=src/registry_schema.toml");
     let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/registry_schema.toml");
     let text = std::fs::read_to_string(&canonical)
-        .expect("src/registry_schema.toml must exist (it is the version's only owner)");
+        .expect("src/registry_schema.toml must exist (it owns the schema and writer floor)");
     let parsed: toml::Value =
         toml::from_str(&text).expect("src/registry_schema.toml must parse as TOML");
     let version = parsed
         .get("version")
         .and_then(|value| value.as_integer())
         .expect("src/registry_schema.toml must carry an integer `version`");
+    let min_writer = parsed
+        .get("min_writer")
+        .and_then(|value| value.as_integer())
+        .expect("src/registry_schema.toml must carry an integer `min_writer`");
+    assert!(
+        min_writer <= version,
+        "src/registry_schema.toml `min_writer` must not exceed `version`"
+    );
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
     std::fs::write(
         out_dir.join("registry_schema.rs"),
-        format!("pub const REGISTRY_SCHEMA_VERSION: u32 = {version};\n"),
+        format!(
+            "pub const REGISTRY_SCHEMA_VERSION: u32 = {version};\npub const REGISTRY_MIN_WRITER_VERSION: u32 = {min_writer};\n"
+        ),
     )
     .expect("generated registry_schema.rs must be writable");
 

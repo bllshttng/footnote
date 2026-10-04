@@ -65,6 +65,26 @@ read_version() {
     printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
+# Missing min_writer at the base is the historical default of 0. Once present,
+# the floor must parse as an integer on both sides.
+read_min_writer() {
+    local rev="$1" label="$2" blob line
+    blob="$(git show "$rev:$SCHEMA_FILE")" || {
+        echo "ERROR: cannot read schema toml at $label ($rev)" >&2
+        return 1
+    }
+    line="$(grep -E '^min_writer[[:space:]]*=' <<<"$blob" || true)"
+    if [[ -z "$line" ]]; then
+        printf '0\n'
+        return 0
+    fi
+    if [[ ! "$line" =~ =[[:space:]]*([0-9]+) ]]; then
+        echo "ERROR: cannot parse min_writer at $label: $line" >&2
+        return 1
+    fi
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 # The single-line `fields = [...]` array, split to sorted names, one per
 # line. Empty output when the key is absent (the introducing PR). Tolerates
 # trailing commas and quoting.
@@ -140,10 +160,21 @@ fi
 
 BASE_V="$(read_version "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 2
 HEAD_V="$(read_version "$HEAD_SHA" "PR head")" || exit 2
+BASE_MIN="$(read_min_writer "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 2
+HEAD_MIN="$(read_min_writer "$HEAD_SHA" "PR head")" || exit 2
 BASE_F="$(read_fields "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 2
 HEAD_F="$(read_fields "$HEAD_SHA" "PR head")" || exit 2
 fields_array_is_single_line "$BASE_TIP" "$REMOTE/$BASE_REF tip" || exit 2
 fields_array_is_single_line "$HEAD_SHA" "PR head" || exit 2
+
+if (( 10#$HEAD_MIN > 10#$HEAD_V )); then
+    echo "ERROR: min_writer=$HEAD_MIN exceeds version=$HEAD_V at PR head." >&2
+    exit 1
+fi
+if (( 10#$HEAD_MIN < 10#$BASE_MIN )); then
+    echo "ERROR: min_writer decreased from $BASE_MIN at base to $HEAD_MIN at PR head." >&2
+    exit 1
+fi
 
 if [[ -z "$BASE_F" ]]; then
     echo "check-registry-schema-bump: no baseline fields at base tip"

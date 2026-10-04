@@ -526,6 +526,7 @@ struct NeedsArgs {
     fires_floor: u64,
     json: bool,
     items: bool,
+    clear_settled: bool,
     answer: Option<String>,
     option: Option<u32>,
     words: Option<String>,
@@ -542,6 +543,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
     let mut fires_floor = DEFAULT_FIRES_FLOOR;
     let mut json = false;
     let mut items = false;
+    let mut clear_settled = false;
     let mut answer: Option<String> = None;
     let mut option: Option<u32> = None;
     let mut words: Option<String> = None;
@@ -570,6 +572,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
             }
             "--json" | "-J" => json = true,
             "--items" => items = true,
+            "--clear-settled" => clear_settled = true,
             "--answer" => answer = Some(it.next().ok_or("--answer needs an item id")?),
             "--option" => {
                 option = Some(
@@ -598,6 +601,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
         fires_floor,
         json,
         items,
+        clear_settled,
         answer,
         option,
         words,
@@ -829,6 +833,14 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
     if let Ok(registry) = crate::state::load_registry(&home.registry_json()) {
         crate::attention::attach_reach(&mut items, &registry);
     }
+    // The settled flag shares the sweep's open-question fold, including its
+    // user-only exemption. An unreadable graph yields no settled ids.
+    let (statuses, raw) = crate::question_sweep::read_closed_rung_facts(cwd, home);
+    let statuses = statuses.into_iter().collect();
+    let settled = node_closed_question_ids(&raw, &statuses)
+        .into_iter()
+        .collect();
+    mark_settled(&mut items, &settled);
     let as_of = now_secs();
     let answered = crate::attention::answered(&journals_raw, as_of);
     let payload = json!({
@@ -849,6 +861,53 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
         return 1;
     }
     0
+}
+
+/// Mark only open question/pin items the canonical node-closed fold returned.
+fn mark_settled(
+    items: &mut [crate::attention::AttentionItem],
+    settled: &std::collections::HashSet<String>,
+) {
+    for item in items.iter_mut() {
+        if item.state != "open" || !matches!(item.kind.as_str(), "question" | "pin") {
+            continue;
+        }
+        item.settled = settled.contains(&item.id);
+    }
+}
+
+/// The `--clear-settled` door: close every still-open question whose node or
+/// blocks entry reads done/superseded, right now, through the same close
+/// rows the daemon sweep writes (`reason: node-closed`), so the attention
+/// arm's vault-page write picks them up on its next beat. The bell's
+/// Clear all calls this; a graph it cannot read closes nothing.
+fn run_clear_settled(home: &AgentsHome, cwd: &Path) -> i32 {
+    let (statuses, raw) = crate::question_sweep::read_closed_rung_facts(cwd, home);
+    let statuses: std::collections::BTreeMap<String, String> = statuses.into_iter().collect();
+    let ids = node_closed_question_ids(&raw, &statuses);
+    let now = crate::claims::now_ms() / 1000;
+    let (cleared, errors) =
+        crate::question_sweep::close_questions(home, &ids, now, "clear-settled");
+    let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+    let _ = emitter.emit(
+        "question_sweep",
+        &json!({
+            "closed": cleared.len(),
+            "tasks_closed": 0,
+            "legacy_moved": 0,
+            "outcome": if errors.is_empty() { "ok" } else { "partial" },
+            "closed_by": "clear-settled",
+        }),
+    );
+    println!(
+        "{}",
+        json!({
+            "cleared": cleared,
+            "errors": errors,
+            "as_of": crate::claims::now_ms() / 1000,
+        })
+    );
+    i32::from(!errors.is_empty())
 }
 
 /// The `--answer` door: record one durable `attention_answer` row for an open
@@ -1628,6 +1687,13 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     }
     if let Some(id) = args.answer.clone() {
         return run_answer(home, &cwd, &args, &id);
+    }
+    if args.clear_settled {
+        if args.items || args.answer.is_some() || !args.archive.is_empty() {
+            eprintln!("fno-agents: needs --clear-settled is its own door; pass it alone");
+            return 2;
+        }
+        return run_clear_settled(home, &cwd);
     }
     if args.items {
         return run_items(home, &cwd);
@@ -2828,6 +2894,7 @@ mod tests {
             fires_floor: 0,
             json: false,
             items: false,
+            clear_settled: false,
             answer: Some("q-door".to_string()),
             option: Some(2),
             words: None,

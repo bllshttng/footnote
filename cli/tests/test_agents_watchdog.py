@@ -1087,8 +1087,10 @@ def test_every_registry_row_is_born_with_an_origin_and_a_substrate():
                 continue
             seen += 1
             body = []
+            indent = len(line) - len(line.lstrip())
             for later in lines[i + 1:]:
-                if later.strip() in ("}", "};", "})", "}),"):
+                later_indent = len(later) - len(later.lstrip())
+                if later_indent == indent and later.strip() in ("}", "};", "})", "}),"):
                     break
                 body.append(later)
             joined = "\n".join(body)

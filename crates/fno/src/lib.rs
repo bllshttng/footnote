@@ -41,6 +41,7 @@ pub mod lane_colors_panel;
 pub(crate) mod lattice;
 pub mod law_cli;
 pub mod link;
+pub mod lint_cli;
 pub mod live_store_fence;
 pub mod messages_model;
 pub mod model_catalog;

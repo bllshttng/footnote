@@ -236,14 +236,58 @@ pub(crate) enum Recorded {
     Skipped,
 }
 
+/// The stored message line for a message-kind bus row: the chat id plus the
+/// envelope verbatim with `type` and `chat_id` added. `None` for a row
+/// without an id. record_at and migrate_import had written this shape twice,
+/// verbatim; it lives once now.
+fn message_line(line: &Value) -> Option<(String, Value)> {
+    let id = line.get("id").and_then(Value::as_str).unwrap_or("");
+    if id.is_empty() {
+        return None;
+    }
+    let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
+    let from_key = line
+        .get("from_session")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            line.get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        })
+        .to_string();
+    let to_key = if kind == "announce" {
+        String::new()
+    } else {
+        let to = line.get("to").and_then(Value::as_str).unwrap_or("");
+        recipient_key(to)
+    };
+    let chat_id = if kind == "announce" {
+        chat_id_for_channel(&scope_of(line))
+    } else {
+        chat_id_for_pair(&from_key, &to_key)
+    };
+    let mut rec = line.clone();
+    if let Value::Object(map) = &mut rec {
+        map.insert("type".into(), json!("message"));
+        map.insert("chat_id".into(), json!(chat_id));
+        if !to_key.is_empty() {
+            map.insert("to_key".into(), json!(to_key));
+        }
+    }
+    Some((chat_id, rec))
+}
+
 /// Record one bus line into the store (plan R2's shared seam target).
 ///
-/// Message kinds (`send`, `announce` without a delivery field) become one
-/// message line: the bus envelope verbatim plus `type` and the stored
-/// `chat_id`. Receipt rows (`landed`, or an envelope carrying `delivery`)
-/// become one delivery line (R3). Anything else is control traffic and is
-/// skipped. The write is the JSONL only; the index catches up lazily on the
-/// next read (it is derived, never authoritative).
+/// Message kinds (`send`, `announce`) become one message line: the bus
+/// envelope verbatim plus `type` and the stored `chat_id`. A message-kind row
+/// that also carries a `delivery` mark is the message AND its receipt in one
+/// row (hosted and typed sends are written after delivery), so it records the
+/// message line when the id is unrecorded, then the delivery line either way.
+/// Receipt rows (`landed`) become one delivery line (R3). Anything else is
+/// control traffic and is skipped. The write is the JSONL only; the index
+/// catches up lazily on the next read (it is derived, never authoritative).
 pub(crate) fn record_at(
     chats_dir: &Path,
     db: &Path,
@@ -257,55 +301,54 @@ pub(crate) fn record_at(
         .and_then(Value::as_str)
         .filter(|d| !d.is_empty());
     if is_message_kind(kind) && delivery.is_none() {
+        let Some((chat_id, rec)) = message_line(line) else {
+            return Ok(Recorded::Skipped);
+        };
+        append_chat_line(&chats_dir.join(&chat_id), &rec)?;
+        Ok(Recorded::Message { chat_id })
+    } else if is_message_kind(kind) {
         let id = line.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty() {
             return Ok(Recorded::Skipped);
         }
-        let from_key = line
-            .get("from_session")
+        let chat_id = match chat_of_message(chats_dir, db, id)? {
+            Some(chat_id) => chat_id,
+            None => {
+                let Some((chat_id, rec)) = message_line(line) else {
+                    return Ok(Recorded::Skipped);
+                };
+                append_chat_line(&chats_dir.join(&chat_id), &rec)?;
+                chat_id
+            }
+        };
+        append_chat_line(
+            &chats_dir.join(&chat_id),
+            &json!({
+                "type": "delivery",
+                "chat_id": chat_id,
+                "id": id,
+                "session": line.get("to").and_then(Value::as_str).unwrap_or(""),
+                "how": delivery.unwrap_or(""),
+                "ts": line.get("ts").and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(crate::announce::now_iso),
+            }),
+        )?;
+        Ok(Recorded::Delivery { chat_id })
+    } else if kind == "landed" {
+        let meta = line.get("meta").cloned().unwrap_or(Value::Null);
+        let session = meta
+            .get("session")
             .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                line.get("from")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-            })
-            .to_string();
-        let chat_id = if kind == "announce" {
-            chat_id_for_channel(&scope_of(line))
-        } else {
-            let to = line.get("to").and_then(Value::as_str).unwrap_or("");
-            chat_id_for_pair(&from_key, &recipient_key(to))
-        };
-        let mut rec = line.clone();
-        if let Value::Object(map) = &mut rec {
-            map.insert("type".into(), json!("message"));
-            map.insert("chat_id".into(), json!(chat_id));
-        }
-        append_chat_line(&chats_dir.join(&chat_id), &rec)?;
-        Ok(Recorded::Message { chat_id })
-    } else if kind == "landed" || delivery.is_some() {
-        let (id, session, how) = if kind == "landed" {
-            let meta = line.get("meta").cloned().unwrap_or(Value::Null);
-            let id = meta.get("landed").and_then(Value::as_str).unwrap_or("");
-            let session = meta
-                .get("session")
+            .unwrap_or_else(|| line.get("to").and_then(Value::as_str).unwrap_or(""));
+        let (id, session, how) = (
+            meta.get("landed")
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| line.get("to").and_then(Value::as_str).unwrap_or(""));
-            (id.to_string(), session.to_string(), "landed".to_string())
-        } else {
-            (
-                line.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                line.get("to")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                delivery.unwrap_or("").to_string(),
-            )
-        };
+                .unwrap_or("")
+                .to_string(),
+            session.to_string(),
+            "landed".to_string(),
+        );
         if id.is_empty() {
             return Ok(Recorded::Skipped);
         }
@@ -746,66 +789,34 @@ fn migrate_import(chats_dir: &Path, bus: &Path) -> Result<MigrationReceipt, Stri
             .and_then(Value::as_str)
             .filter(|d| !d.is_empty());
         if is_message_kind(kind) && delivery.is_none() {
-            let id = line.get("id").and_then(Value::as_str).unwrap_or("");
-            if id.is_empty() || id_to_chat.contains_key(id) {
-                // A row without an id, or a duplicate of one already staged,
-                // records once or not at all.
+            let Some((chat_id, rec)) = message_line(line) else {
                 receipt.skipped += 1;
                 continue;
-            }
-            let from_key = line
-                .get("from_session")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    line.get("from")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                })
-                .to_string();
-            let chat_id = if kind == "announce" {
-                chat_id_for_channel(&scope_of(line))
-            } else {
-                let to = line.get("to").and_then(Value::as_str).unwrap_or("");
-                chat_id_for_pair(&from_key, &recipient_key(to))
             };
-            let mut rec = line.clone();
-            if let Value::Object(map) = &mut rec {
-                map.insert("type".into(), json!("message"));
-                map.insert("chat_id".into(), json!(chat_id));
+            let id = line.get("id").and_then(Value::as_str).unwrap_or("");
+            if id_to_chat.contains_key(id) {
+                // A duplicate of one already staged records once, not twice.
+                receipt.skipped += 1;
+                continue;
             }
             id_to_chat
                 .entry(id.to_string())
                 .or_insert_with(|| chat_id.clone());
             stage(&mut chats, &mut order, chat_id, rec);
             receipt.messages += 1;
-        } else if kind == "landed" || delivery.is_some() {
-            let (id, session, how) = if kind == "landed" {
-                let meta = line.get("meta").cloned().unwrap_or(Value::Null);
-                (
-                    meta.get("landed")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    meta.get("session")
-                        .and_then(Value::as_str)
-                        .unwrap_or_else(|| line.get("to").and_then(Value::as_str).unwrap_or(""))
-                        .to_string(),
-                    "landed".to_string(),
-                )
-            } else {
-                (
-                    line.get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    line.get("to")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    delivery.unwrap_or("").to_string(),
-                )
-            };
+        } else if kind == "landed" {
+            let meta = line.get("meta").cloned().unwrap_or(Value::Null);
+            let (id, session, how) = (
+                meta.get("landed")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                meta.get("session")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| line.get("to").and_then(Value::as_str).unwrap_or(""))
+                    .to_string(),
+                "landed".to_string(),
+            );
             if id.is_empty() {
                 receipt.skipped += 1;
                 continue;
@@ -826,8 +837,133 @@ fn migrate_import(chats_dir: &Path, bus: &Path) -> Result<MigrationReceipt, Stri
             });
             stage(&mut chats, &mut order, chat_id.clone(), rec);
             receipt.deliveries += 1;
+        } else if is_message_kind(kind) {
+            // A hosted or typed send is ONE row carrying the message and its
+            // receipt. An unrecorded id stages the message line first, then
+            // the delivery line; a staged id gets only the delivery line.
+            let id = line.get("id").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty() {
+                receipt.skipped += 1;
+                continue;
+            }
+            let chat_id = match id_to_chat.get(id) {
+                Some(chat_id) => chat_id.clone(),
+                None => {
+                    let Some((chat_id, rec)) = message_line(line) else {
+                        receipt.skipped += 1;
+                        continue;
+                    };
+                    id_to_chat
+                        .entry(id.to_string())
+                        .or_insert_with(|| chat_id.clone());
+                    stage(&mut chats, &mut order, chat_id.clone(), rec);
+                    receipt.messages += 1;
+                    chat_id
+                }
+            };
+            let rec = json!({
+                "type": "delivery",
+                "chat_id": chat_id,
+                "id": id,
+                "session": line.get("to").and_then(Value::as_str).unwrap_or(""),
+                "how": delivery.unwrap_or(""),
+                "ts": line.get("ts").and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(crate::announce::now_iso),
+            });
+            stage(&mut chats, &mut order, chat_id.clone(), rec);
+            receipt.deliveries += 1;
         } else {
             receipt.skipped += 1;
+        }
+    }
+    for chat_id in &order {
+        for line in &chats[chat_id] {
+            append_chat_line(&chats_dir.join(chat_id), line)?;
+        }
+    }
+    Ok(receipt)
+}
+
+/// The `migrate --missing` backfill: import every message-kind bus row whose
+/// id the store does not hold, oldest first, each with its delivery line when
+/// the row carries a mark. Rows already recorded are skipped and counted, so
+/// a second run imports 0 (AC3). Never touches the migrated stamp and never
+/// refuses: it runs against a store that migrated long ago.
+/// Every message id the store holds, from the index plus one pass over the
+/// chat files (the index is derived and may be stale; the JSONL is truth).
+fn known_message_ids(
+    chats_dir: &Path,
+    db: &Path,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut ids = std::collections::HashSet::new();
+    let conn = open_index(db)?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM messages")
+        .map_err(|e| format!("index query: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("index query: {e}"))?;
+    for r in rows {
+        ids.insert(r.map_err(|e| format!("index row: {e}"))?);
+    }
+    if chats_dir.is_dir() {
+        let rd = std::fs::read_dir(chats_dir).map_err(|e| format!("chats dir: {e}"))?;
+        for entry in rd.flatten() {
+            let (messages, _) = read_chat_lines(&entry.path().join("messages.jsonl"));
+            for m in messages {
+                if let Some(id) = m.get("id").and_then(Value::as_str) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn migrate_missing(chats_dir: &Path, db: &Path, bus: &Path) -> Result<MigrationReceipt, String> {
+    let rows = crate::announce::read_bus_segments(bus);
+    let mut receipt = MigrationReceipt::default();
+    let mut order: Vec<String> = Vec::new();
+    let mut chats: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+    let mut known_ids = known_message_ids(chats_dir, db)?;
+    for line in &rows {
+        let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
+        if !is_message_kind(kind) {
+            continue;
+        }
+        let id = line.get("id").and_then(Value::as_str).unwrap_or("");
+        if !id.is_empty() && known_ids.contains(id) {
+            receipt.skipped += 1;
+            continue;
+        }
+        let Some((chat_id, rec)) = message_line(line) else {
+            receipt.skipped += 1;
+            continue;
+        };
+        if !chats.contains_key(&chat_id) {
+            order.push(chat_id.clone());
+        }
+        known_ids.insert(id.to_string());
+        chats.entry(chat_id.clone()).or_default().push(rec);
+        receipt.messages += 1;
+        let delivery = line
+            .get("delivery")
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty());
+        if let Some(how) = delivery {
+            let rec = json!({
+                "type": "delivery",
+                "chat_id": chat_id,
+                "id": id,
+                "session": line.get("to").and_then(Value::as_str).unwrap_or(""),
+                "how": how,
+                "ts": line.get("ts").and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(crate::announce::now_iso),
+            });
+            chats.entry(chat_id).or_default().push(rec);
+            receipt.deliveries += 1;
         }
     }
     for chat_id in &order {
@@ -860,6 +996,187 @@ fn ensure_ready_at(chats_dir: &Path, db: &Path, bus: &Path) -> Result<(), String
 // Verb doors (the hidden `fno-agents chats` family; never advertised)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Show (the `fno agents mail show` read model; the door is run_chats "show")
+// ---------------------------------------------------------------------------
+
+/// One show invocation's flags and the caller identity the privacy rule
+/// reads. `caller` is the resolved session id; `None` reads as outside
+/// unless `all` lifts the scope.
+pub(crate) struct ShowQuery {
+    pub thread: bool,
+    pub json: bool,
+    pub all: bool,
+    pub limit: usize,
+    pub caller: Option<String>,
+}
+
+fn participant_key(v: &Value, session: &str, fallback: &str) -> String {
+    v.get(session)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| v.get(fallback).and_then(Value::as_str).unwrap_or("unknown"))
+        .to_string()
+}
+
+/// The privacy rule a body prints under: the caller is the message's sender
+/// or recipient; `--all` is the operator override.
+fn caller_in_message(line: &Value, caller: &str) -> bool {
+    let norm = crate::mail_hold::identity_key;
+    norm(&participant_key(line, "from_session", "from")) == norm(caller)
+        || norm(&participant_key(line, "to_key", "to")) == norm(caller)
+}
+
+fn message_body(line: &Value) -> &str {
+    line.get("body").and_then(Value::as_str).unwrap_or("")
+}
+
+/// One message as the reader sees it: the delivered header line, then the
+/// full body. The auto summary stands in until the Rust send verb sets
+/// subjects (wave 2); the id is what the receiver answers and resolves with.
+fn render_message(line: &Value) -> String {
+    format!(
+        "{}\n{}",
+        crate::mail_header::render_header(
+            crate::mail_header::HeaderForm::Mention,
+            line.get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            line.get("id").and_then(Value::as_str).unwrap_or(""),
+            &crate::mail_header::summary_of(message_body(line)),
+        ),
+        message_body(line),
+    )
+}
+
+/// A chat file's message and delivery lines, in file order. Malformed lines
+/// are skipped (the JSONL tolerates a torn final line).
+fn read_chat_lines(chat_file: &Path) -> (Vec<Value>, Vec<Value>) {
+    let mut messages = Vec::new();
+    let mut deliveries = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(chat_file) {
+        for line in text.lines() {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                match v.get("type").and_then(Value::as_str) {
+                    Some("message") => messages.push(v),
+                    Some("delivery") => deliveries.push(v),
+                    _ => {}
+                }
+            }
+        }
+    }
+    (messages, deliveries)
+}
+
+fn ts_of(line: &Value) -> &str {
+    line.get("ts").and_then(Value::as_str).unwrap_or("")
+}
+
+/// `show <id>`: resolve the prefix, privacy-gate, render one message -- or
+/// with `--thread`, the whole chat in ts order, each delivery line as one
+/// `delivered <how> <ts>` line under its message. The error string carries
+/// the door's wording; "ambiguous" maps to exit 2 there.
+pub(crate) fn show_at(
+    chats_dir: &Path,
+    db: &Path,
+    id: &str,
+    q: &ShowQuery,
+) -> Result<String, String> {
+    let hit = resolve_prefix_at(db, chats_dir, id)?;
+    let (messages, deliveries) =
+        read_chat_lines(&chats_dir.join(&hit.chat_id).join("messages.jsonl"));
+    let Some(msg) = messages
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(hit.id.as_str()))
+    else {
+        return Err(format!("no stored id matches {id:?}"));
+    };
+    if !q.all
+        && !q
+            .caller
+            .as_deref()
+            .map(|c| caller_in_message(msg, c))
+            .unwrap_or(false)
+    {
+        return Err(format!(
+            "{id} is not addressed to or from the caller; --all is the operator view"
+        ));
+    }
+    if q.json {
+        return Ok(msg.to_string());
+    }
+    if !q.thread {
+        return Ok(render_message(msg));
+    }
+    let mut sorted = messages.clone();
+    sorted.sort_by(|a, b| ts_of(a).cmp(ts_of(b)));
+    let mut out = String::new();
+    for m in &sorted {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&render_message(m));
+        let mid = m.get("id").and_then(Value::as_str).unwrap_or("");
+        for d in deliveries
+            .iter()
+            .filter(|d| d.get("id").and_then(Value::as_str) == Some(mid))
+        {
+            out.push_str(&format!(
+                "\ndelivered {} {}",
+                d.get("how").and_then(Value::as_str).unwrap_or(""),
+                d.get("ts").and_then(Value::as_str).unwrap_or(""),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `show` with no id: the listing `view` printed, scoped to the caller's own
+/// session (`--all` lifts it), the most recent `limit` messages by ts.
+pub(crate) fn show_list_at(chats_dir: &Path, q: &ShowQuery) -> Result<String, String> {
+    let mut rows: Vec<Value> = Vec::new();
+    if chats_dir.is_dir() {
+        let rd = std::fs::read_dir(chats_dir).map_err(|e| format!("chats dir: {e}"))?;
+        for entry in rd.flatten() {
+            let (messages, _) = read_chat_lines(&entry.path().join("messages.jsonl"));
+            rows.extend(messages);
+        }
+    }
+    if !q.all {
+        let Some(caller) = q.caller.as_deref() else {
+            return Ok(String::new());
+        };
+        rows.retain(|m| caller_in_message(m, caller));
+    }
+    rows.sort_by(|a, b| ts_of(a).cmp(ts_of(b)));
+    if q.limit > 0 && rows.len() > q.limit {
+        rows.drain(..rows.len() - q.limit);
+    }
+    if q.json {
+        return Ok(Value::Array(rows).to_string());
+    }
+    let mut out = String::new();
+    for m in rows {
+        let mut body1 = message_body(&m).trim().replace('\n', " ");
+        if body1.chars().count() > 80 {
+            body1 = format!("{}...", body1.chars().take(77).collect::<String>());
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "{}  {} -> {} ({}/{}): {}",
+            ts_of(&m),
+            m.get("from").and_then(Value::as_str).unwrap_or("unknown"),
+            m.get("to").and_then(Value::as_str).unwrap_or(""),
+            m.get("kind").and_then(Value::as_str).unwrap_or(""),
+            m.get("delivery").and_then(Value::as_str).unwrap_or(""),
+            body1
+        ));
+    }
+    Ok(out)
+}
+
 fn valid_chat_id(id: &str) -> bool {
     let Some(rest) = id.strip_prefix(CHAT_PREFIX) else {
         return false;
@@ -868,7 +1185,7 @@ fn valid_chat_id(id: &str) -> bool {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: fno-agents chats <append|migrate|rebuild|list|read|resolve> ...");
+    eprintln!("usage: fno-agents chats <append|migrate|rebuild|list|read|resolve|show> ...");
     2
 }
 
@@ -919,6 +1236,21 @@ pub fn run_chats(args: &[String]) -> i32 {
             }
         }
         "migrate" => {
+            if args.iter().any(|a| a == "--missing") {
+                return match migrate_missing(&dir, &index_path(), &bus_live_path()) {
+                    Ok(receipt) => {
+                        println!(
+                            "{{\"migrated\":true,\"missing\":true,\"messages\":{},\"deliveries\":{},\"skipped\":{}}}",
+                            receipt.messages, receipt.deliveries, receipt.skipped
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("chats migrate: {e}");
+                        1
+                    }
+                };
+            }
             let conn = match open_index(&index_path()) {
                 Ok(c) => c,
                 Err(e) => {
@@ -994,6 +1326,76 @@ pub fn run_chats(args: &[String]) -> i32 {
                 Err(e) => {
                     eprintln!("chats read: {}: {e}", file.display());
                     1
+                }
+            }
+        }
+        "show" => {
+            let mut id: Option<String> = None;
+            let mut q = ShowQuery {
+                thread: false,
+                json: false,
+                all: false,
+                limit: 50,
+                caller: None,
+            };
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--thread" => q.thread = true,
+                    "-J" | "--json" => q.json = true,
+                    "--all" => q.all = true,
+                    "-n" | "--limit" => match it.next().and_then(|v| v.parse::<usize>().ok()) {
+                        Some(n) => q.limit = n,
+                        None => {
+                            eprintln!("chats show: -n/--limit needs a number");
+                            return 2;
+                        }
+                    },
+                    "--help" => {
+                        println!("usage: fno-agents chats show [<id-or-prefix>] [--thread] [--json] [--all] [-n N]");
+                        return 0;
+                    }
+                    other => {
+                        if other.starts_with('-') || id.is_some() {
+                            eprintln!("chats show: unexpected argument {other:?}");
+                            return 2;
+                        }
+                        id = Some(other.to_string());
+                    }
+                }
+            }
+            let home = crate::paths::AgentsHome::from_env();
+            q.caller = crate::spawn_context::resolve_self_identity(
+                &|k| std::env::var(k).ok(),
+                None,
+                None,
+                &home,
+            )
+            .session_id;
+            let out = match &id {
+                Some(id) => show_at(&dir, &index_path(), id, &q),
+                None if q.thread => {
+                    eprintln!("chats show: --thread needs an id");
+                    return 2;
+                }
+                None => show_list_at(&dir, &q),
+            };
+            match out {
+                Ok(s) if s.is_empty() && id.is_none() && !q.json => {
+                    println!("no messages");
+                    0
+                }
+                Ok(s) => {
+                    println!("{s}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("chats show: {e}");
+                    if e.contains("ambiguous") {
+                        2
+                    } else {
+                        1
+                    }
                 }
             }
         }
@@ -1244,6 +1646,218 @@ mod tests {
         assert_eq!(ok.from_key, "sess-a", "the reply adapter reads from_key");
         let none = resolve_prefix_at(&db, &chats, "fmail-99999999");
         assert!(none.is_err());
+
+        // --- hosted and typed sends: one row records message + delivery
+        // (AC1: unrecorded id gets both lines; AC2: recorded id gets only
+        // the delivery line); migrate --missing backfills and is idempotent
+        // (AC3); show gates bodies on the caller and reads in ts order
+        // (AC4, AC5, AC6).
+        let root = temp_root("hosted");
+        let chats = root.join("chats");
+        let db = root.join("db").join("chats.db");
+        let bus = root.join("bus").join("messages.jsonl");
+        std::fs::create_dir_all(bus.parent().unwrap()).unwrap();
+        let mut hosted = bus_line("fmail-111111111111", "sess-a", "sess-b", "send");
+        hosted["delivery"] = serde_json::json!("hosted");
+        assert_eq!(
+            record_at(&chats, &db, &bus, &hosted).unwrap(),
+            Recorded::Delivery {
+                chat_id: chat_id_for_pair("sess-a", "sess-b")
+            }
+        );
+        let text = std::fs::read_to_string(
+            chats
+                .join(chat_id_for_pair("sess-a", "sess-b"))
+                .join("messages.jsonl"),
+        )
+        .unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "message line then delivery line");
+        let first: Value = serde_json::from_str(lines[0]).unwrap();
+        let second: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first["type"], "message");
+        assert_eq!(second["type"], "delivery");
+        assert_eq!(second["how"], "hosted");
+        assert_eq!(
+            resolve_prefix_at(&db, &chats, "fmail-111111111111")
+                .unwrap()
+                .id,
+            "fmail-111111111111",
+            "the hosted send's id resolves"
+        );
+
+        // AC2: an id already recorded as a message takes only the delivery line.
+        let plain = bus_line("fmail-222222222222", "sess-a", "sess-b", "send");
+        let Recorded::Message { .. } = record_at(&chats, &db, &bus, &plain).unwrap() else {
+            panic!("expected a message record");
+        };
+        let mut hosted2 = plain.clone();
+        hosted2["delivery"] = serde_json::json!("typed");
+        assert_eq!(
+            record_at(&chats, &db, &bus, &hosted2).unwrap(),
+            Recorded::Delivery {
+                chat_id: chat_id_for_pair("sess-a", "sess-b")
+            }
+        );
+        let text = std::fs::read_to_string(
+            chats
+                .join(chat_id_for_pair("sess-a", "sess-b"))
+                .join("messages.jsonl"),
+        )
+        .unwrap();
+        let messages_for: usize = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v["type"] == "message" && v["id"] == "fmail-222222222222")
+            .count();
+        assert_eq!(messages_for, 1, "the message is never duplicated");
+        let lines: Vec<&str> = text.lines().collect();
+        let last: Value = serde_json::from_str(lines[lines.len() - 1]).unwrap();
+        assert_eq!(last["type"], "delivery");
+        assert_eq!(last["how"], "typed");
+
+        // AC3: the backfill imports unrecorded ids and is idempotent.
+        let mut rows = Vec::new();
+        for pair in ["sess-c", "sess-d", "sess-e"] {
+            let id = format!("fmail-3333333333{}", pair.chars().last().unwrap());
+            let mut row = bus_line(&id, "sess-a", pair, "send");
+            row["delivery"] = serde_json::json!("hosted");
+            rows.push(row);
+        }
+        let recorded_plain = bus_line("fmail-444444444444", "sess-a", "sess-f", "send");
+        let Recorded::Message { .. } = record_at(&chats, &db, &bus, &recorded_plain).unwrap()
+        else {
+            panic!("expected a message record");
+        };
+        rows.push(recorded_plain.clone());
+        std::fs::write(
+            &bus,
+            rows.iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let first_run = migrate_missing(&chats, &db, &bus).unwrap();
+        assert_eq!(first_run.messages, 3, "three hosted sends import");
+        assert_eq!(first_run.deliveries, 3);
+        assert_eq!(first_run.skipped, 1, "the recorded plain send skips");
+        let second_run = migrate_missing(&chats, &db, &bus).unwrap();
+        assert_eq!(second_run.messages, 0, "a second run imports none");
+        assert_eq!(second_run.skipped, 4);
+        let backfilled = std::fs::read_to_string(
+            chats
+                .join(chat_id_for_pair("sess-a", "sess-c"))
+                .join("messages.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            backfilled.lines().count(),
+            2,
+            "message then its delivery line"
+        );
+
+        // show: the sender reads header plus body; a stranger does not; an
+        // ambiguous prefix names candidates; the thread reads in ts order.
+        let q = |caller: Option<&str>, thread: bool| ShowQuery {
+            thread,
+            json: false,
+            all: false,
+            limit: 50,
+            caller: caller.map(str::to_string),
+        };
+        let shown = show_at(&chats, &db, "fmail-444444444444", &q(Some("sess-a"), false)).unwrap();
+        assert!(
+            shown.starts_with("`@sess-a · fmail-444444444444 · "),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("hello"),
+            "the body follows the header: {shown}"
+        );
+        let amb = show_at(&chats, &db, "fmail-3333333333", &q(Some("sess-a"), false));
+        assert!(amb.unwrap_err().contains("ambiguous"));
+        let stranger = show_at(&chats, &db, "fmail-444444444444", &q(Some("sess-z"), false));
+        assert!(stranger
+            .unwrap_err()
+            .contains("not addressed to or from the caller"));
+        // A send addressed to a registry name records the resolved session
+        // key as to_key, so the recipient reads their mail by their own
+        // session id.
+        std::fs::write(
+            home_pin.join("registry.json"),
+            r#"{"agents":[{"name":"rowan","session_id":"sess-b-uuid","harness":"claude"}]}"#,
+        )
+        .unwrap();
+        let named = bus_line("fmail-777777777777", "sess-a", "rowan", "send");
+        let Recorded::Message {
+            chat_id: named_chat,
+        } = record_at(&chats, &db, &bus, &named).unwrap()
+        else {
+            panic!("expected a message record");
+        };
+        assert_eq!(named_chat, chat_id_for_pair("sess-a", "sess-b-uuid"));
+        let stored = std::fs::read_to_string(chats.join(&named_chat).join("messages.jsonl"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let rec: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(rec["to_key"], "sess-b-uuid", "the resolved key is stored");
+        let shown = show_at(
+            &chats,
+            &db,
+            "fmail-777777777777",
+            &q(Some("sess-b-uuid"), false),
+        )
+        .unwrap();
+        assert!(
+            shown.contains("hello"),
+            "the recipient reads by id: {shown}"
+        );
+        let ids_ts = [
+            ("fmail-555555555553", "2026-10-03T19:03:00Z"),
+            ("fmail-555555555551", "2026-10-03T19:01:00Z"),
+            ("fmail-555555555552", "2026-10-03T19:02:00Z"),
+        ];
+        for (id, ts) in ids_ts {
+            let mut row = bus_line(id, "sess-a", "sess-g", "send");
+            row["ts"] = serde_json::json!(ts);
+            let Recorded::Message { .. } = record_at(&chats, &db, &bus, &row).unwrap() else {
+                panic!("expected a message record");
+            };
+        }
+        let thread = show_at(&chats, &db, "fmail-555555555551", &q(Some("sess-a"), true)).unwrap();
+        let (i1, i2, i3) = (
+            thread.find("fmail-555555555551").unwrap(),
+            thread.find("fmail-555555555552").unwrap(),
+            thread.find("fmail-555555555553").unwrap(),
+        );
+        assert!(i1 < i2 && i2 < i3, "the thread reads in ts order: {thread}");
+        let mut excluded = bus_line("fmail-666666666666", "sess-x", "sess-y", "send");
+        excluded["ts"] = serde_json::json!("2026-10-03T20:00:00Z");
+        let Recorded::Message { .. } = record_at(&chats, &db, &bus, &excluded).unwrap() else {
+            panic!("expected a message record");
+        };
+        let list = show_list_at(&chats, &q(Some("sess-a"), false)).unwrap();
+        assert!(
+            list.contains("sess-f"),
+            "the caller's own sends list: {list}"
+        );
+        assert!(
+            !list.contains("sess-y"),
+            "another pair's mail stays out of the caller's listing"
+        );
+        let mut q_all = q(Some("sess-z"), false);
+        q_all.all = true;
+        let list_all = show_list_at(&chats, &q_all).unwrap();
+        assert!(
+            list_all.contains("sess-y"),
+            "--all lifts the scope: {list_all}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
 
         // --- migration + index: import once, cutover refuses, lost index
         // rebuilds identically, hand-edited rollup is overwritten

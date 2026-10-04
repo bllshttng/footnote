@@ -893,6 +893,17 @@ mod tests {
         assert_eq!(records[0].pr_state, "MERGED");
         assert_eq!(records[0].merge_sha.as_deref(), Some("abc"));
         assert!(records[0].closeable());
+
+        // An open listing row for the same PR means no drift and no query.
+        let cache = ListingCache::new();
+        let open_rows = vec![pr_row(7, "feature/x-aaaa", "OPEN")];
+        cache
+            .rows_for_with("open", ".", |_| Ok(open_rows.clone()))
+            .expect("seed open");
+        let records = scan_merge_drift(&entries, None, Some(&cache), |_, _, _, _| {
+            panic!("an open listing row means no drift")
+        });
+        assert!(records.is_empty(), "{records:?}");
     }
 
     #[test]
@@ -924,22 +935,23 @@ mod tests {
     }
 
     #[test]
-    fn an_open_listing_row_means_no_drift_and_no_query() {
+    fn open_binding_scan_releases_the_repo_keys_borrow() {
+        // Regression for the daemon merge_close exit-101: the grouping step
+        // held the repo_keys RefMut across the loop, and rows_for's
+        // borrow_mut panicked the moment one ref-less open-bound node gave
+        // the loop a group to walk. Seeding first keeps the run hermetic:
+        // the loop's rows_for hits the store, never gh.
         let cache = ListingCache::new();
-        let open_rows = vec![pr_row(7, "feature/x-aaaa", "OPEN")];
         cache
-            .rows_for_with("open", ".", |_| Ok(open_rows.clone()))
+            .rows_for_with("open", ".", |_| Ok(Vec::new()))
             .expect("seed open");
-        // A node cwd is needed for the listing to answer; point it at ".".
-        let entries = vec![open_node(json!({
-            "pr_number": 7,
-            "pr_url": "https://github.com/o/r/pull/7",
-            "cwd": ".",
-        }))];
-        let records = scan_merge_drift(&entries, None, Some(&cache), |_, _, _, _| {
-            panic!("an open listing row means no drift")
-        });
-        assert!(records.is_empty(), "{records:?}");
+        let entries = vec![open_node(json!({"cwd": "."}))];
+        let (heals, advisories) =
+            collect_open_binding_heals(&entries, None, Some(&cache), |_, _, _, _| {
+                panic!("no PR read is owed: the listing is empty")
+            });
+        assert!(heals.is_empty(), "{heals:?}");
+        assert!(advisories.is_empty(), "{advisories:?}");
     }
 
     #[test]
@@ -1043,16 +1055,21 @@ pub(crate) fn collect_open_binding_heals(
     listings: Option<&ListingCache>,
     query: impl Fn(i64, Option<&str>, Option<&str>, bool) -> Result<PrMergeState, PrReadError>,
 ) -> (Vec<OpenBindingHeal>, Vec<String>) {
-    let mut fallback = HashMap::new();
-    let mut cache_memo;
-    let memo: &mut HashMap<String, String> = match listings {
-        Some(cache) => {
-            cache_memo = cache.repo_keys.borrow_mut();
-            &mut cache_memo
-        }
-        None => &mut fallback,
+    // The repo_keys RefMut must drop before the loop: rows_for re-borrows
+    // it, and a borrow held across the loop panicked (exit 101) on every
+    // daemon sweep once the graph held a ref-less open-bound node.
+    let (groups, cwd_by_nid, _skipped) = {
+        let mut fallback = HashMap::new();
+        let mut cache_memo;
+        let memo: &mut HashMap<String, String> = match listings {
+            Some(cache) => {
+                cache_memo = cache.repo_keys.borrow_mut();
+                &mut cache_memo
+            }
+            None => &mut fallback,
+        };
+        group_refless_by_repo(entries, scope, memo, true)
     };
-    let (groups, cwd_by_nid, _skipped) = group_refless_by_repo(entries, scope, memo, true);
 
     let mut heals: Vec<OpenBindingHeal> = Vec::new();
     let mut advisories: Vec<String> = Vec::new();

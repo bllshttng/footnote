@@ -85,6 +85,7 @@ pub mod cargo_build_dirs;
 pub mod census;
 pub mod chats;
 pub mod check_supersession;
+pub mod claim_cli;
 pub mod claim_lanes_cli;
 pub mod claim_queue;
 pub mod claim_store;
@@ -123,6 +124,7 @@ pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
+pub mod codex_watch;
 pub mod compaction;
 mod completion_output;
 pub mod component_update;
@@ -341,6 +343,7 @@ pub mod reclaim;
 pub mod reentry;
 pub mod refusal_rate;
 pub mod refusal_trend;
+pub mod registry_commit;
 pub mod registry_guard;
 pub mod registry_json;
 pub mod reign_eval;
@@ -431,6 +434,7 @@ pub mod sync_canonical;
 pub mod system_sender;
 pub mod task_context;
 pub mod terminal_stop;
+pub mod terminal_vocab;
 pub mod territory;
 pub mod test_delta;
 pub mod test_hold;
@@ -722,6 +726,38 @@ pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
     PATH_TEST_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Point `FNO_AGENTS_HOME` at `path` for the rest of the scope. Serialized by
+/// [`crate::claims::test_env_lock`], so every test that resolves the agents
+/// home shares one lane, and the previous value is restored on drop, panic
+/// included.
+#[cfg(test)]
+pub(crate) struct AgentsHomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl AgentsHomeEnvGuard {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", path);
+        Self { previous, _lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AgentsHomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+    }
 }
 
 /// The process `PATH` with `dir` in front. PREPEND, never replace: PATH is
@@ -1435,6 +1471,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // transaction (classified, claims-held, pane-stopped, hand-off,
     // resumed, flipped, rolled-back), carrying the name and strategy.
     "agent_convert_phase",
+    // Spawn gate: registry writer-floor incompatibility, latched by the
+    // writer/floor/reader tuple so repeated refusals emit once.
+    "version_skew",
     "agent_stopped",
     // Stop/rm claims release: the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.
@@ -1802,7 +1841,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "legacy", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "legacy", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "rust", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"
