@@ -73,7 +73,7 @@ const EXPIRED_SUBDIR: &str = ".expired";
 
 /// Recovery-mutex wait: poll cadence + deadline (mirrors core.py's 20ms/5s).
 const RECOVERY_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const RECOVERY_LOCK_MAX_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const RECOVERY_LOCK_MAX_WAIT: Duration = Duration::from_secs(5);
 /// Bounded retry for gone-away / lost-recovery races. Python recurses
 /// unboundedly here; a bound is an accepted divergence — hitting it means
 /// pathological churn and every Rust caller is fail-open.

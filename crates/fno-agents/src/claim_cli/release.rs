@@ -182,9 +182,18 @@ fn run_keyed(a: &LeafArgs, key: &str) -> i32 {
     let root = a.root.clone().or_else(|| node_aware_root(key));
     // The strict prior check `core.release_claim` runs before the native
     // release (core.py:2133-2138): a foreign holder is a named exit 4, every
-    // other state falls through to the release itself.
+    // other state falls through to the release itself. A corrupt file under
+    // --strict is a named transient exit 3 - strict mode exists so a caller
+    // can TELL a corruption from an already-released claim.
     if a.strict {
         let (state, prior) = crate::claims::status(key, root.as_deref());
+        if state == crate::claims::ClaimState::Corrupted {
+            eprintln!(
+                "transient error: {key}: claim corrupted; cannot verify \
+                 ownership (use `fno agents claim release --force`)"
+            );
+            return 3;
+        }
         if state != crate::claims::ClaimState::Free {
             if let Some(prior) = prior {
                 if !prior.holder.is_empty() && prior.holder != a.holder {

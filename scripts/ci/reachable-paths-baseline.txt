@@ -248,7 +248,6 @@ A	truth-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/f
 A	unreadable install receipt	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# CLASSIFY protocol|msg-twin|data
 A	unresolved:no-harness-session	py=cli/src/fno/cost/_register.py;rs=crates/fno-agents/src/ledger_axes.rs|crates/fno/src/agents_history.rs	# CLASSIFY protocol|msg-twin|data
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
-A	validation error: key is required (or use --lane <id>)	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY protocol|msg-twin|data
 A	warning: force flag set on advisory node {task_id} (reason: {reason}); no pr refs to check.	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	was superseded by {superseder}	py=cli/src/fno/graph/_contain.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	{brevity_marker}{brevity_instruction}{brevity_end_marker}	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# CLASSIFY protocol|msg-twin|data
