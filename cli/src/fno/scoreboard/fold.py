@@ -23,28 +23,22 @@ from statistics import median
 
 import yaml
 
-# termination_reason -> outcome class. The delivered-ship set is the explicit
-# _SHIPPED_TERMINALS allowlist below; the wedge set is the stuck-terminal set.
-# Everything else (Interrupted, delegated, NoWork, DoneAwaitingMerge,
-# DoneAwaitingReview, or no reason at all) is neither and lands in "other" so
-# the spend split always reconciles to the window total.
+# termination_reason -> outcome class. The delivered-ship set is the one
+# delivered vocabulary (fno.rust_binary.delivered_terminals); the wedge set is
+# the stuck-terminal set. Everything else (Interrupted, delegated, NoWork,
+# DoneAwaitingMerge, DoneAwaitingReview, or no reason at all) is neither and
+# lands in "other" so the spend split always reconciles to the window total.
 _WEDGE_REASONS = frozenset({"NoProgress", "Budget", "Aborted"})
-
-# Terminal reasons that count a node as DELIVERED for telemetry (cost
-# An explicit allowlist, NOT a `startswith("Done")` prefix match - see
-# fno.terminals for why DoneAwaitingMerge is absent. This is intentionally
-# looser than finalize.SHIP_REASONS (which gates plan stamp/graduate on
-# DonePRGreen|DoneAdvisory only) - "delivered for telemetry" and "graduate
-# the plan" differ.
-from fno.terminals import DELIVERED_TERMINALS as _SHIPPED_TERMINALS  # noqa: E402
 
 
 def _is_shipped_reason(termination_reason: str | None) -> bool:
     """True iff a terminal reason counts as a delivered node for telemetry.
     Non-string junk (a hand-edited/partial ledger row) is never a ship reason,
     and must not reach the frozenset membership test unhashable."""
+    from fno.rust_binary import delivered_terminals
+
     tr = termination_reason if isinstance(termination_reason, str) else ""
-    return tr in _SHIPPED_TERMINALS
+    return tr in delivered_terminals()
 
 
 def classify_deliveries(
