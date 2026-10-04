@@ -669,7 +669,9 @@ pub fn set_manifest_shape(
     shape: &str,
     expect_session: Option<&str>,
 ) -> Result<String, String> {
-    if shape != "pass" && shape != "org" && shape != "org" {
+    // The manifest's stored value stays `court` this release; the renamed
+    // spelling is accepted beside it.
+    if shape != "pass" && shape != "court" && shape != "org" {
         return Err(format!("shape must be pass or org, got {shape:?}"));
     }
     set_manifest_fields(root, scope, &[("shape", shape)], expect_session)?;

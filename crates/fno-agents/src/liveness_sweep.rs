@@ -1711,7 +1711,7 @@ mod tests {
             "2026-09-10T12:00:00Z",
         );
         assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].row, "king");
+        assert_eq!(applied[0].row, "lead");
         assert_eq!(applied[0].from, "exited");
         assert_eq!(applied[0].to, "live");
         assert_eq!(applied[0].cause, "revival");
