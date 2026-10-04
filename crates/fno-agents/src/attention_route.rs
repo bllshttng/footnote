@@ -354,6 +354,7 @@ mod tests {
             ready: true,
             missing: vec![],
             state: "open".into(),
+            settled: false,
         }
     }
 

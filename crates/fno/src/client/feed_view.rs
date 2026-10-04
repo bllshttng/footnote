@@ -814,8 +814,8 @@ impl View {
         let Some(item) = item else {
             return;
         };
-        // A question row answers from the feed, the same question view the
-        // questions block opens (ruling 2026-09-29).
+        // A question row answers from the feed, the same detail view the bell
+        // opens.
         if item.kind == "question_asked" {
             if let Some(qid) = item.r#ref.as_deref() {
                 self.open_detail_on(qid);

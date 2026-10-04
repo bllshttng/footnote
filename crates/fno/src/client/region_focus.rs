@@ -141,6 +141,23 @@ pub(super) async fn mouse_pre_pass(
         if view.question_detail.is_some() {
             continue;
         }
+        if view.bell.open {
+            if bell::button_at(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                continue;
+            }
+            if let Some(hit) = bell::hit(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, hit, sock_w).await?;
+                }
+                continue;
+            }
+            if !matches!(rep.kind, MouseKind::Move) {
+                bell::close(view);
+            }
+        }
         // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
@@ -569,6 +586,11 @@ pub(super) async fn mouse_pre_pass(
             if rep.row == 0 {
                 // The strip row: only its words act (R15); the rest of the
                 // row is dead.
+                if bell::button_range(view, view.panel_w().saturating_sub(1) as usize)
+                    .contains(&(rep.col as usize))
+                {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
                 for (start, w, v) in view.top_row_spans() {
                     if (rep.col as usize) >= start && (rep.col as usize) < start + w {
                         apply_hit(view, ChromeHit::TopRow(v), sock_w).await?;
