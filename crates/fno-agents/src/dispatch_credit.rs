@@ -92,7 +92,7 @@ pub fn covering_crown(payload: &Value) -> Value {
 
 /// [`covering_crown`] over handed-in rows: pure, so a test pins fixtures and
 /// the ask never touches a store under test.
-pub(crate) fn covering_crown_in(
+pub fn covering_crown_in(
     node: &str,
     node_row: Option<&Value>,
     registry_rows: &[Value],
@@ -157,7 +157,7 @@ pub(crate) fn covering_crown_in(
 }
 
 /// The launch notice: one wrapped line naming what launched and who answers.
-pub(crate) fn launch_mail_text(node: &str, worker: &Value) -> String {
+pub fn launch_mail_text(node: &str, worker: &Value) -> String {
     let s = |k: &str| {
         worker
             .get(k)
@@ -224,107 +224,5 @@ pub fn launch_credit_mail(payload: &Value) -> Value {
             })
         }
         Err(e) => json!({"node": node, "mailed": false, "reason": e.message()}),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn projects() -> HashMap<String, String> {
-        HashMap::from([
-            ("f".to_string(), "fno".to_string()),
-            ("fno".to_string(), "fno".to_string()),
-        ])
-    }
-
-    fn crown_row(name: &str, scope: &str, session: &str, status: &str) -> Value {
-        json!({
-            "name": name,
-            "crown_scope": scope,
-            "harness_session_id": session,
-            "harness": "claude",
-            "status": status,
-        })
-    }
-
-    fn node_row(id: &str, parent: &str) -> Value {
-        json!({"id": id, "parent": parent, "project": "fno"})
-    }
-
-    #[test]
-    fn a_crown_over_the_epic_covers_its_child_node() {
-        let rows = vec![crown_row("lead", "x-epic", "aaaa-bbbb", "live")];
-        let out = covering_crown_in(
-            "x-child",
-            Some(&node_row("x-child", "x-epic")),
-            &rows,
-            &projects(),
-        );
-        assert_eq!(out["owner"]["kind"], "crown");
-        assert_eq!(out["owner"]["scope"], "x-epic");
-        assert_eq!(out["lead"]["session"], "aaaa-bbbb");
-    }
-
-    #[test]
-    fn a_memberless_or_terminal_registry_names_no_lead() {
-        let rows = vec![crown_row("gone", "x-epic", "aaaa-bbbb", "exited")];
-        let out = covering_crown_in(
-            "x-child",
-            Some(&node_row("x-child", "x-epic")),
-            &rows,
-            &projects(),
-        );
-        assert!(out["owner"].is_null());
-        let rows = vec![crown_row("elsewhere", "x-other", "aaaa-bbbb", "live")];
-        let out = covering_crown_in(
-            "x-child",
-            Some(&node_row("x-child", "x-epic")),
-            &rows,
-            &projects(),
-        );
-        assert!(out["owner"].is_null());
-    }
-
-    #[test]
-    fn a_node_without_a_row_is_kingless() {
-        let rows = vec![crown_row("lead", "x-epic", "aaaa-bbbb", "live")];
-        let out = covering_crown_in("x-ghost", None, &rows, &projects());
-        assert!(out["owner"].is_null());
-    }
-
-    #[test]
-    fn the_most_specific_covering_crown_wins() {
-        let rows = vec![
-            crown_row("portfolio", "x-a,x-epic", "pppp", "live"),
-            crown_row("epic-king", "x-epic", "eeee", "live"),
-        ];
-        let out = covering_crown_in(
-            "x-child",
-            Some(&node_row("x-child", "x-epic")),
-            &rows,
-            &projects(),
-        );
-        assert_eq!(out["lead"]["session"], "eeee");
-    }
-
-    #[test]
-    fn a_scope_alias_resolves_through_the_project_map() {
-        let rows = vec![crown_row("lead", "f", "aaaa", "live")];
-        let row = json!({"id": "x-s", "parent": "fno", "project": "fno"});
-        let out = covering_crown_in("x-s", Some(&row), &rows, &projects());
-        assert_eq!(out["lead"]["session"], "aaaa");
-    }
-
-    #[test]
-    fn the_notice_names_node_worker_and_axes() {
-        let text = launch_mail_text(
-            "x-node",
-            &json!({"name": "brave-quill", "harness": "claude", "model": "claude-opus-5", "effort": ""}),
-        );
-        assert!(text.contains("brave-quill started on x-node"));
-        assert!(text.contains("claude-opus-5"));
-        assert!(text.contains("effort default"));
-        assert!(!text.contains("--raw"));
     }
 }

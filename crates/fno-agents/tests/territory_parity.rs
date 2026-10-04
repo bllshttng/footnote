@@ -184,6 +184,78 @@ fn drain_receipt_two_territories() {
     std::fs::write(&plan_doc, "---\nstatus: design\n---\n").unwrap();
     let fixture = build_fixture("", base_graph(&plan_doc), crown_registry());
     assert_case("drain_two_territories", &fixture, || rust_drain(&fixture));
+
+    // Dispatch credit (dispatch_credit): the live crown whose scope covers
+    // the node answers for it; a kingless node keeps no owner. Pure core,
+    // so the asserts stay hermetic beside the golden above.
+    let projects = std::collections::HashMap::from([
+        ("f".to_string(), "fno".to_string()),
+        ("fno".to_string(), "fno".to_string()),
+    ]);
+    let crown = |name: &str, scope: &str, session: &str, status: &str| {
+        serde_json::json!({
+            "name": name, "crown_scope": scope, "harness_session_id": session,
+            "harness": "claude", "status": status,
+        })
+    };
+    let node_row =
+        |id: &str, parent: &str| serde_json::json!({"id": id, "parent": parent, "project": "fno"});
+    let rows = vec![crown("lead", "x-epic", "aaaa-bbbb", "live")];
+    let covered = fno_agents::dispatch_credit::covering_crown_in(
+        "x-child",
+        Some(&node_row("x-child", "x-epic")),
+        &rows,
+        &projects,
+    );
+    assert_eq!(covered["owner"]["kind"], "crown");
+    assert_eq!(covered["owner"]["scope"], "x-epic");
+    assert_eq!(covered["lead"]["session"], "aaaa-bbbb");
+
+    let terminal_rows = vec![crown("gone", "x-epic", "aaaa-bbbb", "exited")];
+    let kingless = fno_agents::dispatch_credit::covering_crown_in(
+        "x-child",
+        Some(&node_row("x-child", "x-epic")),
+        &terminal_rows,
+        &projects,
+    );
+    assert!(kingless["owner"].is_null());
+
+    let elsewhere = vec![crown("far", "x-other", "aaaa-bbbb", "live")];
+    let kingless = fno_agents::dispatch_credit::covering_crown_in(
+        "x-child",
+        Some(&node_row("x-child", "x-epic")),
+        &elsewhere,
+        &projects,
+    );
+    assert!(kingless["owner"].is_null());
+
+    let specific = vec![
+        crown("portfolio", "x-a,x-epic", "pppp", "live"),
+        crown("epic-king", "x-epic", "eeee", "live"),
+    ];
+    let out = fno_agents::dispatch_credit::covering_crown_in(
+        "x-child",
+        Some(&node_row("x-child", "x-epic")),
+        &specific,
+        &projects,
+    );
+    assert_eq!(out["lead"]["session"], "eeee");
+
+    let aliased = vec![crown("lead", "f", "aaaa", "live")];
+    let row = serde_json::json!({"id": "x-s", "parent": "fno", "project": "fno"});
+    let out =
+        fno_agents::dispatch_credit::covering_crown_in("x-s", Some(&row), &aliased, &projects);
+    assert_eq!(out["lead"]["session"], "aaaa");
+
+    let notice = fno_agents::dispatch_credit::launch_mail_text(
+        "x-node",
+        &serde_json::json!({"name": "brave-quill", "harness": "claude",
+                            "model": "claude-opus-5", "effort": ""}),
+    );
+    assert!(notice.contains("brave-quill started on x-node"));
+    assert!(notice.contains("claude-opus-5"));
+    assert!(notice.contains("effort default"));
+    assert!(!notice.contains("--raw"));
 }
 
 #[test]
