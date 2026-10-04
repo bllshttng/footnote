@@ -106,9 +106,20 @@ pub(super) async fn ensure_codex_thread_handle(
         .or_else(|| Some(posture.requested.clone()).filter(|r| !r.is_empty()));
     let resumed_name = entry.name.clone();
     let turn_policy_source = driver.turn_policy_source().to_string();
+    let mut resolved_sandbox = Some(resolved_sandbox);
     let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if let Some(row) = registry.find_mut(&resumed_name) {
-            row.resolved_sandbox = Some(resolved_sandbox);
+            // First resolution wins: the column is the crowning-time
+            // baseline the check-in's drift judge reads, so a later resume
+            // never moves it (a narrowed resolution would mask the drift it
+            // caused). `unknown` is no baseline; a real name may replace it.
+            let frozen = row
+                .resolved_sandbox
+                .as_deref()
+                .is_some_and(|name| name != "unknown" && !name.is_empty());
+            if !frozen {
+                row.resolved_sandbox = resolved_sandbox.take();
+            }
             row.granted_writable_roots = granted_writable_roots;
             row.requested_permission_mode = requested_permission_mode;
             row.turn_policy_source = Some(turn_policy_source);

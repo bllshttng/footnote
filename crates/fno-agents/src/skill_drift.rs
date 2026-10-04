@@ -4,9 +4,10 @@
 
 use std::{
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
+
+use crate::lead_checkin::OwnTranscript::*;
 
 use serde_json::{json, Value};
 
@@ -14,18 +15,37 @@ const SKILL_PREFIX: &str = "Base directory for this skill: ";
 const TRUNCATED: &str = "\n\n[... skill content truncated for compaction";
 
 pub(crate) fn reading() -> Result<Value, String> {
-    let path = crate::king_checkin::own_claude_transcript()?;
-    fold(&path)
+    match crate::lead_checkin::own_transcript() {
+        // Only a claude session carries invoked_skills attachments; every
+        // other harness names why the reader cannot run there.
+        Ok(Text {
+            harness: "claude",
+            text,
+            ..
+        }) => fold(&text),
+        Ok(Text {
+            harness: "codex", ..
+        }) => Ok(unmeasured_json(
+            "codex carries no invoked_skills attachments",
+        )),
+        Ok(Text { harness, .. }) => Ok(unmeasured_json(&format!(
+            "the {harness} transcript carries no invoked_skills attachments"
+        ))),
+        Ok(Unmeasured { reason, .. }) => Ok(unmeasured_json(&reason)),
+        Err(e) => Err(e),
+    }
 }
 
-fn fold(path: &Path) -> Result<Value, String> {
+fn unmeasured_json(reason: &str) -> Value {
+    json!({ "unmeasured": reason, "carried": Value::Null, "stale": [] })
+}
+
+fn fold(raw: &str) -> Result<Value, String> {
     // ponytail: reads the whole transcript each beat, as repeated_asks does; seek to the newest invoked_skills row if the check-in's reader time matters.
-    let file = fs::File::open(path).map_err(|e| format!("transcript unreadable: {e}"))?;
     let mut carried: Vec<(String, String)> = Vec::new();
     let mut reinvoked: Vec<String> = Vec::new();
     let mut compacted_at: Option<String> = None;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|e| format!("transcript unreadable: {e}"))?;
+    for line in raw.lines() {
         if line.contains("invoked_skills") {
             let Ok(row) = serde_json::from_str::<Value>(&line) else {
                 continue;
@@ -149,12 +169,15 @@ fn body_of(raw: &str) -> &str {
     after.trim()
 }
 
-pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+pub(crate) fn lines(readings: &[crate::lead_checkin::Reading]) -> Vec<String> {
     let Some(reading) = readings.iter().find(|r| r.name == "skill_drift") else {
         return Vec::new();
     };
     if !reading.ok {
         return vec![format!("READER FAILED skill_drift: {}", reading.error)];
+    }
+    if let Some(reason) = reading.value.get("unmeasured").and_then(Value::as_str) {
+        return vec![format!("skill drift: unmeasured ({reason})")];
     }
     let Some(ts) = reading.value.get("compacted_at").and_then(Value::as_str) else {
         return vec!["skill drift: none (no compaction in this session)".into()];
@@ -192,32 +215,34 @@ pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::king_checkin::Reading;
+    use crate::lead_checkin::Reading;
 
     #[test]
     fn fold_names_the_stale_carried_body_and_lines_render_the_remedy() {
         let dir = tempfile::tempdir().unwrap();
         let skills = dir.path().join("skills");
-        std::fs::create_dir_all(skills.join("reign")).unwrap();
+        std::fs::create_dir_all(skills.join("review")).unwrap();
         std::fs::create_dir_all(skills.join("lead")).unwrap();
         std::fs::write(
-            skills.join("reign").join("SKILL.md"),
-            "---\nname: reign\ndescription: \"Retired spelling of lead.\"\n---\n`reign` is the retired spelling of `lead`, kept for one release. Run the Skill tool with `fno:lead` and the same arguments now.\n",
+            skills.join("review").join("SKILL.md"),
+            "---\nname: review\ndescription: \"Retired spelling of review.\"\n---\n`review` is the retired spelling of `review`, kept for one release. Run the Skill tool with `fno:review` and the same arguments now.\n",
         )
         .unwrap();
-        let lead_body =
-            "Crown mail delivers live between beats. Read the crown doc before you act.";
+        let lead_body = "Team mail delivers live between beats. Read the team doc before you act.";
         std::fs::write(
             skills.join("lead").join("SKILL.md"),
             format!("---\nname: lead\ndescription: \"Beats.\"\n---\n{lead_body}\n"),
         )
         .unwrap();
 
-        let reign_carried = format!(
-            "Base directory for this skill: {}\n\nCrown mail delivers live between beats.\n\nLift the mail hold first, every beat.\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]",
-            skills.join("reign").display()
+        // A stale carried body: the head names steps the on-disk stub body
+        // no longer carries.
+        let review_carried = format!(
+            "Base directory for this skill: {}\n\nTeam mail delivers live between beats.\n\nLift the mail hold first, every beat.\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]",
+            skills.join("review").display()
         );
         let lead_head = &lead_body[..lead_body.find(" Read").unwrap()];
+        // A fresh carried body: the truncated head still matches the file.
         let lead_carried = format!(
             "Base directory for this skill: {}\n\n{lead_head}\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]",
             skills.join("lead").display()
@@ -230,7 +255,7 @@ mod tests {
             json!({"type":"user", "timestamp":"2026-09-30T01:35:00Z",
             "attachment":{"type":"invoked_skills","skills":[
                 {"name":"bundled:loop","content":"# /loop - schedule a recurring or self-paced prompt"},
-                {"name":"fno:reign","content":reign_carried},
+                {"name":"fno:review","content":review_carried},
                 {"name":"fno:lead","content":lead_carried},
                 {"name":"fno:other","content":format!("Base directory for this skill: {}\n\nOld body.", skills.join("other").display())}
             ]}}),
@@ -246,15 +271,16 @@ mod tests {
             .join("\n")
             + "\n";
         std::fs::write(&transcript, body).unwrap();
+        let raw = std::fs::read_to_string(&transcript).unwrap();
 
-        let folded = fold(&transcript).unwrap();
+        let folded = fold(&raw).unwrap();
         assert_eq!(folded["compacted_at"], json!("2026-09-30T01:35:00Z"));
         assert_eq!(folded["carried"], json!(2));
         assert_eq!(
             folded["stale"],
             json!([{
-                "name": "fno:reign",
-                "file": skills.join("reign").join("SKILL.md").display().to_string(),
+                "name": "fno:review",
+                "file": skills.join("review").join("SKILL.md").display().to_string(),
                 "reason": "text drift",
             }])
         );
@@ -264,10 +290,10 @@ mod tests {
             rendered,
             vec![
                 format!(
-                    "skill drift: fno:reign text carried since the 2026-09-30T01:35:00Z compaction no longer matches {}",
-                    skills.join("reign").join("SKILL.md").display()
+                    "skill drift: fno:review text carried since the 2026-09-30T01:35:00Z compaction no longer matches {}",
+                    skills.join("review").join("SKILL.md").display()
                 ),
-                "  remedy: run the Skill tool with fno:reign again before you act on its steps; a step you remember from it may be retired.".to_string(),
+                "  remedy: run the Skill tool with fno:review again before you act on its steps; a step you remember from it may be retired.".to_string(),
             ]
         );
 
@@ -293,5 +319,16 @@ mod tests {
             vec!["READER FAILED skill_drift: transcript unreadable".to_string()]
         );
         assert!(lines(&[]).is_empty());
+
+        // A harness with no invoked_skills mechanism names why, never a zero.
+        assert_eq!(
+            lines(&[Reading::took(
+                "skill_drift",
+                unmeasured_json("codex carries no invoked_skills attachments")
+            )]),
+            vec![
+                "skill drift: unmeasured (codex carries no invoked_skills attachments)".to_string()
+            ]
+        );
     }
 }

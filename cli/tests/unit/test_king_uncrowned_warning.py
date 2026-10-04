@@ -1,7 +1,7 @@
 """`king init`'s uncrowned-row warning, in all four of its outcomes.
 
 The warning exists because three row-keyed readers (`king done`,
-`king manifest-path`, `king-postcompact-reinject.sh`) all fail CLOSED and
+`king manifest-path`, `lead-postcompact-reinject.sh`) all fail CLOSED and
 SILENTLY when the row carries no crown for the armed scope. It never
 refuses: the manifest is written and the loop arms on the FILE.
 

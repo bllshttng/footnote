@@ -20,7 +20,7 @@
 //! suites and the cargo build/run admission doors; the doors wait and
 //! never fail, so a running cargo pauses at its next compile or test
 //! binary and a running suite finishes. `merges` holds the one merge
-//! primitive. `loops` holds live target and king loops at their next turn end.
+//! primitive. `loops` holds live target and lead loops at their next turn end.
 //!
 //! A file that exists but cannot be read or parsed is
 //! [`Verdict::Unavailable`], never clear (AC1-EDGE): an unreadable breaker
@@ -83,7 +83,7 @@ pub struct IncidentRecord {
     /// forgets to distinguish them still names which one it saw.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source: Option<String>,
-    /// The session or crown territory this record targets. Absent means the
+    /// The session or team territory this record targets. Absent means the
     /// machine-wide breaker record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -437,7 +437,7 @@ fn target_matches(target: &str, subject: &Subject<'_>) -> Result<bool, String> {
             };
             let entries =
                 crate::territory::graph_entries(subject.cwd).map_err(|error| error.to_string())?;
-            let projects = crate::king_board::project_map(subject.cwd);
+            let projects = crate::org_board::project_map(subject.cwd);
             let ids = crate::territory::compile_scope_ids(value, &entries, &projects)
                 .map_err(|error| format!("territory scope {value:?}: {error}"))?;
             Ok(ids.contains(node))
@@ -730,7 +730,7 @@ fn territory_target_value(value: &str, cwd: &Path) -> Result<String, String> {
         return Err(format!("unsafe territory scope {value:?}"));
     }
     let entries = crate::territory::graph_entries(cwd).map_err(|error| error.to_string())?;
-    let projects = crate::king_board::project_map(cwd);
+    let projects = crate::org_board::project_map(cwd);
     let (canonical, ids) = crate::territory::compile_territory(&value, &entries, &projects)?;
     if ids.is_empty() {
         return Err(format!("territory scope {canonical:?} has no nodes"));

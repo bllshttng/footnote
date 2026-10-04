@@ -27,7 +27,7 @@ use crate::spawn_gate_lanes;
 /// is a loud non-zero: the transport turns that into a gate-unavailable
 /// refusal, never an admit.
 pub fn run_spawn_gate(args: &[String]) -> i32 {
-    // The reserve mode is argv-typed, so a king can type it in one line; the
+    // The reserve mode is argv-typed, so a lead can type it in one line; the
     // gate and probe modes keep their stdin JSON payloads.
     if args.first().map(String::as_str) == Some("reserve") {
         let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -605,30 +605,30 @@ mod probe {
             cpu = Some(admission.payload);
         }
 
-        // King share: only a caller whose session resolved is checked.
+        // Lead share: only a caller whose session resolved is checked.
         let reading = spawn_gate_lanes::share_reading(&registry_path, cap, caller.as_deref());
-        if let (Some(caller), Some(kings), Some(share), Some(held)) = (
+        if let (Some(caller), Some(leads), Some(share), Some(held)) = (
             caller.as_deref(),
-            reading.kings,
+            reading.leads,
             reading.share,
             reading.held,
         ) {
             if !caller.is_empty() && held >= share {
                 let mut message = format!(
-                    "this reign holds {held} of max_live {cap} across {kings} kings (share {share})"
+                    "this lead holds {held} of max_live {cap} across {leads} leads (share {share})"
                 );
                 message.push_str(&crate::spawn_gate::held_rows_suffix(
                     reading.held_rows.as_ref(),
                 ));
                 return refuse_with(
-                    "king_share",
+                    "lead_share",
                     message,
                     json!({
-                        "king": caller,
+                        "lead": caller,
                         "held": held,
                         "share": share,
                         "max_live": cap,
-                        "kings": kings,
+                        "leads": leads,
                         "held_rows": reading.held_rows.clone().unwrap_or_default(),
                     }),
                     &make_rows(None, slots, cap, ram_row, cpu_rows),
@@ -911,7 +911,7 @@ fn cpu_share_row(payload: &spawn_gate::AdmissionPayload) -> Value {
 
 fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
     let mut share = Map::new();
-    share.insert("kings".into(), json!(reading.kings));
+    share.insert("leads".into(), json!(reading.leads));
     share.insert("share".into(), json!(reading.share));
     share.insert("held".into(), json!(reading.held));
     share.insert(
@@ -1127,9 +1127,9 @@ mod tests {
 
     #[test]
     fn refuse_with_emits_gate_verdict_when_no_measurement_row_refuses() {
-        let message = "king share is active";
+        let message = "lead share is active";
         let answer = refuse_with(
-            "king_share",
+            "lead_share",
             String::from(message),
             json!({}),
             &[],
@@ -1139,7 +1139,7 @@ mod tests {
         let rows = answer["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["name"], "gate-verdict");
-        assert_eq!(rows[0]["measured"], "king_share");
+        assert_eq!(rows[0]["measured"], "lead_share");
         assert_eq!(rows[0]["threshold"], "accepted");
         assert_eq!(rows[0]["verdict"], "refuse");
         assert_eq!(rows[0]["note"], message);
@@ -1582,15 +1582,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The probe's king_share refusal names the rows it charged to the
+    /// The probe's lead_share refusal names the rows it charged to the
     /// caller, in `message` and as a `held_rows` key, from the same reading
     /// `share_json` reports in status mode.
     #[test]
-    fn probe_king_share_refusal_names_the_held_rows() {
+    fn probe_lead_share_refusal_names_the_held_rows() {
         let _g = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("fno-verb-kingshare-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fno-verb-leadshare-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let home = dir.join("agents-home");
         std::fs::create_dir_all(&home).unwrap();
@@ -1600,9 +1600,9 @@ mod tests {
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
             fnodir.join("config.toml"),
-            // max_live 2 with one king divides to share 2; the fixture rows
+            // max_live 2 with one lead divides to share 2; the fixture rows
             // carry no pid, so the fleet slot count stays 0 and the refusal
-            // the probe answers with is the king share, not max_live.
+            // the probe answers with is the lead share, not max_live.
             "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
         )
         .unwrap();
@@ -1613,7 +1613,7 @@ mod tests {
             "FNO_TEST_FOOTPRINT_PAYLOAD",
             r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
         );
-        let crowned = r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
+        let teamed = r#"{"name":"lead-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
         let worker = |name: &str, status: &str| {
             format!(
                 r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}}"#
@@ -1624,7 +1624,7 @@ mod tests {
             format!(
                 r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
-                crowned,
+                teamed,
                 worker("w1", "live"),
                 worker("w2", "live"),
                 // The stopped shape: a row the stop wrote terminal while the
@@ -1637,7 +1637,7 @@ mod tests {
         .unwrap();
 
         let answer = probe::answer(&json!({
-            "name": "probe-kingshare",
+            "name": "probe-leadshare",
             "substrate": "bg",
             "caller_session": "session-aaaaaaaa"
         }));
@@ -1653,10 +1653,10 @@ mod tests {
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
         }
         assert_eq!(answer["verdict"], "refused");
-        assert_eq!(answer["reason"], "king_share");
+        assert_eq!(answer["reason"], "lead_share");
         assert_eq!(
             answer["message"],
-            "this reign holds 2 of max_live 2 across 1 kings (share 2); the rows charged to you are w1, w2"
+            "this lead holds 2 of max_live 2 across 1 leads (share 2); the rows charged to you are w1, w2"
         );
         assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1747,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_spawn_refuses_while_crowned_succession_admits_at_full_slot_cap() {
+    fn plain_spawn_refuses_while_teamed_succession_admits_at_full_slot_cap() {
         let _g = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1793,7 +1793,7 @@ mod tests {
         std::fs::write(
             &registry,
             format!(
-                r#"{{"schema_version":{},"entries":[{{"name":"king","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"crown_level":1,"crown_scope":"x-epic","harness_session_id":"session-king"}},{{"name":"worker","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"session-king"}}]}}"#,
+                r#"{{"schema_version":{},"entries":[{{"name":"lead","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"crown_level":1,"crown_scope":"x-epic","harness_session_id":"session-lead"}},{{"name":"worker","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"session-lead"}}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
             ),
         )
@@ -1804,7 +1804,7 @@ mod tests {
             "name": "plain-spawn",
             "substrate": "bg",
             "no_wait": true,
-            "caller_session": "session-king",
+            "caller_session": "session-lead",
             "holder_pid": pid,
         }));
         let answer = gate_answer(&json!({
@@ -1812,7 +1812,7 @@ mod tests {
             "name": "successor",
             "substrate": "bg",
             "no_wait": true,
-            "caller_session": "session-king",
+            "caller_session": "session-lead",
             "succession_scope": "x-epic",
             "holder_pid": pid,
         }));
@@ -2196,7 +2196,7 @@ mod tests {
         std::fs::write(
             &first,
             format!(
-                "schema_version: {}\nkey: worker:t-first-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                "schema_version: {}\nkey: worker:t-first-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 crate::claims::SCHEMA_VERSION,
                 now + 600_000,
                 std::process::id()

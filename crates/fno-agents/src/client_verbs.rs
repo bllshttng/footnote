@@ -728,7 +728,7 @@ const ECHO_CAP: usize = 40;
 /// Quote and cap an unexpected positional so a refusal stays readable.
 ///
 /// A pasted prompt echoed in full makes the failure read like success to a
-/// human: on 2026-08-21 a king reported three failed resumes as working
+/// human: on 2026-08-21 a lead reported three failed resumes as working
 /// because the refusal ended in the prompt text. Quoting shows where the
 /// argument starts and stops; capping keeps the remedy on screen. Truncation
 /// is on char boundaries, so a multi-byte argument cannot panic here.
@@ -1428,7 +1428,7 @@ pub(crate) fn upsert_synthesized_row(
                 if merged.node.is_none() {
                     merged.node = old.node.clone();
                 }
-                crate::adopt_carry::carry_adopted_crown(&mut merged, old);
+                crate::adopt_carry::carry_adopted_team(&mut merged, old);
                 reg.entries[i] = merged;
             }
             None => reg.entries.push(entry),

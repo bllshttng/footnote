@@ -51,7 +51,7 @@ pub(crate) fn error_class(text: &str) -> &'static str {
         "user_rejected"
     } else if t.contains("hook error")
         || t.starts_with("[fno ")
-        || t.starts_with("king-delegation-guard:")
+        || t.starts_with("lead-delegation-guard:")
     {
         "hook_blocked"
     } else if t.starts_with("<tool_use_error>") {
@@ -578,7 +578,7 @@ mod tests {
             ("PreToolUse:Bash hook error: refused", "hook_blocked"),
             ("[fno backlog] node locked", "hook_blocked"),
             (
-                "king-delegation-guard: kings do not implement",
+                "lead-delegation-guard: leads do not implement",
                 "hook_blocked",
             ),
             (

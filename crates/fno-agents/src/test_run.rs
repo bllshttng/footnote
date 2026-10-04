@@ -1574,10 +1574,10 @@ impl CargoWait {
             };
             eprintln!("cargo admission: {prefix}{context}{held}; waited {waited}s{queue}{nudge}");
             // The priority lever, taught once per wait: a person (or a
-            // king) can give this checkout the next slot with one acquire.
+            // lead) can give this checkout the next slot with one acquire.
             if self.last_notice.is_none() {
                 eprintln!(
-                    "cargo admission: to give {wt} the next slot (user or king): \
+                    "cargo admission: to give {wt} the next slot (user or lead): \
                      fno agents claim acquire test:priority --holder worktree:{wt} \
                      --ttl 30m --pid-unavailable -R \"<why>\"",
                     wt = self.worktree.display()
@@ -1646,7 +1646,7 @@ fn write_waiter_marker(path: &Path, cargo_pid: u32, worktree: &Path, holder: &st
 /// The stop hook's read: `Some` when a live `build-admit` is holding a cargo
 /// build for the checkout that holds `cwd`. The walk stops at the first
 /// `.git`, so a worktree nested under another checkout never reads that
-/// checkout's hold. The marker is a courtesy signal, never a gate, so an
+/// checkout's hold. The marker is a orgesy signal, never a gate, so an
 /// unreadable one reads as no hold.
 pub fn build_hold_message(cwd: &Path) -> Option<String> {
     build_hold_message_in(&crate::claims::build_waiters_dir()?, cwd)

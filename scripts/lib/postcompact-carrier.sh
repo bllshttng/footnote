@@ -2,7 +2,7 @@
 # postcompact-carrier.sh - shared post-compaction delivery for the reinject hooks.
 #
 # Sourced (never executed) by hooks/target-postcompact-reinject.sh and
-# hooks/king-postcompact-reinject.sh. No side effects at source time.
+# hooks/lead-postcompact-reinject.sh. No side effects at source time.
 #
 # The carrier rule this lib encodes (learned the hard way in, hardened in
 # 502af79f2): on Claude, SessionStart with source=="compact" is the only

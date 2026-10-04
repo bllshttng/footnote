@@ -1,7 +1,7 @@
 """Tests for `fno agents king history` - the crown-scope reign readback.
 
 The journal scan and the caller-crown scope resolution are the Rust
-king-history verb (tested there); Python is the relay. Covers the relay
+lead-history verb (tested there); Python is the relay. Covers the relay
 wiring and the refusal taxonomy.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ def test_command_relays_the_native_read(tmp_path, monkeypatch) -> None:
     result = CliRunner().invoke(agents_king_app, ["history", "--scope", SCOPE, "--json"])
 
     assert result.exit_code == 0, result.output
-    assert seen["argv"][1] == "king-history"
+    assert seen["argv"][1] == "lead-history"
     assert "--scope" in seen["argv"] and SCOPE in seen["argv"]
     assert seen["argv"].count("--events-path") >= 1
     assert str(journal) in seen["argv"]
@@ -98,7 +98,7 @@ def test_verdict_read_relays_scope_journals_and_json(tmp_path, monkeypatch) -> N
     history_module.verdict_read([journal], SCOPE, as_json=True)
 
     argv = seen["argv"]
-    assert argv[1] == "king-history"
+    assert argv[1] == "lead-history"
     assert "--verdict" in argv
     assert "--cwd" in argv
     assert "--scope" in argv and SCOPE in argv

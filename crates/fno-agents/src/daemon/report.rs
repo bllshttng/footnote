@@ -372,7 +372,15 @@ pub(super) fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
                 notify = Some((entry.name.clone(), body, true));
             }
-            entry.inside_leg = Some(rep.clone());
+            // A lifecycle report that carries no posture keeps the last
+            // observed one: only the Stop adapter populates the axis, and a
+            // wholesale replace would erase the observation between Stop
+            // reports.
+            let mut stored = rep.clone();
+            if stored.posture.is_none() {
+                stored.posture = prev_posture.clone();
+            }
+            entry.inside_leg = Some(stored);
             // Capability flip: the hook now owns this row's signal; a stale
             // scrape verdict must never shadow it (per-capability arbitration).
             entry.screen_state = None;

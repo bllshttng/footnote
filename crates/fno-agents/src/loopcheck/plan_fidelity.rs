@@ -95,7 +95,7 @@ pub(super) fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
 /// The green-conjunct stop read for one fire: the plan-fidelity gate, or the
 /// delegated-merge park that skips it.
 ///
-/// A delegated merge (a per-run no-merge manifest, or a valid crown ruling
+/// A delegated merge (a per-run no-merge manifest, or a valid team ruling
 /// hold on this node) skips the stop-time read: someone else merges, the
 /// merge gate re-runs the same fidelity join at merge time, and DonePRGreen
 /// is a shipped terminal, so the later join sees a delivered row rather than

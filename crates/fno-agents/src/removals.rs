@@ -7,7 +7,7 @@
 //! But a row with no harness session identity is refused a receipt
 //! (`receipt.rs` builds none), so its removal exists ONLY as the
 //! `registry_row_removed` event the registry choke point emits. Measured
-//! 2026-09-28: a crowned heir dropped out of the feed in exactly that
+//! 2026-09-28: a teamed heir dropped out of the feed in exactly that
 //! shape - the event sat in the store, the projection never read it.
 //!
 //! The fold reads the receipts AND the registry events, keys every cause by
@@ -35,13 +35,13 @@ pub struct Removal {
     pub node: Option<String>,
     pub removed_by: String,
     /// The command that wrote the removal, joined from the same-second
-    /// `registry_rows_lost` line (`fno-py agents spawn --substrate pane --crown`).
+    /// `registry_rows_lost` line (`fno-py agents spawn --substrate pane --team`).
     pub verb: Option<String>,
     pub reason: Option<String>,
     pub cause: Option<String>,
     pub cause_at: Option<String>,
-    /// `L{level} {scope}` when a crown still named this row at removal time.
-    pub crown: Option<String>,
+    /// `L{level} {scope}` when a team still named this row at removal time.
+    pub team: Option<String>,
     pub resume: Option<String>,
     pub cwd: Option<String>,
     pub trigger: Option<String>,
@@ -138,28 +138,28 @@ fn lost_verbs(agent_events: &[JEvent]) -> HashMap<(String, String), String> {
     out
 }
 
-/// The crown a name still held at `before_ts`: the newest grant at or before
+/// The team a name still held at `before_ts`: the newest grant at or before
 /// it, voided when a vacate names that holder in between.
-fn crown_at(grants: &[JEvent], vacates: &[JEvent], name: &str, before_ts: &str) -> Option<String> {
+fn team_at(grants: &[JEvent], vacates: &[JEvent], name: &str, before_ts: &str) -> Option<String> {
     let g = grants
         .iter()
         .filter(|e| {
-            e.kind == "agent_crowned"
+            e.kind == "agent_teamed"
                 && s_str(&e.data, "name") == Some(name)
                 && tord(&e.ts) <= tord(before_ts)
         })
         .max_by(|a, b| tord(&a.ts).cmp(&tord(&b.ts)))?;
     let between = |ts: &str| tord(g.ts.clone().as_str()) < tord(ts) && tord(ts) <= tord(before_ts);
     if vacates.iter().any(|v| {
-        v.kind == "agent_crown_vacated" && s_str(&v.data, "holder") == Some(name) && between(&v.ts)
+        v.kind == "agent_team_vacated" && s_str(&v.data, "holder") == Some(name) && between(&v.ts)
     }) {
         return None;
     }
     let level = g.data.get("level").and_then(Value::as_i64)?;
     let scope = s_str(&g.data, "scope")?;
     let theme = crate::paths::AgentsHome::from_env_opt()
-        .and_then(|home| crate::crown_names::theme_for(&home.crown_names_json(), scope));
-    Some(crate::crown_names::title(
+        .and_then(|home| crate::team_names::theme_for(&home.team_names_json(), scope));
+    Some(crate::team_names::title(
         level as u32,
         scope,
         theme.as_deref(),
@@ -183,12 +183,12 @@ pub fn fold(
         .collect();
     let grants: Vec<JEvent> = global
         .iter()
-        .filter(|e| e.kind == "agent_crowned")
+        .filter(|e| e.kind == "agent_teamed")
         .cloned()
         .collect();
     let vacates: Vec<JEvent> = global
         .iter()
-        .filter(|e| e.kind == "agent_crown_vacated")
+        .filter(|e| e.kind == "agent_team_vacated")
         .cloned()
         .collect();
 
@@ -219,7 +219,7 @@ pub fn fold(
             reason: cause.and_then(|(_, _, why)| why.clone()),
             cause: cause.map(|(kind, _, _)| kind.clone()),
             cause_at: cause.map(|(_, ts, _)| ts.clone()),
-            crown: crown_at(&grants, &vacates, &r.row_name, &r.reaped_at),
+            team: team_at(&grants, &vacates, &r.row_name, &r.reaped_at),
             resume: Some(r.resume.clone()),
             cwd: Some(r.cwd.clone()),
             trigger: Some(r.removal_trigger.clone()),
@@ -275,7 +275,7 @@ pub fn fold(
             reason,
             cause: Some(e.kind.clone()),
             cause_at: Some(e.ts.clone()),
-            crown: crown_at(&grants, &vacates, name, &e.ts),
+            team: team_at(&grants, &vacates, name, &e.ts),
             resume: None,
             cwd: None,
             trigger: None,
@@ -288,7 +288,7 @@ pub fn fold(
 
 /// Read every removal record under `home`: the receipts directory, the agents
 /// journal (bounded by `since_ms`), and the global journal unbounded, because
-/// a crown is granted before the window opens. Every unreadable store adds
+/// a team is granted before the window opens. Every unreadable store adds
 /// one note and never fails.
 pub fn read(home: &AgentsHome, since_ms: Option<i64>) -> (Vec<Removal>, Vec<String>) {
     let mut notes = Vec::new();
@@ -336,8 +336,8 @@ pub fn read(home: &AgentsHome, since_ms: Option<i64>) -> (Vec<Removal>, Vec<Stri
             read_journal(
                 &p,
                 EventQuery::of_types(&[
-                    "agent_crowned",
-                    "agent_crown_vacated",
+                    "agent_teamed",
+                    "agent_team_vacated",
                     "agent_session_id_uncaptured",
                 ]),
                 &mut notes,
@@ -396,16 +396,16 @@ mod tests {
         parts.join("\n")
     }
 
-    /// AC1: the jolly-finch shape. A never-bound crowned row, removed by the
+    /// AC1: the jolly-finch shape. A never-bound teamed row, removed by the
     /// spawn that launched it, its identity never captured.
     #[test]
-    fn a_never_bound_crowned_removal_folds_to_one_removal_with_crown_and_reason() {
+    fn a_never_bound_teamed_removal_folds_to_one_removal_with_team_and_reason() {
         let agent = lines(&[
-            r#"{"ts":"2026-09-28T16:48:49Z","type":"registry_rows_lost","source":"python","data":{"lost":[{"name":"jolly-finch","harness_session_id":""}],"pid":40417,"verb":"fno-py agents spawn --substrate pane --crown"}}"#,
+            r#"{"ts":"2026-09-28T16:48:49Z","type":"registry_rows_lost","source":"python","data":{"lost":[{"name":"jolly-finch","harness_session_id":""}],"pid":40417,"verb":"fno-py agents spawn --substrate pane --team"}}"#,
             r#"{"ts":"2026-09-28T16:48:49Z","type":"registry_row_removed","source":"python","data":{"harness":"codex","harness_session_id":"","name":"jolly-finch","pid":40417,"reason":"row 'jolly-finch': missing harness session identity","receipt_staged":false,"remover":"fno-py","short_id":""}}"#,
         ]);
         let global = lines(&[
-            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-eeee,x-4444","vacated_scope":null}}"#,
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_teamed","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-eeee,x-4444","vacated_scope":null}}"#,
             r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_session_id_uncaptured","source":"python","data":{"harness":"codex","name":"jolly-finch","reason":"no unique codex rollout for this cwd after spawn"}}"#,
         ]);
         let out = fold(&[], &agent, &global);
@@ -416,13 +416,13 @@ mod tests {
         assert_eq!(r.removed_by, "fno-py");
         assert_eq!(
             r.verb.as_deref(),
-            Some("fno-py agents spawn --substrate pane --crown")
+            Some("fno-py agents spawn --substrate pane --team")
         );
         assert_eq!(
             r.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
-        assert_eq!(r.crown.as_deref(), Some("Lead of x-eeee,x-4444"));
+        assert_eq!(r.team.as_deref(), Some("Lead of x-eeee,x-4444"));
         assert_eq!(r.resume, None, "no receipt, no resume line");
     }
 
@@ -481,16 +481,16 @@ mod tests {
         let _ = path;
     }
 
-    /// A crown vacated between grant and removal is not held at removal time.
+    /// A team vacated between grant and removal is not held at removal time.
     #[test]
-    fn a_crown_vacated_before_the_removal_is_not_reported() {
+    fn a_team_vacated_before_the_removal_is_not_reported() {
         let global = lines(&[
-            r#"{"ts":"2026-09-28T10:00:00Z","type":"agent_crowned","source":"python","data":{"level":1,"name":"quill","scope":"fno"}}"#,
-            r#"{"ts":"2026-09-28T11:00:00Z","type":"agent_crown_vacated","source":"python","data":{"cause":"abdicated","holder":"quill","level":1,"scope":"fno"}}"#,
+            r#"{"ts":"2026-09-28T10:00:00Z","type":"agent_teamed","source":"python","data":{"level":1,"name":"quill","scope":"fno"}}"#,
+            r#"{"ts":"2026-09-28T11:00:00Z","type":"agent_team_vacated","source":"python","data":{"cause":"abdicated","holder":"quill","level":1,"scope":"fno"}}"#,
         ]);
         let agent = r#"{"ts":"2026-09-28T12:00:00Z","type":"registry_row_removed","source":"python","data":{"name":"quill","receipt_staged":false,"remover":"daemon"}}"#;
         let out = fold(&[], agent, &global);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].crown, None, "the crown was vacated first");
+        assert_eq!(out[0].team, None, "the team was vacated first");
     }
 }

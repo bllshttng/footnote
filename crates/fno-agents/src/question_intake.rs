@@ -403,7 +403,7 @@ One line plus a node pointer (law d-59af3235)."
         }
         // The asker-must-decide refusal (user ruling 2026-09-22): a
         // reversible question with a recommendation is one the asker or its
-        // king settles itself; it reaches the user only with a user-only
+        // lead settles itself; it reaches the user only with a user-only
         // reason in why_user. A question whose closing action is an
         // operator-only retraction is not the asker's to settle, whatever
         // the file says: the same authority rule decides here.
@@ -417,7 +417,7 @@ One line plus a node pointer (law d-59af3235)."
                 answer.lines.push(format!(
                     "outstanding: refused: you can decide this one: it carries a \
 recommendation and marks itself reversible. Record the ruling yourself or \
-hand it to your king: {decide} (--authority crown or agent), then continue. \
+hand it to your lead: {decide} (--authority team or agent), then continue. \
 The user answers only what only a user can: irreversible, spends money or a \
 credential, reaches outside the machine, or a product or taste call - name it \
 with why_user: in the question file."
@@ -713,7 +713,7 @@ Is a net-zero Python repair legal with no grant?
 the reconcile fix and the merge_close fix are both Python edits
 
 ## Why these options
-the three readings kings have acted on
+the three readings leads have acted on
 
 ## Downside
 a repair can hide a feature

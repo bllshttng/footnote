@@ -19,7 +19,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 
-use super::king_guard::lex;
+use super::lead_guard::lex;
 use super::test_run_guard::{basename, head_of, stages};
 
 const REASON: &str = "[fno bin-install guard] `{cmd}` writes a locally built binary onto the deployed fno-agents or fno-agents-worker in the cargo bin dir. On 2026-09-26 19:45:34Z a worker replayed the CI verb-matrix step (`cp target/debug/fno-agents \"$HOME/.cargo/bin/\"`) locally; the debug build replaced the live binary in place and macOS then SIGKILLed every launch fleet-wide (exit 137) until the file was swapped to a fresh inode. For a local run, build in your checkout and pin it: `export FNO_AGENTS_FRONT=\"$PWD/crates/fno-agents/target/debug/fno-agents\"` - readers resolve through it and the deployed copy is untouched. A real deploy goes through `fno doctor update`.";

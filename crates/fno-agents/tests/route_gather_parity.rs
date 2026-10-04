@@ -116,4 +116,142 @@ fn gather_goldens_reproduce_the_python_payload() {
         );
         unpin_env();
     }
+
+    // The node-pin legs (route_node_pin): a node's own pin overrides the
+    // lanes one rung below a typed flag, and the chain names which pin
+    // decided. The fixtures here name every input the legs read, so the
+    // asserts stay hermetic even though the env is unpinned by now.
+    let pin_pick = fno_agents::route_slot::resolve_slot_payload(&serde_json::json!({
+        "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+        "work_verb": "target",
+        "node": {"difficulty": "medium", "model": "claude-opus-5", "effort": "high"},
+        "slot_by_verb": {
+            "target": {
+                "rung_base": "agents.profiles.target",
+                "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                "lanes_raw": ["opus-x"],
+            },
+        },
+        "declared_rows": {
+            "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                       "operator_view": "claude-native"},
+        },
+        "effort_ok": {"claude": {"high": true}},
+    }));
+    assert_eq!(pin_pick["status"], "pick");
+    assert_eq!(pin_pick["candidate"]["model"], "claude-opus-5");
+    assert_eq!(pin_pick["candidate"]["harness"], "claude");
+    assert_eq!(pin_pick["candidate"]["effort"], "high");
+    let chain: Vec<String> = pin_pick["chain"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(chain.iter().any(|l| l.contains("slot=node-pin row=opus-x")));
+
+    let fallback = fno_agents::route_slot::resolve_slot_payload(&serde_json::json!({
+        "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+        "work_verb": "target",
+        "node": {"difficulty": "medium", "model": "mystery-model"},
+        "slot_by_verb": {
+            "target": {
+                "rung_base": "agents.profiles.target",
+                "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                "lanes_raw": ["flash-x"],
+            },
+        },
+        "declared_rows": {
+            "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                        "route": "zai/glm", "account": "zai-main",
+                        "operator_view": "claude-native"},
+        },
+        "capacity": {"claude": {"state": "ok", "window": "w", "accounts": {}, "evidence": {}, "resets": {}}},
+    }));
+    let chain: Vec<String> = fallback["chain"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(chain
+        .iter()
+        .any(|l| l.contains("no routing.models row names it")));
+
+    let typed_wins = fno_agents::route_slot::resolve_slot_payload(&serde_json::json!({
+        "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+        "work_verb": "target",
+        "node": {"difficulty": "medium", "model": "claude-opus-5"},
+        "slot_by_verb": {
+            "target": {
+                "rung_base": "agents.profiles.target",
+                "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                "lanes_raw": ["flash-x"],
+            },
+        },
+        "declared_rows": {
+            "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5"},
+            "sol-x": {"name": "sol-x", "harness": "codex", "model": "gpt-strong"},
+        },
+        "explicit_model_value": "gpt-strong",
+    }));
+    assert_eq!(typed_wins["status"], "pick");
+    assert_eq!(typed_wins["candidate"]["harness"], "codex");
+    let chain: Vec<String> = typed_wins["chain"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(chain
+        .iter()
+        .any(|l| l.contains("slot=operator-pin-override")));
+
+    let effort_rides = fno_agents::route_slot::resolve_slot_payload(&serde_json::json!({
+        "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+        "work_verb": "target",
+        "node": {"difficulty": "medium", "effort": "high"},
+        "slot_by_verb": {
+            "target": {
+                "rung_base": "agents.profiles.target",
+                "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                "lanes_raw": ["opus-x"],
+            },
+        },
+        "declared_rows": {
+            "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                       "operator_view": "claude-native"},
+        },
+        "capacity": {"claude": {"state": "ok", "window": "w", "accounts": {}, "evidence": {}, "resets": {}}},
+        "effort_ok": {"claude": {"high": true}},
+    }));
+    assert_eq!(effort_rides["status"], "pick");
+    assert_eq!(effort_rides["candidate"]["effort"], "high");
+
+    let no_surface = fno_agents::route_slot::resolve_slot_payload(&serde_json::json!({
+        "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+        "work_verb": "target",
+        "node": {"difficulty": "medium", "effort": "high"},
+        "slot_by_verb": {
+            "target": {
+                "rung_base": "agents.profiles.target",
+                "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                "lanes_raw": ["opus-x"],
+            },
+        },
+        "declared_rows": {
+            "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                       "operator_view": "claude-native"},
+        },
+        "capacity": {"claude": {"state": "ok", "window": "w", "accounts": {}, "evidence": {}, "resets": {}}},
+        "effort_ok": {},
+    }));
+    assert_eq!(no_surface["status"], "pick");
+    assert!(no_surface["candidate"]["effort"].is_null());
 }
