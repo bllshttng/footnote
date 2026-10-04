@@ -149,7 +149,7 @@ def resolvable_uuid(monkeypatch):
 
 @pytest.mark.dev_build
 def test_spawn_with_node_and_review_verb_is_refused(
-    workdir_claude, native_backlog_door, monkeypatch
+    workdir_claude, native_backlog_door, monkeypatch, capfd
 ) -> None:
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
@@ -166,7 +166,7 @@ def test_spawn_with_node_and_review_verb_is_refused(
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
-    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert "review_session" in capfd.readouterr().err
     assert load_registry() == []
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
@@ -179,7 +179,7 @@ def test_spawn_with_node_and_review_verb_is_refused(
     [("review", "/fno:triage deep"), ("do", "/code-review this diff")],
 )
 def test_spawn_review_label_or_seed_is_refused(
-    workdir_claude, native_backlog_door, monkeypatch, phase, seed
+    workdir_claude, native_backlog_door, monkeypatch, capfd, phase, seed
 ) -> None:
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
@@ -195,7 +195,7 @@ def test_spawn_review_label_or_seed_is_refused(
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
-    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert "review_session" in capfd.readouterr().err
     assert load_registry() == []
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
