@@ -2666,6 +2666,13 @@ mod tests {
     /// not reported as drift.
     #[test]
     fn stage_serves_fno_entry_locally_without_drift() {
+        // The env mutations below (FNO_HOME, FNO_RECLAIM_STATE_ROOT) race
+        // every guarded hermetic fixture unless this test holds the shared
+        // lock; an unguarded FNO_HOME removal mid-test once erased a seeded
+        // law and flipped a spared door.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("pi-mkt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let (source, stage) = fresh_stage(&base);

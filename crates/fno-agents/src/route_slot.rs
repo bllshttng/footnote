@@ -173,6 +173,14 @@ fn fold(
                     if !v.is_string() {
                         return Err(fault(&rung, format!(".{k} must be a string; got {v}")));
                     }
+                    if k == "utc_hours" && v.as_str().and_then(parse_utc_hours).is_none() {
+                        return Err(fault(
+                            &rung,
+                            format!(
+                                ".utc_hours must be H-H with 0 <= H <= 23 and start != end; got {v}"
+                            ),
+                        ));
+                    }
                 }
                 let get = |k: &str| {
                     table
@@ -307,6 +315,13 @@ fn outdated_lane_count(
         .filter(|(_, row_name)| rows.contains_key(row_name))
         .filter_map(|(_, row_name)| rows.get(row_name))
         .filter(|r| {
+            // A lane the clock already closes this hour is not walking, so
+            // its staleness never arms the refresh pass.
+            if let Some((start, end)) = parse_utc_hours(&row_value(r, "utc_hours")) {
+                if !hour_in_utc_window(utc_hour_now(), start, end) {
+                    return false;
+                }
+            }
             let harness = row_value(r, "harness");
             let (state, window, _age) = row_capacity(r, capacity.get(&harness));
             state == "unknown" && (window == "stale" || window == "absent")
@@ -378,6 +393,31 @@ fn allowed(value: &str, enum_values: &[&str]) -> bool {
 }
 
 const BAND_RANK_KEYS: [&str; 4] = ["low", "medium", "high", "max"];
+
+/// A lane's `utc_hours` window `H-H` in UTC hours; the end may wrap midnight
+/// (`15-01`). `start == end` refuses as empty: a lane that is always open
+/// omits the field.
+fn parse_utc_hours(spec: &str) -> Option<(u8, u8)> {
+    let (a, b) = spec.split_once('-')?;
+    let hour = |s: &str| s.trim().parse::<u8>().ok().filter(|h| *h <= 23);
+    let start = hour(a)?;
+    let end = hour(b)?;
+    (start != end).then_some((start, end))
+}
+
+fn utc_hour_now() -> u8 {
+    ((slot_now() as u64) / 3600 % 24) as u8
+}
+
+/// Start-inclusive, end-exclusive; `15-01` spans 15:00-01:00 UTC across
+/// midnight.
+fn hour_in_utc_window(hour: u8, start: u8, end: u8) -> bool {
+    if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
+}
 
 /// A row's strength rank; a band outside the vocabulary (including unbanded)
 /// ranks -1, below every banded row.
@@ -1690,6 +1730,36 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
             }
         };
         let harness = row_value(&row, "harness");
+        // A windowed lane gates on its own clock before anything else: the
+        // window IS its availability model, so an out-of-window lane is
+        // skipped without a capacity read, and inside the window an unprobed
+        // capacity read is not evidence against it (checked at the unknown
+        // branch below).
+        let mut windowed = false;
+        let utc_hours_spec = row_value(&row, "utc_hours");
+        if !utc_hours_spec.is_empty() {
+            let Some((start, end)) = parse_utc_hours(&utc_hours_spec) else {
+                chain.push(json!(format!(
+                    "slot=config {rung} utc_hours {utc_hours_spec:?} is not H-H with 0 <= H <= 23 and start != end"
+                )));
+                return none(chain);
+            };
+            // utc_now_hour pins the clock for tests; the dispatch seam and
+            // the readout never set it, so production judges the real hour.
+            let hour = payload
+                .get("utc_now_hour")
+                .and_then(Value::as_u64)
+                .map(|h| (h % 24) as u8)
+                .unwrap_or_else(utc_hour_now);
+            if !hour_in_utc_window(hour, start, end) {
+                chain.push(json!(format!(
+                    "slot skip {} outside utc_hours({utc_hours_spec}) now={hour}z",
+                    lane_label(rung, row_name),
+                )));
+                continue;
+            }
+            windowed = true;
+        }
         if !candidate_supported(&harness, substrate, permission_mode, &thread_seatable) {
             chain.push(json!(format!(
                 "slot skip {} harness {harness:?} cannot carry substrate({}) permission({})",
@@ -1889,7 +1959,7 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
             continue;
         }
         if state != "ok" && state != "low" && state != "available" {
-            if on_unknown == "skip" {
+            if on_unknown == "skip" && !windowed {
                 capacity_unknown_skips += 1;
                 chain.push(json!(format!(
                     "slot skip {} capacity={state} (on_unknown=skip){}",
@@ -2071,6 +2141,9 @@ fn pick(
     let mut lane_fields = Map::new();
     if let Some(inline) = fields_by_rung.get(rung).and_then(Value::as_object) {
         lane_fields = inline.clone();
+        // utc_hours gates the walk; it is not a spawn field, so it never
+        // rides the candidate the way the passthrough fields do.
+        lane_fields.remove("utc_hours");
     } else {
         for (k, v) in [
             ("provider", &harness),
@@ -4885,6 +4958,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "route_slot_utc_hours_tests.rs"]
+mod utc_hours_tests;
 
 #[cfg(test)]
 #[path = "route_slot_capacity_tests.rs"]
