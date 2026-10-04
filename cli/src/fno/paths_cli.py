@@ -1,4 +1,9 @@
-"""CLI surface for path introspection: fno config paths emit-shell / fno config paths verify."""
+"""CLI surface for path introspection: fno config paths shell-stub / verify / handoff.
+
+emit-shell answers natively (crates/fno-agents/src/paths_cli.rs); the rest of
+this group still serves shell-stub, verify and handoff until their child
+nodes port (one verb per PR, d-450caaeb).
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,37 +16,6 @@ app = typer.Typer(
     help="Path introspection and codegen for scripts/lib/paths.sh.",
     no_args_is_help=True,
 )
-
-
-@app.command(name="emit-shell")
-def emit_shell(
-    output: Optional[Path] = typer.Option(
-        None,
-        "--output",
-        help=(
-            "Destination file path. Defaults to scripts/lib/paths.sh "
-            "relative to the repo root."
-        ),
-    ),
-) -> None:
-    """Generate scripts/lib/paths.sh from the Pydantic schema.
-
-    The generated file is byte-deterministic for identical schema inputs.
-    Use --output to redirect to a custom path (useful for tests).
-    """
-    from fno.paths import resolve_repo_root
-    from fno.setup.emit_shell import emit_paths_sh
-    from fno.state.io import atomic_write
-
-    if output is None:
-        repo_root = resolve_repo_root()
-        output = repo_root / "scripts" / "lib" / "paths.sh"
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    content = emit_paths_sh(use_defaults=True)
-    atomic_write(output, content)
-    typer.echo(f"wrote {len(content.encode('utf-8'))} bytes to {output}")
 
 
 @app.command(name="shell-stub")
@@ -94,7 +68,7 @@ def verify_cmd(
     if not paths_sh.exists():
         typer.echo(
             f"error: {paths_sh} does not exist. "
-            "Generate it with: uv run fno-py paths emit-shell",
+            "Generate it with: fno config paths emit-shell",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -110,7 +84,7 @@ def verify_cmd(
             f"schema hash:  {derived}\n"
             f"file hash:    {checked}\n"
             f"\nHashes differ. Regenerate with:\n"
-            f"  cd cli && uv run fno-py paths emit-shell",
+            f"  fno config paths emit-shell",
             err=True,
         )
         raise typer.Exit(code=1)
