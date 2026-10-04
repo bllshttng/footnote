@@ -11,19 +11,8 @@ impl View {
         if let Some(hit) = self.chrome_hit_feed(row, col) {
             return Some(hit);
         }
-        // The questions block pins above the court block: a click on its
-        // rows opens the full questions view on that question; the `+N more`
-        // row opens the list. The header toggles nothing here (the key does).
-        if col < panel_w && self.sideline_view == crate::view_store::SidelineView::Agents {
-            match questions::hit_at(self, self.term.0 as usize, row) {
-                Some(questions::QuestionHit::Row(id)) => {
-                    return Some(ChromeHit::OpenQuestionDetail(id));
-                }
-                Some(questions::QuestionHit::More) => {
-                    return Some(ChromeHit::OpenQuestionsList);
-                }
-                None => {}
-            }
+        if let Some(hit) = bell::hit(self, row, col) {
+            return Some(hit);
         }
         // The sideline's strip row (`Agents  Messages`, R15): the words
         // switch the view, the density button rides the same row, and the
@@ -31,8 +20,11 @@ impl View {
         // Checked before the Agents-only guard so every view's strip
         // answers. A click right of the divider falls through to the tab
         // strip, which shares this row.
-        let top = self.sideline_top();
         let pw = self.sideline_paint_w();
+        if bell::button_at(self, row, col) {
+            return Some(ChromeHit::Bell(bell::Hit::Toggle));
+        }
+        let top = self.sideline_top();
         if row as usize + 1 == top && pw > 0 && (col as usize) < pw.saturating_sub(1) {
             for (start, w, view) in self.top_row_spans() {
                 if (col as usize) >= start && (col as usize) < start + w {
