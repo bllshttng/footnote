@@ -1813,45 +1813,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subject_peels_off_a_forwarded_mail_send_argv() {
-        let os = |vals: &[&str]| vals.iter().map(OsString::from).collect::<Vec<_>>();
-        // A send argv loses the flag pair and exports the subject.
-        let args = os(&[
-            "agents",
-            "mail",
-            "send",
-            "quill",
-            "hi there",
-            "--subject",
-            "status",
-        ]);
-        let peeled = peel_mail_subject(&args).unwrap();
-        assert_eq!(
-            peeled,
-            os(&["agents", "mail", "send", "quill", "hi there"]),
-            "the flag pair leaves the argv"
-        );
-        assert_eq!(
-            std::env::var("FNO_MAIL_SUBJECT").as_deref(),
-            Ok("status"),
-            "the door reads the subject from its env"
-        );
-        // The inline form peels too, and a non-send argv is untouched.
-        let inline = peel_mail_subject(&os(&["mail", "send", "a", "b", "--subject=x"])).unwrap();
-        assert_eq!(inline, os(&["mail", "send", "a", "b"]));
-        assert_eq!(std::env::var("FNO_MAIL_SUBJECT").as_deref(), Ok("x"));
-        let untouched = peel_mail_subject(&os(&["mail", "show", "--subject", "x"])).unwrap();
-        assert_eq!(untouched.len(), 4, "a non-send argv keeps every token");
-        // A separator, a newline or an over-long subject refuses.
-        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a · b"])).is_err());
-        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a\nb"])).is_err());
-        let long = "x".repeat(81);
-        assert!(
-            peel_mail_subject(&os(&["mail", "send", "a", "--subject", long.as_str()])).is_err()
-        );
-    }
-
-    #[test]
     fn stray_stdout_line_does_not_reassign_probe_fields() {
         // A venv can print at interpreter startup - a .pth file, a
         // sitecustomize - BEFORE the probe's own lines run. Positional parsing
@@ -1966,6 +1927,36 @@ mod tests {
             matches!(env_override_python(), Ok(None)),
             "empty falls through"
         );
+
+        // The subject peel (AC12-HP) rides this env test: a send argv loses
+        // the flag pair and exports the value, the inline form peels too, a
+        // non-send argv keeps every token, and a separator, a newline or an
+        // over-long subject refuses.
+        let os = |vals: &[&str]| vals.iter().map(OsString::from).collect::<Vec<_>>();
+        let peeled = peel_mail_subject(&os(&[
+            "agents",
+            "mail",
+            "send",
+            "quill",
+            "hi there",
+            "--subject",
+            "status",
+        ]))
+        .unwrap();
+        assert_eq!(peeled, os(&["agents", "mail", "send", "quill", "hi there"]));
+        assert_eq!(std::env::var("FNO_MAIL_SUBJECT").as_deref(), Ok("status"));
+        let inline = peel_mail_subject(&os(&["mail", "send", "a", "b", "--subject=x"])).unwrap();
+        assert_eq!(inline, os(&["mail", "send", "a", "b"]));
+        assert_eq!(std::env::var("FNO_MAIL_SUBJECT").as_deref(), Ok("x"));
+        let untouched = peel_mail_subject(&os(&["mail", "show", "--subject", "x"])).unwrap();
+        assert_eq!(untouched.len(), 4, "a non-send argv keeps every token");
+        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a \u{b7} b"])).is_err());
+        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a\nb"])).is_err());
+        let long = "x".repeat(81);
+        assert!(
+            peel_mail_subject(&os(&["mail", "send", "a", "--subject", long.as_str()])).is_err()
+        );
+        let _ = std::env::remove_var("FNO_MAIL_SUBJECT");
 
         restore_test_env("FNO_PY", previous_py);
         restore_test_env("FNO_PROCESS_ADMISSION", previous_mode);

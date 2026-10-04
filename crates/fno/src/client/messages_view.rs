@@ -1126,7 +1126,10 @@ fn copy_bubble(view: &mut View, whole_body: bool) {
     let Some(b) = view.messages_board.as_ref() else {
         return;
     };
-    let row = b.conversation_rows().get(b.cursors[2]).map(|row| (**row).clone());
+    let row = b
+        .conversation_rows()
+        .get(b.cursors[2])
+        .map(|row| (**row).clone());
     let Some(row) = row else {
         return;
     };
