@@ -227,7 +227,7 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
     )
     err2 = io.StringIO()
     out = compose_spawn_argv(
-        ["spawn", "--name", "w", "/fno:target x-1"],
+        ["spawn", "--name", "w", "--verbose", "/fno:target x-1"],
         stderr=err2,
     )
     assert out[out.index("--route") + 1] == "zai/glm"

@@ -758,6 +758,14 @@ fn bus_live_path() -> PathBuf {
     dir
 }
 
+/// The live log the bus-append door writes: the same resolution the
+/// Python appender used, so `FNO_BUS_DIR` keeps ruling the path.
+fn bus_append_live_path() -> PathBuf {
+    let home = crate::paths::AgentsHome::from_env();
+    let dot_fno = home.root().parent().unwrap_or_else(|| home.root());
+    crate::intel::bus_log_path(dot_fno)
+}
+
 /// Import the retained bus rows oldest-first: `send`/`announce` rows become
 /// message lines (original ids kept), receipt rows become delivery lines
 /// joined on their message id. Rows without an id or of a control kind are
@@ -1032,9 +1040,22 @@ fn message_body(line: &Value) -> &str {
 }
 
 /// One message as the reader sees it: the delivered header line, then the
-/// full body. The auto summary stands in until the Rust send verb sets
-/// subjects (wave 2); the id is what the receiver answers and resolves with.
+/// full body. The header carries the sender, the id - what the receiver
+/// answers and resolves with - and the row's subject, else the body's first
+/// sentence.
 fn render_message(line: &Value) -> String {
+    let raw = message_body(line);
+    let subject = line
+        .get("meta")
+        .and_then(|m| m.get("subject"))
+        .and_then(Value::as_str);
+    // The read/show surface renders the same body the Messages tab does:
+    // legacy framed rows are cleaned, and a subjectless whole first sentence
+    // is not printed twice under the header's echo of it. The header's third
+    // field reads the pre-strip body, exactly as the envelope render does.
+    let cleaned = crate::mail_header::display_body(raw);
+    let third = crate::mail_header::header_subject(subject, &cleaned);
+    let body = crate::mail_header::delivered_body(subject, &cleaned);
     format!(
         "{}\n{}",
         crate::mail_header::render_header(
@@ -1043,9 +1064,9 @@ fn render_message(line: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             line.get("id").and_then(Value::as_str).unwrap_or(""),
-            &crate::mail_header::summary_of(message_body(line)),
+            &third,
         ),
-        message_body(line),
+        body,
     )
 }
 
@@ -1185,7 +1206,9 @@ fn valid_chat_id(id: &str) -> bool {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: fno-agents chats <append|migrate|rebuild|list|read|resolve|show> ...");
+    eprintln!(
+        "usage: fno-agents chats <append|bus-append|migrate|rebuild|list|read|resolve|show> ..."
+    );
     2
 }
 
@@ -1231,6 +1254,55 @@ pub fn run_chats(args: &[String]) -> i32 {
                 }
                 Err(e) => {
                     eprintln!("chats append: {e}");
+                    1
+                }
+            }
+        }
+        "bus-append" => {
+            // The Python appender's door (d-697ea9c4): one envelope JSON on
+            // stdin. The Rust side owns the lock, the rotation, the
+            // owner-only mode and the record seam; a `--subject` peel
+            // exports FNO_MAIL_SUBJECT and a send row carries it in
+            // meta.subject.
+            let mut input = String::new();
+            if std::io::stdin().read_to_string(&mut input).is_err() {
+                eprintln!("chats bus-append: could not read the envelope from stdin");
+                return 1;
+            }
+            let mut line: Value = match serde_json::from_str(input.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("chats bus-append: not a JSON envelope: {e}");
+                    return 1;
+                }
+            };
+            if line.get("kind").and_then(Value::as_str) == Some("send") {
+                if let Ok(s) = std::env::var("FNO_MAIL_SUBJECT") {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        if let Some(obj) = line.as_object_mut() {
+                            obj.entry("meta")
+                                .or_insert_with(|| json!({}))
+                                .as_object_mut()
+                                .map(|m| m.insert("subject".into(), json!(s)));
+                        }
+                    }
+                }
+            }
+            // The live path rides argv from the Python caller (its
+            // resolver honors config.paths.bus_dir and both env legs);
+            // the fallback resolves envs for a direct invocation.
+            let live = args
+                .get(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(bus_append_live_path);
+            match crate::announce::append_line_open(&live, &line) {
+                Ok(()) => {
+                    println!("{{\"appended\":true}}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("chats bus-append: {e}");
                     1
                 }
             }
@@ -1518,6 +1590,28 @@ mod tests {
 
     #[test]
     fn chats_store_contracts() {
+        // The read/show surface renders what the Messages tab delivers: a
+        // subjectless whole first sentence shows once, under the header's
+        // echo of it; a sentence the summary cut stays whole; a legacy
+        // framed body is cleaned before render.
+        let dup = render_message(&serde_json::json!({
+            "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
+            "body": "Fix the gate. Details follow."
+        }));
+        assert_eq!(
+            dup,
+            "`@folio \u{b7} fmail-0badc0de1234 \u{b7} Fix the gate.`\nDetails follow."
+        );
+        let cut = render_message(&serde_json::json!({
+            "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
+            "body": "one two three four five six seven eight nine ten eleven twelve thirteen. Rest here."
+        }));
+        assert!(cut.ends_with("twelve thirteen. Rest here."), "{cut}");
+        let framed = render_message(&serde_json::json!({
+            "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
+            "body": "<fno_mail from=\"quill\" id=\"fmail-1\">\nlegacy body text\n</fno_mail>"
+        }));
+        assert!(!framed.contains("<fno_mail"), "{framed}");
         // The recipient-key read resolves the registry through AgentsHome;
         // pin a declared test root or the home-fallback fence fires.
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

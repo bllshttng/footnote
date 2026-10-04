@@ -390,6 +390,32 @@ One line plus a node pointer (law d-59af3235)."
         if !recommendation_ok {
             missing.push("a recommendation");
         }
+        // The readiness mirror: the mux renders only ready items
+        // (attention::problems), so every section it reads is required here.
+        // A question admitted half-checked lands exit 0 and the user never
+        // sees it, which is the failure this door exists to prevent.
+        if parsed.options_rationale.trim().is_empty() {
+            missing.push("## Why these options");
+        }
+        if file_options {
+            if parsed.options.iter().any(|o| o.next.trim().is_empty()) {
+                missing.push("What happens next under every option");
+            }
+        } else if has_options {
+            missing.push("a question file (flag options carry no What happens next)");
+        }
+        if parsed.unknowns.trim().is_empty() {
+            missing.push("## Not thought through");
+        }
+        if !matches!(parsed.reversible.trim(), "yes" | "costly" | "no") {
+            missing.push("## Reversible (yes, costly, or no)");
+        }
+        if parsed.reversible.trim() == "costly" && parsed.cost_if_wrong.trim().is_empty() {
+            missing.push("## Cost if wrong");
+        }
+        if parsed.meanwhile.trim().is_empty() {
+            missing.push("## Meanwhile");
+        }
         if !missing.is_empty() {
             answer.lines.push(format!(
                 "outstanding: refused: a question needs {}. Write a question file \
@@ -809,6 +835,12 @@ stops
         assert_eq!(answer.exit_code, 2);
         assert_eq!(answer.refusal.as_deref(), Some("context"));
         assert!(answer.lines.iter().any(|l| l.contains("a question needs")));
+        // Flag options carry no What happens next, so the mux would read the
+        // row not-ready forever; the door says so instead of recording it.
+        assert!(answer
+            .lines
+            .iter()
+            .any(|l| l.contains("flag options carry no What happens next")));
         assert!(journal_text(&root).is_empty());
     }
 
@@ -871,6 +903,18 @@ stops
             answer.lines
         );
         assert!(journal_text(&root).is_empty());
+        // An empty why_user reads the same as an absent one: not user-only.
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "## Meanwhile\nstops\n",
+                "## Meanwhile\nstops\n\n## Why user\n\n",
+            );
+        let mut r2 = req(&question, &root);
+        r2.node = Some("x-aaaa".to_string());
+        let answer2 = run_intake(&r2, &home);
+        assert_eq!(answer2.exit_code, 2);
+        assert_eq!(answer2.refusal.as_deref(), Some("decide_yourself"));
     }
 
     #[test]
@@ -890,20 +934,58 @@ stops
     }
 
     #[test]
-    fn rule10_empty_why_user_is_refused() {
-        let home = tmp_home("rule10-empty");
-        let root = tmp_root("rule10-empty");
-        let question = QUESTION_FILE
-            .replace("## Reversible\ncostly", "## Reversible\nyes")
-            .replace(
-                "## Meanwhile\nstops\n",
-                "## Meanwhile\nstops\n\n## Why user\n\n",
+    fn a_question_missing_a_readiness_section_is_refused_and_named() {
+        // The gate mirrors the mux's readiness read: each stripped section
+        // is named in the refusal, nothing is recorded, no variant exits 0.
+        let cases: [(&str, &str, &str, &str); 6] = [
+            (
+                "unknowns",
+                "## Not thought through\nwhether a net-zero move between files counts\n",
+                "",
+                "## Not thought through",
+            ),
+            ("meanwhile", "## Meanwhile\nstops\n", "", "## Meanwhile"),
+            (
+                "why-these",
+                "## Why these options\nthe three readings leads have acted on\n",
+                "",
+                "## Why these options",
+            ),
+            (
+                "option-next",
+                "    What happens next: unblocks four fixes today\n",
+                "",
+                "What happens next under every option",
+            ),
+            (
+                "cost",
+                "## Cost if wrong\nthe push allowance drops to 0\n",
+                "",
+                "## Cost if wrong",
+            ),
+            (
+                "bad-reversible",
+                "## Reversible\ncostly",
+                "## Reversible\nmaybe",
+                "## Reversible (yes, costly, or no)",
+            ),
+        ];
+        for (tag, needle, hole, want) in cases {
+            let home = tmp_home(tag);
+            let root = tmp_root(tag);
+            let question = QUESTION_FILE.replace(needle, hole);
+            let mut r = req(&question, &root);
+            r.node = Some("x-aaaa".to_string());
+            let answer = run_intake(&r, &home);
+            assert_eq!(answer.exit_code, 2, "{tag}: lines: {:?}", answer.lines);
+            assert_eq!(answer.refusal.as_deref(), Some("context"), "{tag}");
+            assert!(
+                answer.lines.iter().any(|l| l.contains(want)),
+                "{tag}: the refusal must name {want}: {:?}",
+                answer.lines
             );
-        let mut r = req(&question, &root);
-        r.node = Some("x-aaaa".to_string());
-        let answer = run_intake(&r, &home);
-        assert_eq!(answer.exit_code, 2);
-        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
+            assert!(journal_text(&root).is_empty(), "{tag}: nothing recorded");
+        }
     }
 
     fn junk_law() -> crate::law_match::LawRow {

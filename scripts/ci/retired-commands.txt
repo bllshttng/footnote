@@ -62,3 +62,6 @@ fno mux block annotate|fno mux block annotate still shells note --blocking (inte
 # 2026-09-30: the PR lifecycle folded under the ship umbrella; ship is the one
 # delivery verb and pr is its subcommand. skills/pr is deleted, no alias.
 /fno:pr|/fno:ship pr (same modes: create, check, merged)|the ship-umbrella fold
+# 2026-10-02: the bg substrate spelling is retired outright (user ruling, no
+# alias release). thread is the only spelling of the persistent lane.
+--substrate bg|--substrate thread|the bg alias retirement (user 2026-10-02)

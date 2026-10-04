@@ -16,38 +16,13 @@ use crate::claims;
 use crate::spawn_gate::NOTE;
 
 /// The reservation rule, in the same words everywhere it appears: the
-/// provider-cap refusal, the reserve mode's usage text, and
-/// docs/architecture/coordination.md. The refusal must state what actually
-/// governs, so an agent stops inferring a rule from a number.
+/// reserve mode's usage text and docs/architecture/coordination.md. The
+/// provider-cap refusal names the cap, the count and `fno agents
+/// gate-status` in one line; the full rule lives here and in the doc.
 pub(crate) const RESERVATION_RULE: &str = "A reservation is held for a NAME: spawn with \
      --name <that name> to redeem it. A reservation expires within 15 minutes, whatever \
      happened to the session that made it. Slot order is otherwise first-come; read \
      `fno agents gate-status` for the lane.";
-
-/// The provider-cap refusal's reservation clause: the held names and their
-/// expiries, capped at five with an ellipsis (the held_rows_suffix shape).
-/// Empty reservations produce an empty string.
-pub(crate) fn reserved_note(reserved: &[(String, i64)]) -> String {
-    if reserved.is_empty() {
-        return String::new();
-    }
-    let shown: Vec<String> = reserved
-        .iter()
-        .take(5)
-        .map(|(name, exp)| format!("{name} expires {}", hhmm_z(*exp)))
-        .collect();
-    let more = if reserved.len() > 5 {
-        format!(", {} more...", reserved.len() - 5)
-    } else {
-        String::new()
-    };
-    format!(
-        " ({} reserved: {}{})",
-        reserved.len(),
-        shown.join(", "),
-        more
-    )
-}
 
 /// The refusal receipt's `reserved` field: one object per held reservation.
 pub(crate) fn reserved_receipt(reserved: &[(String, i64)]) -> Value {
@@ -57,15 +32,6 @@ pub(crate) fn reserved_receipt(reserved: &[(String, i64)]) -> Value {
             .map(|(name, exp)| serde_json::json!({"name": name, "expires_at": exp}))
             .collect(),
     )
-}
-
-/// Epoch ms to a UTC `HH:MMZ` clock time; 0 (no expiry recorded) reads `?`.
-pub(crate) fn hhmm_z(expires_ms: i64) -> String {
-    if expires_ms <= 0 {
-        return "?".to_string();
-    }
-    let secs = (expires_ms / 1000) % 86_400;
-    format!("{:02}:{:02}Z", secs / 3600, (secs % 3600) / 60)
 }
 
 /// Release the redeemed reservation just before the admitted spawn takes its
@@ -219,6 +185,18 @@ mod tests {
         }
         let refusal = got.expect_err("lane 2/2 must refuse a stranger");
         assert_eq!(refusal.exit_code, EXIT_PROVIDER_CAP);
+        // The refusal is ONE line: the verdict names the reason, the figures
+        // (cap, count) and the one command that shows the lane; the exit code
+        // carries the class.
+        let verdict = crate::spawn_gate::verdict_line(&refusal);
+        assert!(!verdict.contains('\n'), "{verdict}");
+        assert!(verdict.contains("refused on provider_cap"), "{verdict}");
+        assert!(verdict.contains("cap=2"), "{verdict}");
+        assert!(verdict.contains("count=2"), "{verdict}");
+        assert!(
+            verdict.contains("remedy: read fno agents gate-status"),
+            "{verdict}"
+        );
         let receipt = refusal
             .receipt
             .expect("provider_cap refusal carries a receipt");
@@ -228,8 +206,6 @@ mod tests {
             receipt["reserved"][0]["expires_at"].as_i64().unwrap_or(0) > 0,
             "{receipt}"
         );
-        let note = reserved_note(&[("t-reserved-x-4444".into(), 1)]);
-        assert!(note.contains("1 reserved: t-reserved-x-4444"), "{note}");
         assert!(RESERVATION_RULE.contains("first-come"));
         let _ = std::fs::remove_dir_all(&dir);
     }

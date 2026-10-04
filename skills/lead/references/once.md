@@ -77,7 +77,8 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
 `--substrate pane` is explicit here rather than assumed. `pane` is the built-in default. When the flag is absent, `config.agents.defaults.substrate` takes precedence and is injected. If the user set `thread`, this command becomes a placement flag on a non-pane substrate and exits 2. Crowning then fails because you cannot see or change that config here.
 
 What `pane` buys here is the COURT, not the crown.
-The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The deprecated `bg` alias canonicalizes to `thread`.
+
+The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The retired `bg` spelling refuses with a redirect to `thread`.
 What a thread king loses is placement.
 The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a thread session does not have.
 So a thread king seats teammates in fresh tabs instead of beside itself, and the court stops cohering around one screen.
@@ -113,8 +114,9 @@ How you spell that depends on your provider, so take the requirement and not thi
 
 There is a rot-proof abstraction for this: set the node's work-difficulty band, `fno backlog update <id> --difficulty high`, and the dispatch grid resolves harness and model from live provider capacity rather than a hardcoded name.
 It is not a spawn-time flag; set it on the node before crowning, and the grid fires at spawn when no model or provider is pinned.
+
 The band is an intrinsic property of the work (expected time, edge cases, unknowns), not a quality-tier hint about models.
-- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `thread` is the persistent continuation lane; the capability rows and refusals are maintained in `docs/architecture/thread-lanes.md`. The deprecated `bg` alias maps to `thread`. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
+- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `thread` is the persistent continuation lane; the capability rows and refusals are maintained in `docs/architecture/thread-lanes.md`. The retired `bg` spelling refuses with a redirect to `thread`. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
 
 **Authority for the worker you crown.**
 `--yolo` means "full auto, no gates", and the *skill* surface translates it per provider: through `/fno:agent spawn` it maps to `--permission-mode bypassPermissions` on claude, while codex gets its literal bypass flag.
@@ -164,8 +166,8 @@ Make capture part of each tick. Run `fno inbox operator status`. Disposition eve
 
 A captured law uses `chat_attested`, never `operator`. This is honest attribution, not a downgrade. The ack records the user's request. It does not grant authority to the agent.
 
-**Dispatch.**
-`fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|thread|headless` starts a worker (`bg` is the deprecated alias for `thread`).
+**Dispatch.** `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|thread|headless` starts a worker (the retired `bg` spelling refuses with a redirect to `thread`).
+
 The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
 `fno backlog join <node>` hands a held node's remaining waves to joiners in its worktree.

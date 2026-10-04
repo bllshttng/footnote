@@ -1,8 +1,7 @@
-"""Tests for Codex PR #264 round 3 fixes (findings A, B, C, D).
+"""Tests for Codex PR #264 round 3 fixes (findings A, B, D).
 
 Finding A: paths.sh self-sets REPO_ROOT so sourcing under set -u doesn't crash.
 Finding B: dead-line regression in health_monitor.py and collision.py; fail-open.
-Finding C: shell-stub regenerates from current settings, not static snapshot.
 Finding D: plain-relative predicate in paths.py rejects env vars anywhere.
 """
 from __future__ import annotations
@@ -213,74 +212,3 @@ def test_collision_load_thresholds_no_dead_assignment(tmp_path: Path) -> None:
     assert 'Path("~/.fno/settings.yaml").expanduser()' not in src, (
         "Dead assignment in _load_thresholds must be removed"
     )
-
-
-# ===========================================================================
-# Finding C: shell-stub regenerates from current settings
-# ===========================================================================
-
-
-def test_shell_stub_regenerates_per_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC3-HP (Finding C): shell_stub() generates a fresh stub and returns its path.
-
-    Two calls with DIFFERENT settings must produce files with different content
-    (the settings change is reflected in the generated stub).
-    """
-    # First call: default settings
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.paths_cli import shell_stub as _  # noqa: just ensure importable
-    from typer.testing import CliRunner
-    from fno.cli import app
-
-    runner = CliRunner()
-
-    result1 = runner.invoke(
-        app,
-        ["config", "paths", "shell-stub"],
-        env={"FNO_REPO_ROOT": str(tmp_path), "COLUMNS": "240", "NO_COLOR": "1"},
-        catch_exceptions=False,
-    )
-    assert result1.exit_code == 0, f"shell-stub failed: {result1.output}"
-    path1 = result1.output.strip()
-    assert path1, "shell-stub must print a path"
-
-    # Change settings - custom plans_dir - then call again
-    from fno import config as config_mod
-    import fno.paths as paths_mod
-
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/my-custom-plans'\n",
-    )
-
-    result2 = runner.invoke(
-        app,
-        ["config", "paths", "shell-stub"],
-        env={"FNO_REPO_ROOT": str(tmp_path), "COLUMNS": "240", "NO_COLOR": "1"},
-        catch_exceptions=False,
-    )
-    assert result2.exit_code == 0, f"shell-stub failed second call: {result2.output}"
-    path2 = result2.output.strip()
-    assert path2, "shell-stub must print a path on second call"
-
-    # The path returned must be a readable file
-    assert Path(path1).exists(), f"shell-stub path1 must be a readable file: {path1}"
-    assert Path(path2).exists(), f"shell-stub path2 must be a readable file: {path2}"
-
-    # Content must differ because settings changed
-    content1 = Path(path1).read_text(encoding="utf-8")
-    content2 = Path(path2).read_text(encoding="utf-8")
-    assert content1 != content2, (
-        "shell-stub must regenerate from current settings. "
-        "Two calls with different settings must produce different files.\n"
-        f"path1 content:\n{content1}\npath2 content:\n{content2}"
-    )
-    assert "my-custom-plans" in content2, (
-        f"Second stub must reflect custom plans_dir, got:\n{content2}"
-    )
-
-

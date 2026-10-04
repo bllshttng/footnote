@@ -232,6 +232,6 @@ where
     }
     Some(format!(
         "{name} has exited - fno agents resume {name} (continue it in your terminal)\n\
-         or: fno agents spawn {name} --resume {uuid} --substrate bg (detached worker)"
+         or: fno agents spawn {name} --resume {uuid} --substrate thread (detached worker)"
     ))
 }

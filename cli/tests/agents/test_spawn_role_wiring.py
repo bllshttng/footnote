@@ -643,7 +643,7 @@ class _Gate:
     ("substrate", "extra"),
     [
         ("pane", []),
-        ("bg", ["--substrate", "bg"]),
+        ("bg", ["--substrate", "thread"]),
         ("headless", ["--substrate", "headless"]),
     ],
 )
@@ -736,9 +736,9 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
     ("routing", "extra"),
     [
         (["--role", "tidy"], []),
-        (["--role", "tidy"], ["--substrate", "bg"]),
+        (["--role", "tidy"], ["--substrate", "thread"]),
         (["--role", "tidy"], ["--substrate", "headless"]),
-        (["--route", "zai,glm-5.2"], ["--substrate", "bg"]),
+        (["--route", "zai,glm-5.2"], ["--substrate", "thread"]),
         (["--route", "zai,glm-5.2"], ["--substrate", "headless"]),
     ],
     ids=["role-pane", "role-bg", "role-headless", "route-bg", "route-headless"],

@@ -24,9 +24,9 @@
 //!   mux never links the runtime (product boundary). Callers build this
 //!   argv; humans never type it.
 //! - `--paths-exec`: the one-shot paths lane (paths_cli.rs). Serves ONE
-//!   `config paths` verb argv (emit-shell first; siblings still answer in
-//!   Python) and exits with the verb's code. The front's
-//!   `fno config paths emit-shell` spawns it. Callers build this argv;
+//!   `config paths` verb argv (emit-shell and shell-stub so far; siblings
+//!   still answer in Python) and exits with the verb's code. The front's
+//!   `fno config paths <native-verb>` spawns it. Callers build this argv;
 //!   humans never type it.
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling

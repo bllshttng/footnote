@@ -249,7 +249,7 @@ class TestReceipts:
         result = CliRunner().invoke(
             agents_app,
             ["spawn", "--name", "b-prov", "hi", "--harness", "claude",
-             "--substrate", "bg"],
+             "--substrate", "thread"],
         )
         assert result.exit_code == 0, result.output
         receipt = self._receipt_of(result.output)

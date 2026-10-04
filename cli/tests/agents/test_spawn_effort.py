@@ -343,7 +343,7 @@ def test_cli_threads_effort_to_bg_dispatch(runner, monkeypatch):
             "--harness",
             "claude",
             "--substrate",
-            "bg",
+            "thread",
             "--effort",
             "high",
         ],

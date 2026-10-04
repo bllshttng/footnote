@@ -119,7 +119,7 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",
-        "--substrate", "bg", "--cwd", str(bg_home), "--crown", "epic-x", "--succeed",
+        "--substrate", "thread", "--cwd", str(bg_home), "--crown", "epic-x", "--succeed",
     )
     assert result.exit_code == 0, result.output
 
@@ -142,7 +142,7 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     """No parent session env == a human's own shell, same rule as the pane path."""
     result = _spawn(
         "spawn", "--name", "king-bg-human", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "alpha",
+        "--substrate", "thread", "--crown", "alpha",
     )
     assert result.exit_code == 0, result.output
     assert _row("king-bg-human").crown_grantor == "human"
@@ -155,7 +155,7 @@ def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
 
     result = _spawn(
-        "spawn", "--name", "plain-bg", "-H", "claude", "work", "--substrate", "bg"
+        "spawn", "--name", "plain-bg", "-H", "claude", "work", "--substrate", "thread"
     )
     assert result.exit_code == 0, result.output
 
@@ -189,7 +189,7 @@ def test_bg_spawn_refuses_a_duplicate_crown_before_launch(bg_home, monkeypatch) 
 
     result = _spawn(
         "spawn", "--name", "pretender", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-x",
+        "--substrate", "thread", "--crown", "epic-x",
     )
     assert result.exit_code == 2
 
@@ -222,7 +222,7 @@ def test_bg_spawn_refuses_a_crown_over_one_member_of_a_live_set(bg_home, monkeyp
 
     result = _spawn(
         "spawn", "--name", "pretender", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-x",
+        "--substrate", "thread", "--crown", "epic-x",
     )
     assert result.exit_code == 2
 
@@ -255,7 +255,7 @@ def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatc
 
     result = _spawn(
         "spawn", "--name", "successor", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-y",
+        "--substrate", "thread", "--crown", "epic-y",
     )
     assert result.exit_code == 0, result.output
     assert _row("successor").crown_level == 2
@@ -298,7 +298,7 @@ def test_refusal_does_not_claim_bg_is_unsupported(bg_home) -> None:
         "-p", "--crown", "epic-z",
     )
     assert "not yet supported" not in result.output
-    assert "--substrate pane" in result.output and "--substrate bg" in result.output
+    assert "--substrate pane" in result.output and "--substrate thread" in result.output
 
 
 # --- in-process callers get the same guards ----------------------------------
@@ -482,7 +482,7 @@ def test_both_crown_spellings_stay_on_the_python_path(flag: str) -> None:
         _is_pane_substrate_spawn,
     )
 
-    args = ["spawn", "w", "--substrate", "bg", flag, "etl", flag, "web"]
+    args = ["spawn", "w", "--substrate", "thread", flag, "etl", flag, "web"]
     assert _is_crown_bearing_spawn("spawn", args) is True
     assert _is_pane_substrate_spawn("spawn", args) is False
 

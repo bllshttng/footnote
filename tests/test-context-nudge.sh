@@ -78,15 +78,16 @@ BINDIR="$(mktemp -d)"
 # masked registry-json's Rust port entirely, taking four AC31 assertions
 # down with it before this line existed).
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
-# The handoff verb answers natively (crates/fno-agents/src/paths_cli.rs behind
-# crates/fno/src/paths_route.rs), so `config paths` routes through the built
-# Rust front + worker exactly like the installed surface, while every other
-# verb keeps the worktree Python front this suite pins. Without the routing,
-# `config paths handoff` dies on the retired Python leg and the canon ask
-# names no doc (AC5). Spell target/debug/fno contiguously: the smoke runner
-# greps this file for `target/debug/fno-agents` when it selects the harness's
-# cargo build step, and a split spelling selects the harness without its
-# build (the red this comment prevents).
+# The paths verbs emit-shell, shell-stub and handoff answer natively
+# (crates/fno-agents/src/paths_cli.rs behind crates/fno/src/paths_route.rs):
+# the shim routes exactly those to the built Rust front + worker, the way
+# production resolves them, while verify and every other verb keep the
+# worktree Python front this suite pins. Without the routing, the retired
+# Python legs die and the canon ask names no doc (AC5). Spell
+# target/debug/fno contiguously: the smoke runner greps this file for
+# `target/debug/fno-agents` when it selects the harness's cargo build step,
+# and a split spelling selects the harness without its build (the red this
+# comment prevents).
 FRONT_BIN="$REPO_ROOT/crates/fno/target/debug/fno"
 WORKER_BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents-worker"
 if [ ! -x "$FRONT_BIN" ] || [ ! -x "$WORKER_BIN" ]; then
@@ -96,7 +97,7 @@ if [ ! -x "$FRONT_BIN" ] || [ ! -x "$WORKER_BIN" ]; then
   echo "      Fix: (cd crates/fno && cargo build --bin fno) && (cd crates/fno-agents && cargo build --bins)" >&2
   exit 1
 fi
-printf '#!/usr/bin/env bash\nif [ "$1" = "config" ] && [ "$2" = "paths" ]; then\n  export FNO_AGENTS_WORKER="%s"\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$WORKER_BIN" "$FRONT_BIN" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
+printf '#!/usr/bin/env bash\nif [ "$1" = config ] && [ "$2" = paths ] && { [ "$3" = emit-shell ] || [ "$3" = shell-stub ] || [ "$3" = handoff ]; }; then\n  export FNO_AGENTS_WORKER="%s"\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$WORKER_BIN" "$FRONT_BIN" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
 # fno-py is the console script name; provide it too in case anything resolves it.
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
@@ -265,6 +266,20 @@ fi
 
 events_has() { "$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q "\"type\":\"$1\""; }
 
+# Clear the journal AND the physical store. The state-root layout relocates
+# events.db to db/events.db (docs/state-root-layout.tsv), so a legacy-path rm
+# leaves earlier cases' rows committed in the routed store and the all-dead
+# control below inherits them. --store-path-only answers the routed path as
+# pure path math, so it works with the journal already removed.
+clear_events() {
+  rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+  local store
+  store=$("$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" --store-path-only 2>/dev/null | jq -r '.store // empty')
+  if [ -n "$store" ]; then
+    rm -f "$store" "$store-wal" "$store-shm" 2>/dev/null
+  fi
+}
+
 # === AC9: the hook gates on nothing it isn't handed ============================
 assert_absent "AC9: no kill -0"        "$(cat "$HOOK")" "kill -0"
 assert_absent "AC9: no owner_pid"      "$(cat "$HOOK")" "owner_pid"
@@ -418,6 +433,14 @@ assert_absent "AC19: small window no quality block" "$OUT" '"decision":"block"'
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/small.jsonl" 140000 "gpt-5-codex"   # 200k window, 70%, 60k left
 run_hook "$(payload "$SBX/small.jsonl")"
+# The probe rides the stale-while-revalidate cache whose busy tier may serve
+# the previous fingerprint's copy for one boundary under CI shard load; the
+# design's answer is the next Stop, which re-measures. Fire one boundary more
+# before asserting - never a third: a persistent probe death must stay red.
+if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
+  rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+  run_hook "$(payload "$SBX/small.jsonl")"
+fi
 assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
 assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
 run_hook "$(payload "$SBX/small.jsonl")"
@@ -807,7 +830,7 @@ rm -rf "$COUNT_BINDIR"
 # clock, not on a defect.
 # events.jsonl accumulates for the whole file (no other case here truncates
 # it) - clear it once so the all-dead case below can trust a fresh read.
-rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+clear_events
 
 write_registry_liveness() {  # write_registry_liveness '<jq children array>'
   jq -n --argjson children "$1" '{
@@ -859,7 +882,7 @@ CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
   {name:"dead-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
 ]')
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
+clear_events
 write_registry_liveness "$CHILDREN"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "x-1b75 all-dead: no orphan reason when every spawned row is confidently dead" "$OUT" "cannot be a pure pass"

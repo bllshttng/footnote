@@ -1,10 +1,10 @@
-"""CLI surface for path introspection: fno config paths shell-stub / verify.
+"""CLI surface for path introspection: fno config paths verify.
 
-emit-shell and handoff answer natively (crates/fno-agents/src/paths_cli.rs);
-this front keeps a forwarding leaf for each so `fno-py` and the test harnesses
-that wrap it reach the native lane through the one Rust classify. The rest of
-this group still serves shell-stub and verify until their child nodes port
-(one verb per PR, d-450caaeb).
+emit-shell, shell-stub and handoff answer natively
+(crates/fno-agents/src/paths_cli.rs); this front keeps a forwarding leaf for
+handoff so `fno-py` and the test harnesses that wrap it reach the native lane
+through the one Rust classify. Verify is the group's last Python leg until
+its child node ports (one verb per PR, d-450caaeb).
 """
 from __future__ import annotations
 
@@ -39,32 +39,6 @@ def _forward_native(verb: str, ctx: typer.Context) -> None:
 def handoff(ctx: typer.Context) -> None:
     """Forward to the native handoff verb (crates/fno-agents paths_cli.rs)."""
     _forward_native("handoff", ctx)
-
-
-@app.command(name="shell-stub")
-def shell_stub() -> None:
-    """Generate a fresh paths.sh from current settings and print its path.
-
-    Bash callers use: source "$(fno config paths shell-stub)".
-
-    Each invocation regenerates a temp file from the current settings.yaml so
-    shell hooks always reflect the user's current config rather than the
-    checked-in static snapshot.  The checked-in scripts/lib/paths.sh remains
-    available as a fallback for callers where fno is not on PATH.
-    """
-    import tempfile
-    from fno.setup.emit_shell import emit_paths_sh
-
-    content = emit_paths_sh(use_defaults=False)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".sh",
-        prefix="fno-paths-",
-        delete=False,
-        encoding="utf-8",
-    ) as f:
-        f.write(content)
-        print(f.name)
 
 
 @app.command(name="verify")

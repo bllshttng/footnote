@@ -66,9 +66,10 @@ def test_wrap_opens_with_the_delivered_header():
     )
     body = "line one\nline two"
     wrapped = wrap_fno_mail(body, from_="aaaa1111", id="fmail-abc123def456")
-    # The summary is the first sentence (it ends at the newline); the body
-    # follows verbatim, nothing hidden.
-    assert wrapped == "`@aaaa1111 · fmail-abc123def456 · line one`\nline one\nline two"
+    # The summary is the body's first sentence, and the delivered body
+    # drops that sentence (it is the header's third field), so the text
+    # shows once. Header plus rest is still the whole message.
+    assert wrapped == "`@aaaa1111 · fmail-abc123def456 · line one`\nline two"
     # An empty body renders the (empty) summary.
     assert wrap_fno_mail("", from_="aaaa1111", id="fmail-abc123def456") == (
         "`@aaaa1111 · fmail-abc123def456 · (empty)`\n"

@@ -38,7 +38,7 @@ Every placement flag implies `--substrate pane`.
 
 ## Session shape
 
-`--substrate` picks the session shape. `thread` is the default where the harness seats one: persistent, viewed through a portal. `pane` is the mux-hosted PTY, the closable fallback. `headless` is a one-shot. `bg` is a deprecated alias for thread.
+`--substrate` picks the session shape. `thread` is the default where the harness seats one: persistent, viewed through a portal. `pane` is the mux-hosted PTY, the closable fallback. `headless` is a one-shot. The retired `bg` spelling refuses with a redirect to `thread`.
 
 `--resume/-r` seeds a NEW claude session from an existing transcript. The content carries over. The session id does NOT: the result is a new id, a new agent-view row, and a new fno binding. To revive a session under its OWN id use `fno agents resume`. The value is a full uuid or the 8-hex short id. It implies thread. claude and thread only.
 
