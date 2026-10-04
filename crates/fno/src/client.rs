@@ -5654,10 +5654,8 @@ impl View {
     /// only mouse route to a new tab. Below overflow this returns
     /// [`tab_bar_spans`] unchanged.
     fn tab_bar_window(&self) -> Vec<TabSpan> {
-        // The bell keeps the bar's rightmost seat: the strip's budget
-        // reserves it (plus one gap) before spans condense, so the `+`
-        // new-tab affordance never paints under the bell or loses its
-        // click to the bell's earlier hit test.
+        // The bell's rightmost seat (plus one gap) is reserved before spans
+        // condense, so the `+` affordance never paints or clicks under it.
         let width = (self.term.1 as usize)
             .saturating_sub(self.panel_w() as usize)
             .saturating_sub(bell::button_range(self).len() + 1);
@@ -5828,10 +5826,8 @@ impl View {
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
         // event handler already sounded); painted by row_stamp.
         paint_notice_overlay(cells, cols, self.notice_overlay(cols));
-        // The bell keeps the rightmost seat of the bar (the operator's
-        // 2026-10-04 move out of the sideline strip): painted after the
-        // notice so a transient notice yields, and its hit routes first in
-        // chrome_hit for the same reason.
+        // The bell keeps the bar's rightmost seat, painted after the notice
+        // so a transient notice yields to it.
         bell::paint_button(self, cells, cols);
     }
 
