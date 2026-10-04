@@ -50,6 +50,8 @@ COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 # backlog/session_cli.rs). The map row stays: the mux menu binds the leaf
 # and the Rust verb-baseline ratchet reads the same row.
 NATIVE_SERVED_LEAVES = {
+    "agents mail show",
+    "mail show",
     "backlog rank",
     "backlog reopen",
     "backlog session add",

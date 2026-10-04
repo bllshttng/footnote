@@ -159,6 +159,13 @@ enum Role {
     DoctorUpdate(Vec<OsString>),
     /// `fno agents history ... --graph ...`: the native session-card reader.
     AgentsHistory(Vec<OsString>),
+    /// `fno agents mail show ...`: the native one-message reader, lexically
+    /// classified beside agents_history. The Python CLI keeps the rest of
+    /// the mail tree; the carried tail runs `fno-agents chats show`.
+    MailShow(Vec<OsString>),
+    /// `fno agents mail view`: refused by name; the verb is now `show`
+    /// (no compat shell, the same rule as a removed mux verb).
+    MailViewRenamed,
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
     /// binary's grouped dispatcher. The argv passes through byte-verbatim
     /// (the sibling's catalog owns grouped and legacy spellings).
@@ -191,6 +198,22 @@ fn exit_mux(code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// The carried tail runs through the store's one owner: stdio inherited, the
+/// child's exit code returned. A missing binary is a refusal, never a silent
+/// empty read.
+fn mail_show_exec(rest: &[OsString]) -> i32 {
+    let mut cmd = std::process::Command::new(fno::digest_overlay::fno_agents_bin());
+    cmd.args(["chats", "show"]);
+    cmd.args(rest);
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("fno agents mail show: could not run fno-agents: {e}");
+            1
+        }
+    }
+}
+
 /// Parse `serve` flags into [`fno::web::WebArgs`]. One of `--web`, `--stop`,
 /// `--status` is required; a missing flag value, an unknown flag, a non-UTF-8
 /// arg, or a bad `--port` is `None` (the caller maps that to `MuxUsage`, exit
@@ -218,6 +241,29 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     (web || args.stop || args.status || args.attention_api).then_some(args)
 }
 
+/// The mail reader's lexical claim, in the shape of `agents_history::classify`:
+/// `show` is native (it runs `fno-agents chats show`, the store's one owner)
+/// and `view` is refused by name, because the rename ships no compat shell.
+/// The verb mounts at two paths -- `fno agents mail <verb>` and the hidden
+/// `fno mail <verb>` group -- and both spellings claim and refuse alike.
+fn classify_mail_show(args: &[OsString]) -> Option<Role> {
+    let (verb, tail): (&str, &[OsString]) = if args.len() >= 3
+        && args[0].to_str() == Some("agents")
+        && args[1].to_str() == Some("mail")
+    {
+        (args[2].to_str()?, &args[3..])
+    } else if args.len() >= 2 && args[0].to_str() == Some("mail") {
+        (args[1].to_str()?, &args[2..])
+    } else {
+        return None;
+    };
+    match verb {
+        "show" => Some(Role::MailShow(tail.to_vec())),
+        "view" => Some(Role::MailViewRenamed),
+        _ => None,
+    }
+}
+
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     use cli_args::FrontDoor;
     // The native `doctor event` storage verbs are classified lexically,
@@ -231,6 +277,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::agents_history::classify(args) {
         return Role::AgentsHistory(rest);
+    }
+    if let Some(role) = classify_mail_show(args) {
+        return role;
     }
     // The `fno agents org` group claims itself lexically, beside
     // agents_history: the people spelling of the role verbs rewrites to the
@@ -443,6 +492,11 @@ fn main() {
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
         Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
+        Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),
+        Role::MailViewRenamed => {
+            eprintln!("fno agents mail view was renamed: use fno agents mail show");
+            std::process::exit(2);
+        }
         Role::AgentsAlias(fno::agents_alias::Org::Forward(argv)) => bootstrap::forward(&argv),
         Role::AgentsAlias(fno::agents_alias::Org::Help(text)) => {
             println!("{text}");
@@ -578,6 +632,37 @@ mod tests {
         );
         assert_eq!(
             decide_role(&os(&["agents", "history", "--help"]), false),
+            Role::Forward
+        );
+        // The mail reader claims its verb and refuses the renamed one by
+        // name; the send verb still forwards to Python.
+        assert_eq!(
+            decide_role(&os(&["agents", "mail", "show", "fmail-x"]), false),
+            Role::MailShow(os(&["fmail-x"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["agents", "mail", "show", "--all", "-n", "5"]), false),
+            Role::MailShow(os(&["--all", "-n", "5"]))
+        );
+        assert!(matches!(
+            decide_role(&os(&["agents", "mail", "view", "--all"]), false),
+            Role::MailViewRenamed
+        ));
+        // The hidden `fno mail <verb>` mount claims and refuses alike.
+        assert_eq!(
+            decide_role(&os(&["mail", "show", "fmail-x"]), false),
+            Role::MailShow(os(&["fmail-x"]))
+        );
+        assert!(matches!(
+            decide_role(&os(&["mail", "view"]), false),
+            Role::MailViewRenamed
+        ));
+        assert_eq!(
+            decide_role(&os(&["mail", "send", "a", "b"]), false),
+            Role::Forward
+        );
+        assert_eq!(
+            decide_role(&os(&["agents", "mail", "send", "a", "b"]), false),
             Role::Forward
         );
     }

@@ -86,7 +86,7 @@ the matching section. Messaging is free, so **nothing here confirms** (contrast
 | `unread [name]` | `fno agents mail unread [-n <name>]` | no (read) | free |
 | `ack <msg-id> [name]` | `fno agents mail ack <msg-id> [-n <name>]` | no | free |
 | `list` | `fno agents mail list` | no (read) | free |
-| `view` | `fno agents mail view` | no (read) | free |
+| `show [id]` | `fno agents mail show [id]` | no (read) | own session (--all lifts) |
 | `status` | `fno agents mail status` | no (read) | free |
 | `drain` | `fno agents mail drain` | no | free |
 | `hold [minutes\|off\|status]` | `/fno:dnd` (codex `$fno:dnd`) with the same argument | natural-language duration | free |
@@ -193,7 +193,7 @@ Strip the leading `reply`; the rest is `<msg-id> <body>`.
 
 ---
 
-## `unread [name]` / `list` / `view` / `status` - read your inbox (thin pass-through)
+## `unread [name]` / `list` / `show` / `status` - read your inbox (thin pass-through)
 
 Reads. No normalize, no confirm. Run the raw verb and relay its output faithfully.
 
@@ -201,7 +201,7 @@ Reads. No normalize, no confirm. Run the raw verb and relay its output faithfull
 fno agents mail unread                 # my default inbox (project 'footnote')
 fno agents mail unread -n "<name>"     # a specific agent/project inbox
 fno agents mail list                   # unread threads in my inbox (-A for all)
-fno agents mail view                   # render the bus log as an inbox view
+fno agents mail show                   # my session's mail; an id reads one
 fno agents mail status                 # one-screen inbox health snapshot
 ```
 
