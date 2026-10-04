@@ -450,7 +450,6 @@ notify	KEEP	notify	18	single-leaf group
 observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4
 observer judge	T1	observer judge	0	
-paths handoff	T1	paths handoff	9
 paths shell-stub	T1	paths shell-stub	20
 paths verify	T1	paths verify	7
 phase	KEEP	phase	16	single-leaf group
