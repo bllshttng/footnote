@@ -52,17 +52,24 @@ pub(super) enum MetricCell {
 }
 
 /// The four fields in paint order: context, compactions, cost, tokens.
-/// Codex transcripts carry no context window or compaction boundaries;
-/// crowned leads never price; a row with no harness (bare pane) or an exited
-/// row can never be measured again, so its unserved fields hide instead of
-/// pulsing forever.
+/// Hidden outranks served: codex transcripts carry no context window or
+/// compaction boundaries, crowned leads never price. Only claude and codex
+/// transcripts resolve at all (`SessionTranscripts::find`), so any other
+/// harness - and a bare pane or an exited row - can never be measured, and
+/// its unserved fields hide instead of pulsing forever.
 pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
-    let measurable = !a.exited && a.harness.is_some();
+    let reportable = !a.exited && matches!(a.harness.as_deref(), Some("claude" | "codex"));
     let codex = a.harness.as_deref() == Some("codex");
-    let field = |value: Option<String>, hidden: bool| match value {
-        Some(v) => MetricCell::Value(v),
-        None if hidden || !measurable => MetricCell::Hidden,
-        None => MetricCell::Loading,
+    let field = |value: Option<String>, hidden: bool| {
+        if hidden {
+            MetricCell::Hidden
+        } else {
+            match value {
+                Some(v) => MetricCell::Value(v),
+                None if !reportable => MetricCell::Hidden,
+                None => MetricCell::Loading,
+            }
+        }
     };
     [
         field(
