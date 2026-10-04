@@ -131,5 +131,18 @@
     "claude_code_version": "the Run 0 claude-code container installs Claude Code 2.1.286, the Run 1 pin; the 16:03Z smoke had installed 2.1.287",
     "images": "unused task images were removed at 18:29Z to free disk; later arms pull them again in environment setup, before the agent timer",
     "freeze": "no setting, image or environment changes mid-arm unless the machine is at risk"
+  },
+  "amendment_12": {
+    "declared_at": "2026-10-04T05:10:00Z",
+    "scope": "one retry for every Run 0 trial excluded under the 1302 rule, in every arm (user ruling: re-run the rate-limited trials before the results ship); no grade or decision rule changes",
+    "first_results_commit": "71151e0a50",
+    "excluded_1302": {"pi": 7, "claude-code": 27, "opencode": 7, "terminus-2": 13, "total": 54},
+    "rule": "each such trial runs once more in the same job, model, effort, Claude Code pin and concurrency; the original attempt is set aside",
+    "one_retry": "a re-run that ends in a 1302 timeout again stays excluded and does not run a third time",
+    "spend": "cost tables count the attempts in the final record, as after Amendment 11; set-aside attempts and their spend are reported apart; decision.md shows the margin with and without them",
+    "order": "one arm at a time in the seeded order: pi, claude-code, opencode, terminus-2",
+    "when_set": "after the first results were written and read, before any re-run started; no re-run outcome existed at commit",
+    "run_1": "unchanged; its top-up already refilled every rate-limited attempt",
+    "load_rule": "the Amendment 11 load rule applies to the re-runs"
   }
 }
