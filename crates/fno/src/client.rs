@@ -948,32 +948,18 @@ struct View {
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
     questions_fold: Option<crate::needs_overlay::QuestionsFold>,
-    /// The questions command failed/timed out; same degrade contract as
-    /// `mine_degraded`/`needs_degraded`.
     questions_degraded: bool,
-    /// Why the questions read failed, for the toggle toast; None when the
-    /// fold landed or never ran.
     questions_degraded_reason: Option<String>,
-    /// The questions detail overlay, `Some` while open. Keys divert to
-    /// [`questions::detail_keys`], the draw chain arm renders it.
+    /// The full question view's list/detail split.
     question_detail: Option<questions::Detail>,
-    /// The questions block's operator prefs (the toggle, the height, and
-    /// whether answered questions show), each persisted through the view
-    /// store. The block itself reads them at layout time.
-    questions_block: questions::BlockPrefs,
-    /// Pending escape bytes in questions-detail mode (the same split-arrow
-    /// safety as [`View::ans_esc`]).
+    questions_split: u8,
     question_esc: Vec<u8>,
-    /// The questions block's refresh: the last kick and the in-flight flag
-    /// (the feed fold's single-flight discipline), every 10 s.
+    /// Latest questions fold and its single-flight refresh while visible.
     questions_kick_at: Option<Instant>,
     questions_inflight: bool,
-    /// A queued question answer, mirroring
-    /// `mine_action`/`mine_acting` exactly (its own single-flight guard - a
-    /// question answer and a MINE write are independent, so one in flight
-    /// never blocks the other).
     question_action: Option<(String, crate::needs_overlay::AnswerPick)>,
     question_archive: Option<Vec<String>>,
+    question_clear_settled: bool,
     question_acting: bool,
     /// Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
@@ -1057,6 +1043,7 @@ struct View {
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
     messages_board: Option<messages_view::MessagesBoard>,
+    bell: bell::Panel,
     org_board: Option<org_board::OrgBoard>,
     org_generation: u64,
     sideline_view: crate::view_store::SidelineView,
@@ -1351,6 +1338,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // The needs overlay's projection + render, moved out of this file (file
 // budget); the feed overlay answers its own question from its own module and
 // reuses join_fold_row's join keys for its deep link.
+mod bell;
 mod feed_detail;
 mod feed_view;
 mod keys_modal;
@@ -2002,11 +1990,12 @@ impl View {
             questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
-            questions_block: questions::BlockPrefs::load(),
+            questions_split: view_store::load_questions_split(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
             question_archive: None,
+            question_clear_settled: false,
             question_acting: false,
             needs_want: false,
             needs_inflight: false,
@@ -2038,6 +2027,7 @@ impl View {
             server_proto: None,
             backlog_board: None,
             messages_board: None,
+            bell: bell::Panel::initial(),
             org_board: None,
             org_generation: 0,
             sideline_view: crate::view_store::load_sideline_view(),
@@ -4020,7 +4010,14 @@ impl View {
     /// button and keeps the gesture.
     fn density_button_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
         let tw = panel_w.saturating_sub(1); // last column is the divider
-        (tw >= DENSITY_BTN_W + 6).then(|| (tw - DENSITY_BTN_W)..tw)
+        let bell = bell::button_range(self, tw);
+        let end = if bell.is_empty() {
+            tw
+        } else {
+            bell.start.saturating_sub(1)
+        };
+        let start = end.checked_sub(DENSITY_BTN_W)?;
+        (tw >= DENSITY_BTN_W + 6 && start >= bell::top_row_words_end(self)).then_some(start..end)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -5020,6 +5017,7 @@ impl View {
         self.draw_bottom_row(&mut cells, rows, cols);
         // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
+        bell::draw(self, &mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(m) = &self.feed_detail {
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
@@ -6526,6 +6524,7 @@ enum ChromeHit {
     /// The strip row's view word (`Agents  Messages`, R15): switch the
     /// sideline to that view.
     TopRow(crate::view_store::SidelineView),
+    Bell(bell::Hit),
     /// Owned, not `&'static`: an in-flight card's notice carries the
     /// server-computed `where_hint` (v18), which is per-card data.
     Notice(String),
@@ -6555,8 +6554,6 @@ enum ChromeHit {
     /// Open the questions detail overlay on one block row. Carries the id,
     /// not the index: a fold between click and open must not retarget it.
     OpenQuestionDetail(String),
-    /// Open the questions view on the list (the `+N more` row's click).
-    OpenQuestionsList,
     /// A card's node tap: the plan in Obsidian, else the node details pane.
     OpenNode(String),
     OpenPr(String),
@@ -7641,6 +7638,8 @@ async fn attach_and_run(
     )>();
     let (reply_notice_tx, mut reply_notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     view.reply_notice_tx = Some(reply_notice_tx);
+    let (bell_tx, mut bell_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Result<serde_json::Value, String>)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -7656,9 +7655,8 @@ async fn attach_and_run(
     // other.
     let (question_act_tx, mut question_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
-    // The questions block's fold channel: the 10s kick spawns the projection
-    // read off the UI loop; the arm applies it under no gen guard (the block
-    // always shows the latest fold).
+    // The bell's question list uses the same questions projection as the
+    // detail view; reads stay off the UI loop and apply the latest fold.
     let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
         Result<crate::needs_overlay::QuestionsFold, String>,
     >();
@@ -7776,6 +7774,7 @@ async fn attach_and_run(
         backlog_board::maybe_kick(&mut view, &board_tx);
         org_board::maybe_kick(&mut view, &org_tx);
         messages_view::maybe_kick(&mut view, &messages_tx);
+        bell::maybe_kick(&mut view, &bell_tx);
         // a queued board write verb runs off the UI loop too.
         if let Some(action) = view
             .backlog_board
@@ -7807,8 +7806,7 @@ async fn attach_and_run(
         // task 2.3: kick a queued question answer off the UI loop.
         // `question_acting` is set by the stdin handler at enqueue time,
         // same discipline as the MINE mutation above.
-        // The questions block's kick: one fold every 10 s while the sideline
-        // is shown, single-flight like the feed fold.
+        // Refresh the questions projection while the sidebar is shown.
         questions::maybe_kick(&mut view, &questions_tx);
         questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
@@ -8426,6 +8424,12 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some((gen, projection)) = bell_rx.recv() => {
+                bell::apply(&mut view, gen, projection);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -8442,7 +8446,7 @@ async fn attach_and_run(
                 }
             }
             Some(fold) = questions_rx.recv() => {
-                // The questions block's fold landed: apply and repaint.
+                // The questions fold landed: apply and repaint.
                 view.apply_questions_fold(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -9167,9 +9171,7 @@ async fn dispatch_event(
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
-        Event::ToggleQuestionsBlock => questions::toggle_block(view),
-        Event::ResizeQuestionsBlock(delta) => questions::resize_block(view, delta),
-        Event::ToggleQuestionsDone => questions::toggle_show_done(view),
+        Event::ToggleBell => bell::toggle(view),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
@@ -9450,6 +9452,7 @@ async fn apply_hit(
             }
             crate::view_store::SidelineView::Org => org_board::open(view),
         },
+        ChromeHit::Bell(hit) => bell::apply_hit(view, hit),
         ChromeHit::Cmds(cmds) => {
             for cmd in cmds {
                 view.note_command_sent(&cmd);
@@ -9486,7 +9489,6 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => feed_detail::open_into(view, item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
-        ChromeHit::OpenQuestionsList => view.open_questions_list(),
         ChromeHit::OpenNode(id) => node_link::open(view, id).await,
         ChromeHit::OpenPr(url) => update_menu::open_pr(view, url).await,
     }
@@ -10216,9 +10218,6 @@ async fn selector_keys(
         let Some(cur) = view.selector else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
-        if questions::selector_key(view, k, cur) {
-            continue;
-        }
         // Any key other than a J/K reorder drops the cursor-follow intent, so a
         // later Layout re-anchors normally instead of chasing a stale squad.
         if k != b'J' && k != b'K' {

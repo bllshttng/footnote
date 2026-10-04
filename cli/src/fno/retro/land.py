@@ -163,7 +163,6 @@ def land_candidates(
     # F10: batch the filing-time anchor scan once per harvest (each PR fetched
     # once), not once per candidate (N gh round-trips, rate-limit prone).
     _anchor_verdicts = anchor_verdicts(candidates, anchor_scan_fn) if anchor_scan_fn else {}
-    born_rs = None  # one shared blast-cap across the whole harvest batch (lazy)
     for c in candidates:
         if c.uncited:
             continue  # never land an uncited candidate
@@ -237,11 +236,9 @@ def land_candidates(
         # non-fatal + opt-in (gate OFF => complete no-op). The hook re-reads the
         # durable node by id, so the id stub is all it needs.
         try:
-            from fno.provenance.spawn_think import RunState, on_node_born
+            from fno.provenance.spawn_think import on_node_born
 
-            if born_rs is None:
-                born_rs = RunState()
-            on_node_born({"id": node_id}, run_state=born_rs)
+            on_node_born({"id": node_id})
         except Exception:  # noqa: BLE001 - additive; never wedge the harvest
             pass
 
