@@ -382,7 +382,11 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     assert row.crown_level == 2, "an epic is a Director"
     assert row.crown_scope == "epic-x"
     assert row.crown_grantor == "human"
-    manifest = Path(row.cwd) / ".fno" / "kings" / "epic-x.md"
+    # Resolve the manifest path through the same state-root resolver the arm
+    # uses: a dev-build env can pin the state root away from <cwd>/.fno.
+    from fno.king.state import king_state_root
+
+    manifest = king_state_root(Path(row.cwd)) / "kings" / "epic-x.md"
     assert manifest.exists(), "the king loop manifest armed"
 
 
