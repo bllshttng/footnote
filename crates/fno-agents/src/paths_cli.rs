@@ -299,14 +299,11 @@ fn state_dir_resolved(cwd: &Path) -> Result<PathBuf, String> {
     resolve_template(raw.trim_end_matches('/'), None)
 }
 
-/// One `paths.<key>` override against its `$STATE_DIR/<sub>` default, the
-/// shape of Python `_state_subpath`: a `{template}` resolves at codegen
-/// time, a `~` value goes `$HOME`-relative, anything else passes through.
-fn state_subpath(override_: Option<String>, subdir: &str) -> Result<String, String> {
-    let Some(raw) = override_ else {
-        return Ok(format!("$STATE_DIR/{subdir}"));
-    };
-    glob_check("paths override", &raw)?;
+/// One `paths.<key>` override value, the shape Python's emitter shares for
+/// every override: a `{template}` resolves at codegen time, a `~` value
+/// goes `$HOME`-relative, anything else passes through verbatim.
+fn resolve_override(raw: &str) -> Result<String, String> {
+    glob_check("paths override", raw)?;
     let stripped = raw.trim_end_matches('/');
     if has_template(stripped) {
         Ok(resolve_template(stripped, None)?
@@ -316,6 +313,16 @@ fn state_subpath(override_: Option<String>, subdir: &str) -> Result<String, Stri
         Ok(home_relative(stripped))
     } else {
         Ok(stripped.to_string())
+    }
+}
+
+/// One `paths.<key>` override against its `$STATE_DIR/<sub>` default, the
+/// shape of Python `_state_subpath`: a `{template}` resolves at codegen
+/// time, a `~` value goes `$HOME`-relative, anything else passes through.
+fn state_subpath(override_: Option<String>, subdir: &str) -> Result<String, String> {
+    match override_ {
+        Some(raw) => resolve_override(&raw),
+        None => Ok(format!("$STATE_DIR/{subdir}")),
     }
 }
 
@@ -380,19 +387,7 @@ pub fn emit_paths_sh_live(cwd: &Path) -> Result<String, String> {
 
     // INBOX_DIR: project-relative by default.
     let inbox_tmpl = match cfg_str(cwd, &["paths", "inbox_dir"]) {
-        Some(raw) => {
-            glob_check("paths override", &raw)?;
-            let stripped = raw.trim_end_matches('/');
-            if has_template(stripped) {
-                resolve_template(stripped, None)?
-                    .to_string_lossy()
-                    .into_owned()
-            } else if stripped.starts_with('~') {
-                home_relative(stripped)
-            } else {
-                stripped.to_string()
-            }
-        }
+        Some(raw) => resolve_override(&raw)?,
         None => "$REPO_ROOT/.fno/inbox".to_string(),
     };
     lines.push(format!("export INBOX_DIR={}", bash_quote(&inbox_tmpl)));
@@ -400,19 +395,7 @@ pub fn emit_paths_sh_live(cwd: &Path) -> Result<String, String> {
     // HANDOFFS_DIR: override, else the vault placement, else the state-dir
     // fallback -- mirrors paths.handoffs_dir() resolution.
     let handoffs = match cfg_str(cwd, &["paths", "handoffs_dir"]) {
-        Some(raw) => {
-            glob_check("paths override", &raw)?;
-            let stripped = raw.trim_end_matches('/');
-            if has_template(stripped) {
-                resolve_template(stripped, None)?
-                    .to_string_lossy()
-                    .into_owned()
-            } else if stripped.starts_with('~') {
-                home_relative(stripped)
-            } else {
-                stripped.to_string()
-            }
-        }
+        Some(raw) => resolve_override(&raw)?,
         None => {
             let enabled = crate::agents_config::config_lookup(cwd, &["obsidian", "enabled"])
                 .and_then(|v| v.as_bool())
