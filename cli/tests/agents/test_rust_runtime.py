@@ -278,7 +278,7 @@ def test_spawn_seam_injects_config_defaults(
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     result = CliRunner().invoke(
-        app, ["agents", "spawn", "--name", "worker-A", "hi", "--substrate", "bg"]
+        app, ["agents", "spawn", "--name", "worker-A", "hi", "--substrate", "thread"]
     )
     assert result.exit_code == 0, result.output
     argv = captured[0]
@@ -1377,7 +1377,7 @@ def test_monitor_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch) -> No
             "--monitor",
             "happy",
             "--substrate",
-            "bg",
+            "thread",
             "hello",
         ],
     )
@@ -1443,14 +1443,14 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
     # A message rides along: a claude thread spawn with none is refused first.
     result = CliRunner().invoke(
         app,
-        ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg", "hello"],
+        ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "thread", "hello"],
     )
     assert result.exit_code == 99
     assert len(captured) == 1
     argv = captured[0]
     assert argv[0] == "spawn"
     assert argv[1].startswith("--defaults-applied=")
-    assert argv[2:] == ["--name", "worker", "--harness", "claude", "--substrate", "bg", "hello"]
+    assert argv[2:] == ["--name", "worker", "--harness", "claude", "--substrate", "thread", "hello"]
 
 
 def test_is_role_bearing_spawn_predicate() -> None:
@@ -1465,7 +1465,7 @@ def test_is_role_bearing_spawn_predicate() -> None:
 
 def test_is_monitor_bearing_spawn_predicate() -> None:
     assert rr._is_monitor_bearing_spawn(
-        "spawn", ["spawn", "w", "--monitor", "happy", "--substrate", "bg"]
+        "spawn", ["spawn", "w", "--monitor", "happy", "--substrate", "thread"]
     )
     assert rr._is_monitor_bearing_spawn("spawn", ["spawn", "--monitor=happy"])
     assert not rr._is_monitor_bearing_spawn(
@@ -1482,7 +1482,7 @@ def test_is_resume_bearing_spawn_predicate() -> None:
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--resume", uuid])
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "--name", "w", f"--resume={uuid}"])
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "-r", "6501096a"])
-    assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--substrate", "bg"])
+    assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--substrate", "thread"])
     assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
     # A --resume flag on a non-spawn verb never matches (resume is its own verb).
     assert not rr._is_resume_bearing_spawn("ask", ["ask", "w", "--resume", uuid])
@@ -1607,7 +1607,7 @@ def test_exec_lane_scrubs_ambient_identity_before_rust_spawn(monkeypatch, tmp_pa
 
     result = CliRunner().invoke(
         app,
-        ["agents", "spawn", "--name", "worker", "--harness", "codex", "--substrate", "bg"],
+        ["agents", "spawn", "--name", "worker", "--harness", "codex", "--substrate", "thread"],
     )
     assert result.exit_code == 99
     assert seen["markers"] == {

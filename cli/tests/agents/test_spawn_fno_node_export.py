@@ -60,7 +60,7 @@ def spawned_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, An
     return seen
 
 
-@pytest.mark.parametrize("substrate", ["bg", "headless"])
+@pytest.mark.parametrize("substrate", ["thread", "headless"])
 def test_ac6_hp_node_driven_spawn_exports_fno_node(
     spawned_env: Dict[str, Any], substrate: str
 ) -> None:
@@ -96,7 +96,7 @@ def test_export_does_not_outlive_the_dispatch(spawned_env: Dict[str, Any]) -> No
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "/fix hi", "--harness", "claude",
-         "--substrate", "bg", "--node", "x-aaaa"],
+         "--substrate", "thread", "--node", "x-aaaa"],
     )
     assert result.exit_code == 0, result.output
     assert spawned_env["env"]["FNO_NODE"] == "x-aaaa"
@@ -113,7 +113,7 @@ def test_ac6_hp_nodeless_spawn_exports_no_key(spawned_env: Dict[str, Any]) -> No
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread"],
     )
     assert result.exit_code == 0, result.output
     assert "FNO_NODE" not in spawned_env["env"]
@@ -145,7 +145,7 @@ def test_provenance_keys_are_set_or_cleared_as_a_group(
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "/fix hi", "--harness", "claude",
-         "--substrate", "bg", "--node", "x-aaaa"],
+         "--substrate", "thread", "--node", "x-aaaa"],
     )
     assert result.exit_code == 0, result.output
     assert spawned_env["env"]["FNO_NODE"] == "x-aaaa"
@@ -172,7 +172,7 @@ def test_spawn_exports_the_roster_name_as_worker_name(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread"],
     )
     assert result.exit_code == 0, result.output
     assert spawned_env["env"]["FNO_WORKER_NAME"] == "w1"
@@ -188,7 +188,7 @@ def test_spawn_overwrites_an_inherited_worker_name(
     monkeypatch.setenv("FNO_WORKER_NAME", "parent-otter")
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w2", "hi", "--harness", "claude", "--substrate", "bg"],
+        ["spawn", "--name", "w2", "hi", "--harness", "claude", "--substrate", "thread"],
     )
     assert result.exit_code == 0, result.output
     assert spawned_env["env"]["FNO_WORKER_NAME"] == "w2"

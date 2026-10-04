@@ -142,7 +142,7 @@ def test_spawn_resume_exits_non_zero_when_the_fork_never_comes_up(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", SOURCE_UUID,
-         "--substrate", "bg", "hi"],
+         "--substrate", "thread", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 1, result.output

@@ -66,9 +66,7 @@ def test_wait_exits_at_once_on_an_unrelated_reason(monkeypatch):
     result = _spawn("spawn", "-H", "claude", "--substrate", "thread", "--wait", "5m", "hi")
     assert result.exit_code == EXIT_LOAD_REFUSED
     assert len(calls) == 1, "a policy refusal is not waitable; retrying it is a hang"
-    # The receipt rides stdout only under --json (a refusal prints once).
-    result = _spawn("spawn", "-H", "claude", "--substrate", "thread", "--wait", "5m", "--json", "hi")
-    assert '"king_share"' in result.output, "the receipt lands as JSON under --json"
+    assert '"king_share"' not in result.output, "a refusal prints once; the receipt rides the native route only"
 
 
 def test_wait_with_no_wait_refuses_usage(monkeypatch):

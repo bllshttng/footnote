@@ -106,7 +106,7 @@ def test_spawn_records_parent_edge_claude(workdir_claude, captured_emits, monkey
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-parent-edge", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-parent-edge", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -156,7 +156,7 @@ def test_spawn_parent_edge_codex_harness(workdir_claude, captured_emits, monkeyp
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-codex-edge", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-codex-edge", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -194,7 +194,7 @@ def test_spawn_parent_edge_gemini_harness(workdir_claude, captured_emits, monkey
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-gemini-edge", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-gemini-edge", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -236,7 +236,7 @@ def test_spawn_parent_edge_no_env_vars(workdir_claude, captured_emits, monkeypat
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-no-env", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-no-env", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -279,7 +279,7 @@ def test_spawn_parent_edge_codex_thread_wins_within_family(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-priority", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-priority", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -314,7 +314,7 @@ def test_spawn_parent_edge_mixed_markers_attribute_nothing(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-mixed", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-mixed", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -345,7 +345,7 @@ def test_spawn_parent_edge_same_family_disagreement_attributes_nothing(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-disagree", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-disagree", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -379,7 +379,7 @@ def test_spawn_emits_exactly_one_agent_spawned(workdir_claude, captured_emits, m
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-once-emit", "-H", "claude", "task", "--substrate", "bg"],
+        ["spawn", "--name", "test-once-emit", "-H", "claude", "task", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -412,7 +412,7 @@ def test_spawn_records_trigger_cause_when_dispatcher_sets_it(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-spawn-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-spawn-trigger", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -438,7 +438,7 @@ def test_spawn_trigger_absent_for_a_direct_human_spawn(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-no-spawn-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-no-spawn-trigger", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -484,7 +484,7 @@ def test_machine_dispatch_env_records_no_parent_and_names_the_cause(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-dispatch-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-dispatch-trigger", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
@@ -514,7 +514,7 @@ def test_session_parent_without_trigger_keeps_edge_and_no_cause(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-parent-no-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-parent-no-trigger", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
@@ -710,7 +710,7 @@ def test_spawn_with_no_requester_carries_lineage_reason_in_the_event(
     runner = CliRunner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "test-lineage-reason", "-H", "claude", "do something", "--substrate", "bg"],
+        ["spawn", "--name", "test-lineage-reason", "-H", "claude", "do something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 
@@ -822,7 +822,7 @@ def test_the_launch_edge_stamp_is_wired_into_the_spawn(workdir_claude, monkeypat
     result = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "--name", "test-launch-wired", "-H", "claude", "--node", "x-1234",
-         "/fix something", "--substrate", "bg"],
+         "/fix something", "--substrate", "thread"],
         catch_exceptions=False,
     )
 

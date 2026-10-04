@@ -553,9 +553,8 @@ def normalize_spawn_args(
             toks[i] = "--resume"
             toks[value_at] = resolved
         # `--resume` is a thread-lane revival: default the substrate when none
-        # was pinned. The implied choice prints nothing - the lane is named in
-        # the spawn receipt. The flag pair splices BEFORE any bare `--` fence:
-        # past it, click reads it as passthrough positionals.
+        # was pinned; the implied choice prints nothing - the lane is named in
+        # the receipt. The splice lands BEFORE any `--` fence, never past it.
         if _has_explicit_substrate(toks) is None:
             cut = _fence if _fence is not None else len(toks)
             toks = toks[:cut] + ["--substrate", "thread"] + toks[cut:]
@@ -917,7 +916,6 @@ def compose_spawn_argv(
         except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
             pass
 
-    # Pre-fence --verbose only: past the fence it is the provider's own flag.
     fence = next((i for i, t in enumerate(out) if t in ("--", "--argv")), len(out))
     verbose = "--verbose" in out[1:fence]
     payload = {

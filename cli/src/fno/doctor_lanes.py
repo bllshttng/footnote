@@ -349,8 +349,7 @@ def _census(
     together. The gap rides as its own field for the same reason.
     Full rule: docs/architecture/resource-meter.md.
     """
-    # The ONE gate's probe answer: the share the gate refuses on (None when
-    # unreadable) plus the advisory notes the spawn path no longer prints.
+    # The ONE gate's probe answer: the share, plus the advisory notes.
     try:
         from fno.agents.spawn_gate import probe_capacity
 
@@ -492,8 +491,7 @@ def _census_lines(census: dict) -> list[str]:
         )
     if census.get("roster_error"):
         lines.append(f"  roster: {n['roster_error']} - the counts above are unread")
-    for note in census.get("gate_notes") or []:
-        lines.append(f"  {note}")
+    lines.extend(f"  {note}" for note in census.get("gate_notes") or [])
     if census.get("attribution_gap"):
         lines.append(
             f"  attribution gap: {n['attribution_gap']} - the fleet CPU share is "

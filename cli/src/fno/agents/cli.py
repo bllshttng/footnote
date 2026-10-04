@@ -1755,7 +1755,7 @@ def cmd_spawn(
             print(
                 "--crown needs a session that outlives the grant; headless is a "
                 "one-shot that exits after one answer, so its crown would be "
-                "orphaned at birth. Use --substrate pane or --substrate bg.",
+                "orphaned at birth. Use --substrate pane or --substrate thread.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -2337,8 +2337,6 @@ def cmd_spawn(
             now = time.monotonic()
             if wait_deadline is None or reason not in waitable_reasons or now >= wait_deadline:
                 _release_dispatch_claims(node_reservation, node_claim)
-                if bool(ctx.meta.get("fno_spawn_json")) and exc.receipt is not None:
-                    print(json.dumps(exc.receipt))
                 raise
             if last_wait_note == 0.0 or now - last_wait_note >= 60.0:
                 sys.stderr.write(

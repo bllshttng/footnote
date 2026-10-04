@@ -1341,11 +1341,7 @@ def resolve_dispatch(
         decision.append(f"substrate=default({chosen_substrate})")
 
     if chosen_substrate == "bg":
-        # Retired outright, like the spawn front doors: refuse with the
-        # redirect instead of silently mapping, so a stale config is named.
-        raise DispatchResolveError(
-            "substrate 'bg' was retired; set substrate = \"thread\""
-        )
+        raise DispatchResolveError("substrate 'bg' was retired; set substrate = \"thread\"")
     if chosen_substrate not in _VALID_SUBSTRATES:
         raise DispatchResolveError(
             f"unknown substrate {chosen_substrate!r}; "

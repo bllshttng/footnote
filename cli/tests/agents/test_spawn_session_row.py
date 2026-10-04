@@ -159,7 +159,7 @@ def test_spawn_with_node_and_review_verb_is_refused(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "thread",
             "--effort", "xhigh",
             "--node", NODE, "/code-review this diff",
         ],
@@ -189,7 +189,7 @@ def test_spawn_review_label_or_seed_is_refused(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "review-probe", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "review-probe", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "--session-phase", phase, seed,
         ],
         catch_exceptions=False,
@@ -213,7 +213,7 @@ def test_spawn_with_prose_and_node_composes_a_labeled_seed(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "review this diff",
         ],
         catch_exceptions=False,
@@ -236,7 +236,7 @@ def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> 
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "row-retry", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "row-retry", "-H", "claude", "--substrate", "thread",
          "--node", NODE,
          f"/fno:think {NODE} please"],
         catch_exceptions=False,
@@ -265,7 +265,7 @@ def test_spawn_without_uuid_parks_the_row(workdir_claude) -> None:
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "nouuid-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "nouuid-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:think this diff",
         ],
         catch_exceptions=False,
@@ -301,7 +301,7 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "prose-worker", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "prose-worker", "-H", "claude", "--substrate", "thread",
          f"look at {NODE} and report"],
         catch_exceptions=False,
     )
@@ -318,7 +318,7 @@ def test_spawn_prompt_two_ids_cannot_bypass_review_session(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "thread",
          f"/review {NODE} then x-4ab2"],
         catch_exceptions=False,
     )
@@ -337,7 +337,7 @@ def test_spawn_target_family_stamps_do(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume",
         ],
         catch_exceptions=False,
@@ -363,7 +363,7 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "triage-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "triage-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:triage deep",
         ],
         catch_exceptions=False,
@@ -402,7 +402,7 @@ def test_spawn_bare_blueprint_spelling_stamps_blueprint(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "bp-bare-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "bp-bare-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/blueprint x-4ab1",
         ],
         catch_exceptions=False,
@@ -424,7 +424,7 @@ def test_spawn_explicit_phase_rescues_unmapped_verb(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "triage-labeled", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "triage-labeled", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "--session-phase", "think", "/fno:triage deep",
         ],
         catch_exceptions=False,
@@ -443,7 +443,7 @@ def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "think-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "think-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:think deep",
         ],
         catch_exceptions=False,
@@ -464,7 +464,7 @@ def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid, 
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "bp-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "bp-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:blueprint x-5baf",
         ],
         catch_exceptions=False,
@@ -487,7 +487,7 @@ def test_spawn_codex_blueprint_spelling_stamps_blueprint(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "bp-codex-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "bp-codex-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "$fno:blueprint the plan doc",
         ],
         catch_exceptions=False,
@@ -506,7 +506,7 @@ def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "adhoc-worker", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "adhoc-worker", "-H", "claude", "--substrate", "thread",
          "just a prose prompt"],
         catch_exceptions=False,
     )
@@ -525,7 +525,7 @@ def test_spawn_bad_session_phase_refuses_before_spawn(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "badphase-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "badphase-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "--session-phase", "verif", "review this",
         ],
     )
@@ -663,7 +663,7 @@ def test_spawn_do_row_records_refusal_without_config(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume",
         ],
         catch_exceptions=False,
@@ -696,7 +696,7 @@ def test_spawn_do_row_records_config_grant(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume",
         ],
         catch_exceptions=False,
@@ -728,7 +728,7 @@ def test_spawn_no_merge_flag_outranks_config_grant(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume --no-merge",
         ],
         catch_exceptions=False,
@@ -746,7 +746,7 @@ def test_spawn_think_row_carries_no_grant(workdir_claude, resolvable_uuid) -> No
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:think this diff",
         ],
         catch_exceptions=False,

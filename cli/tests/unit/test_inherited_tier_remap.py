@@ -46,7 +46,7 @@ ZAI_ENV = {
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
 }
 
-BASE = ["spawn", "--name", "w", "--substrate", "bg", "hi"]
+BASE = ["spawn", "--name", "w", "--substrate", "thread", "hi"]
 
 
 def test_unrouted_tier_alias_under_a_remap_is_caught():
