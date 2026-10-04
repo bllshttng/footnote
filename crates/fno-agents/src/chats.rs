@@ -1051,8 +1051,11 @@ fn render_message(line: &Value) -> String {
         .and_then(Value::as_str);
     // The read/show surface renders the same body the Messages tab does:
     // legacy framed rows are cleaned, and a subjectless whole first sentence
-    // is not printed twice under the header's echo of it.
-    let body = crate::mail_header::delivered_body(subject, &crate::mail_header::display_body(raw));
+    // is not printed twice under the header's echo of it. The header's third
+    // field reads the pre-strip body, exactly as the envelope render does.
+    let cleaned = crate::mail_header::display_body(raw);
+    let third = crate::mail_header::header_subject(subject, &cleaned);
+    let body = crate::mail_header::delivered_body(subject, &cleaned);
     format!(
         "{}\n{}",
         crate::mail_header::render_header(
@@ -1061,7 +1064,7 @@ fn render_message(line: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             line.get("id").and_then(Value::as_str).unwrap_or(""),
-            &crate::mail_header::header_subject(subject, &body),
+            &third,
         ),
         body,
     )
