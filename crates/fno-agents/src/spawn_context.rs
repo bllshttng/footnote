@@ -1131,6 +1131,33 @@ fn ambient_cwd() -> String {
 /// `Session` origin with the proven parent and a `Session` owner; an
 /// unproven caller sends no stamp and the daemon keeps today's ambient
 /// capture until the door enforces (schema v33 rollout).
+/// The ambient parent proof: the spawning session's identity resolved from
+/// its own markers and cwd. `None` when unprovable, never a laundered guess.
+fn ambient_parent_proof() -> Option<crate::spawn_contract::SessionRef> {
+    let get = |k: &str| std::env::var(k).ok();
+    let home = crate::paths::AgentsHome::from_env();
+    let owned = resolve_self_identity(&get, None, None, &home);
+    let session_id = owned.session_id?;
+    let harness = owned.harness?;
+    let cwd = std::env::var("PWD")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
+    if cwd.is_empty() {
+        return None;
+    }
+    Some(crate::spawn_contract::SessionRef {
+        harness: harness.to_string(),
+        session_id,
+        cwd,
+    })
+}
+
 pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Result<(), String> {
     // Explicit dispatch context outranks ambient capture: a daemon
     // producer (the mission drain) exports FNO_SPAWN_ORIGIN +
@@ -1156,33 +1183,13 @@ pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Resul
             // Owner-only: the origin is the door's ambient proof of who
             // caused the spawn. Unprovable identity keeps today's shape
             // (no stamp; the mint answers), never a half record.
-            let get = |k: &str| std::env::var(k).ok();
-            let home = crate::paths::AgentsHome::from_env();
-            let owned = resolve_self_identity(&get, None, None, &home);
-            let (Some(session_id), Some(harness)) = (owned.session_id, owned.harness) else {
+            let Some(parent) = ambient_parent_proof() else {
                 return Ok(());
             };
-            let cwd = std::env::var("PWD")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                });
-            if cwd.is_empty() {
-                return Ok(());
-            }
             let owner: crate::spawn_contract::SpawnOwner =
                 serde_json::from_str(&owner_raw).map_err(|e| {
                     format!("FNO_SPAWN_OWNER is malformed ({e}); the producer carrier must speak the door's vocabulary")
                 })?;
-            let parent = crate::spawn_contract::SessionRef {
-                harness: harness.to_string(),
-                session_id,
-                cwd,
-            };
             let request = crate::spawn_contract::SpawnRequest::new(
                 crate::spawn_contract::SpawnOrigin::Session {
                     parent: parent.clone(),
@@ -1228,28 +1235,8 @@ pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Resul
         params.insert("owner".into(), owner_value);
         return Ok(());
     }
-    let get = |k: &str| std::env::var(k).ok();
-    let home = crate::paths::AgentsHome::from_env();
-    let owned = resolve_self_identity(&get, None, None, &home);
-    let (Some(session_id), Some(harness)) = (owned.session_id, owned.harness) else {
+    let Some(parent) = ambient_parent_proof() else {
         return Ok(());
-    };
-    let cwd = std::env::var("PWD")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        });
-    if cwd.is_empty() {
-        return Ok(());
-    }
-    let parent = crate::spawn_contract::SessionRef {
-        harness,
-        session_id,
-        cwd,
     };
     params.insert(
         "origin".into(),

@@ -917,8 +917,7 @@ def _spawn_worker(
         is_unsafe_short_address,
     )
 
-    # The node's effort pin rides the typed-flag path: the door validates
-    # the effort surface, and the walk's node-pin rung names it.
+    # The node's effort pin rides the typed-flag path; the door validates the surface.
     effort_pin = (node.get("effort") or "").strip() if isinstance(node, dict) else ""
     effort_argv = ("--effort", effort_pin) if effort_pin else ()
     cmd = [
