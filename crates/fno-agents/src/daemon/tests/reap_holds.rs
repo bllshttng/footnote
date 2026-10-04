@@ -1236,10 +1236,14 @@ fn open_candidate_graph() -> GraphRead {
     g
 }
 
-/// The read gate: a candidate inside the grace window is kept without the
-/// read firing at all.
+/// The read gate and the answer fold, one fixture: a candidate inside the
+/// grace window is kept without the read firing at all, and once the read
+/// fires an open answer holds, merged or closed settles, both a failed read
+/// and no reader hold under unread - never a retirement on an unread answer.
+/// The attribution gate is unchanged: a session that never drove the node is
+/// no candidate and pays no read.
 #[test]
-fn open_pr_verdict_asks_only_a_quiet_candidate() {
+fn open_pr_verdict_asks_only_a_quiet_candidate_and_folds_the_answer() {
     let g = open_candidate_graph();
     let mut calls = 0u32;
     {
@@ -1263,15 +1267,6 @@ fn open_pr_verdict_asks_only_a_quiet_candidate() {
     let quiet = gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut reader2));
     assert!(matches!(quiet, gc_sweep::OpenPrVerdict::Holds { .. }));
     assert_eq!(calls2, 1);
-}
-
-/// The three answers once the read fires: open holds, merged or closed
-/// settles, and both a failed read and no reader hold under unread - never
-/// a retirement on an unread answer. The attribution gate is unchanged: a
-/// session that never drove the node is no candidate and pays no read.
-#[test]
-fn open_pr_verdict_settles_on_a_closed_answer() {
-    let g = open_candidate_graph();
     let mut closed = |_pr: u64, _cwd: &str| -> Option<bool> { Some(false) };
     assert!(matches!(
         gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut closed)),
