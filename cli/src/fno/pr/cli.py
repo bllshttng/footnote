@@ -720,8 +720,11 @@ def hold_check(
     from fno.pr import _hold, _review_hold
 
     worktree = _review_hold.resolve_pr_worktree(pr_number, repo or os.getcwd())
-    # "" = no local worktree: no plan is checked out to probe, so no hold.
-    reason = _hold.merge_hold_reason(pr_number, worktree) if worktree else None
+    # "" = no local worktree on the PR branch. The hold reader is
+    # graph-resident and runs from the caller's checkout (its cwd only
+    # resolves the canonical root), so an empty path hands it that checkout -
+    # a graph-bound hold still gates a PR that is not checked out here.
+    reason = _hold.merge_hold_reason(pr_number, worktree or repo or os.getcwd())
     if reason:
         typer.echo(reason, err=True)
         raise typer.Exit(code=3)

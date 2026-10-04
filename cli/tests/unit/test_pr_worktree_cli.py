@@ -52,8 +52,10 @@ def test_pr_commands_from_canonical_use_the_pr_worktree(
     assert handler_calls == [feature]
 
     # No local worktree on the PR branch: the command runs from the caller's
-    # checkout instead of dying in a chdir traceback.
+    # checkout instead of dying in a chdir traceback. The first invoke left
+    # the process inside the feature worktree, so go back first.
     monkeypatch.setattr("fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: "")
+    monkeypatch.chdir(canonical)
     handler_calls.clear()
     monkeypatch.setattr(sys, "argv", ["fno", "do", "pr", command, *args])
 
@@ -93,8 +95,8 @@ def test_hold_check_repo_option_from_canonical_uses_pr_worktree(
     assert resolver_calls == [(42, str(canonical))]
     assert hold_calls == [(42, feature)]
 
-    # No local worktree on the PR branch: no plan is checked out to probe, so
-    # the hold reader is never asked and the verb reports no hold.
+    # No local worktree on the PR branch: the hold reader is graph-resident,
+    # so it is still asked - from the caller's checkout, never skipped.
     monkeypatch.setattr("fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: "")
     hold_calls.clear()
     monkeypatch.setattr(
@@ -106,5 +108,5 @@ def test_hold_check_repo_option_from_canonical_uses_pr_worktree(
     )
 
     assert result.exit_code == 0, result.exception
-    assert hold_calls == []
+    assert hold_calls == [(42, canonical)]
     assert "no plan dispatch hold" in result.output
