@@ -16,6 +16,7 @@ from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
+from fno.rust_binary import VerbUnavailable
 
 requires_rust = pytest.mark.dev_build
 
@@ -93,16 +94,9 @@ def test_pr_worktree_resolution_from_canonical_subdir_uses_the_pr_branch(tmp_pat
     assert resolved == str(feature)
     assert seen == [{"cwd": str(nested), "pr": 42}]
 
-
-def test_no_local_worktree_answers_empty_and_other_failures_still_raise(monkeypatch):
-    """Exit 3 "no local worktree" is an answer (""), never a blocker.
-
-    A PR pushed with no local worktree carries no worktree hold; the exit-3
-    refusal used to propagate as a traceback and block status and merge reads
-    on a PR that was simply not checked out here.
-    """
-    from fno.rust_binary import VerbUnavailable
-
+    # The verb's exit-3 "no local worktree" answer is an answer (""), never a
+    # blocker: a PR pushed with no local worktree carries no worktree hold,
+    # and the exit-3 refusal used to propagate as a traceback instead.
     def no_worktree(verb, payload, unavailable=None):
         exc = VerbUnavailable(
             "fno-agents pr-worktree exited 3: pr-worktree: "
@@ -112,14 +106,20 @@ def test_no_local_worktree_answers_empty_and_other_failures_still_raise(monkeypa
         raise exc
 
     monkeypatch.setattr("fno.rust_binary.verb_call", no_worktree)
-    assert _review_hold.resolve_pr_worktree(42, "/repo") == ""
+    assert _review_hold.resolve_pr_worktree(42, str(nested)) == ""
 
-    def dead(verb, payload, unavailable=None):
-        raise VerbUnavailable("fno-agents pr-worktree failed: gh api exited 1")
+    # Exit 3 WITHOUT that answer (e.g. the gh read failed) still raises: a
+    # dead instrument blocks, only an empty enumeration is an answer.
+    def gh_failed(verb, payload, unavailable=None):
+        exc = VerbUnavailable(
+            "fno-agents pr-worktree exited 3: pr-worktree: gh api pulls/42 failed"
+        )
+        exc.returncode = 3
+        raise exc
 
-    monkeypatch.setattr("fno.rust_binary.verb_call", dead)
+    monkeypatch.setattr("fno.rust_binary.verb_call", gh_failed)
     with pytest.raises(VerbUnavailable):
-        _review_hold.resolve_pr_worktree(42, "/repo")
+        _review_hold.resolve_pr_worktree(42, str(nested))
 
 
 def test_free_hold_and_no_worktree_is_clear(tmp_path: Path):

@@ -51,6 +51,17 @@ def test_pr_commands_from_canonical_use_the_pr_worktree(
     assert resolver_calls == [(42, str(canonical))]
     assert handler_calls == [feature]
 
+    # No local worktree on the PR branch: the command runs from the caller's
+    # checkout instead of dying in a chdir traceback.
+    monkeypatch.setattr("fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: "")
+    handler_calls.clear()
+    monkeypatch.setattr(sys, "argv", ["fno", "do", "pr", command, *args])
+
+    result = CliRunner().invoke(pr_app, [command, *args])
+
+    assert result.exit_code == 0, result.exception
+    assert handler_calls == [canonical]
+
 
 def test_hold_check_repo_option_from_canonical_uses_pr_worktree(
     monkeypatch, tmp_path
@@ -82,41 +93,10 @@ def test_hold_check_repo_option_from_canonical_uses_pr_worktree(
     assert resolver_calls == [(42, str(canonical))]
     assert hold_calls == [(42, feature)]
 
-
-def test_pr_commands_with_no_local_worktree_stay_in_the_caller_checkout(
-    monkeypatch, tmp_path
-):
-    canonical = tmp_path / "canonical"
-    canonical.mkdir()
-    monkeypatch.chdir(canonical)
-    handler_calls = []
-    monkeypatch.setattr(
-        "fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: ""
-    )
-    monkeypatch.setattr(
-        "fno.pr.cli._forward_to_binary",
-        lambda *a, **k: handler_calls.append(Path.cwd()) or 0,
-    )
-    monkeypatch.setattr(sys, "argv", ["fno", "do", "pr", "status", "42"])
-
-    result = CliRunner().invoke(pr_app, ["status", "42"])
-
-    assert result.exit_code == 0, result.exception
-    assert handler_calls == [canonical]
-
-
-def test_hold_check_with_no_local_worktree_reads_no_hold(monkeypatch, tmp_path):
-    canonical = tmp_path / "canonical"
-    canonical.mkdir()
-    monkeypatch.chdir(canonical)
-    hold_calls = []
-    monkeypatch.setattr(
-        "fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: ""
-    )
-    monkeypatch.setattr(
-        "fno.pr._hold.merge_hold_reason",
-        lambda pr, repo: hold_calls.append((pr, repo)) or "should never be asked",
-    )
+    # No local worktree on the PR branch: no plan is checked out to probe, so
+    # the hold reader is never asked and the verb reports no hold.
+    monkeypatch.setattr("fno.pr._review_hold.resolve_pr_worktree", lambda pr, repo: "")
+    hold_calls.clear()
     monkeypatch.setattr(
         sys, "argv", ["fno", "do", "pr", "hold-check", "42", "--repo", str(canonical)]
     )
