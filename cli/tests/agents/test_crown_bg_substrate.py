@@ -323,12 +323,18 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     session_uuid = str(_uuid.uuid4())
     seen = {}
 
+    real_run = _subprocess.run  # captured before the patch replaces the attribute
+
     def fake_run(*args, **kwargs):
         # The Rust lane's registry write, simulated: the row exists BEFORE the
         # Python settlement runs, with all three crown fields unset. The fake
-        # takes any call shape: the emit path also runs subprocess.run under
-        # this patch when a native binary is present (it passes input=).
+        # answers ONLY the lane-spawn argv: this patch rides the shared
+        # subprocess module, and every other caller (the event-store writer
+        # among them) must reach the real run or a retry loop spins.
         argv = args[0]
+        tokens = [a for a in argv if isinstance(a, str)] if argv else []
+        if "spawn" not in tokens or "--substrate" not in tokens:
+            return real_run(*args, **kwargs)
         if "--" in argv:
             seen["seed"] = argv[argv.index("--") + 1]
         update_registry(
