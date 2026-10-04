@@ -22,6 +22,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -212,11 +213,46 @@ impl BusLock {
     }
 }
 
-/// Append one line under the sidecar flock. Rotation stays with the Python
-/// appender. A bare `fno` sender refuses before the write, so a refused send
-/// leaves no bus row.
-// ponytail: Rust never rotates; the next Python append rotates an over-size
-// live segment.
+/// The bus log's size cap and segment count, the Python appender's env
+/// contract (`FNO_BUS_MAX_BYTES` / `FNO_BUS_RETAIN`).
+fn bus_max_bytes() -> u64 {
+    std::env::var("FNO_BUS_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5 * 1024 * 1024)
+}
+
+fn bus_retain() -> usize {
+    std::env::var("FNO_BUS_RETAIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(5)
+}
+
+/// Shift the rotated segments up one and start a fresh live log, the
+/// Python appender's `_rotate_locked` port. Every step is best-effort: a
+/// rotation failure must not lose the message, so the write follows anyway.
+fn rotate_bus_locked(live: &Path) {
+    let name = live
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let segment = |n: usize| live.with_file_name(format!("{name}.{n}"));
+    let retain = bus_retain();
+    let _ = std::fs::remove_file(segment(retain));
+    for n in (1..retain).rev() {
+        let _ = std::fs::rename(segment(n), segment(n + 1));
+    }
+    let _ = std::fs::rename(live, segment(1));
+}
+
+/// Append one line under the sidecar flock, with the Python appender's
+/// rotation and owner-only mode (the bus-append port, d-697ea9c4). A bare
+/// `fno` sender refuses before the write, so a refused send leaves no bus
+/// row.
 pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     if let Some(from) = obj.get("from").and_then(Value::as_str) {
         crate::system_sender::guard_sender(from)?;
@@ -236,9 +272,22 @@ pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
+    // A live log at or over the cap rotates before the write; a stat
+    // failure must not lose the message.
+    if let Ok(meta) = std::fs::metadata(live) {
+        if meta.len() >= bus_max_bytes() {
+            rotate_bus_locked(live);
+        }
+    }
+    // The log holds message bodies: owner-only on creation and on an
+    // existing segment, best-effort, like the Python appender's chmod.
+    if live.exists() {
+        let _ = std::fs::set_permissions(live, std::fs::Permissions::from_mode(0o600));
+    }
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(live)
         .map_err(|e| format!("bus open {}: {e}", live.display()))?;
     f.write_all(line.as_bytes())
@@ -777,17 +826,23 @@ fn standing_announcements(
 
 /// One announcement block: the delivered-mail header line, then the body.
 /// The sender reads through the system-sender table (`fleet-incident` ->
-/// `fno/fleet-incident`); the header carries the sender and the id only, a
-/// subject stays body content.
+/// `fno/fleet-incident`); the third field is the row's subject when it is
+/// header-safe (no backtick or separator could forge a header field), else
+/// the body summary.
 fn render_block(m: &Value) -> String {
     let id = row_str(m, "id").unwrap_or("");
     let from = row_str(m, "from").unwrap_or("unknown");
+    let meta = m.get("meta").cloned().unwrap_or(Value::Null);
+    let subject = meta.get("subject").and_then(Value::as_str).unwrap_or("");
     let body = row_str(m, "body").unwrap_or("");
     let sender = crate::system_sender::canonical(from);
+    let safe = !subject.is_empty() && !subject.contains('`') && !subject.contains(" · ");
+    let third = crate::mail_header::header_subject(safe.then_some(subject), body);
     let header = crate::mail_header::render_header(
         crate::mail_header::HeaderForm::Mention,
         sender,
         id,
+        &third,
     );
     format!("{header}\n{body}")
 }

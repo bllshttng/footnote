@@ -38,37 +38,12 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
-# Size-triggered rotation. A segment is rolled once it reaches this many bytes
-# (checked before each append, under the lock). Env overrides exist for tests
-# and operators; a malformed override degrades to the default rather than raising.
-_DEFAULT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-_DEFAULT_RETAIN = 5  # rotated segments kept; cursors must resolve into these
+# Size-triggered rotation now lives in the Rust bus-append door
+# (fno-agents announce::append_line), which reads the same
+# FNO_BUS_MAX_BYTES / FNO_BUS_RETAIN envs. A malformed override degrades
+# to the default rather than raising.
 _LOCK_TIMEOUT_SECONDS = 5.0
 _LOCK_POLL_SECONDS = 0.05
-
-
-def _max_bytes() -> int:
-    raw = os.environ.get("FNO_BUS_MAX_BYTES")
-    if raw:
-        try:
-            v = int(raw)
-            if v > 0:
-                return v
-        except ValueError:
-            pass
-    return _DEFAULT_MAX_BYTES
-
-
-def _retain() -> int:
-    raw = os.environ.get("FNO_BUS_RETAIN")
-    if raw:
-        try:
-            v = int(raw)
-            if v >= 1:
-                return v
-        except ValueError:
-            pass
-    return _DEFAULT_RETAIN
 
 
 # ---------------------------------------------------------------------------
@@ -370,84 +345,17 @@ class _Flock:
                 self._fd = None
 
 
-def _rotate_locked(live: Path) -> None:
-    """Shift segments: drop the oldest beyond retention, then live -> .1.
-
-    Caller MUST hold the sidecar flock. No-op if the live segment is absent.
-    """
-    if not live.exists():
-        return
-    retain = _retain()
-    # Drop the oldest segment that would fall outside retention.
-    oldest = Path(f"{live}.{retain}")
-    if oldest.exists():
-        try:
-            oldest.unlink()
-        except OSError:
-            pass
-    # Shift .{n} -> .{n+1} from high to low so we never clobber.
-    for n in range(retain - 1, 0, -1):
-        src = Path(f"{live}.{n}")
-        if src.exists():
-            os.replace(str(src), f"{live}.{n + 1}")
-    os.replace(str(live), f"{live}.1")
-
-
 def append(env: Envelope) -> None:
-    """Append one envelope to the log under the sidecar flock.
+    """Append one envelope through the Rust bus-append door.
 
-    Rotation is checked (and performed) under the same lock before the write, so
-    concurrent APPENDERS never race on the size check or interleave a line. The
-    lock serializes writers only; lock-free readers may transiently miss the
-    just-renamed live->.1 segment during a rotation (the reader enumerates
-    segments and checks ``live.exists()`` without the lock). That window is
-    covered by the cursor fallback: a cursor whose message-id is not found in the
-    retained scan rescans all segments rather than declaring loss, so a message
-    is at most delayed by one drain cycle, never dropped.
+    The door owns the sidecar lock, the size rotation and the 0o600 mode,
+    and it records the chats row itself (the record seam and the receipt).
+    Lock-free readers may transiently miss the just-renamed live->.1
+    segment during a rotation; that window is covered by the cursor
+    fallback, so a message is at most delayed by one drain cycle, never
+    dropped. Python keeps the serializer and the one call (AC20-HP).
     """
-    live = bus_log_path()
-    line = to_json_line(env) + "\n"
-    data = line.encode("utf-8")
-    if env.kind in ("send", "announce") and not env.delivery:  # chats record kinds
-        chats_verb(["append"], json.loads(to_json_line(env)))  # record seam, fail closed
-    with _Flock(_lock_path()):
-        try:
-            if live.exists() and live.stat().st_size >= _max_bytes():
-                _rotate_locked(live)
-        except OSError:
-            # A stat failure must not lose the message; fall through to append.
-            pass
-        live.parent.mkdir(parents=True, exist_ok=True)
-        # 0o600: the log holds message bodies; on a single global bus the
-        # filesystem mode is the backstop behind the mediated read, so it is
-        # owner-only (Group 1 privacy hardening). umask may narrow
-        # this further but never widens it. O_CREAT's mode applies only on
-        # creation, so a segment created at 0o644 before this change would keep
-        # appending bodies group/other-readable; tighten an existing segment
-        # too. Best-effort: a chmod failure must never lose the message.
-        if live.exists():
-            try:
-                os.chmod(str(live), 0o600)
-            except OSError:
-                pass
-        fd = os.open(str(live), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-        try:
-            # os.write may short-write; loop so a partial write never leaves a
-            # truncated (corrupt) JSONL line. Under O_APPEND + the flock these
-            # writes stay contiguous.
-            written = 0
-            while written < len(data):
-                n = os.write(fd, data[written:])
-                if n == 0:
-                    raise OSError("bus log: os.write returned 0 bytes")
-                written += n
-        finally:
-            os.close(fd)
-    if env.delivery in (HOSTED_DELIVERY, TYPED_DELIVERY) or env.kind == LANDED_KIND:
-        try:
-            chats_verb(["append"], json.loads(to_json_line(env)))
-        except Exception as why:  # a receipt must never break an ack flow
-            print(f"bus log: chats record failed: {why}", file=sys.stderr)
+    chats_verb(["bus-append"], json.loads(to_json_line(env)))
 
 
 #: The tombstone kind. A withdrawal cannot delete a line (the log is

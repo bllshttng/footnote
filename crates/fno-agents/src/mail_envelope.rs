@@ -238,18 +238,29 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             validate_attr(name, value)?;
         }
     }
-    // The one delivered shape from here on: the header line, then the whole
-    // body. The sender is the fleet name, the id is required (the shape's
-    // join key), and both are guarded so neither can forge a second field.
+    // The one delivered shape from here on: the header line, then the body.
+    // The sender is the fleet name, the id is required (the shape's join
+    // key), and both are guarded so neither can forge a second field.
     let msg_id = attr(input, "id").ok_or("mail envelope: an id is required to render a header")?;
     let sender = header_sender(from_row, from_name, from);
     crate::system_sender::guard_sender(sender)?;
     validate_sender(sender)?;
     validate_attr("msg id", msg_id)?;
+    // The subject rides the payload; a backtick, a separator or a newline
+    // would forge a header field, so the render refuses one.
+    let subject = attr(input, "subject");
+    if let Some(s) = subject {
+        if s.contains('`') || s.contains(" · ") || s.contains('\n') {
+            return Err(
+                "mail envelope: subject must not hold a backtick, a separator or a newline"
+                    .to_string(),
+            );
+        }
+    }
     // The header form: an explicit payload `form` wins (tests, callers with
     // their own knowledge); otherwise the RECIPIENT harness's contract row
-    // rules (`mail_header_at` - the composer check's verdict as data),
-    // defaulting to the mention form.
+    // rules (`mail_header_at` - the composer check's payload's verdict as
+    // data), defaulting to the mention form.
     let form = if attr(input, "form").is_some() {
         form_of(input)
     } else {
@@ -261,9 +272,16 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             _ => crate::mail_header::HeaderForm::Mention,
         }
     };
-    let header = crate::mail_header::render_header(form, sender, msg_id);
+    let body_text = wrapping.as_deref().unwrap_or("");
+    let third = crate::mail_header::header_subject(subject, body_text);
+    let header = crate::mail_header::render_header(form, sender, msg_id, &third);
+    let delivered = if third == crate::mail_header::summary_of(body_text) {
+        crate::mail_header::without_first_sentence(body_text)
+    } else {
+        body_text.to_string()
+    };
     Ok(match wrapping {
-        Some(body) => format!("{header}\n{body}"),
+        Some(_) => format!("{header}\n{delivered}"),
         None => header,
     })
 }
@@ -400,9 +418,12 @@ mod tests {
             &path,
         )
         .unwrap();
-        assert_eq!(rendered, "`@folio \u{b7} msg-1`\nFix the gate. Then ship.");
-        // The header carries sender and id only; the body appears once
-        // (AC10-HP).
+        assert_eq!(
+            rendered,
+            "`@folio \u{b7} msg-1 \u{b7} Fix the gate.`\nThen ship."
+        );
+        // No subject: the third field is the body's first sentence, and the
+        // delivered body drops that sentence, so it shows once (AC10-HP).
         let body_once = render_at(
             &json!({
                 "mode":"wrap", "body":"Fix the gate. Details follow.",
@@ -413,7 +434,21 @@ mod tests {
         .unwrap();
         assert_eq!(
             body_once,
-            "`@folio \u{b7} fmail-0123456789ab`\nFix the gate. Details follow."
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\nDetails follow."
+        );
+        // A given subject rides the header and the body follows whole
+        // (AC11-HP).
+        let subject = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate. Details follow.",
+                "from":"folio-short", "id":"fmail-0123456789ab", "subject":"gate fix"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            subject,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} gate fix`\nFix the gate. Details follow."
         );
         let plain = render_at(
             &json!({
@@ -422,13 +457,16 @@ mod tests {
             &path,
         )
         .unwrap();
-        assert!(plain.starts_with("`folio \u{b7} msg-2`\nhello"), "{plain}");
+        assert!(
+            plain.starts_with("`folio \u{b7} msg-2 \u{b7} hello`\nhello"),
+            "{plain}"
+        );
         let header = render_at(
             &json!({"mode":"tag", "from":"quill-short", "id":"msg-3"}),
             &path,
         )
         .unwrap();
-        assert_eq!(header, "`@quill \u{b7} msg-3`");
+        assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
     }
 
     #[test]
@@ -508,6 +546,6 @@ mod tests {
             completed_while_locked,
             "envelope render waited for the registry lock"
         );
-        assert_eq!(rendered, "`@folio \u{b7} msg-9`\nhello");
+        assert_eq!(rendered, "`@folio \u{b7} msg-9 \u{b7} hello`\nhello");
     }
 }

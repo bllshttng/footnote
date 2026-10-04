@@ -62,16 +62,17 @@ def test_wrap_opens_with_the_delivered_header():
     # The one delivered shape: a backticked header line, then the whole body.
     assert (
         wrap_fno_mail("ship it", from_="7d1f8bdc", id="fmail-abc123def456")
-        == "`@7d1f8bdc · fmail-abc123def456`\nship it"
+        == "`@7d1f8bdc · fmail-abc123def456 · ship it`\nship it"
     )
     body = "line one\nline two"
     wrapped = wrap_fno_mail(body, from_="aaaa1111", id="fmail-abc123def456")
-    # The header carries the sender and the id; the body follows verbatim,
-    # nothing hidden and nothing repeated.
-    assert wrapped == "`@aaaa1111 · fmail-abc123def456`\nline one\nline two"
-    # An empty body still renders the header line alone.
+    # The summary is the body's first sentence, and the delivered body
+    # drops that sentence (it is the header's third field), so the text
+    # shows once. Header plus rest is still the whole message.
+    assert wrapped == "`@aaaa1111 · fmail-abc123def456 · line one`\nline two"
+    # An empty body renders the (empty) summary.
     assert wrap_fno_mail("", from_="aaaa1111", id="fmail-abc123def456") == (
-        "`@aaaa1111 · fmail-abc123def456`\n"
+        "`@aaaa1111 · fmail-abc123def456 · (empty)`\n"
     )
 
 
@@ -86,7 +87,7 @@ def test_an_id_is_required_and_tag_mode_returns_the_bare_header():
         fno_mail_open(from_="aaaa1111")
     # Tag mode (the relay probe form) renders the header line alone.
     assert fno_mail_open(from_="aaaa1111", id="fmail-abc123def456") == (
-        "`@aaaa1111 · fmail-abc123def456`"
+        "`@aaaa1111 · fmail-abc123def456 · (empty)`"
     )
 
 
@@ -117,12 +118,12 @@ def test_the_header_carries_the_registry_name_and_no_rank_attributes(
         to_session="reader-session",
         harness="claude",
     )
-    assert wrapped.startswith("`@folio · fmail-abc123def456`")
+    assert wrapped.startswith("`@folio · fmail-abc123def456 · hi`")
     for gone in ("from_rank", "from_name", "to_rank", "to_name"):
         assert gone not in wrapped
     # A handle that resolves to no live row keeps the raw from value.
     plain = envelope.wrap_fno_mail("hi", from_="stranger", id="fmail-abc123def456")
-    assert plain.startswith("`@stranger · fmail-abc123def456`")
+    assert plain.startswith("`@stranger · fmail-abc123def456 · hi`")
 
 
 def test_the_codex_row_names_the_sender(monkeypatch, tmp_path):
@@ -142,7 +143,7 @@ def test_the_codex_row_names_the_sender(monkeypatch, tmp_path):
         id="fmail-abc123def456",
         harness="codex",
     )
-    assert wrapped.startswith("`@quill · fmail-abc123def456`")
+    assert wrapped.startswith("`@quill · fmail-abc123def456 · hi`")
 
 
 def test_envelope_overhead_budget(monkeypatch, tmp_path):
@@ -166,7 +167,9 @@ def test_envelope_overhead_budget(monkeypatch, tmp_path):
         from_session=full_id,
         harness="claude",
     )
-    assert wrapped.startswith("`@a · fmail-fea270b82c41`\n")
+    assert wrapped.startswith(
+        "`@a · fmail-fea270b82c41 · ship the compact envelope`\n"
+    )
     assert len(wrapped) - len(body) <= 80
 
 

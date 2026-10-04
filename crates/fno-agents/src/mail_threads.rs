@@ -127,6 +127,8 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
     let mut participants: BTreeMap<String, Value> = BTreeMap::new();
     // Counterparty scope counts and latest row per ended participant (R3).
     let mut scope_votes: BTreeMap<String, BTreeMap<String, (usize, String)>> = BTreeMap::new();
+    // Each participant's most recent row ts (item 8's sort key).
+    let mut last_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut threads: Vec<Value> = Vec::new();
     let mut system: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut channels: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -180,6 +182,15 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             let reg_to = registry_lookup(registry, to);
             note(&mut participants, &from_key, reg_from, Some(from));
             note(&mut participants, &to_key, reg_to, None);
+            let ts = v.get("ts").and_then(Value::as_str).unwrap_or("");
+            for key in [&from_key, &to_key] {
+                match last_seen.get_mut(key) {
+                    Some(seen) if seen.as_str() >= ts => {}
+                    _ => {
+                        last_seen.insert(key.clone(), ts.to_string());
+                    }
+                }
+            }
             let system_row = crate::system_sender::is_system_sender(from);
             let raw_body = v.get("body").and_then(Value::as_str).unwrap_or("");
             let body = crate::mail_header::display_body(raw_body);
@@ -290,6 +301,11 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
         if let Some(scope) = scope {
             if let Some(obj) = p.as_object_mut() {
                 obj.insert("archive_scope".into(), json!(scope));
+            }
+        }
+        if let Some(ts) = last_seen.get(key) {
+            if let Some(obj) = p.as_object_mut() {
+                obj.insert("last_ts".into(), json!(ts));
             }
         }
     }

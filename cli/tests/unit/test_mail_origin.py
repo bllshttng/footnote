@@ -209,7 +209,7 @@ def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
     )
     assert envelope.wrap_fno_mail(
         "run the smoke", from_="a1b2c3d4", id="fmail-abc123def456"
-    ) == "`@a1b2c3d4 · fmail-abc123def456`\nrun the smoke"
+    ) == "`@a1b2c3d4 · fmail-abc123def456 · run the smoke`\nrun the smoke"
 
 
 def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
@@ -229,7 +229,7 @@ def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
     rendered = envelope.wrap_fno_mail(
         "run the smoke", from_="king", from_session="session-king", id="fmail-abc123def456"
     )
-    assert rendered.startswith("`@king · fmail-abc123def456`")
+    assert rendered.startswith("`@king · fmail-abc123def456 · run the smoke`")
     assert not any(line.startswith("-- ") for line in rendered.splitlines())
 
 
@@ -261,7 +261,7 @@ def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch)
         "hi", from_="folio-short", from_session="session-folio", harness="claude",
         id="fmail-abc123def456",
     )
-    assert rendered.startswith("`@folio · fmail-abc123def456`")
+    assert rendered.startswith("`@folio · fmail-abc123def456 · hi`")
 
 
 def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch):
@@ -279,7 +279,7 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
         id="fmail-abc123def456",
     )
 
-    assert rendered.startswith("`@session-king · fmail-abc123def456`")
+    assert rendered.startswith("`@session-king · fmail-abc123def456 · write the plan`")
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):
