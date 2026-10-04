@@ -173,15 +173,13 @@ fn fold(
                     if !v.is_string() {
                         return Err(fault(&rung, format!(".{k} must be a string; got {v}")));
                     }
-                    if k == "utc_hours" {
-                        let bad = |why: &str| fault(&rung, format!(".utc_hours {why}; got {v}"));
-                        match v.as_str().and_then(parse_utc_hours) {
-                            Some(_) => {}
-                            None if v.as_str().is_some() => {
-                                return Err(bad("must be H-H with 0 <= H <= 23 and start != end"))
-                            }
-                            None => return Err(bad("must be a string")),
-                        }
+                    if k == "utc_hours" && v.as_str().and_then(parse_utc_hours).is_none() {
+                        return Err(fault(
+                            &rung,
+                            format!(
+                                ".utc_hours must be H-H with 0 <= H <= 23 and start != end; got {v}"
+                            ),
+                        ));
                     }
                 }
                 let get = |k: &str| {
@@ -1739,6 +1737,8 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
                 )));
                 return none(chain);
             };
+            // utc_now_hour pins the clock for tests; the dispatch seam and
+            // the readout never set it, so production judges the real hour.
             let hour = payload
                 .get("utc_now_hour")
                 .and_then(Value::as_u64)
