@@ -10,6 +10,8 @@ The first two triggers do not reach a shared-vocabulary or a generated-artifact 
 
 This page answers four questions. Which cross-tree guards mark a real second implementation. What the procedure is for retiring one. Why most of these guards are not port candidates at all. When a port is justified without duplication.
 
+**The registry skew write.** Dual, disposition dual-logic. Under schema skew, `cli/src/fno/agents/registry.py::update_registry` delegates to `crates/fno-agents/src/registry_commit.rs` under the shared registry lock; the Rust door merges unknown row and top-level fields before atomic publish. Python retains its strict writer at or below its own schema until those writers port.
+
 ## The discriminator
 
 A parity guard exists because two things can drift. Two implementations do not follow from that.

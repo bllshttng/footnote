@@ -1,8 +1,9 @@
-"""Rust supervisor events are documented in events-schema.yaml.
+"""Rust events are documented in events-schema.yaml.
 
 Every kind in the Rust ``KNOWN_EVENT_KINDS`` const has a schema.yaml entry
-listing a daemon-side source, and the pre-existing sources and Python event
-types are still there (those two checks stay additive-only on purpose).
+listing its producer source. Supervisor events name ``daemon`` or ``subagent``;
+``version_skew`` is emitted by the standalone Rust spawn gate and names ``rust``.
+The pre-existing sources and Python event types stay additive-only.
 
 The kind list is parsed out of lib.rs, not restated here, so adding a kind on
 the Rust side cannot leave this file quietly asserting nothing about it.
@@ -46,6 +47,8 @@ EXISTING_EVENT_TYPES = [
     "wave_advanced",
     "mission_complete",
 ]
+
+RUST_CLIENT_EVENT_SOURCES = {"version_skew": "rust"}
 
 
 @pytest.fixture(scope="module")
@@ -144,14 +147,20 @@ def test_existing_event_types_preserved(schema: dict) -> None:
         assert name in documented, f"existing event type {name!r} was removed"
 
 
-def test_rust_events_have_daemon_source(schema: dict, rust_event_kinds: list[str]) -> None:
-    """Rust event entries must list 'daemon' (or 'subagent') as a source."""
+def test_rust_events_have_their_producer_source(schema: dict, rust_event_kinds: list[str]) -> None:
+    """Rust event entries name the daemon/subagent or standalone-client producer."""
     documented = {e["name"]: e for e in schema.get("event_types", [])}
     for kind in rust_event_kinds:
         entry = documented.get(kind)
         if entry is None:
             continue  # caught by test_rust_events_documented
         sources = entry.get("sources", [])
+        client_source = RUST_CLIENT_EVENT_SOURCES.get(kind)
+        allowed = (
+            ("daemon", "subagent", client_source)
+            if client_source is not None
+            else ("daemon", "subagent")
+        )
         assert any(
-            s in ("daemon", "subagent") for s in sources
-        ), f"Rust event {kind!r} sources {sources!r} must include daemon or subagent"
+            s in allowed for s in sources
+        ), f"Rust event {kind!r} sources {sources!r} must include one of {allowed!r}"
