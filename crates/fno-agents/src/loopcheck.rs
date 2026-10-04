@@ -937,9 +937,11 @@ pub(crate) fn decide_with_payload(
                 );
             }
             watching_codex_refusal = Some((EMIT_FAILED_REFUSAL, "emit_failed"));
-        } else if can_idle && routable != Ok(true) {
+        } else if can_idle && renewed && routable != Ok(true) {
             // A codex session that could idle except for the channel: the
-            // routability refusal, not the generic harness text.
+            // routability refusal, not the generic harness text. Only when
+            // the lease ALSO failed does the generic path keep the more
+            // actionable lease cause.
             watching_codex_refusal = Some((CODEX_UNROUTABLE_REFUSAL, "codex_unroutable"));
         }
         // Not idlable, or the lease declined: the refusal is composed after

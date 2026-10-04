@@ -1,4 +1,4 @@
-//! The codex daemon waker (x-184a, US6b+c): the fno-agents daemon is the
+//! The codex daemon waker (US6b+c of the loop-check idle design): the fno-agents daemon is the
 //! watcher for codex `<watching>` idles. loop-check's codex path registers
 //! the watch (the idle event IS the registration), and this arm polls the PR
 //! cheaply - the coalescing status cache, no model turns - and injects
@@ -165,6 +165,9 @@ pub(crate) fn run_pass_with(
         Ok(set) => Some(set),
         Err(_) => None,
     };
+    // One claim read per pass, the expiry arm's eligibility map: session ->
+    // its single live node claim (or the error that says unreadable).
+    let claims = watch_expiry::current_node_claims(home)?;
     for watch in watches {
         let w = &watch.watch;
         if !should_act(w, now_ms, &evidence) {
@@ -191,6 +194,17 @@ pub(crate) fn run_pass_with(
         }
         // Only a ci watch has an early wake; the expiry arm owns the rest.
         if w.blocker != "ci" {
+            continue;
+        }
+        // The expiry arm's eligibility rule, shared: a wake goes only to a
+        // session that still owns the same live node claim, so a settled PR
+        // never burns a turn into a session whose node moved on. A read
+        // error keeps the watch (retry next tick), never a wake.
+        let node = match claims.get(&w.session_id).cloned().unwrap_or(Ok(None)) {
+            Ok(Some(node)) => node,
+            _ => continue,
+        };
+        if !w.node.is_empty() && node != w.node {
             continue;
         }
         let Some(pr) = w.pr else {
@@ -319,11 +333,39 @@ mod tests {
     use std::cell::RefCell;
 
     /// A temp agents home plus its global journal path, the fixture the
-    /// evidence reader and the receipt emitter share.
+    /// evidence reader and the receipt emitter share. The session's claims
+    /// root moves into the temp dir for the test's life, and one live node
+    /// claim (`node:x-codexwt`, holder `target-session:codex-sess`) is staged
+    /// beside a Live registry row, the eligibility pair the wake gate reads.
     fn staged() -> (AgentsHome, std::path::PathBuf, tempfile::TempDir) {
         let td = tempfile::TempDir::new().unwrap();
+        let claims_root = td.path().join("claims-root");
+        std::fs::create_dir_all(&claims_root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         let home = AgentsHome::at(td.path().join("agents"));
         let _ = home.ensure_root();
+        let mut entry = crate::state::RegistryEntry::default();
+        entry.name = "codex-worker".into();
+        entry.harness_session_id = Some("codex-sess".into());
+        entry.status = crate::AgentStatus::Live;
+        let mut registry = crate::state::Registry::default();
+        registry.entries.push(entry);
+        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let acquired = crate::claims::acquire(
+            "node:x-codexwt",
+            "target-session:codex-sess",
+            crate::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                identity: Some(("codex-sess".into(), "codex".into())),
+                root: None,
+                events_dir: Some(td.path().join("claim-events")),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
         let events = crate::daemon::global_events_path(&home);
         (home, events, td)
     }
@@ -348,6 +390,7 @@ mod tests {
                 "harness": "codex",
                 "codex_thread_id": "thread-a",
                 "cwd": "/repo/wt",
+                "node": "x-codexwt",
                 "pr": pr,
                 "blocker": "ci",
                 "expires_at_ms": expires_at_ms
@@ -404,6 +447,9 @@ mod tests {
     fn settled_ci_watch_wakes_once_then_dedupes() {
         // AC4-HP + the receipt dedupe: first pass injects; the receipt it
         // emits suppresses the second pass (and the expiry arm).
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (home, events, _td) = staged();
         let expires = millis_now() + 600_000;
         stage_row(&events, watch_row(42, expires));
@@ -431,6 +477,9 @@ mod tests {
         // and names the thread, so the expiry arm never re-wakes it. The
         // receipt is read back through the store, the same path the evidence
         // reader (and so the dedupe) uses.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (home, events, _td) = staged();
         let expires = millis_now() + 600_000;
         stage_row(&events, watch_row(42, expires));

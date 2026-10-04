@@ -194,7 +194,7 @@ impl FleetArms {
         crate::attention_arm::maybe_tick(&self.attention, ctx.home.clone());
         crate::burn_watch::maybe_tick(&self.burn_watch, ctx.home.clone());
         crate::watch_expiry::maybe_tick(&self.watch_expiry, ctx.home.clone());
-        // The codex waker (x-184a): on CI settle it injects turn/start into
+        // The codex waker: on CI settle it injects turn/start into
         // the parked codex thread. Registered beside its expiry sibling.
         crate::codex_watch::maybe_tick(&self.codex_watch, ctx.home.clone());
         // Serve-only liveness tick: the served pair is the sweep's measurement,
