@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from functools import cache
 from pathlib import Path
 
@@ -63,7 +64,7 @@ def _write_registry(tmp_path: Path, rows: list[dict]) -> None:
     # drops newer columns (delivery_policy arrived at v14) and the hold
     # disappears.
     text = (REPO_CLI / "src" / "fno" / "agents" / "registry_schema.toml").read_text()
-    version = int(text.split("version = ")[1].strip())
+    version = tomllib.loads(text)["version"]
     (tmp_path / ".fno" / "agents").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".fno" / "agents" / "registry.json").write_text(
         json.dumps({"schema_version": version, "agents": rows})
