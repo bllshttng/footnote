@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_name_only_uses_canonical_handle_first_eight() {
+    fn handoff_key_derivation_first_eight_then_slug() {
         let (cwd, home) = handoff_fixture("first8");
         let out = handoff_out(
             &["--session-id".into(), SID.into(), "--name-only".into()],
@@ -520,6 +520,33 @@ mod tests {
             "{out}"
         );
         assert_eq!(rest, "c35abbca.md");
+        let out = handoff_out(
+            &[
+                "--session-id".into(),
+                SID.into(),
+                "--slug".into(),
+                "my-feature".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with("-my-feature.md"), "{out}");
+        assert!(!out.contains("c35abbca"), "{out}");
+        // The attached --flag=value spelling: the retired Click command
+        // accepted it, so the port must too, or it refuses callers that
+        // never were wrong.
+        let out = handoff_out(
+            &[
+                "--session-id=c35abbca-bd2d-4407-8365-cf468baa7eea".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with("-c35abbca.md"), "{out}");
         let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
     }
 
@@ -543,27 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_slug_overrides_handle_key() {
-        let (cwd, home) = handoff_fixture("slug");
-        let out = handoff_out(
-            &[
-                "--session-id".into(),
-                SID.into(),
-                "--slug".into(),
-                "my-feature".into(),
-                "--name-only".into(),
-            ],
-            &cwd,
-            Some(&home),
-        )
-        .unwrap();
-        assert!(out.ends_with("-my-feature.md"), "{out}");
-        assert!(!out.contains("c35abbca"), "{out}");
-        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
-    }
-
-    #[test]
-    fn handoff_argv_validation_refusals() {
+    fn handoff_empty_session_refuses_and_blank_slug_falls_back() {
         let (cwd, home) = handoff_fixture("refuse");
         // The hidden --session alias was removed to pay the flag-surface
         // ratchet (operator ruling 2026-09-12); --session-id is the one
@@ -582,6 +589,29 @@ mod tests {
         v.extend(["--slug".into(), "s".into()]);
         assert!(handoff_out(&v, &cwd, Some(&home)).is_err());
         assert!(handoff_out(&[], &cwd, Some(&home)).is_err());
+        // A shell expanding an unset value hands us Some(""); the shared
+        // `<date>-.md` name must never render.
+        assert!(handoff_out(
+            &["--session-id".into(), "".into(), "--name-only".into()],
+            &cwd,
+            Some(&home),
+        )
+        .is_err());
+        // A blank --slug falls back to the canonical handle (Python
+        // `key = slug or canonical_handle(...)`).
+        let out = handoff_out(
+            &[
+                "--session-id".into(),
+                SID.into(),
+                "--slug".into(),
+                "".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with("-c35abbca.md"), "{out}");
         let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
     }
 
@@ -660,53 +690,6 @@ mod tests {
         assert!(out.ends_with(".md") && out.contains("-crown-x-"), "{out}");
         assert!(!out.contains(',') && !out.contains(' '), "{out}");
         assert!(!out.contains("--"), "{out}");
-        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
-    }
-
-    #[test]
-    fn handoff_accepts_attached_option_values() {
-        // The retired Click command accepted --session-id=<id>; the port must
-        // too, or it refuses callers that never were wrong.
-        let (cwd, home) = handoff_fixture("attached");
-        let out = handoff_out(
-            &[
-                "--session-id=c35abbca-bd2d-4407-8365-cf468baa7eea".into(),
-                "--name-only".into(),
-            ],
-            &cwd,
-            Some(&home),
-        )
-        .unwrap();
-        assert!(out.ends_with("-c35abbca.md"), "{out}");
-        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
-    }
-
-    #[test]
-    fn handoff_empty_session_refuses_and_blank_slug_falls_back() {
-        let (cwd, home) = handoff_fixture("empty-args");
-        // A shell expanding an unset value hands us Some(""); the shared
-        // `<date>-.md` name must never render.
-        assert!(handoff_out(
-            &["--session-id".into(), "".into(), "--name-only".into()],
-            &cwd,
-            Some(&home),
-        )
-        .is_err());
-        // A blank --slug falls back to the canonical handle (Python
-        // `key = slug or canonical_handle(...)`).
-        let out = handoff_out(
-            &[
-                "--session-id".into(),
-                SID.into(),
-                "--slug".into(),
-                "".into(),
-                "--name-only".into(),
-            ],
-            &cwd,
-            Some(&home),
-        )
-        .unwrap();
-        assert!(out.ends_with("-c35abbca.md"), "{out}");
         let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
     }
 }
