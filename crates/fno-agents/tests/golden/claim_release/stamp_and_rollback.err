@@ -1,0 +1,1 @@
+validation error: --stamp-do and --rollback-do are mutually exclusive (one records a finished do window, the other removes a row for work that never ran)

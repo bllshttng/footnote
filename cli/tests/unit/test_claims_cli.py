@@ -529,6 +529,10 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     seed_graph(g, '{"entries": [{"id": "ab-dotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+    # The wave-2 leaf stamps inside the fno-agents binary, so the store is
+    # reached through the state dir, not the in-process graph_json patch (an
+    # env var crosses the subprocess boundary; a monkeypatch cannot).
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path))
 
     acquire_claim(key="node:ab-dotest", holder="target-session:s",
                   ttl_ms=3_600_000, root=home)

@@ -2640,7 +2640,7 @@ fn merge_observed_model(prior: Option<&Value>, fresh: Option<&Value>) -> Option<
 
 /// store.remove_open_session_record: the one compensating write against the
 /// append-only sessions list, gated on all four preconditions.
-fn session_remove_open(
+pub(crate) fn session_remove_open(
     entries: &mut Vec<Value>,
     node_id: &str,
     phase: &str,
