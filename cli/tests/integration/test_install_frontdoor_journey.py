@@ -181,8 +181,8 @@ def clean_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
         + " -c 'from fno.cli import app; app()' \"$@\"\n"
     )
     launcher.chmod(0o755)
-    # init-target-state.sh calls the bare `fno-agents` from PATH (the mint and
-    # the readback verbs); the shim dir answers it with the same dev build the
+    # The init flow calls the bare `fno-agents` from PATH (the mint and the
+    # readback verbs); the shim dir answers it with the same dev build the
     # front door is pinned to.
     agents_link = shim / "fno-agents"
     agents_link.symlink_to(native)
