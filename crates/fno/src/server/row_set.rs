@@ -9,6 +9,35 @@ use crate::proto::{AgentRow, AgentRowReceipt};
 
 use super::*;
 
+/// (x-cd47 1.5) Whether two cwd paths are checkouts of the SAME project:
+/// equal leaves, equal parents (sibling fno worktrees,
+/// `<base>/<repo>/<name>`), or one path's parent carries the other's leaf
+/// (canonical `<...>/footnote` beside worktree `<...>/footnote/x-58f7`).
+/// The leaf-vs-leaf compare read every worktree as foreign and stamped
+/// `(footnote)` on cards (the operator's 2026-10-04 report). Two unparseable
+/// paths (empty cwds) read same-project: neither can show a paren anyway.
+pub(super) fn same_project(a: &str, b: &str) -> bool {
+    fn leaf(p: &str) -> Option<&str> {
+        let p = p.trim_end_matches('/');
+        if p.is_empty() {
+            None
+        } else {
+            p.rsplit('/').next()
+        }
+    }
+    fn parent(p: &str) -> Option<&str> {
+        let p = p.trim_end_matches('/');
+        p.rsplit_once('/')
+            .map(|(h, _)| h.trim_end_matches('/'))
+            .filter(|h| !h.is_empty())
+    }
+    let (la, lb) = (leaf(a), leaf(b));
+    la == lb && la.is_some()
+        || parent(a).and_then(leaf) == lb && lb.is_some()
+        || la == parent(b).and_then(leaf) && la.is_some()
+        || parent(a) == parent(b) && parent(a).is_some()
+}
+
 impl Core {
     pub(crate) fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
@@ -43,6 +72,22 @@ impl Core {
                     .map(|d| (holder.as_str(), d.clone()))
             })
             .collect();
+        // (x-cd47 1.5) A squad-matched row's cwd_base is its FOREIGN-cwd
+        // signal, so a row working in another checkout of its own squad's
+        // project (a worktree beside the canonical, or a sibling worktree)
+        // carries none - leaf-vs-leaf stamped `(footnote)` on every card.
+        // Squad-less rows keep the plain basename for the elsewhere paren.
+        let squad_cwd_of = |squad_id: Option<u64>| -> Option<String> {
+            squad_id
+                .and_then(|id| self.session.squads.iter().find(|s| s.id == id))
+                .map(|s| s.canonical_cwd().to_string())
+        };
+        let foreign_cwd_base = |cwd: &str, squad_cwd: Option<&str>| -> Option<String> {
+            match squad_cwd {
+                Some(sc) if !sc.is_empty() && !same_project(cwd, sc) => cwd_basename(cwd),
+                _ => cwd_basename(cwd),
+            }
+        };
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
         //    bare shell pane a first-class row.
@@ -128,7 +173,7 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 // (US3) cwd basename on every row so the
                                 // sideline can flag a foreign-cwd join.
-                                cwd_base: cwd_basename(&a.cwd),
+                                cwd_base: foreign_cwd_base(&a.cwd, Some(squad.canonical_cwd())),
                                 tombstone: false,
                                 subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                                 // Structural roster-dir tag wins (Locked
@@ -216,7 +261,10 @@ impl Core {
                                 external: false,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
-                                cwd_base: cwd_basename(e.map(|e| e.cwd.as_str()).unwrap_or("")),
+                                cwd_base: foreign_cwd_base(
+                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                    Some(squad.canonical_cwd()),
+                                ),
                                 tombstone: false,
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
@@ -324,7 +372,7 @@ impl Core {
                         external: a.external,
                         tab: None,
                         seen: self.seen.contains(pane),
-                        cwd_base: cwd_basename(&a.cwd),
+                        cwd_base: foreign_cwd_base(&a.cwd, squad_cwd_of(squad).as_deref()),
                         tombstone: false,
                         subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                         account: a.account.clone(),
@@ -367,7 +415,7 @@ impl Core {
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (AC2-UI), a squad-matched row for the foreign-cwd
                     // exception subline.
-                    let cwd_base = cwd_basename(&a.cwd);
+                    let cwd_base = foreign_cwd_base(&a.cwd, squad_cwd_of(squad).as_deref());
                     out.push(AgentRow {
                         harness: a.harness.clone(),
                         model: a.model.clone(),
