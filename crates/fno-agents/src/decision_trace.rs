@@ -48,6 +48,17 @@ pub struct Trace {
 }
 
 pub fn actor_kind(session: Option<&str>, source: &str) -> &'static str {
+    actor_kind_in(&crate::paths::AgentsHome::from_env(), session, source)
+}
+
+/// `actor_kind` against a home the caller already holds: the intake reads
+/// the registry of ITS home rather than re-resolving the environment (whose
+/// hermetic guard refuses an undeclared root under test).
+pub fn actor_kind_in(
+    home: &crate::paths::AgentsHome,
+    session: Option<&str>,
+    source: &str,
+) -> &'static str {
     if source == "daemon" {
         return "sweep";
     }
@@ -55,22 +66,32 @@ pub fn actor_kind(session: Option<&str>, source: &str) -> &'static str {
         return "user";
     };
     let handle = crate::identity::canonical_handle(handle);
-    let teamed =
-        crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json())
-            .map(|teams| {
-                teams.iter().any(|team| {
-                    team.holder_session
-                        .as_deref()
-                        .is_some_and(|s| crate::identity::canonical_handle(s) == handle)
-                })
+    let teamed = crate::territory::live_teams(&home.registry_json())
+        .map(|teams| {
+            teams.iter().any(|team| {
+                team.holder_session
+                    .as_deref()
+                    .is_some_and(|s| crate::identity::canonical_handle(s) == handle)
             })
-            // A registry read error reads as not teamed (fail closed), the
-            // same reading question_clear's caller resolution takes.
-            .unwrap_or(false);
+        })
+        // A registry read error reads as not teamed (fail closed), the
+        // same reading question_clear's caller resolution takes.
+        .unwrap_or(false);
     if teamed {
         "lead"
     } else {
         "worker"
+    }
+}
+
+/// The actor kind for a row whose authority the door already resolved: the
+/// same vocabulary mapped off the row's own provenance, with no second
+/// registry read that could race it.
+pub fn actor_kind_from_authority(authority_source: Option<&str>) -> &'static str {
+    match authority_source {
+        Some("operator") => "user",
+        Some("crown") => "lead",
+        _ => "worker",
     }
 }
 

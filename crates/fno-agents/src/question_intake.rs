@@ -15,7 +15,7 @@
 //! once the request parsed, the question-intake shape); refusal MESSAGES stay
 //! in the shim, which owns the user's name.
 
-use crate::decision_trace::{actor_kind, emit_span_to, new_span_id, Trace};
+use crate::decision_trace::{actor_kind_in, emit_span_to, new_span_id, Trace};
 use crate::paths::AgentsHome;
 use crate::provider_cap::questions_path;
 use serde::{Deserialize, Serialize};
@@ -498,7 +498,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
             span_id: new_span_id(),
             parent_span_id: Some(ask_span.to_string()),
             actor_session: req.session_id.clone(),
-            actor_kind: actor_kind(req.session_id.as_deref(), "question"),
+            actor_kind: actor_kind_in(home, req.session_id.as_deref(), "question"),
             comms: "question",
             recipient_session: None,
             recipient_kind: None,
@@ -611,7 +611,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
             span_id: qid.clone(),
             parent_span_id: route_span_id,
             actor_session: req.session_id.clone(),
-            actor_kind: actor_kind(req.session_id.as_deref(), "question"),
+            actor_kind: actor_kind_in(home, req.session_id.as_deref(), "question"),
             comms: "question",
             recipient_session: None,
             recipient_kind: Some("user"),

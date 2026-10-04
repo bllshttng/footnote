@@ -712,7 +712,7 @@ mod tests {
     }
 }
 use crate::backlog::api::{self, Store};
-use crate::decision_trace::{actor_kind, Trace};
+use crate::decision_trace::{actor_kind_from_authority, Trace};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -1312,9 +1312,10 @@ fn make_decision(
                 .get("decided_by")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            actor_kind: actor_kind(
-                req.provenance.get("decided_by").and_then(Value::as_str),
-                "question",
+            actor_kind: actor_kind_from_authority(
+                req.provenance
+                    .get("authority_source")
+                    .and_then(Value::as_str),
             ),
             comms: "question",
             recipient_session: None,

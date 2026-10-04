@@ -6,7 +6,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::decision_trace::{emit_span_to, new_span_id, Trace};
+use crate::decision_trace::{actor_kind_from_authority, emit_span_to, new_span_id, Trace};
 use crate::law_match::{
     all_decision_rows, attended_terminal, evidence_repo_root, is_retraction_row, mint_decision_id,
     now_iso, project_events_journal, text_cap, WAIVER_SUBJECT_PREFIX,
@@ -794,12 +794,13 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             span_id: new_span_id(),
             parent_span_id: Some(ask.to_string()),
             actor_session: caller_session.clone(),
-            actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
+            actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
             comms: "mail",
             recipient_session: None,
             recipient_kind: None,
         };
         let mut attrs = Map::new();
+        attrs.insert("route".to_string(), json!("self"));
         if let Some(c) = door
             .class
             .as_deref()
@@ -821,7 +822,7 @@ decision index. Run `fno backlog decide-reindex` before retrying."
         span_id: new_span_id(),
         parent_span_id: Some(t.to_string()),
         actor_session: caller_session.clone(),
-        actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
+        actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
         comms: "mail",
         recipient_session: None,
         recipient_kind: None,
@@ -835,7 +836,7 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             span_id: decision_id.clone(),
             parent_span_id: route_span_id.or_else(|| overturns.map(str::to_string)),
             actor_session: caller_session.clone(),
-            actor_kind: crate::decision_trace::actor_kind(caller_session.as_deref(), "mail"),
+            actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
             comms: "mail",
             recipient_session: None,
             recipient_kind: None,
