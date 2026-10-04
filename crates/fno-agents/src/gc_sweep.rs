@@ -1620,20 +1620,16 @@ pub(crate) fn run_with_release(
         .iter()
         .filter_map(|rec| {
             let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
-            if sid.is_empty() {
-                return None;
-            }
-            Some((sid, format!("{} (holder {})", rec.key, rec.holder)))
+            (!sid.is_empty()).then(|| format!("{} (holder {})", rec.key, rec.holder))
         })
         .collect();
-    // The node-claim view of the same records: `node:<id>` -> holding
-    // session, so the dead-work gate sees a node another live session owns.
+    // The node-claim view of the same records: `node:<id>` -> holding session.
     let node_claim_holders: std::collections::HashMap<String, String> = claim_records
         .iter()
         .filter_map(|rec| {
             let node = rec.key.strip_prefix("node:")?.to_ascii_lowercase();
             let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
-            (!(sid.is_empty() || node.is_empty())).then_some((node, sid))
+            (!sid.is_empty()).then_some((node, sid))
         })
         .collect();
     // One ledger parse per sweep: every receipt's enrichment reads these rows.
@@ -2190,10 +2186,8 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
                 Some(KeepReason::NoProvenance) => {
                     summary.kept_no_provenance.push(id.clone());
-                    // The keep gets the same shape every other keep has: a
-                    // hold with a clock, so `fno agents reap --release` and
-                    // the escalation read can reach it. The detail names why
-                    // no node resolved.
+                    // The keep gets the same clocked-hold shape every
+                    // other keep has, so a release can reach it.
                     summary.holds.push(Hold {
                         id,
                         reason: KeepReason::NoProvenance.as_str(),
@@ -2208,11 +2202,9 @@ pub(crate) fn run_with_release(
                     summary.kept_open_work.push((id, node, status, reader))
                 }
                 Some(KeepReason::DeadOpenWork { node }) => {
-                    // Law d-71d03643: the dead worker stays held and the
-                    // tick detail keeps counting it, under the node its
-                    // provenance resolved. The nudge ladder's Resume rung
-                    // is the owner; the row carries no PR yet, so its
-                    // ladder row reads pr: null, live: false.
+                    // Law d-71d03643: the dead worker stays held; the
+                    // ladder's Resume rung is its owner. Its ladder row
+                    // reads pr: null, live: false.
                     summary.kept_open_work.push((
                         id.clone(),
                         node.clone(),
