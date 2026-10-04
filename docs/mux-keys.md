@@ -7,6 +7,11 @@ The three sideline-adjacent actions sit on three different keys, and their names
 | `prefix+f` | `find` | OpenNav | The navigator: a global goto picker over every workspace, tab, pane, agent and work-queue card. Text-filter by label, pane id, node id, title-slug or workspace. |
 | `prefix+w` | `selector` | OpenSelector | The sideline row selector: cursor over the sideline's own rows. |
 | `prefix+b` | `toggle-sideline` | TogglePanel | Sideline panel visibility. |
+| `prefix+q` | `notifications-bell` | ToggleBell | Questions and fleet announcements in the notifications panel. |
+
+## Inside the notifications panel
+
+The panel opens from the bell at the far right of the sideline's top row or with `prefix+q`. While open, bare `j`/`k` move, `Enter` opens a question or clears settled questions, `c` clears settled questions, and `q`/`Esc` closes it.
 
 ## The global chord: Ctrl+Opt+Left
 

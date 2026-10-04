@@ -25,9 +25,6 @@ pub(super) async fn route(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Option<Result<StdinFlow, String>> {
-    if view.selector.is_none() {
-        view.questions_block.cursor = None;
-    }
     if view.digest.is_some() {
         // any key dismisses the catch-up digest into the normal view.
         // Same whole-chunk swallow as the key-table overlay below. A flush
@@ -105,6 +102,10 @@ pub(super) async fn route(
     }
     if view.question_detail.is_some() {
         return Some(questions::detail_keys(view, bytes, sock_w).await);
+    }
+    if view.bell.open {
+        bell::keys(view, bytes);
+        return Some(Ok(StdinFlow::Continue));
     }
     if view.answers.is_some() {
         return Some(answer_keys(view, bytes, sock_w).await);
