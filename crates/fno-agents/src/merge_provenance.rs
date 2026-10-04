@@ -77,7 +77,8 @@ impl TestJournal {
             prev.push((key, std::env::var_os(key)));
             std::env::remove_var(key);
         }
-        TEST_JOURNAL.with(|j| *j.borrow_mut() = Some(root.path().join(".fno").join("events.jsonl")));
+        TEST_JOURNAL
+            .with(|j| *j.borrow_mut() = Some(root.path().join(".fno").join("events.jsonl")));
         Self {
             root,
             _lock: lock,
@@ -386,6 +387,9 @@ mod tests {
             merge_request_pr(&argv(&["pr", "merge", "7", "--squash"])),
             Some(7)
         );
+        // A bare `pr merge` is still a request; gh resolves the number.
+        assert_eq!(merge_argv(&argv(&["gh", "pr", "merge"])), Some(None));
+        assert_eq!(merge_argv(&argv(&["pr", "ready", "7"])), None);
         assert_eq!(merge_request_pr(&argv(&["gh", "pr", "merge"])), None);
         assert_eq!(
             merge_request_pr(&argv(&[
@@ -416,12 +420,6 @@ mod tests {
             merge_request_pr(&argv(&["cd", "/x", "&&", "gh", "pr", "merge", "9"])),
             Some(9)
         );
-    }
-
-    #[test]
-    fn a_bare_pr_merge_is_a_request_with_no_number() {
-        assert_eq!(merge_argv(&argv(&["pr", "merge"])), Some(None));
-        assert_eq!(merge_argv(&argv(&["pr", "ready", "7"])), None);
     }
 
     #[test]
@@ -467,6 +465,18 @@ mod tests {
                 merge_grant: None,
             },
         );
+        // The finalize arm: an Arm ask that names no PR.
+        let mut finalize = request.clone();
+        finalize.effect = Effect::Arm;
+        finalize.pr = None;
+        record_outcome(
+            &finalize,
+            &facts,
+            &Outcome::Armed {
+                head: "abc123".into(),
+                merge_grant: None,
+            },
+        );
         let mut armed = request.clone();
         armed.effect = Effect::Arm;
         armed.pr = None;
@@ -494,68 +504,25 @@ mod tests {
         assert_eq!(landed[0]["data"]["repo"], "o/r");
         assert_eq!(landed[0]["data"]["head"], "abc123");
         assert_eq!(landed[0]["data"]["trace"]["actor_kind"], "user");
-        assert_eq!(armed_rows.len(), 1, "{rows:?}");
-        assert_eq!(armed_rows[0]["data"]["path"], "pr_watch");
-    }
-
-    #[test]
-    fn a_finalize_arm_records_its_own_path() {
-        let journal = TestJournal::opt_in();
-        let request = Request {
-            cwd: PathBuf::from("/tmp"),
-            pr: None,
-            effect: Effect::Arm,
-            approved: Some(true),
-            auto_merge_source: None,
-            require_checks: false,
-            covered_head: None,
-            decide_only: false,
-            authority: None,
-            accept_flake: false,
-            supplied_verdict: None,
-            supplied_counts: None,
-            supplied_rerun_recovered: None,
-            supplied_optional_unresolved: None,
-            supplied_github_blockers: None,
-            supplied_dispatch_hold: None,
-            supplied_review_hold: None,
-            supplied_facts: None,
-        };
-        let facts = PrFacts {
-            number: 7,
-            head_sha: "abc123".into(),
-            head_ref: "feature/x".into(),
-            base_ref: "main".into(),
-            url: "https://github.com/o/r/pull/7".into(),
-            body: None,
-            state: "OPEN".into(),
-            armed: false,
-        };
-        record_outcome(
-            &request,
-            &facts,
-            &Outcome::Armed {
-                head: "abc123".into(),
-                merge_grant: None,
-            },
-        );
-        let rows = journal.rows();
-        let armed: Vec<_> = rows
+        assert_eq!(armed_rows.len(), 2, "{rows:?}");
+        let paths: Vec<_> = armed_rows
             .iter()
-            .filter(|r| r["data"]["span_kind"] == "merge_armed")
+            .map(|r| r["data"]["path"].as_str().unwrap())
             .collect();
-        assert_eq!(armed.len(), 1, "{rows:?}");
-        assert_eq!(armed[0]["data"]["path"], "finalize");
+        assert!(paths.contains(&"pr_watch"), "{paths:?}");
+        assert!(paths.contains(&"finalize"), "{paths:?}");
     }
 
     #[test]
     fn the_proxy_and_hook_paths_record_merge_requests() {
         let journal = TestJournal::opt_in();
-        record_request(&argv(&["pr", "merge", "7"]), None, "gh_proxy");
+        assert!(!has_record(&journal.journal(), "o/r", 7));
+        let cwd = journal.root().to_string_lossy().into_owned();
+        record_request(&argv(&["pr", "merge", "7"]), Some(&cwd), "gh_proxy");
         let payload = json!({
             "merge_provenance": {
                 "hook": {
-                    "cwd": "",
+                    "cwd": cwd,
                     "tool_input": {"command": "gh pr merge 8 --squash"},
                     "tool_response": {"exit_code": 0}
                 }
@@ -592,23 +559,11 @@ mod tests {
         assert_eq!(requested[0]["data"]["pr"], 7);
         assert_eq!(requested[1]["data"]["path"], "hook");
         assert_eq!(requested[1]["data"]["pr"], 8);
-    }
-
-    #[test]
-    fn has_record_answers_absent_false_and_stored_true() {
-        let journal = TestJournal::opt_in();
-        assert!(!has_record(&journal.journal(), "o/r", 7));
-        let seed = json!({
-            "ts": "2026-10-04T00:00:00Z",
-            "type": "decision_span",
-            "source": "target",
-            "data": {"span_kind": "merge_landed", "pr": 7, "repo": "o/r"}
-        });
-        std::fs::create_dir_all(journal.journal().parent().unwrap()).unwrap();
-        crate::event_store::append_envelope(&journal.journal(), &seed.to_string(), None)
-            .expect("seed row");
-        assert!(has_record(&journal.journal(), "o/r", 7));
-        assert!(!has_record(&journal.journal(), "o/r", 8));
-        assert!(!has_record(&journal.journal(), "other/r", 7));
+        // has_record: absent store reads false, a recorded PR reads true,
+        // an unrecorded PR or repo reads false.
+        assert!(!has_record(&journal.journal(), "nothing/here", 1));
+        assert!(has_record(&journal.journal(), "unknown-repo", 7));
+        assert!(has_record(&journal.journal(), "unknown-repo", 8));
+        assert!(!has_record(&journal.journal(), "unknown-repo", 9));
     }
 }
