@@ -239,6 +239,7 @@ fn rust_leg(dir: &Path, json: bool) -> Golden {
     for (k, v) in pin_env(dir) {
         cmd.env(k, v);
     }
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.current_dir(dir);
     let out = cmd.output().expect("pr-watch status runs");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
