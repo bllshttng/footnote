@@ -68,7 +68,7 @@ def _capture(monkeypatch, settings):
         # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
         # real binary and keep it out of the capture, which pins the SPAWN argv.
         parts = [str(part) for part in cmd]
-        if {"name-mint", "name-codes", "name-parse"} & set(parts):
+        if {"name-mint", "name-codes", "name-parse", "spawn-axes"} & set(parts):
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         # Native event commits are infrastructure too: ride the real binary.
         if {"doctor", "event"} <= set(parts):

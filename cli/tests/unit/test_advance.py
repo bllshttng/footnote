@@ -97,7 +97,7 @@ def _naming_passthrough(cmd, **kwargs):
     is_fno = bool(parts) and (
         parts[0].endswith("fno-py") or parts[0].endswith("fno") or "fno-agents" in parts[0]
     )
-    infra = {"name-mint", "name-codes", "name-parse"}
+    infra = {"name-mint", "name-codes", "name-parse", "spawn-axes"}
     if {"doctor", "event"} <= set(parts):
         return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
     if is_fno and not (infra & set(parts)):

@@ -154,6 +154,9 @@ def _node_payload(node: Optional[Mapping]) -> Optional[dict]:
         "difficulty": node.get("difficulty"),
         "priority": node.get("priority"),
         "plan_path": str(node.get("plan_path") or ""),
+        "model": node.get("model") or "",
+        "provider": node.get("provider") or "",
+        "effort": node.get("effort") or "",
     }
 
 

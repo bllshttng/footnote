@@ -50,7 +50,10 @@ def test_resolve_slot_sends_explicit_inputs_only(slot_answer):
     payload = calls[0]
     assert "meta" not in payload
     assert payload["rung_base"] == "agents.profiles.target"
-    assert payload["node"] == {"difficulty": "high", "priority": "p1", "plan_path": "/p.md"}
+    assert payload["node"] == {
+        "difficulty": "high", "priority": "p1", "plan_path": "/p.md",
+        "model": "", "provider": "", "effort": "",
+    }
     assert payload["capacity"] == {"claude": "ok"}
     assert payload["substrate"] == "thread"
     assert payload["constrain_harness"] == "codex"

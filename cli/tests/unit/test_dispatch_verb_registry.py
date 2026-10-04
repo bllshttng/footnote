@@ -87,7 +87,7 @@ def _spawn_args(**over) -> NodeSpawnArgs:
     base = dict(
         node_id="x-1", node_cwd=None, node_slug=None, harness="claude",
         resolved_harness="claude", substrate="bg", command="/marketing x-1",
-        model=None, route=None, resolved_route=None, account=None,
+        model=None, effort=None, route=None, resolved_route=None, account=None,
         dispatch_account=None, permission_mode="", agent_name="n",
         vendor=None, verb="/marketing", verb_source="declared",
         session_phase=None, grid_reason=None, decision=[],

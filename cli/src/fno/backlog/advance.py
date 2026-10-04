@@ -917,9 +917,14 @@ def _spawn_worker(
         is_unsafe_short_address,
     )
 
+    # The node's effort pin rides the typed-flag path: the door validates
+    # the effort surface, and the walk's node-pin rung names it.
+    effort_pin = (node.get("effort") or "").strip() if isinstance(node, dict) else ""
+    effort_argv = ("--effort", effort_pin) if effort_pin else ()
     cmd = [
         *_subprocess_util.fno_py_cmd(),
-        "agents", "spawn", *node_spawn_argv(args, cwd=node_cwd),
+        "agents", "spawn",
+        *node_spawn_argv(args, cwd=node_cwd, extra=effort_argv),
     ]
     # the caller's dispatch:<id> reservation and the --node spawn
     # door's own family-2 guard collide - the door acquires the SAME key,
@@ -1014,6 +1019,19 @@ def _spawn_worker(
     if retask_fallthrough:
         row["retask_fallthrough"] = retask_fallthrough
     row_notes = tuple(notes) + (retask_fallthrough,) if retask_fallthrough else notes
+    # One launch mail to the covering lead, autonomous dispatches only (an
+    # attended caller is present at the spawn). Best-effort: a delivery
+    # fault never fails a launch that already happened.
+    if source:
+        try:
+            from fno.agents.spawn_axes_client import spawn_axes_call
+
+            spawn_axes_call({"launch_credit_mail": {"node": node_id, "worker": {
+                "name": row.get("agent_name") or "", "harness": args.resolved_harness or "",
+                "model": args.model or "", "effort": effort_pin or "",
+            }}})
+        except Exception:
+            pass
     return _finish_spawn(row, events_path, receipt, notes=row_notes)
 
 
