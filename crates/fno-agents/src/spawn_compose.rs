@@ -863,14 +863,22 @@ fn is_seed_verb(seed: &Option<String>) -> bool {
         .is_some_and(|tok| crate::provider::parse_verb_token(tok).is_some())
 }
 
-/// Whether the argv names a crown (`-k`/`--crown`) before the `--argv`
-/// boundary or a bare `--` fence (fenced tokens are prompt text) - the same
-/// boundary rule Python's `_has_permission_mode` applies.
+/// Whether the argv names a crown (`-k` in all three Click spellings, or
+/// `--crown`) before the `--argv` boundary or a bare `--` fence (fenced
+/// tokens are prompt text) - the same boundary rule Python's
+/// `_has_permission_mode` applies, and the same short-form spellings the
+/// Python routing detector accepts.
 fn argv_has_crown(argv: &[String]) -> bool {
     argv.iter()
         .skip(1)
         .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
-        .any(|t| t == "-k" || t == "--crown" || t.starts_with("--crown="))
+        .any(|t| {
+            t == "--crown"
+                || t.starts_with("--crown=")
+                || t == "-k"
+                || t.starts_with("-k=")
+                || (t.starts_with("-k") && t.len() > 2 && !t.starts_with("--"))
+        })
 }
 
 /// An overlay table (or lane args) can carry the ONLY value this spawn
