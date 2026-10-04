@@ -3170,21 +3170,20 @@ mod tests {
     /// Pins `FNO_CONFIG` to an empty file and restores the prior value on
     /// drop. A worktree under `~/.fno` walks into the operator's real config
     /// otherwise, and the walk then reads its lanes instead of the fixture's.
-    struct ConfigPin(std::path::PathBuf, Option<std::ffi::OsString>);
+    struct ConfigPin(Option<std::ffi::OsString>);
 
     impl ConfigPin {
         fn empty(dir: &std::path::Path) -> Self {
-            let path = dir.join("config.toml");
-            std::fs::write(&path, "").unwrap();
+            std::fs::write(dir.join("config.toml"), "").unwrap();
             let prior = std::env::var_os("FNO_CONFIG");
-            std::env::set_var("FNO_CONFIG", &path);
-            ConfigPin(path, prior)
+            std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
+            ConfigPin(prior)
         }
     }
 
     impl Drop for ConfigPin {
         fn drop(&mut self) {
-            match &self.1 {
+            match &self.0 {
                 Some(v) => std::env::set_var("FNO_CONFIG", v),
                 None => std::env::remove_var("FNO_CONFIG"),
             }

@@ -319,7 +319,7 @@ def test_spawn_prompt_two_ids_cannot_bypass_review_session(
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "thread",
-         f"/review {NODE} then x-4ab2"],
+         "--json", f"/review {NODE} then x-4ab2"],
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
