@@ -2866,6 +2866,7 @@ fn registry_schema_fields() {
         .fields
         .expect("serde_derive must pass RegistryEntry's fields to deserialize_struct")
         .iter()
+        .filter(|s| **s != "extra")
         .map(|s| (*s).to_string())
         .collect();
     struct_names.sort();
