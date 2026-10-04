@@ -1,0 +1,127 @@
+{
+  "apply_permission_builtin": true,
+  "argv": [
+    "spawn",
+    "--name",
+    "w40",
+    "-H",
+    "codex",
+    "--substrate",
+    "thread",
+    "--crown",
+    "x-aaaa",
+    "/fno:lead x-aaaa"
+  ],
+  "config_toml": "[agents.defaults]\npermission_mode = \"bypassPermissions\"\n",
+  "env_node": null,
+  "expect": {
+    "argv": [
+      "spawn",
+      "--permission-mode",
+      "yolo",
+      "--name",
+      "w40",
+      "-H",
+      "codex",
+      "--substrate",
+      "thread",
+      "--crown",
+      "x-aaaa",
+      "/fno:lead x-aaaa"
+    ],
+    "exit": 0,
+    "journal": {
+      "applied": [
+        [
+          "permission_mode",
+          "yolo",
+          "builtin.crown.permission_mode"
+        ]
+      ],
+      "fingerprint": "",
+      "kind": "spawn_defaults_applied",
+      "name": "w40",
+      "resolved": {
+        "account": {
+          "rung": null,
+          "value": ""
+        },
+        "effort": {
+          "rung": null,
+          "value": ""
+        },
+        "model": {
+          "rung": null,
+          "value": ""
+        },
+        "pane_group": {
+          "rung": null,
+          "value": ""
+        },
+        "permission_mode": {
+          "rung": "builtin.crown",
+          "value": "yolo"
+        },
+        "provider": {
+          "rung": null,
+          "value": ""
+        },
+        "route": {
+          "rung": null,
+          "value": ""
+        },
+        "substrate": {
+          "rung": null,
+          "value": ""
+        }
+      },
+      "seed": "/fno:lead x-aaaa",
+      "suppressed": [],
+      "verb": "lead"
+    },
+    "stderr": [
+      "fno agents spawn: applied permission_mode=yolo (builtin.crown.permission_mode)"
+    ],
+    "stdout": null
+  },
+  "facts": {
+    "role_protected": null,
+    "role_resolves": false
+  },
+  "node": null,
+  "node_row": null,
+  "node_verb": null,
+  "scan": {
+    "account_flag_present": false,
+    "explicit_harness": "codex",
+    "explicit_route": false,
+    "explicit_substrate": "thread",
+    "explicit_vendor": null,
+    "flag_node": null,
+    "has_effort": false,
+    "has_harness": true,
+    "has_model": false,
+    "has_permission": false,
+    "model_value": null,
+    "name": "w40",
+    "permission_value": null,
+    "positional_present": true,
+    "role": null,
+    "route_value": null,
+    "seed": "/fno:lead x-aaaa",
+    "seed_form": "positional",
+    "seed_index": 9,
+    "spawn_tokens": [
+      "--name",
+      "w40",
+      "-H",
+      "codex",
+      "--substrate",
+      "thread",
+      "--crown",
+      "x-aaaa",
+      "/fno:lead x-aaaa"
+    ],
+    "tab_flag_present": false
+  }
+}
