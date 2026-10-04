@@ -866,12 +866,15 @@ impl View {
                         // agents launched from arbitrary directories - unless
                         // the worktree IS the agent's own node worktree, where
                         // the basename repeats the node id and prints noise.
-                        if let Some(base) = a
-                            .cwd_base
-                            .as_deref()
-                            .filter(|b| Some(*b) != a.node.as_deref())
-                        {
-                            suffix.push_str(&format!(" ({base})"));
+                        // Squad members never read cwd here.
+                        if a.squad.is_none() {
+                            if let Some(base) = a
+                                .cwd_base
+                                .as_deref()
+                                .filter(|b| Some(*b) != a.node.as_deref())
+                            {
+                                suffix.push_str(&format!(" ({base})"));
+                            }
                         }
                     }
                 }
