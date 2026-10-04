@@ -2385,7 +2385,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             "use --substrate pane"
         };
         eprintln!(
-            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
+            "--permission-mode is not supported for harness {} on --substrate thread/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
             py_repr(provider),
         );
         return Some(2);

@@ -335,7 +335,7 @@ where
         // `probe` is skipped entirely here, so no provider reachability call can
         // decide an ask row's status. An already-terminal ask is left untouched.
         // [plan, Locked Decision #1]
-        // A `claude --substrate bg` thread lands in this same bucket (claude
+        // A `claude --substrate thread` lands in this same bucket (claude
         // harness, no footnote pid, no mux) and yet it IS a running process --
         // claude's own daemon owns it and lists it in `roster.json`. Reaping it
         // unprobed made `wait --state done` answer "done (via exit)" seconds
@@ -942,7 +942,7 @@ mod tests {
         e
     }
 
-    /// A claude `--substrate bg` thread row: harness claude, a recorded job
+    /// A claude `--substrate thread` row: harness claude, a recorded job
     /// short id, no pid, no pane - the exact `is_one_shot_ask` shape.
     fn bg_thread(name: &str) -> RegistryEntry {
         let mut e = state::RegistryEntry::default();
