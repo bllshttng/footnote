@@ -70,6 +70,38 @@ pub(crate) fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: 
     ) && !is_loop_run_child
 }
 
+/// US6a: the codex watch registration address. `Some` only for a codex
+/// session: the manifest's `codex_thread_id` (what `fno do target init`
+/// recorded), falling back to the session id when init recorded none. A
+/// non-codex session answers None (no codex gate, no extra event fields).
+pub(crate) fn codex_watch_target(
+    author_harness: Option<&str>,
+    manifest: &str,
+    session_id: &str,
+) -> Option<String> {
+    if author_harness != Some("codex") {
+        return None;
+    }
+    Some(
+        super::scan_manifest_field(manifest, "codex_thread_id")
+            .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case("null"))
+            .unwrap_or_else(|| session_id.to_string()),
+    )
+}
+
+/// AC4-EDGE: the daemon cannot reach the thread (absent daemon, or up daemon
+/// with the thread unloaded). Today's block behavior is the status quo, so
+/// the refusal names the channel, not a watcher ritual codex cannot run.
+pub(crate) const CODEX_UNROUTABLE_REFUSAL: &str = "watching ignored: the fno daemon cannot reach \
+this codex thread (no app-server daemon, or thread not loaded), so no watcher would wake this \
+park. Stop instead of idling; when the daemon is up again the next stop may idle.";
+
+/// AC4-ERR: on codex the `loop_check_watch_idle` event IS the daemon's watch
+/// registration, so a failed write refuses the idle.
+pub(crate) const EMIT_FAILED_REFUSAL: &str = "watching ignored: the watch registration \
+(loop_check_watch_idle) failed to write, so no watcher is registered. Do not idle on this \
+tag; the next stop retries the write.";
+
 pub(crate) fn watching_harness_refusal(
     author_harness: Option<&str>,
     is_loop_run_child: bool,
@@ -78,7 +110,9 @@ pub(crate) fn watching_harness_refusal(
         "watching ignored: loop-run child cannot idle".to_string()
     } else {
         format!(
-            "watching ignored: harness {} cannot idle",
+            "watching ignored: harness {} cannot idle and cannot wake itself. Do not arm a \
+watcher or re-emit the tag - stop instead. claude parks on its own harness-tracked watcher; \
+codex parks only when the fno daemon can inject (loop_check_watch_idle routability gate).",
             author_harness.unwrap_or("unknown")
         )
     }
@@ -494,6 +528,8 @@ mod tests {
         );
         assert_eq!(watch_target("local", None), ("local", None));
         assert_eq!(watch_target("cargo-test", None), ("unknown", None));
+        // Padding never eats a real number.
+        assert_eq!(watch_target("ci", Some(" 2206 ")), ("ci", Some(2206)));
     }
 
     #[test]
@@ -505,11 +541,6 @@ mod tests {
         assert_eq!(watch_target("ci", Some("")), ("ci", None));
         assert_eq!(watch_target("ci", Some("-3")), ("ci", None));
         assert_eq!(watch_target("local", Some("0")), ("local", None));
-    }
-
-    #[test]
-    fn watch_target_keeps_a_real_pr_number_even_padded() {
-        assert_eq!(watch_target("ci", Some(" 2206 ")), ("ci", Some(2206)));
     }
 
     #[test]
@@ -535,5 +566,25 @@ mod tests {
         assert!(CONTINUE_WORKING.contains("reason=\"ci|review\" pr=\"<N>\""));
         assert!(!CONTINUE_WORKING.contains("pr=\"0\""));
         assert!(CONTINUE_WORKING.contains("pr is a real PR number or left out, never 0"));
+    }
+
+    #[test]
+    fn codex_watch_target_names_the_thread_for_codex_only() {
+        // The daemon injects turn/start into this address, so it must come
+        // from the manifest's own record, never a guess.
+        let manifest = "harness: \"codex\"\ncodex_thread_id: \"01a0-thread\"\n";
+        assert_eq!(
+            codex_watch_target(Some("codex"), manifest, "sess-9"),
+            Some("01a0-thread".to_string())
+        );
+        // No thread id recorded: the session id is the address the mail lane
+        // already resolves for codex threads.
+        assert_eq!(
+            codex_watch_target(Some("codex"), "harness: \"codex\"\n", "sess-9"),
+            Some("sess-9".to_string())
+        );
+        // Non-codex: no codex gate at all.
+        assert_eq!(codex_watch_target(Some("claude"), manifest, "sess-9"), None);
+        assert_eq!(codex_watch_target(None, manifest, "sess-9"), None);
     }
 }

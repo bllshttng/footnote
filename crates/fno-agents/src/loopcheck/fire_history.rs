@@ -251,6 +251,44 @@ pub(crate) fn emit_to_both(
     }
 }
 
+/// `emit_to_both` that reports a failed append: on codex the
+/// `loop_check_watch_idle` event IS the daemon's watch registration, so a
+/// write that did not land must refuse the idle (AC4-ERR) instead of parking
+/// a session nobody will wake. The project write is best-effort as always;
+/// the GLOBAL journal is the one the daemon consumes.
+pub(crate) fn emit_to_both_checked(
+    project_events: &Path,
+    global_events: &Path,
+    event_type: &str,
+    data: serde_json::Value,
+) -> Result<(), String> {
+    append_loop_event(project_events, event_type, data.clone());
+    append_event_checked(global_events, event_type, data)
+}
+
+fn append_event_checked(
+    path: &Path,
+    event_type: &str,
+    data: serde_json::Value,
+) -> Result<(), String> {
+    let env = LoopEventEnvelope {
+        ts: now_rfc3339_utc(),
+        event_type,
+        source: "hook",
+        data,
+    };
+    let event = serde_json::to_value(&env)
+        .map_err(|error| format!("failed to serialize event {event_type}: {error}"))?;
+    crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2)).map_err(
+        |error| {
+            format!(
+                "failed to write event {event_type} to {}: {error}",
+                path.display()
+            )
+        },
+    )
+}
+
 pub(crate) fn observe_shadow_transition(
     run_log: &Path,
     session_id: &str,

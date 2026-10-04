@@ -19,12 +19,9 @@ mid-write cannot corrupt the existing file. Schema version is bumped any
 time the on-disk shape changes.
 
 An OLDER on-disk schema is read transparently. A NEWER one is read
-forward: this file is global to every agent on the machine, so refusing it
-meant one process running ahead of the deployment bricked every deployed
-reader at once. Above our own version, a row this fno cannot represent is
-skipped rather than fatal, and the skip is announced. What makes that safe
-is ``write_registry`` REFUSING while the on-disk schema is higher, since a
-read that drops what it cannot see must never write those rows back.
+forward: above our own version, a row this fno cannot represent is skipped
+rather than fatal, and the skip is announced. Skewed writes go through the
+Rust registry-commit door, which merges raw disk fields before publishing.
 
 Malformed JSON, a missing or non-integer ``schema_version``, non-dict
 rows, and rows with no valid identity token all still surface as
@@ -1198,8 +1195,8 @@ def _read_raw_registry(target: Path) -> Optional[dict]:
     """Best-effort parse of the on-disk registry, or ``None`` when it is
     missing, unreadable, or not a JSON object.
 
-    Shared by ``_refuse_write_over_newer_schema`` and ``_existing_row_names``
-    so a write pays for this read once, not twice.
+    Read once by ``write_registry`` and shared by its schema, row-loss, and
+    existing-name checks.
     """
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
@@ -1208,30 +1205,6 @@ def _read_raw_registry(target: Path) -> Optional[dict]:
     if not isinstance(raw, dict):
         return None
     return raw
-
-
-def _refuse_write_over_newer_schema(raw: Optional[dict], target: Path) -> None:
-    """Refuse to overwrite a registry written by a newer fno.
-
-    This is the half of read-forward that protects the file. ``load_registry``
-    drops fields above its own schema, so entries read from a newer store are
-    incomplete by construction, and writing them back would erase every field
-    this fno cannot see -- for every agent on the machine, not just this one.
-
-    Only a readable, higher integer version blocks. A missing or unparseable
-    file is not a newer writer, and refusing there would leave a torn registry
-    unrepairable by the very command meant to rewrite it.
-    """
-    if raw is None:
-        return
-    on_disk = raw.get("schema_version")
-    if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
-        raise RegistryVersionError(
-            f"refusing to write registry at {target}: on-disk schema_version="
-            f"{on_disk} is newer than the schema_version={SCHEMA_VERSION} this "
-            "fno understands, and writing would drop the fields it cannot see. "
-            "Upgrade fno to match."
-        )
 
 
 # Re-exported under the registry's own name so a caller (and a test that
@@ -1243,10 +1216,8 @@ _running_from_source = running_from_source
 def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
     """Refuse to RAISE the shared registry's schema from a source checkout.
 
-    The inverse of :func:`_refuse_write_over_newer_schema`, and the other half
-    of the same comparison. That guard protects a reader from erasing fields it
-    cannot see. This one stops the bump that creates those readers in the first
-    place: a worktree whose branch raised ``SCHEMA_VERSION`` writes that number
+    This stops the bump that creates stale readers in the first place: a
+    worktree whose branch raised ``SCHEMA_VERSION`` writes that number
     into ``~/.fno/agents/registry.json`` on its next ordinary mail send, and
     every deployed process on the machine degrades until the branch merges.
 
@@ -1277,9 +1248,8 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
 
 
 def _existing_row_names(raw: Optional[dict]) -> set[str]:
-    """Names already on disk, from the same read ``_refuse_write_over_newer_schema``
-    uses -- so the new-vs-existing split for the resolvable-handle invariant
- costs no extra I/O."""
+    """Names already on disk, from ``write_registry``'s single raw read, so
+    the new-vs-existing split for resolvable handles costs no extra I/O."""
     if raw is None:
         return set()
     agents = raw.get("agents")
@@ -1375,7 +1345,6 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     """
     target = _registry_path(path)
     raw = _read_raw_registry(target)
-    _refuse_write_over_newer_schema(raw, target)
     _refuse_source_ahead_schema_bump(raw, target)
     _refuse_probe_or_row_loss_write(target, raw, entries)
     existing = _existing_row_names(raw)
@@ -1387,6 +1356,18 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
         "schema_version": SCHEMA_VERSION,
         "agents": [asdict(e) for e in entries],
     }
+    on_disk = raw.get("schema_version") if raw else None
+    if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
+        from fno import rust_binary
+
+        try:
+            answer = rust_binary.verb_call("registry-commit", {"path": str(target), **payload})
+        except rust_binary.VerbUnavailable as exc:
+            raise RegistryVersionError(f"registry-commit refused {target}: {exc}") from exc
+        if answer.get("status") != "written":
+            detail = answer.get("message") or answer.get("reason") or "unknown refusal"
+            raise RegistryVersionError(f"registry-commit refused {target}: {detail}")
+        return
     # Bare-name call resolves via module globals at call time, so
     # ``monkeypatch.setattr(reg_module, "_json_dumps", ...)`` works.
     text = _json_dumps(payload, indent=2, sort_keys=False)
@@ -1769,9 +1750,8 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     # that surfaced far from the cause. A newer writer is now read, not refused.
     #
     # Two things make that safe, and neither is optional.
-    #   - write_registry REFUSES while the on-disk schema is higher, because
-    #     reading forward drops fields this reader cannot see and a write from
-    #     that state would erase rows it never knew about.
+    #   - write_registry delegates while the on-disk schema is higher, and the
+    #     Rust door merges raw fields back before publishing.
     #   - every degraded read announces itself below. Silence is the real trap:
     #     it makes a partial row indistinguishable from a complete one, so a
     #     routing or liveness decision taken on a truncated row leaves no trace.
@@ -1781,8 +1761,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             f"fno agents: registry at {target} is schema_version="
             f"{on_disk_version}, ahead of the schema_version={SCHEMA_VERSION} "
             "this fno understands. Reading the fields it knows and ignoring the "
-            "rest; writes are refused until this fno is upgraded. Rows may be "
-            "incomplete.",
+            "rest; writes use the Rust registry-commit door. Rows may be incomplete.",
             file=sys.stderr,
         )
     needs_v1_synthesis = on_disk_version == 1

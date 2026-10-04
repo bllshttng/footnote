@@ -185,6 +185,14 @@ const BACKLOG_NO_SIBLING_REMEDY: &str = "run any other fno verb once (for \
 /// install remedy and NEVER provisions the Python wheel: the backlog
 /// namespace has no Python fallback on this side of the door.
 pub fn forward_backlog(args: &[OsString]) -> ! {
+    forward_agents(args, "fno backlog")
+}
+
+/// Forward argv to the sibling Rust binary, printing `label` on the exec
+/// refusal instead of the backlog namespace's. One exec, stdio inherited,
+/// signals and exit codes pass through unchanged. The sibling is never
+/// provisioned from here: a missing binary refuses with the install remedy.
+pub fn forward_agents(args: &[OsString], label: &str) -> ! {
     let bin = crate::digest_overlay::fno_agents_bin();
     let mut command = bootstrap_command(&bin);
     command.args(args);
@@ -192,7 +200,7 @@ pub fn forward_backlog(args: &[OsString]) -> ! {
     {
         let err = crate::process_admission::bootstrap_exec(&mut command);
         eprintln!(
-            "fno backlog: the sibling Rust binary could not be exec'd: {err}\n       {BACKLOG_NO_SIBLING_REMEDY}"
+            "{label}: the sibling Rust binary could not be exec'd: {err}\n       {BACKLOG_NO_SIBLING_REMEDY}"
         );
         std::process::exit(2);
     }
@@ -201,7 +209,7 @@ pub fn forward_backlog(args: &[OsString]) -> ! {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(err) => {
             eprintln!(
-                "fno backlog: the sibling Rust binary could not be run: {err}\n       {BACKLOG_NO_SIBLING_REMEDY}"
+                "{label}: the sibling Rust binary could not be run: {err}\n       {BACKLOG_NO_SIBLING_REMEDY}"
             );
             std::process::exit(2);
         }

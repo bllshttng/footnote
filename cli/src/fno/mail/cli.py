@@ -353,21 +353,21 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         return
     if allow_reason and allow_reason.strip():
         return
-    from fno import style
+    from fno import rust_binary
     from fno.config import load_settings
     from fno.mail import budget
 
     if budget.is_control(body):
-        # A control body is terse operational fragments, and refusing it for
-        # prose style re-creates the wall the lane exists to remove.
+        # A control body is terse operational fragments; refusing it re-creates the wall the lane removes.
         return
 
-    if style.has_exception(body):
-        return
-    violations = style.check(body, surface="mail", word_cap=load_settings().style.word_cap.mail)
-    if violations:
-        _emit_style_refusal(violations)
-        print(style.format_violations(violations, surface="mail"), file=sys.stderr)
+    err, receipt = rust_binary.style_receipt(body, "mail", load_settings().style.word_cap.mail)
+    # A door error, a violation, or a silent binary (no dict) refuses: the gate never vanishes.
+    clean = isinstance(receipt, dict) and (receipt.get("exception") or not receipt.get("violations"))
+    if not clean:
+        if isinstance(receipt, dict) and receipt.get("violations"):
+            _emit_style_refusal(receipt["violations"])
+        print(err or (receipt or {}).get("report") or "", file=sys.stderr)
         raise typer.Exit(code=1)
 
 
@@ -386,27 +386,22 @@ def _reserve_budget(
     An ordinary body reserves nothing: rule 7 is its only word gate, so the
     return is ``(None, words)`` and callers release unconditionally.
     """
-    from fno import style
+    from fno import rust_binary
     from fno.mail import budget
 
-    words = style.word_count(body)
-    if budget.is_control(body):
-        return _reserve_control_budget(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            sender_key=sender_key,
-            recipient_key=recipient_key,
-        )
-    return None, words
+    if not budget.is_control(body):
+        return None, rust_binary.style_word_count(body)
+    return _reserve_control_budget(
+        sender=sender, recipient=recipient, body=body, msg_id=msg_id,
+        sender_key=sender_key, recipient_key=recipient_key,
+    )
 
 
 def _reserve_control_budget(
     *,
     sender: str,
     recipient: str,
-    words: int,
+    body: str,
     msg_id: str,
     sender_key: str | None = None,
     recipient_key: str | None = None,
@@ -415,11 +410,14 @@ def _reserve_control_budget(
 
     The stderr note is the receipt's lane marker, in one place, for every
     lane that routes through here; it reads RESERVED because delivery is
-    proven later, by the lane's own receipt.
+    proven later, by the lane's own receipt. The word count arrives from the
+    checked door: the cap enforces, so a door failure refuses the send.
     """
+    from fno import rust_binary
     from fno.mail import budget
 
     try:
+        words = rust_binary.style_word_count_checked(body)
         reservation = budget.reserve_control(
             sender=sender,
             recipient=recipient,
@@ -434,7 +432,7 @@ def _reserve_control_budget(
             file=sys.stderr,
         )
         raise typer.Exit(code=1) from exc
-    except budget.BudgetUnavailable as exc:
+    except (budget.BudgetUnavailable, budget.BudgetCountUnavailable) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
     print(
@@ -465,7 +463,7 @@ def _emit_style_refusal(violations: list) -> None:
 
         data: dict = {
             "surface": "mail",
-            "rule_ids": sorted({v.rule for v in violations}),
+            "rule_ids": sorted({v["rule"] for v in violations}),
             "violation_count": len(violations),
         }
         ident = resolve_self_identity()

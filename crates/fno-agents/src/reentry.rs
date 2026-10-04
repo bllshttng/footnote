@@ -1020,6 +1020,7 @@ mod tests {
         Registry {
             schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
             entries,
+            ..Default::default()
         }
     }
 

@@ -1,8 +1,11 @@
 //! The plan-promise gate: did the plan's declared work all ship? The
 //! resolve_promise_evidence twin, refusal texts intact, so the native close
-//! cannot bypass the gates the Python close ran. Fails open (outcome Ok) on
-//! an absent, unreadable or unparseable plan so a stale plan_path never
-//! wedges a close; the warning names the path.
+//! cannot bypass the gates the Python close ran. Fails closed (Unmet) on an
+//! unreadable or unparseable plan: unreadable promise data cannot clear a
+//! gate, and the fail-open here is what let a node whose frontmatter the
+//! parser rejected close with its promise gate skipped. Fails open only on
+//! an absent plan_path (no promise declared), so a plan-less node closes
+//! normally. `--force --reason` is the operator override.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -180,19 +183,35 @@ pub(crate) fn resolve_promise_evidence(
     }
     let text = match std::fs::read_to_string(&plan_file) {
         Ok(t) => t,
+        // Fail closed: an unreadable plan cannot prove its promises, and the
+        // old skip read as a clean pass on the daemon close path.
         Err(e) => {
-            return ok_verdict(Some(format!(
-                "promise gate could not read plan {plan_clean} ({e}); gate skipped for this close"
-            )))
+            return PromiseVerdict {
+                outcome: PromiseOutcome::Unmet,
+                reason: Some(format!(
+                    "{node_id}: promise gate cannot read plan {plan_clean} ({e}); \
+                     the plan's promises are unverified. Restore the plan or close \
+                     with --force --reason."
+                )),
+                warning: None,
+            };
         }
     };
 
     let frontmatter = match crate::plan_doc::codec::parse_frontmatter(&text) {
         Ok(parsed) => parsed,
+        // Fail closed: a rejected frontmatter must block the close, not
+        // skip the gate, whatever line of the plan the parser chokes on.
         Err(e) => {
-            return ok_verdict(Some(format!(
-                "promise gate skipped {plan_clean}; plan frontmatter would not parse ({e})"
-            )))
+            return PromiseVerdict {
+                outcome: PromiseOutcome::Unmet,
+                reason: Some(format!(
+                    "{node_id}: promise gate cannot parse plan {plan_clean} ({e}); \
+                     the plan's promises are unverified. Fix the frontmatter or close \
+                     with --force --reason."
+                )),
+                warning: None,
+            };
         }
     };
 
@@ -422,16 +441,167 @@ fn count_merged_refs(
     (merged, failure)
 }
 
+/// The plan's declared ship count, tri-state: `Absent` (single-ship by
+/// default), `Count(n)`, or `Unreadable` (present but not an integer).
+/// The reaper's delivery predicate needs the third state - a declared
+/// count that cannot be read is unknown, never one ship.
+pub(crate) enum DeclaredShips {
+    Absent,
+    Count(i64),
+    Unreadable,
+}
+
+pub(crate) fn declared_ships(fields: &crate::plan_doc::codec::Fields) -> DeclaredShips {
+    match fields.get("expected_url_count") {
+        None => DeclaredShips::Absent,
+        Some(crate::plan_doc::codec::Value::Scalar(s)) => match s.trim().parse::<i64>() {
+            Ok(n) => DeclaredShips::Count(n),
+            Err(_) => DeclaredShips::Unreadable,
+        },
+        Some(_) => DeclaredShips::Unreadable,
+    }
+}
+
+/// The deduplicated MERGED ref count one graph row carries: the primary
+/// when its merge_status reads merged, plus every numbered additional_prs
+/// entry recorded merged. A duplicate recording of the primary, or of an
+/// already-counted extra, never counts twice, an unrecorded extra never
+/// inflates the count, and a ref with no number is unverifiable evidence
+/// that never counts - this is the local confirmed-merged evidence the
+/// merged-lag delivery predicate reads, never a promise count.
+pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
+    let primary_merged = entry.get("merge_status").and_then(Value::as_str) == Some("merged");
+    let primary_number = entry.get("pr_number").and_then(Value::as_i64);
+    let mut merged = usize::from(primary_merged);
+    let mut seen: Vec<i64> = Vec::new();
+    for extra in entry
+        .get("additional_prs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if extra.get("merge_status").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        // A ref with no number cannot be told apart from any other ref, so
+        // it is unverifiable evidence and never counts.
+        let Some(number) = extra.get("number").and_then(Value::as_i64) else {
+            continue;
+        };
+        if primary_merged && Some(number) == primary_number {
+            continue;
+        }
+        if seen.contains(&number) {
+            continue;
+        }
+        seen.push(number);
+        merged += 1;
+    }
+    merged
+}
+
+/// The one plan-path resolver: a `#wave-1` fragment is stripped first (the
+/// module's reader convention), `~/` expands against `$HOME`, a relative
+/// path joins the close or sweep cwd, and an unresolvable path is None -
+/// the caller decides what None reads as. One resolver so two readers can
+/// never resolve the same plan_path to two different files.
+pub(crate) fn resolve_plan_path(plan_path: &str, cwd: Option<&str>) -> Option<std::path::PathBuf> {
+    let plan_path = plan_path.split('#').next().unwrap_or(plan_path);
+    let path = match plan_path.strip_prefix("~/") {
+        Some(rest) => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(rest),
+        None => PathBuf::from(plan_path),
+    };
+    if path.is_relative() {
+        Some(Path::new(cwd?).join(path))
+    } else {
+        Some(path)
+    }
+}
+
+/// The reaper side of the same delivery rule the close gate runs: a
+/// recorded merge_status is the LAST ship, never the whole delivery. The
+/// plan completion stamp decides: no plan, or a single-ship promise,
+/// settles with the recorded merge; a multi-ship plan keeps its worker
+/// until MERGED refs cover the promise; an unreadable or unparseable plan
+/// reads as unknown, and unknown keeps the row - unknown is never done.
+/// No network: the count arrives deduplicated from the graph's recorded
+/// merge evidence, so a promise it cannot cover is unmet by construction.
+/// The close gate itself is [`resolve_promise_evidence`].
+pub(crate) fn merged_delivery_settled(
+    merged_refs: usize,
+    plan_path: Option<&str>,
+    cwd: Option<&str>,
+) -> bool {
+    let Some(plan_path) = plan_path.filter(|p| !p.is_empty()) else {
+        return true;
+    };
+    let Some(path) = resolve_plan_path(plan_path, cwd) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(frontmatter) = crate::plan_doc::codec::parse_frontmatter(&text) else {
+        return false;
+    };
+    match declared_ships(&frontmatter.fields) {
+        DeclaredShips::Absent => true,
+        DeclaredShips::Count(n) if n < 2 => true,
+        DeclaredShips::Count(n) => merged_refs >= n as usize,
+        DeclaredShips::Unreadable => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_plan_less_node_passes_without_gh_io() {
+    fn plan_promise_gate_reads_or_fails_closed() {
+        // No plan_path: nothing promised, the gate passes without gh io.
         let node = serde_json::json!({"id": "ab-1234abcd", "status": "in_progress"});
         let v = resolve_promise_evidence(&node, None, &[]);
         assert!(v.satisfied());
         assert!(v.warning.is_none());
+
+        // Unreadable plan: Unmet, naming the path and the force remedy.
+        let node = serde_json::json!({
+            "id": "ab-1234abcd",
+            "status": "in_progress",
+            "plan_path": "/nonexistent/plan-promise-test/plan.md",
+        });
+        let v = resolve_promise_evidence(&node, None, &[]);
+        assert!(!v.satisfied());
+        assert_eq!(v.exit_code(), 6);
+        let reason = v.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("cannot read plan"), "{reason}");
+        assert!(reason.contains("--force --reason"), "{reason}");
+
+        // Malformed frontmatter: Unmet, naming the parse error.
+        let dir = std::env::temp_dir().join(format!(
+            "promise-gate-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let plan = dir.join("bad-plan.md");
+        std::fs::write(
+            &plan,
+            "---\ntitle: t\n  orphan: continuation without a parent key\n---\nbody\n",
+        )
+        .expect("write test plan");
+        let node = serde_json::json!({
+            "id": "ab-1234abcd",
+            "status": "in_progress",
+            "plan_path": plan.to_string_lossy().into_owned(),
+        });
+        let v = resolve_promise_evidence(&node, None, &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!v.satisfied());
+        assert_eq!(v.exit_code(), 6);
+        let reason = v.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("cannot parse plan"), "{reason}");
+        assert!(reason.contains("Malformed frontmatter"), "{reason}");
     }
 
     #[test]

@@ -1,0 +1,15 @@
+message blocked by the style rules.
+
+rule 2 (semicolon): sentence 2 has a semicolon. Split it into two sentences. "You should do this; it is basically fine."
+
+rule 3 (modal): sentence 2 uses "should". Write "can", "will", or "must" instead. "You should do this; it is basically fine."
+
+rule 8 (filler): sentence 2 uses the filler "basically". Delete it. The imperative alone reads stronger. "You should do this; it is basically fine."
+
+A quoted word is a mention, not a use.
+
+Wrap "should" in double quotes or backticks to name it.
+
+This refusal does that with every word it names.
+
+commit the rewrite, then run "fno doctor lint style --surface markdown --diff-base <base>" to check it.

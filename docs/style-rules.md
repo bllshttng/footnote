@@ -205,4 +205,4 @@ Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 
 The comment surface is honest about refusing nothing. A PR comment goes out through `gh pr comment`, which this repo never wraps. A surface that reads as a guard and blocks nothing is worse than no surface at all.
 
-The checker lives in `cli/src/fno/style.py`. Run it directly with `fno doctor lint style`.
+The checker lives in `crates/fno-agents/src/backlog/style_check.rs`, behind `fno doctor lint style`.

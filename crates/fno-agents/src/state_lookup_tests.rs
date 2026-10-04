@@ -155,6 +155,7 @@ fn demoted_find_resolves_prior_labels_then_session_ids() {
     let reg = Registry {
         schema_version: 1,
         entries: vec![e],
+        ..Default::default()
     };
     assert!(reg.find("new-name").is_some(), "own name resolves");
     assert!(reg.find("old-name").is_some(), "a prior label resolves");
@@ -179,6 +180,7 @@ fn related_and_predecessor_ids_resolve_at_the_full_tier() {
     let reg = Registry {
         schema_version: 1,
         entries: vec![e],
+        ..Default::default()
     };
     assert!(reg.find(related).is_some(), "a parked fork id resolves");
     assert!(reg.find(pred).is_some(), "a predecessor id resolves");
