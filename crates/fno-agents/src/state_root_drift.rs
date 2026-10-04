@@ -2,7 +2,7 @@
 //! `docs/state-root-inventory.md` does not name. The doc is the wire contract:
 //! the Python gate (`fno.graph._state_root_inventory`) parses it for the CLI
 //! test, and this module parses it for the daemon's daily reclaim lane and the
-//! reign check-in. Keep the two parsers dialect-identical (the mail-hold
+//! lead check-in. Keep the two parsers dialect-identical (the mail-hold
 //! shape: one contract, two legs).
 
 use std::path::{Path, PathBuf};

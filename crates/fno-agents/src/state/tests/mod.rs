@@ -2932,7 +2932,7 @@ fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
     );
     assert_eq!(warden.name, "warden", "the name survives");
     assert_eq!(warden.aliases, vec!["footnote-49a80492"]);
-    assert_eq!(warden.crown_level, Some(1), "the crown fields survive");
+    assert_eq!(warden.crown_level, Some(1), "the team fields survive");
     assert_eq!(warden.crown_scope.as_deref(), Some("fleet"));
     assert_eq!(by_name("spawned").short_id, "abcd1234");
     assert_eq!(

@@ -330,7 +330,7 @@ pub fn classify(runs: &Value, workflow: &str, contains: &dyn Fn(&str) -> Option<
 
 /// The node row for `node_id`, read from the graph at `cwd`'s project scope.
 fn read_node(node_id: &str, cwd: &Path) -> Option<Value> {
-    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
     let rows = crate::backlog::api::rows(&store).ok()?;
     crate::graph_get::find_entry(&rows, node_id).cloned()

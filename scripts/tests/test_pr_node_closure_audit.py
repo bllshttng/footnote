@@ -29,7 +29,7 @@ def test_classify_close_claim():
 
 def test_classify_dependency_wins_over_close_verb():
     # A close verb elsewhere in the sentence must not override dependency
-    # language naming the SAME sentence (x-59a6 king correction).
+    # language naming the SAME sentence (x-59a6 lead correction).
     sentence = "x-3a91 is blocked_by this and gets its own Part 2 plan."
     assert audit.classify_mention(sentence) == "dependency"
 

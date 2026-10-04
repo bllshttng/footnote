@@ -1,0 +1,2404 @@
+//! `lead_state` + the shape rewrite: who is leading, in what shape, is it live.
+//!
+//! Module name starts with "loop" for the same LOC-ratchet reason as
+//! `loop_lead.rs`: its lines must count toward the `crates/fno-agents/src/loop*`
+//! control-plane glob.
+//!
+//! Ported from the Python reader (`cli/src/fno/lead/state.py`): the
+//! Python tree is shrink-only as a whole, so the compute landed here and the
+//! Python side kept a thin JSON client plus the CLI shell. The port is
+//! behavior-identical, refusal strings included, because the escalate closing
+//! sentence and the tests key on those substrings.
+//!
+//! The contract the port preserves: every unknownable field answers `None`
+//! with `unknown_reason` naming the unreadable side, never a clean `false`.
+//! The four consumers (escalate's closing sentence, the Stop nudge's org
+//! branch, org's split count, the team-liveness monitor) each act
+//! differently on "absent" versus "cannot read", and flattening the two is the
+//! shared root this reader exists to end.
+//!
+//! CLI surface (direct dispatch in `bin/client.rs`, not routable `fno agents`
+//! verbs, same reasoning as `kill-check`):
+//!   `fno-agents lead-state [--scope S | --session ID] [--root PATH]`
+//!     one JSON LeadState on stdout, exit 0; unknowns are encoded in the JSON.
+//!   `fno-agents lead-shape --scope S --shape pass|org [--session ID]`
+//!     rewrites `shape` on the scope's manifest under the manifest lock;
+//!     exit 0 prints the shape now on the file, exit 1 carries the refusal.
+
+use crate::loop_lead::{same_territory, scopes_overlap};
+use crate::state::{load_registry, RegistryEntry};
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Write;
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
+
+/// The four terminal row statuses, Python's `TERMINAL_STATUSES` exactly.
+pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
+    matches!(
+        row.status,
+        crate::AgentStatus::Exited
+            | crate::AgentStatus::Orphaned
+            | crate::AgentStatus::Failed
+            | crate::AgentStatus::PermanentDead
+    )
+}
+
+/// The one name join `mail_envelope.rs` renders addresses with: filter the
+/// rows by a liveness side first (dead twins must never answer for a live
+/// name), match name or alias, and refuse when the name still matches more
+/// than one row - the first match of a duplicate name is a guess, and the
+/// callers below act on the row.
+pub(crate) enum NameJoin<'a> {
+    One(&'a RegistryEntry),
+    Ambiguous,
+    None,
+}
+
+fn join_rows<'a, F>(rows: &'a [RegistryEntry], name: &str, keep: F) -> NameJoin<'a>
+where
+    F: Fn(&RegistryEntry) -> bool,
+{
+    let mut matches = rows.iter().filter(|row| {
+        keep(row) && (row.name == name || row.aliases.iter().any(|alias| alias == name))
+    });
+    match (matches.next(), matches.next()) {
+        (Some(row), None) => NameJoin::One(row),
+        (None, _) => NameJoin::None,
+        (Some(_), Some(_)) => NameJoin::Ambiguous,
+    }
+}
+
+/// The join over live rows: every terminal row is invisible to it.
+pub(crate) fn live_name_join<'a>(rows: &'a [RegistryEntry], name: &str) -> NameJoin<'a> {
+    join_rows(rows, name, |row| !is_terminal(row))
+}
+
+/// The join over terminal rows: the caller already knows the row it wants is
+/// dead (a stale-team reading), so a live twin of the same name must never
+/// answer for it.
+pub(crate) fn terminal_name_join<'a>(rows: &'a [RegistryEntry], name: &str) -> NameJoin<'a> {
+    join_rows(rows, name, is_terminal)
+}
+
+/// One read of who is leading, over what, in what shape, and is it live.
+/// Field names mirror the Python dataclass the JSON client deserializes into.
+#[derive(Debug, Default, Serialize)]
+pub struct LeadState {
+    pub teamed: Option<bool>,
+    pub scope: Option<String>,
+    /// `pass` | `org` from the manifest; `None` when the manifest side is
+    /// unreadable. A readable manifest written before the field existed reads
+    /// as `pass`, the value its writer would have recorded.
+    pub shape: Option<String>,
+    pub manifest_session: Option<String>,
+    pub registry_session: Option<String>,
+    /// The team holder's row is live (non-terminal). `None` = unreadable.
+    pub live: Option<bool>,
+    /// `Some(true)` only when BOTH sides were read and name different
+    /// sessions. `None` when either side is unknown - a vacated team and an
+    /// unreadable manifest are not disagreements, and must never render as one.
+    pub split: Option<bool>,
+    /// The manifest file's path, when it exists: the manifest is the
+    /// durable team record, and org names where the record lives.
+    pub manifest_path: Option<String>,
+    /// The manifest carries `crown_scope` equal to the scope: a durable team
+    /// copy exists, not just identity (a pre-fields manifest holds the holder
+    /// id but no team to restore). `None` when the manifest side is unreadable.
+    pub team_on_manifest: Option<bool>,
+    pub unknown_reason: Option<String>,
+}
+
+/// Same unsafe-scope refusal as `lead_manifest_path`: scope becomes a filename
+/// here, so two spellings of one scope must never select two files and no
+/// scope may escape the state root.
+pub(crate) fn manifest_path(root: &Path, scope: &str) -> Result<PathBuf, String> {
+    let scope = scope.trim();
+    if scope.is_empty()
+        || scope.contains("..")
+        || scope.contains('/')
+        || scope.contains('\\')
+        || scope.contains('\0')
+    {
+        return Err(format!("unsafe lead scope for manifest path: {scope:?}"));
+    }
+    // `root` is the state root itself (the repo's space), matching Python's
+    // lead_manifest_path: leads sit at <root>/leads, NOT <root>/.fno/leads.
+    Ok(root.join("kings").join(format!("{scope}.md")))
+}
+
+/// The row's canonical session id, tolerating legacy rows without one
+/// (Python's `_row_session`).
+fn row_session(row: &RegistryEntry) -> Option<String> {
+    row.harness_session_id
+        .clone()
+        .or_else(|| row.cc_session_id.clone())
+}
+
+/// True when a lead manifest in the row's own space names the row's session
+/// as team holder. The manifest is team truth that survives registry
+/// damage: a restore or rewrite can strip the row's stamp, so a reaper that
+/// reads only `crown_level` sees an ordinary row where a live lead sits.
+/// Absence of a stamp is not absence of a team. Only
+/// `team_reap::sweep`'s holder verdict may vacate the manifest, so a manifest
+/// naming a session keeps the row - the fail-safe direction.
+pub(crate) fn row_holds_manifest_live_team(row: &RegistryEntry) -> bool {
+    let mut cache = HashMap::new();
+    row_holds_manifest_live_team_cached(row, &mut cache)
+}
+
+/// [`row_holds_manifest_live_team`] over a per-pass cache keyed by leads
+/// dir: a sweep scanning the registry reads each space's manifests once, not
+/// once per row. Callers sweeping many rows use this form; single-row
+/// callers keep the plain wrapper.
+pub(crate) fn row_holds_manifest_live_team_cached(
+    row: &RegistryEntry,
+    cache: &mut HashMap<PathBuf, HashSet<String>>,
+) -> bool {
+    let Some(session) = row_session(row)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let cwd = std::path::PathBuf::from(row.cwd.trim());
+    if cwd.as_os_str().is_empty() {
+        return false;
+    }
+    let leads = crate::paths::space_dir(&cwd).join("kings");
+    cache
+        .entry(leads.clone())
+        .or_insert_with(|| manifest_team_sessions(&leads))
+        .contains(&session)
+}
+
+/// Per-pass cache for the sweep form: one map keyed by leads dir, so a
+/// registry-wide sweep reads each space's manifests once, not once per row.
+pub(crate) struct ManifestCrownCache(HashMap<PathBuf, HashSet<String>>);
+
+impl ManifestCrownCache {
+    pub(crate) fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// [`row_holds_manifest_live_team`] over this pass's cache.
+    pub(crate) fn holds(&mut self, row: &RegistryEntry) -> bool {
+        row_holds_manifest_live_team_cached(row, &mut self.0)
+    }
+}
+
+/// The harness session ids every manifest under one leads dir names as
+/// holder. Unreadable or non-manifest files are skipped; an empty dir
+/// answers an empty set.
+fn manifest_team_sessions(leads: &Path) -> HashSet<String> {
+    let Ok(files) = fs::read_dir(leads) else {
+        return HashSet::new();
+    };
+    files
+        .flatten()
+        .map(|file| file.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| fs::read_to_string(&path).ok())
+        .filter_map(|content| crate::claude_adopt::manifest_field(&content, "harness_session_id"))
+        .map(|sid| sid.trim().to_string())
+        .filter(|sid| !sid.is_empty())
+        .collect()
+}
+
+/// Python `_find_by_session`, both of its forms. A known harness scopes the
+/// match to rows of that harness and to exact ids only; `None` (the explicit
+/// session form, and any harness Python could not resolve) keeps the original
+/// claude-shaped scan: exact id match first, then the claude 8-hex `short_id`
+/// prefix (a 32-bit jobId is a prefix of a claude session uuid). Without the
+/// scoping, a non-claude caller's uuid could fall through to an unrelated
+/// claude row's short_id prefix.
+pub(crate) fn find_by_session<'a>(
+    rows: &'a [RegistryEntry],
+    sid: &str,
+    harness: Option<&str>,
+) -> Option<&'a RegistryEntry> {
+    let exact = |r: &RegistryEntry| {
+        r.harness_session_id.as_deref() == Some(sid)
+            || r.cc_session_id.as_deref() == Some(sid)
+            // The guard's jq select also matched the bare `session_id` field
+            // One matcher keeps every caller on the same rows.
+            || r.session_id.as_deref() == Some(sid)
+    };
+    match harness {
+        Some(h) if h != "claude" => rows
+            .iter()
+            .find(|r| r.harness.as_deref() == Some(h) && exact(r)),
+        _ => rows.iter().find(|r| exact(r)).or_else(|| {
+            rows.iter().find(|r| {
+                r.harness.as_deref() == Some("claude")
+                    && !r.short_id.is_empty()
+                    && sid.len() >= 8
+                    && sid.starts_with(&r.short_id)
+            })
+        }),
+    }
+}
+
+/// `(manifest_session, shape, team_on_manifest)` from one content read;
+/// `(None, None, None)` when the file cannot read. A manifest from before
+/// `shape` existed reads as its writer's default, not as a third unknown
+/// shape. `team_on_manifest` answers durability, not identity: a manifest
+/// written before team fields existed holds no team copy to restore.
+fn read_manifest_identity(path: &Path) -> (Option<String>, Option<String>, Option<bool>) {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return (None, None, None),
+    };
+    let Some(m) = crate::loopcheck::parse_lead_manifest(&content) else {
+        return (None, None, None);
+    };
+    let session = m.harness_session_id.filter(|s| !s.is_empty());
+    // An empty shape is a manifest from before the field existed: its writer's
+    // default, not a third unknown shape.
+    let shape = if m.shape.is_empty() {
+        "pass".to_string()
+    } else {
+        m.shape
+    };
+    let team = Some(crate::claude_adopt::manifest_field(&content, "crown_scope").is_some());
+    (session, Some(shape), team)
+}
+
+/// Fill the manifest limb of an otherwise-answered state, in place
+/// (Python's `_with_manifest`).
+fn with_manifest(mut state: LeadState, scope: &str, root: &Path) -> LeadState {
+    let path = match manifest_path(root, scope) {
+        Ok(p) => p,
+        Err(_) => {
+            if state.unknown_reason.is_none() {
+                state.unknown_reason = Some(format!("unsafe scope for manifest: {scope:?}"));
+            }
+            return state;
+        }
+    };
+    if !path.is_file() {
+        if state.unknown_reason.is_none() {
+            state.unknown_reason = Some(format!("no manifest at {}", path.display()));
+        }
+        return state;
+    }
+    state.manifest_path = Some(path.display().to_string());
+    let (session, shape, team) = read_manifest_identity(&path);
+    state.manifest_session = session;
+    state.shape = shape;
+    state.team_on_manifest = team;
+    if state.manifest_session.is_none() {
+        // Unreadable, or readable with no session to compare; shape may still
+        // have read, and each gap names itself.
+        if state.unknown_reason.is_none() {
+            let reason = if state.shape.is_none() {
+                format!("manifest unreadable: {}", path.display())
+            } else {
+                format!("manifest names no session: {}", path.display())
+            };
+            state.unknown_reason = Some(reason);
+        }
+        return state;
+    }
+    if let Some(registry_session) = state.registry_session.as_deref() {
+        state.split = Some(state.manifest_session.as_deref() != Some(registry_session));
+    }
+    state
+}
+
+/// Load the registry with Python's missing-file semantics: absent reads as
+/// empty (nothing teamed), damage reads as an error the caller names.
+fn load_rows(path: &Path) -> Result<Vec<RegistryEntry>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    load_registry(path)
+        .map(|r| r.entries)
+        .map_err(|e| format!("registry unreadable: {e}"))
+}
+
+/// The reader. With `scope`, the registry team rows over that territory are
+/// the authority and the manifest is corroborated against them. With `session`
+/// instead, the caller's own row resolves the scope exactly as the Python
+/// reader's caller form does.
+pub fn lead_state(
+    root: &Path,
+    scope: Option<&str>,
+    session: Option<&str>,
+    harness: Option<&str>,
+    registry_path: &Path,
+) -> LeadState {
+    lead_state_in_repo(root, root, scope, session, harness, registry_path)
+}
+
+/// `repo_cwd` is the CHECKOUT the alias map resolves from; `root` is the
+/// space dir the manifests live under. One path each, on purpose.
+fn lead_state_in_repo(
+    root: &Path,
+    repo_cwd: &Path,
+    scope: Option<&str>,
+    session: Option<&str>,
+    harness: Option<&str>,
+    registry_path: &Path,
+) -> LeadState {
+    lead_state_with_projects(
+        root,
+        scope,
+        session,
+        harness,
+        registry_path,
+        &crate::org_board::project_map(repo_cwd),
+    )
+}
+
+fn lead_state_with_projects(
+    root: &Path,
+    scope: Option<&str>,
+    session: Option<&str>,
+    harness: Option<&str>,
+    registry_path: &Path,
+    projects_result: &Result<HashMap<String, String>, String>,
+) -> LeadState {
+    let rows = match load_rows(registry_path) {
+        Ok(rows) => rows,
+        Err(e) => {
+            // The registry is the team authority, so teamed/live/split are
+            // unanswerable. The manifest (scope permitting) still reads: shape
+            // is a file fact, and starving the caller of it because a
+            // different instrument broke is the absence-lie this reader
+            // refuses. An unsafe scope must degrade the manifest side to
+            // unknown, never add a second error to the named reason.
+            let mut reason = e.clone();
+            let mut manifest_session = None;
+            let mut shape = None;
+            let mut manifest_path_field = None;
+            let mut team_on_manifest = None;
+            if let Some(s) = scope {
+                match manifest_path(root, s) {
+                    Ok(path) => {
+                        if path.is_file() {
+                            manifest_path_field = Some(path.display().to_string());
+                        }
+                        let (m, sh, cr) = read_manifest_identity(&path);
+                        manifest_session = m;
+                        shape = sh;
+                        team_on_manifest = cr;
+                    }
+                    Err(_) => reason = format!("{e}; unsafe scope {s:?}"),
+                }
+            }
+            return LeadState {
+                teamed: None,
+                scope: scope.map(str::to_string),
+                shape,
+                manifest_session,
+                manifest_path: manifest_path_field,
+                team_on_manifest,
+                registry_session: None,
+                live: None,
+                split: None,
+                unknown_reason: Some(reason),
+            };
+        }
+    };
+
+    let scope = match scope {
+        Some(s) => s.to_string(),
+        None => {
+            // Caller form: the caller's own row resolves the scope.
+            let Some(sid) = session.filter(|s| !s.is_empty()) else {
+                return LeadState {
+                    teamed: Some(false),
+                    live: Some(false),
+                    unknown_reason: Some(
+                        "no session identity: not resolvable to a team".to_string(),
+                    ),
+                    ..Default::default()
+                };
+            };
+            let Some(row) = find_by_session(&rows, sid, harness) else {
+                return LeadState {
+                    teamed: Some(false),
+                    live: Some(false),
+                    unknown_reason: Some(format!("no registry row matches session {sid}")),
+                    ..Default::default()
+                };
+            };
+            if is_terminal(row) {
+                return LeadState {
+                    teamed: Some(false),
+                    live: Some(false),
+                    unknown_reason: Some(format!("row status is terminal ({:?})", row.status)),
+                    ..Default::default()
+                };
+            }
+            let registry_session = row_session(row);
+            let Some(own) = row.crown_scope.clone().filter(|s| !s.trim().is_empty()) else {
+                return LeadState {
+                    teamed: Some(false),
+                    registry_session,
+                    live: Some(false),
+                    unknown_reason: Some("row holds no team".to_string()),
+                    ..Default::default()
+                };
+            };
+            return with_manifest(
+                LeadState {
+                    teamed: Some(true),
+                    scope: Some(own.clone()),
+                    registry_session,
+                    live: Some(true),
+                    ..Default::default()
+                },
+                &own,
+                root,
+            );
+        }
+    };
+
+    // Scope form: live holders over the named territory. A rung-2 team is
+    // stored as the joined set and a set-holder leads over each member, so
+    // the scan answers shared membership through the same alias-aware helper
+    // the walk guard uses - never string equality, which reads a live lead
+    // over e-1,e-2 as "no team over e-1".
+    let projects = projects_result.clone().unwrap_or_default();
+    let holders: Vec<&RegistryEntry> = rows
+        .iter()
+        .filter(|r| {
+            !is_terminal(r)
+                && r.crown_scope
+                    .as_deref()
+                    .is_some_and(|held| scopes_overlap(held, &scope, &projects))
+        })
+        .collect();
+    if holders.is_empty() {
+        // An unreadable project map degrades alias matching to raw spellings,
+        // so an empty answer can be a MISS. But only when live teamed rows
+        // exist for a miss to hide: an empty (or all-terminal) registry is
+        // decisive on its own, whatever the map read.
+        let live_teamed = rows
+            .iter()
+            .filter(|r| {
+                !is_terminal(r)
+                    && r.crown_scope
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty())
+            })
+            .count();
+        if live_teamed > 0 && projects_result.is_err() {
+            let reason = format!(
+                "project map unreadable ({}), so alias members may hide a live \
+                 holder; no raw-spelled holder over {scope}",
+                projects_result.as_ref().err().cloned().unwrap_or_default()
+            );
+            return LeadState {
+                teamed: None,
+                scope: Some(scope),
+                live: None,
+                unknown_reason: Some(reason),
+                ..Default::default()
+            };
+        }
+        let reason = format!("no live teamed row over {scope}");
+        return LeadState {
+            teamed: Some(false),
+            scope: Some(scope),
+            live: Some(false),
+            unknown_reason: Some(reason),
+            ..Default::default()
+        };
+    }
+    // Overlap finds orgs as well as rivals (a portfolio over alpha,beta
+    // overlaps a question about alpha), so the row to describe is the one
+    // whose territory IS the asked scope, with a set-holder as the fallback.
+    let primary = holders
+        .iter()
+        .find(|r| {
+            r.crown_scope
+                .as_deref()
+                .is_some_and(|held| same_territory(held, &scope, &projects))
+        })
+        .unwrap_or(&holders[0]);
+    let registry_session = row_session(primary);
+    let mut state = LeadState {
+        teamed: Some(true),
+        scope: Some(scope.clone()),
+        registry_session,
+        live: Some(true),
+        ..Default::default()
+    };
+    // A org is legal: only RIVALS of the primary (same derived rung, shared
+    // territory) count toward the multiple-holders warning, never a mere
+    // overlap this ladder declares legitimate.
+    let rival_count = holders
+        .iter()
+        .filter(|r| {
+            crate::loop_lead::team_rivals_pub(
+                primary.crown_scope.as_deref().unwrap_or(""),
+                primary.crown_level,
+                r.crown_scope.as_deref().unwrap_or(""),
+                r.crown_level,
+                &projects,
+            )
+        })
+        .count();
+    if rival_count > 1 {
+        state.unknown_reason = Some(format!(
+            "multiple rival rows hold {scope}; fno agents org shows every team"
+        ));
+    }
+    // The manifest keys on the HOLDER's own scope: a holder found through one
+    // member of its set arms the set's manifest, and a manifest named for the
+    // member alone does not exist.
+    let holder_scope = primary.crown_scope.clone().unwrap_or_else(|| scope.clone());
+    with_manifest(state, &holder_scope, root)
+}
+
+/// Rewrite one or more fields in place on one scope's existing manifest,
+/// under the same `<scope>.md.lock` the arming and respawn paths flock. The
+/// only legal post-init write to a lead manifest; every refusal is a
+/// `String` the CLI shell relays, matching the Python ValueError texts.
+/// Fields already present are replaced in place; fields absent are inserted
+/// just after the opening fence, in `fields` order.
+pub fn set_manifest_fields(
+    root: &Path,
+    scope: &str,
+    fields: &[(&str, &str)],
+    expect_session: Option<&str>,
+) -> Result<(), String> {
+    if let Some((key, _)) = fields.iter().find(|(_, v)| v.contains('\n')) {
+        return Err(format!(
+            "refusing to write {key:?}: its value contains a newline, which the hand-rolled \
+             frontmatter cannot quote safely."
+        ));
+    }
+    let path = manifest_path(root, scope)?;
+    if !path.is_file() {
+        return Err(format!(
+            "no manifest at {}; declare a field only on a team you have armed with \
+             `fno agents lead init --scope`.",
+            path.display()
+        ));
+    }
+    let lock_path = path.with_extension("md.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    let result = (|| {
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let parsed = crate::loopcheck::parse_lead_manifest(&content)
+            .ok_or_else(|| format!("manifest unreadable: {}", path.display()))?;
+        let manifest_session = parsed.harness_session_id.filter(|s| !s.is_empty());
+        if let (Some(expect), Some(named)) = (expect_session, manifest_session.as_deref()) {
+            if named != expect {
+                return Err(format!(
+                    "refusing to rewrite {scope:?}: the manifest names session {named}, not \
+                     {expect}. Re-read with `fno agents org` before touching anything."
+                ));
+            }
+        }
+        let mut pending: std::collections::HashMap<&str, &str> = fields.iter().copied().collect();
+        let mut out = String::with_capacity(content.len() + 16);
+        for line in content.lines() {
+            let key = line.split(':').next().map(str::trim);
+            if let Some(value) = key.and_then(|k| pending.remove(k)) {
+                out.push_str(&format!("{}: {value}", key.unwrap()));
+            } else {
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+        if !pending.is_empty() {
+            // Insert just after the opening fence, where a reader scanning the
+            // frontmatter expects the team's own fields. Prepending to the
+            // file would land the line ABOVE the `---`, invisible to every
+            // fenced parser, and every manifest written before the field
+            // existed hits this branch. Rebuild fresh: the replace loop above
+            // already applied every already-present field into `out`.
+            let mut rebuilt = String::with_capacity(out.len() + 16);
+            let mut inserted = false;
+            for line in out.lines() {
+                rebuilt.push_str(line);
+                rebuilt.push('\n');
+                if !inserted && line.trim() == "---" {
+                    for (key, value) in fields.iter().filter(|(k, _)| pending.contains_key(k)) {
+                        rebuilt.push_str(&format!("{key}: {value}\n"));
+                    }
+                    inserted = true;
+                }
+            }
+            if !inserted {
+                let mut prefix = String::new();
+                for (key, value) in fields.iter().filter(|(k, _)| pending.contains_key(k)) {
+                    prefix.push_str(&format!("{key}: {value}\n"));
+                }
+                rebuilt = format!("{prefix}{rebuilt}");
+            }
+            out = rebuilt;
+        }
+        let tmp = path.with_extension("md.tmp");
+        {
+            let mut handle = fs::File::create(&tmp)
+                .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+            handle
+                .write_all(out.as_bytes())
+                .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        }
+        fs::rename(&tmp, &path).map_err(|e| format!("cannot replace {}: {e}", path.display()))?;
+        Ok(())
+    })();
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+    result
+}
+
+/// Rewrite `shape` in place on one scope's existing manifest. A thin caller
+/// of [`set_manifest_fields`]; kept because the CLI verb and its tests key
+/// on this name and its `Ok(new_value)` return.
+pub fn set_manifest_shape(
+    root: &Path,
+    scope: &str,
+    shape: &str,
+    expect_session: Option<&str>,
+) -> Result<String, String> {
+    // The manifest's stored value stays `court` this release; the renamed
+    // spelling is accepted beside it.
+    if shape != "pass" && shape != "court" && shape != "org" {
+        return Err(format!("shape must be pass or org, got {shape:?}"));
+    }
+    set_manifest_fields(root, scope, &[("shape", shape)], expect_session)?;
+    Ok(shape.to_string())
+}
+
+/// `fno-agents lead-term`: declare or extend a team's term, exit 0/1/2.
+/// A declared or reached term refuses replacement without `--reason`: the
+/// extension IS the receipt (a bare re-declaration would let a lead dodge
+/// the handoff the Stop-hook gate demands).
+pub fn run_lead_term(args: &[String]) -> i32 {
+    let mut scope: Option<String> = None;
+    let mut term: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut events_path: Option<PathBuf> = None;
+    let mut global_events_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--scope" if i + 1 < args.len() => {
+                scope = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--term" if i + 1 < args.len() => {
+                term = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--reason" if i + 1 < args.len() => {
+                reason = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--session" if i + 1 < args.len() => {
+                session = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--root" if i + 1 < args.len() => {
+                root = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            "--events-path" if i + 1 < args.len() => {
+                events_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--global-events-path" if i + 1 < args.len() => {
+                global_events_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            other => {
+                eprintln!("fno-agents lead-term: unknown flag {other}");
+                eprintln!(
+                    "fno-agents lead-term: --scope S --term SPEC [--reason TEXT] \
+                     [--session ID] [--root PATH] [--events-path PATH] [--global-events-path PATH]"
+                );
+                return 2;
+            }
+        }
+    }
+    let (Some(scope), Some(term)) = (scope, term) else {
+        eprintln!("fno-agents lead-term: --scope and --term are required");
+        return 2;
+    };
+    let spec = match crate::lead_term::parse_spec(&term) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let path = match manifest_path(&root, &scope) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            return 1;
+        }
+    };
+    let Some(manifest) = crate::loopcheck::parse_lead_manifest(&content) else {
+        eprintln!("manifest unreadable: {}", path.display());
+        return 1;
+    };
+    if spec.is_compactions() && manifest.harness.as_deref().unwrap_or("claude") != "claude" {
+        eprintln!(
+            "fno-agents lead-term: compactions: terms only measure a claude transcript; this \
+             team's harness is {:?}. Use span:<N>[smhd] instead.",
+            manifest.harness.as_deref().unwrap_or("")
+        );
+        return 1;
+    }
+    let view = crate::team_names::lead_view(&manifest);
+    let prior_reading = crate::lead_term::reading(&view, chrono::Utc::now(), None);
+    let already_declared = view.term.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let reached = matches!(
+        prior_reading.state,
+        crate::lead_term::TermState::Reached { .. }
+    );
+    let reason = reason.filter(|r| !r.trim().is_empty());
+    if (already_declared || reached) && reason.is_none() {
+        eprintln!(
+            "refusing to replace a declared or reached term without --reason: the extension is \
+             the receipt. Hand off instead: fno agents spawn --crown {scope} --succeed"
+        );
+        return 1;
+    }
+    let mut fields: Vec<(&str, &str)> = vec![("term", &term)];
+    if let Some(reason) = reason.as_deref() {
+        fields.push(("term_reason", reason));
+    }
+    if let Err(e) = set_manifest_fields(&root, &scope, &fields, session.as_deref()) {
+        eprintln!("{e}");
+        return 1;
+    }
+    if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
+        if let Err(e) =
+            crate::team_names::stamp_lead(&home.team_names_json(), &manifest, Some(&term))
+        {
+            eprintln!("fno-agents lead-term: WARNING: lead clock not stamped: {e}");
+        }
+    }
+    let events_path = events_path.unwrap_or_else(|| crate::paths::events_path(&root));
+    let global_events_path = global_events_path.unwrap_or_else(|| events_path.clone());
+    crate::loopcheck::emit_to_both(
+        &events_path,
+        &global_events_path,
+        "lead_term",
+        serde_json::json!({
+            "scope": scope,
+            "session_id": manifest.harness_session_id,
+            "term": term,
+            "reason": reason,
+            "prior_term": view.term,
+            "prior_state": crate::lead_term::state_word(&prior_reading.state),
+        }),
+    );
+    println!("{term}");
+    0
+}
+
+fn usage(verb: &str) -> String {
+    format!("fno-agents {verb}: [--scope S | --session ID] [--root PATH] [--registry PATH]")
+}
+
+/// One orphan team for the org sweep: a manifest that carries a team no
+/// live teamed row holds. Field names are the Python renderer's row keys.
+#[derive(Debug, Default, Serialize)]
+pub struct OrphanCrown {
+    pub scope: String,
+    pub level: Option<u32>,
+    pub grantor: Option<String>,
+    /// The holder session the manifest names; the file stem when it names none.
+    pub manifest_session: Option<String>,
+    pub manifest_path: String,
+}
+
+/// Normalized territory key for held matching: comma-split members, trimmed,
+/// sorted - "a, b" and "b,a" are one territory, mirroring team's
+/// `_territory_key` so the sweep and the grant-time checks cannot disagree.
+pub(crate) fn territory_key(scope: &str) -> String {
+    let mut members: Vec<String> = scope
+        .split(',')
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .collect();
+    members.sort();
+    members.join(",")
+}
+
+/// A session holds one team and a re-scope arms the new manifest before it
+/// clears the old one, so an older manifest naming the same session is a
+/// leftover. Group the manifests by `harness_session_id`; in a group every
+/// path but the greatest `created_at` is superseded (a missing stamp reads as
+/// the empty string, the oldest value). A tie at the greatest stamp supersedes
+/// neither.
+/// The manifest corpus every team sweep reads: every space's `leads/*.md`
+/// under `root`, in sorted path order. Sorted so a duplicated territory's
+/// winner cannot vary run to run.
+pub(crate) fn collect_lead_manifests(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut manifests: Vec<(PathBuf, String)> = Vec::new();
+    let mut spaces: Vec<_> = match fs::read_dir(root) {
+        Ok(rd) => rd.flatten().collect(),
+        Err(_) => return manifests,
+    };
+    spaces.sort_by_key(|e| e.path());
+    for space in spaces {
+        let leads = space.path().join("kings");
+        let mut files: Vec<_> = match fs::read_dir(&leads) {
+            Ok(rd) => rd.flatten().collect(),
+            Err(_) => continue,
+        };
+        files.sort_by_key(|e| e.path());
+        for file in files {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            manifests.push((path, content));
+        }
+    }
+    manifests
+}
+
+pub(crate) fn superseded_manifests(
+    manifests: &[(PathBuf, String)],
+) -> std::collections::BTreeSet<PathBuf> {
+    let mut newest: std::collections::BTreeMap<String, (String, Vec<PathBuf>)> = Default::default();
+    let mut grouped: std::collections::BTreeSet<PathBuf> = Default::default();
+    for (path, content) in manifests {
+        let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id")
+        else {
+            continue;
+        };
+        grouped.insert(path.clone());
+        let created =
+            crate::claude_adopt::manifest_field(content, "created_at").unwrap_or_default();
+        match newest.get_mut(&session) {
+            Some((best, paths)) => {
+                if created > *best {
+                    *best = created;
+                    paths.clear();
+                    paths.push(path.clone());
+                } else if created == *best {
+                    paths.push(path.clone());
+                }
+            }
+            None => {
+                newest.insert(session, (created, vec![path.clone()]));
+            }
+        }
+    }
+    let kept: std::collections::BTreeSet<PathBuf> =
+        newest.into_values().flat_map(|(_, paths)| paths).collect();
+    grouped.difference(&kept).cloned().collect()
+}
+
+/// Teams whose registry row is gone but whose manifest still holds them
+/// scan every project space's `leads/` under `root`, keep manifests
+/// carrying `crown_scope` not among `held`. The sweep walks the spaces ROOT,
+/// not the rows' own projects - a vanished row names no cwd, and the
+/// vanished-row scope is exactly the case this read exists to surface. The
+/// holder verdict keys on `harness_session_id`, never on `owner_pid`, which
+/// records the teaming CLI's pid. The org drops a candidate only when
+/// the reaper's full vacate predicate holds - the holder is proven dead
+/// AND the team is older than the window - so a young team whose holder
+/// died stays listed until the reaper can vacate it, and the empty-team
+/// alarm pages on it. A young candidate neither claims the territory key
+/// nor yields to a sibling that claimed it, so every young manifest of one
+/// key lists. The age test runs first, so a young team spends no
+/// roster read; the roster read stays lazy - it fires at most once, and
+/// only when a candidate survives every file filter. The holder verdict is
+/// the one function team_reap also runs, so the org and the sweep
+/// cannot disagree about who is dead: a holder proven dead by a positive
+/// witness (terminal roster state, gone roster pid) drops out here too,
+/// while absence plus a quiet transcript reads Unknown and stays listed -
+/// the reboot orphan shape. The transcript age, window, and `now` arrive as
+/// parameters for the same reason the roster fn does.
+pub fn org_vacancies(
+    root: &Path,
+    held: &[String],
+    roster: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
+    transcript_age_s: &dyn Fn(&str) -> Option<i64>,
+    window_s: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<OrphanCrown> {
+    let held_keys: std::collections::BTreeSet<String> =
+        held.iter().map(|h| territory_key(h)).collect();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut out = Vec::new();
+    let manifests = collect_lead_manifests(root);
+    let superseded = superseded_manifests(&manifests);
+    let mut roster_read: Option<crate::claude_roster::ClaudeAgentsSnapshot> = None;
+    for (path, content) in &manifests {
+        let Some(scope) = crate::claude_adopt::manifest_field(content, "crown_scope") else {
+            continue;
+        };
+        if superseded.contains(path) {
+            continue;
+        }
+        let key = territory_key(&scope);
+        // A DATED young team neither claims the territory key nor yields
+        // to a sibling that claimed it: the reaper cannot vacate it yet, so
+        // it must stay visible whatever else shares the key, and it must
+        // not hide a sibling either. An undated one keeps the old rule -
+        // yield to a claimed key, claim when listed - so multi-spelling
+        // dedup holds for manifests with no parsable created_at.
+        let team_old = crate::team_reap::team_outlived_window(content, now, window_s);
+        let young = team_old == Some(false);
+        if held_keys.contains(&key) || (!young && seen.contains(&key)) {
+            continue;
+        }
+        if let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id") {
+            let harness = crate::claude_adopt::manifest_field(content, "harness");
+            // The drop is the reaper's full vacate predicate: only an OLD
+            // team drops on a proven-dead holder, so a young or undated
+            // one lists whatever the roster says - and only an old claude
+            // candidate spends a roster read.
+            if team_old == Some(true)
+                && crate::team_reap::no_witness_reason(harness.as_deref()).is_none()
+            {
+                let snapshot = roster_read.get_or_insert_with(roster);
+                if let crate::team_reap::HolderVerdict::Dead(_) = crate::team_reap::holder_verdict(
+                    harness.as_deref(),
+                    &session,
+                    snapshot,
+                    transcript_age_s,
+                    window_s,
+                ) {
+                    continue;
+                }
+            }
+        }
+        // Only a LISTED candidate claims the territory key: one the verdict
+        // dropped must not hide a second spelling held by a live session.
+        // A dated-young candidate never claims, so every dated-young
+        // manifest of the key lists.
+        if !young {
+            seen.insert(key);
+        }
+        let level = crate::claude_adopt::manifest_field(content, "crown_level")
+            .and_then(|v| v.parse().ok());
+        out.push(OrphanCrown {
+            scope,
+            level,
+            grantor: crate::claude_adopt::manifest_field(content, "crown_grantor"),
+            manifest_session: crate::claude_adopt::manifest_field(content, "harness_session_id")
+                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned())),
+            manifest_path: path.display().to_string(),
+        });
+    }
+    out
+}
+
+/// `fno-agents org-vacancies`: print the orphan teams as JSON, exit 0.
+pub fn run_org_vacancies(args: &[String]) -> i32 {
+    let mut root = None;
+    let mut held: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--root" if i + 1 < args.len() => {
+                root = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--held" if i + 1 < args.len() => {
+                // One flag per scope: a multi-project scope itself contains
+                // commas, so a CSV value could not carry it.
+                held.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--json" | "-J" => i += 1,
+            other => {
+                eprintln!("fno-agents org-vacancies: unknown flag {other}");
+                eprintln!("fno-agents org-vacancies: --root PATH [--held SCOPE]...");
+                return 2;
+            }
+        }
+    }
+    let Some(root) = root else {
+        eprintln!("fno-agents org-vacancies: --root is required");
+        return 2;
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let window = 3 * crate::lead_verdict_inputs::checkin_interval_secs(&cwd);
+    match serde_json::to_string(&org_vacancies(
+        &root,
+        &held,
+        &crate::claude_roster::read_all_agents_union,
+        &crate::team_reap::transcript_age_now,
+        window,
+        chrono::Utc::now(),
+    )) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents org-vacancies: cannot serialize: {e}");
+            1
+        }
+    }
+}
+
+/// `fno-agents lead-state`: print one LeadState as JSON, exit 0.
+pub fn run_lead_state(args: &[String]) -> i32 {
+    let mut scope: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut harness: Option<String> = None;
+    let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut repo_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut registry: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--scope" if i + 1 < args.len() => {
+                scope = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--session" if i + 1 < args.len() => {
+                session = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--harness" if i + 1 < args.len() => {
+                harness = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--root" if i + 1 < args.len() => {
+                root = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            // The checkout the ALIAS map resolves from. Distinct from --root
+            // on purpose: root is the SPACE dir the manifests live under,
+            // and probing it for config.toml finds nothing, so a project
+            // alias declared in the repo config would miss its own lead.
+            "--cwd" if i + 1 < args.len() => {
+                repo_cwd = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            "--registry" if i + 1 < args.len() => {
+                registry = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--json" | "-J" => i += 1,
+            other => {
+                eprintln!("fno-agents lead-state: unknown flag {other}");
+                eprintln!("{}", usage("lead-state"));
+                return 2;
+            }
+        }
+    }
+    if scope.is_none() && session.is_none() {
+        eprintln!("fno-agents lead-state: one of --scope or --session is required");
+        eprintln!("{}", usage("lead-state"));
+        return 2;
+    }
+    let registry_path =
+        registry.unwrap_or_else(|| crate::paths::AgentsHome::from_env().registry_json());
+    let state = lead_state_in_repo(
+        &root,
+        &repo_cwd,
+        scope.as_deref(),
+        session.as_deref(),
+        harness.as_deref(),
+        &registry_path,
+    );
+    match serde_json::to_string(&state) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents lead-state: cannot serialize the lead state: {e}");
+            1
+        }
+    }
+}
+
+/// `fno-agents lead-shape [--term SPEC]`: a `--term` flag is a term
+/// declaration wearing the same registered verb (the client-actions shrink
+/// law bars a second verb for this: an argument of an existing action,
+/// never a new action).
+pub fn run_lead_shape_or_term(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--term") {
+        run_lead_term(args)
+    } else {
+        run_lead_shape(args)
+    }
+}
+
+/// `fno-agents lead-shape`: rewrite the manifest's shape, exit 0/1/2.
+pub fn run_lead_shape(args: &[String]) -> i32 {
+    let mut scope: Option<String> = None;
+    let mut shape: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--scope" if i + 1 < args.len() => {
+                scope = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--shape" if i + 1 < args.len() => {
+                shape = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--session" if i + 1 < args.len() => {
+                session = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--root" if i + 1 < args.len() => {
+                root = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            other => {
+                eprintln!("fno-agents lead-shape: unknown flag {other}");
+                eprintln!("fno-agents lead-shape: --scope S --shape pass|org [--session ID] [--root PATH]");
+                return 2;
+            }
+        }
+    }
+    let (Some(scope), Some(shape)) = (scope, shape) else {
+        eprintln!("fno-agents lead-shape: --scope and --shape are required");
+        return 2;
+    };
+    match set_manifest_shape(&root, &scope, &shape, session.as_deref()) {
+        Ok(new_value) => {
+            println!("{new_value}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentStatus;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("loop-lead-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_manifest(root: &Path, scope: &str, session: &str, shape: &str) -> PathBuf {
+        let path = manifest_path(root, scope).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = format!(
+            "---\nfno_id: 20260904T000000Z-kg1-abcdef\nscope: {scope}\nshape: {shape}\n\
+             harness: claude\nharness_session_id: {session}\nowner_pid: 1\n\
+             budget_max_iterations: 40\nrespawn_count: 0\nrespawn_ceiling: 4\n---\n"
+        );
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn row(
+        name: &str,
+        session: &str,
+        scope: Option<&str>,
+        status: AgentStatus,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "cwd": "/tmp",
+            "status": status,
+            "created_at": "2026-09-04T00:00:00Z",
+            "harness": "claude",
+            "harness_session_id": session,
+            "crown_level": scope.map(|_| 2),
+            "crown_scope": scope,
+            "crown_grantor": scope.map(|_| "human"),
+        })
+    }
+
+    fn registry_file(dir: &Path, rows: &[serde_json::Value]) -> PathBuf {
+        let path = dir.join("registry.json");
+        fs::write(
+            &path,
+            serde_json::json!({"schema_version": 11, "agents": rows}).to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn org_vacancies_matches_territory_and_dedups() {
+        let root = tmp("orphans");
+        let leads = root.join("space-a").join("kings");
+        fs::create_dir_all(&leads).unwrap();
+        let team = |scope: &str, level: &str, file: &str| {
+            let body = format!(
+                "---\nscope: x\nshape: pass\nharness: claude\n\
+                 harness_session_id: sess-{file}\ncrown_scope: {scope}\n\
+                 crown_level: {level}\ncrown_grantor: operator\n---\n"
+            );
+            fs::write(leads.join(file), body).unwrap();
+        };
+        team("alpha", "2", "alpha.md");
+        team("beta,gamma", "1", "multi.md");
+        team("gamma, beta", "1", "dup.md");
+
+        // Held as a differently-spelled member list: no orphan, and the two
+        // spellings of one territory do not double-report.
+        let held = vec!["alpha".to_string(), "beta, gamma".to_string()];
+        // Nothing survives the held filter, so the roster read stays lazy.
+        assert!(org_vacancies(
+            &root,
+            &held,
+            &|| { panic!("roster read must stay lazy") },
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now()
+        )
+        .is_empty());
+
+        // Not held: the first spelling in sorted order surfaces, parsed, with
+        // its session; dup.md sorts before multi.md.
+        let out = org_vacancies(
+            &root,
+            &["alpha".to_string()],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].scope, "gamma, beta");
+        assert_eq!(out[0].level, Some(1));
+        assert_eq!(out[0].grantor.as_deref(), Some("operator"));
+        assert_eq!(out[0].manifest_session.as_deref(), Some("sess-dup.md"));
+
+        // A manifest naming no session falls back to the file stem.
+        fs::write(
+            leads.join("stem.md"),
+            "---\ncrown_scope: delta\ncrown_level: 0\n---\n",
+        )
+        .unwrap();
+        let out = org_vacancies(
+            &root,
+            &[],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        let delta = out.iter().find(|o| o.scope == "delta").unwrap();
+        assert_eq!(delta.manifest_session.as_deref(), Some("stem"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Write a leads manifest with full field control for the org tests:
+    /// scope, session, and the recency stamp the superseded read compares.
+    fn write_org_manifest(root: &Path, scope: &str, session: &str, created_at: &str) -> PathBuf {
+        let leads = root.join("space-a").join("kings");
+        let path = leads.join(format!("{scope}.md"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = format!(
+            "---\nscope: {scope}\nshape: pass\nharness: claude\n\
+             harness_session_id: {session}\nowner_pid: 1\ncreated_at: {created_at}\n\
+             crown_scope: {scope}\ncrown_level: 2\ncrown_grantor: operator\n---\n"
+        );
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// A roster snapshot that decides nothing: every candidate stays listed.
+    /// Unknown answers for a read that failed or carries no rows, and
+    /// absence from a roster never proves death.
+    fn no_verdict_roster() -> crate::claude_roster::ClaudeAgentsSnapshot {
+        crate::claude_roster::ClaudeAgentsSnapshot::unknown("no roster in this test")
+    }
+
+    #[test]
+    fn a_rescope_leftover_stops_reading_as_a_team() {
+        // AC1-HP: a session holds one team. The re-scope armed the newer
+        // manifest before it cleared the older one, so the older file is a
+        // leftover: the org lists the live one (held), never the leftover.
+        let root = tmp("rescope-leftover");
+        let sess = "aaaa1111-0000-4000-8000-000000000001";
+        let old = write_org_manifest(&root, "x-old", sess, "2026-09-17T16:53:16Z");
+        let _new = write_org_manifest(&root, "x-new", sess, "2026-09-18T21:22:20Z");
+        let held = vec!["x-new".to_string()];
+        let out = org_vacancies(
+            &root,
+            &held,
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert!(
+            !out.iter()
+                .any(|o| o.manifest_path == old.display().to_string()),
+            "the leftover must not list: {out:?}"
+        );
+        assert!(
+            out.is_empty(),
+            "held live team must not list either: {out:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unheld_manifests_from_distinct_sessions_all_list() {
+        // AC1-EDGE (first half): leftovers are per-SESSION, never per-scope.
+        // Two different sessions each naming one unheld manifest: both list.
+        let root = tmp("two-sessions");
+        let s1 = "aaaa1111-0000-4000-8000-000000000001";
+        let s2 = "bbbb2222-0000-4000-8000-000000000002";
+        let m1 = write_org_manifest(&root, "x-aaaa", s1, "2026-09-18T20:00:00Z");
+        let m2 = write_org_manifest(&root, "x-bbbb", s2, "2026-09-18T21:00:00Z");
+        let out = org_vacancies(
+            &root,
+            &[],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        let listed: Vec<&str> = out.iter().map(|o| o.manifest_path.as_str()).collect();
+        assert!(listed.contains(&m1.display().to_string().as_str()));
+        assert!(listed.contains(&m2.display().to_string().as_str()));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn equal_created_at_supersedes_neither() {
+        // AC1-EDGE (second half): a tie at the greatest created_at is genuine
+        // ambiguity, so neither file is a leftover and both list.
+        let root = tmp("tie");
+        let sess = "cccc3333-0000-4000-8000-000000000003";
+        let a = write_org_manifest(&root, "x-tie-a", sess, "2026-09-18T21:22:20Z");
+        let b = write_org_manifest(&root, "x-tie-b", sess, "2026-09-18T21:22:20Z");
+        let out = org_vacancies(
+            &root,
+            &[],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        let listed: Vec<&str> = out.iter().map(|o| o.manifest_path.as_str()).collect();
+        assert!(listed.contains(&a.display().to_string().as_str()));
+        assert!(listed.contains(&b.display().to_string().as_str()));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn missing_created_at_reads_oldest() {
+        // AC2-HP: zzz-scope carries no created_at; aaa does. The newest per
+        // session is the team record, so zzz is the leftover and aaa lists.
+        let root = tmp("missing-created");
+        let sess = "dddd4444-0000-4000-8000-000000000004";
+        let _zzz = write_org_manifest(&root, "zzz-scope", sess, "");
+        let aaa = write_org_manifest(&root, "aaa-scope", sess, "2026-09-18T21:00:00Z");
+        let out = org_vacancies(
+            &root,
+            &[],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "zzz is superseded, aaa lists: {out:?}");
+        assert_eq!(out[0].manifest_path, aaa.display().to_string());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sessionless_manifests_never_supersede_and_fall_back_to_the_stem() {
+        // AC2-EDGE: two unheld manifests with different scopes and no
+        // harness_session_id line. No group, no supersession: both list, each
+        // with its file stem as manifest_session.
+        let root = tmp("sessionless");
+        let leads = root.join("space-a").join("kings");
+        fs::create_dir_all(&leads).unwrap();
+        for scope in ["zzz-scope", "aaa-scope"] {
+            fs::write(
+                leads.join(format!("{scope}.md")),
+                format!("---\ncrown_scope: {scope}\ncrown_level: 0\n---\n"),
+            )
+            .unwrap();
+        }
+        let out = org_vacancies(
+            &root,
+            &[],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 2, "no session, no supersession: {out:?}");
+        let sessions: Vec<&str> = out
+            .iter()
+            .map(|o| o.manifest_session.as_deref().unwrap())
+            .collect();
+        assert!(sessions.contains(&"zzz-scope"));
+        assert!(sessions.contains(&"aaa-scope"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_live_owner_pid_cannot_keep_a_roster_finished_holder_listed() {
+        // AC3-HP: owner_pid records a live stranger's process, yet the
+        // roster lists the holder session stopped. The verdict keys on the
+        // session, so the candidate drops out.
+        let root = tmp("verdict-finished");
+        let sess = "eeee5555-0000-4000-8000-000000000005";
+        write_org_manifest(&root, "x-done", sess, "2026-09-18T21:00:00Z");
+        let short = &sess[..8];
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("stopped")),
+            ])
+        };
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert!(
+            out.is_empty(),
+            "a roster-finished holder never lists: {out:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_young_dead_team_stays_listed_until_the_reaper_can_vacate_it() {
+        // AC1-HP / AC2-HP / AC3-EDGE: the org drops a dead team only
+        // when the reaper would vacate it. A team 1h old whose holder the
+        // roster lists stopped stays listed; the same team 13h old drops;
+        // no created_at keeps it listed, matching the reaper's keep.
+        let now = chrono::Utc::now();
+        let stamp = |age_h: i64| {
+            (now - chrono::Duration::hours(age_h))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let sess = "caca2222-0000-4000-8000-000000000022";
+        let short = &sess[..8];
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("stopped")),
+            ])
+        };
+        let young = tmp("young-dead");
+        write_org_manifest(&young, "x-young", sess, &stamp(1));
+        let out = org_vacancies(&young, &[], &roster, &|_| None, 12 * 3600, now);
+        assert_eq!(out.len(), 1, "a young dead team stays listed: {out:?}");
+        assert_eq!(out[0].manifest_session.as_deref(), Some(sess));
+        fs::remove_dir_all(&young).ok();
+
+        let old = tmp("old-dead");
+        write_org_manifest(&old, "x-old", sess, &stamp(13));
+        let out = org_vacancies(&old, &[], &roster, &|_| None, 12 * 3600, now);
+        assert!(out.is_empty(), "an old dead team drops: {out:?}");
+        fs::remove_dir_all(&old).ok();
+
+        let no_stamp = tmp("no-created-dead");
+        write_org_manifest(&no_stamp, "x-nostamp", sess, "");
+        let out = org_vacancies(&no_stamp, &[], &roster, &|_| None, 12 * 3600, now);
+        assert_eq!(out.len(), 1, "no created_at keeps the team listed: {out:?}");
+        fs::remove_dir_all(&no_stamp).ok();
+
+        // No-hide: a young dead team and an older live manifest of the
+        // same territory key both list. The young one claims nothing, and
+        // nothing that claimed the key hides it.
+        let older_sess = "dedd3333-0000-4000-8000-000000000033";
+        let roster_both = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("stopped")),
+                crate::claude_roster::ClaudeAgentRow::new(&older_sess[..8], Some("working")),
+            ])
+        };
+        let both = tmp("young-and-live");
+        write_org_manifest(&both, "x-key", sess, &stamp(1));
+        let leads_b = both.join("space-b").join("kings");
+        fs::create_dir_all(&leads_b).unwrap();
+        fs::write(
+            leads_b.join("x-key.md"),
+            format!(
+                "---\nscope: x-key\nshape: pass\nharness: claude\n\
+                 harness_session_id: {older_sess}\nowner_pid: 1\ncreated_at: {}\n\
+                 crown_scope: x-key\ncrown_level: 2\ncrown_grantor: operator\n---\n",
+                stamp(13)
+            ),
+        )
+        .unwrap();
+        let out = org_vacancies(&both, &[], &roster_both, &|_| None, 12 * 3600, now);
+        assert_eq!(out.len(), 2, "young dead and old live both list: {out:?}");
+        fs::remove_dir_all(&both).ok();
+    }
+
+    #[test]
+    fn a_dead_owner_pid_cannot_drop_a_live_holder() {
+        // AC4-HP: owner_pid is a reaped pid (ESRCH), yet the roster lists
+        // the holder working under a live pid. The manifest lists.
+        let root = tmp("verdict-live");
+        let sess = "ffff6666-0000-4000-8000-000000000006";
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let m = write_org_manifest(&root, "x-live", sess, "2026-09-18T21:00:00Z");
+        // write_org_manifest stamps owner_pid: 1; re-stamp with the reaped
+        // pid so the test pins the exact false-dead shape the node reports.
+        let body = fs::read_to_string(&m).unwrap().replacen(
+            "owner_pid: 1",
+            &format!("owner_pid: {dead_pid}"),
+            1,
+        );
+        fs::write(&m, body).unwrap();
+        let short = &sess[..8];
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("working"))
+                    .with_pid(Some(std::process::id())),
+            ])
+        };
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "the live holder stays listed: {out:?}");
+        assert_eq!(out[0].manifest_session.as_deref(), Some(sess));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unknown_roster_decides_nothing() {
+        // AC3-ERR: a failed roster read must never read as death. Every
+        // unheld, non-superseded manifest stays listed.
+        let root = tmp("verdict-unknown");
+        let sess = "aaaa7777-0000-4000-8000-000000000007";
+        write_org_manifest(&root, "x-unk", sess, "2026-09-18T21:00:00Z");
+        let out = org_vacancies(
+            &root,
+            &[],
+            &no_verdict_roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "unknown roster, candidate stays: {out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_roster_that_lacks_the_holder_proves_nothing() {
+        // AC3-EDGE (first half): absence from a known roster is not a death
+        // proof; the candidate stays.
+        let root = tmp("verdict-absent");
+        let sess = "bbbb8888-0000-4000-8000-000000000008";
+        write_org_manifest(&root, "x-absent", sess, "2026-09-18T21:00:00Z");
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("zzzz9999", Some("working")),
+            ])
+        };
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "absence never drops a candidate: {out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_non_claude_manifest_stays_listed() {
+        // AC3-EDGE (second half): the verdict is claude-only. A codex
+        // manifest whose short id the roster lists stopped still lists.
+        let root = tmp("verdict-codex");
+        let path = root.join("space-a").join("kings").join("x-codex.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nscope: x-codex\nshape: pass\nharness: codex\n\
+             harness_session_id: cccc9999-0000-4000-8000-000000000009\n\
+             owner_pid: 1\ncreated_at: 2026-09-18T21:00:00Z\n\
+             crown_scope: x-codex\ncrown_level: 2\n---\n",
+        )
+        .unwrap();
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("stopped")),
+            ])
+        };
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "codex manifests never drop: {out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_dropped_holder_frees_the_territory_key() {
+        // Two spellings of ONE territory: a.md sorts first and names a
+        // finished session, b.md names a live one. The drop must not burn
+        // the dedup key, or the live spelling never lists.
+        let root = tmp("verdict-key");
+        let finished = "eeee5555-0000-4000-8000-000000000005";
+        let live = "ffff6666-0000-4000-8000-000000000006";
+        let a = write_org_manifest(&root, "beta,gamma", finished, "2026-09-18T20:00:00Z");
+        let b = write_org_manifest(&root, "gamma, beta", live, "2026-09-18T21:00:00Z");
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(&finished[..8], Some("stopped")),
+                crate::claude_roster::ClaudeAgentRow::new(&live[..8], Some("working")),
+            ])
+        };
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "only the live spelling lists: {out:?}");
+        assert_eq!(out[0].manifest_path, b.display().to_string());
+        assert_ne!(out[0].manifest_path, a.display().to_string());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_reboot_absent_holder_with_an_old_transcript_stays_listed() {
+        // AC1-HP: the reboot shape. Holder absent from a KNOWN, warning-free
+        // roster, transcript quiet 19h past a 12h window: the machine was
+        // down, the session is resumable, so the org lists the orphan
+        // team instead of dropping it as dead.
+        let root = tmp("verdict-transcript");
+        let sess = "aaaa7777-0000-4000-8000-000000000007";
+        write_org_manifest(&root, "zed", sess, "2026-09-18T18:11:00Z");
+        let roster = || crate::claude_roster::ClaudeAgentsSnapshot::known(vec![]);
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|s| {
+                if s == sess {
+                    Some(19 * 3600)
+                } else {
+                    None
+                }
+            },
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "the reboot orphan stays listed: {out:?}");
+        assert_eq!(out[0].manifest_session.as_deref(), Some(sess));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_same_holder_without_a_transcript_stays_listed() {
+        // The other half of AC10: without the transcript witness, absence
+        // from the roster proves nothing and the candidate stays listed.
+        let root = tmp("verdict-no-transcript");
+        let sess = "bbbb8888-0000-4000-8000-000000000008";
+        write_org_manifest(&root, "zed", sess, "2026-09-18T18:11:00Z");
+        let roster = || crate::claude_roster::ClaudeAgentsSnapshot::known(vec![]);
+        let out = org_vacancies(
+            &root,
+            &[],
+            &roster,
+            &|_| None,
+            12 * 3600,
+            chrono::Utc::now(),
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn caller_form_answers_scope_shape_live() {
+        let root = tmp("caller");
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        let reg = registry_file(&root, &[row("lead", sid, Some("alpha"), AgentStatus::Busy)]);
+        write_manifest(&root, "alpha", sid, "pass");
+        let state = lead_state(&root, None, Some(sid), None, &reg);
+        assert_eq!(state.teamed, Some(true));
+        assert_eq!(state.scope.as_deref(), Some("alpha"));
+        assert_eq!(state.live, Some(true));
+        assert_eq!(state.shape.as_deref(), Some("pass"));
+        assert_eq!(state.split, Some(false));
+    }
+
+    #[test]
+    fn manifest_and_registry_sessions_differ_is_split() {
+        let root = tmp("split");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "heir",
+                "bbbb2222-0000-4000-8000-000000000002",
+                Some("alpha"),
+                AgentStatus::Idle,
+            )],
+        );
+        write_manifest(
+            &root,
+            "alpha",
+            "aaaa1111-0000-4000-8000-000000000001",
+            "org",
+        );
+        let state = lead_state(&root, Some("alpha"), None, None, &reg);
+        assert_eq!(state.split, Some(true));
+        assert_eq!(
+            state.manifest_session.as_deref(),
+            Some("aaaa1111-0000-4000-8000-000000000001")
+        );
+        assert_eq!(
+            state.registry_session.as_deref(),
+            Some("bbbb2222-0000-4000-8000-000000000002")
+        );
+        // The mail_envelope join contract, on both liveness sides: a
+        // dead twin never answers a live name, a live twin never answers
+        // a terminal name, and a side that still matches two rows refuses.
+        let dir = tmp("name-join");
+        let rows = [
+            row("heir", "s-1", None, AgentStatus::Live),
+            row("heir", "s-2", None, AgentStatus::Exited),
+            row("lead", "s-3", None, AgentStatus::Orphaned),
+            row("lead", "s-4", None, AgentStatus::Exited),
+        ];
+        registry_file(&dir, &rows);
+        let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+        assert!(matches!(
+            live_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            live_name_join(&reg.entries, "lead"),
+            NameJoin::None
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "heir"),
+            NameJoin::One(_)
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "lead"),
+            NameJoin::Ambiguous
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scope_form_finds_a_set_holder_through_any_member() {
+        // A rung-2 team is stored as the joined set; asking after one member
+        // must still find the lead that holds it, and the manifest read keys
+        // on the HOLDER's own scope, not the member the caller named.
+        let root = tmp("setholder");
+        let sid = "aaaa1111-0000-4000-8000-00000000000a";
+        let reg = registry_file(
+            &root,
+            &[row(
+                "set-lead",
+                sid,
+                Some("epic-a,epic-b"),
+                AgentStatus::Busy,
+            )],
+        );
+        write_manifest(&root, "epic-a,epic-b", sid, "pass");
+
+        let state = lead_state(&root, Some("epic-a"), None, None, &reg);
+        assert_eq!(state.teamed, Some(true));
+        assert_eq!(state.live, Some(true));
+        assert_eq!(state.shape.as_deref(), Some("pass"));
+        assert_eq!(
+            state.manifest_session.as_deref(),
+            Some(sid),
+            "the manifest read keys on the holder's own scope"
+        );
+    }
+
+    #[test]
+    fn scope_form_describes_the_exact_holder_not_the_org() {
+        // Portfolio over {alpha,beta} and project lead over alpha are both
+        // live and both legitimate; the question "who leads over alpha" is
+        // about the project lead, so the exact-territory row wins and the
+        // org draws no rivalry warning.
+        let root = tmp("exact");
+        let reg = registry_file(
+            &root,
+            &[
+                row(
+                    "portfolio-lead",
+                    "dddd4444-0000-4000-8000-000000000004",
+                    Some("alpha,beta"),
+                    AgentStatus::Busy,
+                ),
+                row(
+                    "project-lead",
+                    "eeee5555-0000-4000-8000-000000000005",
+                    Some("alpha"),
+                    AgentStatus::Busy,
+                ),
+            ],
+        );
+        write_manifest(
+            &root,
+            "alpha",
+            "eeee5555-0000-4000-8000-000000000005",
+            "pass",
+        );
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), "alpha".to_string());
+        map.insert("beta".to_string(), "beta".to_string());
+        let state = lead_state_with_projects(&root, Some("alpha"), None, None, &reg, &Ok(map));
+        assert_eq!(
+            state.registry_session.as_deref(),
+            Some("eeee5555-0000-4000-8000-000000000005"),
+            "the exact-territory holder is described, not the portfolio"
+        );
+        assert_eq!(state.unknown_reason, None, "a org is not a rivalry");
+        assert_eq!(
+            state.manifest_session.as_deref(),
+            Some("eeee5555-0000-4000-8000-000000000005")
+        );
+    }
+
+    #[test]
+    fn two_true_rivals_still_warn() {
+        let root = tmp("rivals");
+        let reg = registry_file(
+            &root,
+            &[
+                row(
+                    "set-lead",
+                    "ffff6666-0000-4000-8000-000000000006",
+                    Some("e-1,e-2"),
+                    AgentStatus::Busy,
+                ),
+                row(
+                    "member-lead",
+                    "aaaa7777-0000-4000-8000-000000000007",
+                    Some("e-1"),
+                    AgentStatus::Busy,
+                ),
+            ],
+        );
+        let state = lead_state(&root, Some("e-1"), None, None, &reg);
+        assert_eq!(state.teamed, Some(true));
+        let reason = state.unknown_reason.unwrap();
+        assert!(reason.contains("rival"), "reason was {reason}");
+    }
+
+    #[test]
+    fn unreadable_project_map_answers_unknown_not_no_team() {
+        // The scan degrades to raw spellings when the map errs, so an empty
+        // answer can be an alias miss. That must read as unknown, never as a
+        // clean "no live teamed row".
+        let root = tmp("nomap");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "other-lead",
+                "cccc3333-0000-4000-8000-000000000003",
+                Some("gamma"),
+                AgentStatus::Busy,
+            )],
+        );
+        let projects: Result<std::collections::HashMap<String, String>, String> =
+            Err("no work.workspaces in any candidate config.toml".to_string());
+        let state = lead_state_with_projects(&root, Some("alpha"), None, None, &reg, &projects);
+        assert_eq!(state.teamed, None);
+        assert_eq!(state.live, None);
+        let reason = state.unknown_reason.unwrap();
+        assert!(
+            reason.contains("project map unreadable"),
+            "reason was {reason}"
+        );
+    }
+
+    #[test]
+    fn unreadable_registry_answers_unknown_never_clean_false() {
+        let root = tmp("unreadable");
+        let bad = root.join("not-a-registry.json");
+        fs::write(&bad, "{ this is not json").unwrap();
+        let state = lead_state(&root, Some("alpha"), None, None, &bad);
+        assert_eq!(state.live, None);
+        assert_eq!(state.teamed, None);
+        assert_eq!(state.split, None);
+        let reason = state.unknown_reason.unwrap();
+        assert!(reason.contains("registry"), "reason was {reason}");
+    }
+
+    #[test]
+    fn unsafe_scope_with_unreadable_registry_degrades_not_raises() {
+        let root = tmp("unsafe");
+        let bad = root.join("not-a-registry.json");
+        fs::write(&bad, "{ this is not json").unwrap();
+        let state = lead_state(&root, Some("a/b"), None, None, &bad);
+        assert_eq!(state.live, None);
+        assert_eq!(state.split, None);
+        let reason = state.unknown_reason.unwrap();
+        assert!(reason.contains("unsafe scope"), "reason was {reason}");
+    }
+
+    #[test]
+    fn missing_registry_file_reads_as_no_team_not_unknown() {
+        // Python load_registry: a missing file is empty, not an error.
+        let root = tmp("missing");
+        let state = lead_state(&root, Some("alpha"), None, None, &root.join("absent.json"));
+        assert_eq!(state.teamed, Some(false));
+        assert_eq!(state.live, Some(false));
+        assert!(state.unknown_reason.unwrap().contains("no live teamed row"));
+    }
+
+    #[test]
+    fn scope_with_no_manifest_keeps_split_none_and_names_it() {
+        let root = tmp("nomanifest");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "lead",
+                "aaaa1111-0000-4000-8000-000000000001",
+                Some("alpha"),
+                AgentStatus::Busy,
+            )],
+        );
+        let state = lead_state(&root, Some("alpha"), None, None, &reg);
+        assert_eq!(state.teamed, Some(true));
+        assert_eq!(state.split, None);
+        assert_eq!(state.shape, None);
+        assert!(state.unknown_reason.unwrap().contains("no manifest"));
+    }
+
+    #[test]
+    fn terminal_team_row_is_not_a_live_lead() {
+        let root = tmp("terminal");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "lead",
+                "aaaa1111-0000-4000-8000-000000000001",
+                Some("alpha"),
+                AgentStatus::Exited,
+            )],
+        );
+        let state = lead_state(&root, Some("alpha"), None, None, &reg);
+        assert_eq!(state.teamed, Some(false));
+        assert_eq!(state.live, Some(false));
+        assert_eq!(state.split, None);
+    }
+
+    #[test]
+    fn caller_form_without_session_identity_is_not_a_team() {
+        let root = tmp("nosession");
+        let reg = registry_file(&root, &[]);
+        let state = lead_state(&root, None, None, None, &reg);
+        assert_eq!(state.teamed, Some(false));
+        assert_eq!(state.live, Some(false));
+        // The empty-registry caller form finds no row for the id.
+        let state = lead_state(
+            &root,
+            None,
+            Some("cccc3333-0000-4000-8000-000000000003"),
+            None,
+            &reg,
+        );
+        assert_eq!(state.teamed, Some(false));
+        assert_eq!(state.live, Some(false));
+        assert!(state
+            .unknown_reason
+            .unwrap()
+            .contains("no registry row matches"));
+    }
+
+    #[test]
+    fn caller_row_without_team_names_it() {
+        let root = tmp("nocrown");
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        let reg = registry_file(&root, &[row("worker", sid, None, AgentStatus::Busy)]);
+        let state = lead_state(&root, None, Some(sid), None, &reg);
+        assert_eq!(state.teamed, Some(false));
+        assert_eq!(state.live, Some(false));
+        assert!(state.unknown_reason.unwrap().contains("row holds no team"));
+    }
+
+    #[test]
+    fn multiple_live_holders_still_corroborate_the_manifest() {
+        let root = tmp("multi");
+        let reg = registry_file(
+            &root,
+            &[
+                row(
+                    "lead",
+                    "aaaa1111-0000-4000-8000-000000000001",
+                    Some("alpha"),
+                    AgentStatus::Busy,
+                ),
+                row(
+                    "heir",
+                    "bbbb2222-0000-4000-8000-000000000002",
+                    Some("alpha"),
+                    AgentStatus::Idle,
+                ),
+            ],
+        );
+        write_manifest(
+            &root,
+            "alpha",
+            "aaaa1111-0000-4000-8000-000000000001",
+            "org",
+        );
+        let state = lead_state(&root, Some("alpha"), None, None, &reg);
+        assert_eq!(state.teamed, Some(true));
+        assert!(
+            state
+                .unknown_reason
+                .unwrap()
+                .contains("multiple rival rows"),
+            "two rows over one territory are rivals, not a org"
+        );
+        assert_eq!(state.shape.as_deref(), Some("org"));
+    }
+
+    #[test]
+    fn legacy_manifest_without_shape_reads_as_pass() {
+        let root = tmp("legacy");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "lead",
+                "dddd1111-0000-4000-8000-00000000000d",
+                Some("legacy"),
+                AgentStatus::Busy,
+            )],
+        );
+        let path = manifest_path(&root, "legacy").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nscope: legacy\nfno_id: 20260904T000000Z-kg1-abcdef\n\
+             harness_session_id: dddd1111-0000-4000-8000-00000000000d\n---\n",
+        )
+        .unwrap();
+        let state = lead_state(&root, Some("legacy"), None, None, &reg);
+        assert_eq!(state.shape.as_deref(), Some("pass"));
+    }
+
+    #[test]
+    fn a_known_non_claude_harness_never_falls_through_to_a_claude_prefix() {
+        let root = tmp("scoped");
+        // A claude row whose 8-hex short_id prefixes the codex caller's uuid.
+        let codex_sid = "abcd1234-0000-4000-8000-00000000000c";
+        let claude_row = serde_json::json!({
+            "name": "claude-worker",
+            "cwd": "/tmp",
+            "status": "busy",
+            "created_at": "2026-09-04T00:00:00Z",
+            "harness": "claude",
+            "short_id": "abcd1234",
+            "harness_session_id": "ffff0000-0000-4000-8000-00000000000f",
+        });
+        let reg = registry_file(&root, &[claude_row]);
+        // Harness scoped: no codex row carries the id, so no row matches even
+        // though the claude row's short_id prefixes it.
+        let state = lead_state(&root, None, Some(codex_sid), Some("codex"), &reg);
+        assert_eq!(state.teamed, Some(false));
+        assert!(state
+            .unknown_reason
+            .unwrap()
+            .contains("no registry row matches"));
+        // The claude-shaped scan (harness unknown) still finds it by prefix,
+        // which is the original reader's explicit-session behavior.
+        let state = lead_state(&root, None, Some(codex_sid), None, &reg);
+        assert_eq!(state.teamed, Some(false));
+        assert!(state.unknown_reason.unwrap().contains("row holds no team"));
+    }
+
+    #[test]
+    fn shape_rewrite_is_idempotent_and_refuses_a_foreign_manifest() {
+        let root = tmp("shape");
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        write_manifest(&root, "alpha", sid, "pass");
+
+        assert_eq!(
+            set_manifest_shape(&root, "alpha", "org", None).unwrap(),
+            "org"
+        );
+        let path = manifest_path(&root, "alpha").unwrap();
+        let binding = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = binding.lines().collect();
+        assert_eq!(lines[0], "---");
+        assert!(
+            lines.contains(&"shape: org"),
+            "field replaced in place, was {lines:?}"
+        );
+        assert_eq!(lines.iter().filter(|l| **l == "shape: org").count(), 1);
+
+        // Same value again is a no-op rewrite, not a refusal.
+        assert_eq!(
+            set_manifest_shape(&root, "alpha", "org", Some(sid)).unwrap(),
+            "org"
+        );
+        // A different expect-session refuses.
+        let err = set_manifest_shape(
+            &root,
+            "alpha",
+            "pass",
+            Some("bbbb2222-0000-4000-8000-000000000002"),
+        )
+        .unwrap_err();
+        assert!(err.contains("names session"), "err was {err}");
+    }
+
+    #[test]
+    fn shape_insert_on_a_legacy_manifest_lands_inside_the_fence() {
+        let root = tmp("insert");
+        let path = manifest_path(&root, "legacy").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nscope: legacy\nfno_id: 20260904T000000Z-kg1-abcdef\n---\n",
+        )
+        .unwrap();
+        set_manifest_shape(&root, "legacy", "org", None).unwrap();
+        let binding = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = binding.lines().collect();
+        assert_eq!(lines[0], "---");
+        assert_eq!(lines[1], "shape: org");
+    }
+
+    #[test]
+    fn shape_refusals_name_the_remedy() {
+        let root = tmp("refuse");
+        assert!(set_manifest_shape(&root, "alpha", "siege", None)
+            .unwrap_err()
+            .contains("pass or org"));
+        let err = set_manifest_shape(&root, "alpha", "org", None).unwrap_err();
+        assert!(err.contains("no manifest"), "err was {err}");
+        assert!(set_manifest_shape(&root, "a/b", "org", None)
+            .unwrap_err()
+            .contains("unsafe lead scope"));
+    }
+
+    #[test]
+    fn term_declare_writes_the_field_and_emits_one_event() {
+        let root = tmp("term-declare");
+        write_manifest(
+            &root,
+            "alpha",
+            "aaaa1111-0000-4000-8000-000000000001",
+            "pass",
+        );
+        let events = root.join("events.jsonl");
+        let rc = run_lead_term(&[
+            "--scope".into(),
+            "alpha".into(),
+            "--term".into(),
+            "span:72h".into(),
+            "--root".into(),
+            root.display().to_string(),
+            "--events-path".into(),
+            events.display().to_string(),
+        ]);
+        assert_eq!(rc, 0);
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(
+            content.lines().any(|l| l.trim() == "term: span:72h"),
+            "manifest was {content}"
+        );
+        let logged = crate::events::committed_journal_text(&events);
+        assert_eq!(
+            logged.lines().filter(|l| l.contains("lead_term")).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn term_replace_without_reason_refuses_and_leaves_manifest_unchanged() {
+        let root = tmp("term-noreason");
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        write_manifest(&root, "alpha", sid, "pass");
+        let events = root.join("events.jsonl");
+        let declare = |term: &str, extra: Vec<String>| {
+            let mut args = vec![
+                "--scope".to_string(),
+                "alpha".to_string(),
+                "--term".to_string(),
+                term.to_string(),
+                "--root".to_string(),
+                root.display().to_string(),
+                "--events-path".to_string(),
+                events.display().to_string(),
+            ];
+            args.extend(extra);
+            run_lead_term(&args)
+        };
+        assert_eq!(declare("span:48h", vec![]), 0);
+        assert_eq!(declare("span:120h", vec![]), 1);
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(
+            content.lines().any(|l| l.trim() == "term: span:48h"),
+            "extension without --reason must not touch the manifest: {content}"
+        );
+        assert_eq!(
+            declare(
+                "span:120h",
+                vec![
+                    "--reason".to_string(),
+                    "overstayed; handing off soon".to_string()
+                ],
+            ),
+            0
+        );
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(content.lines().any(|l| l.trim() == "term: span:120h"));
+        assert!(content
+            .lines()
+            .any(|l| l.trim() == "term_reason: overstayed; handing off soon"));
+    }
+
+    #[test]
+    fn term_compactions_refused_on_a_non_claude_harness() {
+        let root = tmp("term-codex");
+        let path = manifest_path(&root, "alpha").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nfno_id: 20260904T000000Z-kg1-abcdef\nscope: alpha\nshape: pass\n\
+             harness: codex\nharness_session_id: aaaa1111-0000-4000-8000-000000000001\n\
+             owner_pid: 1\nbudget_max_iterations: 40\nrespawn_count: 0\nrespawn_ceiling: 4\n---\n",
+        )
+        .unwrap();
+        let rc = run_lead_term(&[
+            "--scope".into(),
+            "alpha".into(),
+            "--term".into(),
+            "compactions:10".into(),
+            "--root".into(),
+            root.display().to_string(),
+        ]);
+        assert_eq!(rc, 1);
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(!content.contains("term:"), "manifest was {content}");
+    }
+
+    #[test]
+    fn term_rejects_a_bad_spec_before_touching_the_manifest() {
+        let root = tmp("term-badspec");
+        write_manifest(
+            &root,
+            "alpha",
+            "aaaa1111-0000-4000-8000-000000000001",
+            "pass",
+        );
+        let rc = run_lead_term(&[
+            "--scope".into(),
+            "alpha".into(),
+            "--term".into(),
+            "weeks:2".into(),
+            "--root".into(),
+            root.display().to_string(),
+        ]);
+        assert_eq!(rc, 1);
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(!content.contains("term:"), "manifest was {content}");
+    }
+
+    /// Both JSON-only verbs accept the flag: -J parses (0), never "unknown
+    /// flag" (2), and the normal required-args validation still runs.
+    #[test]
+    fn json_only_verbs_accept_both_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        assert_eq!(
+            run_org_vacancies(&["-J".into(), "--root".into(), root.clone()]),
+            0
+        );
+        assert_eq!(
+            run_org_vacancies(&["--json".into(), "--root".into(), root]),
+            0
+        );
+        assert_eq!(run_org_vacancies(&["--bogus".into()]), 2);
+        // lead-state: with the flag present, the missing-argument refusal
+        // names --scope/--session, not the flag.
+        assert_eq!(run_lead_state(&["-J".into()]), 2);
+    }
+
+    /// The reaper guard answers on the manifest, not the stamp: a manifest in
+    /// the row's own space naming the row's session is a live team, and a
+    /// mismatch, an empty cwd, or a missing session is not.
+    #[test]
+    fn manifest_team_guard_answers_by_session() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
+        let dir = tmp("team-guard");
+        std::env::set_var("FNO_SPACES_DIR", dir.join("spaces"));
+        let repo = dir.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let space = crate::paths::space_dir(&repo);
+        write_manifest(&space, "x-demo", "s-lead9", "pass");
+        let mut held = RegistryEntry::default();
+        held.name = "lead-x-demo".into();
+        held.cwd = repo.display().to_string();
+        held.harness_session_id = Some("s-lead9".into());
+        assert!(row_holds_manifest_live_team(&held));
+        held.harness_session_id = Some("s-other".into());
+        assert!(!row_holds_manifest_live_team(&held));
+        held.harness_session_id = Some("s-lead9".into());
+        held.cwd = String::new();
+        assert!(!row_holds_manifest_live_team(&held));
+        held.cwd = repo.display().to_string();
+        held.harness_session_id = None;
+        assert!(!row_holds_manifest_live_team(&held));
+        match saved_spaces {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

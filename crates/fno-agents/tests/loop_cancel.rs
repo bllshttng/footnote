@@ -19,8 +19,8 @@ impl OneUnitQueue {
     fn new() -> Self {
         Self {
             unit: Some(Unit {
-                id: "king-k".to_string(),
-                title: "king fixture".to_string(),
+                id: "lead-k".to_string(),
+                title: "lead fixture".to_string(),
                 session_key: "walk-k".to_string(),
                 plan_path: None,
             }),
@@ -121,11 +121,11 @@ fn write_executable(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
+fn lead_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     let dir = TempDir::new().unwrap();
     let fno_dir = dir.path().join(".fno");
     fs::create_dir_all(&fno_dir).unwrap();
-    let kings_dir = dir
+    let leads_dir = dir
         .path()
         .join(".fno")
         .join("spaces")
@@ -133,12 +133,12 @@ fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         .join("kings");
     let lib_dir = dir.path().join("lib");
     let bin_dir = dir.path().join("bin");
-    fs::create_dir_all(&kings_dir).unwrap();
+    fs::create_dir_all(&leads_dir).unwrap();
     fs::create_dir_all(&lib_dir).unwrap();
     fs::create_dir_all(&bin_dir).unwrap();
     write_executable(
         &dir.path().join("fake-fno"),
-        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then\n\
+        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"drain\" ]; then\n\
          \x20 printf '%s\\n' '{\"scope\":\"k\",\"undelivered\":1}'\n\
          \x20 exit 0\n\
          fi\n\
@@ -150,21 +150,21 @@ fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         "driver_default_max() { echo 1; }\ndriver_invoke() { exit 0; }",
     );
     fs::write(
-        kings_dir.join("k.md"),
-        "---\nfno_id: fixture-king\nscope: k\nrespawn_ceiling: 0\n---\n",
+        leads_dir.join("k.md"),
+        "---\nfno_id: fixture-lead\nscope: k\nrespawn_ceiling: 0\n---\n",
     )
     .unwrap();
     (dir, lib_dir, bin_dir, fno_dir.join("events.jsonl"))
 }
 
-fn run_king(dir: &TempDir, lib_dir: &Path, bin_dir: &Path) -> Output {
+fn run_lead(dir: &TempDir, lib_dir: &Path, bin_dir: &Path) -> Output {
     Command::new(LOOP_BINARY)
         .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
             "--driver",
-            "king",
+            "lead",
             "--dispatcher",
             "claude-code",
             "--driver-lib-dir",
@@ -188,12 +188,12 @@ fn run_king(dir: &TempDir, lib_dir: &Path, bin_dir: &Path) -> Output {
 fn sentinel_refusal_records_cause_path_and_age() {
     let dir = TempDir::new().unwrap();
     let events = dir.path().join(".fno/events.jsonl");
-    let sentinel = dir.path().join(".fno/kings/k.cancelled");
+    let sentinel = dir.path().join(".fno/leads/k.cancelled");
     let cancelled = Cancelled {
         cause: "sentinel",
         path: Some(sentinel.clone()),
         age_secs: Some(2 * 60 * 60),
-        clear_hint: "fno agents king cancel --scope k --clear".to_string(),
+        clear_hint: "fno agents lead cancel --scope k --clear".to_string(),
         author: None,
         reason: None,
     };
@@ -230,12 +230,12 @@ fn sentinel_refusal_records_cause_path_and_age() {
 fn attributed_sentinel_refusal_records_author_and_reason() {
     let dir = TempDir::new().unwrap();
     let events = dir.path().join(".fno/events.jsonl");
-    let sentinel = dir.path().join(".fno/kings/k.cancelled");
+    let sentinel = dir.path().join(".fno/leads/k.cancelled");
     let cancelled = Cancelled {
         cause: "sentinel",
         path: Some(sentinel.clone()),
         age_secs: Some(60),
-        clear_hint: "fno agents king cancel --scope k --clear".to_string(),
+        clear_hint: "fno agents lead cancel --scope k --clear".to_string(),
         author: Some("operator".to_string()),
         reason: Some("wrong direction".to_string()),
     };
@@ -293,11 +293,11 @@ fn cleared_cancel_reaches_iteration_one() {
 }
 
 #[test]
-fn king_ignores_target_cancel_and_reaches_iteration_one() {
-    let (dir, lib_dir, bin_dir, events) = king_fixture();
+fn lead_ignores_target_cancel_and_reaches_iteration_one() {
+    let (dir, lib_dir, bin_dir, events) = lead_fixture();
     fs::write(dir.path().join(".fno/.target-cancelled"), "").unwrap();
 
-    let output = run_king(&dir, &lib_dir, &bin_dir);
+    let output = run_lead(&dir, &lib_dir, &bin_dir);
 
     assert_eq!(
         output.status.code(),
@@ -307,19 +307,19 @@ fn king_ignores_target_cancel_and_reaches_iteration_one() {
     assert!(
         output.stderr.is_empty()
             || !String::from_utf8_lossy(&output.stderr).contains("refusing to walk"),
-        "target sentinel must not cancel king: {}",
+        "target sentinel must not cancel lead: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let dispatched = read_events(&events)
         .into_iter()
         .find(|event| event["type"] == "loop_unit_dispatched")
-        .expect("king positive control must dispatch iteration 1");
+        .expect("lead positive control must dispatch iteration 1");
     assert_eq!(dispatched["data"]["iteration"], 1);
 }
 
 #[test]
-fn king_cancel_refusal_names_its_file_age_and_clear_command() {
-    let (dir, lib_dir, bin_dir, events) = king_fixture();
+fn lead_cancel_refusal_names_its_file_age_and_clear_command() {
+    let (dir, lib_dir, bin_dir, events) = lead_fixture();
     let sentinel = dir
         .path()
         .join(".fno")
@@ -329,7 +329,7 @@ fn king_cancel_refusal_names_its_file_age_and_clear_command() {
     fs::write(&sentinel, "").unwrap();
     let sentinel = sentinel.canonicalize().unwrap();
 
-    let output = run_king(&dir, &lib_dir, &bin_dir);
+    let output = run_lead(&dir, &lib_dir, &bin_dir);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(130));
@@ -339,13 +339,13 @@ fn king_cancel_refusal_names_its_file_age_and_clear_command() {
     );
     assert!(stderr.contains("age:"), "stderr: {stderr}");
     assert!(
-        stderr.contains("fno agents king cancel --scope k --clear"),
+        stderr.contains("fno agents lead cancel --scope k --clear"),
         "stderr: {stderr}"
     );
     let refusal = read_events(&events)
         .into_iter()
         .find(|event| event["type"] == "loop_terminated")
-        .expect("king refusal must emit loop_terminated");
+        .expect("lead refusal must emit loop_terminated");
     assert_eq!(refusal["data"]["cancel_cause"], "sentinel");
     assert_eq!(
         refusal["data"]["cancel_path"],
@@ -357,7 +357,7 @@ fn king_cancel_refusal_names_its_file_age_and_clear_command() {
         .args(["-t", "202608310000", sentinel.to_str().unwrap()])
         .status()
         .unwrap();
-    let stale = run_king(&dir, &lib_dir, &bin_dir);
+    let stale = run_lead(&dir, &lib_dir, &bin_dir);
     assert!(
         String::from_utf8_lossy(&stale.stderr).contains("stale:"),
         "stale cancel must be called out: {}",

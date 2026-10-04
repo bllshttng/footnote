@@ -711,7 +711,7 @@ fn chord_rows() {
                 .expect("route runs");
         assert!(matches!(flow, StdinFlow::Continue));
     });
-    assert!(v.court.is_expanded(), "^B C toggled the court fold");
+    assert!(v.org.is_expanded(), "^B C toggled the org fold");
     assert!(v.backlog_board.is_some(), "the board survives the chord");
     // `^B ?` opens the GLOBAL keybinds, never the board's own keys overlay
     // (that stays on the bare key).
@@ -1110,7 +1110,7 @@ fn comment_thread_renders_in_order_with_marks() {
 // The `c` column picker: opening, hiding the focus column, and the focus
 // width clamp (25..=75), each persisted.
 
-// The crown's finding: a wide row merged its columns' role walks out of
+// The team's finding: a wide row merged its columns' role walks out of
 // lockstep, so a header's style landed mid-word (`No|w`). Each header word
 // carries exactly one style.
 
@@ -1118,7 +1118,7 @@ fn comment_thread_renders_in_order_with_marks() {
 // WIDE_CELLS_AT threshold with the six default columns, the last column's
 // header still paints (the 12-column floors never overrun `w`).
 
-// The crown's finding: a summary cut mid-word (`Nex`) reads as a broken
+// The team's finding: a summary cut mid-word (`Nex`) reads as a broken
 // word; the cut lands after a whole word and carries an ellipsis.
 
 // D5: a detail field's label reads dim and its value stays normal.

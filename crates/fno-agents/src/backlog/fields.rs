@@ -196,7 +196,7 @@ mod tests {
     fn canonical_write_drains_model_tier_and_attributes_change() {
         let mut obj = Map::new();
         obj.insert("difficulty".into(), json!("medium"));
-        obj.insert("model_tier".into(), json!("crown"));
+        obj.insert("model_tier".into(), json!("team"));
         write_canonical_difficulty(&mut obj, Some("high"), "update", "<TS>", "change");
         assert_eq!(obj["difficulty"], json!("high"));
         assert!(obj.get("model_tier").is_none());

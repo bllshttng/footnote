@@ -838,7 +838,7 @@ fn approved_sidecars(
     for name in [
         "subscribe",
         "status_fanout",
-        "king_answer_wake",
+        "lead_answer_wake",
         "attention_reply",
         "question_lifecycle",
         "question_sweep",

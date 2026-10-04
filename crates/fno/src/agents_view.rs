@@ -129,13 +129,13 @@ pub struct RegistryAgent {
     /// and `exited_at`. `None` when none parsed. Feeds the peek `changed Ns ago`
     /// line via `AgentRow.updated_at`.
     pub updated_at: Option<u64>,
-    /// The spawn-stamped crown altitude (0 VP / 1 Director / 2 IC), mesh-owned;
-    /// `None` = an un-crowned leaf. Read-only here - the sideline orders and
+    /// The spawn-stamped team altitude (0 VP / 1 Director / 2 IC), mesh-owned;
+    /// `None` = an un-teamed leaf. Read-only here - the sideline orders and
     /// indents by it, the mux never writes it.
     pub crown_level: Option<u32>,
-    /// The project/epic/node id the crown rules over, for the inline crown badge.
+    /// The project/epic/node id the team rules over, for the inline team badge.
     pub crown_scope: Option<String>,
-    /// (v94) The role's people title read from crown_names.json; None when
+    /// (v94) The role's people title read from team_names.json; None when
     /// the store has none.
     pub crown_title: Option<String>,
     /// The session id this row was spawned by - the lineage join key,
@@ -1324,7 +1324,7 @@ fn is_well_formed_node_id(candidate: &str) -> bool {
 ///
 /// Three live spellings, measured against a registry dump on 2026-08-20:
 /// `t-xaaaa-tally-claude-sonnet` -> `x-aaaa` (hyphen dropped),
-/// `king-cliverbs-x-bbbb-g2` -> `x-bbbb` (hyphenated), and
+/// `lead-cliverbs-x-bbbb-g2` -> `x-bbbb` (hyphenated), and
 /// `t-eeee-finish` -> `fd2a` (bare hex, prefix-less).
 pub(crate) fn node_id_candidates(name: &str) -> Vec<String> {
     let tokens: Vec<&str> = name.split('-').collect();
@@ -2017,7 +2017,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         .flatten()
         .filter_map(rfc3339_like_to_secs)
         .max();
-        // (US9 crown) Mesh-owned role metadata, additive: absent -> un-crowned.
+        // (US9 team) Mesh-owned role metadata, additive: absent -> un-teamed.
         // Parsed tolerantly like every other field; the FILE is the contract.
         let crown_level = row
             .get("crown_level")
@@ -2031,12 +2031,12 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         // The people title rides the row: one tolerant store read per
         // derive, keyed on the row's canonical scope. No record, no title -
         // the sideline falls back to the scope.
-        let crown_titles =
-            crate::org_titles::titles(&registry_path().with_file_name("crown_names.json"));
+        let team_titles =
+            crate::org_titles::titles(&registry_path().with_file_name("team_names.json"));
         let crown_title = crown_scope
             .as_ref()
-            .and_then(|scope| crown_titles.get(scope.trim()).cloned());
-        // Succession re-homes the court: the CURRENT owner edge (the row's
+            .and_then(|scope| team_titles.get(scope.trim()).cloned());
+        // Succession re-homes the org: the CURRENT owner edge (the row's
         // spawn_provenance.owner) outranks the birth edge for every sideline
         // join - the lead label and the nest parent. The FILE keeps the birth
         // edge as history; this projection reads who the row obeys now.
@@ -2494,7 +2494,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             claude_session_uuid: None,
             log_path: None,
             updated_at: None,
-            // A roster worker carries no crown (crown is an fno-registry fact).
+            // A roster worker carries no team (team is an fno-registry fact).
             crown_level: None,
             crown_scope: None,
             crown_title: None,
@@ -2878,13 +2878,13 @@ mod tests {
 
     #[test]
     fn derive_rows_reads_the_owner_edge_over_the_birth_edge() {
-        // Succession re-homes the court. The FILE keeps the birth
-        // edge (the abdicated king) as history; the sideline joins the
+        // Succession re-homes the org. The FILE keeps the birth
+        // edge (the abdicated lead) as history; the sideline joins the
         // CURRENT owner, so the lead label names the heir.
         let raw = reg(r#"{"name":"kestrel-heir","cwd":"/w","status":"live",
                  "harness_session_id":"01a0ee3f-heir"},
                {"name":"xfcb4-w5","cwd":"/w","status":"live",
-                 "spawned_by_session":"bf388b2e-king",
+                 "spawned_by_session":"bf388b2e-lead",
                  "spawn_provenance":{"origin":{"kind":"session"},
                    "owner":{"kind":"session","harness":"codex",
                             "session_id":"01a0ee3f-heir","cwd":"/w"}}}"#);
@@ -3667,9 +3667,9 @@ unheard_of_field = true
     }
 
     #[test]
-    fn derive_rows_carries_crown_level_and_scope() {
-        // The registry->row parse boundary: a spawn-stamped crown reaches the
-        // RegistryAgent; an un-crowned row carries None (additive, absence-safe).
+    fn derive_rows_carries_team_level_and_scope() {
+        // The registry->row parse boundary: a spawn-stamped team reaches the
+        // RegistryAgent; an un-teamed row carries None (additive, absence-safe).
         let raw = reg(
             r#"{"name":"dir","cwd":"/w","status":"live","provider":"claude",
                 "crown_level":1,"crown_scope":"epic-x"},
@@ -3681,7 +3681,7 @@ unheard_of_field = true
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
         assert_eq!(get("dir").crown_level, Some(1));
         assert_eq!(get("dir").crown_scope.as_deref(), Some("epic-x"));
-        assert_eq!(get("leaf").crown_level, None, "un-crowned => None");
+        assert_eq!(get("leaf").crown_level, None, "un-teamed => None");
         assert_eq!(get("leaf").crown_scope, None);
         // An empty scope string degrades to None (the badge then shows `?`).
         assert_eq!(get("partial").crown_level, Some(0));
@@ -4373,7 +4373,7 @@ config_dir = "~/.claude-alt"
         ]);
         for (name, expected) in [
             ("t-xaaaa-tally-claude-sonnet", "x-aaaa"),
-            ("king-cliverbs-x-bbbb-g2", "x-bbbb"),
+            ("lead-cliverbs-x-bbbb-g2", "x-bbbb"),
             ("build-xcccc", "x-cccc"),
             ("target-x-dddd-fleet-status", "x-dddd"),
             ("target-ab-1a2b3c4d-slug", "ab-1a2b3c4d"),
@@ -4397,18 +4397,18 @@ config_dir = "~/.claude-alt"
     const LIVE_NAMES: &[(&str, Option<&str>)] = &[
         ("t-xaaaa-tally-claude-sonnet", Some("x-aaaa")),
         ("bp-xffff-toml", Some("x-ffff")),
-        ("king-cliverbs-x-bbbb-g2", Some("x-bbbb")),
+        ("lead-cliverbs-x-bbbb-g2", Some("x-bbbb")),
         ("bp-sccache-x0000", Some("x-0000")),
         ("build-xcccc", Some("x-cccc")),
         ("bp-slotleak-x1111", Some("x-1111")),
         ("t-eeee-finish", Some("x-eeee")),
         ("t-x2222-ship-agy", Some("x-2222")),
-        ("king-machinecost-x-3333", Some("x-3333")),
+        ("lead-machinecost-x-3333", Some("x-3333")),
         ("30d3c7e0", None),
         ("4763481e", None),
         ("rebase-988", None),
         ("bp-prcol-naming", None),
-        ("king-footnote-g4", None),
+        ("lead-footnote-g4", None),
         ("codexprobe-bind", None),
     ];
 

@@ -527,7 +527,7 @@ pub(crate) fn run_probe(mut cmd: Command) -> Option<Run> {
 /// first positive wins. The spawned verb's fail-closed contract: a graph
 /// read failure is `dispatch-hold-invalid` prose, never an assumed unheld.
 pub(crate) fn dispatch_hold(cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
-    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
     match crate::backlog::api::rows(&store) {
         Ok(entries) => dispatch_hold_rows(cwd, facts, &entries),
@@ -553,7 +553,7 @@ pub(crate) fn dispatch_hold_rows(root: &Path, facts: &PrFacts, entries: &[Value]
     else {
         return ProbeOutcome::Clear;
     };
-    let keys = crate::king_board::prs::pr_binding_keys(
+    let keys = crate::org_board::prs::pr_binding_keys(
         facts.number as i64,
         &facts.head_ref,
         Some(&facts.url),
@@ -759,7 +759,7 @@ mod tests {
             "pr_url": "https://github.com/o/r/pull/9",
             "dispatch_hold": {
                 "held": true, "reason": "awaiting ops",
-                "set_by": "king", "release_when": "ops done", "review_on": "2026-10-06",
+                "set_by": "lead", "release_when": "ops done", "review_on": "2026-10-06",
             },
         })];
         let root = Path::new("/repo");
@@ -767,7 +767,7 @@ mod tests {
         match out {
             ProbeOutcome::Refused(text) => {
                 assert!(text.contains("dispatch-hold:x-h1"));
-                assert!(text.contains("set_by=king"));
+                assert!(text.contains("set_by=lead"));
             }
             other => panic!("expected Refused, got {other:?}"),
         }
@@ -777,7 +777,7 @@ mod tests {
     fn hold_ignores_a_url_only_backref() {
         let held = json!({
             "held": true, "reason": "awaiting ops",
-            "set_by": "king", "release_when": "ops done", "review_on": "2026-10-06",
+            "set_by": "lead", "release_when": "ops done", "review_on": "2026-10-06",
         });
         // A url-only row: the stamped gate needs a pr_number, so the spawned
         // verb's ladder never saw this row either.
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn hold_refuses_when_bare_number_binding_is_ambiguous() {
         let hold = json!({
-            "reason": "awaiting ops", "set_by": "king",
+            "reason": "awaiting ops", "set_by": "lead",
             "release_when": "ops done", "review_on": "2026-10-06",
         });
         let entries = vec![

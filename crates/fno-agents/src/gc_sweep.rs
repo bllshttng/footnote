@@ -86,14 +86,14 @@ pub struct GcSummary {
     /// `(row id, descendant)`: a live CHILD registry row names this row's
     /// session in its own `spawned_by_session` - the parent is held,
     /// unretired, until that child is gone. A CHILD is a join worker
-    /// (`jn-t-`, legacy `j-`) or a row a crowned session spawned; a handoff
+    /// (`jn-t-`, legacy `j-`) or a row a teamed session spawned; a handoff
     /// (a blueprint's target, an advance dispatch) never holds its spawner.
     /// A parent whose own harness reports a terminal state is not held: the
     /// lineage guard exists to keep a running parent's surface alive for
     /// its children, and a terminal parent has none.
     pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
-    pub kept_crowned: Vec<String>,
+    pub kept_teamed: Vec<String>,
     /// `(id, origin)`: origin is not `spawn` (adopted, unknown spelling), so
     /// a sweep never removes it - only a row fno itself spawned retires.
     pub kept_not_spawn: Vec<(String, String)>,
@@ -216,10 +216,10 @@ pub struct GcSummary {
     /// node (law d-71d03643): the nudge ladder's Resume rung is the
     /// owner. A projection the `kept_total` does not count.
     pub dead_work_rows: Vec<OpenPrRow>,
-    /// The dead-crown sweep's report when it ran beside this pass; `None`
-    /// when it did not run. The daemon arm reports crowns through its detail
+    /// The dead-team sweep's report when it ran beside this pass; `None`
+    /// when it did not run. The daemon arm reports teams through its detail
     /// line, the manual verb fills this field.
-    pub crowns: Option<crate::crown_reap::CrownReap>,
+    pub teams: Option<crate::team_reap::TeamReap>,
 }
 
 /// One open-PR row the nudge ladder reads (Locked Decision 7): the row, the
@@ -310,7 +310,7 @@ impl GcSummary {
         self.kept_shared_tree.len()
             + self.kept_live_descendants.len()
             + self.kept_operator.len()
-            + self.kept_crowned.len()
+            + self.kept_teamed.len()
             + self.kept_not_spawn.len()
             + self.kept_no_provenance.len()
             + self.kept_node_conflict.len()
@@ -1615,18 +1615,23 @@ pub(crate) fn run_with_release(
             .iter()
             .map(|c| std::path::Path::new(c.as_str()).join(crate::claims::CLAIMS_DIRNAME)),
     );
-    let claims_by_session: std::collections::HashMap<String, String> =
-        crate::claims::list_in(&claims_dirs, None, false)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|rec| {
-                let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
-                if sid.is_empty() {
-                    return None;
-                }
-                Some((sid, format!("{} (holder {})", rec.key, rec.holder)))
-            })
-            .collect();
+    let claim_records = crate::claims::list_in(&claims_dirs, None, false).unwrap_or_default();
+    let claims_by_session: std::collections::HashMap<String, String> = claim_records
+        .iter()
+        .filter_map(|rec| {
+            let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
+            (!sid.is_empty()).then_some((sid, format!("{} (holder {})", rec.key, rec.holder)))
+        })
+        .collect();
+    // The node-claim view of the same records: `node:<id>` -> holding session.
+    let node_claim_holders: std::collections::HashMap<String, String> = claim_records
+        .iter()
+        .filter_map(|rec| {
+            let node = rec.key.strip_prefix("node:")?.to_ascii_lowercase();
+            let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
+            (!sid.is_empty()).then_some((node, sid))
+        })
+        .collect();
     // One ledger parse per sweep: every receipt's enrichment reads these rows.
     let ledger = ledger_rows(&default_ledger_path());
     let mut receipts: std::collections::BTreeMap<String, ReapReceipt> =
@@ -1764,15 +1769,15 @@ pub(crate) fn run_with_release(
         }
     }
 
-    let mut manifest_crowns = crate::loop_reign::ManifestCrownCache::new();
+    let mut manifest_teams = crate::lead_state::ManifestCrownCache::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
         }
-        if e.crown_level.is_some() || manifest_crowns.holds(e) {
-            summary.kept_crowned.push(id);
+        if e.crown_level.is_some() || manifest_teams.holds(e) {
+            summary.kept_teamed.push(id);
             continue;
         }
         // The origin gate runs BEFORE the graph read so a row fno never
@@ -2079,9 +2084,16 @@ pub(crate) fn run_with_release(
                 release_note = Some(release_basis_prefix(&r.reason, hold_age_s, &r.detail));
             }
         }
+        let node_held_elsewhere = match &work {
+            WorkState::Open { node, .. } => node_claim_holders
+                .get(node.to_ascii_lowercase().as_str())
+                .filter(|holder| holder.as_str() != sid.to_ascii_lowercase())
+                .cloned(),
+            _ => None,
+        };
         let mut row = GcRow {
             origin: e.origin.clone(),
-            crowned: e.crown_level.is_some(),
+            teamed: e.crown_level.is_some(),
             work,
             transcript_age_s: age,
             owns_worktree,
@@ -2117,6 +2129,12 @@ pub(crate) fn run_with_release(
                 e.status,
                 crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
             ),
+            // Transcript mentions are witnesses, not ownership.
+            worked_node: !verdict
+                .route
+                .source
+                .is_some_and(node_route::NodeSource::is_transcript),
+            node_held_elsewhere,
             open_work_retire_s,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
@@ -2156,16 +2174,20 @@ pub(crate) fn run_with_release(
                     ));
                 }
             }
+            let reader = verdict
+                .route
+                .source
+                .map(|s| s.as_str())
+                .unwrap_or("sessions")
+                .to_string();
             match reason {
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
-                Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
+                Some(KeepReason::Teamed) => summary.kept_teamed.push(id),
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
                 Some(KeepReason::NoProvenance) => {
                     summary.kept_no_provenance.push(id.clone());
-                    // The keep gets the same shape every other keep has: a
-                    // hold with a clock, so `fno agents reap --release` and
-                    // the escalation read can reach it. The detail names why
-                    // no node resolved.
+                    // The keep gets the same clocked-hold shape every
+                    // other keep has, so a release can reach it.
                     summary.holds.push(Hold {
                         id,
                         reason: KeepReason::NoProvenance.as_str(),
@@ -2177,26 +2199,12 @@ pub(crate) fn run_with_release(
                     });
                 }
                 Some(KeepReason::OpenWork { node, status }) => {
-                    let reader = verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                        .to_string();
                     summary.kept_open_work.push((id, node, status, reader))
                 }
                 Some(KeepReason::DeadOpenWork { node }) => {
-                    // Law d-71d03643: the dead worker stays held and the
-                    // tick detail keeps counting it, under the node its
-                    // provenance resolved. The nudge ladder's Resume rung
-                    // is the owner; the row carries no PR yet, so its
-                    // ladder row reads pr: null, live: false.
-                    let reader = verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                        .to_string();
+                    // Law d-71d03643: the dead worker stays held; the
+                    // ladder's Resume rung is its owner. Its ladder row
+                    // reads pr: null, live: false.
                     summary.kept_open_work.push((
                         id.clone(),
                         node.clone(),
@@ -2223,17 +2231,9 @@ pub(crate) fn run_with_release(
                         busy: false,
                     });
                 }
-                Some(KeepReason::OpenWorkStale { node, status }) => {
-                    let reader = verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                        .to_string();
-                    summary
-                        .kept_open_work_stale
-                        .push((id, node, status, reader))
-                }
+                Some(KeepReason::OpenWorkStale { node, status }) => summary
+                    .kept_open_work_stale
+                    .push((id, node, status, reader)),
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::LiveClaim { detail }) => {
                     summary.kept_live_claim.push((id.clone(), detail.clone()));
@@ -2354,8 +2354,8 @@ pub(crate) fn run_with_release(
             continue;
         }
         // A parent whose live CHILD descendant exists is never retired: a
-        // CHILD edge means the spawner orchestrates and waits (a king over
-        // its court, a lead over its join workers), so the parent's surface
+        // CHILD edge means the spawner orchestrates and waits (a lead over
+        // its org, a lead over its join workers), so the parent's surface
         // must outlive the child's. A PEER edge is a handoff (a blueprint's
         // target, an advance dispatch); the spawner is done and waits on
         // nothing, so it never holds. A parent whose own harness reports a

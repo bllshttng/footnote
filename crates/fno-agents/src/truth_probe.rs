@@ -7,7 +7,7 @@
 //!
 //! Moved out of `claude_ask` because it answers a different question. That file
 //! is the `claude --bg` ask path; this one is "what is this session doing", and
-//! its callers (`wait`, `needs`, `king_board`, the daemon's list rows) reach it
+//! its callers (`wait`, `needs`, `org_board`, the daemon's list rows) reach it
 //! without going near an ask.
 //!
 //! Every spawn here goes through [`crate::single_flight`]. The daemon probes
@@ -165,7 +165,7 @@ pub fn drain_to_detail(child: &mut std::process::Child, grace: Duration) -> Stri
 
 /// One `fno agents truth <handle>` in flight per handle, machine-wide.
 ///
-/// The daemon, `wait`, `needs` and `king_board` each probe the same rows from
+/// The daemon, `wait`, `needs` and `org_board` each probe the same rows from
 /// their own processes. Every one of those was a Python cold start of 1 to 2.4
 /// seconds, and a slow read made the next one overlap it. The retry rides
 /// INSIDE the flight: retrying outside it would leave a joiner waiting on a

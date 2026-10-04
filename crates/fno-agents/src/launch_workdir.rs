@@ -70,7 +70,7 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
         "rev-parse".to_string(),
         "--show-toplevel".to_string(),
     ];
-    let repo = crate::king_board::budget::run_with_timeout(&git_cmd, Path::new("."), GIT_TIMEOUT);
+    let repo = crate::org_board::budget::run_with_timeout(&git_cmd, Path::new("."), GIT_TIMEOUT);
 
     if !cwd.is_dir() {
         return (json!({ "workdir": recorded }), None);
@@ -95,7 +95,7 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
         );
     }
 
-    let mut cmd = crate::king_board::budget::fno_py_cmd();
+    let mut cmd = crate::org_board::budget::fno_py_cmd();
     cmd.extend([
         "workspace".to_string(),
         "worktree".to_string(),
@@ -110,7 +110,7 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
     if !branch.is_empty() {
         cmd.extend(["--branch".to_string(), branch.to_string()]);
     }
-    match crate::king_board::budget::run_with_timeout_full(&cmd, Path::new("."), ENSURE_TIMEOUT) {
+    match crate::org_board::budget::run_with_timeout_full(&cmd, Path::new("."), ENSURE_TIMEOUT) {
         Err(e) => (json!({ "hold": e.message() }), None),
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();

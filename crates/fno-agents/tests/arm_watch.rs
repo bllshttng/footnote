@@ -87,7 +87,7 @@ fn real_now() -> u64 {
 #[test]
 fn a_failing_arm_past_threshold_sends_one_notice() {
     let store = temp_store("ac1");
-    let rows = vec![failing(row("king_wake"), "timeout", 2000)];
+    let rows = vec![failing(row("lead_wake"), "timeout", 2000)];
     let mut sends: Vec<(String, String)> = Vec::new();
     let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |title, body| {
         sends.push((title.to_string(), body.to_string()));
@@ -97,7 +97,7 @@ fn a_failing_arm_past_threshold_sends_one_notice() {
     assert_eq!(out.skip_reason, None);
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].0, "control plane: needs attention");
-    assert!(sends[0].1.contains("king_wake"), "{}", sends[0].1);
+    assert!(sends[0].1.contains("lead_wake"), "{}", sends[0].1);
     assert!(sends[0].1.contains("2000s"), "{}", sends[0].1);
     assert!(sends[0].1.contains("fno agents status"), "{}", sends[0].1);
     std::fs::remove_file(&store).ok();
@@ -109,12 +109,12 @@ fn a_failing_arm_past_threshold_sends_one_notice() {
 fn the_same_set_three_hundred_seconds_later_is_deduped() {
     let store = temp_store("ac2");
     let mut sends = 0usize;
-    let first = vec![failing(row("king_wake"), "timeout", 2000)];
+    let first = vec![failing(row("lead_wake"), "timeout", 2000)];
     tick_arm_watch(&lined(&first), &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
-    let second = vec![failing(row("king_wake"), "timeout", 2300)];
+    let second = vec![failing(row("lead_wake"), "timeout", 2300)];
     let out = tick_arm_watch(&lined(&second), &[], 1800, &store, TS_UNIX + 300, |_, _| {
         sends += 1;
         true
@@ -131,11 +131,11 @@ fn the_same_set_three_hundred_seconds_later_is_deduped() {
 fn a_new_arm_joining_the_set_sends_after_the_rate_floor() {
     let store = temp_store("ac3");
     let now = real_now();
-    let first = vec![failing(row("king_wake"), "timeout", 2000)];
+    let first = vec![failing(row("lead_wake"), "timeout", 2000)];
     let out1 = tick_arm_watch(&lined(&first), &[], 1800, &store, now, |_, _| true);
     assert_eq!(out1.acted, 1);
     let second = vec![
-        failing(row("king_wake"), "timeout", 2000 + 1900),
+        failing(row("lead_wake"), "timeout", 2000 + 1900),
         failing(row("notify_watch"), "timeout", 1900),
     ];
     let mut bodies: Vec<String> = Vec::new();
@@ -145,7 +145,7 @@ fn a_new_arm_joining_the_set_sends_after_the_rate_floor() {
     });
     assert_eq!(out2.acted, 1);
     assert_eq!(bodies.len(), 1);
-    assert!(bodies[0].contains("king_wake"), "{}", bodies[0]);
+    assert!(bodies[0].contains("lead_wake"), "{}", bodies[0]);
     assert!(bodies[0].contains("notify_watch"), "{}", bodies[0]);
     std::fs::remove_file(&store).ok();
 }
@@ -157,10 +157,10 @@ fn below_threshold_sends_nothing_and_forgets_the_stored_token() {
     let store = temp_store("ac4");
     std::fs::write(
         &store,
-        r#"{"arm_failing": {"token": "king_wake@1", "ts": "2026-09-04T12:00:00Z"}}"#,
+        r#"{"arm_failing": {"token": "lead_wake@1", "ts": "2026-09-04T12:00:00Z"}}"#,
     )
     .unwrap();
-    let rows = vec![failing(row("king_wake"), "timeout", 600)];
+    let rows = vec![failing(row("lead_wake"), "timeout", 600)];
     let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| {
         panic!("no send below threshold")
     });
@@ -178,7 +178,7 @@ fn a_dead_scheduler_names_all_its_arms_and_the_cause() {
     let now = TS_UNIX + 2400;
     let rows = vec![
         stale(row("pr_watch_merge"), "scheduler_down"),
-        stale(row("king_wake"), "scheduler_down"),
+        stale(row("lead_wake"), "scheduler_down"),
         stale(row("notify_watch"), "scheduler_down"),
         stale(row("watchdog"), "scheduler_down"),
     ];
@@ -189,7 +189,7 @@ fn a_dead_scheduler_names_all_its_arms_and_the_cause() {
     });
     assert_eq!(out.acted, 1);
     assert_eq!(bodies.len(), 1);
-    for arm in ["pr_watch_merge", "king_wake", "notify_watch", "watchdog"] {
+    for arm in ["pr_watch_merge", "lead_wake", "notify_watch", "watchdog"] {
         assert!(bodies[0].contains(arm), "{arm} missing: {}", bodies[0]);
     }
     assert!(bodies[0].contains("scheduler_down"), "{}", bodies[0]);
@@ -213,7 +213,7 @@ fn an_unexplained_stale_row_is_not_in_the_set() {
 #[test]
 fn a_failed_send_stores_no_token_so_the_next_tick_retries() {
     let store = temp_store("ac7");
-    let rows = vec![failing(row("king_wake"), "timeout", 2000)];
+    let rows = vec![failing(row("lead_wake"), "timeout", 2000)];
     let out = tick_arm_watch(&lined(&rows), &[], 1800, &store, TS_UNIX, |_, _| false);
     assert_eq!(out.acted, 0);
     assert_eq!(out.skip_reason.as_deref(), Some("notify_failed"));
@@ -234,7 +234,7 @@ fn a_failed_send_stores_no_token_so_the_next_tick_retries() {
 #[test]
 fn an_anchorless_failing_episode_pages_once_not_every_floor() {
     let store = temp_store("anchorless");
-    let mut r = row("king_wake");
+    let mut r = row("lead_wake");
     r.failing = true;
     r.skip_reason = Some("timeout".to_string());
     r.failing_for_s = None;
@@ -261,7 +261,7 @@ fn an_anchorless_failing_episode_pages_once_not_every_floor() {
 #[test]
 fn an_unobserved_periodic_arm_pages_and_then_dedupes() {
     let store = temp_store("unobserved");
-    let mut unobserved = row("king_wake");
+    let mut unobserved = row("lead_wake");
     unobserved.producer_evidence = fno_agents::tick_ledger::ProducerEvidence::Unobserved;
     let rows = vec![unobserved];
     let mut sends: Vec<(String, String)> = Vec::new();
@@ -382,7 +382,7 @@ fn empty_arms_and_empty_findings_stay_clear() {
 #[test]
 fn the_notice_line_is_the_rows_own_line() {
     let store = temp_store("ac9");
-    let rows = lined(&[failing(row("king_wake"), "timeout", 2000)]);
+    let rows = lined(&[failing(row("lead_wake"), "timeout", 2000)]);
     let mut bodies: Vec<String> = Vec::new();
     tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, body| {
         bodies.push(body.to_string());
@@ -401,7 +401,7 @@ fn the_notice_line_is_the_rows_own_line() {
 fn a_cut_notice_says_how_many_lines_it_cut() {
     let store = temp_store("cut");
     let mut rows = Vec::new();
-    for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+    for arm in ["lead_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
         let mut r = failing(row(arm), "timeout", 2000);
         r.detail = Some("x".repeat(180));
         rows.push(r);
@@ -537,7 +537,7 @@ fn heal_off_leaves_the_hold_and_pages() {
 fn a_paused_tier_pages_nothing_and_heals_nothing() {
     let td = tempfile::TempDir::new().unwrap();
     let store = td.path().join("signals.json");
-    let paused: Vec<ArmStatus> = ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
+    let paused: Vec<ArmStatus> = ["lead_wake", "watchdog", "pr_watch_merge", "notify_watch"]
         .iter()
         .map(|arm| {
             let mut r = row(arm);
@@ -579,12 +579,12 @@ fn a_paused_tier_pages_nothing_and_heals_nothing() {
     assert_eq!(runs, 0);
 }
 
-/// The wire: a crown finding alone, with no overdue arms, still sends. The
+/// The wire: a team finding alone, with no overdue arms, still sends. The
 /// tick's clear gate is the empty SET, not the empty arm table - this is the
 /// whole point of the chain.
 #[test]
-fn a_crown_finding_alone_still_sends() {
-    let store = temp_store("crown-wire");
+fn a_team_finding_alone_still_sends() {
+    let store = temp_store("team-wire");
     let mut sends: Vec<(String, String)> = Vec::new();
     let mut rows: Vec<ArmStatus> = Vec::new();
     let out = tick_with_heal(
@@ -598,10 +598,10 @@ fn a_crown_finding_alone_still_sends() {
         || {
             Ok((
                 vec![fno_agents::stuck_work::Finding {
-                    kind: "empty_crown",
-                    key: "crown_empty:x-1@1788520000".to_string(),
-                    line: "no king on scope x-1: empty 47m against a 30m grace; respawn: \
-                           fno agents spawn --crown x-1 --succeed"
+                    kind: "empty_team",
+                    key: "team_empty:x-1@1788520000".to_string(),
+                    line: "no lead on scope x-1: empty 47m against a 30m grace; respawn: \
+                           fno agents spawn --team x-1 --succeed"
                         .to_string(),
                     root: None,
                     holder: None,
@@ -618,15 +618,15 @@ fn a_crown_finding_alone_still_sends() {
     );
     assert_eq!(out.acted, 1);
     assert_eq!(sends.len(), 1);
-    assert!(sends[0].1.contains("no king on scope"), "{}", sends[0].1);
+    assert!(sends[0].1.contains("no lead on scope"), "{}", sends[0].1);
     std::fs::remove_file(&store).ok();
 }
 
-/// A crown read that failed names itself in the tick row and never reads as
+/// A team read that failed names itself in the tick row and never reads as
 /// a clear board.
 #[test]
-fn a_crown_read_failure_notes_crown_unread() {
-    let store = temp_store("crown-err");
+fn a_team_read_failure_notes_team_unread() {
+    let store = temp_store("team-err");
     let mut rows: Vec<ArmStatus> = Vec::new();
     let out = tick_with_heal(
         &mut rows,
@@ -636,14 +636,14 @@ fn a_crown_read_failure_notes_crown_unread() {
         &store,
         TS_UNIX,
         || Ok(Vec::new()),
-        || Err("the court read timed out after 30s".to_string()),
+        || Err("the org read timed out after 30s".to_string()),
         &mut |_| panic!("no repair"),
         |_, body| panic!("no notice claims anything: {body}"),
     );
     assert_eq!(out.acted, 0);
     assert!(
         out.detail
-            .contains("crown unread: the court read timed out after 30s"),
+            .contains("team unread: the org read timed out after 30s"),
         "{}",
         out.detail
     );

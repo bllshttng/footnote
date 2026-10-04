@@ -1173,7 +1173,8 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
                 parsed.adapter = args.get(i + 1).cloned();
                 i += 2;
             }
-            "--crown" => {
+            // The pre-rename spelling rides one release: python still sends it.
+            "--team" | "--crown" => {
                 parsed.crown = args.get(i + 1).cloned();
                 i += 2;
             }
@@ -2027,12 +2028,12 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
     };
     let hooks = home.join(".gemini").join("config").join("hooks.json");
     let adapter = stage.join("hooks").join("footnote-agy-target-stop-hook.sh");
-    let crown = stage.join("hooks").join("agy-crown-inject.sh");
+    let team_inject = stage.join("hooks").join("agy-team-inject.sh");
     let guard = stage.join("hooks").join("agy-king-guard.sh");
     let s = crate::agy_hooks::status(
         &hooks,
         adapter.is_file().then_some(adapter.as_path()),
-        crown.is_file().then_some(crown.as_path()),
+        team_inject.is_file().then_some(team_inject.as_path()),
         guard.is_file().then_some(guard.as_path()),
     );
     Ok(format!("agy plugin imported; {}", s.summary()))
@@ -2665,6 +2666,13 @@ mod tests {
     /// not reported as drift.
     #[test]
     fn stage_serves_fno_entry_locally_without_drift() {
+        // The env mutations below (FNO_HOME, FNO_RECLAIM_STATE_ROOT) race
+        // every guarded hermetic fixture unless this test holds the shared
+        // lock; an unguarded FNO_HOME removal mid-test once erased a seeded
+        // law and flipped a spared door.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("pi-mkt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let (source, stage) = fresh_stage(&base);

@@ -56,7 +56,7 @@ setup_env() {
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
     SPACE_DIR="${TMP_DIR}/space"
-    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}" "${SPACE_DIR}/kings"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}" "${SPACE_DIR}/leads"
 
     TRANSCRIPT_FILE="${TMP_DIR}/${uuid}.jsonl"
     printf '{"role":"assistant","content":"hello"}\n' > "$TRANSCRIPT_FILE"
@@ -79,7 +79,7 @@ setup_env_codex() {
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
     SPACE_DIR="${TMP_DIR}/space"
-    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}" "${SPACE_DIR}/kings"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}" "${SPACE_DIR}/leads"
 
     TRANSCRIPT_FILE="${TMP_DIR}/${transcript_basename}.jsonl"
     printf '{"role":"assistant","content":"hello"}\n' > "$TRANSCRIPT_FILE"

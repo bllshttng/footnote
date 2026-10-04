@@ -868,7 +868,7 @@ fn is_seed_verb(seed: &Option<String>) -> bool {
 /// tokens are prompt text) - the same boundary rule Python's
 /// `_has_permission_mode` applies, and the same short-form spellings the
 /// Python routing detector accepts.
-fn argv_has_crown(argv: &[String]) -> bool {
+fn argv_has_team(argv: &[String]) -> bool {
     argv.iter()
         .skip(1)
         .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
@@ -1321,7 +1321,7 @@ fn mechanical_axes(stage: &mut Stage, seam: &mut Seam) {
     // name claude words codex maps to workspace-write, so the crown widens
     // the default to yolo; a crowned codex spawn that names a bounded mode
     // refuses before launch.
-    if prov == "codex" && argv_has_crown(&stage.inputs.argv) {
+    if prov == "codex" && argv_has_team(&stage.inputs.argv) {
         if !has_permission {
             let full = crate::codex_posture::resolve_thread_posture(None, Some(&permission.0))
                 .map(|p| p.is_full_access())

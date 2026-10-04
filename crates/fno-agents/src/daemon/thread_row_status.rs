@@ -159,8 +159,8 @@ async fn write_thread_inside_leg(
 /// intent `(body, is_done)` when the report ENTERED blocked/done.
 /// Both writers route through here - the claude hook's buffered flush and the
 /// codex thread driver's direct write - so the gate, the capability
-/// clear, and the episode edge cannot drift apart. A crowned row's done is a
-/// turn end under its reign, so it carries no intent. `None` on a stale-seq
+/// clear, and the episode edge cannot drift apart. A teamed row's done is a
+/// turn end under its lead, so it carries no intent. `None` on a stale-seq
 /// drop or a row that holds no such session.
 pub(super) fn gate_inside_leg_onto_row(
     registry: &mut crate::state::Registry,
@@ -188,6 +188,13 @@ pub(super) fn gate_inside_leg_onto_row(
                 && crate::state::enters(prev_state, rep_state, crate::state::InsideLegState::Done)
             {
                 notify = Some((body, true));
+            }
+            // The same posture-preservation rule the direct store path
+            // runs: a report with no posture never erases the last
+            // observed one.
+            let mut rep = rep;
+            if rep.posture.is_none() {
+                rep.posture = e.inside_leg.as_ref().and_then(|r| r.posture.clone());
             }
             e.inside_leg = Some(rep);
             e.screen_state = None;

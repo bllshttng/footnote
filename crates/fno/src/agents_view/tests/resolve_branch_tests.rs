@@ -129,7 +129,7 @@ fn derive_rows_reads_the_spawned_by_edge_tolerantly() {
 fn lineage_child_renders_beneath_its_parent() {
     let rows = [
         LRow {
-            name: "king",
+            name: "lead",
             id: Some("sid-k"),
             parent: None,
         },
@@ -140,7 +140,7 @@ fn lineage_child_renders_beneath_its_parent() {
         },
     ];
     let (order, depths) = layout(&rows);
-    assert_eq!(ordered_names(&rows, &order), vec!["king", "worker"]);
+    assert_eq!(ordered_names(&rows, &order), vec!["lead", "worker"]);
     assert_eq!(depths, vec![0, 1]);
 }
 
@@ -150,7 +150,7 @@ fn lineage_grandchild_nests_before_later_siblings() {
     // parent's name-later sibling.
     let rows = [
         LRow {
-            name: "king",
+            name: "lead",
             id: Some("k"),
             parent: None,
         },
@@ -173,7 +173,7 @@ fn lineage_grandchild_nests_before_later_siblings() {
     let (order, depths) = layout(&rows);
     assert_eq!(
         ordered_names(&rows, &order),
-        vec!["king", "a-child", "a-grand", "b-child"]
+        vec!["lead", "a-child", "a-grand", "b-child"]
     );
     assert_eq!(depths, vec![0, 1, 2, 1]);
 }
