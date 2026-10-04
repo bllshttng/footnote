@@ -167,12 +167,14 @@ fn unwrap_held_body(body: &str) -> String {
 
 /// The body a reader sees: a whole-body paired `<fno_mail ...>...</fno_mail>`
 /// block yields its inner text, a leading delivered-header line is removed,
-/// and a header whose summary was also pasted as the body's own first line
-/// loses that repeat. Old mail that stored the envelope reads as its body;
-/// the stored bytes are never rewritten.
+/// a fence that wraps the whole body under the header (the pane lane's
+/// framing) is stripped, and a header whose summary was also pasted as the
+/// body's own first line loses that repeat. Old mail that stored the
+/// envelope reads as its body; the stored bytes are never rewritten.
 pub fn display_body(body: &str) -> String {
     let body = unwrap_held_body(body);
     let (rest, header) = strip_leading_header(&body);
+    let rest = strip_body_fence(&rest).to_string();
     match header.as_deref().and_then(header_summary) {
         Some(summary) => strip_display_repeat(&rest, &summary),
         None => rest,
@@ -187,6 +189,27 @@ fn strip_leading_header(body: &str) -> (String, Option<String>) {
         return (body.to_string(), None);
     }
     (rest.to_string(), Some(header.to_string()))
+}
+
+/// A pane-delivered body rides inside a backtick fence one run longer than
+/// any run it holds. A fence that wraps the WHOLE body - first line all
+/// backticks, last line the same run - is the pane lane's framing, not body
+/// text, and display strips it. Anything else stays untouched.
+fn strip_body_fence(body: &str) -> &str {
+    let Some((first, rest)) = body.split_once('\n') else {
+        return body;
+    };
+    if first.is_empty() || !first.bytes().all(|b| b == b'`') {
+        return body;
+    }
+    let Some((inner, last)) = rest.rsplit_once('\n') else {
+        return body;
+    };
+    if last == first {
+        inner
+    } else {
+        body
+    }
 }
 
 fn header_summary(header: &str) -> Option<String> {

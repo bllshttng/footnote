@@ -105,6 +105,31 @@ fn validate_sender(sender: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The pane lane asks for a fenced delivery (`FNO_MAIL_FENCE=1` on the
+/// pane-prepare child, or the payload's `fence` field): the body rides
+/// inside a backtick fence, so a pasted body cannot pose as the pane's own
+/// framing. Hook and mail lanes set neither and render unchanged.
+fn fence_requested(input: &Value) -> bool {
+    std::env::var("FNO_MAIL_FENCE").as_deref() == Ok("1")
+        || input.get("fence").and_then(Value::as_bool) == Some(true)
+}
+
+/// The fence for `body`: a backtick run one longer than the longest run the
+/// body holds, minimum three, so no body line can close it.
+fn fence_for(body: &str) -> String {
+    let mut longest = 3usize;
+    let mut run = 0usize;
+    for ch in body.chars() {
+        if ch == '`' {
+            run += 1;
+            longest = longest.max(run + 1);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest)
+}
+
 fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let mode = input.get("mode").and_then(Value::as_str).unwrap_or("wrap");
     let wrapping = input.get("body").and_then(Value::as_str);
@@ -277,6 +302,10 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let header = crate::mail_header::render_header(form, sender, msg_id, &third);
     let delivered = crate::mail_header::delivered_body(subject, body_text);
     Ok(match wrapping {
+        Some(_) if fence_requested(input) => {
+            let fence = fence_for(&delivered);
+            format!("{header}\n{fence}\n{delivered}\n{fence}")
+        }
         Some(_) => format!("{header}\n{delivered}"),
         None => header,
     })
@@ -479,6 +508,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
+    }
+
+    #[test]
+    fn the_pane_fence_wraps_the_body_and_the_default_stays_unfenced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("registry.json");
+        registry(&path);
+        let fenced = render_at(
+            &json!({
+                "mode":"wrap", "body":"hi ```x``` there",
+                "from":"folio-short", "id":"msg-4", "fence":true
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            fenced,
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\n````\nhi ```x``` there\n````"
+        );
+        // The fence clears: a run one longer than anything the body holds.
+        assert_eq!(fence_for("hi ```x``` there"), "````");
+        assert_eq!(fence_for("plain body"), "```");
+        assert_eq!(fence_for("a ``b`` c `````"), "``````");
+        // Without the request the render is byte-identical to the header
+        // lane's: hook and mail lanes never fence.
+        let plain = render_at(
+            &json!({
+                "mode":"wrap", "body":"hi ```x``` there",
+                "from":"folio-short", "id":"msg-4"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            plain,
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\nhi ```x``` there"
+        );
+        // The Messages tab reads the fenced pane delivery as its plain body.
+        assert_eq!(
+            crate::mail_header::display_body(&fenced),
+            "hi ```x``` there"
+        );
     }
 
     #[test]
