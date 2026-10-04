@@ -240,7 +240,7 @@ fn write_stub(out: &std::path::Path) -> i32 {
             return 1;
         }
     }
-    let tmp = out.with_extension("sh.tmp");
+    let tmp = out.with_extension(format!("sh.tmp.{}", std::process::id()));
     if let Err(e) = std::fs::write(&tmp, &content) {
         eprintln!(
             "fno config paths emit-shell: cannot write {}: {e}",

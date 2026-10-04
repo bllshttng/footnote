@@ -13,17 +13,21 @@ use std::process::Command;
 /// emit-shell landed first; the rest forward to Python.
 pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell"];
 
-/// Classify `fno config paths <verb> ...` for the front door.
+/// Classify the paths verb for the front door: `fno config paths <v> ...`
+/// and its deprecated top-level spelling `fno paths <v> ...` both route
+/// here when the verb is served natively.
 pub fn classify(args: &[OsString]) -> Option<Vec<OsString>> {
-    if args.len() >= 3
-        && args[0].to_str() == Some("config")
-        && args[1].to_str() == Some("paths")
-        && NATIVE_PATHS_VERBS.contains(&args[2].to_str()?)
-    {
-        Some(args[2..].to_vec())
-    } else {
-        None
+    let w0 = args.first().and_then(|a| a.to_str());
+    let start = match w0 {
+        Some("config") if args.get(1).and_then(|a| a.to_str()) == Some("paths") => 2,
+        Some("paths") => 1,
+        _ => return None,
+    };
+    let verb = args.get(start).and_then(|a| a.to_str())?;
+    if !NATIVE_PATHS_VERBS.contains(&verb) {
+        return None;
     }
+    Some(args[start..].to_vec())
 }
 
 /// Exec the worker's `--paths-exec` lane; stdout, stderr and the exit code
@@ -73,7 +77,17 @@ mod tests {
     fn classify_leaves_other_verbs_to_python() {
         for verb in ["shell-stub", "verify", "handoff", "bogus"] {
             assert!(classify(&oss(&["config", "paths", verb])).is_none());
+            assert!(classify(&oss(&["paths", verb])).is_none());
         }
         assert!(classify(&oss(&["config", "setup", "auto-wire"])).is_none());
+        assert!(classify(&oss(&["paths"])).is_none());
+        assert!(classify(&oss(&["config", "paths"])).is_none());
+    }
+
+    #[test]
+    fn classify_claims_the_deprecated_top_level_spelling() {
+        let rest = classify(&oss(&["paths", "emit-shell", "--output", "/tmp/p.sh"])).unwrap();
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest[0], OsString::from("emit-shell"));
     }
 }
