@@ -42,20 +42,80 @@ pub(super) struct IdentitySpans {
     pub pr: Option<Range<usize>>,
 }
 
+/// One metrics-line field's render state: a served value, a loading skeleton
+/// (the fold has not landed yet), or hidden - this harness or role cannot
+/// report it, so it never prints a `?`.
+pub(super) enum MetricCell {
+    Value(String),
+    Loading,
+    Hidden,
+}
+
+/// The four fields in paint order: context, compactions, cost, tokens.
+/// Hidden outranks served: codex transcripts carry no context window or
+/// compaction boundaries, crowned leads never price. Only claude and codex
+/// transcripts resolve at all (`SessionTranscripts::find`), so any other
+/// harness - and a bare pane or an exited row - can never be measured, and
+/// its unserved fields hide instead of pulsing forever.
+pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
+    let reportable = !a.exited && matches!(a.harness.as_deref(), Some("claude" | "codex"));
+    let codex = a.harness.as_deref() == Some("codex");
+    let field = |value: Option<String>, hidden: bool| {
+        if hidden {
+            MetricCell::Hidden
+        } else {
+            match value {
+                Some(v) => MetricCell::Value(v),
+                None if !reportable => MetricCell::Hidden,
+                None => MetricCell::Loading,
+            }
+        }
+    };
+    [
+        field(
+            a.context_used_pct
+                .map(|p| format!("{} {p}%", super::row_meter::ctx_sparkline(p))),
+            codex,
+        ),
+        field(a.compaction_count.map(|n| format!("{n}c")), codex),
+        field(
+            a.session_cost_cents.map(super::row_meter::cost_cell),
+            a.crown_level.is_some(),
+        ),
+        field(a.session_tokens.map(super::row_meter::token_cell), false),
+    ]
+}
+
+/// Whether any field still waits on the fold: the breathe timer's arm signal.
+pub(super) fn has_loading(a: &AgentRow) -> bool {
+    metric_cells(a)
+        .iter()
+        .any(|c| matches!(c, MetricCell::Loading))
+}
+
+/// Skeleton widths mirror each field's served width (spark+percent, count,
+/// cost, tokens) so a landing fold does not reflow the line.
+const LOADING_W: [usize; 4] = [8, 3, 6, 8];
+
 pub(super) fn metrics(a: &AgentRow, message: Option<&str>, width: usize) -> String {
-    let spark = super::row_meter::ctx_sparkline(a.context_used_pct);
-    let pct = a
-        .context_used_pct
-        .map_or_else(|| "?".into(), |n| format!("{n}%"));
-    let count = a
-        .compaction_count
-        .map_or_else(|| "?c".into(), |n| format!("{n}c"));
-    let cost = super::row_meter::cost_cell(a.session_cost_cents);
-    let tokens = super::row_meter::token_cell(a.session_tokens);
-    let prefix = format!("{spark} {pct} · {count} · {cost} · {tokens}");
+    let phase = crate::lattice::spin_epoch().map(|t0| t0.elapsed().as_millis() as u64);
+    let fields: Vec<String> = metric_cells(a)
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| match c {
+            MetricCell::Value(v) => Some(v.clone()),
+            MetricCell::Loading => Some(super::row_meter::skeleton_cell(LOADING_W[i], phase)),
+            MetricCell::Hidden => None,
+        })
+        .collect();
+    let prefix = fields.join(" · ");
     let Some(message) = message.filter(|s| !s.is_empty()) else {
         return crate::chrome::clip(&prefix, width);
     };
+    if prefix.is_empty() {
+        // Every field hid: the message stands alone, no leading separator.
+        return crate::chrome::clip(message, width);
+    }
     let separator = " · ";
     let room = width.saturating_sub(crate::chrome::str_cols(&prefix));
     let separator_w = crate::chrome::str_cols(separator);
