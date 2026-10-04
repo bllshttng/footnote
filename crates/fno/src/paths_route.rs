@@ -7,7 +7,6 @@
 //! `--paths-exec` lane (worker_binary resolution like the law door), argv
 //! and exit code
 
-
 use std::ffi::OsString;
 use std::process::Command;
 
