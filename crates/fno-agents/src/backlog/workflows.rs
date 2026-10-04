@@ -375,6 +375,14 @@ pub(crate) fn apply_completion_fields(node: &mut Value, merge_status: bool) {
     if merge_status {
         obj.insert("merge_status".into(), Value::String("merged".into()));
     }
+    let session = crate::identity::ambient_agent_handle();
+    obj.insert(
+        "closed_by".into(),
+        json!({
+            "session": session,
+            "actor_kind": crate::decision_trace::actor_kind(session.as_deref(), "verb"),
+        }),
+    );
 }
 
 /// Undo a close (the _clear_completion_fields twin). `status` is the
@@ -2681,6 +2689,52 @@ mod tests {
             live_child_ids(&rows, "ab-cccccccc"),
             vec!["ab-aaaaaaaa".to_string()]
         );
+    }
+
+    #[test]
+    fn completion_records_its_closer() {
+        let lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let names: Vec<&str> = crate::claims::AMBIENT_IDENTITY_NAMES
+            .iter()
+            .copied()
+            .chain(
+                crate::claims::HARNESS_SESSION_MARKERS
+                    .iter()
+                    .map(|(k, _)| *k),
+            )
+            .chain(
+                crate::claims::LEGACY_HARNESS_SESSION_MARKERS
+                    .iter()
+                    .map(|(k, _)| *k),
+            )
+            .collect();
+        let saved: Vec<(String, Option<std::ffi::OsString>)> = names
+            .iter()
+            .map(|k| (k.to_string(), std::env::var_os(k)))
+            .collect();
+        for key in &names {
+            std::env::remove_var(key);
+        }
+        let mut row = seed("ab-cccccccc", None);
+        apply_completion_fields(&mut row, true);
+        assert_eq!(row["closed_by"]["session"], Value::Null);
+        assert_eq!(row["closed_by"]["actor_kind"], "user");
+        // The set case: the ladder resolves through the registry, so the
+        // unit test pins the SHAPE only (spawn_context's own suites own the
+        // resolution itself).
+        let mut row = seed("ab-dddddddd", None);
+        apply_completion_fields(&mut row, false);
+        assert!(row["closed_by"]["session"].is_null() || row["closed_by"]["session"].is_string());
+        assert!(row["closed_by"]["actor_kind"].is_string());
+        for (key, value) in &saved {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        drop(lock);
     }
 
     #[test]
