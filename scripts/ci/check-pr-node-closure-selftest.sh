@@ -89,7 +89,7 @@ run "no trailer here" "main" \
 # to read it as a node id and demanded a Fixes line naming no real node, so
 # a p0 revert could not pass on its own branch and had to move to a fresh
 # one (reproduced live).
-run "Fixes x-f890" "revert-pr-2809" \
+run "Fixes x-aaaa" "revert-pr-2809" \
   && pass "revert branch word-hex segment is not a node id" \
   || fail "revert branch should skip, not demand pr-2809"
 
