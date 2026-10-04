@@ -897,12 +897,9 @@ pub(crate) fn succession_replaces(
 // Registry schema guard
 // ---------------------------------------------------------------------------
 
-/// Refuse a spawn into a fleet whose shared registry this binary cannot write:
-/// an on-disk schema_version ahead of the version this binary writes refuses
-/// (exit 81); an unreadable or missing file skips, as the Python guard skips.
-/// Both trees read the version from `src/registry_schema.toml` (build.rs
-/// projects the same file into the wheel), so the two guards cannot disagree
-/// about a number.
+/// Refuse a spawn only when the shared registry's writer floor is ahead of
+/// this binary. Additive schemas remain readable; an unreadable or missing
+/// file skips, as the Python guard skips.
 pub(crate) fn check_registry_schema(
     registry_path: &Path,
     warnings: &mut Vec<String>,
@@ -916,21 +913,49 @@ pub(crate) fn check_registry_schema(
         Ok(doc) => doc,
         Err(_) => return Ok(()), // a torn registry is not a spawn-time verdict
     };
-    let on_disk = doc.get("schema_version").and_then(Value::as_u64);
-    let Some(on_disk) = on_disk else {
+    let Some(on_disk) = doc.get("schema_version").and_then(Value::as_u64) else {
         return Ok(());
     };
     let understood = crate::state::REGISTRY_SCHEMA_VERSION as u64;
-    if on_disk <= understood {
+    let min_writer = doc
+        .get("min_writer_version")
+        .and_then(Value::as_u64)
+        .unwrap_or(on_disk);
+    if min_writer <= understood {
         return Ok(());
     }
+    let writer_rev = doc
+        .get("writer_rev")
+        .and_then(Value::as_str)
+        .unwrap_or("unstamped");
+    let reader_rev = env!("FNO_AGENTS_GIT_REV");
     warnings.push(format!(
-        "spawn-gate: the shared agent registry at {} is schema_version={on_disk}, ahead of \
-         the schema_version={understood} this binary understands, so this worker could neither \
-         claim its node nor stamp its mail; refusing to spawn. Upgrade this fno (fno doctor \
-         update), or repair the file (fno agents registry-repair --to {understood} --apply).",
-        registry_path.display()
+        "spawn-gate: shared agent registry at {} was written by {writer_rev} with \
+         schema_version={on_disk} and min_writer_version={min_writer}; this reader is \
+         {reader_rev} and understands schema_version={understood}. Refusing to spawn; \
+         upgrade this fno with fno doctor update.",
+        registry_path.display(),
     ));
+    let data_dir = registry_path.parent().unwrap_or_else(|| Path::new("."));
+    let latch_path = data_dir.join("version-skew.last");
+    let latch_key = format!("{writer_rev}:{min_writer}:{understood}");
+    if !matches!(std::fs::read_to_string(&latch_path), Ok(stored) if stored == latch_key) {
+        let emitted = crate::events::EventEmitter::new(data_dir.join("events.jsonl"), "rust")
+            .emit(
+                "version_skew",
+                &serde_json::json!({
+                    "on_disk": on_disk,
+                    "min_writer": min_writer,
+                    "understood": understood,
+                    "writer_rev": writer_rev,
+                    "reader_rev": reader_rev,
+                }),
+            )
+            .is_ok();
+        if emitted {
+            let _ = std::fs::write(latch_path, latch_key);
+        }
+    }
     Err(Refusal::with_receipt(
         EXIT_REGISTRY_SCHEMA,
         serde_json::json!({
@@ -938,7 +963,11 @@ pub(crate) fn check_registry_schema(
             "reason": "registry_schema",
             "registry_path": registry_path.to_string_lossy(),
             "on_disk": on_disk,
+            "min_writer": min_writer,
             "understood": understood,
+            "writer_rev": writer_rev,
+            "reader_rev": reader_rev,
+            "remedy": "fno doctor update",
         }),
     ))
 }
@@ -1881,36 +1910,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A schema_version ahead of this binary refuses exit 81 with both
-    /// integers; a file this binary understands passes.
+    /// Additive ahead schemas pass; a floor-ahead schema refuses with a
+    /// head-pinned receipt and one event per distinct writer/floor/reader.
     #[test]
-    fn registry_schema_ahead_refuses_with_both_integers() {
+    fn registry_schema_floor_controls_forward_read_and_latches_skew_event() {
         let dir = std::env::temp_dir().join(format!("fno-lanes-schema-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let reg = dir.join("registry.json");
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":{},"entries":[]}}"#,
-                crate::state::REGISTRY_SCHEMA_VERSION + 1
+                r#"{{"schema_version":{},"min_writer_version":{},"writer_rev":"writer-a","entries":[]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION + 1,
+                crate::state::REGISTRY_SCHEMA_VERSION,
             ),
         )
         .unwrap();
         let mut warnings = Vec::new();
+        assert!(check_registry_schema(&reg, &mut warnings).is_ok());
+        assert!(warnings.is_empty());
+
+        let min_writer = crate::state::REGISTRY_SCHEMA_VERSION + 1;
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":{},"min_writer_version":{min_writer},"writer_rev":"writer-a","entries":[]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION + 1
+            ),
+        )
+        .unwrap();
         let err = check_registry_schema(&reg, &mut warnings).unwrap_err();
         assert_eq!(err.exit_code, crate::spawn_gate::EXIT_REGISTRY_SCHEMA);
         let receipt = err.receipt.unwrap();
         assert_eq!(receipt["reason"], "registry_schema");
         assert_eq!(
-            receipt["on_disk"].as_u64().unwrap() as u32,
+            receipt["on_disk"],
             crate::state::REGISTRY_SCHEMA_VERSION + 1
         );
         assert_eq!(receipt["understood"], crate::state::REGISTRY_SCHEMA_VERSION);
+        assert_eq!(receipt["min_writer"], min_writer);
+        assert_eq!(receipt["writer_rev"], "writer-a");
+        assert_eq!(receipt["reader_rev"], env!("FNO_AGENTS_GIT_REV"));
+        assert_eq!(receipt["remedy"], "fno doctor update");
+        assert!(warnings[0].contains("writer-a"));
+        assert!(warnings[0].contains(env!("FNO_AGENTS_GIT_REV")));
+        assert!(warnings[0].contains("fno doctor update"));
+
+        let err = check_registry_schema(&reg, &mut warnings).unwrap_err();
+        let receipt = err.receipt.unwrap();
+        assert_eq!(receipt["writer_rev"], "writer-a");
+        assert_eq!(receipt["reader_rev"], env!("FNO_AGENTS_GIT_REV"));
+        assert_eq!(receipt["remedy"], "fno doctor update");
+        let journal = dir.join("events.jsonl");
+        let event_rows = crate::events::committed_journal_text(&journal)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["type"] == "version_skew")
+            .count();
+        assert_eq!(event_rows, 1);
+        let event = crate::events::committed_journal_text(&journal)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|event| event["type"] == "version_skew")
+            .unwrap();
+        assert_eq!(event["source"], "rust");
+
+        let latch = dir.join("version-skew.last");
+        std::fs::remove_file(&latch).unwrap();
+        std::fs::create_dir(&latch).unwrap();
+        assert!(check_registry_schema(&reg, &mut warnings).is_err());
+
+        std::fs::write(
+            &reg,
+            r#"{"schema_version":4294967296,"min_writer_version":4294967296}"#,
+        )
+        .unwrap();
+        assert!(check_registry_schema(&reg, &mut warnings).is_err());
 
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":{},"entries":[]}}"#,
+                r#"{{"schema_version":{},"min_writer_version":{},"entries":[]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
                 crate::state::REGISTRY_SCHEMA_VERSION
             ),
         )
