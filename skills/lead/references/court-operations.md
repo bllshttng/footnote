@@ -74,7 +74,7 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 
 **Anointing on the thread substrate.**
 
-`--promote` rides `--substrate thread` for Claude only. Non-Claude thread spawns reject `--crown`. For Claude, only `headless` is refused, since a one-shot exits before it can reign. The deprecated `bg` alias maps to `thread`.
+`--crown` rides `--substrate thread` for Claude only. Non-Claude thread spawns reject it. For Claude, only `headless` is refused, since a one-shot exits before it can reign. The deprecated `bg` alias maps to `thread`.
 
 What a thread sub-king gives up is placement, not authority.
 The placement flags are mux geometry and refuse outside a pane, and `--at current` resolves the anchor from `FNO_PANE`, which a thread session does not have.

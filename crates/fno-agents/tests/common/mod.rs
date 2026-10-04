@@ -281,17 +281,17 @@ pub fn loss_shaped_rows() -> Vec<String> {
 
 /// Write the loss-shaped registry under `home` and return its path.
 ///
-/// Seeded at the CURRENT schema: a source-run daemon (this test build) is
-/// refused any schema bump of its own FNO_AGENTS_HOME store, so a v20 seed
-/// would fail the sweep's first write - the guard firing, not the incident
-/// replaying. The old-version refusal has its own test below.
+/// The top-level `pane_id` fields are unknown to Python, so seed an additive
+/// schema ahead with this build's writer floor. The daemon and Python writer
+/// can then prove they preserve those fields across their interleaved writes.
 pub fn seed_loss_shaped_registry(home: &fno_agents::paths::AgentsHome) -> PathBuf {
     fs::create_dir_all(home.root()).unwrap();
     let path = home.registry_json();
     fs::write(
         &path,
         format!(
-            r#"{{"schema_version":{},"agents":[{}]}}"#,
+            r#"{{"schema_version":{},"min_writer_version":{},"agents":[{}]}}"#,
+            fno_agents::state::REGISTRY_SCHEMA_VERSION + 1,
             fno_agents::state::REGISTRY_SCHEMA_VERSION,
             loss_shaped_rows().join(",")
         ),

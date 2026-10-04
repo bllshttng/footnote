@@ -150,7 +150,7 @@ fn empty_crown_finding(
         line: format!(
             "no king on scope {scope}: {manifest}, holder {holder}, 0 live rows; \
              empty {}m against a {}m grace; {} ready over {threshold_min}m with no \
-             worker ({}); respawn: fno agents spawn --promote {scope} --succeed; \
+             worker ({}); respawn: fno agents spawn --crown {scope} --succeed; \
              this notifies only, it gates no dispatch and takes no crown",
             age_s / 60,
             CROWN_EMPTY_GRACE_S / 60,
@@ -289,7 +289,7 @@ mod tests {
         assert!(line.contains("ready over 60m with no worker"), "{line}");
         assert!(line.contains("x-1"), "{line}");
         assert!(
-            line.contains("respawn: fno agents spawn --promote alpha --succeed"),
+            line.contains("respawn: fno agents spawn --crown alpha --succeed"),
             "{line}"
         );
         assert!(line.contains("gates no dispatch"), "{line}");

@@ -581,7 +581,9 @@ pub(crate) fn job_log<P: GhProbe>(
     if let Ok(row) = std::fs::read_to_string(&path) {
         if let Ok(parsed) = serde_json::from_str::<Value>(&row) {
             if let Some(log) = parsed.get("log").and_then(Value::as_str) {
-                return Ok(log.to_string());
+                // Rows written before the strip carry raw ANSI; the strip is
+                // idempotent, so normalizing the hit costs nothing on clean text.
+                return Ok(crate::claude_ask::strip_ansi_csi(log).into_owned());
             }
         }
     }
@@ -603,6 +605,9 @@ pub(crate) fn job_log<P: GhProbe>(
             stderr.trim().to_string()
         });
     }
+    // Actions logs carry ANSI color on nearly every line; strip once here so
+    // the failing-test scans and every cache consumer read clean text.
+    let log = crate::claude_ask::strip_ansi_csi(&stdout).into_owned();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -611,9 +616,22 @@ pub(crate) fn job_log<P: GhProbe>(
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(mut f) = std::fs::File::create(&path) {
-        let _ = f.write_all(json!({"ts": ts, "log": stdout}).to_string().as_bytes());
+        let _ = f.write_all(json!({"ts": ts, "log": log}).to_string().as_bytes());
     }
-    Ok(stdout)
+    Ok(log)
+}
+
+/// The escape refusal's remedy, for the one caller class that still meets
+/// it: a gh build without `--allow-escape-sequences` refuses escape-laden
+/// log output on stdout, and the raw bytes only reach such a caller through
+/// the flag or a file redirect.
+pub(crate) fn escape_refusal_remedy(stderr: &str, endpoint: &str) -> Option<String> {
+    if !stderr.to_lowercase().contains("terminal escape sequences") {
+        return None;
+    }
+    Some(format!(
+        " fetch the raw log to a file: gh api {endpoint} --allow-escape-sequences > ci-log.txt"
+    ))
 }
 
 /// Detail entries for the failing rollup rows, loudest facts first. The log
@@ -648,7 +666,13 @@ pub(crate) fn collect_failures<P: GhProbe>(
         let log_text = job_log(probe, cwd, slug_key, &owner, &repo, &job_id);
         match log_text {
             Err(why) => {
-                entry["detail"] = json!(format!("log unavailable: {}", truncate(&why, 160)));
+                let remedy = escape_refusal_remedy(
+                    &why,
+                    &format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                )
+                .unwrap_or_default();
+                entry["detail"] =
+                    json!(format!("log unavailable: {}{remedy}", truncate(&why, 160)));
             }
             Ok(log) if log.is_empty() => {
                 // No log text (an empty log): the job object still names WHICH

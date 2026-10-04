@@ -1,8 +1,8 @@
-# Single owner of the per-agent registry schema version. build.rs renders the
-# Rust constant (state.rs include!s $OUT_DIR/registry_schema.rs) and projects
-# this file byte-for-byte to cli/src/fno/agents/registry_schema.toml, which
-# registry.py reads as package data. Bump `version` here and rebuild: both
-# languages move together, so there is no second constant to drift.
+# Single owner of the per-agent registry schema version and writer floor.
+# Additive fields move `version` only. Raise `min_writer` to the new version
+# when an older writer would make a wrong decision, not merely miss a field.
+# build.rs renders both Rust constants and projects this file byte-for-byte to
+# cli/src/fno/agents/registry_schema.toml, which registry.py reads as package data.
 #
 # v27: additive `launch_account_source` - WHO chose the row's
 # `launch_account`: "caller" (a flag on this spawn's argv) or "config"
@@ -89,3 +89,4 @@
 # that order, in one PR.
 fields = ["account_record_id", "adopted_by_session", "aliases", "cc_session_id", "claude_session_uuid", "claude_short_id", "codex_session_id", "context_measured_at", "context_used_pct", "context_used_tokens", "context_window_tokens", "created_at", "crown_grantor", "crown_level", "crown_scope", "cwd", "delivery_policy", "effort", "exited_at", "fno_id", "forked_from_session_id", "gemini_session_id", "git_grant", "granted_writable_roots", "harness", "harness_args", "harness_session_id", "harness_title", "host_mode", "inside_leg", "keeper_child_pid", "last_message_at", "last_reconciled_at", "launch_account", "launch_account_source", "legacy_provider", "lineage_kind", "lineage_reason", "liveness", "liveness_measured_at", "log_path", "mail_unread", "mcp_channel_id", "messaging_socket_path", "model", "model_basis", "model_name", "mux", "name", "node", "node_reason", "origin", "pending_session_row", "pid", "pid_start_time", "predecessor_session_ids", "project_root", "provider", "related_session_id", "requested_effort", "requested_model", "requested_permission_mode", "requested_provider", "resolved_sandbox", "route_provider_id", "route_settings_path", "sandbox_posture", "screen_state", "session_id", "short_id", "spawn_id", "spawn_provenance", "spawn_trigger", "spawned_by_cwd", "spawned_by_harness", "spawned_by_session", "start_source", "status", "stop", "substrate", "transcript_path", "turn_policy_source"]
 version = 38
+min_writer = 38

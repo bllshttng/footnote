@@ -243,6 +243,18 @@ pub enum StateError {
          Upgrade or downgrade fno to match."
     )]
     UnsupportedSchemaVersion { found: u32, max: u32 },
+    #[error(
+        "registry writer is too old for {path}: writer_rev={writer_rev}, min_writer={min_writer}; \
+         this fno reader_rev={reader_rev}, understands={understood}. Run `fno doctor update` to upgrade.",
+        writer_rev = writer_rev.as_deref().unwrap_or("unstamped")
+    )]
+    WriterTooOld {
+        path: String,
+        min_writer: u32,
+        understood: u32,
+        writer_rev: Option<String>,
+        reader_rev: String,
+    },
     #[error("registry invariant violation: {0}")]
     InvariantViolation(String),
     /// The mirror of Python's `_refuse_source_ahead_schema_bump`. Typed rather
@@ -281,6 +293,12 @@ pub enum StateError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Registry {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_writer_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_rev: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
     /// Rows. Python's `registry.write_registry` (cli/.../agents/registry.py)
     /// stores these under the canonical top-level `"agents"` key and reads ONLY
     /// that key (no `entries` fallback). Serialize under `agents` so a Rust write
@@ -298,6 +316,9 @@ impl Default for Registry {
         Registry {
             schema_version: REGISTRY_SCHEMA_VERSION,
             entries: Vec::new(),
+            min_writer_version: None,
+            writer_rev: None,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -738,14 +759,8 @@ pub struct MuxRef {
     pub pane_id: u64,
 }
 
-/// One registry row (design schema v6). Optional fields default to `None` and
-/// are preserved across `update_registry` because the whole row round-trips
-/// through this typed struct -- but ONLY for fields this struct models. A
-/// Python `AgentEntry` field with no counterpart here is DROPPED on the next
-/// Rust write, silently, because there is no serde catch-all. `origin` and
-/// `spawn_trigger` sat outside the struct that way until and read
-/// 0-of-37 populated on the live fleet as a result. Adding a Python-only field
-/// means mirroring it here in the same commit.
+/// One registry row. Optional fields default to `None`; fields not modeled
+/// here are retained in `extra` so a read-modify-write preserves newer data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RegistryEntry {
     pub name: String,
@@ -1273,6 +1288,8 @@ pub struct RegistryEntry {
     /// does not know is dropped on write-back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_provenance: Option<crate::spawn_contract::SpawnProvenance>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The spawn-time parent edge as one value. Ambient, never required of a
@@ -2102,6 +2119,24 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
             // dropped row is announced above), so this arm is exempt from the
             // count guard the Ok arm runs; the daemon's startup assertion is
             // what refuses to serve a partial roster as complete.
+            let min_writer_version = probe
+                .get("min_writer_version")
+                .and_then(serde_json::Value::as_u64)
+                .map(|version| u32::try_from(version).unwrap_or(u32::MAX));
+            let writer_rev = probe
+                .get("writer_rev")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let mut extra = probe.as_object().cloned().unwrap_or_default();
+            for key in [
+                "schema_version",
+                "min_writer_version",
+                "writer_rev",
+                "agents",
+                "entries",
+            ] {
+                extra.remove(key);
+            }
             Registry {
                 // Saturate rather than `as u32`. A truncating cast can wrap an
                 // absurd version DOWN to one at or below ours, and the write
@@ -2109,6 +2144,9 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
                 // overwrite would be the one that looks safe to overwrite.
                 schema_version: u32::try_from(on_disk).unwrap_or(u32::MAX),
                 entries,
+                min_writer_version,
+                writer_rev,
+                extra,
             }
         }
     };
@@ -2135,17 +2173,12 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     // accepted any u32. Reject anything outside 1..=REGISTRY_SCHEMA_VERSION so a
     // pre-inside-leg daemon refuses a v5 store (instead of silently dropping the
     // inside-leg report) and the current daemon refuses a future v6 store.
-    // READ FORWARD (see Python load_registry and client_verbs). The earlier
-    // forward-compat guard refused a newer store so a stale reader could not
-    // silently drop a field. The refusal turned out to be the worse failure:
-    // registry.json is global to every agent here, so one process ahead of the
-    // deployment took the whole fleet's registry reads down at once. Serde
-    // ignores unknown fields on RegistryEntry, so a newer store reads as the
-    // subset this binary understands.
+    // READ FORWARD (see Python load_registry and client_verbs). The writer
+    // floor lets additive bumps remain readable; flattened maps preserve
+    // unknown top-level and row fields across an allowed read-modify-write.
     //
-    // Dropping a field is now made safe by refusing to WRITE (update_registry
-    // below) and by announcing every degraded read, rather than by refusing to
-    // look. A version below 1 is damage, not a newer writer, and still fails.
+    // A newer floor or a partial row decode still blocks writes below. A
+    // version below 1 is damage, not a newer writer, and still fails.
     if reg.schema_version < 1 {
         return Err(StateError::UnsupportedSchemaVersion {
             found: reg.schema_version,
@@ -2162,13 +2195,24 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
         // swallowed by the latch.
         static LAST_ANNOUNCED: AtomicU32 = AtomicU32::new(0);
         if LAST_ANNOUNCED.swap(reg.schema_version, Ordering::Relaxed) != reg.schema_version {
-            eprintln!(
-                "fno agents: registry is schema_version={}, ahead of the \
-                 schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
-                 Reading the fields it knows and ignoring the rest; writes are \
-                 refused until this fno is upgraded. Rows may be incomplete.",
-                reg.schema_version
-            );
+            if effective_min_writer(&reg) <= REGISTRY_SCHEMA_VERSION {
+                eprintln!(
+                    "fno agents: registry schema_version={} is an additive bump ahead of \
+                     this fno's schema_version={REGISTRY_SCHEMA_VERSION}; unknown fields are \
+                     preserved and writes stay allowed.",
+                    reg.schema_version
+                );
+            } else {
+                eprintln!(
+                    "fno agents: registry schema_version={} requires min_writer_version={}; \
+                     this fno understands {}. writer_rev={}; writes are refused until upgrade \
+                     with `fno doctor update`.",
+                    reg.schema_version,
+                    effective_min_writer(&reg),
+                    REGISTRY_SCHEMA_VERSION,
+                    reg.writer_rev.as_deref().unwrap_or("unstamped")
+                );
+            }
         }
     }
     Ok((reg, raw_rows))
@@ -2480,23 +2524,25 @@ where
         std::fs::create_dir_all(parent)?;
     }
     let lock = acquire_exclusive(&lock_path)?;
-    let mut registry = read_existing_registry(path)?;
-    // The half of read-forward that protects the file. The read above drops
-    // fields this binary does not know, so writing those rows back would erase
-    // them for every agent on the machine. Checked under the lock, against what
-    // was actually read, so a writer that raced in between cannot slip past.
-    if registry.schema_version > REGISTRY_SCHEMA_VERSION {
-        return Err(StateError::UnsupportedSchemaVersion {
-            found: registry.schema_version,
-            max: REGISTRY_SCHEMA_VERSION,
+    let (mut registry, raw_rows) = read_existing_registry(path)?;
+    let min_writer = effective_min_writer(&registry);
+    // A read-forward writer may update additive schemas when it can preserve
+    // unknown keys. Refuse when the declared floor is newer or row decoding
+    // lost any raw rows; both checks happen under the write lock.
+    if min_writer > REGISTRY_SCHEMA_VERSION || raw_rows != registry.entries.len() {
+        return Err(StateError::WriterTooOld {
+            path: path.display().to_string(),
+            min_writer,
+            understood: REGISTRY_SCHEMA_VERSION,
+            writer_rev: registry.writer_rev.clone(),
+            reader_rev: env!("FNO_AGENTS_GIT_REV").into(),
         });
     }
-    // The other direction of the same comparison. The check above stops
-    // a stale writer erasing fields it cannot see; this one stops a SOURCE-run
-    // writer creating those stale readers, by refusing the bump at line
-    // `registry.schema_version = REGISTRY_SCHEMA_VERSION` below. Inside the lock
-    // and before `write_json_atomic`, for the reason the comment above already
-    // argues: a racing writer must not slip past.
+    // The other direction of the same comparison. The check above stops a
+    // stale writer erasing fields it cannot see; this one stops a SOURCE-run
+    // writer publishing a schema bump to the shared registry before it merges.
+    // Keep it inside the lock and before the atomic write so a racing writer
+    // cannot slip past either guard.
     refuse_source_ahead_schema_bump(path, registry.schema_version)?;
     // The rows themselves, not just their signatures: a receipt for a removed
     // row must be built from the row the closure is about to drop, and the
@@ -2604,13 +2650,16 @@ where
             }
         }
     }
-    // Upgrade-on-write (Codex P2): stamp the current schema version
-    // so a Rust write of an older (e.g. v3) store bumps it to v4, matching
-    // Python's write_registry (which always writes SCHEMA_VERSION). Without this,
-    // adding host_mode to an existing v3 registry would leave schema_version:3 and
-    // a pre-host_mode reader would still accept it - defeating the forward-compat
-    // bump for every store that predates it (the common case).
-    registry.schema_version = REGISTRY_SCHEMA_VERSION;
+    // Keep version and writer floor monotonic across additive read-forward
+    // writes, while recording the build that last wrote the shared registry.
+    registry.schema_version = registry.schema_version.max(REGISTRY_SCHEMA_VERSION);
+    registry.min_writer_version = Some(
+        registry
+            .min_writer_version
+            .unwrap_or(0)
+            .max(REGISTRY_MIN_WRITER_VERSION),
+    );
+    registry.writer_rev = Some(env!("FNO_AGENTS_GIT_REV").into());
     // Rolling snapshot of the bytes this write replaces, under the lock so a
     // racing writer cannot snapshot a half-read state. Best effort: never
     // fails the write.
@@ -3086,10 +3135,16 @@ fn validate_changed_identities(
     Ok(())
 }
 
-fn read_existing_registry(path: &Path) -> Result<Registry, StateError> {
+pub fn effective_min_writer(registry: &Registry) -> u32 {
+    registry
+        .min_writer_version
+        .unwrap_or(registry.schema_version)
+}
+
+fn read_existing_registry(path: &Path) -> Result<(Registry, usize), StateError> {
     match OpenOptions::new().read(true).open(path) {
-        Ok(file) => Ok(read_registry_tolerant(path, &file)?.0),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
+        Ok(file) => read_registry_tolerant(path, &file),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
         Err(e) => Err(e.into()),
     }
 }
