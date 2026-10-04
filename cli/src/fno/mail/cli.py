@@ -389,24 +389,19 @@ def _reserve_budget(
     from fno import rust_binary
     from fno.mail import budget
 
-    words = rust_binary.style_word_count(body)
-    if budget.is_control(body):
-        return _reserve_control_budget(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            sender_key=sender_key,
-            recipient_key=recipient_key,
-        )
-    return None, words
+    if not budget.is_control(body):
+        return None, rust_binary.style_word_count(body)
+    return _reserve_control_budget(
+        sender=sender, recipient=recipient, body=body, msg_id=msg_id,
+        sender_key=sender_key, recipient_key=recipient_key,
+    )
 
 
 def _reserve_control_budget(
     *,
     sender: str,
     recipient: str,
-    words: int,
+    body: str,
     msg_id: str,
     sender_key: str | None = None,
     recipient_key: str | None = None,
@@ -415,11 +410,14 @@ def _reserve_control_budget(
 
     The stderr note is the receipt's lane marker, in one place, for every
     lane that routes through here; it reads RESERVED because delivery is
-    proven later, by the lane's own receipt.
+    proven later, by the lane's own receipt. The word count arrives from the
+    checked door: the cap enforces, so a door failure refuses the send.
     """
+    from fno import rust_binary
     from fno.mail import budget
 
     try:
+        words = rust_binary.style_word_count_checked(body, budget.BudgetUnavailable)
         reservation = budget.reserve_control(
             sender=sender,
             recipient=recipient,

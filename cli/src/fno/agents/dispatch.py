@@ -7396,8 +7396,8 @@ def _reserve_send_budget(
 
     if not budget.is_control(message):
         return None
-    words = rust_binary.style_word_count(message)
     try:
+        words = rust_binary.style_word_count_checked(message, budget.BudgetUnavailable)
         return budget.reserve_control(
             sender=sender, recipient=recipient, words=words, msg_id=msg_id
         )

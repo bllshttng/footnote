@@ -422,9 +422,12 @@ fn strip_word(word: &str) -> &str {
     word.trim_matches(|c| ".,;:!?\"'()".contains(c))
 }
 
-/// Rule 4 strip set drops the apostrophe from the trim set.
+/// Rule 4 strip set drops the apostrophe from the trim set, lowered first
+/// like the Python leg: the contraction list is lowercase, and a sentence
+/// often starts with a capitalized one ("Don't retry.").
 fn strip_token(word: &str) -> String {
     word.replace('\u{2019}', "'")
+        .to_lowercase()
         .trim_matches(|c| ".,;:!?\"()".contains(c))
         .to_string()
 }
@@ -1284,6 +1287,42 @@ fn parse_word_cap(raw: &str) -> Result<Option<usize>, i32> {
     }
 }
 
+/// The usage text `fno doctor lint style --help` prints (the Typer help the
+/// Python leg printed, carried over as the command's own documentation).
+fn print_usage() {
+    print!(
+        "Check text against the eight style rules in docs/style-rules.md.
+
+Usage: fno doctor lint style [OPTIONS]
+
+A list-item sentence is 20 words or fewer, and every other sentence is 25 or
+fewer. No semicolon. No \"should\", \"would\", \"may\", \"might\", or \"could\". No
+contractions. If a sentence carries \"if\" or \"when\", that word starts the
+sentence. A paragraph is one physical line. No filler: \"please\", \"thanks\",
+\"basically\", and the phrases \"thank you\", \"of course\", \"happy to\", \"feel
+free\". Code, paths, flags, and quoted output do not count. Mail and encounter
+prose also carry an 80 masked-word cap.
+
+Options:
+  --surface <s>    Where the text is read: mail, encounter, pr-body, markdown,
+                   or comment. Mail and encounter carry the word cap.
+  --stdin          Read the body from standard input.
+  --text <body>    Check this body directly (internal door form).
+  --files <path>   Files to check whole; repeatable.
+  --diff-base <ref>  Check ADDED lines only since this ref (markdown only).
+  --fix            Rewrite the mechanical set (semicolons, wrapped lines);
+                   report the rest. Residue exits 1.
+  --json           Print the door receipt (exception, word_count, violations,
+                   report) and always exit 0.
+  --word-cap <n>   Override the message word cap for this run (internal).
+  -h, --help       Print this help.
+
+Exit 0 clean, 1 with violations, 2 on bad usage or a run that read zero lines
+because every input carried a style-exception.
+"
+    );
+}
+
 /// The hidden binary-direct `style-check` verb: the full
 /// `fno doctor lint style` contract, from `--stdin`/`--text`/`--files`/
 /// `--diff-base` to the receipts and exit codes the goldens freeze.
@@ -1299,6 +1338,10 @@ pub fn run_cli(args: &[String]) -> i32 {
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         match tok.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                return 0;
+            }
             "--surface" => surface = it.next().cloned().unwrap_or_default(),
             "--stdin" => stdin_mode = true,
             "--text" => text_arg = it.next().cloned(),
@@ -1555,6 +1598,14 @@ diff --git a/m.md b/m.md
         let (fixed, residue) = fix("You should do this; do that.\n", "mail");
         assert_eq!(fixed, "You should do this. Do that.\n");
         assert!(residue.iter().any(|v| v.rule == 3), "{residue:?}");
+    }
+
+    #[test]
+    fn capitalized_sentence_initial_contraction_fires_rule_4() {
+        let violations = check("Don't retry.\n", "mail", None);
+        assert!(violations.iter().any(|v| v.rule == 4), "{violations:?}");
+        let violations = check("don't retry.\n", "mail", None);
+        assert!(violations.iter().any(|v| v.rule == 4), "{violations:?}");
     }
 
     #[test]
