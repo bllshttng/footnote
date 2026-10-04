@@ -616,20 +616,20 @@ mod tests {
         assert!(manifest.harness_session_id.is_none());
 
         let manifest =
-            parse_king_manifest("---\nfno_id: k\nqueue: x-aaaa, x-bbbb\n---\n").expect("parses");
+            parse_lead_manifest("---\nfno_id: k\nqueue: x-aaaa, x-bbbb\n---\n").expect("parses");
         assert_eq!(
             manifest.queue,
             vec!["x-aaaa".to_string(), "x-bbbb".to_string()]
         );
         let manifest =
-            parse_king_manifest("---\nfno_id: k\nqueue: \"x-aaaa,x-bbbb\"\n---\n").expect("parses");
+            parse_lead_manifest("---\nfno_id: k\nqueue: \"x-aaaa,x-bbbb\"\n---\n").expect("parses");
         assert_eq!(
             manifest.queue,
             vec!["x-aaaa".to_string(), "x-bbbb".to_string()]
         );
-        let manifest = parse_king_manifest("---\nfno_id: k\nqueue: , ,\n---\n").expect("parses");
+        let manifest = parse_lead_manifest("---\nfno_id: k\nqueue: , ,\n---\n").expect("parses");
         assert!(manifest.queue.is_empty());
-        let manifest = parse_king_manifest("---\nfno_id: k\n---\n").expect("parses");
+        let manifest = parse_lead_manifest("---\nfno_id: k\n---\n").expect("parses");
         assert!(manifest.queue.is_empty());
     }
 

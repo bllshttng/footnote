@@ -56,7 +56,7 @@ const HISTORY: usize = 12;
 
 /// The simple glance's second line: where the agents stand against the
 /// limit that decides whether another worker starts.
-fn simple_limit_line(org: &Court) -> String {
+fn simple_limit_line(org: &Org) -> String {
     match (
         org.arm_num("cpu admission", "share_low"),
         org.arm_num("cpu admission", "ceiling"),
@@ -85,7 +85,7 @@ fn spark(history: &[f64]) -> String {
 /// The glance's team line: leads first, then the workers by how recently
 /// each one did something. A lead count that failed to read is left out,
 /// never shown as zero.
-fn census_line(org: &Court, ages: &[Option<u64>]) -> String {
+fn census_line(org: &Org, ages: &[Option<u64>]) -> String {
     let mut parts = Vec::new();
     if let Some(leads) = org.census.leads {
         parts.push(format!("{leads} leads"));
@@ -476,7 +476,7 @@ impl Panel {
     /// The simple glance's first line: the whole machine, then how much of
     /// it is ours, so both numbers read on one base. The agents' share is a
     /// slice of the busy total, never a second total beside it.
-    fn simple_cpu_line(&self, org: &Court) -> String {
+    fn simple_cpu_line(&self, org: &Org) -> String {
         let busy = org.arm_num("whole-machine cpu", "busy_fraction");
         let agents = org.arm_num("cpu admission", "share_low");
         match (busy, agents) {
@@ -497,7 +497,7 @@ impl Panel {
 
     /// Memory in use with its graph: one line in both views, since a full
     /// machine swaps long before its CPU line looks alarming.
-    fn memory_line(&self, org: &Court) -> String {
+    fn memory_line(&self, org: &Org) -> String {
         match (
             org.arm_num("memory", "free_fraction"),
             org.arm_num("memory", "available_gb"),

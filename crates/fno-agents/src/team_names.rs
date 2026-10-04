@@ -963,22 +963,22 @@ pub fn revert_stale_pending(
     let reg = crate::state::load_registry(registry_path)
         .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
     for (scope, pending) in stale {
-        let evidence = match crate::loop_lead::live_name_join(&reg.entries, &pending.heir_name) {
-            crate::loop_lead::NameJoin::One(row) => {
+        let evidence = match crate::lead_state::live_name_join(&reg.entries, &pending.heir_name) {
+            crate::lead_state::NameJoin::One(row) => {
                 kept.push(format!(
                     "{scope}: heir row {} still {:?}",
                     pending.heir_name, row.status
                 ));
                 continue;
             }
-            crate::loop_lead::NameJoin::Ambiguous => {
+            crate::lead_state::NameJoin::Ambiguous => {
                 kept.push(format!(
                     "{scope}: heir row {} name ambiguous; revert refused",
                     pending.heir_name
                 ));
                 continue;
             }
-            crate::loop_lead::NameJoin::None => {
+            crate::lead_state::NameJoin::None => {
                 // No live row answers the heir name; the name's raw matches
                 // are all terminal by the join's construction, so the first
                 // names why the succession reverts.

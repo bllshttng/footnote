@@ -729,12 +729,12 @@ fn r_team() -> Result<Value, String> {
                     let reading = match registry_read
                         .as_ref()
                         .ok()
-                        .map(|r| crate::loop_lead::terminal_name_join(&r.entries, &s.row))
+                        .map(|r| crate::lead_state::terminal_name_join(&r.entries, &s.row))
                     {
-                        Some(crate::loop_lead::NameJoin::One(e)) => {
+                        Some(crate::lead_state::NameJoin::One(e)) => {
                             crate::team_split::dead_call(e, boot)
                         }
-                        Some(crate::loop_lead::NameJoin::Ambiguous) => {
+                        Some(crate::lead_state::NameJoin::Ambiguous) => {
                             crate::team_split::DeadCallReading::Unread(
                                 "teamed row name ambiguous in the registry".to_string(),
                             )
@@ -2432,7 +2432,7 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
         let joined = stored.join(",");
         let root = crate::paths::space_dir(&ctx.cwd);
         if let Err(e) =
-            crate::loop_lead::set_manifest_fields(&root, &ctx.scope, &[("queue", &joined)], None)
+            crate::lead_state::set_manifest_fields(&root, &ctx.scope, &[("queue", &joined)], None)
         {
             eprintln!("fno-agents lead-checkin: --queue: {e}");
             return 2;
@@ -2495,7 +2495,7 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
             Err(e) => (None, Some(e.to_string())),
         };
     let manifest_queue: Vec<String> =
-        crate::loop_lead::manifest_path(&crate::paths::space_dir(&ctx.cwd), &ctx.scope)
+        crate::lead_state::manifest_path(&crate::paths::space_dir(&ctx.cwd), &ctx.scope)
             .ok()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|c| crate::lead_termination::parse_lead_manifest(&c))

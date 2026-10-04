@@ -853,17 +853,15 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `backlog-notes` and `backlog-note` folded into the grouped `backlog`
     // dispatcher (the early transport arm); see backlog::cli's doc.
-    // `org-vacancies`: the orphan-team sweep for `fno agents org`,
-    // daemon-free read; `==` dispatch like graph-get, and registered in
-    // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
+    // `org-vacancies`: the orphan-team sweep for `fno agents org`, daemon-free;
+    // `==` dispatch like graph-get, registered in ALL_CLIENT_ACTIONS.
     if verb == "org-vacancies" || verb == "court-orphans" {
         return fno_agents::lead_state::run_org_vacancies(&args[1..]);
     }
-    // `org-fold`: the team scope fold for `fno agents org
-    // --nodes` and the local board's org section, daemon-free like
-    // org-vacancies; the workers column rides the same native claim verdicts
-    // `claim sweep` established, so a fold and the claims surface cannot
-    // disagree about who holds a node.
+    // `org-fold`: the team scope fold for `fno agents org --nodes` and the
+    // local board's org section, daemon-free like org-vacancies; the workers
+    // column rides the same native claim verdicts `claim sweep` established,
+    // so a fold and the claims surface cannot disagree about who holds a node.
     if verb == "org-fold" || verb == "court-fold" {
         return fno_agents::org_fold::run_org_fold(&args[1..]);
     }
@@ -884,10 +882,10 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `lead-checkin`: one verb runs the lead check-in body for
-    // `fno agents lead checkin`. Daemon-free beat like lead-history:
-    // Python resolves the caller's team scope and the paths Python owns,
-    // the native side gathers, prints, diffs and journals the row, reusing
-    // the org-fold fold and the lead-history scan in process.
+    // `fno agents lead checkin`. Daemon-free beat like lead-history: Python
+    // resolves the caller's team scope and Python-owned paths, the native
+    // side gathers, prints, diffs and journals the row, reusing the org-fold
+    // fold and the lead-history scan in process.
     if verb == "lead-checkin" || verb == "king-checkin" {
         return fno_agents::lead_checkin::run_lead_checkin(&args[1..]);
     }

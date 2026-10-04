@@ -1114,7 +1114,7 @@ pub(crate) fn collect_open_binding_heals(
                 continue;
             }
         };
-        for verdict in crate::king_board::prs::pr_binding_verdicts(&rows, entries) {
+        for verdict in crate::org_board::prs::pr_binding_verdicts(&rows, entries) {
             match verdict.verdict {
                 "ambiguous" => {
                     if let Some(detail) = &verdict.detail {

@@ -1,12 +1,12 @@
-//! The `lineup:` table: seated court rows then the on-deck queue, one row
+//! The `lineup:` table: seated org rows then the on-deck queue, one row
 //! each with title, difficulty, PR, harness/model and status.
 //!
-//! Split out of `king_checkin` so the row builder stays testable without a
+//! Split out of `lead_checkin` so the row builder stays testable without a
 //! beat: `lineup_rows` folds the inputs, `render_lineup` prints them. The
 //! planned model for a queued row comes in as a closure so this module never
 //! reads config itself.
 
-use crate::king_checkin::{dash, MAX_COURT_ROWS};
+use crate::lead_checkin::{dash, MAX_ORG_ROWS};
 use crate::state::Registry;
 use serde_json::{json, Value};
 
@@ -44,7 +44,7 @@ fn graph_row<'a>(graph_rows: &'a [Value], id: &str) -> Option<&'a Value> {
 }
 
 /// The seated model, as `harness/model`. The registry row is picked the way
-/// the seat is held: the court row's session first, then its worker name
+/// the seat is held: the org row's session first, then its worker name
 /// within the node, then the node alone - a retried node's predecessor row
 /// must never read as the active seat.
 fn seated_model(
@@ -69,12 +69,12 @@ fn seated_model(
     }
 }
 
-/// Seated rows first in court order, then the queue in queue order, skipping
+/// Seated rows first in org order, then the queue in queue order, skipping
 /// a queued id that is already seated. Title, difficulty and PR come from the
 /// graph row; a queued row's model is the planned seat for its full routing
 /// inputs (difficulty and priority).
 pub(crate) fn lineup_rows(
-    court_rows: &[Value],
+    org_rows: &[Value],
     queue: &[String],
     graph_rows: &[Value],
     registry: Option<&Registry>,
@@ -82,7 +82,7 @@ pub(crate) fn lineup_rows(
 ) -> Vec<Value> {
     let mut rows: Vec<Value> = Vec::new();
     let mut seated: Vec<String> = Vec::new();
-    for row in court_rows {
+    for row in org_rows {
         let id = row.get("id").and_then(Value::as_str).unwrap_or("");
         seated.push(id.to_string());
         let graph = graph_row(graph_rows, id);
@@ -129,14 +129,14 @@ fn cell(v: Option<&Value>) -> String {
     dash(v).replace('|', "\\|")
 }
 
-/// `lineup:` then one markdown row per entry, capped like the court rows.
+/// `lineup:` then one markdown row per entry, capped like the org rows.
 pub(crate) fn render_lineup(rows: &[Value]) -> Vec<String> {
     let mut out = vec![
         "lineup:".to_string(),
         "| node | title | difficulty | PR | harness/model | status |".to_string(),
         "|---|---|---|---|---|---|".to_string(),
     ];
-    for row in rows.iter().take(MAX_COURT_ROWS) {
+    for row in rows.iter().take(MAX_ORG_ROWS) {
         out.push(format!(
             "| {} | {} | {} | {} | {} | {} |",
             cell(row.get("node")),
@@ -147,7 +147,7 @@ pub(crate) fn render_lineup(rows: &[Value]) -> Vec<String> {
             cell(row.get("status")),
         ));
     }
-    let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
+    let hidden = rows.len().saturating_sub(MAX_ORG_ROWS);
     if hidden > 0 {
         out.push(format!("  ... {hidden} more rows cut"));
     }

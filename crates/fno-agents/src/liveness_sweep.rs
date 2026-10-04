@@ -864,7 +864,7 @@ pub(crate) fn apply_reconcile_changes(
                         harness_session: e.harness_session_id.clone(),
                         from: status_word(from),
                         to: status_word(to),
-                        cause: if ch.crown_revive {
+                        cause: if ch.team_revive {
                             "revival"
                         } else if ch.pid_proven {
                             "pid_proven"
