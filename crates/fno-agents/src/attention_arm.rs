@@ -54,7 +54,7 @@ pub trait SinkIo {
     fn list_md(&mut self, dir: &Path) -> Vec<PathBuf>;
     /// Whether the path exists, through the same seam as every other read.
     fn path_exists(&mut self, path: &Path) -> bool;
-    /// Route one item to its crown. `Err` names the unread source.
+    /// Route one item to its team. `Err` names the unread source.
     fn route(&mut self, item: &AttentionItem) -> Result<Routing, String>;
     /// Write one `attention_answer` row. Returns the `Recorded:` receipt text.
     fn record(
@@ -316,7 +316,7 @@ pub fn tick_pages(
                 title: attention_file::unescape_text(&page.front.title),
                 kind: page.front.kind.clone(),
                 blocks: page.front.blocks.clone(),
-                king: page.front.king.clone(),
+                lead: page.front.lead.clone(),
                 created: page.front.asked_at.clone(),
             });
         }
@@ -330,7 +330,7 @@ pub fn tick_pages(
             title: attention_file::page_title(&item.title),
             kind: item.kind.clone(),
             blocks: item.blocks.clone(),
-            king: routing.king.clone().unwrap_or_else(|| "none".to_string()),
+            lead: routing.lead.clone().unwrap_or_else(|| "none".to_string()),
             created: item.created_at.clone(),
         });
     }
@@ -1086,7 +1086,7 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
         detail.extend(http.detail);
         // The mux pass: every unsuperseded attention_answer row, whatever its
         // sink, drives one reply ladder (clear while open, mail, resume,
-        // crown). Runs with no sinks configured - the answer rows are the
+        // team). Runs with no sinks configured - the answer rows are the
         // input, not the sink config.
         mark("answers");
         let (ans_acted, ans_detail) = crate::attention_reply::tick_answers(
@@ -1176,7 +1176,7 @@ pub(crate) fn read_items_at(
         }
     }
     let notes = read_notes(cwd);
-    let lane_path = crate::king_board::scope::operator_lane_path(cwd);
+    let lane_path = crate::org_board::scope::operator_lane_path(cwd);
     let lane_text = std::fs::read_to_string(lane_path).unwrap_or_default();
     let mut items = crate::attention::project(&journals_raw, &notes, &lane_text, now_secs());
     if let Ok(registry) =
@@ -1471,7 +1471,7 @@ pub(crate) fn append_answer_row(
         }
         (crate::attention_file::FileAnswer::Done, false) => format!("Recorded: done ({sink})"),
         (crate::attention_file::FileAnswer::Delegate, false) => {
-            format!("Recorded: delegated to the crown ({sink})")
+            format!("Recorded: delegated to the team ({sink})")
         }
         (
             crate::attention_file::FileAnswer::None | crate::attention_file::FileAnswer::TwoTicked,
@@ -1564,7 +1564,7 @@ mod tests {
     /// One not-ready question with a live asker: every context field but
     /// `unknowns` is present, so `missing` names exactly one field.
     fn not_ready_items() -> Vec<AttentionItem> {
-        let row = r#"{"ts":"2026-09-18T12:00:00Z","type":"operator_question","source":"test","data":{"question_id":"q-nr","question":"Which?","ask":"pick","session_id":"s1","cwd":"/repo/fno","node":"x-aaaa","asker":"worker-1","options":[{"n":1,"text":"A","next":"x"},{"n":2,"text":"B","next":"y"}],"context":{"blocked_because":"two repairs are Python edits","options_rationale":"the readings kings acted on","recommendation":{"option":1,"why":"narrowest"},"reversible":"costly","cost_if_wrong":"allowance drops","meanwhile":"stops"}}}"#;
+        let row = r#"{"ts":"2026-09-18T12:00:00Z","type":"operator_question","source":"test","data":{"question_id":"q-nr","question":"Which?","ask":"pick","session_id":"s1","cwd":"/repo/fno","node":"x-aaaa","asker":"worker-1","options":[{"n":1,"text":"A","next":"x"},{"n":2,"text":"B","next":"y"}],"context":{"blocked_because":"two repairs are Python edits","options_rationale":"the readings leads acted on","recommendation":{"option":1,"why":"narrowest"},"reversible":"costly","cost_if_wrong":"allowance drops","meanwhile":"stops"}}}"#;
         project(row, &[], "", 0)
     }
 

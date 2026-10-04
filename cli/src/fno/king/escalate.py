@@ -7,7 +7,7 @@ respawned king meeting the same board records no second question, and a
 changed board supersedes only that king's stale row.
 
 The operator-facing text renders in the ``fno-agents`` crate
-(``king-escalation-text``); the reconcile fold behind ``escalate`` lives in
+(``lead-escalation-text``); the reconcile fold behind ``escalate`` lives in
 ``crates/fno-agents/src/fleet_task.rs``, reached through the ``fleet-task``
 transport.
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-MARKER = "king-escalation"
+MARKER = "lead-escalation"
 
 
 def _render(
@@ -38,7 +38,7 @@ def _render(
     from fno.rust_binary import verb_call
 
     return verb_call(
-        "king-escalation-text",
+        "lead-escalation-text",
         {
             "stalled": ids,
             "key": key,
@@ -82,7 +82,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         session_id=session_id,
         cwd=cwd,
         marker=answer.get("marker") or MARKER,
-        subject="king-escalation",
+        subject="lead-escalation",
         identities=ids,
         question=lambda _key: answer["question"],
         # No ask line. A stalled row is queue-qualified (`undispatched:`)

@@ -87,7 +87,7 @@ fn stand_down_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)overstay|stand(ing)?[ -]down|step(ping)?[ -]down|abdicat|(end|stop) (the|your|this) reign|compact\w* (\w+ ){0,3}(degraded|diminish)",
+            r"(?i)overstay|stand(ing)?[ -]down|step(ping)?[ -]down|abdicat|(end|stop) (the|your|this) lead|compact\w* (\w+ ){0,3}(degraded|diminish)",
         )
         .expect("valid pattern")
     })
@@ -1106,7 +1106,7 @@ mod tests {
         let out = read_raw(
             "stand-down-payload",
             &[user_row(
-                json!("Perhaps our reign has overstayed its welcome"),
+                json!("Perhaps our lead has overstayed its welcome"),
                 "u-stand-down",
             )],
         );
@@ -1132,7 +1132,7 @@ mod tests {
         let tp = dir.join("transcript.jsonl");
         write_jsonl(
             &tp,
-            &[user_row(json!("the reign has overstayed"), "u-acked")],
+            &[user_row(json!("the lead has overstayed"), "u-acked")],
         );
         std::fs::write(ledger_path(&dir, "s"), "{\"turn_id\":\"u-acked\"}\n").unwrap();
         assert!(pending_stand_down("s", &tp, &dir, NOW).unwrap().is_empty());

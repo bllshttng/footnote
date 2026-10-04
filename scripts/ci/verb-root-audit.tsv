@@ -27,7 +27,7 @@ evals	1	1	22	7	keep-and-fold	doctor evals	only 1 call but skills/ship gates a do
 event	92	92	56	26	keep-and-fold	doctor event	
 executor	0	0	13	3	delete	-	zero calls; the live resolver is skills/do/scripts/resolve-executor.sh, the CLI verb is an uncalled wrapper
 help	510	499	39	3	keep-as-root	help	stays a root by the decided taxonomy.
-king	18	18	14	6	keep-and-fold	agents king	The king root folds into agents; the king board leaf folds into inbox.
+lead	18	18	14	6	keep-and-fold	agents lead	The lead root folds into agents; the lead board leaf folds into inbox.
 lint	1511	1506	34	7	keep-and-fold	doctor lint	
 loops	0	0	5	2	keep-and-fold	do loops	ZERO calls, and the lowest-traffic survivor. It stays only because it is the sole WRITER of the pause-all sentinel that cli/src/fno/observer/cli.py reads through fno.paths. Re-audit it after one release.
 mail	4999	4998	347	104	keep-and-fold	agents mail	

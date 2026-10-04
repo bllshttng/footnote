@@ -2189,7 +2189,7 @@ fn run_retract_door(argv: &[String]) -> i32 {
 pub fn run_backlog_retract(argv: &[String]) -> i32 {
     run_retract_labeled(
         "fno backlog decide-retract",
-        "usage: fno backlog decide-retract <subject-or-decision-id> --reason <why> [-R] [--authority operator|crown|agent|beastmode]",
+        "usage: fno backlog decide-retract <subject-or-decision-id> --reason <why> [-R] [--authority operator|team|agent|beastmode]",
         argv,
         false,
     )
@@ -2208,8 +2208,8 @@ fn run_retract_labeled(label: &str, usage: &str, argv: &[String], law_only: bool
         }
     };
     if let Some(a) = &door.stated_authority {
-        if !matches!(a.as_str(), "operator" | "crown" | "agent" | "beastmode") {
-            eprintln!("{label}: --authority '{a}' is not one of operator, crown, agent, beastmode");
+        if !matches!(a.as_str(), "operator" | "team" | "agent" | "beastmode") {
+            eprintln!("{label}: --authority '{a}' is not one of operator, team, agent, beastmode");
             return 2;
         }
     }
@@ -3630,7 +3630,7 @@ pub(crate) mod tests {
                 stage_row(
                     "d-epic0001",
                     "epic-merge-authority",
-                    "The x-bbbb epic keeps merge authority with the crown.",
+                    "The x-bbbb epic keeps merge authority with the team.",
                 ),
                 stage_row("d-node0001", "x-aaaa", "unfindable by topic"),
                 stage_row(
@@ -4587,7 +4587,7 @@ pub(crate) mod scope_tests {
             "ts": "2026-09-01T00:00:00Z"
         })];
         let retired = decision_index::retirement_map(&rows);
-        for lane in ["chat_attested", "crown", "agent", "beastmode"] {
+        for lane in ["chat_attested", "team", "agent", "beastmode"] {
             let err = retract_target(
                 "portal-test",
                 &rows,

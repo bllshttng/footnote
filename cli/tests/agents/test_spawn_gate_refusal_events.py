@@ -115,7 +115,7 @@ def test_king_share_refusal_emits_though_it_carries_no_receipt(journal: Path) ->
 
     with pytest.raises(spawn_gate.GateRefused) as excinfo:
         spawn_gate._refuse(
-            spawn_gate.EXIT_KING_SHARE,
+            spawn_gate.EXIT_LEAD_SHARE,
             None,
             reason="king_share",
             king="kingA",

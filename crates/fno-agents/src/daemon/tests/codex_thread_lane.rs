@@ -660,13 +660,15 @@ async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
 /// with no state dirs and overwrote the row with the narrowed result, which
 /// is the loss `codex_thread_resumed_without_state_grant` used to announce.
 #[tokio::test(flavor = "current_thread")]
-async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
+async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
     // CODEX_HOME is process-global: hold the same guard every other fake
     // user holds, or a parallel test's driver reads THIS test's fake.
     let _guard = crate::path_test_guard();
     let home = tmp_home("codex-resume-records-posture");
     let cwd = tempfile::tempdir().unwrap();
-    let behavior = crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed");
+    let behavior = crate::codex_fake_daemon::Behavior::quick()
+        .with_thread_id("thread-resumed")
+        .with_thread_sandbox(serde_json::json!({"type": "readOnly"}));
     let received = std::sync::Arc::clone(&behavior.received);
     let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
     // Must match the fake's configured thread_id: `resume()` refuses when
@@ -712,12 +714,10 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         .find("t-resume")
         .cloned()
         .unwrap();
-    // The fake models no sandbox, so the fresh read is the explicit
-    // unknown - not the workspaceWrite the row was seeded with.
-    assert_eq!(
-        after.resolved_sandbox.as_deref(),
-        Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN)
-    );
+    // The crowning resolution is FROZEN: the fake resolves readOnly, and the
+    // seeded workspaceWrite must survive it - a mid-reign refresh would mask
+    // the drift a narrowed resolution caused.
+    assert_eq!(after.resolved_sandbox.as_deref(), Some("workspaceWrite"));
     // AC3-EDGE: the recorded grant survives the write-back.
     assert!(
         after
@@ -726,8 +726,42 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         "the recorded roots must survive the write-back: {:?}",
         after.granted_writable_roots
     );
-    // AC6: the v35 columns are stamped.
-    assert_eq!(after.turn_policy_source.as_deref(), Some("requested"));
+    // AC6: the v35 columns are stamped. The fake answers a sandbox, so the
+    // turn policy echoes the server posture, not the replayed request.
+    assert_eq!(after.turn_policy_source.as_deref(), Some("resolved"));
+
+    // The other half of the freeze: `unknown` is no baseline, so a real
+    // fresh read replaces it at the first resume. A second home, because the
+    // registry refuses two rows carrying one session identity.
+    let home2 = tmp_home("codex-resume-freeze-unknown");
+    let ctx2 = test_ctx(home2.clone(), PathBuf::from("/nonexistent"));
+    state::update_registry(&home2.registry_json(), |registry| {
+        let mut entry = thread_entry("t-resume-unknown", AgentStatus::Live, None);
+        entry.cwd = cwd.path().to_string_lossy().into_owned();
+        entry.project_root = entry.cwd.clone();
+        entry.harness_session_id = Some(session_id.clone());
+        entry.codex_session_id = Some(session_id.clone());
+        entry.sandbox_posture = Some("workspace-write".into());
+        entry.resolved_sandbox = Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN.into());
+        registry.entries.push(entry);
+    })
+    .unwrap();
+    let entry = state::load_registry(&home2.registry_json())
+        .unwrap()
+        .find("t-resume-unknown")
+        .cloned()
+        .unwrap();
+    ensure_codex_thread_handle(&ctx2, &entry)
+        .await
+        .expect("the fake daemon answers the second thread/resume");
+    let after = state::load_registry(&home2.registry_json())
+        .unwrap()
+        .find("t-resume-unknown")
+        .cloned()
+        .unwrap();
+    // `unknown` is no baseline: the fake's real resolution replaces it.
+    assert_eq!(after.resolved_sandbox.as_deref(), Some("readOnly"));
+    std::fs::remove_dir_all(home2.root()).ok();
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -1474,7 +1508,7 @@ async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
 
         let params = json!({
             "to": "t",
-            "from": "king",
+            "from": "lead",
             "body": "hello thread",
             "mirror": false,
             "recipient_identity": {
@@ -1540,7 +1574,7 @@ async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
 
         let params = json!({
             "to": "t",
-            "from": "king",
+            "from": "lead",
             "body": "wake up",
             "mirror": false,
             "recipient_identity": {
@@ -1813,14 +1847,14 @@ fn gate_inside_leg_onto_row_notifies_once_per_done_episode() {
     assert_eq!(n, None);
 }
 
-/// A crowned row's done is a turn end under its reign: the gate carries no
+/// A teamed row's done is a turn end under its lead: the gate carries no
 /// notify intent, the report still lands and reads done, and a blocked
 /// report still pages the operator.
 #[test]
-fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
+fn gate_inside_leg_onto_row_teamed_done_is_quiet_but_lands() {
     let mut registry = state::Registry::default();
-    let mut row = thread_entry("t-king", AgentStatus::Live, None);
-    row.codex_session_id = Some("sid-king".into());
+    let mut row = thread_entry("t-lead", AgentStatus::Live, None);
+    row.codex_session_id = Some("sid-lead".into());
     row.crown_level = Some(2);
     registry.entries.push(row);
 
@@ -1836,7 +1870,7 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
     // Working at seq 1 lands with no intent.
     let n = gate_inside_leg_onto_row(
         &mut registry,
-        "sid-king",
+        "sid-lead",
         rep(1, state::InsideLegState::Working, None),
     );
     assert_eq!(n, None);
@@ -1844,10 +1878,10 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
     // Done at seq 2: no intent, but the row reads done at seq 2.
     let n = gate_inside_leg_onto_row(
         &mut registry,
-        "sid-king",
+        "sid-lead",
         rep(2, state::InsideLegState::Done, None),
     );
-    assert_eq!(n, None, "a crowned row's done carries no notify intent");
+    assert_eq!(n, None, "a teamed row's done carries no notify intent");
     assert_eq!(registry.entries[0].inside_leg.as_ref().unwrap().seq, 2);
     assert_eq!(
         registry.entries[0].inside_leg.as_ref().unwrap().state,
@@ -1857,7 +1891,7 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
     // Blocked at seq 3 still pages the operator.
     let n = gate_inside_leg_onto_row(
         &mut registry,
-        "sid-king",
+        "sid-lead",
         rep(
             3,
             state::InsideLegState::Blocked,
@@ -1880,11 +1914,11 @@ fn badge_lane_table() {
 
     // The toast argv matches the Python dispatch's escaping (AC3).
     assert_eq!(
-        toast_argv("macos", "king \"a\"", "c:\\d"),
+        toast_argv("macos", "lead \"a\"", "c:\\d"),
         vec![
             "osascript".to_string(),
             "-e".to_string(),
-            "display notification \"c:\\\\d\" with title \"king \\\"a\\\"\"".to_string(),
+            "display notification \"c:\\\\d\" with title \"lead \\\"a\\\"\"".to_string(),
         ]
     );
     assert_eq!(

@@ -163,10 +163,10 @@ fn an_exited_joiner_releases_its_lead() {
     );
 }
 
-/// AC2-HP: a crowned parent is kept by its crown gate, and its court row
-/// (a live busy row naming the king's session) answers as a live CHILD.
+/// AC2-HP: a teamed parent is kept by its team gate, and its org row
+/// (a live busy row naming the lead's session) answers as a live CHILD.
 #[test]
-fn a_crowned_parent_is_kept_and_its_court_reads_as_child() {
+fn a_teamed_parent_is_kept_and_its_org_reads_as_child() {
     let (dir, home) = staged_graph_home();
     stage_graph(
         dir.path(),
@@ -178,33 +178,33 @@ fn a_crowned_parent_is_kept_and_its_court_reads_as_child() {
     );
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     crate::state::update_registry(&home.registry_json(), |r| {
-        let mut king = parent_row("king-x-demo", "s-king");
-        king.crown_level = Some(1);
-        r.entries.push(king);
-        let mut court = child_row("node-x-demo2-g2", "s-court", "s-king");
-        court.status = crate::AgentStatus::Busy;
-        r.entries.push(court);
+        let mut lead = parent_row("lead-x-demo", "s-lead");
+        lead.crown_level = Some(1);
+        r.entries.push(lead);
+        let mut org = child_row("node-x-demo2-g2", "s-org", "s-lead");
+        org.status = crate::AgentStatus::Busy;
+        r.entries.push(org);
     })
     .unwrap();
     let summary = lineage_sweep(&home, &emitter);
     assert!(
-        !summary.retired.iter().any(|(id, _)| id == "king-x-demo"),
+        !summary.retired.iter().any(|(id, _)| id == "lead-x-demo"),
         "{:?}",
         summary.retired
     );
     assert!(
-        summary.kept_crowned.iter().any(|id| id == "king-x-demo"),
+        summary.kept_teamed.iter().any(|id| id == "lead-x-demo"),
         "{:?}",
-        summary.kept_crowned
+        summary.kept_teamed
     );
 }
 
-/// x-2b6f: the crown gate reads the MANIFEST, not just the stamp. An
-/// unstamped row whose space carries a king manifest naming its session is a
-/// live king for the sweep: kept under kept_crowned, never retired. The row
-/// carries no crown field at all - the restore-stripped-stamp shape.
+/// x-2b6f: the team gate reads the MANIFEST, not just the stamp. An
+/// unstamped row whose space carries a lead manifest naming its session is a
+/// live lead for the sweep: kept under kept_teamed, never retired. The row
+/// carries no team field at all - the restore-stripped-stamp shape.
 #[test]
-fn an_unstamped_row_with_a_live_manifest_is_kept_crowned() {
+fn an_unstamped_row_with_a_live_manifest_is_kept_teamed() {
     let _lock = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -215,12 +215,12 @@ fn an_unstamped_row_with_a_live_manifest_is_kept_crowned() {
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     let space = crate::paths::space_dir(&repo);
-    let kings = space.join("kings");
-    std::fs::create_dir_all(&kings).unwrap();
+    let leads = space.join("kings");
+    std::fs::create_dir_all(&leads).unwrap();
     std::fs::write(
-        kings.join("x-demo.md"),
+        leads.join("x-demo.md"),
         "---\nscope: x-demo\nshape: pass\nharness: claude\n\
-         harness_session_id: s-kingm\nowner_pid: 1\ncreated_at: 2026-09-01T00:00:00Z\n\
+         harness_session_id: s-leadm\nowner_pid: 1\ncreated_at: 2026-09-01T00:00:00Z\n\
          crown_scope: x-demo\ncrown_level: 2\ncrown_grantor: vellum\n---\n",
     )
     .unwrap();
@@ -234,21 +234,21 @@ fn an_unstamped_row_with_a_live_manifest_is_kept_crowned() {
     );
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     crate::state::update_registry(&home.registry_json(), |r| {
-        let mut king = parent_row("king-x-demo", "s-kingm");
-        king.cwd = repo.display().to_string();
-        r.entries.push(king);
+        let mut lead = parent_row("lead-x-demo", "s-leadm");
+        lead.cwd = repo.display().to_string();
+        r.entries.push(lead);
     })
     .unwrap();
     let summary = lineage_sweep(&home, &emitter);
     assert!(
-        !summary.retired.iter().any(|(id, _)| id == "king-x-demo"),
+        !summary.retired.iter().any(|(id, _)| id == "lead-x-demo"),
         "{:?}",
         summary.retired
     );
     assert!(
-        summary.kept_crowned.iter().any(|id| id == "king-x-demo"),
+        summary.kept_teamed.iter().any(|id| id == "lead-x-demo"),
         "{:?}",
-        summary.kept_crowned
+        summary.kept_teamed
     );
     match saved_spaces {
         Some(v) => std::env::set_var("FNO_SPACES_DIR", v),

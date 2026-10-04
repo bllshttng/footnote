@@ -260,7 +260,7 @@ assert_contains "AC5: decision block" "$OUT" '"decision":"block"'
 assert_contains "AC5: reason carries measured 50%" "$OUT" '50% used'
 assert_contains "AC5: reason names the crowned scope" "$OUT" "$SCOPE"
 assert_contains "AC5: canon ask names the scope-keyed rolling doc" "$OUT" "crown-${SCOPE}.md"
-events_has king_context_nudge && ok "AC5: king_context_nudge event emitted" || bad "AC5: no king_context_nudge event"
+events_has lead_context_nudge && ok "AC5: lead_context_nudge event emitted" || bad "AC5: no lead_context_nudge event"
 
 # A crown survives a compact, so this percentage asks a king to COMPACT and keep
 # ruling. It is not a handoff threshold, and the branch must not read as one: the
@@ -328,7 +328,7 @@ assert_contains "AC14: names resolution 1 (court)" "$OUT" 'stay as court'
 # passed while documenting a command that no longer exists.
 assert_contains "AC14: names resolution 2 (spawn the heir)" "$OUT" 'fno agents spawn -k'
 assert_contains "AC14: names resolution 3 (carveout)" "$OUT" 'carveout add'
-events_has king_orphan_block && ok "AC14: king_orphan_block event emitted" || bad "AC14: no king_orphan_block event"
+events_has lead_orphan_block && ok "AC14: lead_orphan_block event emitted" || bad "AC14: no lead_orphan_block event"
 
 # === AC31: unlinked-only workers make ownership unknown, never zero ==========
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
@@ -557,7 +557,7 @@ rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry yes no yes                              # crowned king + 1 peer king
 write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
-assert_contains "AC25: king roll-up names the peer king" "$OUT" 'peer king'
+assert_contains "AC25: lead roll-up names the peer lead" "$OUT" 'peer lead'
 
 # === compact gate: the advice matches a MEASURED injection path ================
 # The hook used to prescribe a self-inject to every session unconditionally. A
@@ -844,7 +844,7 @@ rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db" 2>/dev/null
 write_registry_liveness "$CHILDREN"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "x-1b75 all-dead: no orphan reason when every spawned row is confidently dead" "$OUT" "cannot be a pure pass"
-events_has king_orphan_block && bad "x-1b75 all-dead: king_orphan_block fired anyway" || ok "x-1b75 all-dead: no king_orphan_block event"
+events_has lead_orphan_block && bad "x-1b75 all-dead: lead_orphan_block fired anyway" || ok "x-1b75 all-dead: no lead_orphan_block event"
 
 # --- Unresolved: no liveness field at all. Reported as unknown, excluded ----
 # --- from the alive count, and the nudge still fires (a broken reader must --

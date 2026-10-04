@@ -25,11 +25,11 @@ if [ "${1:-}" = "--self-test" ]; then
     trap 'rm -rf "$tmp"' EXIT
 
     # Case A: a done badge plus a done transition -> exit 1, name the row.
-    printf '%s\n' '{"ts":"2026-09-15T01:00:00Z","type":"operator_notice","data":{"title":"king-a","body":"done"}}' > "$tmp/a-space.jsonl"
+    printf '%s\n' '{"ts":"2026-09-15T01:00:00Z","type":"operator_notice","data":{"title":"lead-a","body":"done"}}' > "$tmp/a-space.jsonl"
     printf '%s\n' '{"ts":"2026-09-15T01:00:01Z","type":"inside_leg_report","data":{"state":"done"}}' > "$tmp/a-agents.jsonl"
     out="$("$0" --space-events "$tmp/a-space.jsonl" --agents-events "$tmp/a-agents.jsonl" --since "2026-09-15T01:00:00Z" --until "2026-09-15T02:00:00Z" 2>&1)"
     rc=$?
-    if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'done=1' && printf '%s' "$out" | grep -q 'king-a'; then
+    if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'done=1' && printf '%s' "$out" | grep -q 'lead-a'; then
         echo "case A: ok"
     else
         echo "case A: FAIL rc=$rc out=$out" >&2
@@ -37,7 +37,7 @@ if [ "${1:-}" = "--self-test" ]; then
     fi
 
     # Case B: a blocked notice plus a done transition -> exit 0.
-    printf '%s\n' '{"ts":"2026-09-15T02:00:00Z","type":"operator_notice","data":{"title":"king-b","body":"Claude needs your permission"}}' > "$tmp/b-space.jsonl"
+    printf '%s\n' '{"ts":"2026-09-15T02:00:00Z","type":"operator_notice","data":{"title":"lead-b","body":"Claude needs your permission"}}' > "$tmp/b-space.jsonl"
     printf '%s\n' '{"ts":"2026-09-15T02:00:01Z","type":"inside_leg_report","data":{"state":"done"}}' > "$tmp/b-agents.jsonl"
     out="$("$0" --space-events "$tmp/b-space.jsonl" --agents-events "$tmp/b-agents.jsonl" --since "2026-09-15T02:00:00Z" --until "2026-09-15T03:00:00Z" 2>&1)"
     rc=$?

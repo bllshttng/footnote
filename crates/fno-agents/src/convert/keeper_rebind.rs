@@ -177,7 +177,7 @@ mod tests {
 
     fn plan() -> ConvertPlan {
         ConvertPlan {
-            name: "king-delivery".to_string(),
+            name: "lead-delivery".to_string(),
             harness: "pi".to_string(),
             strategy: "keeper-rebind".to_string(),
             preserves_id: true,
@@ -205,10 +205,10 @@ mod tests {
     fn the_thread_socket_is_named_for_the_row_not_the_pane() {
         // The pane id dies with the hand-off; the row name is what the
         // sweep and `fno mux thread <name>` address afterward.
-        let path = thread_socket_path(std::path::Path::new("/state"), "king-delivery");
+        let path = thread_socket_path(std::path::Path::new("/state"), "lead-delivery");
         assert_eq!(
             path,
-            std::path::PathBuf::from("/state/mux/threads/king-delivery.sock")
+            std::path::PathBuf::from("/state/mux/threads/lead-delivery.sock")
         );
     }
 
@@ -222,7 +222,7 @@ mod tests {
         };
         hand_off(
             &plan(),
-            std::path::Path::new("/state/mux/threads/king-delivery.sock"),
+            std::path::Path::new("/state/mux/threads/lead-delivery.sock"),
             &run,
         )
         .expect("the hand-off runs");
@@ -231,7 +231,7 @@ mod tests {
             vec![(
                 "fno".to_string(),
                 2313,
-                "/state/mux/threads/king-delivery.sock".to_string()
+                "/state/mux/threads/lead-delivery.sock".to_string()
             )]
         );
     }
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn the_flipped_row_reads_as_a_keeper_thread() {
         let mut entry = crate::state::RegistryEntry {
-            name: "king-delivery".to_string(),
+            name: "lead-delivery".to_string(),
             cwd: "/repo".to_string(),
             status: crate::AgentStatus::Live,
             created_at: "2026-09-20T00:00:00Z".to_string(),
@@ -308,7 +308,7 @@ mod tests {
         flipped_row(
             &mut entry,
             &RebindOutcome {
-                socket: "/state/mux/threads/king-delivery.sock".to_string(),
+                socket: "/state/mux/threads/lead-delivery.sock".to_string(),
                 keeper_pid: 900,
                 child_pid: 4242,
                 session_id: "sid".to_string(),
@@ -319,7 +319,7 @@ mod tests {
         assert!(entry.mux.is_none(), "a thread row holds no mux ref");
         assert_eq!(
             entry.messaging_socket_path.as_deref(),
-            Some("/state/mux/threads/king-delivery.sock")
+            Some("/state/mux/threads/lead-delivery.sock")
         );
         // The pid pair is the one a reader can get backwards, so it is
         // asserted both ways round.

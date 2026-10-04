@@ -22,7 +22,7 @@ refuse() {
     echo "This gate reads the DESTINATION, not your current branch. Pushing a" >&2
     echo "non-protected ref from a checkout on main is allowed." >&2
     echo "A feature-branch force-push needs no approval, from an operator or a" >&2
-    echo "king: this gate has never blocked one. Prefer --force-with-lease." >&2
+    echo "lead: this gate has never blocked one. Prefer --force-with-lease." >&2
     echo "Open a PR instead:" >&2
     echo "  git push origin HEAD:refs/heads/feature/<name>" >&2
 }

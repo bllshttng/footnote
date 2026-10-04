@@ -27,7 +27,7 @@ pub struct HookStatus {
     /// "matches" | "stale" | "unverifiable"
     pub stop: String,
     /// "matches" | "missing" | "not_shipped"
-    pub crown: String,
+    pub team: String,
     /// "matches" | "missing" | "not_shipped"
     pub guard: String,
     pub loaded: &'static str,
@@ -106,12 +106,12 @@ impl HookStatus {
             ),
         };
         format!(
-            "file={} footnote={} {} stop={} crown={} guard={} -> {}",
+            "file={} footnote={} {} stop={} team={} guard={} -> {}",
             file,
             self.footnote,
             enabled,
             self.stop,
-            self.crown,
+            self.team,
             self.guard,
             if self.installed {
                 "installed"
@@ -123,13 +123,13 @@ impl HookStatus {
 }
 
 /// Read the hooks file's real state against the adapters this install
-/// ships. `adapter`/`crown` are the shipped adapter scripts; `None` means
+/// ships. `adapter`/`team` are the shipped adapter scripts; `None` means
 /// this install carries none, which reads `unverifiable`/`not_shipped`
 /// rather than a guess.
 pub fn status(
     hooks_file: &Path,
     adapter: Option<&Path>,
-    crown: Option<&Path>,
+    team: Option<&Path>,
     guard: Option<&Path>,
 ) -> HookStatus {
     let mut s = HookStatus {
@@ -140,7 +140,7 @@ pub fn status(
         footnote: "absent".to_string(),
         enabled: true,
         stop: "unverifiable".to_string(),
-        crown: "not_shipped".to_string(),
+        team: "not_shipped".to_string(),
         guard: "not_shipped".to_string(),
         loaded: "unverified",
         runtime: "unverified",
@@ -185,7 +185,7 @@ pub fn status(
         (Some(_), None) => "stale",
     }
     .to_string();
-    s.crown = match (crown, fn_map) {
+    s.team = match (team, fn_map) {
         (None, _) => "not_shipped",
         (Some(c), Some(map)) => {
             if has_handler(map.get("PreInvocation"), c) {
@@ -211,12 +211,12 @@ pub fn status(
     .to_string();
     s.installed = s.footnote == "configured"
         && s.stop == "matches"
-        && s.crown != "missing"
+        && s.team != "missing"
         && s.guard != "missing";
     s
 }
 
-/// Install footnote's Stop (and crown PreInvocation) handlers, preserving
+/// Install footnote's Stop (and team PreInvocation) handlers, preserving
 /// every other byte of structure: foreign top-level namespaces, foreign
 /// `footnote` keys, and `footnote.enabled` all survive. Refuses - writing
 /// nothing - on an unparseable file, a non-object root, or a non-object
@@ -224,7 +224,7 @@ pub fn status(
 pub fn install(
     hooks_file: &Path,
     adapter: &Path,
-    crown: Option<&Path>,
+    team: Option<&Path>,
     guard: Option<&Path>,
 ) -> Result<InstallReceipt, String> {
     let mut root = match read_root(hooks_file) {
@@ -265,7 +265,7 @@ pub fn install(
         "Stop".to_string(),
         json!([{"type": "command", "command": adapter.display().to_string(), "timeout": 60}]),
     );
-    if let Some(crown) = crown {
+    if let Some(team) = team {
         match fn_map.get("PreInvocation") {
             Some(Value::Array(_)) => {}
             None => {
@@ -279,7 +279,7 @@ pub fn install(
                 ))
             }
         }
-        let needs_append = !has_handler(fn_map.get("PreInvocation"), crown);
+        let needs_append = !has_handler(fn_map.get("PreInvocation"), team);
         if needs_append {
             let pre = fn_map
                 .get_mut("PreInvocation")
@@ -287,7 +287,7 @@ pub fn install(
                 .expect("array checked above");
             pre.push(json!({
                 "type": "command",
-                "command": crown.display().to_string(),
+                "command": team.display().to_string(),
                 "timeout": 30
             }));
         }
@@ -320,7 +320,7 @@ pub fn install(
     // The session-state reporter ships beside the stop adapter in the same
     // plugin stage; when the sibling exists on disk, register it under
     // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
-    // event's decision contract). Append-once like the crown.
+    // event's decision contract). Append-once like the team.
     let report = adapter
         .parent()
         .map(|dir| dir.join("agy-session-report.sh"))
@@ -475,7 +475,7 @@ mod tests {
         let path = dir.path().join("deep/nested/hooks.json");
         // A real adapter dir with the session-state reporter as a sibling:
         // install registers the reporter under PreInvocation beside the
-        // crown, append-once.
+        // team, append-once.
         let adapter_dir = dir.path().join("stage").join("hooks");
         std::fs::create_dir_all(&adapter_dir).unwrap();
         let adapter = adapter_dir.join("footnote-agy-target-stop-hook.sh");
@@ -493,16 +493,16 @@ mod tests {
         );
     }
 
-    /// The crown PreInvocation handler is appended when absent and not
+    /// The team PreInvocation handler is appended when absent and not
     /// duplicated when present; the guard PreToolUse group is added once;
     /// a foreign namespace's PreToolUse groups and other footnote keys
     /// survive (AC13).
     #[test]
-    fn crown_appended_once_and_other_keys_survive() {
+    fn team_appended_once_and_other_keys_survive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
-        let crown = Path::new("/plugin/hooks/agy-crown-inject.sh");
-        let guard = Path::new("/plugin/hooks/agy-king-guard.sh");
+        let team = Path::new("/plugin/hooks/agy-team-inject.sh");
+        let guard = Path::new("/plugin/hooks/agy-lead-guard.sh");
         std::fs::write(
             &path,
             r#"{
@@ -512,15 +512,15 @@ mod tests {
         )
         .unwrap();
         let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
-        install(&path, adapter, Some(crown), Some(guard)).expect("install");
-        install(&path, adapter, Some(crown), Some(guard)).expect("second install");
+        install(&path, adapter, Some(team), Some(guard)).expect("install");
+        install(&path, adapter, Some(team), Some(guard)).expect("second install");
         let data: Value = serde::de::Deserialize::deserialize(
             &mut serde_json::Deserializer::from_str(&std::fs::read_to_string(&path).unwrap()),
         )
         .unwrap();
         let pre = data["footnote"]["PreInvocation"].as_array().unwrap();
-        assert_eq!(pre.len(), 1, "crown appended once");
-        assert_eq!(pre[0]["command"], crown.display().to_string());
+        assert_eq!(pre.len(), 1, "team appended once");
+        assert_eq!(pre[0]["command"], team.display().to_string());
         let groups = data["footnote"]["PreToolUse"].as_array().unwrap();
         assert_eq!(groups.len(), 1, "guard group appended once");
         assert_eq!(groups[0]["matcher"], "*");

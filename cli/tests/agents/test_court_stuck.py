@@ -210,7 +210,7 @@ def test_a_fold_that_answered_nothing_says_so_rather_than_nothing(
 
     def timeout(*a, **kw):
         raise subprocess.TimeoutExpired(
-            cmd=["fno-agents", "court-fold", "--graph", "/g"], timeout=30
+            cmd=["fno-agents", "org-fold", "--graph", "/g"], timeout=30
         )
 
     # court.py imports subprocess inside the function, so the stdlib module is

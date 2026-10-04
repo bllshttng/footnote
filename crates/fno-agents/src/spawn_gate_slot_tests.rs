@@ -93,7 +93,7 @@ impl SuccessionFixture {
         })
     }
 
-    fn king(&self, name: &str, session: &str, scope: &str) -> serde_json::Value {
+    fn lead(&self, name: &str, session: &str, scope: &str) -> serde_json::Value {
         let mut row = self.row(name);
         row["crown_level"] = serde_json::json!(1);
         row["crown_scope"] = serde_json::json!(scope);
@@ -162,49 +162,49 @@ impl Drop for SuccessionFixture {
 fn plain_spawn_stays_refused_while_valid_succession_reuses_one_slot() {
     let fixture = SuccessionFixture::new(2);
     fixture.write_entries(vec![
-        fixture.king("king", "session-king", "x-epic"),
-        fixture.worker("worker", "session-king"),
+        fixture.lead("lead", "session-lead", "x-epic"),
+        fixture.worker("worker", "session-lead"),
     ]);
 
     let refusal = fixture
-        .spawn("plain", Some("session-king"), None)
-        .expect_err("ordinary spawn cannot reuse the king's slot");
+        .spawn("plain", Some("session-lead"), None)
+        .expect_err("ordinary spawn cannot reuse the lead's slot");
     assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
     assert_eq!(refusal.receipt.as_ref().unwrap()["axis"], "max_live");
 
     fixture
-        .spawn("successor", Some("session-king"), Some("x-epic"))
-        .expect("a sole crowned caller replaces its row")
+        .spawn("successor", Some("session-lead"), Some("x-epic"))
+        .expect("a sole teamed caller replaces its row")
         .release();
 }
 
 #[test]
-fn succession_skips_a_full_king_share() {
+fn succession_skips_a_full_lead_share() {
     let fixture = SuccessionFixture::new(3);
     fixture.write_entries(vec![
-        fixture.king("king-a", "session-a", "x-epic"),
-        fixture.king("king-b", "session-b", "y-epic"),
+        fixture.lead("lead-a", "session-a", "x-epic"),
+        fixture.lead("lead-b", "session-b", "y-epic"),
         fixture.worker("worker-a", "session-a"),
     ]);
 
     fixture
         .spawn("successor", Some("session-a"), Some("x-epic"))
-        .expect("a crowned succession does not pay king share")
+        .expect("a teamed succession does not pay lead share")
         .release();
 }
 
 #[test]
-fn succession_skips_a_full_king_share_on_a_multi_epic_scope() {
+fn succession_skips_a_full_lead_share_on_a_multi_epic_scope() {
     let fixture = SuccessionFixture::new(3);
     fixture.write_entries(vec![
-        fixture.king("king-a", "session-a", "x-epic-a,x-epic-b"),
-        fixture.king("king-b", "session-b", "y-epic"),
+        fixture.lead("lead-a", "session-a", "x-epic-a,x-epic-b"),
+        fixture.lead("lead-b", "session-b", "y-epic"),
         fixture.worker("worker-a", "session-a"),
     ]);
 
     fixture
         .spawn("successor", Some("session-a"), Some("x-epic-a,x-epic-b"))
-        .expect("a succession over a comma-joined epic set does not pay king share")
+        .expect("a succession over a comma-joined epic set does not pay lead share")
         .release();
 }
 
@@ -212,13 +212,13 @@ fn succession_skips_a_full_king_share_on_a_multi_epic_scope() {
 fn succession_refusal_reports_an_ineligible_caller() {
     let fixture = SuccessionFixture::new(2);
     fixture.write_entries(vec![
-        fixture.king("king-a", "session-a", "x-epic"),
-        fixture.king("king-b", "session-b", "x-epic"),
+        fixture.lead("lead-a", "session-a", "x-epic"),
+        fixture.lead("lead-b", "session-b", "x-epic"),
     ]);
 
     let refusal = fixture
         .spawn("successor", Some("session-a"), Some("x-epic"))
-        .expect_err("two live holders cannot both succeed the same crown");
+        .expect_err("two live holders cannot both succeed the same team");
     assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
     assert_eq!(
         refusal.receipt.as_ref().unwrap()["succession"],
@@ -230,8 +230,8 @@ fn succession_refusal_reports_an_ineligible_caller() {
 fn succession_refusal_reports_a_scope_held_by_another_caller() {
     let fixture = SuccessionFixture::new(2);
     fixture.write_entries(vec![
-        fixture.king("king-a", "session-a", "y-epic"),
-        fixture.king("king-b", "session-b", "x-epic"),
+        fixture.lead("lead-a", "session-a", "y-epic"),
+        fixture.lead("lead-b", "session-b", "x-epic"),
     ]);
 
     let refusal = fixture
@@ -248,7 +248,7 @@ fn succession_refusal_reports_a_scope_held_by_another_caller() {
 fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
     let fixture = SuccessionFixture::new(2);
     fixture.write_entries(vec![
-        fixture.king("king-a", "session-a", "x-epic"),
+        fixture.lead("lead-a", "session-a", "x-epic"),
         fixture.worker("worker", "session-a"),
     ]);
     let no_caller = fixture
@@ -259,14 +259,14 @@ fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
         "no_caller"
     );
 
-    let mut dead = fixture.row("dead-king");
+    let mut dead = fixture.row("dead-lead");
     dead["pid"] = serde_json::json!(4_194_321_u32);
     dead["crown_level"] = serde_json::json!(1);
     dead["crown_scope"] = serde_json::json!("x-epic");
     dead["harness_session_id"] = serde_json::json!("session-dead");
     fixture.write_entries(vec![
         dead,
-        fixture.king("other-king", "session-other", "y-epic"),
+        fixture.lead("other-lead", "session-other", "y-epic"),
         fixture.worker("other-worker", "session-other"),
     ]);
     let not_live = fixture
@@ -284,26 +284,26 @@ fn succession_cannot_take_a_second_slot_at_cap_plus_one() {
     let mut heir = fixture.row("pending-heir");
     heir["harness_session_id"] = serde_json::json!("session-heir");
     fixture.write_entries(vec![
-        fixture.king("king", "session-king", "x-epic"),
-        fixture.worker("worker", "session-king"),
+        fixture.lead("lead", "session-lead", "x-epic"),
+        fixture.worker("worker", "session-lead"),
         heir,
     ]);
 
     let refusal = fixture
-        .spawn("second-heir", Some("session-king"), Some("x-epic"))
+        .spawn("second-heir", Some("session-lead"), Some("x-epic"))
         .expect_err("cap plus one cannot replace another slot");
     assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
     assert_eq!(refusal.receipt.as_ref().unwrap()["count"], 3);
 }
 
 #[test]
-fn succession_refuses_the_old_king_after_transfer() {
+fn succession_refuses_the_old_lead_after_transfer() {
     let fixture = SuccessionFixture::new(3);
-    let mut old_king = fixture.row("old-king");
-    old_king["harness_session_id"] = serde_json::json!("session-old");
+    let mut old_lead = fixture.row("old-lead");
+    old_lead["harness_session_id"] = serde_json::json!("session-old");
     fixture.write_entries(vec![
-        old_king,
-        fixture.king("new-king", "session-new", "x-epic"),
+        old_lead,
+        fixture.lead("new-lead", "session-new", "x-epic"),
         fixture.worker("worker", "session-new"),
     ]);
 
@@ -321,8 +321,8 @@ fn succession_refuses_the_old_king_after_transfer() {
 fn succession_refuses_ambiguous_caller_session() {
     let fixture = SuccessionFixture::new(2);
     let rows: Vec<RegistryEntry> = serde_json::from_value(serde_json::json!([
-        fixture.king("king-a", "session-shared", "x-epic"),
-        fixture.king("king-b", "session-shared", "x-epic"),
+        fixture.lead("lead-a", "session-shared", "x-epic"),
+        fixture.lead("lead-b", "session-shared", "x-epic"),
     ]))
     .unwrap();
 
