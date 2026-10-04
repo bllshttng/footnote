@@ -1213,7 +1213,7 @@ mod tests {
         let items = vec![item("q-a", true), item("q-b", true)];
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(items));
-        v.open_questions_list();
+        v.open_detail_on("q-a");
         detail_keys(&mut v, b"\t", &mut Vec::new()).await.unwrap();
         assert!(!v.question_detail.as_ref().unwrap().focus);
         detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
