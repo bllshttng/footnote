@@ -508,13 +508,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
-    }
-
-    #[test]
-    fn the_pane_fence_wraps_the_body_and_the_default_stays_unfenced() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("registry.json");
-        registry(&path);
+        // The pane lane's fenced delivery (payload `fence`, or FNO_MAIL_FENCE=1
+        // on the pane-prepare child): the body rides a backtick run one longer
+        // than any run it holds; the header line stays readable.
         let fenced = render_at(
             &json!({
                 "mode":"wrap", "body":"hi ```x``` there",
@@ -525,7 +521,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fenced,
-            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\n````\nhi ```x``` there\n````"
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\n````\nhi ```x``` there\n````",
         );
         // The fence clears: a run one longer than anything the body holds.
         assert_eq!(fence_for("hi ```x``` there"), "````");
@@ -543,12 +539,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             plain,
-            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\nhi ```x``` there"
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\nhi ```x``` there",
         );
         // The Messages tab reads the fenced pane delivery as its plain body.
         assert_eq!(
             crate::mail_header::display_body(&fenced),
-            "hi ```x``` there"
+            "hi ```x``` there",
         );
     }
 

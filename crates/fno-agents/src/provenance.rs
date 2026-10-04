@@ -1005,27 +1005,6 @@ mod tests {
     }
 
     #[test]
-    fn a_native_peer_row_is_relay_never_operator() {
-        let empty = BusIndex { rows: Vec::new() };
-        let row = json!({
-            "type": "user",
-            "origin": {"kind": "peer", "from": "uds:/tmp/cc-socks/1.sock",
-                       "verifiedPeerPid": 42, "name": "king-a1", "body": "hi"},
-            "message": {"role": "user", "content": "hi"}
-        });
-        assert_eq!(
-            classify_turn(&row, &empty, "s"),
-            Provenance::Relay(RelayKind::NativePeer)
-        );
-        // A human origin is unchanged: unshaped text reads unknown.
-        let human = json!({
-            "type": "user", "origin": {"kind": "human"},
-            "message": {"role": "user", "content": "hi"}
-        });
-        assert_eq!(classify_turn(&human, &empty, "s"), Provenance::Unknown);
-    }
-
-    #[test]
     fn the_fixture_counts_operator_relay_and_keepalive() {
         let bus = bus_index(json!([{
             "v": 1, "id": "msg-2", "ts": "2026-09-16T11:00:00Z",
@@ -1040,6 +1019,12 @@ mod tests {
                 "Another Claude session sent a message:\n<teammate-message>hi</teammate-message>",
             ),
             user_row("[cache-keepalive] Ping 2/4"),
+            // A native peer row (origin.kind == "peer" on the transcript row
+            // itself) is its own relay kind, never an operator turn.
+            json!({
+                "type": "user", "origin": {"kind": "peer", "name": "king-a1"},
+                "message": {"role": "user", "content": "hi from a peer"}
+            }),
         ];
         let mut counters: std::collections::BTreeMap<String, u64> =
             std::collections::BTreeMap::new();
@@ -1052,6 +1037,16 @@ mod tests {
         assert_eq!(counters.get("relay_fno_mail"), Some(&1));
         assert_eq!(counters.get("relay_teammate_message"), Some(&1));
         assert_eq!(counters.get("keepalive"), Some(&1));
+        assert_eq!(counters.get("relay_native_peer"), Some(&1));
+        // A human origin is unchanged: unshaped text reads unknown.
+        let human = json!({
+            "type": "user", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": "hi"}
+        });
+        assert_eq!(
+            classify_turn(&human, &BusIndex { rows: Vec::new() }, "s"),
+            Provenance::Unknown
+        );
     }
 
     #[test]
