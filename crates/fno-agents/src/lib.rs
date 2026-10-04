@@ -299,6 +299,7 @@ pub mod pane_rebind;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
+pub mod paths_cli;
 pub mod pending_session_row;
 pub mod phase_close;
 pub mod pi;
