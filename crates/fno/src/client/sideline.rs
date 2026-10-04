@@ -460,6 +460,11 @@ impl View {
         // The strip row owns row 0 (R15), so its words go down after the
         // one blit that would otherwise erase them.
         self.paint_top_row(cells, cols, text_w);
+        // Card lines 2-3 indent to the name column's x (the operator's
+        // 2026-10-04 mockup); list rows never indent.
+        let card_indent = rects
+            .get(1)
+            .map_or(0, |r| (r.x as usize).min(text_w.saturating_sub(1)));
         // Per-row overlays the widget cannot express: the full-width rows
         // (bands, sublines, the idle fold, the footer, the empty state - see
         // the catch-all in `sideline_table_row`), the active-squad caret
@@ -527,25 +532,29 @@ impl View {
                     header_band_text(&format!("{}{label}", view_caret(*view)), rollup, band_w),
                     header_band_flags(false),
                 )),
-                // Card lines 2 and 3 carry one leading space: the edge bar
-                // paints into it, so the bar never eats a text cell (line 1
-                // already leads with its mark column).
+                // Card lines 2 and 3 indent under the name (the operator's
+                // 2026-10-04 mockup): their pad is the name column's x, so
+                // the edge bar paints into it and no line starts at column 0.
                 DisplayRow::CardDetail(a) => Some((
                     format!(
-                        " {}",
-                        self.card_detail_text(a, now, text_w.saturating_sub(1))
+                        "{:>iw$}{}",
+                        "",
+                        self.card_detail_text(a, now, text_w.saturating_sub(card_indent)),
+                        iw = card_indent
                     ),
                     cell_flags::DIM,
                 )),
                 DisplayRow::CardMetrics(a) => Some((
                     format!(
-                        " {}",
+                        "{:>iw$}{}",
+                        "",
                         card_line::metrics(
                             a,
                             now,
                             row_message_text(a).as_deref(),
-                            text_w.saturating_sub(1),
-                        )
+                            text_w.saturating_sub(card_indent),
+                        ),
+                        iw = card_indent
                     ),
                     0,
                 )),
@@ -568,6 +577,9 @@ impl View {
                     ))
                 }
                 DisplayRow::TableEmpty => Some(("  no agents".to_string(), cell_flags::DIM)),
+                // The card separator (the operator's 2026-10-04 spacing
+                // mockup): one dim dashed rule, full width.
+                DisplayRow::CardRule => Some(("\u{2504}".repeat(text_w), cell_flags::DIM)),
                 DisplayRow::IdleFold {
                     hidden, expanded, ..
                 } => Some((
@@ -797,6 +809,7 @@ impl View {
             | DisplayRow::TableEmpty
             | DisplayRow::CardDetail(..)
             | DisplayRow::CardMetrics(..)
+            | DisplayRow::CardRule
             | DisplayRow::IdleFold { .. } => {
                 (vec![rt_cell(String::new(), Color::Default, 0, false); 5], 0)
             }
@@ -944,7 +957,10 @@ impl View {
                         // column of the right-aligned word, so the word stays put.
                         rt_cell(
                             match (card, lat) {
-                                (true, _) => status_glyph(lat).to_string(),
+                                // Card line 1 keeps the still lattice glyph
+                                // (the operator's 2026-10-04 mockup): no spin
+                                // frames, the state reads as a shape.
+                                (true, _) => lattice_glyph(lat).0.to_string(),
                                 (false, LatticeState::Working) => {
                                     format!("{}{}", status_glyph(lat), status_word(lat))
                                 }
@@ -1024,7 +1040,11 @@ impl View {
         }
         let mut out_rows = Vec::with_capacity(rows.len() * 3);
         let mut out_depths = Vec::with_capacity(rows.len() * 3);
-        for (row, depth) in rows.into_iter().zip(depths) {
+        let mut rows_iter = rows.into_iter().peekable();
+        let depths_iter = depths.into_iter();
+        let mut depths_peek = depths_iter.peekable();
+        while let Some(row) = rows_iter.next() {
+            let depth = depths_peek.next().unwrap_or(0);
             match row {
                 DisplayRow::Agent(a) => {
                     out_rows.extend([
@@ -1033,6 +1053,13 @@ impl View {
                         DisplayRow::CardMetrics(a),
                     ]);
                     out_depths.extend([0, 0, 0]);
+                    // The dashed rule rides between adjacent cards (the
+                    // operator's 2026-10-04 spacing mockup): no rule before a
+                    // header, a blank, or the section's end.
+                    if matches!(rows_iter.peek(), Some(DisplayRow::Agent(_))) {
+                        out_rows.push(DisplayRow::CardRule);
+                        out_depths.push(0);
+                    }
                 }
                 DisplayRow::Blank => {
                     out_rows.push(DisplayRow::Blank);
@@ -1147,7 +1174,9 @@ impl View {
         }
     }
 
-    /// Line 2 keeps model and lead left, with created and activity ages right.
+    /// Line 2 keeps model, lead and cost left, with created and activity
+    /// ages right. Cost is served-only: a crowned lead never prices, and an
+    /// unserved cost renders nothing rather than a placeholder.
     pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
         let mut segments: Vec<String> = Vec::new();
         if let Some(model) = card_line::model_label(a) {
@@ -1155,6 +1184,9 @@ impl View {
         }
         if let Some(k) = self.lead_label(a) {
             segments.push(k);
+        }
+        if let Some(cents) = a.session_cost_cents {
+            segments.push(row_meter::cost_cell(cents));
         }
         let left = segments.join(" \u{b7} ");
         let created = a

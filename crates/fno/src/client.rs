@@ -3681,6 +3681,7 @@ impl View {
             DisplayRow::Blank
             | DisplayRow::CardDetail(..)
             | DisplayRow::CardMetrics(..)
+            | DisplayRow::CardRule
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -4014,18 +4015,13 @@ impl View {
         (tw >= DENSITY_BTN_W + 6).then_some(start..tw)
     }
 
-    /// What acting on sideline display row `i` does - the single resolver both
-    /// a mouse click ([`View::chrome_hit`]) and the prefix+w selector's Enter
-    /// route through, so the two inputs can never diverge. `None` only
-    /// for an out-of-range index or an inert [`DisplayRow::Header`].
+    /// What acting on display row `i` does - the one resolver a click and
+    /// the selector's Enter share. `None` for out-of-range or an inert row.
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
         match self.painted_rows().get(i)? {
             DisplayRow::Sel(row) => match row.tab {
-                // Acting on the already-active squad row was a silent no-op
-                // (SelectSquad to the squad you're on); it now toggles the
-                // caret locally instead. Inactive rows keep
-                // SelectSquad - auto-expand in set_layout completes the
-                // gesture when the resulting layout push lands.
+                // The already-active squad row toggles the caret locally;
+                // inactive rows SelectSquad (auto-expand completes the gesture).
                 None if row.squad == self.layout.active_squad => {
                     Some(ChromeHit::CycleSection(squad_key(&self.layout, row.squad)?))
                 }
@@ -4033,10 +4029,8 @@ impl View {
                 Some(t) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad)?;
                     let tid = squad.tabs.get(t)?.id;
-                    // SelectTab already resolves the squad server-side (find_tab
-                    // -> set_view), so one command switches squad+tab in a single
-                    // layout push - sending SelectSquad first would flicker
-                    // through the squad's previously-active tab (gemini review).
+                    // SelectTab resolves squad+tab server-side in one push;
+                    // SelectSquad first would flicker through the old tab.
                     Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)]))
                 }
             },
@@ -4045,22 +4039,21 @@ impl View {
             // shared with the navigator's goto so a click and a keyboard jump
             // never diverge on what an agent's action is.
             DisplayRow::Agent(a) => Some(agent_hit(a, self.layout.active_squad)),
-            // A `~` section header cycles its own view state, exactly
-            // like a squad name row. It stays `row_is_inert` so the selector
-            // cursor still skips it (the "never rests on a label"
-            // invariant): this makes it CLICKABLE, not selectable.
+            // A `~` header cycles its own view state, exactly like a squad
+            // name row: inert to the selector, clickable.
             DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
-            // The idle fold row toggles its squad's idle expansion -
-            // the idle sibling of a header's CycleSection. Actionable, so it is
-            // NOT inert: both a click and a selector Enter route here.
+            // The idle fold toggles its squad's idle expansion: actionable
+            // (click and Enter), so not inert.
             DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
-            // A card's lower half acts on the card: the exact hit of the
-            // Agent row painted above it. Inert for the selector, clickable
-            // here - the same split a Header has.
+            // A card's lower half acts on the Agent row above it: the same
+            // inert-to-selector, clickable split a Header has.
             DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
             DisplayRow::CardMetrics(..) => self.row_action(i.checked_sub(2)?),
-            // Inert rows (spacer, table column header) resolve to no action.
-            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+            // Inert rows resolve to no action.
+            DisplayRow::Blank
+            | DisplayRow::CardRule
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay.
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -6200,6 +6193,8 @@ enum DisplayRow<'a> {
     Blank,
     CardDetail(&'a AgentRow),
     CardMetrics(&'a AgentRow),
+    /// The dashed rule between adjacent cards; inert (one display row).
+    CardRule,
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6326,6 +6321,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
             | DisplayRow::Blank
             | DisplayRow::CardDetail(..)
             | DisplayRow::CardMetrics(..)
+            | DisplayRow::CardRule
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )

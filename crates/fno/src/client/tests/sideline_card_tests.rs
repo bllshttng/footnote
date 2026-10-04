@@ -91,14 +91,18 @@ fn card_mode_expands_each_agent_into_three_lines_without_padding_rows() {
             DisplayRow::Agent(_) => "agent",
             DisplayRow::CardDetail(..) => "detail",
             DisplayRow::CardMetrics(..) => "metrics",
+            DisplayRow::CardRule => "rule",
             _ => "other",
         })
         .map(String::from)
         .collect();
     assert!(
-        names.len() >= 8
-            && names[..8]
-                == ["head", "band", "agent", "detail", "metrics", "agent", "detail", "metrics"],
+        names.len() >= 9
+            && names[..9]
+                == [
+                    "head", "band", "agent", "detail", "metrics", "rule", "agent", "detail",
+                    "metrics"
+                ],
         "{names:?}"
     );
     assert!(
@@ -223,7 +227,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs());
     let unmeasured = frame_text(&v.compose());
     assert!(
-        unmeasured.contains("░░░░░░░░ · ░░░ · ░░░░░░ · ░░░░░░░░"),
+        unmeasured.contains("░░░░░░░░░░░░░ · ░░░ · ░░░░░░░░"),
         "a claude card whose fold has not landed pulses every field: {unmeasured:?}"
     );
     // Past 10s the fold-less row gives up the pulse: static dashes at the
@@ -231,7 +235,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs() - 11);
     let gave_up = frame_text(&v.compose());
     assert!(
-        gave_up.contains("-        · -   · -      · -        "),
+        gave_up.contains("-             · -   · -"),
         "a row past 10s holds static dashes: {gave_up:?}"
     );
     assert!(text.contains("w1"), "{text:?}");
@@ -241,7 +245,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▄▅ 26% · 3c · ~$0.42 · 12.3k tok · one message"),
+        text.contains("▂▃▄▅ 26% · 3c · 12.3k tok · one message"),
         "the compact sparkline line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
@@ -253,34 +257,37 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     // skeletons, never `?`.
     let hidden = |c: &card_line::MetricCell| matches!(c, card_line::MetricCell::Hidden);
     let mut bare = agent_row("w9", 6, Some(AgentBadge::Working), false);
-    assert!(card_line::metric_cells(&bare).iter().all(hidden));
+    assert!(card_line::metric_cells(&bare, 0).iter().all(hidden));
     bare.harness = Some("claude".into());
     bare.harness_session_id = Some("sess-w9".into());
     bare.crown_level = Some(2);
     bare.context_used_pct = Some(26);
     bare.session_tokens = Some(999);
     bare.session_cost_cents = Some(77);
-    let cells = card_line::metric_cells(&bare);
+    let cells = card_line::metric_cells(&bare, 0);
     assert!(matches!(cells[0], card_line::MetricCell::Value(_)));
-    assert!(
-        hidden(&cells[2]),
-        "a teamed lead never prices, served or not"
-    );
-    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
+    assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "999 tok"));
+    // Cost left the metrics line (it rides line 2, served-only): a crowned
+    // lead's session_cost_cents never reach this line at all.
     // A codex row keeps the populated-paint contract off its unreportable
     // fields: context and compactions hide even when the wire carries them,
-    // while its cost and tokens still arrive.
+    // while its tokens still arrive.
     let mut cx = agent_row("w10", 7, Some(AgentBadge::Working), false);
     cx.harness = Some("codex".into());
     cx.harness_session_id = Some("sess-w10".into());
     cx.context_used_pct = Some(40);
     cx.session_tokens = Some(500);
-    let cells = card_line::metric_cells(&cx);
+    let cells = card_line::metric_cells(&cx, 0);
     assert!(
         hidden(&cells[0]) && hidden(&cells[1]),
         "codex never reports context or compactions"
     );
-    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "500 tok"));
+    assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "500 tok"));
+    // The history ramp's bar math (pct -> bar height); the full ramp itself
+    // only paints under the spin clock, so the static cell stands in tests.
+    assert_eq!(card_line::ramp_char(0), '▁');
+    assert_eq!(card_line::ramp_char(50), '▄');
+    assert_eq!(card_line::ramp_char(100), '▇');
 }
 
 #[test]

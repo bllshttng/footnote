@@ -1,6 +1,8 @@
 //! Shared sideline card fields and hit ranges.
 
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
+use std::sync::{Mutex, OnceLock};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -51,13 +53,15 @@ pub(super) enum MetricCell {
     Hidden,
 }
 
-/// The four fields in paint order: context, compactions, cost, tokens.
-/// Hidden outranks served: codex transcripts carry no context window or
-/// compaction boundaries, crowned leads never price. Only claude and codex
-/// transcripts resolve at all (`SessionTranscripts::find`), so any other
-/// harness - and a bare pane or an exited row - can never be measured, and
-/// its unserved fields hide instead of pulsing forever.
-pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
+/// The three metrics-line fields in paint order: context, compactions,
+/// tokens. Cost moved to line 2 (the operator's 2026-10-04 mockup; ruled
+/// d-027912c6), where card_detail_text paints it served-only. Hidden
+/// outranks served: codex transcripts carry no context window or
+/// compaction boundaries. Only claude and codex transcripts resolve at all
+/// (`SessionTranscripts::find`), so any other harness - and a bare pane or
+/// an exited row - can never be measured, and its unserved fields hide
+/// instead of pulsing forever.
+pub(super) fn metric_cells(a: &AgentRow, now: u64) -> [MetricCell; 3] {
     let reportable = !a.exited && matches!(a.harness.as_deref(), Some("claude" | "codex"));
     let codex = a.harness.as_deref() == Some("codex");
     let field = |value: Option<String>, hidden: bool| {
@@ -72,20 +76,57 @@ pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
         }
     };
     [
-        field(
-            a.context_used_pct
-                .map(|p| format!("{} {p}%", super::row_meter::ctx_sparkline(p))),
-            codex,
-        ),
+        field(history_cell(a, now), codex),
         field(a.compaction_count.map(|n| format!("{n}c")), codex),
-        field(
-            a.session_cost_cents.map(super::row_meter::cost_cell),
-            a.crown_level.is_some(),
-        ),
         field(a.session_tokens.map(super::row_meter::token_cell), false),
     ]
 }
 
+/// (x-cd47 1.3) The line-3 context cell's history: paint-time samples of
+/// `context_used_pct`, one per 5s the sideline paints the row, capped at 8,
+/// replacing the static sparkline once two samples exist. Sampled only under
+/// the spin clock (tests and snapshots stay on the static sparkline), keyed
+/// by session id, name fallback.
+const SAMPLE_EVERY_S: u64 = 5;
+const RAMP_CAP: usize = 8;
+const RAMP_CHARS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+
+pub(super) fn ramp_char(p: u8) -> char {
+    RAMP_CHARS[(usize::from(p.min(100)) * 7 / 101).min(6)]
+}
+
+static HISTORY: OnceLock<Mutex<HashMap<String, (u64, VecDeque<u8>)>>> = OnceLock::new();
+
+fn history_cell(a: &AgentRow, now: u64) -> Option<String> {
+    let p = a.context_used_pct?;
+    if crate::lattice::spin_epoch().is_none() {
+        return Some(format!("{} {p}%", super::row_meter::ctx_sparkline(p)));
+    }
+    let key = a
+        .harness_session_id
+        .clone()
+        .unwrap_or_else(|| a.name.clone());
+    let mut g = HISTORY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let e = g.entry(key).or_default();
+    if e.0 + SAMPLE_EVERY_S <= now {
+        e.0 = now;
+        e.1.push_back(p);
+        while e.1.len() > RAMP_CAP {
+            e.1.pop_front();
+        }
+    }
+    if e.1.len() < 2 {
+        return Some(format!("{} {p}%", super::row_meter::ctx_sparkline(p)));
+    }
+    let ramp: String = std::iter::repeat(ramp_char(e.1[0]))
+        .take(RAMP_CAP - e.1.len())
+        .chain(e.1.iter().map(|&s| ramp_char(s)))
+        .collect();
+    Some(format!("{ramp} {p}%"))
+}
 /// Past this age a Loading field gives up the pulse and holds a static dash.
 const LOADING_DASH_AFTER_S: u64 = 10;
 
@@ -93,7 +134,7 @@ const LOADING_DASH_AFTER_S: u64 = 10;
 /// A row whose Loading fields are all past [`LOADING_DASH_AFTER_S`] holds a
 /// static dash and arms no more frames.
 pub(super) fn has_loading(a: &AgentRow, now: u64) -> bool {
-    metric_cells(a)
+    metric_cells(a, now)
         .iter()
         .any(|c| matches!(c, MetricCell::Loading))
         && !loading_gave_up(a, now)
@@ -107,13 +148,13 @@ pub(super) fn loading_gave_up(a: &AgentRow, now: u64) -> bool {
 }
 
 /// Skeleton widths mirror each field's served width (spark+percent, count,
-/// cost, tokens) so a landing fold does not reflow the line.
-const LOADING_W: [usize; 4] = [8, 3, 6, 8];
+/// tokens) so a landing fold does not reflow the line.
+const LOADING_W: [usize; 3] = [13, 3, 8];
 
 pub(super) fn metrics(a: &AgentRow, now: u64, message: Option<&str>, width: usize) -> String {
     let phase = crate::lattice::spin_epoch().map(|t0| t0.elapsed().as_millis() as u64);
     let gave_up = loading_gave_up(a, now);
-    let fields: Vec<String> = metric_cells(a)
+    let fields: Vec<String> = metric_cells(a, now)
         .iter()
         .enumerate()
         .filter_map(|(i, c)| match c {
