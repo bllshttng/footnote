@@ -250,7 +250,10 @@ impl View {
         let reserved = self
             .density_button_range(self.panel_w() as usize)
             .map_or(limit, |r| r.start.min(limit));
-        let mut c = reserved.saturating_sub(total + 1).max(2);
+        // The floor yields to the density seat at degenerate widths: a word
+        // pushed past `reserved` would paint under the button and lose its
+        // click to the button's own range.
+        let mut c = reserved.saturating_sub(total + 1).max(1);
         let mut out = Vec::new();
         for (word, view) in words {
             let w = word.chars().count();
@@ -859,10 +862,17 @@ impl View {
                     Some(TabContext::Named(ctx)) => suffix.push_str(&format!(" \u{b7}{ctx}")),
                     Some(TabContext::Ordinal(ord)) => suffix.push_str(&format!(" \u{b7}{ord}")),
                     None => {
-                        // A squad-less row's cwd base is a per-node worktree
-                        // name - a node id, not a disambiguation - so it
-                        // prints nothing. Squad members keep the foreign-base
-                        // parenthetical further down.
+                        // A squad-less row's cwd base disambiguates paneless
+                        // agents launched from arbitrary directories - unless
+                        // the worktree IS the agent's own node worktree, where
+                        // the basename repeats the node id and prints noise.
+                        if let Some(base) = a
+                            .cwd_base
+                            .as_deref()
+                            .filter(|b| Some(*b) != a.node.as_deref())
+                        {
+                            suffix.push_str(&format!(" ({base})"));
+                        }
                     }
                 }
                 if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {

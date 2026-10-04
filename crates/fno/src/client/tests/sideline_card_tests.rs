@@ -529,6 +529,35 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
         frame_text.contains("w1 (elsewhere)"),
         "the cwd rides inline after the slug: {frame_text}"
     );
+    // A squad-less row whose cwd base repeats its own node id prints no
+    // parenthetical (the user's noise case); one from an arbitrary directory
+    // keeps the context (the wire contract's purpose).
+    let orphan_node = {
+        let mut a = agent_row("orphan-node", 9, Some(AgentBadge::Working), false);
+        a.squad = None;
+        a.node = Some("x-fcb4".into());
+        a.cwd_base = Some("x-fcb4".into());
+        a
+    };
+    let orphan_dir = {
+        let mut a = agent_row("orphan-dir", 10, Some(AgentBadge::Working), false);
+        a.squad = None;
+        a.cwd_base = Some("footnote".into());
+        a
+    };
+    let mut v2 = card_view(vec![king_and_worker()[0].clone(), orphan_node, orphan_dir]);
+    v2.term = (30, 140);
+    v2.sideline_width = 80;
+    v2.expand_pull_sections();
+    let text2 = crate::vt::frame_text(&v2.compose());
+    assert!(
+        !text2.contains("orphan-node (x-fcb4)"),
+        "a cwd base that repeats the node id prints nothing: {text2}"
+    );
+    assert!(
+        text2.contains("orphan-dir (footnote)"),
+        "a real directory base keeps its context: {text2}"
+    );
     // Each Agent owns its detail and metrics rows without spacer rows.
     let rows = v.display_rows();
     for (i, r) in rows.iter().enumerate() {

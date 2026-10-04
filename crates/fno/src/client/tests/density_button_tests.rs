@@ -96,4 +96,16 @@ fn the_strip_presents_tabs_density_and_the_tab_bar_bell() {
         }
     }
     assert!(last_end < range.start, "the words end before the button");
+    // At the supported 9-column panel the words yield to the density seat:
+    // the last word ends before the button's range, so the button's cells
+    // route to the density cycle, not the Messages switch.
+    let mut v9 = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+    v9.sideline_width = 9;
+    let range9 = v9.density_button_range(v9.panel_w() as usize).unwrap();
+    let spans9 = v9.top_row_spans();
+    let last_end9 = spans9.iter().map(|(s, w, _)| s + w).max().unwrap();
+    assert!(
+        last_end9 <= range9.start,
+        "words end before the density seat at the 9-column panel: spans {spans9:?} vs {range9:?}"
+    );
 }

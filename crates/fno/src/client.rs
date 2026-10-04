@@ -5654,7 +5654,13 @@ impl View {
     /// only mouse route to a new tab. Below overflow this returns
     /// [`tab_bar_spans`] unchanged.
     fn tab_bar_window(&self) -> Vec<TabSpan> {
-        let width = (self.term.1 as usize).saturating_sub(self.panel_w() as usize);
+        // The bell keeps the bar's rightmost seat: the strip's budget
+        // reserves it (plus one gap) before spans condense, so the `+`
+        // new-tab affordance never paints under the bell or loses its
+        // click to the bell's earlier hit test.
+        let width = (self.term.1 as usize)
+            .saturating_sub(self.panel_w() as usize)
+            .saturating_sub(bell::button_range(self).len() + 1);
         let span_w = |s: &TabSpan| tab_text_cols(&s.text);
         let full = self.tab_bar_spans();
         if full.iter().map(span_w).sum::<usize>() <= width {

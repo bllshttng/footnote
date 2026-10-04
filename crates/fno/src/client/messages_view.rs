@@ -1054,6 +1054,14 @@ pub(crate) async fn mouse(
     }
     view.region_owner = super::region_focus::RegionOwner::Board;
     if rep.row == 0 {
+        // The bell keeps the tab bar's right seat, painted under this strip:
+        // its click routes before the words act (R15).
+        if bell::button_at(view, rep.row, rep.col) {
+            if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock).await?;
+            }
+            return Ok(());
+        }
         // The strip row: only its words act (R15).
         for (start, w, view_switch) in view.top_row_spans() {
             if (rep.col as usize) >= start && (rep.col as usize) < start + w {

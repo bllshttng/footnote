@@ -211,6 +211,15 @@ pub(super) async fn mouse_pre_pass(
             continue;
         }
         if view.sideline_full && view.sideline_view == crate::view_store::SidelineView::Agents {
+            // The bell lives on the tab bar now (terminal row 0, far right),
+            // above the sideline's own rows: answer its seat before the
+            // full-surface delegation, which rejects row 0 outright.
+            if bell::button_at(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                continue;
+            }
             sideline::route_mouse(view, rep, sock_w).await?;
             continue;
         }
