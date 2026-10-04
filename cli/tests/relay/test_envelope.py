@@ -9,26 +9,28 @@ from fno.relay import envelope as env
 
 # ---- wire format: frame / parse round-trip ---------------------------------
 
-def test_frame_produces_single_line_attribute_tag():
-    # node x-1f23: the single-line <fno_mail> transport variant, built by the
-    # sole open-tag renderer (x-d7cf: compact form, no harness/model attr).
+def test_frame_produces_the_single_line_header_form():
+    # The one delivered shape on one physical line: header, glyph, body.
     line = env.frame("sid-abc", "hello there")
-    assert line == '<fno_mail from="sid-abc"> hello there'
+    assert line.startswith("`@sid-abc · ")
+    assert line.endswith(" ⏎ hello there")
+    assert "<fno_mail" not in line
     assert "\n" not in line  # one physical line (Enter submits the TUI turn)
 
 
 def test_frame_collapses_multiline_body():
     line = env.frame("A", "line one\nline two\t  three")
-    assert line == '<fno_mail from="A"> line one line two three'
+    assert line.endswith(" ⏎ line one line two three")
+    assert "\n" not in line
 
 
-def test_parse_round_trips_frame():
+def test_frame_output_reads_as_framed_to_the_rust_door():
+    # parse() reads the legacy tag form; the frame output rides the header
+    # framing, which the Rust door (mail-envelope --classify) accepts.
+    from fno.mail.envelope import mail_shape
+
     line = env.frame("uuid-with-dashes-1234", "the body")
-    got = env.parse(line)
-    assert got == {
-        "from_session": "uuid-with-dashes-1234",
-        "body": "the body",
-    }
+    assert mail_shape([line])[0]["framing"] == "header"
 
 
 def test_parse_legacy_line_still_parses():
@@ -45,11 +47,13 @@ def test_parse_unframed_is_none():
     assert not env.is_framed('<fno from="A" provider="claude"> hi')  # old tag is NOT the new one
 
 
-def test_relay_single_line_frame_is_deliberately_id_free():
-    # US1 boundary: the `id` attribute is on the PAIRED name-lane envelope
-    # (fno.mail.envelope + the Rust lockstep), NOT this single-line relay hop:
-    # the frame renders no id, and a relay reply has no `reply --to` target.
-    assert "id=" not in env.frame("sid-abc", "hello")
+def test_frame_carries_a_reply_resolvable_id():
+    # The header's middle field is the msg id, so a relay hop resolves as a
+    # reply target like any delivered mail.
+    from fno.mail.envelope import mail_shape
+
+    parsed = mail_shape([env.frame("sid-abc", "hello")])[0]
+    assert parsed["msg_id"] and parsed["msg_id"].startswith("fmail-")
 
 
 # ---- forged body: the shared producer every delivery vehicle derives from --
@@ -122,11 +126,11 @@ def test_meta_junk_degrades_to_default():
 def test_frame_envelope_uses_provenance_fields():
     e = env.make_relay_envelope(from_session="A", to="B", body="ping",
                                 from_harness="claude", from_model="opus")
-    # AC2-HP: the single-line frame carries the wire-vocabulary harness, and
-    # `is_framed` reads it back.
     framed = env.frame_envelope(e)
-    assert framed == '<fno_mail from="A" harness="claude-code"> ping'
-    assert env.is_framed(framed)
+    # The header names the sender and the body rides the glyph; the harness
+    # stays bus-row provenance (it is legible context, not a header field).
+    assert framed.startswith("`@A · ")
+    assert framed.endswith(" ⏎ ping")
 
 
 def test_frame_envelope_none_when_provenance_missing():
