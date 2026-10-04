@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-from fno.rust_binary import chats_verb
+from fno.rust_binary import VerbUnavailable, chats_verb
 from fno.time_budget import validate_timeout_budget
 
 
@@ -353,9 +353,24 @@ def append(env: Envelope) -> None:
     Lock-free readers may transiently miss the just-renamed live->.1
     segment during a rotation; that window is covered by the cursor
     fallback, so a message is at most delayed by one drain cycle, never
-    dropped. Python keeps the serializer and the one call (AC20-HP).
+    dropped. Python keeps the serializer and the one call (AC20-HP). A
+    contended door lock re-raises as :class:`BusLockTimeout`, the
+    exception contract the send path already catches.
     """
-    chats_verb(["bus-append"], json.loads(to_json_line(env)))
+    try:
+        # The live path rides argv so the door writes wherever THIS
+        # resolver points: config.paths.bus_dir and both env legs stay
+        # Python's single source (the door has no settings reader).
+        chats_verb(["bus-append", str(bus_log_path())], json.loads(to_json_line(env)))
+    except VerbUnavailable as exc:
+        if "bus lock timeout" in str(exc):
+            raw = os.environ.get("FNO_BUS_LOCK_TIMEOUT_SECS")
+            try:
+                timeout = float(raw) if raw else _LOCK_TIMEOUT_SECONDS
+            except ValueError:
+                timeout = _LOCK_TIMEOUT_SECONDS
+            raise BusLockTimeout(_lock_path(), timeout) from exc
+        raise
 
 
 #: The tombstone kind. A withdrawal cannot delete a line (the log is

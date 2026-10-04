@@ -193,15 +193,18 @@ impl BusLock {
             .write(true)
             .open(&lock_path)
             .map_err(|e| format!("bus lock open {}: {e}", lock_path.display()))?;
-        let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+        // The Python tests' tuning rides env now that the door owns the
+        // wait: a contended lock must time out inside the caller's own
+        // subprocess budget (FNO_BUS_LOCK_TIMEOUT_SECS).
+        let timeout = lock_timeout();
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(BusLock { _file: file }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
-                            "bus lock timeout after {:?} at {}",
-                            LOCK_TIMEOUT,
+                            "bus lock timeout after {timeout:?} at {}",
                             lock_path.display()
                         ));
                     }
@@ -211,6 +214,15 @@ impl BusLock {
             }
         }
     }
+}
+
+fn lock_timeout() -> Duration {
+    std::env::var("FNO_BUS_LOCK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(LOCK_TIMEOUT)
 }
 
 /// The bus log's size cap and segment count, the Python appender's env
@@ -257,6 +269,13 @@ pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     if let Some(from) = obj.get("from").and_then(Value::as_str) {
         crate::system_sender::guard_sender(from)?;
     }
+    append_line_open(live, obj)
+}
+
+/// The append without the announce sender guard: the Python appender's
+/// parity surface, where the caller owns sender validation and a tested
+/// send from the bare fleet name lands as-is.
+pub(crate) fn append_line_open(live: &Path, obj: &Value) -> Result<(), String> {
     let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("");
     let has_delivery = obj
         .get("delivery")

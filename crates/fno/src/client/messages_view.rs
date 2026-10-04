@@ -324,13 +324,16 @@ impl MessagesBoard {
                             .unwrap_or(agent)
                     })
                     .unwrap_or(agent);
-                let other_reaped = proj
+                let other_row = proj
                     .and_then(|p| p.get("participants"))
                     .and_then(Value::as_array)
-                    .and_then(|ps| ps.iter().find(|p| text_of(p, "key") == other))
-                    .is_some_and(|p| {
-                        !bool_of(p, "live") && !text_of(p, "archive_scope").is_empty()
-                    });
+                    .and_then(|ps| ps.iter().find(|p| text_of(p, "key") == other));
+                if other_row.is_some_and(|p| bool_of(p, "system")) {
+                    continue;
+                }
+                let other_reaped = other_row.is_some_and(|p| {
+                    !bool_of(p, "live") && !text_of(p, "archive_scope").is_empty()
+                });
                 if other_reaped != (self.col2 == ChatTab::Archive) {
                     continue;
                 }
@@ -682,6 +685,9 @@ pub(crate) fn paint(
     let body_h = height.saturating_sub(2);
     // The cursor's painted line follows the window, so a long tree keeps
     // the selection visible and the click map's window matches the paint.
+    // Each column's rows start after its own prefix lines (strip, status,
+    // spacer), so the follow line is that prefix plus the cursor.
+    let tree_prefix = tree.len().saturating_sub(b.tree_rows().len());
     super::backlog_style::paint_panel_at(
         cells,
         rows,
@@ -691,7 +697,7 @@ pub(crate) fn paint(
         tree_w,
         body_h,
         &tree,
-        Some(2 + b.cursors[0]),
+        Some(tree_prefix + b.cursors[0]),
         &view.theme,
     );
     super::backlog_style::paint_panel_at(
@@ -703,7 +709,7 @@ pub(crate) fn paint(
         part_w,
         body_h,
         &partners,
-        Some(1 + b.cursors[1]),
+        Some(2 + b.cursors[1]),
         &view.theme,
     );
     super::backlog_style::paint_panel_at(
@@ -1201,25 +1207,70 @@ pub(crate) async fn mouse(
         b.col = col;
     }
     let body_h = (view.term.0 as usize).saturating_sub(3);
+    if rep.row == 1 {
+        // A tab strip's own labels switch tabs (items 7 and 8); the
+        // thread column's title affordances were handled above.
+        let hit = |span: std::ops::Range<usize>, rel: usize| span.contains(&rel);
+        let Some(board) = view.messages_board.as_ref() else {
+            return Ok(());
+        };
+        match col {
+            Col::Tree => {
+                let label = match board.sort_mode {
+                    SortMode::Last => "Agents · last",
+                    SortMode::Alpha => "Agents · a-z",
+                };
+                let a = label.chars().count();
+                let rel = rep.col as usize;
+                if hit(0..a, rel) {
+                    if let Some(b) = view.messages_board.as_mut() {
+                        b.list_tab = ListTab::Agents;
+                    }
+                } else if hit(a + 3..a + 10, rel) {
+                    if let Some(b) = view.messages_board.as_mut() {
+                        b.list_tab = ListTab::Archive;
+                    }
+                }
+                return Ok(());
+            }
+            Col::Chats => {
+                let rel = (rep.col as usize).saturating_sub(tree_w);
+                let tab = if hit(0..5, rel) {
+                    Some(ChatTab::Chats)
+                } else if hit(7..13, rel) {
+                    Some(ChatTab::System)
+                } else if hit(15..22, rel) {
+                    Some(ChatTab::Archive)
+                } else {
+                    None
+                };
+                if let Some(tab) = tab {
+                    if let Some(b) = view.messages_board.as_mut() {
+                        b.col2 = tab;
+                        b.cursors[1] = 0;
+                    }
+                }
+                return Ok(());
+            }
+            Col::Thread => {}
+        }
+    }
     let index = match col {
         Col::Tree => {
-            let len = view
-                .messages_board
-                .as_ref()
-                .map(|b| b.tree_rows().len())
-                .unwrap_or(0);
-            let (start, _) = column_rect(
-                len + 2,
-                body_h,
-                2 + view
-                    .messages_board
-                    .as_ref()
-                    .map(|b| b.cursors[0])
-                    .unwrap_or(0),
-            );
-            // The tree column paints its two header lines at rows 1 to 2,
-            // so row r holds line r - 1 - 2 (strip at 0).
-            (rep.row as usize).checked_sub(3).map(|i| i + start)
+            let Some(board) = view.messages_board.as_ref() else {
+                return Ok(());
+            };
+            // Rows start after the column's own prefix lines (strip,
+            // status, optional not-read note, spacer), so the row index
+            // reads off the painted line against that prefix.
+            let rows_len = board.tree_rows().len();
+            let lines = board.tree_column(view.term.1 as usize);
+            let start_line = lines.len().saturating_sub(rows_len);
+            let (scroll, _) = column_rect(lines.len(), body_h, start_line + board.cursors[0]);
+            (rep.row as usize)
+                .checked_sub(1)
+                .map(|i| i + scroll)
+                .and_then(|line| line.checked_sub(start_line))
         }
         Col::Chats => {
             let agent = view
@@ -1234,17 +1285,20 @@ pub(crate) async fn mouse(
                         .unwrap_or(0)
                 })
                 .unwrap_or(0);
+            // Two prefix lines: the tab strip and the spacer under it.
             let (start, _) = column_rect(
-                len + 1,
+                len + 2,
                 body_h,
-                1 + view
+                2 + view
                     .messages_board
                     .as_ref()
                     .map(|b| b.cursors[1])
                     .unwrap_or(0),
             );
-            // One header line at row 1.
-            (rep.row as usize).checked_sub(2).map(|i| i + start)
+            (rep.row as usize)
+                .checked_sub(1)
+                .and_then(|line| line.checked_sub(2))
+                .map(|i| i + start)
         }
         Col::Thread => {
             let (tree_w, part_w) = split(view.term.1 as usize);

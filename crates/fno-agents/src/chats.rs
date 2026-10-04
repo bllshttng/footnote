@@ -1282,7 +1282,14 @@ pub fn run_chats(args: &[String]) -> i32 {
                     }
                 }
             }
-            match crate::announce::append_line(&bus_append_live_path(), &line) {
+            // The live path rides argv from the Python caller (its
+            // resolver honors config.paths.bus_dir and both env legs);
+            // the fallback resolves envs for a direct invocation.
+            let live = args
+                .get(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(bus_append_live_path);
+            match crate::announce::append_line_open(&live, &line) {
                 Ok(()) => {
                     println!("{{\"appended\":true}}");
                     0
