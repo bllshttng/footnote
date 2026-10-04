@@ -78,7 +78,7 @@ pub(super) fn lines(readings: &[Reading]) -> Vec<String> {
     if v.get("drifted").and_then(Value::as_bool) == Some(true) {
         return vec![format!(
             "POSTURE DRIFT: crowned sandbox {}, observed {} - a lead's posture \
-             is fixed for its reign; only the user may re-pin or restore it",
+             is fixed for its reign, and only the user can re-pin or restore it",
             part("sandbox"),
             part("observed_sandbox"),
         )];
