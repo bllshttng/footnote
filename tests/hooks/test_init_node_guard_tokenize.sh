@@ -124,7 +124,7 @@ pass "AC3-ERR: ambiguous input sets no single graph_node_id and says why"
 # ── x-cd1e: ambiguous for the MANIFEST is not ambiguous for the CLAIM ─────
 # A two-node payload used to take zero claims, which is the worst of the three
 # options: two nodes are being built and the store recorded neither, so both
-# read free to every king that checked. The manifest still holds one
+# read free to every lead that checked. The manifest still holds one
 # graph_node_id (asserted above); the claims are per node.
 log "x-cd1e: 'tst-aa00aa00 tst-bb00bb00' claims BOTH nodes"
 MK2="$(grep '^target_claim_multi_keys:' "$STATE" 2>/dev/null | sed 's/^target_claim_multi_keys:[[:space:]]*//' | tr -d '"\r')"

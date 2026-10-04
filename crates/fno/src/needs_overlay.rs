@@ -394,7 +394,7 @@ fn parse_questions(stdout: &[u8]) -> Option<QuestionsFold> {
 }
 
 /// The pick the overlay sends through the door: an option number (1-based),
-/// free-text words, a pin's done, or a hand-off to the crown over the node.
+/// free-text words, a pin's done, or a hand-off to the team over the node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnswerPick {
     Option(u32),

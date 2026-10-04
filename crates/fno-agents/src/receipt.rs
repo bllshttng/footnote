@@ -73,7 +73,7 @@ impl Writer {
 /// source `fno agents history` renders), and enriched from the ledger entry
 /// when one exists. Written durably BEFORE the retain drops the row, so a
 /// reaped row stays recoverable even when its ledger entry does not exist and
-/// never will (kings, blueprint and rescue sessions never open a PR, so no
+/// never will (leads, blueprint and rescue sessions never open a PR, so no
 /// target run ever writes them one).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReapReceipt {

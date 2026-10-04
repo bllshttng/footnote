@@ -13,7 +13,7 @@ use crate::{
     completion_output::{allow_output, paused_output},
     delivery_completion::pr_passes,
     disposition_gate::disposition_blockers_on_chain,
-    king_termination::read_king_board,
+    lead_termination::read_org_board,
 };
 // The integration tests reach the blocker predicates through loopcheck, the
 // facade they have always imported from; the predicates live in
@@ -24,7 +24,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::{bound_breached, king_output, king_quiet_body};
+use crate::lead_termination::{bound_breached, lead_output, lead_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -130,7 +130,7 @@ mod authorship;
 mod awaiting_merge;
 mod coverage_receipt;
 mod holds;
-mod king_decide;
+mod lead_decide;
 mod range_tiling;
 mod session_binding;
 pub use range_tiling::{compute_range_tiling, RangeTiling};
@@ -389,8 +389,8 @@ pub(crate) fn decide_with_payload(
     hook_input: Option<&str>,
 ) -> (i32, String) {
     // Publish the fire bound before any read. The drain reserve is NOT armed
-    // here: it arms in `king_decide` (`stopgate_hold_drain_reserve`), the one
-    // place both king routes converge, so the route into the king path, not
+    // here: it arms in `lead_decide` (`stopgate_hold_drain_reserve`), the one
+    // place both lead routes converge, so the route into the lead path, not
     // the `--driver` string on the fire, decides who pays for the drain.
     stopgate_stamp_fire(
         parsed.read_timeout_ms.unwrap_or(0),
@@ -401,14 +401,14 @@ pub(crate) fn decide_with_payload(
     if let Some(message) = crate::loops_pause::pause_message(&subject) {
         return (0, paused_output(&parsed.driver, &message));
     }
-    // The king uses a separate manifest and decision path.
-    if parsed.driver == "king" {
-        return king_decide::king_decide(&parsed);
+    // The lead uses a separate manifest and decision path.
+    if parsed.driver == "lead" {
+        return lead_decide::lead_decide(&parsed);
     }
 
     // Session binding: when the caller names the harness session that asked,
     // the registry answers who may drive this target before any progress
-    // logic runs. Body, refusal and crown routing: loopcheck/session_binding.rs.
+    // logic runs. Body, refusal and team routing: loopcheck/session_binding.rs.
     if let Some(out) = session_binding::gate_output(&parsed) {
         return out;
     }
@@ -1657,7 +1657,7 @@ pub(crate) fn decide_with_payload(
                     return terminal("allow", Some(TerminationReason::DonePRGreen), &done_msg);
                 }
 
-                // DoneAwaitingMerge (ruling hold): a crown's dispatch_hold on
+                // DoneAwaitingMerge (ruling hold): a team's dispatch_hold on
                 // this session's node is proof on its own, so this gate does
                 // NOT require `reviewed` (the review read flaps true/false on
                 // alternate fires while a PR sits held; the ruling outranks
@@ -2290,19 +2290,19 @@ pub(crate) use read_bounds::{
     stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_DRAIN_FLOOR, STOPGATE_FIRE_BUDGET,
 };
 
-// ── king driver arm ───────────────────────────────────────────────────────────
+// ── lead driver arm ───────────────────────────────────────────────────────────
 //
 // A target driver asks whether its one deliverable shipped: PR, CI, review,
-// probes. A king has no PR, so pointing the target driver at one can never
+// probes. A lead has no PR, so pointing the target driver at one can never
 // reach a clean terminal state; it burns to NoProgress or Budget while looking
-// like it is working. This arm asks the king's question instead, which is
+// like it is working. This arm asks the lead's question instead, which is
 // whether the board is clean, and reads that answer from `fno inbox board`
 // rather than deciding anything itself.
 //
 // It is deliberately self-contained. The target arm below is untouched, which
 // is also what the plan's engine_edit kill criterion exists to enforce.
 
-pub(crate) use crate::king_termination::{parse_king_manifest, KingManifest};
+pub(crate) use crate::lead_termination::{parse_lead_manifest, LeadManifest};
 
 // ── public entry points ───────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 //! The node's verb against the payload's verb, decided in one place: a
 //! `--node` spawn runs the verb the node derives, or refuses. The Python
 //! seam projects the lifecycle table's answer (never a copy of it), the
-//! seed's slot facts and the crown/resume flags; this module answers
+//! seed's slot facts and the team/resume flags; this module answers
 //! pass / profile / compose / refuse, and the seam applies the answer
 //! verbatim before any lane is chosen. Pure over its input: no config,
 //! filesystem or network reads.
@@ -230,7 +230,7 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
     // point at the payload, so the remedy names what to fix.
     let from_payload = payload.get("node_source").and_then(Value::as_str) == Some("payload");
 
-    // 1. Crown and resume spawns pass unchanged: their flags already name
+    // 1. Team and resume spawns pass unchanged: their flags already name
     //    the work profile, and the payload carries them as facts.
     if payload.get("crown").and_then(Value::as_bool) == Some(true)
         || payload.get("resume").and_then(Value::as_bool) == Some(true)
@@ -511,7 +511,7 @@ mod tests {
             .expect("decision is an object")
     }
 
-    /// The shared shape: node x-1 derives /blueprint, no error, no crown.
+    /// The shared shape: node x-1 derives /blueprint, no error, no team.
     fn base() -> Value {
         json!({
             "node": "x-1", "row_found": true, "effective_verb": "/blueprint",
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn crown_and_resume_spawns_pass_unchanged() {
+    fn team_and_resume_spawns_pass_unchanged() {
         let mut p = base().clone();
         p["crown"] = json!(true);
         assert_eq!(decide_map(p.clone())["action"], "pass");
@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn crown_and_resume_never_derive() {
+    fn team_and_resume_never_derive() {
         let mut p = base_derive("/fno:target x-1", 1);
         p["crown"] = json!(true);
         assert_eq!(decide_map(p.clone())["action"], "pass");

@@ -51,7 +51,7 @@ fn framed_pair() -> View {
     v.frames.insert(10, text_frame(27, 33, 'a'));
     v.frames.insert(11, text_frame(27, 34, 'b'));
     v.layout.squads[0].tabs[0].panes = vec![
-        meta_row(10, "king-5317-succeed-g3", "x-0e67", "main", "49%"),
+        meta_row(10, "lead-5317-succeed-g3", "x-0e67", "main", "49%"),
         meta_row(11, "pane-b", "n-abc12", "feature/pane", "22%"),
     ];
     let mut a = tab_agent(Some(0), Some(AgentBadge::Working), false);
@@ -126,7 +126,7 @@ fn pane_border_renders_the_focused_frame() {
     assert_eq!(top[99], '╮');
     // Unfocused neighbour: caps-less tab, the 10-col name clips with no
     // marker, so the last char is the name's own dash.
-    assert!(seg(28, 63).contains("─ king-5317- ─"), "{top:?}");
+    assert!(seg(28, 63).contains("─ lead-5317- ─"), "{top:?}");
     // Content blits at the content origin.
     assert_eq!(lines[2][P10_CONTENT], 'a');
     assert_eq!(lines[2][65], 'b');

@@ -139,12 +139,12 @@ pub struct DrainConfig {
     /// on every dispatch this loop makes, so an autonomous row never says
     /// nothing about who answers for it.
     pub project: String,
-    /// The territory key: the canonical crown scope this loop drains.
+    /// The territory key: the canonical team scope this loop drains.
     /// Empty on a legacy receipt; the loop then keys by `mission`.
     pub scope: String,
-    /// No live crown holds this territory; the readout names it kingless while
-    /// the drain continues (machinery does not need a king to dispatch).
-    pub kingless: bool,
+    /// No live team holds this territory; the readout names it leadless while
+    /// the drain continues (machinery does not need a lead to dispatch).
+    pub leadless: bool,
     /// What one tick converges: epic members shell `advance --epic`, project
     /// members shell `advance --loose --project`. Empty falls back to a single
     /// epic member = `mission` (the legacy single-mission receipt).
@@ -1220,13 +1220,13 @@ pub fn mission_drain_tick(
         .rotation
         .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
-    let (label, kingless_mark) = if cfg.scope.is_empty() {
+    let (label, leadless_mark) = if cfg.scope.is_empty() {
         (format!("mission={}", cfg.mission), String::new())
     } else {
         (
             format!("territory={}", cfg.scope),
-            if cfg.kingless {
-                " kingless".to_string()
+            if cfg.leadless {
+                " leadless".to_string()
             } else {
                 String::new()
             },
@@ -1245,7 +1245,7 @@ pub fn mission_drain_tick(
     let detail = format!(
         "{}{}{} ready={} closed={} dispatched={} sync={} pending={}{}{}{}",
         label,
-        kingless_mark,
+        leadless_mark,
         rotation,
         facts.ready,
         closed,
@@ -1294,16 +1294,16 @@ pub struct ResolvedTarget {
     /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
-    /// The territory key: the canonical crown scope, empty on a
+    /// The territory key: the canonical team scope, empty on a
     /// legacy receipt (the loop then keys by `mission`).
     #[serde(default)]
     pub scope: String,
-    /// The crown rung of the scope; 0 on a legacy receipt.
+    /// The team rung of the scope; 0 on a legacy receipt.
     #[serde(default)]
     pub rung: u8,
-    /// No live crown holds the scope; the drain continues regardless.
+    /// No live team holds the scope; the drain continues regardless.
     #[serde(default)]
-    pub kingless: bool,
+    pub leadless: bool,
     /// What one tick converges: epic ids at rung 2, project names at rungs 0/1.
     #[serde(default)]
     pub members: Vec<String>,
@@ -1490,7 +1490,7 @@ fn drain_targets_json(
             "mission": mission,
             "scope": territory.key,
             "rung": territory.rung,
-            "kingless": territory.kingless,
+            "leadless": territory.leadless,
             "members": members,
             "max_concurrent": facts.max_concurrent,
         }));
@@ -1691,8 +1691,8 @@ fn journal_for(cwd: &Path) -> Journal {
 
 /// The dispatch-provenance env carrier: the origin names THIS
 /// daemon arm (never a session - the daemon env is scrubbed by design), and
-/// the owner names the durable mission or crown scope the work answers to,
-/// kingless or not. `fno agents spawn` consumes these on the request and the
+/// the owner names the durable mission or team scope the work answers to,
+/// leadless or not. `fno agents spawn` consumes these on the request and the
 /// row carries them; a session running `fno backlog advance` by hand exports
 /// neither, so its workers keep their ambient session parent.
 fn spawn_provenance_env(cfg: &DrainConfig, arm: &str) -> Vec<(String, String)> {
@@ -1758,7 +1758,7 @@ fn drain_config_for(
         mission: target.mission.clone().unwrap_or_else(|| key.clone()),
         project: target.project.clone(),
         scope: target.scope.clone(),
-        kingless: target.kingless,
+        leadless: target.leadless,
         members,
         failure_limit: target.failure_limit,
         interval_seconds: target.interval_seconds,
@@ -1965,7 +1965,7 @@ pub async fn run_supervisor(
         }
 
         for target in targets {
-            // Key by territory: the canonical crown scope; a legacy
+            // Key by territory: the canonical team scope; a legacy
             // receipt without one still keys by mission. An empty key is a
             // malformed receipt; skip it rather than key an unnamed loop.
             let key = territory_key(&target);
@@ -2086,7 +2086,7 @@ async fn mission_drain_loop(
         }
 
         // Re-resolve this territory's liveness. If its scope dropped out of the
-        // target set (crown revoked / workspace gone), exit the loop (the
+        // target set (team revoked / workspace gone), exit the loop (the
         // supervisor will not respawn it). The position in this list (already
         // scope-ordered) names the rotation in the tick's detail row; a lone
         // territory prints no `(1 of 1)` - that reads as a fault, not a count.
@@ -2198,7 +2198,7 @@ mod tests {
         Territory {
             key: "x-e".to_string(),
             rung: 2,
-            kingless: true,
+            leadless: true,
             members,
             project: "alpha".to_string(),
             cwd: "/tmp/alpha".to_string(),
@@ -2487,7 +2487,7 @@ mod tests {
             mission: "x-epic".to_string(),
             project: "fno".to_string(),
             scope: String::new(),
-            kingless: false,
+            leadless: false,
             members: Vec::new(),
             failure_limit,
             interval_seconds: 300,
@@ -3470,7 +3470,7 @@ mod tests {
             mission: Some("x-epic".into()),
             scope: "x-epic".into(),
             rung: 0,
-            kingless: true,
+            leadless: true,
             members: vec!["x-epic".into()],
             max_concurrent: 1,
         };
@@ -3986,7 +3986,7 @@ mod tests {
         // A receipt the parse refuses is a gate error, never an exhausted
         // mission: the tick names gate:receipt-unparseable, the stranded
         // observer is not read, and the detail carries no stranded token -
-        // the reading that sent a king after a stall that was really this
+        // the reading that sent a lead after a stall that was really this
         // parse failure.
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4312,8 +4312,8 @@ mod tests {
         std::env::set_var("FNO_AGENTS_HOME", tmp.join("agents-home"));
         std::env::set_var("FNO_CONFIG", tmp.join("config.toml"));
         let log = tmp.join("converges.log");
-        // The receipt is native: N workspace projects with no crowns resolve
-        // to N kingless rung-1 territories rooted at the fixture dir.
+        // The receipt is native: N workspace projects with no teams resolve
+        // to N leadless rung-1 territories rooted at the fixture dir.
         let mut projects = String::new();
         for i in 0..missions {
             projects.push_str(&format!(

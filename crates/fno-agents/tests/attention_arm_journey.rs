@@ -263,7 +263,7 @@ fn render_helpers_smoke() {
     let _ = render_page(
         &items().remove(0),
         &Routing {
-            crown: Some("fno".into()),
+            team: Some("fno".into()),
             ..Default::default()
         },
     );

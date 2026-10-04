@@ -24,8 +24,8 @@ pub(super) struct FleetArms {
     // The periodic arms: each module owns its cadence, gate and memory.
     machine_watch: crate::machine_watch::Arm,
     merge_close: crate::merge_close::Arm,
-    crown_ledger: crate::king_ledger::Arm,
-    reign_eval: crate::reign_eval::Arm,
+    team_ledger: crate::rundown::Arm,
+    lead_eval: crate::lead_eval::Arm,
     fleet_page: crate::fleet_page::Arm,
     arm_watch: crate::arm_watch::Arm,
     provider_cap: crate::provider_cap_verbs::Arm,
@@ -67,8 +67,8 @@ impl FleetArms {
             last_liveness_sweep: Instant::now(),
             machine_watch: crate::machine_watch::Arm::default(),
             merge_close: crate::merge_close::Arm::default(),
-            crown_ledger: crate::king_ledger::Arm::default(),
-            reign_eval: crate::reign_eval::Arm::default(),
+            team_ledger: crate::rundown::Arm::default(),
+            lead_eval: crate::lead_eval::Arm::default(),
             fleet_page: crate::fleet_page::Arm::new(opts.agents_config_cwd.clone()),
             arm_watch: crate::arm_watch::Arm::new(opts.agents_config_cwd.clone()),
             provider_cap: crate::provider_cap_verbs::Arm::new(opts.agents_config_cwd.clone()),
@@ -107,7 +107,7 @@ impl FleetArms {
         }
         // Retirement sweep: a row leaves when its work is done (reverse
         // join) and its transcript is quiet past `agents.retire_grace_s`.
-        // The dead crown sweep runs first. Throttled to
+        // The dead team sweep runs first. Throttled to
         // `agents.retire_interval_s`; off-loop.
         let retire_interval = crate::gc::retire_interval_snapshot(&self.retire_interval_next);
         crate::gc::maybe_retirement_sweep(
@@ -120,7 +120,7 @@ impl FleetArms {
             retire_interval,
             || crate::gc::mux_tab_sweep(false, false),
             crate::gc::production_roster_sweep,
-            crate::gc::production_crown_sweep,
+            crate::gc::production_team_sweep,
         );
         // Worktree sweep + merge reaper: the sweep backstops
         // what the reaper cannot reach; the reaper is the merge-triggered
@@ -185,8 +185,8 @@ impl FleetArms {
         );
         crate::machine_watch::maybe_tick(&self.machine_watch, ctx.home.clone());
         crate::merge_close::maybe_tick(&self.merge_close, ctx.home.clone());
-        crate::king_ledger::maybe_tick(&self.crown_ledger, ctx.home.clone());
-        crate::reign_eval::maybe_tick(&self.reign_eval, ctx.home.clone());
+        crate::rundown::maybe_tick(&self.team_ledger, ctx.home.clone());
+        crate::lead_eval::maybe_tick(&self.lead_eval, ctx.home.clone());
         crate::fleet_page::maybe_tick(&self.fleet_page, ctx.home.clone());
         crate::arm_watch::maybe_tick(&self.arm_watch, ctx.home.clone());
         crate::provider_cap_verbs::maybe_tick(&self.provider_cap, ctx.home.clone());

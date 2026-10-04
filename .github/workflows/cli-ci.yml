@@ -1128,7 +1128,7 @@ jobs:
         run: >-
           cargo test --test idle_cpu_budget_e2e --test mux_restore_doneness_e2e
           --test cross_door_property --test persistence --test search_e2e
-          --test court_fold_degrade --test agent_edge_e2e --test squad_prune
+          --test org_fold_degrade --test agent_edge_e2e --test squad_prune
           --test focus_report_hold_e2e --test layout_e2e --test mouse_e2e
           --test squad_prune_receipt --test pane_ls_identity
           --test board_menu_keys_e2e --test squad_prune_live_pane
@@ -1225,7 +1225,7 @@ jobs:
           --test test_owned_keeper_reap --test agent_launcher_journey
           --test product_boundary --test attach_override_retire
           --test attach_override_ac1 --test attach_override_ac5
-          --test backlog_door --test court_fold_live --test thread_portal_arg
+          --test backlog_door --test org_fold_live --test thread_portal_arg
           -- --test-threads=1
 
   test:

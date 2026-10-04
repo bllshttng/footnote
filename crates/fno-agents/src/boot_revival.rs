@@ -3,7 +3,7 @@
 //! On the first daemon start of a boot, every registry worker that was live
 //! at the boot comes back without a tap: `claude agents --json --all` lists
 //! its job as stopped or failed, so `claude respawn <job id>` restarts it.
-//! A worker whose node is done, merged or superseded stays stopped. Kings go
+//! A worker whose node is done, merged or superseded stays stopped. Leads go
 //! first. A revival re-seats a row that already held a seat, so it never
 //! asks the spawn gate. One receipt row per worker lands in
 //! `<agents home>/boot-revival.json`, and that file's boot stamp is what
@@ -69,14 +69,14 @@ pub(crate) fn start(home: &AgentsHome) {
         return;
     }
     let closed = closed_nodes();
-    let (kings, workers, mut rows) = plan(&registry.entries, &listing, &closed, boot);
+    let (leads, workers, mut rows) = plan(&registry.entries, &listing, &closed, boot);
     // Stamp the boot first: a daemon that dies mid-pass must not respawn the
     // fleet again on its next start. The tap is the fallback for a row the
     // pass never reached.
     write_receipt(&receipt, boot, &rows);
     let home = home.clone();
     std::thread::spawn(move || {
-        for name in &kings {
+        for name in &leads {
             rows.push(revive(&home, name));
         }
         let handles: Vec<_> = workers
@@ -95,7 +95,7 @@ pub(crate) fn start(home: &AgentsHome) {
     });
 }
 
-/// Split the registry into kings to revive, workers to revive, and the rows
+/// Split the registry into leads to revive, workers to revive, and the rows
 /// skipped with their reason. A row counts only when it was live at the
 /// boot: a live-ish status, or an exit stamped after the boot began.
 pub(crate) fn plan(
@@ -104,7 +104,7 @@ pub(crate) fn plan(
     closed_nodes: &HashSet<String>,
     boot: u64,
 ) -> (Vec<String>, Vec<String>, Vec<ReceiptRow>) {
-    let mut kings = Vec::new();
+    let mut leads = Vec::new();
     let mut workers = Vec::new();
     let mut skipped = Vec::new();
     for e in entries {
@@ -140,7 +140,7 @@ pub(crate) fn plan(
         match state.as_deref() {
             Some("stopped" | "failed") => {
                 if e.crown_level.is_some() {
-                    kings.push(e.name.clone());
+                    leads.push(e.name.clone());
                 } else {
                     workers.push(e.name.clone());
                 }
@@ -157,7 +157,7 @@ pub(crate) fn plan(
             )),
         }
     }
-    (kings, workers, skipped)
+    (leads, workers, skipped)
 }
 
 /// One revival through the canonical re-entry plan: the listing lists the
@@ -261,9 +261,9 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_pass_revives_stopped_and_failed_workers_kings_first() {
-        let mut king = row("quill", "99473043-aaaa", AgentStatus::Live);
-        king.crown_level = Some(1);
+    fn the_boot_pass_revives_stopped_and_failed_workers_leads_first() {
+        let mut lead = row("quill", "99473043-aaaa", AgentStatus::Live);
+        lead.crown_level = Some(1);
         let failed = row("kestrel", "11112222-bbbb", AgentStatus::Orphaned);
         // Exited by this boot's own daemon: it was live when the machine
         // went down.
@@ -286,9 +286,9 @@ mod tests {
         ]);
         let closed = HashSet::from(["x-done".to_string()]);
         let boot = crate::state::rfc3339_like_to_secs("2026-09-26T01:00:00Z").unwrap();
-        let (kings, workers, skipped) = plan(
+        let (leads, workers, skipped) = plan(
             &[
-                king,
+                lead,
                 failed,
                 exited_now,
                 stopped_before,
@@ -300,7 +300,7 @@ mod tests {
             &closed,
             boot,
         );
-        assert_eq!(kings, vec!["quill"]);
+        assert_eq!(leads, vec!["quill"]);
         assert_eq!(workers, vec!["kestrel", "folio"]);
         let names: Vec<_> = skipped.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["shipped", "candor", "warden"], "{skipped:?}");

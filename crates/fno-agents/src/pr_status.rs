@@ -8,7 +8,7 @@
 //! crates/fno-agents/tests/fixtures/pr_status/. Every gh read rides the
 //! `GhProbe` seam so tests run offline.
 
-use crate::king_board::prs::classify_check;
+use crate::org_board::prs::classify_check;
 use crate::pr_status_facts::{failure_cause, zero_job_scan, GhProbe};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -70,7 +70,7 @@ fn alt_conclusion(check: &Value) -> String {
 }
 
 /// A rollup entry's pass/fail/pending class, mirroring
-/// `king_board::prs::classify_check` with the same case handling.
+/// `org_board::prs::classify_check` with the same case handling.
 pub(crate) fn has_settled_marker(check: &Value) -> bool {
     let status = s_str(check, "status").to_uppercase();
     if !status.is_empty() && status != "COMPLETED" {

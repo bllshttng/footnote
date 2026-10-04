@@ -1,5 +1,5 @@
 """``fno agents king ledger``: Python resolves the court and the paths; the
-native reign-ledger verb owns the page assembly (the king-history split).
+native lead-rundown verb owns the page assembly (the lead-history split).
 
 The renderer's own truth lives in the Rust tests; these pin the Python-side
 plumbing: the court gather + fold, the binary relay's argv, and the refusal
@@ -103,7 +103,7 @@ def test_relay_hands_the_native_renderer_court_graph_and_out(
     out = tmp_path / "page.html"
     assert write_ledger(court, out) == out
     argv = seen["argv"]
-    assert argv[1] == "reign-ledger"
+    assert argv[1] == "lead-rundown"
     assert argv[argv.index("--court-json") + 1] == "-"
     assert seen["court"] == court
     assert "--graph" in argv

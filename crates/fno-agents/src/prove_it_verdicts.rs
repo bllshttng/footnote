@@ -24,7 +24,7 @@
 //! index). Every unretired FAIL surfaces: a narrow re-run PASS cannot mute a
 //! broader claim it did not answer. The newest PASS/FAIL record is
 //! also emitted as the node's headline verdict. The verb never changes a
-//! node's status: an unverified auditor must not move doneness, a king
+//! node's status: an unverified auditor must not move doneness, a lead
 //! rules. `--route` writes the one progress note that surfaces an open,
 //! unrouted FAIL on the node.
 
@@ -505,7 +505,7 @@ fn route_rows(rows: &[Value]) -> i32 {
             continue;
         };
         let body = format!(
-            "prove-it FAIL: {}. Report: {}. The node stays {}; a king rules. \
+            "prove-it FAIL: {}. Report: {}. The node stays {}; a lead rules. \
 Retire with a newer PASS whose claim states this claim, or fno inbox decide {} naming this report.",
             row["claim"].as_str().unwrap_or(""),
             row["report"].as_str().unwrap_or(""),

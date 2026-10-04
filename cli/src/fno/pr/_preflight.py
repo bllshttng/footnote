@@ -78,7 +78,7 @@ _PREFLIGHT_BASE_SCOPE = frozenset(
 _PREFLIGHT_OPTIONAL_SCOPE = frozenset(
     {
         "file-budget:fno",
-        "reign-arms:fno",
+        "lead-arms:fno",
         "squads-leak-guard:fno",
         "tracker-gates:fno",
     }

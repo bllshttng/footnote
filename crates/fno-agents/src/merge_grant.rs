@@ -24,7 +24,7 @@ use crate::backlog::api as backlog_api;
 use crate::claims::{status as claim_status, ClaimState, ClaimState::*};
 use crate::finalize::slug_from_git_remote;
 use crate::graph_keeper::node_carries_pr;
-use crate::king_board::scope::graph_json_path;
+use crate::org_board::scope::graph_json_path;
 use crate::paths::canonical_repo_root;
 use crate::tick_ledger::parse_rfc3339_unix;
 use serde_json::{json, Value};

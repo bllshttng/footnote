@@ -41,7 +41,7 @@
 //! Exit codes: 0 with the receipt as one stdout JSON line for both
 //! `retasked` and `refused`; 2 for a usage or payload error (stderr names the
 //! problem). The receipt keys and refusal words are byte-for-byte the ones
-//! the Python transaction emitted, because the king loop and
+//! the Python transaction emitted, because the lead loop and
 //! `fno backlog advance` read them.
 
 use serde_json::{json, Value};

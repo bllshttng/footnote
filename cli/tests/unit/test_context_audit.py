@@ -527,7 +527,7 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
         manifest = by_harness[harness]["compiled"]["source_manifest"]
         for source_id in (
             "target-postcompact-reinject",
-            "king-postcompact-reinject",
+            "lead-postcompact-reinject",
         ):
             source = next(
                 item for item in manifest if item["source_id"] == source_id
@@ -687,8 +687,8 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
         "#!/bin/sh\n"
         "case \"${1-}:${2-}:${3-}\" in\n"
         "  agents:registry-json:*) printf '%s\\n' '{\"agents\":[{\"session_id\":\"king-session\",\"harness_session_id\":\"king-session\",\"crown_level\":\"epic\",\"crown_scope\":\"xd863\"}]}' ;;\n"
-        "  agents:king:faq) exit 0 ;;\n"
-        "  agents:king:manifest-path) printf '%s\\n' \"$KING_MANIFEST_PATH\" ;;\n"
+        "  agents:lead:faq) exit 0 ;;\n"
+        "  agents:lead:manifest-path) printf '%s\\n' \"$KING_MANIFEST_PATH\" ;;\n"
         "  backlog:get:xd863) printf '%s\\n' '[{\"id\":\"xd863\",\"status\":\"in_progress\"}]' ;;\n"
         "  *) exit 1 ;;\n"
         "esac\n",
@@ -709,7 +709,7 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
     }
 
     result = subprocess.run(
-        [str(ROOT / "hooks" / "king-postcompact-reinject.sh")],
+        [str(ROOT / "hooks" / "lead-postcompact-reinject.sh")],
         cwd=tmp_path,
         env=env,
         input=json.dumps({"session_id": "king-session", "transcript_path": str(transcript)}),

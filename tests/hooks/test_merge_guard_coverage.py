@@ -99,10 +99,10 @@ def test_unparseable_pr_is_skipped(monkeypatch):
 def test_dispatch_hold_veto_refuses_confirmed_hold(monkeypatch):
     seen = _patch_run(
         monkeypatch,
-        _Proc(3, stderr="dispatch-hold:x-5a5c: blocking; set_by=king\n"),
+        _Proc(3, stderr="dispatch-hold:x-5a5c: blocking; set_by=lead\n"),
     )
     msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
-    assert msg == "dispatch-hold:x-5a5c: blocking; set_by=king"
+    assert msg == "dispatch-hold:x-5a5c: blocking; set_by=lead"
     assert seen["cmd"] == ["fno", "do", "pr", "hold-check", "900"]
     assert seen["timeout"] <= 5
 

@@ -219,7 +219,7 @@ fn default_true() -> bool {
 /// deserialize it and an unbumped upgraded client would lose its connection on
 /// the first relocation rather than at handshake.
 ///
-/// v41 also carries the mesh crown fields (`AgentRow.crown_level`/`crown_scope`,
+/// v41 also carries the mesh team fields (`AgentRow.crown_level`/`crown_scope`,
 /// additive + `#[serde(default)]`, documented inline on the fields); the two
 /// changes share the one version bump.
 ///
@@ -330,8 +330,8 @@ fn default_true() -> bool {
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
 /// v88: `AgentLaunchRequest.node` (serde default), the board's target key
 /// binds the launch to its node; floor stays 58.
-/// v89: `AgentRow.crown_title` (serde default), the crown's display name from
-/// the crown-name store file; floor stays 58. v94 renames the never-filled
+/// v89: `AgentRow.crown_title` (serde default), the team's display name from
+/// the team-name store file; floor stays 58. v94 renames the never-filled
 /// field to `crown_title` (the role's people title); floor stays 58.
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
@@ -1186,20 +1186,20 @@ pub struct AgentRow {
     /// `#[serde(default)]` keeps a v36 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<String>,
-    /// (v41) The crown altitude of this row, mesh-owned (the spawn-stamped crown
-    /// ladder: 0 VP/project, 1 Director/epic, 2 IC/node). `None` = an un-crowned
+    /// (v41) The team altitude of this row, mesh-owned (the spawn-stamped team
+    /// ladder: 0 VP/project, 1 Director/epic, 2 IC/node). `None` = an un-teamed
     /// leaf worker. The sideline orders coordinators above leaves within a squad
     /// by this; the mux only renders it, never writes it. `#[serde(default)]`
-    /// keeps a v40 reader wire-tolerant (a missing crown reads as un-crowned).
+    /// keeps a v40 reader wire-tolerant (a missing team reads as un-teamed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_level: Option<u32>,
-    /// (v41) The project/epic/node id this row's crown rules over, for the inline
-    /// `L{level} {scope}` badge. `None` on an un-crowned row or a partial crown
+    /// (v41) The project/epic/node id this row's team rules over, for the inline
+    /// `L{level} {scope}` badge. `None` on an un-teamed row or a partial team
     /// (the badge then shows `?`). Rendered verbatim - no graph lookup on the
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
-    /// (v94) The role's people title read from crown_names.json; None when
+    /// (v94) The role's people title read from team_names.json; None when
     /// the store has none. Replaces the never-filled v89 `crown_title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_title: Option<String>,
@@ -3585,7 +3585,7 @@ mod tests {
         // what we assert here is (a) the canonical version and (b) the new
         // variants survive the codec losslessly, exactly the discipline every
         // prior new-verb bump followed. (The version literal is pinned once, in
-        // the crown-fields test; asserting it again here caught nothing.)
+        // the team-fields test; asserting it again here caught nothing.)
         for msg in [
             ClientMsg::Command(Command::BreakPane { pane: 7 }),
             ClientMsg::Command(Command::JoinTab {
@@ -3959,7 +3959,7 @@ mod tests {
         // version because a bump that DID move the floor would refuse every
         // older client, and that must never happen by accident.
         assert_eq!(MIN_COMPAT_PROTO, 58);
-        // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
+        // A pre-41 row omits both team keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
@@ -3987,21 +3987,21 @@ mod tests {
             !serde_json::to_string(&row).unwrap().contains("dnd"),
             "legacy false DND stays absent from the wire"
         );
-        // A crowned row round-trips losslessly.
-        let mut crowned = row.clone();
-        crowned.crown_level = Some(1);
-        crowned.crown_scope = Some("epic-x".into());
-        crowned.no_pane_reason = Some(AgentNoPaneReason::LivePaneless);
-        let wire = serde_json::to_string(&crowned).unwrap();
+        // A teamed row round-trips losslessly.
+        let mut teamed = row.clone();
+        teamed.crown_level = Some(1);
+        teamed.crown_scope = Some("epic-x".into());
+        teamed.no_pane_reason = Some(AgentNoPaneReason::LivePaneless);
+        let wire = serde_json::to_string(&teamed).unwrap();
         let back: AgentRow = serde_json::from_str(&wire).unwrap();
         assert_eq!(back.crown_level, Some(1));
         assert_eq!(back.crown_scope.as_deref(), Some("epic-x"));
         assert_eq!(back.no_pane_reason, Some(AgentNoPaneReason::LivePaneless));
-        // An un-crowned row omits the keys on the wire (skip_serializing_if), so
+        // An un-teamed row omits the keys on the wire (skip_serializing_if), so
         // a pre-41 reader never sees an unknown field.
         assert!(
             !serde_json::to_string(&row).unwrap().contains("crown_level"),
-            "un-crowned row omits crown on the wire"
+            "un-teamed row omits team on the wire"
         );
         assert!(
             !serde_json::to_string(&row)
@@ -4035,7 +4035,7 @@ mod tests {
         // never a failure - the skew window the handshake holds. An exact
         // placement sets Refuse, and the receipt carries it losslessly.
         // (Later bumps do not touch these v44 shapes; the version itself is
-        // pinned once, in the crown-fields test.)
+        // pinned once, in the team-fields test.)
         let v43 = r#"{"target":"CurrentRoute"}"#;
         let legacy: PanePlacement = serde_json::from_str(v43).unwrap();
         assert_eq!(legacy.fallback, PlacementFallback::NewTab);
