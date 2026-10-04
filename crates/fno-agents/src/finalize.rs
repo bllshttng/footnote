@@ -1452,8 +1452,11 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 ///   4. vault-derived `<vault>/internal/<project>/handoffs/` when
 ///      `obsidian.enabled` + `obsidian.vault` are set (placement rule,
 ///      ab-f063 Wave 2 - mirrors `paths.handoffs_dir()` in the Python CLI)
-///   5. fallback `<state_dir>/handoffs/<project>` where state_dir is
-///      `FNO_STATE_DIR`, else the config's `state_dir`, else `~/.fno`
+///   5. fallback `<FNO_STATE_DIR>/handoffs/<project>` when the env names a
+///      state root, else `<home>/.fno/handoffs/<project>`. A configured
+///      `state_dir` key is deliberately not read here: the hermetic `home`
+///      parameter owns the bare default, and the ambient global config read
+///      broke every hermetic fixture on a machine that pins the key.
 ///
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
@@ -1493,14 +1496,27 @@ pub(crate) fn resolve_handoffs_dir(
             }
         }
     }
-    // Python parity: the fallback base is state_dir() (FNO_STATE_DIR, then
-    // the config's state_dir, then ~/.fno), so an isolated lane's handoffs
-    // land in its own state root, never beside the operator's.
-    let base = crate::agents_config::state_dir(cwd).unwrap_or_else(|| {
-        home.map(Path::to_path_buf)
+    // FNO_STATE_DIR pins an isolated lane's root outright, so its handoff
+    // docs land in its own state root (Python state_dir env parity). A
+    // configured `state_dir` is NOT honored here - the resolver's hermetic
+    // `home` parameter owns the bare default, and reading the ambient global
+    // config for it broke every hermetic fixture on a machine that pins the
+    // key. Named gap, not an accident.
+    let base = match std::env::var_os("FNO_STATE_DIR") {
+        Some(v)
+            if !v.is_empty()
+                && !v
+                    .to_str()
+                    .map(|s| s.eq_ignore_ascii_case("null"))
+                    .unwrap_or(false) =>
+        {
+            PathBuf::from(v)
+        }
+        _ => home
+            .map(Path::to_path_buf)
             .unwrap_or_else(|| cwd.to_path_buf())
-            .join(".fno")
-    });
+            .join(".fno"),
+    };
     base.join("handoffs").join(project)
 }
 
