@@ -481,11 +481,13 @@ pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
     merged
 }
 
-/// The one plan-path resolver: `~/` expands against `$HOME`, a relative
+/// The one plan-path resolver: a `#wave-1` fragment is stripped first (the
+/// module's reader convention), `~/` expands against `$HOME`, a relative
 /// path joins the close or sweep cwd, and an unresolvable path is None -
 /// the caller decides what None reads as. One resolver so two readers can
 /// never resolve the same plan_path to two different files.
 pub(crate) fn resolve_plan_path(plan_path: &str, cwd: Option<&str>) -> Option<std::path::PathBuf> {
+    let plan_path = plan_path.split('#').next().unwrap_or(plan_path);
     let path = match plan_path.strip_prefix("~/") {
         Some(rest) => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(rest),
         None => PathBuf::from(plan_path),
