@@ -777,25 +777,17 @@ fn standing_announcements(
 
 /// One announcement block: the delivered-mail header line, then the body.
 /// The sender reads through the system-sender table (`fleet-incident` ->
-/// `fno/fleet-incident`), the summary is the subject when it is header-safe
-/// (no backtick or separator could forge a header field), else the body
-/// summary.
+/// `fno/fleet-incident`); the header carries the sender and the id only, a
+/// subject stays body content.
 fn render_block(m: &Value) -> String {
     let id = row_str(m, "id").unwrap_or("");
     let from = row_str(m, "from").unwrap_or("unknown");
-    let meta = m.get("meta").cloned().unwrap_or(Value::Null);
-    let subject = meta.get("subject").and_then(Value::as_str).unwrap_or("");
     let body = row_str(m, "body").unwrap_or("");
     let sender = crate::system_sender::canonical(from);
-    let summary = match subject {
-        s if !s.is_empty() && !s.contains('`') && !s.contains(" · ") => s.to_string(),
-        _ => crate::mail_header::summary_of(body),
-    };
     let header = crate::mail_header::render_header(
         crate::mail_header::HeaderForm::Mention,
         sender,
         id,
-        &summary,
     );
     format!("{header}\n{body}")
 }

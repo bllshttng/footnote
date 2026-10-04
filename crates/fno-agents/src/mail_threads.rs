@@ -178,9 +178,11 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                 registry_lookup(registry, &from_key)
             };
             let reg_to = registry_lookup(registry, to);
-            note(&mut participants, &from_key, reg_from);
-            note(&mut participants, &to_key, reg_to);
+            note(&mut participants, &from_key, reg_from, Some(from));
+            note(&mut participants, &to_key, reg_to, None);
             let system_row = crate::system_sender::is_system_sender(from);
+            let raw_body = v.get("body").and_then(Value::as_str).unwrap_or("");
+            let body = crate::mail_header::display_body(raw_body);
             let mut row = json!({
                 "id": v.get("id").and_then(Value::as_str).unwrap_or(""),
                 "ts": v.get("ts").and_then(Value::as_str).unwrap_or(""),
@@ -188,10 +190,8 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                 "from_key": from_key,
                 "to_key": to_key,
                 "to": to,
-                "summary": crate::mail_header::summary_of(
-                    v.get("body").and_then(Value::as_str).unwrap_or(""),
-                ),
-                "body": v.get("body").and_then(Value::as_str).unwrap_or(""),
+                "summary": crate::mail_header::summary_of(&body),
+                "body": body,
                 "expires": expires_at(&v),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
                 "delivery": v.get("delivery").and_then(Value::as_str),
@@ -309,38 +309,57 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
     })
 }
 
-/// One participant row, inserted once per key with its registry join.
-fn note<'a>(
-    participants: &'a mut BTreeMap<String, Value>,
+/// One participant row: the registry join over `key`. `extra` is the
+/// message's own `from` name, the display fallback when no registry row
+/// ever names the key; the id stays the key (d-6e0bf89b).
+fn participant_row(key: &str, reg: Option<&Value>, extra: Option<&str>) -> Value {
+    json!({
+        "key": key,
+        "name": reg
+            .and_then(|r| r.get("name")).and_then(Value::as_str)
+            .filter(|_| !crate::system_sender::is_system_sender(key))
+            .or_else(|| extra
+                .filter(|n| !n.is_empty() && !crate::system_sender::is_system_sender(key)))
+            .unwrap_or(key),
+        "session_id": reg.and_then(|r| r.get("harness_session_id"))
+            .and_then(Value::as_str),
+        "fno_id": reg.and_then(|r| r.get("fno_id")).and_then(Value::as_str),
+        "harness": reg.and_then(|r| r.get("harness")).and_then(Value::as_str),
+        "model": reg.and_then(|r| r.get("model")).and_then(Value::as_str),
+        "effort": reg.and_then(|r| r.get("effort")).and_then(Value::as_str),
+        "node": reg.and_then(|r| r.get("node")).and_then(Value::as_str),
+        "live": reg.is_some_and(|r| {
+            r.get("liveness").and_then(Value::as_str) == Some("alive")
+                || r.get("status").and_then(Value::as_str) == Some("live")
+        }),
+        "crown_scope": reg.and_then(|r| r.get("crown_scope")).and_then(Value::as_str),
+        "crown_level": reg.and_then(|r| r.get("crown_level")).and_then(Value::as_u64),
+        "created_at": reg.and_then(|r| r.get("created_at")).and_then(Value::as_str),
+        "exited_at": reg.and_then(|r| r.get("exited_at")).and_then(Value::as_str),
+        "system": crate::system_sender::is_system_sender(key),
+        "archive_scope": Value::Null,
+    })
+}
+
+/// One participant row, inserted once per key with its registry join. A
+/// later sighting that carries a registry row upgrades a raw-key name, so
+/// a session that registers after its first mail shows its name, never the
+/// id.
+fn note(
+    participants: &mut BTreeMap<String, Value>,
     key: &str,
     row: Option<&Value>,
-) -> &'a mut Value {
-    participants.entry(key.to_string()).or_insert_with(|| {
-        let reg = row;
-        json!({
-            "key": key,
-            "name": reg.and_then(|r| r.get("name")).and_then(Value::as_str)
-                .filter(|_| !crate::system_sender::is_system_sender(key))
-                .unwrap_or(key),
-            "session_id": reg.and_then(|r| r.get("harness_session_id"))
-                .and_then(Value::as_str),
-            "fno_id": reg.and_then(|r| r.get("fno_id")).and_then(Value::as_str),
-            "harness": reg.and_then(|r| r.get("harness")).and_then(Value::as_str),
-            "model": reg.and_then(|r| r.get("model")).and_then(Value::as_str),
-            "effort": reg.and_then(|r| r.get("effort")).and_then(Value::as_str),
-            "node": reg.and_then(|r| r.get("node")).and_then(Value::as_str),
-            "live": reg.is_some_and(|r| {
-                r.get("liveness").and_then(Value::as_str) == Some("alive")
-                    || r.get("status").and_then(Value::as_str) == Some("live")
-            }),
-            "crown_scope": reg.and_then(|r| r.get("crown_scope")).and_then(Value::as_str),
-            "crown_level": reg.and_then(|r| r.get("crown_level")).and_then(Value::as_u64),
-            "created_at": reg.and_then(|r| r.get("created_at")).and_then(Value::as_str),
-            "exited_at": reg.and_then(|r| r.get("exited_at")).and_then(Value::as_str),
-            "system": crate::system_sender::is_system_sender(key),
-            "archive_scope": Value::Null,
+    extra: Option<&str>,
+) {
+    participants
+        .entry(key.to_string())
+        .and_modify(|v| {
+            let named = v.get("name").and_then(Value::as_str) != Some(key);
+            if row.is_some() && !named {
+                *v = participant_row(key, row, None);
+            }
         })
-    })
+        .or_insert_with(|| participant_row(key, row, extra));
 }
 
 /// One counterparty-scope vote for R3: count per scope, latest ts on a tie.
@@ -719,6 +738,48 @@ mod tests {
                 "Opening the bell PR.",
             )],
         );
+        // AC4-HP: a session the registry never names still shows the
+        // sender's own from name; the session id stays the key.
+        write_chat(
+            &chats,
+            "chat-f0f0f0f0f0f0f0f0",
+            &[json!({
+                "type": "message", "kind": "send", "v": 1,
+                "id": "fmail-d0d0d0d0d0d0", "ts": "2026-10-01T09:15:00Z",
+                "thread": "fmail-d0d0d0d0d0d0",
+                "from": "candor", "from_session": "s-lone", "to": "vellum",
+                "body": "Pinging the shelf.",
+            })],
+        );
+        // AC7-AC9-HP: old envelope mail and old header mail read as the
+        // body at display time; a mid-text mention never rewrites.
+        write_chat(
+            &chats,
+            "chat-e0e0e0e0e0e0e0e0",
+            &[
+                msg(
+                    "fmail-b1b1b1b1b1b1",
+                    "2026-10-01T09:16:00Z",
+                    "s-candor",
+                    "vellum",
+                    "<fno_mail from=\"a\" id=\"fmail-b1b1b1b1b1b1\">Ship it.</fno_mail>",
+                ),
+                msg(
+                    "fmail-b2b2b2b2b2b2",
+                    "2026-10-01T09:17:00Z",
+                    "s-candor",
+                    "vellum",
+                    "`@a \u{b7} fmail-b2b2b2b2b2b2 \u{b7} Ship it.`\nShip it. Then merge.",
+                ),
+                msg(
+                    "fmail-b3b3b3b3b3b3",
+                    "2026-10-01T09:18:00Z",
+                    "s-candor",
+                    "vellum",
+                    "see <fno_mail> docs",
+                ),
+            ],
+        );
         // A system arm mails the live worker (the ONE System row, inbound).
         write_chat(
             &chats,
@@ -783,7 +844,43 @@ mod tests {
             .get("participants")
             .and_then(Value::as_array)
             .unwrap();
-        assert_eq!(threads.len(), 3, "pair chats only: {threads:?}");
+        assert_eq!(threads.len(), 5, "pair chats only: {threads:?}");
+        // Old mail reads as the body: envelope unwrapped, the pasted
+        // header-summary repeat stripped once, mid-text mention untouched
+        // (AC7-AC9-HP).
+        let body_of = |id: &str| -> String {
+            threads
+                .iter()
+                .flat_map(|t| t.get("rows").and_then(Value::as_array).unwrap())
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                .map(|r| {
+                    r.get("body")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(body_of("fmail-b1b1b1b1b1b1"), "Ship it.");
+        assert_eq!(body_of("fmail-b2b2b2b2b2b2"), "Ship it. Then merge.");
+        assert_eq!(body_of("fmail-b3b3b3b3b3b3"), "see <fno_mail> docs");
+        // AC4-HP: the registry never named s-lone; its from name shows and
+        // the id stays the key.
+        let lone = participants
+            .iter()
+            .find(|p| p.get("key").and_then(Value::as_str) == Some("s-lone"))
+            .expect("lone participant");
+        assert_eq!(lone.get("name").and_then(Value::as_str), Some("candor"));
+        assert_eq!(lone.get("key").and_then(Value::as_str), Some("s-lone"));
+        // AC3-HP: a later registry sighting upgrades a raw-key name; the
+        // id stays the key.
+        let mut named = BTreeMap::new();
+        let quill_row = json!({"name": "quill", "fno_id": "s1", "harness_session_id": "s1"});
+        note(&mut named, "s1", None, Some("s1"));
+        assert_eq!(named["s1"]["name"], "s1");
+        note(&mut named, "s1", Some(&quill_row), None);
+        assert_eq!(named["s1"]["name"], "quill");
+        assert_eq!(named["s1"]["key"], "s1");
         // The successor over the scope sees the same Archive: quill's
         // archive_scope names the scope it mailed most (AC2-HP).
         let quill = participants

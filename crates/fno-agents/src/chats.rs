@@ -1032,8 +1032,8 @@ fn message_body(line: &Value) -> &str {
 }
 
 /// One message as the reader sees it: the delivered header line, then the
-/// full body. The auto summary stands in until the Rust send verb sets
-/// subjects (wave 2); the id is what the receiver answers and resolves with.
+/// full body. The header carries the sender and the id - what the receiver
+/// answers and resolves with; the body speaks for itself.
 fn render_message(line: &Value) -> String {
     format!(
         "{}\n{}",
@@ -1043,7 +1043,6 @@ fn render_message(line: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             line.get("id").and_then(Value::as_str).unwrap_or(""),
-            &crate::mail_header::summary_of(message_body(line)),
         ),
         message_body(line),
     )

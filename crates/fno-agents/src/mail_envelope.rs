@@ -241,7 +241,6 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     // The one delivered shape from here on: the header line, then the whole
     // body. The sender is the fleet name, the id is required (the shape's
     // join key), and both are guarded so neither can forge a second field.
-    let summary = crate::mail_header::summary_of(wrapping.unwrap_or(""));
     let msg_id = attr(input, "id").ok_or("mail envelope: an id is required to render a header")?;
     let sender = header_sender(from_row, from_name, from);
     crate::system_sender::guard_sender(sender)?;
@@ -262,7 +261,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             _ => crate::mail_header::HeaderForm::Mention,
         }
     };
-    let header = crate::mail_header::render_header(form, sender, msg_id, &summary);
+    let header = crate::mail_header::render_header(form, sender, msg_id);
     Ok(match wrapping {
         Some(body) => format!("{header}\n{body}"),
         None => header,
@@ -401,9 +400,20 @@ mod tests {
             &path,
         )
         .unwrap();
+        assert_eq!(rendered, "`@folio \u{b7} msg-1`\nFix the gate. Then ship.");
+        // The header carries sender and id only; the body appears once
+        // (AC10-HP).
+        let body_once = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate. Details follow.",
+                "from":"folio-short", "id":"fmail-0123456789ab"
+            }),
+            &path,
+        )
+        .unwrap();
         assert_eq!(
-            rendered,
-            "`@folio \u{b7} msg-1 \u{b7} Fix the gate.`\nFix the gate. Then ship."
+            body_once,
+            "`@folio \u{b7} fmail-0123456789ab`\nFix the gate. Details follow."
         );
         let plain = render_at(
             &json!({
@@ -412,16 +422,13 @@ mod tests {
             &path,
         )
         .unwrap();
-        assert!(
-            plain.starts_with("`folio \u{b7} msg-2 \u{b7} hello`\nhello"),
-            "{plain}"
-        );
+        assert!(plain.starts_with("`folio \u{b7} msg-2`\nhello"), "{plain}");
         let header = render_at(
             &json!({"mode":"tag", "from":"quill-short", "id":"msg-3"}),
             &path,
         )
         .unwrap();
-        assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
+        assert_eq!(header, "`@quill \u{b7} msg-3`");
     }
 
     #[test]
@@ -501,6 +508,6 @@ mod tests {
             completed_while_locked,
             "envelope render waited for the registry lock"
         );
-        assert_eq!(rendered, "`@folio \u{b7} msg-9 \u{b7} hello`\nhello");
+        assert_eq!(rendered, "`@folio \u{b7} msg-9`\nhello");
     }
 }

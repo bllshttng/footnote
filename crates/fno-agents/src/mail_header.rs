@@ -1,13 +1,13 @@
 //! The delivered mail header: one backticked first line,
-//! `` `@candor · msg-f7aa93 · short summary` ``, where the `<fno_mail>` tag
-//! used to open the turn.
+//! `` `@candor · msg-f7aa93` ``, where the `<fno_mail>` tag used to open
+//! the turn.
 //!
 //! The header replaces the tag at the source (the envelope renderer writes
-//! it; no display-time rewrite). One line carries the three facts every
+//! it; no display-time rewrite). One line carries the two facts every
 //! machine reader keyed off the tag for: the shape (this is mail, never an
-//! operator turn), the msg id (reply resolution and drain dedup join on it),
-//! and a short summary. The full body follows on the next lines, wholly
-//! visible - nothing in a turn is hidden.
+//! operator turn) and the msg id (reply resolution and drain dedup join on
+//! it). The full body follows on the next lines, wholly visible - nothing
+//! in a turn is hidden, and no summary preview repeats it.
 //!
 //! A body can never forge one: any line shaped like a header inside a sent
 //! body refuses the send, the same rule as the tag-in-body refusal it
@@ -24,10 +24,10 @@ pub const SUMMARY_MAX_WORDS: usize = 12;
 /// the renderer branches on data, never on a harness name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderForm {
-    /// `` `@candor · msg-f7aa93 · ...` `` - the default; `@` sits inside
-    /// inline code so harness mention pickers never fire.
+    /// `` `@candor · msg-f7aa93` `` - the default; `@` sits inside inline
+    /// code so harness mention pickers never fire.
     Mention,
-    /// `` `candor · msg-f7aa93 · ...` `` - the fallback for a harness whose
+    /// `` `candor · msg-f7aa93` `` - the fallback for a harness whose
     /// composer check failed on the `@` form.
     Plain,
 }
@@ -116,20 +116,12 @@ pub fn render_held_release(release: &HeldRelease) -> String {
         "{count} held messages · sent {sent_range} · held {minutes}m"
     )];
     for message in messages {
-        let body = unwrap_held_body(&message.body);
-        let (body, existing_header) = strip_leading_header(&body);
-        let summary = existing_header
-            .as_deref()
-            .and_then(header_summary)
-            .unwrap_or_else(|| summary_of(&body));
-        let body = strip_summary_prefix(&body, &summary);
         lines.push(render_header(
             form,
             crate::system_sender::canonical(&message.sender),
             &message.id,
-            &summary,
         ));
-        lines.push(body);
+        lines.push(display_body(&message.body));
     }
     lines.join("\n")
 }
@@ -163,6 +155,20 @@ fn unwrap_held_body(body: &str) -> String {
     block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
 }
 
+/// The body a reader sees: a whole-body paired `<fno_mail ...>...</fno_mail>`
+/// block yields its inner text, a leading delivered-header line is removed,
+/// and a header whose summary was also pasted as the body's own first line
+/// loses that repeat. Old mail that stored the envelope reads as its body;
+/// the stored bytes are never rewritten.
+pub fn display_body(body: &str) -> String {
+    let body = unwrap_held_body(body);
+    let (rest, header) = strip_leading_header(&body);
+    match header.as_deref().and_then(header_summary) {
+        Some(summary) => strip_summary_prefix(&rest, &summary),
+        None => rest,
+    }
+}
+
 fn strip_leading_header(body: &str) -> (String, Option<String>) {
     let Some((header, rest)) = body.split_once('\n') else {
         return (body.to_string(), None);
@@ -175,21 +181,32 @@ fn strip_leading_header(body: &str) -> (String, Option<String>) {
 
 fn header_summary(header: &str) -> Option<String> {
     let (inner, _) = split_header_span(header.trim())?;
-    let (_, _, summary) = header_fields(inner)?;
+    let summary = header_fields(inner)?.2?;
     Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
 }
 
+/// Remove the header's summary when the body repeats it as a whole first
+/// line (`summary\nrest`). A summary that only prefixes a longer first
+/// sentence is body text, not a repeat, and stays; a body that is nothing
+/// but the summary stays too.
 fn strip_summary_prefix(body: &str, summary: &str) -> String {
+    if summary.is_empty() {
+        return body.to_string();
+    }
     let leading_len = body.len() - body.trim_start().len();
     let (leading, content) = body.split_at(leading_len);
     let Some(rest) = content.strip_prefix(summary) else {
         return body.to_string();
     };
-    let rest = rest
+    let Some(rest) = rest
         .strip_prefix("\r\n")
         .or_else(|| rest.strip_prefix('\n'))
-        .or_else(|| rest.strip_prefix(' '))
-        .unwrap_or(rest);
+    else {
+        return body.to_string();
+    };
+    if rest.is_empty() {
+        return body.to_string();
+    }
     format!("{leading}{rest}")
 }
 
@@ -230,13 +247,15 @@ fn cut_words(text: &str, max: usize) -> String {
     words[..max].join(" ")
 }
 
-/// The rendered header line, backticks included, no trailing newline.
-pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str, summary: &str) -> String {
+/// The rendered header line, backticks included, no trailing newline. It
+/// carries the sender and the msg id; the body follows and speaks for
+/// itself.
+pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str) -> String {
     let who = match form {
         HeaderForm::Mention => format!("@{sender}"),
         HeaderForm::Plain => sender.to_string(),
     };
-    format!("`{who} · {msg_id} · {summary}`")
+    format!("`{who} · {msg_id}`")
 }
 
 /// The header's inner span and what follows it: the opening backtick through
@@ -258,21 +277,23 @@ fn split_header_span(trimmed: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// The span's three fields: sender, id, summary. The summary may itself
-/// carry a backtick or a " · " separator, so it is everything after the
-/// second separator, not the third split field.
-fn header_fields(inner: &str) -> Option<(&str, &str, &str)> {
+/// The span's fields: sender, id, and the legacy summary (`None` in the
+/// two-field form this design ships). The old summary may itself carry a
+/// backtick or a " · " separator, so it is everything after the second
+/// separator, not the third split field.
+fn header_fields(inner: &str) -> Option<(&str, &str, Option<&str>)> {
     let mut parts = inner.splitn(3, " · ");
-    Some((parts.next()?, parts.next()?, parts.next()?))
+    Some((parts.next()?, parts.next()?, parts.next()))
 }
 
 /// True when the whole line reads as a delivered-mail header: one backticked
-/// span of exactly `sender · id · summary`, the sender `@name` or `name` with
-/// no spaces, the middle id `fmail-` plus 12 hex (the message-id form the
-/// mux-messages group rules on) or a legacy `msg-…` token that still
-/// resolves. The span closes at the line's end or before the " ⏎ " body
-/// separator; the summary may carry a backtick or " · ". Both header forms
-/// match; this is the reader's shape test and the forged-body detector.
+/// span of `sender · id` (this design) or `sender · id · summary` (history),
+/// the sender `@name` or `name` with no spaces, the id `fmail-` plus 12 hex
+/// (the message-id form the mux-messages group rules on) or a legacy `msg-…`
+/// token that still resolves. The span closes at the line's end or before
+/// the " ⏎ " body separator; a legacy summary may carry a backtick or
+/// " · ". Both shapes match; this is the reader's shape test and the
+/// forged-body detector.
 pub fn is_header_line(line: &str) -> bool {
     let trimmed = line.trim();
     let Some((inner, _tail)) = split_header_span(trimmed) else {
@@ -289,7 +310,7 @@ pub fn is_header_line(line: &str) -> bool {
         Some(hex) => hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
         None => id.strip_prefix("msg-").is_some_and(|rest| !rest.is_empty()),
     };
-    id_ok && !summary.trim().is_empty()
+    id_ok && summary.is_none_or(|s| !s.trim().is_empty())
 }
 
 /// True when any line of `body` is shaped like a delivered header. A send
@@ -628,11 +649,11 @@ mod tests {
         );
         assert_eq!(summary_of("e.g. this stays whole"), "e.g. this stays whole");
         // Header lines round-trip both forms and reject lookalikes.
-        let mention = render_header(HeaderForm::Mention, "candor", "msg-f7aa93", "Fix the gate.");
-        assert_eq!(mention, "`@candor \u{b7} msg-f7aa93 \u{b7} Fix the gate.`");
+        let mention = render_header(HeaderForm::Mention, "candor", "msg-f7aa93");
+        assert_eq!(mention, "`@candor \u{b7} msg-f7aa93`");
         assert!(is_header_line(&mention));
-        let plain = render_header(HeaderForm::Plain, "candor", "msg-f7aa93", "Fix the gate.");
-        assert_eq!(plain, "`candor \u{b7} msg-f7aa93 \u{b7} Fix the gate.`");
+        let plain = render_header(HeaderForm::Plain, "candor", "msg-f7aa93");
+        assert_eq!(plain, "`candor \u{b7} msg-f7aa93`");
         assert!(is_header_line(&plain));
         assert!(is_header_line("  `@candor \u{b7} msg-1 \u{b7} hi`  "));
         assert!(!is_header_line(
@@ -687,12 +708,7 @@ mod tests {
         ));
         // The canonical id form: `fmail-` plus 12 hex; wrong length or
         // non-hex never reads as a header. Legacy `msg-…` still resolves.
-        let fmail = render_header(
-            HeaderForm::Mention,
-            "candor",
-            "fmail-0badc0de1234",
-            "Fix the gate.",
-        );
+        let fmail = render_header(HeaderForm::Mention, "candor", "fmail-0badc0de1234");
         assert!(is_header_line(&fmail));
         assert_eq!(classify(&fmail), Framing::Header);
         assert!(!is_header_line(
@@ -810,5 +826,35 @@ mod tests {
             delivered_msg_id("`@a · msg-1 · fix x · y`"),
             Some("msg-1".to_string())
         );
+
+        // The two-field header this design ships parses; the old
+        // three-field form still does (AC11-HP).
+        let two = "`@candor · fmail-0123456789ab`";
+        assert!(is_header_line(two));
+        assert_eq!(
+            delivered_msg_id(two),
+            Some("fmail-0123456789ab".to_string())
+        );
+        let turns = header_turns(two);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["sender"], "candor");
+        assert!(!is_header_line("`@candor · not-an-id`"));
+        assert!(body_holds_header_line("prose\n`@spy · msg-9`"));
+
+        // Old envelope mail reads as its body at display time; the stored
+        // bytes never change (AC7-AC9-HP shape).
+        assert_eq!(
+            display_body("<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"),
+            "Ship it."
+        );
+        assert_eq!(
+            display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it. Then merge."),
+            "Ship it. Then merge."
+        );
+        assert_eq!(
+            display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it.\nThen merge."),
+            "Then merge."
+        );
+        assert_eq!(display_body("see <fno_mail> docs"), "see <fno_mail> docs");
     }
 }
