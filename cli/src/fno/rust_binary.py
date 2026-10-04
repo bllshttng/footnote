@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -154,8 +155,13 @@ def resolve_binary() -> Optional[Path]:
 def call_binary_json(
     verb: str, args: Sequence[str] = (), *, timeout: Optional[float] = 60,
     binary: Optional[Path] = None,
+    input_text: Optional[str] = None,
 ) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
+
+    ``input_text`` feeds the child's stdin when given, so a large payload
+    rides stdin instead of an argv entry (the OS per-argument cap would
+    otherwise become an undocumented body cap).
 
     Returns ``(error, parsed)``: ``error`` is None on success; a missing
     binary, non-zero exit, timeout, or unparseable stdout yields a short error
@@ -173,7 +179,8 @@ def call_binary_json(
         return ("fno-agents binary not found", None)
     try:
         proc = subprocess.run(
-            [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout
+            [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout,
+            input=input_text,
         )
     except subprocess.TimeoutExpired:
         bound = f"{timeout:.1f}s" if timeout is not None else "the caller's bound"
@@ -186,6 +193,49 @@ def call_binary_json(
         return (None, json.loads(proc.stdout or "null"))
     except ValueError:
         return ("unreadable JSON receipt", None)
+
+
+def style_receipt(
+    text: str, surface: str, word_cap: Optional[int] = None
+) -> tuple[Optional[str], Any]:
+    """One style-gate read through the door: ``(error, receipt)``.
+
+    The body rides stdin, so the OS per-argument cap never becomes an
+    undocumented body cap. The receipt carries ``exception``, ``word_count``,
+    ``violations`` and ``report``. An error tuple means the gate could not
+    run, and the caller keeps its own failure posture.
+    """
+    argv = ["--surface", surface, "--stdin", "--json"]
+    if word_cap is not None:
+        argv += ["--word-cap", str(word_cap)]
+    return call_binary_json("style-check", argv, input_text=text)
+
+
+def style_word_count(text: str) -> int:
+    """Masked word count through the style door; 0 when the door fails.
+
+    The counting sites are advisory (a ledger row, a long-note nudge), so a
+    door failure counts zero rather than blocking the send.
+    """
+    err, receipt = call_binary_json("style-check", ["--stdin", "--json"], input_text=text)
+    if err or not isinstance(receipt, dict):
+        return 0
+    return int(receipt.get("word_count") or 0)
+
+
+def style_word_count_checked(text: str) -> int:
+    """Masked word count for an ENFORCING site: raises
+    ``budget.BudgetCountUnavailable`` on a door failure instead of answering a
+    silent zero (a zero would read as unlimited traffic under the control
+    lane's rolling cap). Imported lazily: budget.py never imports this module,
+    so there is no cycle.
+    """
+    from fno.mail.budget import BudgetCountUnavailable
+
+    err, receipt = call_binary_json("style-check", ["--stdin", "--json"], input_text=text)
+    if err or not isinstance(receipt, dict):
+        raise BudgetCountUnavailable(f"style count unavailable: {err or 'no receipt'}")
+    return int(receipt.get("word_count") or 0)
 
 
 def mint_fno_id() -> str:
@@ -208,6 +258,35 @@ def mint_fno_id() -> str:
             (proc.stderr or "fno-agents state mint-id answered nothing").strip()[:200]
         )
     return minted
+
+
+@lru_cache(maxsize=1)
+def delivered_terminals() -> frozenset:
+    """The delivered-terminal vocabulary, owned by Rust
+    (`TerminationReason::is_delivered` in loopcheck.rs) and served through one
+    fail-closed `fno-agents terminals` subprocess per process, like the roster.
+
+    The set counts a run DELIVERED for telemetry: DonePRGreen, DoneAdvisory,
+    DoneDelivery, DoneBatched. DoneAwaitingMerge and DoneUnreviewed are
+    deliberately absent (complete-but-unmerged and waiting are not landed).
+    Raises VerbUnavailable when the binary is missing or answers nothing; no
+    Python-side fallback exists, by the rule that keeps the vocabulary single.
+    """
+    error, payload = call_binary_json(
+        "terminals", timeout=15, binary=find_dev_binary() or resolve_binary()
+    )
+    if error is not None:
+        raise VerbUnavailable(
+            "the delivered-terminal vocabulary lives in the fno-agents binary"
+            " (loopcheck.rs TerminationReason::is_delivered) and the read"
+            f" failed: {error}; run `fno doctor update --rust` or set FNO_AGENTS_BIN"
+        )
+    names = payload.get("delivered") if isinstance(payload, dict) else None
+    if not names or not all(isinstance(n, str) and n for n in names):
+        raise VerbUnavailable(
+            f"fno-agents terminals answered no usable delivered list: {payload!r}"[:200]
+        )
+    return frozenset(names)
 
 
 def resolve_installed_binary() -> Optional[Path]:

@@ -48,6 +48,10 @@ The `slot-exhausted-queue` stub and the planted `node_row`s are the only
 non-live inputs; every other expected value was produced by the unmodified
 merge-base Python and binary.
 
+## Hand-authored cases
+
+`crown-codex-yolo.json`, `crown-codex-short-flag.json`, and `crown-codex-bounded-refuses.json` have no Python capture behind them. They pin the crown-codex posture the Rust compose owns. A crowned codex spawn defaults to `yolo` at rung `builtin.crown` (`--crown` on the first case, the attached `-kx-aaaa` spelling on the second). One that names a bounded mode refuses with exit 2. Each case is authored against the compose contract, in the same shape as the captured goldens.
+
 ## Post-capture drift applied
 
 One case was refreshed after main moved under the capture: main merged

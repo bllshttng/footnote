@@ -17,7 +17,7 @@ const INTERVAL: Duration = Duration::from_secs(60);
 const WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_EVENTS: u32 = 10_000;
 const MAX_LIVE_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
-const WATCH_IDLE: &str = "loop_check_watch_idle";
+pub(crate) const WATCH_IDLE: &str = "loop_check_watch_idle";
 pub(crate) const WAKE_EVENT: &str = "loop_check_watch_expiry_wake";
 const ACTIVITY_AND_TERMINAL: &[&str] = &[
     "loop_check",
@@ -39,6 +39,9 @@ pub(crate) struct Watch {
     pub event_id: String,
     pub seq: i64,
     pub session_id: String,
+    /// The PR the tag names; null when the tag names no positive PR number.
+    /// The CI-settle poller reads it; the expiry arm ignores it.
+    pub pr: Option<i64>,
     pub node: String,
     pub blocker: String,
     pub task_id: Option<String>,
@@ -109,7 +112,7 @@ fn event_id(line: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(line.as_bytes()))
 }
 
-fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String> {
+pub(crate) fn read_evidence(home: &AgentsHome, now_ms: i64) -> Result<Vec<Evidence>, String> {
     let mut types = vec![WATCH_IDLE, WAKE_EVENT];
     types.extend_from_slice(ACTIVITY_AND_TERMINAL);
     let query = crate::event_store::EventQuery {
@@ -219,6 +222,7 @@ fn watches(evidence: &[Evidence]) -> Vec<Watch> {
             event_id: row.event_id.clone(),
             seq: row.seq,
             session_id: session_id.clone(),
+            pr: data.get("pr").and_then(Value::as_i64),
             node: data
                 .get("node")
                 .and_then(Value::as_str)
