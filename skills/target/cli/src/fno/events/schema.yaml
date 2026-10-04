@@ -48,7 +48,7 @@ envelope:
       # (previously only the parity-script layer checked them).
       enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli, pr-park, rust, legacy]
       patterns:
-        - '^(worker|stream-worker):.+$'
+        - '^(worker|stream-worker|footnote):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
     data:
       type: object
@@ -8138,6 +8138,11 @@ event_types:
   - name: heartbeat
     description: "Test fixture only: a null-payload row the events library tests append. Never emitted in production."
     sources: [test, daemon, hook, loop]
+    data:
+      required: []
+  - name: test_events_path_pin
+    description: "Test fixture only: the marker kind the journal-path pin test emits to prove an emit lands on the pinned journal and never the checkout's. Never emitted in production."
+    sources: [target, test]
     data:
       required: []
   - name: status_control

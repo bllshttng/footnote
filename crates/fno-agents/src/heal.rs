@@ -1594,15 +1594,18 @@ fn journal_path(a: &Args) -> std::path::PathBuf {
 /// skip_reason/detail vocabulary the tick's own `_emit_tick_row` writes, so
 /// the journal agrees with the status line on why nothing ran.
 fn emit_arm_row(a: &Args, acted: u8, skip_reason: Option<&str>, detail: &str) {
-    let mut fields = serde_json::Map::new();
-    fields.insert("arm".to_string(), serde_json::json!("heal"));
-    fields.insert("acted".to_string(), serde_json::json!(acted));
-    if let Some(s) = skip_reason {
-        fields.insert("skip_reason".to_string(), serde_json::json!(s));
-    }
-    if !detail.is_empty() {
-        fields.insert("detail".to_string(), serde_json::json!(detail));
-    }
+    let fields = crate::tick_ledger::tick_data(
+        "heal",
+        crate::tick_ledger::SCHED_LAUNCHD,
+        acted as u64,
+        skip_reason,
+        if detail.is_empty() {
+            None
+        } else {
+            Some(detail)
+        },
+        600,
+    );
     if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal")
         .emit_fields("control_plane_tick", fields)
     {

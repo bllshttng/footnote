@@ -51,7 +51,7 @@
           ]
         },
         {
-          "pattern": "^(worker|stream-worker):.+$"
+          "pattern": "^(worker|stream-worker|footnote):.+$"
         }
       ],
       "description": "Producer identity: a fixed-string source from the enum, or a per-agent worker (worker:<id> / stream-worker:<id>). Derived from the real EventEmitter::new call sites."
