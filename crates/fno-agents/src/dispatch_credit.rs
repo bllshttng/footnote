@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::king_board::project_map;
-use crate::loop_king::territory_members;
+use crate::org_board::project_map;
+use crate::loop_lead::territory_members;
 
 /// The mail budget: a wrapped notice, never a `--raw` command.
 const MAIL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -227,7 +227,7 @@ pub fn launch_credit_mail(payload: &Value) -> Value {
         session.clone(),
         text,
     ];
-    match crate::king_board::budget::run_with_timeout(&cmd, std::path::Path::new("."), MAIL_TIMEOUT)
+    match crate::org_board::budget::run_with_timeout(&cmd, std::path::Path::new("."), MAIL_TIMEOUT)
     {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out).into_owned();
