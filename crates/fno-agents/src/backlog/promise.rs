@@ -444,11 +444,12 @@ pub(crate) fn declared_ships(fields: &crate::plan_doc::codec::Fields) -> Declare
 }
 
 /// The deduplicated MERGED ref count one graph row carries: the primary
-/// when its merge_status reads merged, plus every additional_prs entry
-/// recorded merged. A duplicate recording of the primary, or of an
-/// already-counted extra, never counts twice, and an unrecorded extra
-/// never inflates the count - this is the local confirmed-merged evidence
-/// the merged-lag delivery predicate reads, never a promise count.
+/// when its merge_status reads merged, plus every numbered additional_prs
+/// entry recorded merged. A duplicate recording of the primary, or of an
+/// already-counted extra, never counts twice, an unrecorded extra never
+/// inflates the count, and a ref with no number is unverifiable evidence
+/// that never counts - this is the local confirmed-merged evidence the
+/// merged-lag delivery predicate reads, never a promise count.
 pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
     let primary_merged = entry.get("merge_status").and_then(Value::as_str) == Some("merged");
     let primary_number = entry.get("pr_number").and_then(Value::as_i64);
@@ -463,16 +464,18 @@ pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
         if extra.get("merge_status").and_then(Value::as_str) != Some("merged") {
             continue;
         }
-        let number = extra.get("number").and_then(Value::as_i64);
-        if primary_merged && number.is_some() && number == primary_number {
+        // A ref with no number cannot be told apart from any other ref, so
+        // it is unverifiable evidence and never counts.
+        let Some(number) = extra.get("number").and_then(Value::as_i64) else {
+            continue;
+        };
+        if primary_merged && Some(number) == primary_number {
             continue;
         }
-        if number.is_some_and(|n| seen.contains(&n)) {
+        if seen.contains(&number) {
             continue;
         }
-        if let Some(n) = number {
-            seen.push(n);
-        }
+        seen.push(number);
         merged += 1;
     }
     merged
