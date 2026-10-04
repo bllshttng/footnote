@@ -1,7 +1,7 @@
 //! The client loop's frame timer: when to wake an otherwise idle terminal
-//! (nothing else redraws there) so a timed animation advances. Two sources:
-//! the open yard overlay's spotlight, and the spin glyph of Working rows on
-//! screen. Re-armed each loop pass; with neither running there is no
+//! (nothing else redraws there) so a timed animation advances. Three sources:
+//! the yard overlay's spotlight, the Working-row spin, and the metrics
+//! skeleton's breathe. Re-armed each loop pass; with none running there is no
 //! deadline and no wakeup.
 
 use super::*;
@@ -15,8 +15,12 @@ impl View {
         let spin = crate::lattice::spin_epoch()
             .filter(|_| self.working_row_on_screen())
             .map(|t0| (t0, crate::lattice::SPIN_FRAME_MS));
+        let breathe = crate::lattice::spin_epoch()
+            .filter(|_| self.breathe_on_screen())
+            .map(|t0| (t0, crate::lattice::SPIN_FRAME_MS));
         yard.into_iter()
             .chain(spin)
+            .chain(breathe)
             .map(|(t0, step)| next_boundary(t0, step))
             .min()
     }
@@ -40,6 +44,20 @@ impl View {
                     .skip(self.sideline_offset())
                     .take(self.sideline_visible_rows())
                     .any(|r| matches!(r, DisplayRow::Agent(a) if working(a)))
+    }
+
+    /// A CardMetrics row with an unserved field in the scroll window: its
+    /// skeleton needs frames to pulse, and an off-screen one wakes nothing.
+    fn breathe_on_screen(&self) -> bool {
+        let sideline_shown = (self.sideline_full || self.panel_w() > 0)
+            && self.sideline_view != crate::view_store::SidelineView::Backlog;
+        sideline_shown
+            && self
+                .painted_rows()
+                .iter()
+                .skip(self.sideline_offset())
+                .take(self.sideline_visible_rows())
+                .any(|r| matches!(r, DisplayRow::CardMetrics(a) if card_line::has_loading(a)))
     }
 }
 

@@ -424,36 +424,32 @@ pub(crate) fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, 
     let obj = raw
         .as_object()
         .ok_or_else(|| "registry top-level is not a JSON object".to_string())?;
-    // READ FORWARD, matching Python's load_registry. This store is global to
-    // every agent on the machine, so refusing a newer writer bricked every
-    // deployed reader at once rather than only the one that was behind. Rows are
-    // read as raw `Value` here and unknown keys are already ignored, so a newer
-    // store costs this path nothing but the fields it cannot see.
-    //
-    // The announcement is required, not courtesy: silently reading a partial row
-    // makes it indistinguishable from a complete one, and a routing decision
-    // taken on one leaves no trace. Fixing only Python would have left this
-    // path, the daemon, and mux still failing closed on the same file.
+    // Read newer registries forward; announce whether this writer may safely
+    // write back, since this file governs every agent on the machine.
     let on_disk_version = obj.get("schema_version").and_then(Value::as_u64);
-    // Registry schema versions this fno reads: `1..=REGISTRY_SCHEMA_VERSION`
-    // (the current write version plus the older shapes it back-fills in
-    // memory). Each bump is forward-compat: a stale reader pinned to a lower
-    // set rejects a newer store instead of silently dropping a field. v10
-    // removes the on-disk `provider` + per-provider session-id trio;
-    // a legacy v1..=v9 row still carries `provider`, read leniently below. A
-    // range, not a list: the upper bound cannot drift from the version this
-    // binary writes.
+    // Older schema shapes remain readable; newer versions are floor-gated.
     let mut read_forward = false;
     match on_disk_version {
         Some(v) if (1..=REGISTRY_SCHEMA_VERSION as u64).contains(&v) => {}
         Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
             read_forward = true;
+            let writer = crate::state::Registry {
+                schema_version: u32::try_from(v).unwrap_or(u32::MAX),
+                min_writer_version: obj
+                    .get("min_writer_version")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| n.try_into().ok()),
+                writer_rev: obj
+                    .get("writer_rev")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                ..Default::default()
+            };
+            let min_writer = crate::state::effective_min_writer(&writer);
+            let writer_rev = writer.writer_rev.as_deref().unwrap_or("unstamped");
             eprintln!(
-                "fno agents: registry at {} is schema_version={v}, ahead of the \
-                 schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
-                 Reading the fields it knows and ignoring the rest; writes are \
-                 refused until this fno is upgraded. Rows may be incomplete.",
-                registry_path.display()
+                "{}",
+                registry_read_announcement(registry_path, v, min_writer, writer_rev)
             );
         }
         other => {
@@ -498,6 +494,23 @@ pub(crate) fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, 
         }
     }
     Ok(out)
+}
+
+fn registry_read_announcement(
+    path: &Path,
+    version: u64,
+    min_writer: u32,
+    writer_rev: &str,
+) -> String {
+    let policy = if min_writer <= REGISTRY_SCHEMA_VERSION {
+        "additive; unknown fields preserved; writes allowed"
+    } else {
+        "incompatible; writes are refused until this fno is upgraded"
+    };
+    format!(
+        "fno agents: registry at {} has schema_version={version}, min_writer_version={min_writer}; {policy}; writer_rev={writer_rev}",
+        path.display()
+    )
 }
 
 /// One registry row's shape checks, split out of [`load_registry_entries`] so a
@@ -4664,11 +4677,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let reg = dir.join("registry.json");
 
-        // Missing file -> empty (not an error).
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 0);
 
-        // Legacy Python format: top-level "agents" with provider as the
-        // harness identity. Current rows carry harness separately.
         let valid = r#"{"name":"cx","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         let valid_current = r#"{"name":"cx","harness":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         fs::write(
@@ -4680,7 +4690,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["name"], "cx");
 
-        // Daemon format: "entries" fallback.
         let valid_g = r#"{"name":"e","provider":"gemini","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         fs::write(
             &reg,
@@ -4689,9 +4698,15 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Current v8 (canonical-identity bump), v5 (inside_leg), and the
-        // prior v4 (host_mode bump) are accepted, and v1 back-compat reads are
-        // retained (the widened accepted set).
+        for (floor, expected) in [
+            (REGISTRY_SCHEMA_VERSION, "writes allowed"),
+            (REGISTRY_SCHEMA_VERSION + 1, "writes are refused"),
+        ] {
+            let announcement = registry_read_announcement(&reg, 99, floor, "writer");
+            assert!(announcement.contains(expected) && announcement.contains("writer_rev=writer"));
+        }
+
+        // Current, prior, and v1 registry shapes remain readable.
         fs::write(
             &reg,
             format!(r#"{{"schema_version":8,"agents":[{valid}]}}"#),
@@ -4717,10 +4732,7 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // A NEWER schema_version now reads forward rather than erroring. The old
-        // refusal meant one source-ahead writer bricked every deployed reader on
-        // the machine at once; a reader that is merely behind must degrade, not
-        // take the fleet down. Matches Python load_registry.
+        // Newer schema reads forward so one ahead writer cannot brick all readers.
         fs::write(
             &reg,
             format!(r#"{{"schema_version":99,"agents":[{valid_current}]}}"#),
@@ -4740,15 +4752,13 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // A missing or non-integer version is damage, not a newer writer.
+        // Missing or non-integer versions are damage.
         fs::write(&reg, r#"{"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
         fs::write(&reg, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // an unknown provider no longer bricks the read -- it loads as
-        // an undispatchable identity row (goose: a real CLI we deliberately do
-        // not host). Capability is refused later at the spawn seam, not here.
+        // Unknown providers load as undispatchable rows; spawn refuses them.
         fs::write(
             &reg,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"goose","cwd":"/x","log_path":"/l","status":"live"}]}"#,
@@ -4756,7 +4766,7 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Corrupt identity (empty provider AND no harness) still bricks (AC1-ERR).
+        // Empty provider without a harness is corrupt.
         fs::write(
             &reg,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"","cwd":"/x","log_path":"/l","status":"live"}]}"#,
@@ -4764,7 +4774,7 @@ mod tests {
         .unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // Unknown status -> Err.
+        // Unknown statuses are corrupt.
         fs::write(
             &reg,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"codex","cwd":"/x","log_path":"/l","status":"zombie"}]}"#,
@@ -4772,12 +4782,7 @@ mod tests {
         .unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // `exited` (and the other projected AgentStatus values) MUST be
-        // accepted: the daemon writes `status:"exited"` when a worker exits
-        // and retains the row until rm. A too-narrow {live,orphaned} set
-        // hard-errored every read until the row was removed (
-        // grid testing surfaced this). Spot-check the previously-rejected
-        // statuses now load cleanly.
+        // Projected AgentStatus values, including exited, remain readable.
         for st in [
             "exited",
             "idle",
@@ -4802,7 +4807,6 @@ mod tests {
             );
         }
 
-        // Missing required field (no log_path) -> Err (Python AgentEntry TypeError).
         fs::write(
             &reg,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"codex","cwd":"/x","status":"live"}]}"#,
@@ -4810,11 +4814,9 @@ mod tests {
         .unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // agents not a list -> Err.
         fs::write(&reg, r#"{"schema_version":3,"agents":{}}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // Invalid UTF-8 -> Err (strict decode, codex P2).
         fs::write(&reg, [0xff, 0xfe, 0x00]).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
@@ -4831,8 +4833,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let reg = dir.join("registry.json");
 
-        // AC2-HP: an alien harness row (provider == harness == "newharness")
-        // loads instead of bricking. Same fixture the Python parity test uses.
+        // Alien harness rows load instead of bricking.
         fs::write(
             &reg,
             r#"{"schema_version":9,"agents":[{"name":"nh","provider":"newharness","harness":"newharness","harness_session_id":"deadbeefcafef00d","cwd":"/x","log_path":"/l","status":"live"}]}"#,
@@ -4842,8 +4843,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["provider"], "newharness");
 
-        // AC1-EDGE: a provider-less row (post-v10 writer shape, harness only)
-        // loads with provider backfilled from harness.
+        // Provider-less rows load with provider backfilled from harness.
         fs::write(
             &reg,
             r#"{"schema_version":9,"agents":[{"name":"pv","harness":"claude","harness_session_id":"aaaabbbbccccdddd","cwd":"/x","log_path":"/l","status":"live"}]}"#,

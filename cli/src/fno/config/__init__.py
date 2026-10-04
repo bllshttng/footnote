@@ -1229,8 +1229,9 @@ class WordCapBlock(BaseModel):
     """Per-surface masked-word caps for style rule 7.
 
     One number per surface that is read MID-TURN. The surface set itself lives
-    in `fno.style.CAPPED_SURFACES` and is not configurable: a project may move a
-    number here, and may never cap a surface the checker says is uncapped.
+    in the style gate (crates/fno-agents/src/backlog/style_check.rs) and is not
+    configurable: a project may move a number here, and may never cap a surface
+    the checker says is uncapped.
 
     Bounds come from a validator, not from `Field(80, ge=1)`. A positional
     default plus a constraint makes mypy resolve this class's `default_factory`

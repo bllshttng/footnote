@@ -78,11 +78,13 @@ def _collect_event_types() -> list[str]:
         return []
 
     # Rust-infrastructure sources: process identities used exclusively by the
-    # Rust fno-agents supervisor. Event types whose ALL sources are within this
-    # set were added to events-schema.yaml as documentation for Rust-emitted
-    # events and are never emitted by the Python fno pipeline. 'active-backlog'
-    # is the daemon's own dispatch task (daemon.rs), not a Python producer.
-    rust_infra_sources = frozenset(["daemon", "subagent", "loop", "pr-heal", "active-backlog"])
+    # Rust fno-agents supervisor or its standalone spawn gate. Event types whose
+    # ALL sources are within this set are documented for Rust emitters and are
+    # never emitted by the Python fno pipeline. 'active-backlog' is the daemon's
+    # own dispatch task (daemon.rs), not a Python producer.
+    rust_infra_sources = frozenset(
+        ["daemon", "subagent", "loop", "pr-heal", "active-backlog", "rust"]
+    )
 
     result = []
     for entry in SCHEMA.get("event_types", []):

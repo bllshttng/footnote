@@ -199,13 +199,20 @@ fn main() {
     ) {
         std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
-    // `harness-roster`: the one-roster JSON read; Python's
-    // fno.harness_names transports here through resolve_binary.
+    // `harness-roster`: Python's fno.harness_names one-roster JSON read.
     if args.first().map(String::as_str) == Some("harness-roster") {
         std::process::exit(fno_agents::harness_roster::run_harness_roster(&args[1..]));
     }
+    // `terminals`: the delivered-terminal vocabulary JSON read; Python's
+    // ledger promotion gate and scoreboard fold read it like the roster.
+    if args.first().map(String::as_str) == Some("terminals") {
+        std::process::exit(fno_agents::terminal_vocab::run_terminals(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("registry-commit") {
+        std::process::exit(fno_agents::registry_commit::run(&args[1..]));
     }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
@@ -403,6 +410,12 @@ async fn run(args: Vec<String>) -> i32 {
     // stays binary-direct because it only folds a local diff and needs no daemon.
     if matches!(verb, "test-delta") {
         return fno_agents::test_delta::run_test_delta(&args[1..]);
+    }
+
+    // The style gate's hidden binary-direct door (mail, encounters, markdown);
+    // matched with `matches!` so the routable-verb parity sets never see it.
+    if matches!(verb, "style-check") {
+        return fno_agents::backlog::style_check::run_cli(&args[1..]);
     }
 
     // `component-verdict` is the HIDDEN decision verb for deployed-component
@@ -1652,18 +1665,16 @@ async fn run(args: Vec<String>) -> i32 {
     };
 
     let call_result = if verb_owned == "rm" {
-        // change 3: a stale daemon means the removal would be
-        // executed by the OLD binary - the exact shape that left four
-        // sessions stamped origin=adopted while their harness sessions
-        // stayed alive. The notice moves onto the refusal path for rm:
-        // non-zero, no `removed:` line, and the remedy named. `list` keeps
-        // its advisory drift notice (a stale read is still a read).
-        if let Some(w) = drift_warning(&check_daemon_drift(&home).await, None) {
-            eprintln!("fno-agents: refusing rm: {w}");
-            eprintln!("  the removal was not attempted; run `fno doctor update` (or restart the daemon) and retry");
+        let Ok(result) = fno_agents::restart_run::rm_after_drift_repair(
+            &check_daemon_drift(&home).await,
+            fno_agents::restart_run::restart_daemon_for_rm(),
+            call(&home, &daemon_bin, &req),
+        )
+        .await
+        else {
             return 21;
-        }
-        call(&home, &daemon_bin, &req).await
+        };
+        result
     } else {
         call(&home, &daemon_bin, &req).await
     };
@@ -1721,11 +1732,8 @@ async fn run(args: Vec<String>) -> i32 {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     );
                 }
-                // Drift warning on read/removal verbs, stderr-only so a
-                // `--json` stdout consumer stays clean. These verbs already
-                // ensured a daemon is up via `call`; a freshly lazy-started one
-                // reads Fresh, so no false warning. A separate status probe keeps
-                // this off every other verb's hot path.
+                // Keep drift warnings on read/removal verbs stderr-only; `call`
+                // already ensured a daemon, so only these verbs pay the probe.
                 if warns_on_daemon_drift(&verb_owned) {
                     let state = check_daemon_drift(&home).await;
                     if let Some(w) = drift_warning(&state, None) {

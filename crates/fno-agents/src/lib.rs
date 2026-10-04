@@ -124,6 +124,7 @@ pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
+pub mod codex_watch;
 pub mod compaction;
 mod completion_output;
 pub mod component_update;
@@ -342,6 +343,7 @@ pub mod reclaim;
 pub mod reentry;
 pub mod refusal_rate;
 pub mod refusal_trend;
+pub mod registry_commit;
 pub mod registry_guard;
 pub mod registry_json;
 pub mod reign_eval;
@@ -432,6 +434,7 @@ pub mod sync_canonical;
 pub mod system_sender;
 pub mod task_context;
 pub mod terminal_stop;
+pub mod terminal_vocab;
 pub mod territory;
 pub mod test_delta;
 pub mod test_hold;
@@ -1468,6 +1471,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // transaction (classified, claims-held, pane-stopped, hand-off,
     // resumed, flipped, rolled-back), carrying the name and strategy.
     "agent_convert_phase",
+    // Spawn gate: registry writer-floor incompatibility, latched by the
+    // writer/floor/reader tuple so repeated refusals emit once.
+    "version_skew",
     "agent_stopped",
     // Stop/rm claims release: the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.
@@ -1835,7 +1841,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "rust", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

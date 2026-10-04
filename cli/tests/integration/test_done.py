@@ -10,7 +10,9 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,19 @@ from typer.testing import CliRunner
 from fno.cli import app
 
 runner = CliRunner()
+
+# The promise gate refuses a close whose plan is unreadable, so a fixture
+# that closes a live node needs a real, parseable plan. The done-status
+# fixtures never reach the gate and keep their literal paths.
+_PLANS_DIR = tempfile.mkdtemp(prefix="done-it-plans-")
+
+
+def _readable_plan(name: str = "p") -> str:
+    path = os.path.join(_PLANS_DIR, f"{name}.md")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write("---\nstatus: ready\n---\n# plan\n")
+    return path
 
 
 # -- shared fixtures/helpers --
@@ -561,7 +576,7 @@ def test_done_normal_mode_still_prefers_env_session(tmp_graph, tmp_ledger, monke
     """#30 control: without --force-overwrite, env_session still takes
     precedence over ledger (normal first-time marking semantics unchanged).
     """
-    plan_path = "/some/plan.md"
+    plan_path = _readable_plan()
     ledger_session = "ledger-session-aabbccdd"
     current_env_session = "current-env-99887766"
 
