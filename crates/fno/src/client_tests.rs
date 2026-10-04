@@ -2000,9 +2000,15 @@ fn chrome_hit_rows() {
     assert!(view.chrome_hit(0, 41).is_none());
 
     // Rows (x-cd67 US1; the strip owns terminal row 0 since R15): the strip
-    // word at row 0, then [squad 1 (terminal 1), Blank (2), squad 2 (3)].
+    // words right-align now (the bell moved to the tab bar), so the word
+    // columns read from the shared span table, then [squad 1 (terminal 1),
+    // Blank (2), squad 2 (3)].
     let view = two_pane_view();
-    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
+    let (word_start, _, _) = view.top_row_spans()[0];
+    assert!(matches!(
+        view.chrome_hit(0, word_start as u16),
+        Some(ChromeHit::TopRow(_))
+    ));
     assert_eq!(cmds(view.chrome_hit(3, 4)), vec![Command::SelectSquad(2)]);
     // The Blank spacer row is inert.
     assert!(view.chrome_hit(2, 4).is_none());
