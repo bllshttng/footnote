@@ -315,6 +315,13 @@ fn outdated_lane_count(
         .filter(|(_, row_name)| rows.contains_key(row_name))
         .filter_map(|(_, row_name)| rows.get(row_name))
         .filter(|r| {
+            // A lane the clock already closes this hour is not walking, so
+            // its staleness never arms the refresh pass.
+            if let Some((start, end)) = parse_utc_hours(&row_value(r, "utc_hours")) {
+                if !hour_in_utc_window(utc_hour_now(), start, end) {
+                    return false;
+                }
+            }
             let harness = row_value(r, "harness");
             let (state, window, _age) = row_capacity(r, capacity.get(&harness));
             state == "unknown" && (window == "stale" || window == "absent")
@@ -4955,3 +4962,7 @@ mod tests {
 #[cfg(test)]
 #[path = "route_slot_utc_hours_tests.rs"]
 mod utc_hours_tests;
+
+#[cfg(test)]
+#[path = "route_slot_capacity_tests.rs"]
+mod capacity_tests;
