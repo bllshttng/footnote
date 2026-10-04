@@ -36,6 +36,9 @@ use std::time::SystemTime;
 #[path = "king_checkin_watch_projection.rs"]
 mod watch_projection;
 
+#[path = "king_checkin_posture.rs"]
+mod posture;
+
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
@@ -1126,6 +1129,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         }
     });
     take("crown", r_crown());
+    take("posture", posture::reading());
     take("refusal_rate", r_refusal_rate());
     take("subagents", crate::king_answers::r_subagents());
     take("wake_meter", r_wake_meter(since));
@@ -1266,6 +1270,16 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     }
     if let Some(hold) = get("self_hold").filter(|r| r.ok) {
         data.insert("self_hold".into(), hold.value.clone());
+    }
+    if let Some(p) = get("posture").filter(|r| r.ok) {
+        data.insert(
+            "posture_drifted".into(),
+            p.value.get("drifted").cloned().unwrap_or(json!(false)),
+        );
+        data.insert(
+            "posture_observed".into(),
+            p.value.get("observed").cloned().unwrap_or(Value::Null),
+        );
     }
     if let Some(sd) = get("skill_drift").filter(|r| r.ok) {
         let names: Vec<String> = sd
@@ -1830,6 +1844,8 @@ fn render_lines_with(
             }
         }
     }
+    lines.extend(posture::lines(readings));
+
     match failed("refusal_rate") {
         Some(r) => lines.push(format!("READER FAILED refusal_rate: {}", r.error)),
         None => {
@@ -2845,7 +2861,7 @@ mod tests {
     }
 
     #[test]
-    fn escalations_reading_names_overdue_defaults() {
+    fn escalations_reading_names_overdue_defaults_and_unreadable_paths() {
         let _lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2911,13 +2927,7 @@ mod tests {
             );
         });
         let _ = std::fs::remove_dir_all(&base);
-    }
 
-    #[test]
-    fn escalations_reading_says_unreadable_when_the_path_is_a_file() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let (base, repo, dir) = escalations_fixture("unreadable");
         with_fixture_home(&base, || {
             std::fs::remove_dir_all(&dir).unwrap();
@@ -2926,6 +2936,7 @@ mod tests {
             let err = r_escalations(&repo, &folded).unwrap_err();
             assert!(err.starts_with("unreadable ("), "{err}");
         });
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// One escalation note's frontmatter plus stub sections.
