@@ -63,10 +63,10 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_BOARD_SCOPE` | rs | unclear: crates/fno/src/backlog_view.rs:333 |
 | `FNO_BOOTSTRAP_WHEEL` | rs | unclear: crates/fno/src/bootstrap.rs:280 |
 | `FNO_BUS_DIR` | py+rs | unclear: cli/src/fno/paths.py:1204 |
-| `FNO_BUS_LOCK_TIMEOUT_SECS` | rs | Overrides the bus-append door's sidecar-lock wait; test escape hatch for the contended-lock refusal. |
-| `FNO_BUS_MAX_BYTES` | py+rs | Size cap the bus-append door rotates the live log at; malformed degrades to 5 MB. |
-| `FNO_BUS_RETAIN` | py+rs | Rotated bus segments the append door keeps; malformed degrades to 5. |
-| `FNO_MAIL_SUBJECT` | rs+py | The peeled `mail send --subject`; the front exports it, the envelope render and the bus-append door stamp it as `meta.subject`. |
+| `FNO_BUS_LOCK_TIMEOUT_SECS` | py+rs | Overrides the bus-append door's sidecar-lock wait; test escape hatch for the contended-lock refusal. |
+| `FNO_BUS_MAX_BYTES` | rs | Size cap the bus-append door rotates the live log at; malformed degrades to 5 MB. |
+| `FNO_BUS_RETAIN` | rs | Rotated bus segments the append door keeps; malformed degrades to 5. |
+| `FNO_MAIL_SUBJECT` | py+rs | The peeled `mail send --subject`; the front exports it, the envelope render and the bus-append door stamp it as `meta.subject`. |
 | `FNO_CALLER_KIND` | rs | The surface that shelled this fno-agents verb; `mux` stamps `caller_kind` on its events. |
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
