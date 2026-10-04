@@ -4,9 +4,10 @@
 
 use std::{
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
+
+use crate::lead_checkin::OwnTranscript::*;
 
 use serde_json::{json, Value};
 
@@ -14,18 +15,37 @@ const SKILL_PREFIX: &str = "Base directory for this skill: ";
 const TRUNCATED: &str = "\n\n[... skill content truncated for compaction";
 
 pub(crate) fn reading() -> Result<Value, String> {
-    let path = crate::lead_checkin::own_claude_transcript()?;
-    fold(&path)
+    match crate::lead_checkin::own_transcript() {
+        // Only a claude session carries invoked_skills attachments; every
+        // other harness names why the reader cannot run there.
+        Ok(Text {
+            harness: "claude",
+            text,
+            ..
+        }) => fold(&text),
+        Ok(Text {
+            harness: "codex", ..
+        }) => Ok(unmeasured_json(
+            "codex carries no invoked_skills attachments",
+        )),
+        Ok(Text { harness, .. }) => Ok(unmeasured_json(&format!(
+            "the {harness} transcript carries no invoked_skills attachments"
+        ))),
+        Ok(Unmeasured { reason, .. }) => Ok(unmeasured_json(&reason)),
+        Err(e) => Err(e),
+    }
 }
 
-fn fold(path: &Path) -> Result<Value, String> {
+fn unmeasured_json(reason: &str) -> Value {
+    json!({ "unmeasured": reason, "carried": Value::Null, "stale": [] })
+}
+
+fn fold(raw: &str) -> Result<Value, String> {
     // ponytail: reads the whole transcript each beat, as repeated_asks does; seek to the newest invoked_skills row if the check-in's reader time matters.
-    let file = fs::File::open(path).map_err(|e| format!("transcript unreadable: {e}"))?;
     let mut carried: Vec<(String, String)> = Vec::new();
     let mut reinvoked: Vec<String> = Vec::new();
     let mut compacted_at: Option<String> = None;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|e| format!("transcript unreadable: {e}"))?;
+    for line in raw.lines() {
         if line.contains("invoked_skills") {
             let Ok(row) = serde_json::from_str::<Value>(&line) else {
                 continue;
@@ -156,6 +176,9 @@ pub(crate) fn lines(readings: &[crate::lead_checkin::Reading]) -> Vec<String> {
     if !reading.ok {
         return vec![format!("READER FAILED skill_drift: {}", reading.error)];
     }
+    if let Some(reason) = reading.value.get("unmeasured").and_then(Value::as_str) {
+        return vec![format!("skill drift: unmeasured ({reason})")];
+    }
     let Some(ts) = reading.value.get("compacted_at").and_then(Value::as_str) else {
         return vec!["skill drift: none (no compaction in this session)".into()];
     };
@@ -248,8 +271,9 @@ mod tests {
             .join("\n")
             + "\n";
         std::fs::write(&transcript, body).unwrap();
+        let raw = std::fs::read_to_string(&transcript).unwrap();
 
-        let folded = fold(&transcript).unwrap();
+        let folded = fold(&raw).unwrap();
         assert_eq!(folded["compacted_at"], json!("2026-09-30T01:35:00Z"));
         assert_eq!(folded["carried"], json!(2));
         assert_eq!(
@@ -295,5 +319,16 @@ mod tests {
             vec!["READER FAILED skill_drift: transcript unreadable".to_string()]
         );
         assert!(lines(&[]).is_empty());
+
+        // A harness with no invoked_skills mechanism names why, never a zero.
+        assert_eq!(
+            lines(&[Reading::took(
+                "skill_drift",
+                unmeasured_json("codex carries no invoked_skills attachments")
+            )]),
+            vec![
+                "skill drift: unmeasured (codex carries no invoked_skills attachments)".to_string()
+            ]
+        );
     }
 }

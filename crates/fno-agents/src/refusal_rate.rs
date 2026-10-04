@@ -2,14 +2,18 @@
 //! for context degradation, no model introspection needed. Feeds the
 //! `refusal_rate` reading in `lead_checkin.rs`.
 //!
-//! The bucket regex is the union of the 7 patterns proven against a live
+//! The bucket set is the union of the 7 patterns proven against a live
 //! lead transcript (gate
 //! refusals, usage errors, style-lint refusals, fno guard refusals,
-//! timeouts, parse errors, operator rejections). A single combined check is
-//! enough here: the reading reports one rate, not a per-bucket breakdown.
+//! timeouts, parse errors, operator rejections). The reading reports one
+//! rate, not a per-bucket breakdown.
+//!
+//! Reads claude-shaped and codex rollout texts. While machine_watch reads
+//! hot, `discount_load` drops the two load-caused buckets - `timeout` and
+//! `gate_refusal` - from the numerator: they rise with machine load, not
+//! lead quality (a 14.5 to 18 percent rise measured under load 100 to 200).
 
 use serde_json::{json, Value};
-use std::path::Path;
 use std::sync::OnceLock;
 
 pub(crate) const REFUSAL_BUCKETS: [(&str, &str); 7] = [
@@ -38,22 +42,7 @@ pub(crate) const REFUSAL_BUCKETS: [(&str, &str); 7] = [
 /// Matches the 4000-char lead the lead-control retro measured against.
 const CONTENT_LEAD_CHARS: usize = 4000;
 
-static REFUSAL_RE: OnceLock<Result<regex::Regex, String>> = OnceLock::new();
 static BUCKET_SET: OnceLock<regex::RegexSet> = OnceLock::new();
-
-fn refusal_regex() -> Result<regex::Regex, String> {
-    let pattern = REFUSAL_BUCKETS
-        .iter()
-        .map(|(_, pattern)| *pattern)
-        .collect::<Vec<_>>()
-        .join("|");
-    match REFUSAL_RE
-        .get_or_init(|| regex::Regex::new(&pattern).map_err(|e| format!("bad refusal regex: {e}")))
-    {
-        Ok(regex) => Ok(regex.clone()),
-        Err(error) => Err(error.clone()),
-    }
-}
 
 pub(crate) fn buckets_of(text: &str) -> impl Iterator<Item = &'static str> + '_ {
     let set = BUCKET_SET.get_or_init(|| {
@@ -79,7 +68,17 @@ fn lead(text: &str, max_chars: usize) -> &str {
     }
 }
 
-fn trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
+fn trailing_calls(harness: &str, text: &str, window: usize) -> Vec<Option<String>> {
+    if harness == "codex" {
+        codex_trailing_calls(text, window)
+    } else {
+        claude_trailing_calls(text, window)
+    }
+}
+
+/// The claude-shaped pairing: calls join to results by tool_use id, and a
+/// result may land rows after its call.
+fn claude_trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
     let mut order: Vec<String> = Vec::new();
     let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for line in text.lines() {
@@ -127,36 +126,111 @@ fn trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
         .collect()
 }
 
-/// Refusal rate over the trailing `window` tool calls in `transcript`.
+/// The codex rollout pairing: call and output rows share a `call_id`, so
+/// each output row answers the call carrying its id; rows without one (the
+/// legacy shapes, `local_shell_call`) fall back to answering the newest
+/// call still missing a result.
+fn codex_trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
+    let mut calls: Vec<Option<String>> = Vec::new();
+    let mut call_ids: Vec<Option<String>> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+            "function_call" | "custom_tool_call" | "local_shell_call" => {
+                calls.push(None);
+                call_ids.push(
+                    payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+            "custom_tool_call_output" | "function_call_output" => {
+                let out = crate::session_activity::codex_output_text(payload).into_owned();
+                let call_id = payload.get("call_id").and_then(Value::as_str);
+                let slot = match call_id {
+                    Some(id) => call_ids
+                        .iter()
+                        .position(|slot_id| slot_id.as_deref() == Some(id))
+                        .and_then(|idx| calls.get_mut(idx)),
+                    None => calls.iter_mut().rev().find(|slot| slot.is_none()),
+                };
+                if let Some(slot) = slot {
+                    *slot = Some(out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let start = calls.len().saturating_sub(window);
+    calls.into_iter().skip(start).collect()
+}
+
+/// Refusal rate over the trailing `window` tool calls in one transcript
+/// text of `harness` ("claude" or "codex").
 ///
 /// Never errors on a transcript that merely has fewer than `window` calls -
 /// it reports against however many exist, and `"window"` in the return
 /// value is that ACTUAL count, so the printed line never claims a
-/// denominator it did not have. Errors only when the transcript itself
-/// cannot be read.
-pub fn refusal_rate(transcript: &Path, window: usize) -> Result<Value, String> {
-    let text =
-        std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
-    let trailing = trailing_calls(&text, window);
+/// denominator it did not have.
+///
+/// `discount_load` (machine_watch reads hot) makes the headline `rate` the
+/// load-free one: the `timeout` and `gate_refusal` buckets leave the
+/// numerator, and `rate_full` keeps the raw rate so a reader can see both.
+pub fn rate_from_text(
+    harness: &str,
+    text: &str,
+    window: usize,
+    discount_load: bool,
+) -> Result<Value, String> {
+    let trailing = trailing_calls(harness, text, window);
     let total = trailing.len();
-    let re = refusal_regex()?;
-    let refused = trailing
+    let buckets: Vec<Vec<&'static str>> = trailing
         .iter()
-        .filter(|c| {
-            c.as_ref()
-                .is_some_and(|r| re.is_match(lead(r, CONTENT_LEAD_CHARS)))
+        .map(|call| {
+            call.as_ref()
+                .map(|text| buckets_of(text).collect())
+                .unwrap_or_default()
         })
-        .count();
-    let rate = if total == 0 {
-        0.0
+        .collect();
+    let refused_full = buckets.iter().filter(|set| !set.is_empty()).count();
+    let (refused, discounted) = if discount_load {
+        (
+            buckets
+                .iter()
+                .filter(|set| {
+                    set.iter()
+                        .any(|bucket| *bucket != "timeout" && *bucket != "gate_refusal")
+                })
+                .count(),
+            true,
+        )
     } else {
-        refused as f64 / total as f64
+        (refused_full, false)
+    };
+    let ratio = |refused: usize| {
+        if total == 0 {
+            0.0
+        } else {
+            refused as f64 / total as f64
+        }
     };
     Ok(json!({
-        "rate": rate,
+        "rate": ratio(refused),
+        "rate_full": ratio(refused_full),
         "refused": refused,
         "total": total,
         "window": total,
+        "load_discounted": discounted,
     }))
 }
 
@@ -206,11 +280,52 @@ mod tests {
             transcript_line("t3", "Bash", Some("[fno recursive-grep guard] refused")),
         ];
         let file = write_transcript(&lines);
-        let result = refusal_rate(file.path(), 200).unwrap();
+        let result = rate_from_text(
+            "claude",
+            &std::fs::read_to_string(file.path()).unwrap(),
+            200,
+            false,
+        )
+        .unwrap();
         assert_eq!(result["total"], 3);
         assert_eq!(result["refused"], 2);
         assert_eq!(result["window"], 3);
         assert!((result["rate"].as_f64().unwrap() - (2.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(result["load_discounted"], false);
+    }
+
+    /// The codex rollout pairing: an output answers its `call_id` when the
+    /// rows carry one (real rollouts do), positionally otherwise, and the
+    /// load discount drops the timeout bucket while the usage-error bucket
+    /// stays counted.
+    #[test]
+    fn codex_rows_pair_by_call_id_and_the_load_discount_drops_load_buckets() {
+        let codex_line = |ptype: &str, call_id: &str, text: &str| {
+            let mut payload = json!({"type": ptype});
+            if !call_id.is_empty() {
+                payload["call_id"] = json!(call_id);
+            }
+            if !text.is_empty() {
+                payload["output"] = json!(text);
+            }
+            json!({"payload": payload}).to_string()
+        };
+        // Out-of-order outputs: the first output answers the SECOND call by
+        // id; the id-less output falls back to the newest unanswered call.
+        let text = [
+            codex_line("function_call", "c1", ""),
+            codex_line("function_call", "c2", ""),
+            codex_line("function_call_output", "c2", "Usage: bad args"),
+            codex_line("function_call_output", "", "Command timed out after 30m"),
+        ]
+        .join("\n");
+        let full = rate_from_text("codex", &text, 200, false).unwrap();
+        assert_eq!(full["total"], 2);
+        assert_eq!(full["refused"], 2);
+        let discounted = rate_from_text("codex", &text, 200, true).unwrap();
+        assert_eq!(discounted["load_discounted"], true);
+        assert_eq!(discounted["refused"], 1, "the timeout bucket left");
+        assert_eq!(discounted["rate_full"], full["rate"]);
     }
 
     #[test]
@@ -225,7 +340,13 @@ mod tests {
         }
         lines.push(transcript_line("t5", "Bash", Some("clean result")));
         let file = write_transcript(&lines);
-        let result = refusal_rate(file.path(), 1).unwrap();
+        let result = rate_from_text(
+            "claude",
+            &std::fs::read_to_string(file.path()).unwrap(),
+            1,
+            false,
+        )
+        .unwrap();
         assert_eq!(result["total"], 1);
         assert_eq!(result["refused"], 0);
     }
@@ -234,15 +355,15 @@ mod tests {
     fn an_interrupted_call_with_no_result_counts_toward_total_never_refused() {
         let lines = vec![transcript_line("t1", "Bash", None)];
         let file = write_transcript(&lines);
-        let result = refusal_rate(file.path(), 200).unwrap();
+        let result = rate_from_text(
+            "claude",
+            &std::fs::read_to_string(file.path()).unwrap(),
+            200,
+            false,
+        )
+        .unwrap();
         assert_eq!(result["total"], 1);
         assert_eq!(result["refused"], 0);
-    }
-
-    #[test]
-    fn unreadable_transcript_is_an_error() {
-        let err = refusal_rate(Path::new("/nonexistent/path.jsonl"), 200).unwrap_err();
-        assert!(err.contains("unreadable"));
     }
 
     // A byte-offset slice at exactly CONTENT_LEAD_CHARS bytes would panic
@@ -255,7 +376,13 @@ mod tests {
         content.push_str("Usage: this text is past the lead and unread");
         let lines = vec![transcript_line("t1", "Bash", Some(&content))];
         let file = write_transcript(&lines);
-        let result = refusal_rate(file.path(), 200).unwrap();
+        let result = rate_from_text(
+            "claude",
+            &std::fs::read_to_string(file.path()).unwrap(),
+            200,
+            false,
+        )
+        .unwrap();
         assert_eq!(result["total"], 1);
         assert_eq!(result["refused"], 0, "the matching text sits past the lead");
     }

@@ -547,9 +547,10 @@ fn holds_live_team(entries: &[crate::state::RegistryEntry], sid: &str) -> bool {
     false
 }
 
-/// Move the record from `old_scope` to `new_scope`, keeping name and regnal,
-/// when the old record's holder is the live team now holding `new_scope`
-/// (a told-to re-scope). Otherwise refuse and name the holder.
+/// Move the record from `old_scope` to `new_scope`, keeping name, regnal,
+/// theme and title, when the old record's holder is the live team now
+/// holding `new_scope` (a told-to re-scope). Otherwise refuse and name the
+/// holder.
 pub fn keep_from(
     store_path: &Path,
     registry_path: &Path,
@@ -586,17 +587,23 @@ pub fn keep_from(
             ));
         }
         store.teams.remove(&old);
-        // A re-scope clears the theme: the epics changed, so the next
-        // check-in must name the theme again. The title recomputes from the
-        // bare scope until it does.
+        // The theme belongs to the lead, not the scope: a re-scope carries
+        // it, so growing the epic list never drops the rank back to the raw
+        // scope text. The title always rebuilds from the landing team's
+        // level and the carried theme - the same string when the level is
+        // unchanged, the right rank on a level change - and an L1 takes no
+        // theme at all (set_theme refuses one), so a re-scope that lands on
+        // a Head row drops the carried theme with it.
+        let carried_theme = rec.theme.clone().filter(|_| team.level != 1);
+        let carried_title = Some(title(team.level as u32, &new, carried_theme.as_deref()));
         store.teams.insert(
             new.clone(),
             TeamNameRecord {
                 holder_session: team.holder_session.clone(),
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
-                theme: None,
-                title: Some(title(team.level as u32, &new, None)),
+                theme: carried_theme,
+                title: carried_title,
                 ..rec
             },
         );
@@ -1342,7 +1349,7 @@ mod tests {
             assert!(err.contains("set once per scope"), "{err}");
         }
 
-        fn a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one() {
+        fn a_rescope_carries_the_theme_and_title_and_the_next_beat_needs_no_new_one() {
             let tmp = tempfile::TempDir::new().unwrap();
             write_registry(
                 tmp.path(),
@@ -1367,29 +1374,62 @@ mod tests {
                 "2026-09-29T22:00:00Z",
             );
             stamp_lead(&store, &mk("x-aaaa", t0, Some("span:200h")), None).unwrap();
-            // The told-to re-scope: the same holder now holds a new scope.
+            // The told-to re-scope: the same holder now holds a scope grown
+            // by one epic. The theme and title it titled stay.
             write_registry(
                 tmp.path(),
-                json!([team_row("kestrel", "new-scope", 2, "sess-k")]),
+                json!([team_row("kestrel", "x-aaaa,x-bbbb", 2, "sess-k")]),
             );
-            keep_from(&store, &registry, "x-aaaa", "new-scope").unwrap();
+            keep_from(&store, &registry, "x-aaaa", "x-aaaa,x-bbbb").unwrap();
             let dump = snapshot(&store).unwrap();
-            let rec = &dump["teams"]["new-scope"];
-            assert!(rec.get("theme").is_none() || rec["theme"].is_null());
-            assert_eq!(rec["title"], json!("Lead of new-scope"));
+            let rec = &dump["teams"]["x-aaaa,x-bbbb"];
+            assert_eq!(rec["theme"], json!("native backlog"));
+            assert_eq!(rec["title"], json!("Lead of native backlog"));
             // The next arm on the new scope folds the carried clock in.
-            stamp_lead(&store, &mk("new-scope", t1, None), None).unwrap();
-            let view = lead_view_in(&store, &mk("new-scope", t1, None));
+            stamp_lead(&store, &mk("x-aaaa,x-bbbb", t1, None), None).unwrap();
+            let view = lead_view_in(&store, &mk("x-aaaa,x-bbbb", t1, None));
             assert_eq!(view.created_at.as_deref(), Some(t0));
             assert_eq!(view.term.as_deref(), Some("span:200h"));
             // AC4-EDGE: a same-scope re-arm (a newer manifest, same scope)
             // starts fresh; the carried clock does not apply.
-            let view = lead_view_in(&store, &mk("new-scope", t2, None));
+            let view = lead_view_in(&store, &mk("x-aaaa,x-bbbb", t2, None));
             assert_eq!(view.created_at.as_deref(), Some(t2));
             assert_eq!(view.term, None);
-            let err = apply_team_naming(&store, &registry, None, None, None, Some(2), "new-scope")
-                .unwrap_err();
-            assert!(err.contains("--theme"), "{err}");
+            // The carried theme satisfies the once-per-team check: the next
+            // beat needs no new theme.
+            apply_team_naming(
+                &store,
+                &registry,
+                None,
+                None,
+                None,
+                Some(2),
+                "x-aaaa,x-bbbb",
+            )
+            .unwrap();
+            // A level change rebuilds the title: the themed L2 lead landing
+            // on an L0 Chief row reads Chief of the same theme.
+            write_registry(
+                tmp.path(),
+                json!([team_row("kestrel", "x-cccc", 0, "sess-k")]),
+            );
+            keep_from(&store, &registry, "x-aaaa,x-bbbb", "x-cccc").unwrap();
+            let dump = snapshot(&store).unwrap();
+            assert_eq!(dump["teams"]["x-cccc"]["theme"], json!("native backlog"));
+            assert_eq!(
+                dump["teams"]["x-cccc"]["title"],
+                json!("Chief of native backlog")
+            );
+            // A re-scope that lands on an L1 row drops the theme: a Head
+            // takes no theme, and its title recomputes from the project.
+            write_registry(
+                tmp.path(),
+                json!([team_row("kestrel", "fno", 1, "sess-k")]),
+            );
+            keep_from(&store, &registry, "x-cccc", "fno").unwrap();
+            let dump = snapshot(&store).unwrap();
+            assert!(dump["teams"]["fno"].get("theme").is_none());
+            assert_eq!(dump["teams"]["fno"]["title"], json!("Head of fno"));
         }
         an_unnamed_live_team_cannot_complete_checkin();
         a_successor_checkin_carries_the_name_into_its_registry_label();
@@ -1403,7 +1443,7 @@ mod tests {
         titles_fall_back_to_the_scope_and_unknown_levels_keep_the_level_form();
         a_theme_with_a_quote_or_bad_length_refuses();
         the_theme_is_set_once_per_scope_and_the_same_theme_is_a_noop();
-        a_rescope_clears_the_theme_and_the_next_beat_refuses_without_one();
+        a_rescope_carries_the_theme_and_title_and_the_next_beat_needs_no_new_one();
     }
     use super::*;
     use serde_json::json;
@@ -1826,6 +1866,11 @@ mod tests {
         assert!(dump["teams"].get("old-scope").is_none());
         assert_eq!(dump["teams"]["new-scope"]["name"], json!("barnaby"));
         assert_eq!(dump["teams"]["new-scope"]["regnal"], json!(2));
+        // An un-themed record recomputes its scope-derived title.
+        assert_eq!(
+            dump["teams"]["new-scope"]["title"],
+            json!("Head of new-scope")
+        );
         let registry = crate::state::load_registry(&registry_path(tmp.path())).unwrap();
         assert_eq!(registry.entries[0].name, "barnaby");
 

@@ -23,9 +23,10 @@
 //!
 //! rc 0 a completed beat, 3 when an asked-for row was not journalled or
 //! stdout could not be written, 2 usage failure.
-use crate::lead_history::LEAD_CHECKIN;
-use crate::org_board::{read_board, BoardOpts};
 use crate::org_fold::org_fold;
+use crate::king_board::{read_board, BoardOpts};
+use crate::lead_history::REIGN_CHECKIN;
+use crate::provenance::TranscriptSource;
 use crate::scrape::fno_bin;
 use serde_json::{json, Map, Value};
 use std::io::Write;
@@ -833,40 +834,117 @@ fn team_split_fields(
 /// context degradation, no model introspection needed. Resolves its OWN
 /// ambient identity (same primitive `claim_store`/`lead_verdict_inputs`
 /// already use) rather than taking a flag, so no CLI surface or Python
-/// wiring is needed to reach it - only claude sessions keep a per-session
-/// transcript file today (`crate::claude_drive::find_transcript`), so any
-/// other harness (or a claude session whose transcript cannot be found)
-/// reads as an ordinary failed reading, never a silent zero.
+/// wiring is needed to reach it - every harness with a transcript store the
+/// readers can read gets a reading, and a harness with no store names why.
 const REFUSAL_RATE_WINDOW: usize = 200;
 
-fn r_refusal_rate() -> Result<Value, String> {
-    let transcript = own_claude_transcript()?;
-    crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
+/// One check-in transcript reader's own transcript. `Text` carries the raw
+/// transcript text (a real file for claude and codex, the claude-shaped
+/// render for opencode); `Unmeasured` names a harness whose transcript the
+/// readers cannot read, never a silent zero.
+pub(crate) enum OwnTranscript {
+    Text {
+        harness: &'static str,
+        text: String,
+        /// The real transcript file, when one exists (claude, codex). The
+        /// opencode render is queried live from its store, so the subagent
+        /// reader has no file to pair per-agent transcripts against.
+        path: Option<PathBuf>,
+    },
+    Unmeasured {
+        reason: String,
+    },
 }
 
-/// The caller's own claude transcript, shared by the check-in transcript
-/// readers. Only claude sessions keep a per-session transcript file today
-/// (`crate::claude_drive::find_transcript`), so any other harness (or a
-/// claude session whose transcript cannot be found) reads as an ordinary
-/// failed reading, never a silent zero.
-pub(crate) fn own_claude_transcript() -> Result<PathBuf, String> {
+/// The reading value for a reader that cannot run on this harness: an
+/// explicit unmeasured value naming why, never a silent zero.
+pub(crate) fn unmeasured_value(reason: &str) -> Value {
+    json!({ "unmeasured": reason })
+}
+
+/// The caller's own transcript under whichever harness it runs. Claude
+/// resolves its per-session file, codex its rollout, opencode renders its
+/// store claude-shaped; pi, agy and the rest name why they read unmeasured.
+pub(crate) fn own_transcript() -> Result<OwnTranscript, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
-    if harness.as_deref() != Some("claude") {
-        return Err("the check-in transcript readers need a claude transcript; \
-             this session's harness is not claude"
-            .into());
-    }
     let session_id = session_id
         .ok_or_else(|| "no session id resolved from the ambient environment".to_string())?;
-    crate::claude_drive::find_transcript(&session_id)
-        .ok_or_else(|| format!("no transcript found for session {session_id}"))
+    let harness = harness
+        .as_deref()
+        .ok_or_else(|| "no harness resolved from the ambient environment".to_string())?;
+    match harness {
+        "claude" => {
+            let path = crate::claude_drive::find_transcript(&session_id)
+                .ok_or_else(|| format!("no transcript found for session {session_id}"))?;
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("transcript unreadable: {e}"))?;
+            Ok(OwnTranscript::Text {
+                harness: "claude",
+                text,
+                path: Some(path),
+            })
+        }
+        "codex" => {
+            let path = crate::lead_history::hygiene_transcript_for_holder("codex", &session_id)
+                .ok_or_else(|| format!("no codex rollout for session {session_id}"))?;
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("transcript unreadable: {e}"))?;
+            Ok(OwnTranscript::Text {
+                harness: "codex",
+                text,
+                path: Some(path),
+            })
+        }
+        "opencode" => {
+            let source = crate::opencode_transcript::OpencodeSource {
+                dbs: crate::opencode_transcript::opencode_stores(),
+                roots: None,
+            };
+            let file = source
+                .sessions(30)
+                .into_iter()
+                .find(|file| file.session_id == session_id)
+                .ok_or_else(|| format!("no opencode session {session_id} in its stores"))?;
+            Ok(OwnTranscript::Text {
+                harness: "opencode",
+                text: source.read(&file),
+                path: None,
+            })
+        }
+        other => Ok(OwnTranscript::Unmeasured {
+            reason: format!("no transcript store reader for harness {other}"),
+        }),
+    }
+}
+
+/// The trailing-window refusal rate reading. While machine_watch's runaway
+/// brake holds, the headline `rate` is the load-free one (the timeout and
+/// gate_refusal buckets leave the numerator); `rate_full` keeps the raw rate.
+fn r_refusal_rate() -> Result<Value, String> {
+    match own_transcript() {
+        // The opencode render carries tool-use blocks without ids and no
+        // tool results, so a rate over it would read a silent zero percent.
+        Ok(OwnTranscript::Text {
+            harness: "opencode",
+            ..
+        }) => Ok(unmeasured_value(
+            "the opencode render carries no tool results a refusal rate can read",
+        )),
+        Ok(OwnTranscript::Text { harness, text, .. }) => crate::refusal_rate::rate_from_text(
+            harness,
+            &text,
+            REFUSAL_RATE_WINDOW,
+            crate::machine_watch::brake_holds().is_some(),
+        ),
+        Ok(OwnTranscript::Unmeasured { reason, .. }) => Ok(unmeasured_value(&reason)),
+        Err(e) => Err(e),
+    }
 }
 
 /// The wake meter over the lead's own transcript. `since` is the previous
 /// loop row's top-level `ts`: token spend is the per-task-id delta since
 /// that beat, and with no previous row it reads the whole session.
 fn r_wake_meter(since: Option<&str>) -> Result<Value, String> {
-    let transcript = own_claude_transcript()?;
     let cut = match since {
         None => None,
         Some(ts) => Some(
@@ -875,7 +953,13 @@ fn r_wake_meter(since: Option<&str>) -> Result<Value, String> {
                 .timestamp() as f64,
         ),
     };
-    crate::wake_meter::wake_meter(&transcript, cut)
+    match own_transcript() {
+        Ok(OwnTranscript::Text { harness, text, .. }) => {
+            crate::wake_meter::wake_meter_text(harness, &text, cut)
+        }
+        Ok(OwnTranscript::Unmeasured { reason, .. }) => Ok(unmeasured_value(&reason)),
+        Err(e) => Err(e),
+    }
 }
 
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
@@ -1127,6 +1211,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     });
     take("team", r_team());
     take("refusal_rate", r_refusal_rate());
+    take("pushback", crate::lead_pushback::reading());
     take("subagents", crate::lead_answers::r_subagents());
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
@@ -1219,6 +1304,28 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "refusal_rate".into(),
             rr.value.get("rate").cloned().unwrap_or(Value::Null),
         );
+        data.insert(
+            "load_discounted".into(),
+            rr.value
+                .get("load_discounted")
+                .cloned()
+                .unwrap_or(Value::Bool(false)),
+        );
+    }
+    if let Some(pb) = get("pushback").filter(|r| r.ok) {
+        for key in [
+            "asks",
+            "routes",
+            "answered_self",
+            "escalated",
+            "overturned",
+            "score",
+        ] {
+            data.insert(
+                format!("pushback_{key}"),
+                pb.value.get(key).cloned().unwrap_or(Value::Null),
+            );
+        }
     }
     if let Some(sa) = get("subagents").filter(|r| r.ok) {
         data.insert("idle_subagents".into(), sa.value["held_idle"].clone());
@@ -1304,21 +1411,48 @@ fn previous_row(ctx: &Ctx, holder: Option<&str>) -> (Option<Value>, String) {
 /// tick is noise; two consecutive rises is the handoff signal. The priors
 /// come from [`crate::refusal_trend`], whose baseline advances with every
 /// measured beat, journalled or not. A missing pair reads unmeasured, never
-/// rising.
+/// rising, and a trend that crosses the machine-load discount (a discounted
+/// beat against full-rate priors, either direction) reads unmeasured too:
+/// the two rates count different refusal sets.
 fn mark_refusal_rate_trend(
     data: &mut Map<String, Value>,
-    previous_rate: Option<f64>,
-    second_previous_rate: Option<f64>,
+    previous_rate: Option<(f64, bool)>,
+    second_previous_rate: Option<(f64, bool)>,
 ) {
-    let current = data.get("refusal_rate").and_then(Value::as_f64);
-    let rising = match (current, previous_rate, second_previous_rate) {
-        (Some(c), Some(p1), Some(p2)) => c > p1 && p1 > p2,
-        _ => false,
-    };
+    let current = data
+        .get("refusal_rate")
+        .and_then(Value::as_f64)
+        .map(|rate| {
+            (
+                rate,
+                data.get("load_discounted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        });
+    let rising = flags_match(current, previous_rate, second_previous_rate)
+        && match (current, previous_rate, second_previous_rate) {
+            (Some((c, _)), Some((p1, _)), Some((p2, _))) => c > p1 && p1 > p2,
+            _ => false,
+        };
     data.insert("refusal_rate_rising".into(), json!(rising));
-    let unmeasured =
-        current.is_some() && (previous_rate.is_none() || second_previous_rate.is_none());
+    let unmeasured = current.is_some()
+        && (previous_rate.is_none()
+            || second_previous_rate.is_none()
+            || !flags_match(current, previous_rate, second_previous_rate));
     data.insert("refusal_rate_trend_unmeasured".into(), json!(unmeasured));
+}
+
+/// True when all three beats carry the same discount flag.
+fn flags_match(
+    current: Option<(f64, bool)>,
+    previous_rate: Option<(f64, bool)>,
+    second_previous_rate: Option<(f64, bool)>,
+) -> bool {
+    match (current, previous_rate, second_previous_rate) {
+        (Some((_, cf)), Some((_, f1)), Some((_, f2))) => cf == f1 && f1 == f2,
+        _ => false,
+    }
 }
 
 fn derive_change(
@@ -1836,28 +1970,64 @@ fn render_lines_with(
             let rr = by_name("refusal_rate")
                 .map(|r| &r.value)
                 .unwrap_or(&Value::Null);
-            let rate = rr.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
-            let mut text = format!(
-                "refusal_rate: {:.1}% ({}/{} last {} calls)",
-                rate * 100.0,
-                dash(rr.get("refused")),
-                dash(rr.get("total")),
-                dash(rr.get("window")),
-            );
-            let rising = data
-                .get("refusal_rate_rising")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let unmeasured = data
-                .get("refusal_rate_trend_unmeasured")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if rising {
-                text.push_str(" - RISING (handoff signal)");
-            } else if unmeasured {
-                text.push_str(" - UNMEASURED (needs two prior beats)");
+            if let Some(reason) = rr.get("unmeasured").and_then(Value::as_str) {
+                lines.push(format!("refusal_rate: unmeasured ({reason})"));
+            } else {
+                let rate = rr.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
+                let mut text = format!(
+                    "refusal_rate: {:.1}% ({}/{} last {} calls)",
+                    rate * 100.0,
+                    dash(rr.get("refused")),
+                    dash(rr.get("total")),
+                    dash(rr.get("window")),
+                );
+                let rising = data
+                    .get("refusal_rate_rising")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let trend_unmeasured = data
+                    .get("refusal_rate_trend_unmeasured")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if rising {
+                    text.push_str(" - RISING (handoff signal)");
+                } else if trend_unmeasured {
+                    text.push_str(" - UNMEASURED (needs two prior beats)");
+                }
+                if data
+                    .get("load_discounted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    text.push_str(" (load-free: timeouts and gate refusals dropped)");
+                }
+                lines.push(text);
             }
-            lines.push(text);
+        }
+    }
+
+    match failed("pushback") {
+        Some(r) => lines.push(format!("READER FAILED pushback: {}", r.error)),
+        None => {
+            let pb = by_name("pushback")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let routes = pb.get("routes").and_then(Value::as_u64).unwrap_or(0);
+            if routes == 0 {
+                lines.push("pushback: no traced routes yet".to_string());
+            } else {
+                let score = pb.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                let overturned = pb.get("overturned").and_then(Value::as_u64).unwrap_or(0);
+                let self_n = pb.get("answered_self").and_then(Value::as_u64).unwrap_or(0);
+                let escalated_n = pb.get("escalated").and_then(Value::as_u64).unwrap_or(0);
+                let asks = pb.get("asks").and_then(Value::as_u64).unwrap_or(0);
+                lines.push(format!(
+                    "pushback: {}/{} routes overturned ({self_n} self, {escalated_n} escalate, {asks} asks) = {:.1}%",
+                    overturned,
+                    routes,
+                    score * 100.0,
+                ));
+            }
         }
     }
 
@@ -1867,39 +2037,43 @@ fn render_lines_with(
             let wm = by_name("wake_meter")
                 .map(|r| &r.value)
                 .unwrap_or(&Value::Null);
-            let machine = wm.get("machine").and_then(Value::as_u64).unwrap_or(0);
-            let user = wm.get("user").and_then(Value::as_u64).unwrap_or(0);
-            let mut text = if user == 0 {
-                format!("wake_ratio: {machine} machine / 0 user wakes = n/a")
+            if let Some(reason) = wm.get("unmeasured").and_then(Value::as_str) {
+                lines.push(format!("wake_ratio: unmeasured ({reason})"));
             } else {
-                format!(
-                    "wake_ratio: {machine} machine / {user} user wakes = {:.1} to 1",
-                    machine as f64 / user as f64
-                )
-            };
-            if data
-                .get("wake_over")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                text.push_str(" - OVER 3 to 1");
+                let machine = wm.get("machine").and_then(Value::as_u64).unwrap_or(0);
+                let user = wm.get("user").and_then(Value::as_u64).unwrap_or(0);
+                let mut text = if user == 0 {
+                    format!("wake_ratio: {machine} machine / 0 user wakes = n/a")
+                } else {
+                    format!(
+                        "wake_ratio: {machine} machine / {user} user wakes = {:.1} to 1",
+                        machine as f64 / user as f64
+                    )
+                };
+                if data
+                    .get("wake_over")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    text.push_str(" - OVER 3 to 1");
+                }
+                lines.push(text);
+                let since_phrase = if previous
+                    .as_ref()
+                    .and_then(|p| p.get("ts"))
+                    .and_then(Value::as_str)
+                    .is_some()
+                {
+                    "since last beat"
+                } else {
+                    "since session start"
+                };
+                lines.push(format!(
+                    "subagent_tokens: {} {since_phrase} ({} this session)",
+                    dash(wm.get("tokens_since")),
+                    dash(wm.get("tokens_session")),
+                ));
             }
-            lines.push(text);
-            let since_phrase = if previous
-                .as_ref()
-                .and_then(|p| p.get("ts"))
-                .and_then(Value::as_str)
-                .is_some()
-            {
-                "since last beat"
-            } else {
-                "since session start"
-            };
-            lines.push(format!(
-                "subagent_tokens: {} {since_phrase} ({} this session)",
-                dash(wm.get("tokens_since")),
-                dash(wm.get("tokens_session")),
-            ));
         }
     }
 
@@ -2479,9 +2653,15 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     let (previous_rate, second_previous_rate) = crate::refusal_trend::priors(&trend_dir, trend_key);
     mark_refusal_rate_trend(&mut data, previous_rate, second_previous_rate);
     // The baseline advances on the measurement the beat just printed,
-    // whether or not the full row journals below.
+    // whether or not the full row journals below. The discount flag rides
+    // the ring: a discounted beat must never be trend-compared against
+    // two full-rate beats (the handoff signal reads unmeasured instead).
     if let Some(rate) = data.get("refusal_rate").and_then(Value::as_f64) {
-        crate::refusal_trend::record(&trend_dir, trend_key, &ts, rate);
+        let discounted = data
+            .get("load_discounted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        crate::refusal_trend::record(&trend_dir, trend_key, &ts, rate, discounted);
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
@@ -3717,7 +3897,7 @@ mod tests {
         // Two rises: 0.05 -> 0.10 -> 0.20 trips the signal.
         let mut data: Map<String, Value> = Map::new();
         data.insert("refusal_rate".into(), json!(0.20));
-        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.05));
+        mark_refusal_rate_trend(&mut data, Some((0.10, false)), Some((0.05, false)));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(true)));
         assert_eq!(
             data.get("refusal_rate_trend_unmeasured"),
@@ -3725,11 +3905,11 @@ mod tests {
         );
 
         // One rise only: 0.10 -> 0.10 -> 0.20 (flat, then up).
-        mark_refusal_rate_trend(&mut data, Some(0.10), Some(0.10));
+        mark_refusal_rate_trend(&mut data, Some((0.10, false)), Some((0.10, false)));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
         // Falling into the current beat: 0.05 -> 0.30 -> 0.20.
-        mark_refusal_rate_trend(&mut data, Some(0.30), Some(0.05));
+        mark_refusal_rate_trend(&mut data, Some((0.30, false)), Some((0.05, false)));
         assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
 
         // Missing history reads unmeasured, never a false positive.
@@ -3760,6 +3940,7 @@ mod tests {
                 "x-bbbb",
                 &format!("2026-09-15T10:0{n}:00Z"),
                 *current,
+                false,
             );
         }
 
@@ -3788,6 +3969,71 @@ mod tests {
         assert_eq!(
             line,
             "refusal_rate: 5.0% (5/100 last 100 calls) - UNMEASURED (needs two prior beats)"
+        );
+
+        // A trend that crosses the machine-load discount reads unmeasured,
+        // never rising: the two rates count different refusal sets.
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("refusal_rate".into(), json!(0.20));
+        data.insert("load_discounted".into(), json!(true));
+        mark_refusal_rate_trend(&mut data, Some((0.10, false)), Some((0.05, false)));
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+        assert_eq!(
+            data.get("refusal_rate_trend_unmeasured"),
+            Some(&json!(true))
+        );
+
+        // While the discount holds, the line names it.
+        let readings = sample_readings(board7(), org4(), cap_ok(), workers3());
+        let mut data = build_data(&readings, "x-bbbb");
+        data.insert("load_discounted".into(), json!(true));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert!(
+            line.contains("(load-free: timeouts and gate refusals dropped)"),
+            "the discount names itself: {line}"
+        );
+
+        // An unmeasured harness prints unmeasured, never a zero percent.
+        let readings = sample_readings(board7(), org4(), cap_ok(), workers3());
+        let mut readings = readings;
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "refusal_rate",
+                json!({"unmeasured": "no transcript store reader for harness pi"}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert_eq!(
+            line,
+            "refusal_rate: unmeasured (no transcript store reader for harness pi)"
+        );
+
+        // The pushback line renders beside the refusal rate.
+        let readings = sample_readings(board7(), org4(), cap_ok(), workers3());
+        let mut readings = readings;
+        readings.push(Reading::took(
+            "pushback",
+            json!({
+                "asks": 3, "routes": 2, "answered_self": 1,
+                "escalated": 1, "overturned": 1, "score": 0.5,
+            }),
+        ));
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines.iter().find(|l| l.starts_with("pushback:")).unwrap();
+        assert_eq!(
+            line,
+            "pushback: 1/2 routes overturned (1 self, 1 escalate, 3 asks) = 50.0%"
         );
 
         let mut data: Map<String, Value> = Map::new();

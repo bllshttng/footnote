@@ -5,7 +5,6 @@
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::Path;
 
 /// Machine wakes beyond 3 to 1 over typed turns is the attention line the
 /// check-in prints OVER at (lead-5317-succeed-g3 ran 6.5 to 1). A named
@@ -24,16 +23,25 @@ pub(crate) fn wake_class(provenance: crate::provenance::Provenance) -> Option<bo
     }
 }
 
-pub(crate) fn wake_meter(transcript: &Path, since_epoch: Option<f64>) -> Result<Value, String> {
-    let raw =
-        std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
+pub(crate) fn wake_meter_text(
+    harness: &str,
+    raw: &str,
+    since_epoch: Option<f64>,
+) -> Result<Value, String> {
+    let turns = if harness == "codex" {
+        crate::provenance::codex_shaped_turns(raw)
+    } else {
+        crate::provenance::claude_shaped_turns(raw)
+    };
     let mut machine: u64 = 0;
     let mut user: u64 = 0;
     // Per task id, in notify order: latest value overall, latest before the
     // cutoff, latest at or after it. The counts are cumulative per id, so the
     // spend since the last beat is the after-minus-before delta, never a sum.
+    // A codex rollout carries no task notifications, so the token fields read
+    // their session floor (0) there.
     let mut tokens: HashMap<String, (u64, u64, Option<u64>)> = HashMap::new();
-    for turn in crate::provenance::claude_shaped_turns(&raw) {
+    for turn in turns {
         if turn.text.is_empty() {
             continue;
         }
@@ -108,7 +116,6 @@ fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn row(text: &str, ts: &str, is_meta: bool) -> String {
         let mut obj = json!({
@@ -130,12 +137,6 @@ mod tests {
             ts,
             false,
         )
-    }
-
-    fn write_transcript(lines: &[String]) -> tempfile::NamedTempFile {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(file, "{}", lines.join("\n")).unwrap();
-        file
     }
 
     #[test]
@@ -163,8 +164,7 @@ mod tests {
                 false,
             ));
         }
-        let file = write_transcript(&lines);
-        let result = wake_meter(file.path(), None).unwrap();
+        let result = wake_meter_text("claude", &lines.join("\n"), None).unwrap();
         assert_eq!(result["machine"], 10);
         assert_eq!(result["user"], 3);
         assert!((result["ratio"].as_f64().unwrap() - 3.333_333).abs() < 1e-5);
@@ -178,28 +178,46 @@ mod tests {
             notification("b1", 250_000, "2026-09-24T12:00:00Z"),
             notification("b2", 50_000, "2026-09-24T12:30:00Z"),
         ];
-        let file = write_transcript(&lines);
         let cutoff = chrono::DateTime::parse_from_rfc3339("2026-09-24T11:00:00Z")
             .unwrap()
             .timestamp() as f64;
-        let result = wake_meter(file.path(), Some(cutoff)).unwrap();
+        let result = wake_meter_text("claude", &lines.join("\n"), Some(cutoff)).unwrap();
         assert_eq!(result["tokens_since"], 200_000);
         assert_eq!(result["tokens_session"], 300_000);
+
+        // Batched notifications: one claude wake can carry several
+        // task-id/token pairs in a single row.
+        let batched = vec![row(
+            "<task-notification><task-id>m1</task-id><subagent_tokens>7000</subagent_tokens></task-notification> \
+             <task-notification><task-id>m2</task-id><subagent_tokens>9000</subagent_tokens></task-notification>",
+            "2026-09-24T12:00:00Z",
+            false,
+        )];
+        let batched_result = wake_meter_text("claude", &batched.join("\n"), None).unwrap();
+        assert_eq!(batched_result["tokens_session"], 16_000);
     }
 
+    /// The codex rollout shape: payload message rows classify through the
+    /// same wake classes, and the token fields stay at their floor.
     #[test]
-    fn unreadable_transcript_is_an_error_not_a_zero() {
-        let err = wake_meter(Path::new("/nonexistent/wake-fixture.jsonl"), None).unwrap_err();
-        assert!(err.contains("unreadable"));
-    }
-
-    #[test]
-    fn batched_notifications_all_count() {
-        let text = "<task-notification><task-id>m1</task-id><subagent_tokens>7000</subagent_tokens></task-notification> \
-                    <task-notification><task-id>m2</task-id><subagent_tokens>9000</subagent_tokens></task-notification>";
-        let lines = vec![row(text, "2026-09-24T12:00:00Z", false)];
-        let file = write_transcript(&lines);
-        let result = wake_meter(file.path(), None).unwrap();
-        assert_eq!(result["tokens_session"], 16_000);
+    fn codex_rollout_rows_classify_and_tokens_read_zero() {
+        let codex_row = |text: &str, ts: &str| {
+            json!({
+                "timestamp": ts,
+                "payload": {"type": "message", "role": "user", "content": text},
+            })
+            .to_string()
+        };
+        let lines = vec![
+            codex_row(
+                "<fno_mail from=\"peer\">hi</fno_mail>",
+                "2026-09-24T12:00:00Z",
+            ),
+            codex_row("what moved since the last beat", "2026-09-24T12:01:00Z"),
+        ];
+        let result = wake_meter_text("codex", &lines.join("\n"), None).unwrap();
+        assert_eq!(result["machine"], 1);
+        assert_eq!(result["user"], 1);
+        assert_eq!(result["tokens_session"], 0);
     }
 }

@@ -11,6 +11,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::lead_checkin::OwnTranscript::*;
+
 use serde_json::{json, Value};
 
 /// How many peek records one worker's tail reads: deep enough that a RESULT
@@ -368,11 +370,27 @@ pub(crate) fn overdue_watches_reading() -> Result<Value, String> {
     }))
 }
 
-/// The finished background subagents this session still holds, read from
-/// its own claude transcript; claude-only, the same posture as the refusal
-/// and wake readers, and it fails as a reader on every other harness.
+/// The finished background subagents this session still holds, read from its
+/// own transcript. Claude is the only harness with per-agent transcript
+/// files a hold reader can pair; every other harness names why it reads
+/// unmeasured, never a silent zero.
 pub(crate) fn r_subagents() -> Result<Value, String> {
-    let transcript = crate::lead_checkin::own_claude_transcript()?;
+    let transcript = match crate::lead_checkin::own_transcript() {
+        Ok(Text {
+            harness: "claude",
+            path: Some(path),
+            ..
+        }) => path,
+        Ok(Text { harness, .. }) => {
+            return Ok(crate::lead_checkin::unmeasured_value(&format!(
+                "{harness} keeps no per-agent transcripts a hold reader can pair"
+            )));
+        }
+        Ok(Unmeasured { reason, .. }) => {
+            return Ok(crate::lead_checkin::unmeasured_value(&reason));
+        }
+        Err(e) => return Err(e),
+    };
     crate::subagent_hold::reading(
         &transcript,
         std::time::SystemTime::now(),
@@ -442,6 +460,13 @@ pub(crate) fn subagent_lines(readings: &[crate::lead_checkin::Reading]) -> Vec<S
     if let Some(r) = failed {
         lines.push(format!("READER FAILED subagents: {}", r.error));
         return lines;
+    }
+    if let Some(reason) = readings
+        .iter()
+        .find(|r| r.name == "subagents")
+        .and_then(|r| r.value.get("unmeasured").and_then(Value::as_str))
+    {
+        return vec![format!("subagents: unmeasured ({reason})")];
     }
     let held = readings
         .iter()
