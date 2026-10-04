@@ -234,6 +234,7 @@ pub(crate) enum RelayKind {
     CrossSession,
     TaskNotification,
     BusRow,
+    NativePeer,
 }
 
 impl RelayKind {
@@ -244,6 +245,7 @@ impl RelayKind {
             RelayKind::CrossSession => "relay_cross_session",
             RelayKind::TaskNotification => "relay_task_notification",
             RelayKind::BusRow => "relay_bus_row",
+            RelayKind::NativePeer => "relay_native_peer",
         }
     }
 }
@@ -315,6 +317,7 @@ impl Provenance {
                 RelayKind::CrossSession,
                 RelayKind::TaskNotification,
                 RelayKind::BusRow,
+                RelayKind::NativePeer,
             ]
             .into_iter()
             .map(RelayKind::label),
@@ -343,6 +346,17 @@ impl Provenance {
 pub(crate) fn classify_turn(obj: &Value, bus: &BusIndex, session: &str) -> Provenance {
     if !is_user_turn(obj) {
         return meta_kind(&turn_text(obj));
+    }
+    if obj
+        .get("origin")
+        .and_then(|o| o.get("kind"))
+        .and_then(Value::as_str)
+        == Some("peer")
+    {
+        // A native peer row carries the verified origin on the row itself; no
+        // chats row is ever minted for one, so it cannot pass store-verified
+        // mail trust either. It is a teammate speaking, never the operator.
+        return Provenance::Relay(RelayKind::NativePeer);
     }
     match classify_text(&turn_text(obj), Some((bus, session))) {
         Verdict::Operator(_) => Provenance::Unknown,
@@ -988,6 +1002,27 @@ mod tests {
             classify_turn(&row, &BusIndex { rows: Vec::new() }, "cccc-dddd"),
             Provenance::Unknown
         );
+    }
+
+    #[test]
+    fn a_native_peer_row_is_relay_never_operator() {
+        let empty = BusIndex { rows: Vec::new() };
+        let row = json!({
+            "type": "user",
+            "origin": {"kind": "peer", "from": "uds:/tmp/cc-socks/1.sock",
+                       "verifiedPeerPid": 42, "name": "king-a1", "body": "hi"},
+            "message": {"role": "user", "content": "hi"}
+        });
+        assert_eq!(
+            classify_turn(&row, &empty, "s"),
+            Provenance::Relay(RelayKind::NativePeer)
+        );
+        // A human origin is unchanged: unshaped text reads unknown.
+        let human = json!({
+            "type": "user", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": "hi"}
+        });
+        assert_eq!(classify_turn(&human, &empty, "s"), Provenance::Unknown);
     }
 
     #[test]
