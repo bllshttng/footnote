@@ -90,6 +90,24 @@ def _describe_process(pid: object) -> str:
         return "<uninspectable>"
 
 
+def _process_is_pool_machinery(pid: object) -> bool:
+    """True when pid is Claude Code pool machinery (a bg-spare, a bg-pty-host,
+    or the daemon): the measured argv deny-list of ``is_claude_pool_machinery``
+    (spawn_context.rs; sibling mirror gc.rs:849). Unprovable input -> False.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return False
+    import psutil
+
+    try:
+        argv = psutil.Process(pid).cmdline()
+    except Exception:  # noqa: BLE001 - NoSuchProcess/AccessDenied: not provably machinery
+        return False
+    if argv[1:2] == ["daemon"] and argv[0].lower().find("claude") >= 0:
+        return True
+    return any(a in ("--bg-spare", "--bg-pty-host") for a in argv[1:])
+
+
 def incarnation_fence_blocks(
     session_uuid: Optional[str], *, claims_root: Optional[Path] = None
 ) -> Tuple[bool, str]:
@@ -124,8 +142,14 @@ def incarnation_fence_blocks(
         return False, ""  # ours
     holder = info.get("holder", "?")
     pid = info.get("pid", "?")
+    if same_machine and _process_is_pool_machinery(pid):
+        # Not a rival: pool machinery either hosts this very worker or is
+        # parked stock; the claim itself still gates real adopters.
+        return False, ""
     return True, (
         f"incarnation-fence: {key} held by {holder} "
         f"(pid={pid}, {_describe_process(pid)}); "
-        f"refusing outward action - another incarnation owns this lineage"
+        f"refusing outward action - another incarnation owns this lineage; "
+        f"if the holder is stale, release it with: "
+        f"fno agents claim release {key} --force --reason \"stale holder\""
     )

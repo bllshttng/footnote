@@ -250,3 +250,129 @@ def test_blocked_refusal_names_a_dead_pid_honestly(monkeypatch):
     blocked, reason = incarnation_fence_blocks("uuid1")
     assert blocked
     assert "no such process" in reason
+
+
+# ---------------------------------------------------------------------------
+# pool-machinery carve-out (the bg-spare hosts the worker's own lineage)
+# ---------------------------------------------------------------------------
+
+
+def _fake_psutil_process(monkeypatch, argv):
+    """Replace psutil.Process with one whose cmdline() answers ARGV (or raises
+    the class set on .raise_)."""
+    import psutil
+
+    class _FakeProc:
+        raise_ = None
+
+        def __init__(self, pid):
+            self.pid = pid
+
+        def cmdline(self):
+            if self.raise_ is not None:
+                raise self.raise_(self.pid)
+            return list(argv)
+
+    monkeypatch.setattr(psutil, "Process", _FakeProc)
+    return _FakeProc
+
+
+def test_helper_matches_the_measured_pool_shapes(monkeypatch):
+    # The three measured argv shapes from spawn_context.rs pool_machinery
+    # tests: a bg-spare, its pty host, and the daemon after the claude binary.
+    from fno.claims.incarnation import _process_is_pool_machinery
+
+    _fake_psutil_process(
+        monkeypatch,
+        ["claude", "bg-spare", "--bg-spare", "/tmp/cc/spare/6cd.sock"],
+    )
+    assert _process_is_pool_machinery(82264) is True
+    _fake_psutil_process(
+        monkeypatch,
+        [
+            "claude", "bg-pty-host", "--bg-pty-host", "/tmp/cc/spare/1ec.pty.sock",
+            "200", "50", "--", "--bg-spare", "/tmp/cc/spare",
+        ],
+    )
+    assert _process_is_pool_machinery(82265) is True
+    _fake_psutil_process(
+        monkeypatch,
+        ["/Users/bb16/.local/bin/claude", "daemon", "run", "--origin", "transient"],
+    )
+    assert _process_is_pool_machinery(82266) is True
+
+
+def test_helper_rejects_real_sessions_and_non_pids(monkeypatch):
+    # A real session's argv carries none of the tokens; `daemon` counts only
+    # after a claude binary; every unprovable input fails closed so the fence
+    # keeps blocking.
+    from fno.claims.incarnation import _process_is_pool_machinery
+
+    import psutil
+
+    _fake_psutil_process(
+        monkeypatch,
+        ["/versions/2.1.0", "--resume", "/tmp/s/abc123.jsonl", "--name", "w"],
+    )
+    assert _process_is_pool_machinery(900) is False
+    _fake_psutil_process(monkeypatch, ["fno", "daemon", "run"])
+    assert _process_is_pool_machinery(901) is False
+    _fake_psutil_process(monkeypatch, [])
+    assert _process_is_pool_machinery(902) is False
+    fake = _fake_psutil_process(monkeypatch, ["claude", "bg-spare", "--bg-spare", "x"])
+    fake.raise_ = psutil.NoSuchProcess
+    assert _process_is_pool_machinery(903) is False
+    for junk in ("garbage", None, True):
+        assert _process_is_pool_machinery(junk) is False
+
+
+def test_machinery_holder_on_own_machine_proceeds(monkeypatch):
+    # THE BUG: the session claim is pinned to the bg-spare that hosts this
+    # very worker. Pool machinery is not a rival incarnation; the fence
+    # proceeds (the claim itself still gates real adopters).
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "revive:64225", "pid": 999_999,
+         "host": "h", "machine_id": "h"},
+        own_pid=None,  # a thread worker: the walk refuses spares, so no own pid
+    )
+    monkeypatch.setattr(
+        "fno.claims.incarnation._process_is_pool_machinery", lambda pid: True
+    )
+    assert incarnation_fence_blocks("uuid1") == (False, "")
+
+
+def test_real_holder_still_blocks_and_names_the_release_verb(monkeypatch):
+    # A same-machine holder that is NOT machinery still blocks, and the
+    # refusal now carries the administrative release verb so an operator can
+    # act without reading source.
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "revive:64225", "pid": 999_999,
+         "host": "h", "machine_id": "h"},
+        own_pid=123,
+    )
+    monkeypatch.setattr(
+        "fno.claims.incarnation._process_is_pool_machinery", lambda pid: False
+    )
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "fno agents claim release session:uuid1 --force --reason" in reason
+
+
+def test_remote_machinery_holder_still_blocks(monkeypatch):
+    # A spare-shaped holder on ANOTHER machine cannot be inspected, so the
+    # same-machine guard short-circuits before the helper and the fence
+    # blocks (fail closed).
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "revive:other", "pid": 999_999,
+         "host": "remote", "machine_id": "other"},
+        own_pid=123,
+    )
+    monkeypatch.setattr(
+        "fno.claims.incarnation._process_is_pool_machinery", lambda pid: True
+    )
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "no such process" in reason
