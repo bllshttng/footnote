@@ -24,7 +24,8 @@ fn utc_hours_window_rows() {
     assert!(
         chain
             .iter()
-            .any(|l| l == "slot skip agents.profiles.target.lanes[0] outside utc_hours(9-10) now=11z"),
+            .any(|l| l
+                == "slot skip agents.profiles.target.lanes[0] outside utc_hours(9-10) now=11z"),
         "chain: {chain:?}"
     );
 
@@ -64,7 +65,8 @@ fn utc_hours_window_rows() {
     assert!(
         chain
             .iter()
-            .any(|l| l == "slot skip agents.profiles.target.lanes[0] outside utc_hours(15-01) now=2z"),
+            .any(|l| l
+                == "slot skip agents.profiles.target.lanes[0] outside utc_hours(15-01) now=2z"),
         "chain: {chain:?}"
     );
 
@@ -78,7 +80,10 @@ fn utc_hours_window_rows() {
                     "on_unknown": "skip", "by_difficulty": {}},
     })));
     assert_eq!(out["status"], "pick");
-    assert_eq!(out["candidate"]["evidence"]["capacity"], "unknown-permitted");
+    assert_eq!(
+        out["candidate"]["evidence"]["capacity"],
+        "unknown-permitted"
+    );
     let chain = chain_of(&out);
     assert!(
         chain
