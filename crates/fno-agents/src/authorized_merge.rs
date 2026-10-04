@@ -1256,6 +1256,7 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         }
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
+            crate::merge_provenance::record_outcome(request, &authorized.facts, &outcome);
             // Only a Merge hands the slot back. Every terminal effect() outcome of a Merge
             // - landed, durably Failed, HeadChanged, or Unknown - releases it
             // here rather than starving the queue for the rest of the lease.
@@ -3993,6 +3994,22 @@ mod tests {
         let calls = fake.gh_calls.borrow();
         assert!(!calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
+    }
+
+    #[test]
+    fn a_merge_writes_one_merge_landed_span() {
+        let journal = crate::merge_provenance::TestJournal::opt_in();
+        assert_eq!(run(&clean(), &request(Effect::Merge)).word(), "merged");
+        let spans: Vec<_> = journal
+            .rows()
+            .into_iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_landed")
+            .collect();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["data"]["path"], "pr_merge");
+        assert_eq!(spans[0]["data"]["pr"], 7);
+        assert_eq!(spans[0]["data"]["repo"], "o/r");
+        assert_eq!(spans[0]["data"]["head"], "abc123");
     }
 
     #[test]
