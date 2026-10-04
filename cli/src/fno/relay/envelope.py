@@ -43,8 +43,7 @@ DEFAULT_TTL = 8
 
 RELAY_KIND = "relay"
 
-# The one-line body separator the transcript renderer uses (the Rust door's
-# NEWLINE_GLYPH): the framed line stays ONE physical line.
+# The transcript one-line body separator (the Rust door's NEWLINE_GLYPH).
 NEWLINE_GLYPH = " ⏎ "
 
 
@@ -54,10 +53,8 @@ def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
     submits the TUI turn, so an embedded newline would submit early). Raises
     ForgedEnvelopeError on a body holding a tag or a header-shaped line (the
     Rust renderer refuses both), or a from_session that could forge the sender
-    field. This is the single producer every delivery vehicle's framed line
-    derives from: the daemon RPC and the mail-inject binary each take an
-    already-framed string, so no downstream check alone covers a
-    peer-controlled body or attribute."""
+    field. The daemon RPC and the mail-inject binary each take an
+    already-framed string from this single producer."""
     for name, value in (("from_session", from_session), ("harness", harness)):
         if value is None:
             continue
