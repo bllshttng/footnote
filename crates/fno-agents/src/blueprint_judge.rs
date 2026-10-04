@@ -13,9 +13,10 @@
 //! than growing a second one here (AGENTS.md principle 9).
 //!
 //! One JSON object on stdout. Single-plan mode exits 0 when every dimension
-//! answered, 3 when the budget tripped (the answered rows still print and the
-//! plan gains a `judge: timed out (...)` frontmatter stamp), 1 when the plan
-//! is unreadable; calibration mode exits 1 when any control disagrees,
+//! answered (retracting any earlier timeout stamp), 3 when the budget tripped
+//! (the answered rows still print and the plan gains a
+//! `judge: timed out (...)` frontmatter stamp), 1 when the plan is
+//! unreadable; calibration mode exits 1 when any control disagrees,
 //! matching the retired Python `judge_cmd --labels` contract.
 
 use crate::evidence::truncate_chars;
@@ -786,6 +787,32 @@ fn stamp_judge_timeout(plan_path: &Path, reason: &str) {
     }
 }
 
+/// A later clean run retracts an earlier run's timeout stamp: the field's
+/// invariant is "present = the latest run timed out", so a run that finished
+/// inside its budget must not leave a stale timed-out record behind.
+fn clear_judge_stamp(plan_path: &Path) {
+    let _guard = match PlanDocLock::acquire(plan_path, std::time::Duration::from_secs(10)) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("fno-agents judge: stamp clear skipped (lock: {e})");
+            return;
+        }
+    };
+    let (target, mut fields, rest) = match codec::read_plan_file(plan_path) {
+        Ok(ok) => ok,
+        Err(e) => {
+            eprintln!("fno-agents judge: stamp clear skipped (read: {e})");
+            return;
+        }
+    };
+    if !fields.remove("judge") {
+        return;
+    }
+    if let Err(e) = codec::write_plan_file(&target, &fields, &rest) {
+        eprintln!("fno-agents judge: stamp clear skipped (write: {e})");
+    }
+}
+
 fn run_single_plan(
     plan_path: &Path,
     node_id: Option<&str>,
@@ -815,6 +842,8 @@ fn run_single_plan(
             })
             .unwrap_or("budget exhausted");
         stamp_judge_timeout(plan_path, reason);
+    } else {
+        clear_judge_stamp(plan_path);
     }
     println!("{}", json!({"kind": kind, "rows": rows}));
     if budget_tripped {
@@ -1150,12 +1179,8 @@ mod tests {
     }
 
     #[test]
-    fn run_judge_refuses_an_unknown_flag() {
+    fn run_judge_refuses_bad_invocations() {
         assert_eq!(run_judge(&["--bogus".to_string()]), 2);
-    }
-
-    #[test]
-    fn run_judge_refuses_with_neither_plan_nor_labels() {
         assert_eq!(run_judge(&[]), 2);
     }
 
@@ -1229,6 +1254,13 @@ mod tests {
             fields.get("judge"),
             Some(Fv::Scalar(s)) if s.starts_with("timed out (budget exhausted")
         ));
+        let rc = run_single_plan(&plan, None, dir.path(), &lenses, &spawn, JUDGE_BUDGET_SECS);
+        assert_eq!(rc, 0);
+        let (_, fields, _) = codec::read_plan_file(&plan).unwrap();
+        assert!(
+            fields.get("judge").is_none(),
+            "a clean run retracts the stamp"
+        );
         let rc = run_single_plan(
             Path::new("/nonexistent/no-plan.md"),
             None,
