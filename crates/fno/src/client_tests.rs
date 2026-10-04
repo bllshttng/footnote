@@ -1785,8 +1785,8 @@ fn link_hover_rows() {
     view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
     let lit = view.compose();
     let ul = cell_flags::UNDERLINE;
-    // Pane 10's content origin sits at (row 2, col 29); row 0 (the strip's
-    // tab underline) is excluded.
+    // Pane 10's origin sits at (row 2, col 29); row 0 (the strip's tab
+    // underline) is excluded.
     let underlined = |f: &Frame| -> Vec<(usize, usize)> {
         (1..f.rows as usize)
             .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
@@ -1796,7 +1796,7 @@ fn link_hover_rows() {
     assert_eq!(
         underlined(&lit),
         vec![(2, 28 + 4), (3, 28 + 5)],
-        "exactly the two accepted cells, at the pane's screen position"
+        "exactly the two accepted cells"
     );
     assert!(
         underlined(&clean).is_empty(),
