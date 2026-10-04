@@ -214,14 +214,26 @@ def test_no_plan_path_passes():
     assert resolve_promise_evidence({"id": "x-a"}).outcome == "ok"
 
 
-def test_unreadable_plan_fails_open_with_named_warning(tmp_path: Path):
+def test_unreadable_or_unparseable_plan_fails_closed(tmp_path: Path):
+    """x-ff06: an unreadable or unparseable delivery promise never reads as
+    complete. The refusal names the node, the path, the error, and the
+    --force remedy (the rule PR 3017 cites on the Rust side)."""
     from fno.graph._reconcile import resolve_promise_evidence
 
     missing = tmp_path / "nope.md"
     v = resolve_promise_evidence({"id": "x-a", "plan_path": str(missing)})
-    assert v.outcome == "ok"
-    assert v.warning is not None
-    assert str(missing) in v.warning  # the path is named, not just "plan unreadable"
+    assert v.outcome == "promise_unmet"
+    assert v.exit_code == 6
+    assert str(missing) in (v.reason or "")  # the path is named, not just "plan unreadable"
+    assert "x-a" in (v.reason or "")  # the node is named
+    assert "--force --reason" in (v.reason or "")  # the remedy is named
+    # A plan whose frontmatter the parser rejects blocks the same way, and
+    # the parse error itself is named.
+    broken = tmp_path / "broken.md"
+    broken.write_text("---\n- a list, not a mapping\n---\n# b\n")
+    b = resolve_promise_evidence({"id": "x-a", "plan_path": str(broken)})
+    assert b.outcome == "promise_unmet"
+    assert b.warning is None
 
 
 def test_condition_b_passing_probes_pass(tmp_path: Path):

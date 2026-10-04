@@ -783,17 +783,19 @@ class PromiseVerdict:
     Sibling to :class:`MergeEvidence`: the merge gate asks "is a PR merged" (a
     fact about an artifact); this asks "did the plan's declared work all ship".
     One verdict, three callers (``cmd_done``, ``cmd_reconcile``, ``done_command``)
-    so a node can never close through a second, ungated path. Fails open
-    (``outcome="ok"``) on an absent/unreadable/unparseable plan so a stale
-    ``plan_path`` never wedges a close; the warning names the path.
+    so a node can never close through a second, ungated path. An absent
+    ``plan_path`` promises nothing and passes; an unreadable or unparseable
+    plan is a delivery promise that cannot be confirmed, so it fails CLOSED
+    (``promise_unmet``, x-ff06) with the remedy in the refusal - never as a
+    silent pass.
     """
 
     outcome: Literal["ok", "promise_unmet", "promise_unknown"]
     reason: Optional[str] = None  # multi-line refusal text; None when ok
-    # Why a fail-open happened (unreadable plan, unparseable frontmatter), naming
-    # the path. Returned, not printed: the close verbs emit it on stderr, but a
-    # raw stderr write here would pollute the `reconcile --json` stream (JSON on
-    # stdout) and break the JSON-only contract of that path.
+    # Why a degraded read passed anyway (today only the prove-it verdict
+    # reader). Returned, not printed: the close verbs emit it on stderr, but
+    # a raw stderr write here would pollute the `reconcile --json` stream
+    # (JSON on stdout) and break the JSON-only contract of that path.
     warning: Optional[str] = None
 
     @property
@@ -940,10 +942,12 @@ def resolve_promise_evidence(
         text = plan_file.read_text(encoding="utf-8")
     except OSError as exc:
         return PromiseVerdict(
-            outcome="ok",
-            warning=(
-                f"promise gate could not read plan {plan_path_clean} ({exc}); "
-                f"gate skipped for this close"
+            outcome="promise_unmet",
+            reason=(
+                f"{node_id or '(unknown)'}: the promise gate could not read plan "
+                f"{plan_path_clean} ({exc}). An unreadable delivery promise is "
+                f"never a complete one. Fix or restore the plan, then close; "
+                f"or close with --force --reason."
             ),
         )
 
@@ -956,10 +960,12 @@ def resolve_promise_evidence(
         frontmatter = _parse_frontmatter(yaml_text) if yaml_text.strip() else {}
     except FrontmatterError as exc:
         return PromiseVerdict(
-            outcome="ok",
-            warning=(
-                f"promise gate skipped {plan_path_clean}; plan frontmatter "
-                f"would not parse ({exc})"
+            outcome="promise_unmet",
+            reason=(
+                f"{node_id or '(unknown)'}: plan frontmatter would not parse "
+                f"({exc}) in {plan_path_clean}. An unparseable delivery promise "
+                f"never reads as complete. Fix the frontmatter, then close; "
+                f"or close with --force --reason."
             ),
         )
 
