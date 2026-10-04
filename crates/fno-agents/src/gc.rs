@@ -154,6 +154,15 @@ pub struct GcRow {
     /// reaped as unattended while it holds one. `None` when
     /// the pass read no such claim (or the claims root read empty).
     pub live_claim: Option<String>,
+    /// The row's node resolved from a dispatch record (sessions, registry,
+    /// name), not a transcript mention: this session WORKED the node. A
+    /// transcript mention is a witness, never ownership, so it does not
+    /// qualify the row as the node's dead worker.
+    pub worked_node: bool,
+    /// A live or suspect `node:<id>` claim whose session is not this row:
+    /// another session owns the node, so this row must not resume it.
+    /// `None` when no such claim was read.
+    pub node_held_elsewhere: Option<String>,
 }
 
 impl GcRow {
@@ -446,6 +455,8 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // the successor this row must not double-drive.
             if status == "in_progress"
                 && row.process_gone
+                && row.worked_node
+                && row.node_held_elsewhere.is_none()
                 && row.superseded_by_live_peer.is_none()
                 && !row.node_merged
             {
@@ -2552,6 +2563,8 @@ mod tests {
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
             live_claim: None,
+            worked_node: true,
+            node_held_elsewhere: None,
         }
     }
 
@@ -3877,6 +3890,8 @@ mod tests {
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
             live_claim: None,
+            worked_node: true,
+            node_held_elsewhere: None,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -3913,6 +3928,8 @@ mod tests {
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
             live_claim: None,
+            worked_node: true,
+            node_held_elsewhere: None,
         }
     }
 

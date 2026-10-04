@@ -1087,6 +1087,179 @@ fn ac2_hp_dead_worker_on_in_progress_node_is_kept_and_laddered() {
     assert_eq!(dead.session_id, "cccc9999-1111-2222-3333-444444444444");
     assert!(!dead.live, "the ladder's Resume rung reads this");
     assert!(summary.open_pr_rows.is_empty(), "not an open-PR row");
+    // shape 1: a transcript-guessed row is not the node's dead
+    // worker. No sessions row, no registry node, no name match - the node
+    // resolves only through the transcript mention - so the rung must not
+    // hold or ladder it, and the ordinary open-work stale keep answers.
+    {
+        let home = tmp_home("gc-dead-work-guess");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let transcripts = tempfile::tempdir().unwrap();
+        let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+        let mention = transcripts.path().join("mention.jsonl");
+        std::fs::write(
+            &mention,
+            "{\"type\":\"user\",\"message\":{\"content\":\"drive x-abcd to a PR\"}}",
+        )
+        .unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            let mut row = claude_worker_row("guess-row", "eeee1111");
+            row.origin = Some("spawn".into());
+            r.entries.push(row);
+        })
+        .unwrap();
+        let guess_sid = "eeee1111-1111-2222-3333-444444444444";
+        let graph = Some(GraphRead {
+            statuses: HashMap::from([
+                ("x-node".to_string(), "in_progress".to_string()),
+                ("x-abcd".to_string(), "in_progress".to_string()),
+            ]),
+            pr_state: HashMap::from([
+                ("x-node".to_string(), (None, 0, 0)),
+                ("x-abcd".to_string(), (None, 0, 0)),
+            ]),
+            pr_number: HashMap::from([("x-node".to_string(), None), ("x-abcd".to_string(), None)]),
+            ..Default::default()
+        });
+        let summary = evidence_sweep(
+            &home,
+            &emitter,
+            900,
+            false,
+            graph,
+            &|e: &crate::state::RegistryEntry| {
+                if e.harness_session_id.as_deref() == Some(guess_sid) {
+                    Some(vec![mention.clone()])
+                } else {
+                    Some(vec![quiet.clone()])
+                }
+            },
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("eeee1111", Some("blocked")),
+                crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working"))
+                    .with_pid(Some(5001)),
+            ]),
+            &|_| true,
+        );
+        assert_eq!(
+            summary.dead_work_rows,
+            vec![],
+            "a transcript-guessed row is never laddered: {:?}",
+            summary.dead_work_rows
+        );
+        assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
+        assert!(
+            !summary
+                .holds
+                .iter()
+                .any(|h| h.id == "eeee1111" && h.reason == "dead open work"),
+            "{:?}",
+            summary.holds
+        );
+        assert!(
+            summary
+                .kept_open_work_stale
+                .iter()
+                .any(|(id, node, _, _)| id == "eeee1111" && node == "x-abcd"),
+            "the ordinary open-work keep still names the row: {:?}",
+            summary.kept_open_work_stale
+        );
+    }
+
+    // shape 2: the node another live session claims is not this
+    // dead row's to resume. A sessions row + do row put the row on the
+    // node, and a live node claim names a DIFFERENT session, so no
+    // dead-work hold or ladder row may answer.
+    {
+        let home = tmp_home("gc-dead-work-claimheld");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let transcripts = tempfile::tempdir().unwrap();
+        let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+        state::update_registry(&home.registry_json(), |r| {
+            let mut row = claude_worker_row("held-row", "ffff2222");
+            row.origin = Some("spawn".into());
+            r.entries.push(row);
+        })
+        .unwrap();
+        let held_sid = "ffff2222-1111-2222-3333-444444444444";
+        let claims_dir =
+            crate::claims_root::global_claims_dir().expect("tmp_home pinned a claims root");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        let rec = crate::claims::ClaimRecord {
+            schema_version: crate::claims::SCHEMA_VERSION,
+            key: "node:x-abcd".into(),
+            holder: "spawn-handover:t-other-glm".into(),
+            acquired_at: crate::claims::now_ms(),
+            pid: Some(std::process::id() as i32),
+            host: crate::claims::hostname(),
+            pid_unavailable: false,
+            expires_at: None,
+            reason: None,
+            harness: Some("claude".into()),
+            session_id: Some("dddd9999-1111-2222-3333-444444444444".into()),
+            pid_provenance: Some("session-prover".into()),
+            machine_id: None,
+            metadata: Default::default(),
+        };
+        std::fs::write(
+            claims_dir.join("node:x-abcd.lock"),
+            crate::claims::serialize_claim(&rec).unwrap(),
+        )
+        .unwrap();
+        let graph = Some(GraphRead {
+            index: HashMap::from([(
+                held_sid.to_string(),
+                vec![("x-abcd".to_string(), "in_progress".to_string())],
+            )]),
+            work_index: HashMap::from([(
+                held_sid.to_string(),
+                vec![("x-abcd".to_string(), "in_progress".to_string())],
+            )]),
+            statuses: HashMap::from([("x-abcd".to_string(), "in_progress".to_string())]),
+            pr_state: HashMap::from([("x-abcd".to_string(), (None, 0, 0))]),
+            pr_number: HashMap::from([("x-abcd".to_string(), None)]),
+            do_nodes: HashMap::from([(
+                held_sid.to_string(),
+                std::collections::HashSet::from(["x-abcd".to_string()]),
+            )]),
+            pr_reads: HashMap::new(),
+            ..Default::default()
+        });
+        let summary = evidence_sweep(
+            &home,
+            &emitter,
+            900,
+            false,
+            graph,
+            &|_| Some(vec![quiet.clone()]),
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("ffff2222", Some("blocked")),
+                crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working"))
+                    .with_pid(Some(5001)),
+            ]),
+            &|_| true,
+        );
+        assert_eq!(
+            summary.dead_work_rows,
+            vec![],
+            "a claim-held node is never laddered: {:?}",
+            summary.dead_work_rows
+        );
+        assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
+        assert!(
+            !summary.holds.iter().any(|h| h.reason == "dead open work"),
+            "{:?}",
+            summary.holds
+        );
+        assert!(
+            summary
+                .kept_open_work_stale
+                .iter()
+                .any(|(id, node, _, _)| id == "ffff2222" && node == "x-abcd"),
+            "the ordinary open-work keep still names the row: {:?}",
+            summary.kept_open_work_stale
+        );
+    }
 }
 
 /// AC2-EDGE, failed: the death of the worker does not finish the node's

@@ -1615,18 +1615,27 @@ pub(crate) fn run_with_release(
             .iter()
             .map(|c| std::path::Path::new(c.as_str()).join(crate::claims::CLAIMS_DIRNAME)),
     );
-    let claims_by_session: std::collections::HashMap<String, String> =
-        crate::claims::list_in(&claims_dirs, None, false)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|rec| {
-                let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
-                if sid.is_empty() {
-                    return None;
-                }
-                Some((sid, format!("{} (holder {})", rec.key, rec.holder)))
-            })
-            .collect();
+    let claim_records = crate::claims::list_in(&claims_dirs, None, false).unwrap_or_default();
+    let claims_by_session: std::collections::HashMap<String, String> = claim_records
+        .iter()
+        .filter_map(|rec| {
+            let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
+            if sid.is_empty() {
+                return None;
+            }
+            Some((sid, format!("{} (holder {})", rec.key, rec.holder)))
+        })
+        .collect();
+    // The node-claim view of the same records: `node:<id>` -> holding
+    // session, so the dead-work gate sees a node another live session owns.
+    let node_claim_holders: std::collections::HashMap<String, String> = claim_records
+        .iter()
+        .filter_map(|rec| {
+            let node = rec.key.strip_prefix("node:")?.to_ascii_lowercase();
+            let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
+            (!(sid.is_empty() || node.is_empty())).then_some((node, sid))
+        })
+        .collect();
     // One ledger parse per sweep: every receipt's enrichment reads these rows.
     let ledger = ledger_rows(&default_ledger_path());
     let mut receipts: std::collections::BTreeMap<String, ReapReceipt> =
@@ -2079,6 +2088,13 @@ pub(crate) fn run_with_release(
                 release_note = Some(release_basis_prefix(&r.reason, hold_age_s, &r.detail));
             }
         }
+        let node_held_elsewhere = match &work {
+            WorkState::Open { node, .. } => node_claim_holders
+                .get(node.to_ascii_lowercase().as_str())
+                .filter(|holder| holder.as_str() != sid.to_ascii_lowercase())
+                .cloned(),
+            _ => None,
+        };
         let mut row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -2117,6 +2133,12 @@ pub(crate) fn run_with_release(
                 e.status,
                 crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
             ),
+            // Transcript mentions are witnesses, not ownership.
+            worked_node: !verdict
+                .route
+                .source
+                .is_some_and(node_route::NodeSource::is_transcript),
+            node_held_elsewhere,
             open_work_retire_s,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
@@ -2156,6 +2178,12 @@ pub(crate) fn run_with_release(
                     ));
                 }
             }
+            let reader = verdict
+                .route
+                .source
+                .map(|s| s.as_str())
+                .unwrap_or("sessions")
+                .to_string();
             match reason {
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
                 Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
@@ -2177,12 +2205,6 @@ pub(crate) fn run_with_release(
                     });
                 }
                 Some(KeepReason::OpenWork { node, status }) => {
-                    let reader = verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                        .to_string();
                     summary.kept_open_work.push((id, node, status, reader))
                 }
                 Some(KeepReason::DeadOpenWork { node }) => {
@@ -2191,12 +2213,6 @@ pub(crate) fn run_with_release(
                     // provenance resolved. The nudge ladder's Resume rung
                     // is the owner; the row carries no PR yet, so its
                     // ladder row reads pr: null, live: false.
-                    let reader = verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                        .to_string();
                     summary.kept_open_work.push((
                         id.clone(),
                         node.clone(),
@@ -2223,17 +2239,9 @@ pub(crate) fn run_with_release(
                         busy: false,
                     });
                 }
-                Some(KeepReason::OpenWorkStale { node, status }) => {
-                    let reader = verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                        .to_string();
-                    summary
-                        .kept_open_work_stale
-                        .push((id, node, status, reader))
-                }
+                Some(KeepReason::OpenWorkStale { node, status }) => summary
+                    .kept_open_work_stale
+                    .push((id, node, status, reader)),
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::LiveClaim { detail }) => {
                     summary.kept_live_claim.push((id.clone(), detail.clone()));
