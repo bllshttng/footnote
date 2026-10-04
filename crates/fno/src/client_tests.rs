@@ -1768,7 +1768,9 @@ fn link_hover_rows() {
     view.link_hover.accepted = Some((10, vec![(0, 0)]));
     view.keys_modal = Some(build_keys_modal());
     let ul = cell_flags::UNDERLINE;
-    let lit = |f: &Frame| f.cells.iter().any(|c| c.flags & ul == ul);
+    // Row 0 is the strip, whose active tab wears an underline by design.
+    let cols = view.term.1 as usize;
+    let lit = |f: &Frame| f.cells[cols..].iter().any(|c| c.flags & ul == ul);
     assert!(!lit(&view.compose()), "no underline beneath an open modal");
     view.keys_modal = None;
     assert!(
@@ -1784,10 +1786,10 @@ fn link_hover_rows() {
     view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
     let lit = view.compose();
     let ul = cell_flags::UNDERLINE;
-    // Pane 10's content origin sits at (row 2, col 29): the frame ring
-    // insets the content one cell.
+    // Pane 10's content origin sits at (row 2, col 29); row 0 (the strip's
+    // tab underline) is excluded.
     let underlined = |f: &Frame| -> Vec<(usize, usize)> {
-        (0..f.rows as usize)
+        (1..f.rows as usize)
             .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
             .filter(|&(r, c)| f.cells[r * f.cols as usize + c].flags & ul == ul)
             .collect()
