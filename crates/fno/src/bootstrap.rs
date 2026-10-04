@@ -103,10 +103,74 @@ type BootResult<T> = Result<T, BootErr>;
 /// `fno`, so resolution keys on this constant either way.
 const TOOL_NAME: &str = "fno";
 
+/// Peel `--subject <text>` (or `--subject=<text>`) off a forwarded
+/// `mail send` argv: validated (one line, at most 80 characters, no
+/// separator) and removed from the argv the Python CLI sees, with the
+/// value exported as `FNO_MAIL_SUBJECT` for the Rust bus-append door. A
+/// violation reads `Err` and `forward` refuses with exit 2 (AC12-HP).
+fn peel_mail_subject(args: &[OsString]) -> Result<Vec<OsString>, String> {
+    let names: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let is_send = names.windows(2).any(|w| w[0] == "mail" && w[1] == "send");
+    if !is_send {
+        return Ok(args.to_vec());
+    }
+    let mut out = Vec::new();
+    let mut subject: Option<String> = None;
+    let mut i = 0;
+    while i < names.len() {
+        match names[i].strip_prefix("--subject=") {
+            Some(v) => {
+                subject = Some(v.to_string());
+                i += 1;
+            }
+            None => {
+                // A separate-token value that itself reads as a flag is a
+                // typo (--subject --verbose): taking it would swallow the
+                // flag and stamp the subject with its text.
+                if names[i] == "--subject" && i + 1 < names.len() && !names[i + 1].starts_with('-')
+                {
+                    subject = Some(names[i + 1].clone());
+                    i += 2;
+                } else {
+                    out.push(args[i].clone());
+                    i += 1;
+                }
+            }
+        }
+    }
+    if let Some(s) = subject {
+        if s.chars().count() > 80
+            || s.contains('\n')
+            || s.contains('\r')
+            || s.contains(" · ")
+            || s.contains('`')
+        {
+            return Err(
+                "fno mail send: --subject must be one line, at most 80 characters, without a backtick or ' · '"
+                    .to_string(),
+            );
+        }
+        // The var rides the child env through the wheel fno to the
+        // bus-append door.
+        std::env::set_var("FNO_MAIL_SUBJECT", s);
+    }
+    Ok(out)
+}
+
 /// Forward `args` to the provisioned wheel `fno`. Diverges: on success the
 /// process is replaced via exec; on failure it prints the error and exits.
 pub fn forward(args: &[OsString]) -> ! {
-    match run(args) {
+    let args = match peel_mail_subject(args) {
+        Ok(args) => args,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+    };
+    match run(&args) {
         // run() either execs (diverges) or returns an error; Ok is unreachable.
         Ok(()) => unreachable!("run() must exec the wheel fno or return an error"),
         Err(e) => {
@@ -1880,6 +1944,44 @@ mod tests {
             matches!(env_override_python(), Ok(None)),
             "empty falls through"
         );
+
+        // The subject peel (AC12-HP) rides this env test: a send argv loses
+        // the flag pair and exports the value, the inline form peels too, a
+        // non-send argv keeps every token, and a separator, a newline or an
+        // over-long subject refuses.
+        let os = |vals: &[&str]| vals.iter().map(OsString::from).collect::<Vec<_>>();
+        let peeled = peel_mail_subject(&os(&[
+            "agents",
+            "mail",
+            "send",
+            "quill",
+            "hi there",
+            "--subject",
+            "status",
+        ]))
+        .unwrap();
+        assert_eq!(peeled, os(&["agents", "mail", "send", "quill", "hi there"]));
+        assert_eq!(std::env::var("FNO_MAIL_SUBJECT").as_deref(), Ok("status"));
+        let inline = peel_mail_subject(&os(&["mail", "send", "a", "b", "--subject=x"])).unwrap();
+        assert_eq!(inline, os(&["mail", "send", "a", "b"]));
+        assert_eq!(std::env::var("FNO_MAIL_SUBJECT").as_deref(), Ok("x"));
+        let untouched = peel_mail_subject(&os(&["mail", "show", "--subject", "x"])).unwrap();
+        assert_eq!(untouched.len(), 4, "a non-send argv keeps every token");
+        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a \u{b7} b"])).is_err());
+        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "a\nb"])).is_err());
+        // A flag-shaped value is a typo, not a subject: both tokens ride to
+        // the CLI, which errors on the valueless flag, and no subject rides.
+        let flag =
+            peel_mail_subject(&os(&["mail", "send", "a", "--subject", "--verbose"])).unwrap();
+        assert_eq!(flag, os(&["mail", "send", "a", "--subject", "--verbose"]));
+        // A backtick refuses at the peel, where the flag was typed, not
+        // later at the envelope render.
+        assert!(peel_mail_subject(&os(&["mail", "send", "a", "--subject", "run `make`"])).is_err());
+        let long = "x".repeat(81);
+        assert!(
+            peel_mail_subject(&os(&["mail", "send", "a", "--subject", long.as_str()])).is_err()
+        );
+        let _ = std::env::remove_var("FNO_MAIL_SUBJECT");
 
         restore_test_env("FNO_PY", previous_py);
         restore_test_env("FNO_PROCESS_ADMISSION", previous_mode);
