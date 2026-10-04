@@ -23,7 +23,7 @@
         {"id": "operator-capture-nudge", "argv": ["${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"]},
         {"id": "inject-announce", "argv": ["${PLUGIN_ROOT}/hooks/inject-announce.sh", "start"]},
         {"id": "target-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"], "sources": ["compact"]},
-        {"id": "king-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"], "sources": ["compact"]}
+        {"id": "lead-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/lead-postcompact-reinject.sh"], "sources": ["compact"]}
       ]
     },
     "codex-session-start": {
@@ -47,7 +47,7 @@
       "entry": "post_compact",
       "producers": [
         {"id": "target-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"]},
-        {"id": "king-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"]}
+        {"id": "lead-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/lead-postcompact-reinject.sh"]}
       ]
     }
   }

@@ -501,12 +501,12 @@ impl Eye {
     }
 }
 
-/// The only grounded hat: `crown_level >= 1` wears it (registry crown fields,
+/// The only grounded hat: `crown_level >= 1` wears it (registry team fields,
 /// stamped by the spawn path - never self-declared). The reference's other
 /// six hats key to an executor mapping not yet verified stable and stay
 /// unrendered; a hat with no reading is the decorative-guard failure the
 /// yard exists to refuse.
-pub const HAT_CROWN: &str = "   \\^^^/    ";
+pub const HAT_TEAM: &str = "   \\^^^/    ";
 
 // No rarity table here: the tier names ride the `fno agents yard --json` payload as
 // strings, so Python's `fno.yard.RARITY_TIERS` is the one live copy. A Rust

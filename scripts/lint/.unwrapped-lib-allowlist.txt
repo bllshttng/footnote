@@ -261,7 +261,7 @@ rotate-append-log.sh
 worktree-status.py
 
 # Shared post-compaction carrier selection for the two reinject hooks
-# (target-postcompact-reinject.sh and king-postcompact-reinject.sh) plus
+# (target-postcompact-reinject.sh and lead-postcompact-reinject.sh) plus
 # precompact-canon-doc.sh. Sourced, never executed; the hooks are the entry
 # points and need no fno verb between them and the lib. Pure sourcing
 # library; no standalone CLI of its own.
@@ -269,8 +269,8 @@ postcompact-carrier.sh
 
 # Canon-doc marker-block reader for the fno:user fence: extraction, the seed
 # placeholder, and the placeholder classifier. Sourced by
-# hooks/precompact-canon-doc.sh, hooks/king-postcompact-reinject.sh, and the
-# reign check-in body. Sourced, never executed; the hooks are the entry
+# hooks/precompact-canon-doc.sh, hooks/lead-postcompact-reinject.sh, and the
+# lead check-in body. Sourced, never executed; the hooks are the entry
 # points. Pure sourcing library; no standalone CLI of its own.
 canon-doc-marker.sh
 cargo-rustc-wrapper.sh

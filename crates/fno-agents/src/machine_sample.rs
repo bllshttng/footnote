@@ -195,7 +195,7 @@ pub struct MachineSample {
     pub swap_total_gb: Option<f64>,
     pub total_mem_gb: Option<f64>,
     pub live_rows: Option<u64>,
-    pub kings: Option<u64>,
+    pub leads: Option<u64>,
     pub workers: Option<u64>,
     pub verdict: Option<String>,
     pub busy_band: Option<f64>,
@@ -274,7 +274,7 @@ pub fn read(
         swap_total_gb: None,
         total_mem_gb: None,
         live_rows: None,
-        kings: None,
+        leads: None,
         workers: None,
         verdict: None,
         busy_band: None,
@@ -306,7 +306,7 @@ pub fn read(
     let mut warnings = Vec::new();
     let live = crate::spawn_gate::live_rows(&home.registry_json(), &mut warnings);
     sample.live_rows = Some(live.len() as u64);
-    sample.kings = Some(live.iter().filter(|row| row.crown_level.is_some()).count() as u64);
+    sample.leads = Some(live.iter().filter(|row| row.crown_level.is_some()).count() as u64);
     sample.workers = Some(live.iter().filter(|row| row.crown_level.is_none()).count() as u64);
     #[cfg(target_os = "macos")]
     {

@@ -9,8 +9,8 @@
 //! resumed id back off the roster and compares.
 //!
 //! A differing id without `--allow-new-id` is a rollback, not a shrug. A
-//! differing id on a CROWNED row is refused even with the flag, because
-//! moving a crown to a new session id is succession - a separate operation
+//! differing id on a TEAMED row is refused even with the flag, because
+//! moving a team to a new session id is succession - a separate operation
 //! with its own attribution.
 
 /// What to do with the id the relaunched session actually reported.
@@ -27,13 +27,13 @@ pub enum IdVerdict {
 
 /// Compare the id read back from the roster against the one converted.
 ///
-/// `crowned` is read ONCE before any mutation, so a crown granted mid-move
+/// `teamed` is read ONCE before any mutation, so a team granted mid-move
 /// cannot flip the answer after the session was already relaunched.
 pub fn id_verdict(
     original: &str,
     read_back: Option<&str>,
     allow_new_id: bool,
-    crowned: bool,
+    teamed: bool,
 ) -> IdVerdict {
     let Some(read_back) = read_back.filter(|id| !id.is_empty()) else {
         // No id at all is not "a new id": nothing proves the relaunched
@@ -46,10 +46,10 @@ pub fn id_verdict(
     if read_back == original {
         return IdVerdict::Kept;
     }
-    if crowned {
+    if teamed {
         return IdVerdict::RollBack(format!(
-            "the relaunch minted {read_back} rather than {original}, and this row is crowned; \
-             moving a crown to a new session id is succession, not conversion"
+            "the relaunch minted {read_back} rather than {original}, and this row is teamed; \
+             moving a team to a new session id is succession, not conversion"
         ));
     }
     if !allow_new_id {
@@ -174,13 +174,13 @@ pub fn to_claude_thread(
     entry.claude_session_uuid = Some(session_id.to_string());
 }
 
-/// Whether this row holds a crown. Read ONCE before the conversion mutates
-/// anything, because a crown granted mid-move must not decide the fate of a
+/// Whether this row holds a team. Read ONCE before the conversion mutates
+/// anything, because a team granted mid-move must not decide the fate of a
 /// session that was already relaunched.
 ///
-/// Crown liveness is the ROW's liveness, so the level alone answers it: an
-/// exited row carries no live crown whatever it records.
-pub fn row_is_crowned(entry: &crate::state::RegistryEntry) -> bool {
+/// Team liveness is the ROW's liveness, so the level alone answers it: an
+/// exited row carries no live team whatever it records.
+pub fn row_is_teamed(entry: &crate::state::RegistryEntry) -> bool {
     entry.crown_level.is_some_and(|level| level > 0)
 }
 
@@ -274,13 +274,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_recorded_crown_level_reads_as_crowned() {
+    fn only_a_recorded_team_level_reads_as_teamed() {
         let mut entry = crate::state::RegistryEntry::default();
-        assert!(!row_is_crowned(&entry), "an uncrowned row holds no crown");
+        assert!(!row_is_teamed(&entry), "an uncrowned row holds no team");
         entry.crown_level = Some(0);
-        assert!(!row_is_crowned(&entry), "level zero is not a crown");
+        assert!(!row_is_teamed(&entry), "level zero is not a team");
         entry.crown_level = Some(1);
-        assert!(row_is_crowned(&entry));
+        assert!(row_is_teamed(&entry));
     }
 
     #[test]
@@ -314,9 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn a_crowned_row_refuses_a_new_id_even_when_it_is_authorized() {
+    fn a_teamed_row_refuses_a_new_id_even_when_it_is_authorized() {
         let IdVerdict::RollBack(reason) = id_verdict("old", Some("new"), true, true) else {
-            panic!("a crowned row must roll back");
+            panic!("a teamed row must roll back");
         };
         assert!(reason.contains("succession"), "{reason}");
     }

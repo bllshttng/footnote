@@ -86,7 +86,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
     // graph, and both hold it.
     let live = GcRow {
         origin: Some("spawn".into()),
-        crowned: false,
+        teamed: false,
         work: fno_agents::graph_store::WorkState::AllDone {
             nodes: vec!["N1".into()],
         },
@@ -112,6 +112,8 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         registry_terminal: false,
         open_work_retire_s: fno_agents::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         live_claim: None,
+        worked_node: true,
+        node_held_elsewhere: None,
     };
     assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(

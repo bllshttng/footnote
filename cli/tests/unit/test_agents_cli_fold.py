@@ -87,13 +87,13 @@ def test_old_king_board_forwards_to_inbox_not_agents() -> None:
 
 def test_rust_shellouts_use_the_folded_mcp_and_board_paths() -> None:
     daemon = (REPO_ROOT / "crates/fno-agents/src/daemon.rs").read_text()
-    termination = (REPO_ROOT / "crates/fno-agents/src/king_termination.rs").read_text()
+    termination = (REPO_ROOT / "crates/fno-agents/src/lead_termination.rs").read_text()
 
     assert '.args(["agents", "mcp", "send", "--session-id", channel_id])' in daemon
     # The king's board read is IN PROCESS since x-25b8: the stop gate calls the
     # collector as a library. The pinned invariant is the library call with the
     # stop-gate budget handed in, never a subprocess spelling.
-    assert "crate::king_board::read_board(&opts)" in termination
+    assert "crate::org_board::read_board(&opts)" in termination
     assert "budget_ms: crate::loopcheck::stopgate_read_timeout()" in termination
 
 
@@ -142,9 +142,9 @@ def test_importing_agents_cli_does_not_import_folded_subgroups() -> None:
 
 
 def test_internal_variable_and_rust_callers_use_folded_paths() -> None:
-    king_loop = (REPO_ROOT / "crates/fno-agents/src/loop_king.rs").read_text()
+    lead_loop = (REPO_ROOT / "crates/fno-agents/src/loop_lead.rs").read_text()
     eval_sweep = (REPO_ROOT / "scripts/lib/eval-sweep-throttle.sh").read_text()
 
-    assert '"agents",\n                "king",\n                "escalate"' in king_loop
+    assert '"agents",\n                "lead",\n                "escalate"' in lead_loop
     assert '"$fno_cmd" agents claim acquire' in eval_sweep
     assert '"$fno_cmd" agents claim release' in eval_sweep

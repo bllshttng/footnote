@@ -152,12 +152,12 @@ struct CachedModel {
 }
 
 /// The rundown page path plus whether its root resolved FAITHFULLY (see
-/// [`crate::reign_root::reign_state_root`]): an unfaithful root is served as a
+/// [`crate::org_root::lead_state_root`]): an unfaithful root is served as a
 /// miss but never written through.
 fn rundown_html_path() -> (PathBuf, bool) {
     #[cfg(not(test))]
     {
-        let (root, faithful) = crate::reign_root::reign_state_root();
+        let (root, faithful) = crate::org_root::lead_state_root();
         (crate::state_layout::place(&root, "rundown.html"), faithful)
     }
     #[cfg(test)]
@@ -784,8 +784,8 @@ fn router(state: AppState) -> Router {
         .route("/backlog/model.json", get(backlog_model))
         .route("/backlog/node.json", get(backlog_node))
         .route("/backlog/act", post(backlog_act))
-        .route("/rundown", get(crown))
-        .route("/crown", get(crown))
+        .route("/rundown", get(team))
+        .route("/team", get(team))
         .route("/fleet", get(fleet))
         .route("/ws", get(ws_handler))
         .with_state(state)
@@ -1014,16 +1014,16 @@ async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Respon
         .into_response()
 }
 
-async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
+async fn team(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
     let authorized = token_ok(q.t.as_deref(), &st.token);
     let modified = std::fs::metadata(&st.rundown_html)
         .and_then(|m| m.modified())
         .ok();
     // An unfaithful root is never written through: the republish would pass
     // the fallback as `--out` and overwrite the global page with this
-    // project's court data.
-    if st.rundown_republish && crown_needs_republish(authorized, modified, SystemTime::now()) {
-        start_crown_republish(&st.rundown_html);
+    // project's org data.
+    if st.rundown_republish && team_needs_republish(authorized, modified, SystemTime::now()) {
+        start_team_republish(&st.rundown_html);
     }
     let notice = if st.rundown_republish {
         "fno agents org rundown (a render has started; reload in about a minute)"
@@ -1035,7 +1035,7 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
         q.t.as_deref(),
         &st.token,
         notice,
-        NavPage::Crown,
+        NavPage::Team,
     )
     .await
 }
@@ -1383,7 +1383,7 @@ async fn model_inputs(st: &AppState) -> Arc<backlog_model::Inputs> {
         Some(agents) => (agents, None),
         None => (
             Vec::new(),
-            Some("no agent roster yet; live, king and session actions are unknown".to_string()),
+            Some("no agent roster yet; live, lead and session actions are unknown".to_string()),
         ),
     };
     let graph = crate::backlog_view::graph_path();
@@ -1426,7 +1426,7 @@ fn layout_agents(snap: &Arc<Mutex<Snapshot>>) -> Option<Vec<proto::AgentRow>> {
 enum NavPage {
     Live,
     Backlog,
-    Crown,
+    Team,
     Fleet,
 }
 
@@ -1436,15 +1436,15 @@ fn token_ok(supplied: Option<&str>, expected: &str) -> bool {
 
 /// Republish-on-read: a render costs about a minute, so the bridge serves the
 /// current file at once and starts ONE background render when the page is
-/// stale. `crown()` checks; this spawns through the fleet admission gate.
-const CROWN_REPUBLISH_AFTER: Duration = Duration::from_secs(300);
-const CROWN_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(300);
-static CROWN_REPUBLISHING: AtomicBool = AtomicBool::new(false);
+/// stale. `team()` checks; this spawns through the fleet admission gate.
+const TEAM_REPUBLISH_AFTER: Duration = Duration::from_secs(300);
+const TEAM_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(300);
+static TEAM_REPUBLISHING: AtomicBool = AtomicBool::new(false);
 
 /// Pure staleness verdict: unauthorized reads start nothing, a missing file
 /// is maximally stale, a future mtime reads as fresh, and anything older
 /// than the threshold needs a render.
-fn crown_needs_republish(authorized: bool, modified: Option<SystemTime>, now: SystemTime) -> bool {
+fn team_needs_republish(authorized: bool, modified: Option<SystemTime>, now: SystemTime) -> bool {
     if !authorized {
         return false;
     }
@@ -1453,7 +1453,7 @@ fn crown_needs_republish(authorized: bool, modified: Option<SystemTime>, now: Sy
         Some(m) if m > now => false,
         Some(m) => now
             .duration_since(m)
-            .map(|age| age > CROWN_REPUBLISH_AFTER)
+            .map(|age| age > TEAM_REPUBLISH_AFTER)
             .unwrap_or(false),
     }
 }
@@ -1462,8 +1462,8 @@ fn crown_needs_republish(authorized: bool, modified: Option<SystemTime>, now: Sy
 /// reads, so writer and reader agree whatever the Python state root resolves
 /// to. Admission refusal, non-zero exit or timeout each log and clear the
 /// flag, so a later read may retry.
-fn start_crown_republish(out: &Path) {
-    if CROWN_REPUBLISHING
+fn start_team_republish(out: &Path) {
+    if TEAM_REPUBLISHING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
@@ -1495,7 +1495,7 @@ fn start_crown_republish(out: &Path) {
                     }
                     buf
                 });
-                match tokio::time::timeout(CROWN_REPUBLISH_TIMEOUT, child.wait()).await {
+                match tokio::time::timeout(TEAM_REPUBLISH_TIMEOUT, child.wait()).await {
                     Err(_) => {
                         let _ = child.kill().await;
                         Err("timed out after 300s".to_string())
@@ -1518,18 +1518,18 @@ fn start_crown_republish(out: &Path) {
         if let Err(e) = result {
             eprintln!("fno mux web: `fno agents org rundown --out <rundown.html>` failed: {e}");
         }
-        CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
+        TEAM_REPUBLISHING.store(false, Ordering::SeqCst);
     });
 }
 
-/// One sticky nav shared by the live, backlog and crown pages. Links are
+/// One sticky nav shared by the live, backlog and team pages. Links are
 /// computed in the browser from `location.pathname`, so any mount prefix
 /// works, and no prefix works too.
 fn nav_fragment(current: NavPage) -> String {
     let name = |p: NavPage| match p {
         NavPage::Live => "live",
         NavPage::Backlog => "backlog",
-        NavPage::Crown => "rundown",
+        NavPage::Team => "rundown",
         NavPage::Fleet => "fleet",
     };
     let link = |p: NavPage| {
@@ -1575,7 +1575,7 @@ fn nav_fragment(current: NavPage) -> String {
         name(current),
         link(NavPage::Live),
         link(NavPage::Backlog),
-        link(NavPage::Crown),
+        link(NavPage::Team),
         link(NavPage::Fleet),
     )
 }
@@ -1822,7 +1822,7 @@ mod tests {
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            rundown_html: dir.join("reign.html"),
+            rundown_html: dir.join("lead.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             writable: true,
@@ -2037,7 +2037,7 @@ mod tests {
         );
 
         assert!(!PAGE.contains("\"/backlog?t="));
-        assert!(!PAGE.contains("\"/crown?t="));
+        assert!(!PAGE.contains("\"/team?t="));
         assert!(!PAGE.contains("\"/fleet?t="));
         assert!(!PAGE.contains("${location.host}/ws"));
         assert!(PAGE.contains("<!--fno-nav-->"));
@@ -2233,7 +2233,7 @@ console.log("evictedRowCount: 18 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            rundown_html: dir.join("reign.html"),
+            rundown_html: dir.join("lead.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             writable: true,
@@ -2708,7 +2708,7 @@ console.log("recent searches: 12 cases ok");
         for (page, name) in [
             (NavPage::Live, "live"),
             (NavPage::Backlog, "backlog"),
-            (NavPage::Crown, "rundown"),
+            (NavPage::Team, "rundown"),
             (NavPage::Fleet, "fleet"),
         ] {
             let frag = nav_fragment(page);
@@ -2727,30 +2727,30 @@ console.log("recent searches: 12 cases ok");
             NavPage::Backlog,
         );
         assert!(out.contains("<body data-local=\"true\"><nav class=\"fno-nav\""));
-        let out = with_nav("<html><BODY><p>x</p></BODY></html>", NavPage::Crown);
+        let out = with_nav("<html><BODY><p>x</p></BODY></html>", NavPage::Team);
         assert!(out.contains("<BODY><nav class=\"fno-nav\""));
         let out = with_nav("<p>no body</p>", NavPage::Live);
         assert!(out.starts_with("<nav class=\"fno-nav\""));
 
         assert!(nav_fragment(NavPage::Backlog).contains(".controls{top:var(--fno-nav-h)}"));
         assert!(!nav_fragment(NavPage::Live).contains(".controls"));
-        assert!(!nav_fragment(NavPage::Crown).contains(".controls"));
+        assert!(!nav_fragment(NavPage::Team).contains(".controls"));
         assert!(!nav_fragment(NavPage::Fleet).contains(".controls"));
     }
 
     #[tokio::test]
-    async fn crown_requires_token_and_serves_private_file_without_cache() {
-        let dir = std::env::temp_dir().join(format!("fno-web-crown-{}-serve", std::process::id()));
+    async fn team_requires_token_and_serves_private_file_without_cache() {
+        let dir = std::env::temp_dir().join(format!("fno-web-team-{}-serve", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("reign.html");
-        std::fs::write(&path, "<body><p>PRIVATE-CROWN-MARKER</p></body>").unwrap();
+        let path = dir.join("lead.html");
+        std::fs::write(&path, "<body><p>PRIVATE-TEAM-MARKER</p></body>").unwrap();
         let response = private_page_response(
             &path,
             Some("right"),
             "right",
             "fno agents org rundown",
-            NavPage::Crown,
+            NavPage::Team,
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -2761,8 +2761,8 @@ console.log("recent searches: 12 cases ok");
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
-        // The served crown page carries the shared nav (inserted after <body>).
+        assert!(String::from_utf8_lossy(&body).contains("PRIVATE-TEAM-MARKER"));
+        // The served team page carries the shared nav (inserted after <body>).
         let text = String::from_utf8_lossy(&body).to_string();
         assert!(text.contains("nav class=\"fno-nav\" data-current=\"rundown\""));
         let denied = private_page_response(
@@ -2770,29 +2770,28 @@ console.log("recent searches: 12 cases ok");
             Some("wrong"),
             "right",
             "fno agents org rundown",
-            NavPage::Crown,
+            NavPage::Team,
         )
         .await;
         assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
         let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
+        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-TEAM-MARKER"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn missing_crown_names_the_render_action() {
-        let dir =
-            std::env::temp_dir().join(format!("fno-web-crown-{}-missing", std::process::id()));
+    async fn missing_team_names_the_render_action() {
+        let dir = std::env::temp_dir().join(format!("fno-web-team-{}-missing", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let response = private_page_response(
-            &dir.join("reign.html"),
+            &dir.join("lead.html"),
             Some("right"),
             "right",
             "fno agents org rundown (a render has started; reload in about a minute)",
-            NavPage::Crown,
+            NavPage::Team,
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
@@ -2804,44 +2803,44 @@ console.log("recent searches: 12 cases ok");
     }
 
     #[test]
-    fn crown_republish_truth_table() {
+    fn team_republish_truth_table() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         // Unauthorized never starts a render.
-        assert!(!crown_needs_republish(false, None, now));
+        assert!(!team_needs_republish(false, None, now));
         // A missing file is maximally stale.
-        assert!(crown_needs_republish(true, None, now));
+        assert!(team_needs_republish(true, None, now));
         // Fresh, and a future mtime, read as fresh.
         let fresh = now.checked_sub(Duration::from_secs(10)).unwrap();
-        assert!(!crown_needs_republish(true, Some(fresh), now));
+        assert!(!team_needs_republish(true, Some(fresh), now));
         let future = now.checked_add(Duration::from_secs(10)).unwrap();
-        assert!(!crown_needs_republish(true, Some(future), now));
+        assert!(!team_needs_republish(true, Some(future), now));
         // Older than the threshold needs a render.
         let stale = now
-            .checked_sub(CROWN_REPUBLISH_AFTER + Duration::from_secs(1))
+            .checked_sub(TEAM_REPUBLISH_AFTER + Duration::from_secs(1))
             .unwrap();
-        assert!(crown_needs_republish(true, Some(stale), now));
+        assert!(team_needs_republish(true, Some(stale), now));
         // Exactly at the threshold is still fresh ("older than" is strict).
-        let boundary = now.checked_sub(CROWN_REPUBLISH_AFTER).unwrap();
-        assert!(!crown_needs_republish(true, Some(boundary), now));
+        let boundary = now.checked_sub(TEAM_REPUBLISH_AFTER).unwrap();
+        assert!(!team_needs_republish(true, Some(boundary), now));
     }
 
     #[tokio::test]
     async fn republish_is_single_flight() {
         // With the flag held, a second start returns without spawning: no task
         // ever runs, so the flag survives the call untouched.
-        CROWN_REPUBLISHING.store(true, Ordering::SeqCst);
-        start_crown_republish(Path::new("/tmp/never-written-reign.html"));
+        TEAM_REPUBLISHING.store(true, Ordering::SeqCst);
+        start_team_republish(Path::new("/tmp/never-written-lead.html"));
         tokio::task::yield_now().await;
-        assert!(CROWN_REPUBLISHING.load(Ordering::SeqCst));
-        CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
+        assert!(TEAM_REPUBLISHING.load(Ordering::SeqCst));
+        TEAM_REPUBLISHING.store(false, Ordering::SeqCst);
     }
 
     #[tokio::test]
-    async fn an_unfaithful_reign_root_never_serves_the_render_started_notice() {
+    async fn an_unfaithful_org_root_never_serves_the_render_started_notice() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let dir =
-            std::env::temp_dir().join(format!("fno-web-reign-{}-unfaithful", std::process::id()));
+            std::env::temp_dir().join(format!("fno-web-lead-{}-unfaithful", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, _) = broadcast::channel(4);
@@ -2850,14 +2849,14 @@ console.log("recent searches: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            rundown_html: dir.join("reign.html"),
+            rundown_html: dir.join("lead.html"),
             rundown_republish: false,
             fleet_html: dir.join("fleet.html"),
             writable: true,
             model: Default::default(),
             shutdown,
         };
-        CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
+        TEAM_REPUBLISHING.store(false, Ordering::SeqCst);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -2865,7 +2864,7 @@ console.log("recent searches: 12 cases ok");
         });
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         stream
-            .write_all(b"GET /crown?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET /team?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
         let mut buf = Vec::new();
@@ -2879,7 +2878,7 @@ console.log("recent searches: 12 cases ok");
         );
         tokio::task::yield_now().await;
         assert!(
-            !CROWN_REPUBLISHING.load(Ordering::SeqCst),
+            !TEAM_REPUBLISHING.load(Ordering::SeqCst),
             "an unfaithful root never starts a republish"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2931,7 +2930,7 @@ console.log("recent searches: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            rundown_html: dir.join("reign.html"),
+            rundown_html: dir.join("lead.html"),
             rundown_republish: true,
             fleet_html: fleet_path,
             writable: true,
@@ -3292,7 +3291,7 @@ console.log("recent searches: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            rundown_html: dir.join("reign.html"),
+            rundown_html: dir.join("lead.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             writable: true,
@@ -3384,7 +3383,7 @@ console.log("recent searches: 12 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            rundown_html: dir.join("reign.html"),
+            rundown_html: dir.join("lead.html"),
             rundown_republish: true,
             fleet_html: dir.join("fleet.html"),
             writable: true,

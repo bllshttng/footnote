@@ -6,7 +6,7 @@
 //! an `operator_question`. Every reader keyed on the question type falls
 //! out of the new type untouched: the Python fold, the SessionStart block,
 //! the attention projection, the notify arm, the stop gate, the spawn gate.
-//! A king reads open tasks on the board's `fleet_task` queue, report-only.
+//! A lead reads open tasks on the board's `fleet_task` queue, report-only.
 //!
 //! Identity is lane + key + cwd: one heal process serves several repos and
 //! PR numbers repeat across them, so a task filed for another root is never
@@ -31,7 +31,7 @@ pub const LEGACY_MARKERS: [&str; 7] = [
     "[watchdog-friction:",
     "[reap-hold:",
     "[watchdog-unfinished-work:",
-    "[king-escalation:",
+    "[lead-escalation:",
 ];
 
 /// One open fleet task, folded from the store.

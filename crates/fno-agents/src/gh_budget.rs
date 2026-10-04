@@ -258,7 +258,7 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
 }
 
 /// flock held for the scope of one read-modify-write, following
-/// `loop_king::bump_respawn_count`. Shared with the pr-park store so the
+/// `loop_lead::bump_respawn_count`. Shared with the pr-park store so the
 /// daemon sweep and the watcher tick serialize on the same `.lock` file.
 pub(crate) struct FileLock {
     handle: std::fs::File,

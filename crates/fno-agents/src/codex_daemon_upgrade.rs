@@ -254,7 +254,7 @@ async fn snapshot_and_swap(
             }
         }
     };
-    // Join each thread id with its fno registry row (crown/row association)
+    // Join each thread id with its fno registry row (team/row association)
     // before anything mutates, so the receipt carries the association.
     let registry_rows = crate::restart_run::read_thread_rows(&crate::paths::AgentsHome::from_env());
     for thread in &mut snapshot {

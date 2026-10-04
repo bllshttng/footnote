@@ -322,7 +322,7 @@ def _agy_crown_adapter_path() -> "Optional[Path]":
     # gated on invocationNum == 0 (first model call == session start).
     from fno.paths import resolve_plugin_script
 
-    p = resolve_plugin_script("hooks/agy-crown-inject.sh")
+    p = resolve_plugin_script("hooks/agy-team-inject.sh")
     return p if p.is_file() else None
 
 

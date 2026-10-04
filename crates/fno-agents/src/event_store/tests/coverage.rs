@@ -15,7 +15,7 @@ fn imported_history_reads_partial_until_the_epoch() {
     sync(&live).unwrap();
     // A since before the epoch is only partially proven even though rows
     // were imported from before it.
-    let early = coverage(&live, Some(0), &["reign_checkin".to_string()]);
+    let early = coverage(&live, Some(0), &["lead_checkin".to_string()]);
     assert_eq!(early.status, "partial", "{early:?}");
     let epoch = early.complete_since_ms.unwrap();
     assert!(
@@ -23,7 +23,7 @@ fn imported_history_reads_partial_until_the_epoch() {
         "observed history precedes the epoch: {early:?}"
     );
     // A since at or after the epoch is proven complete.
-    let late = coverage(&live, Some(epoch), &["reign_checkin".to_string()]);
+    let late = coverage(&live, Some(epoch), &["lead_checkin".to_string()]);
     assert_eq!(late.status, "complete", "{late:?}");
     assert_eq!(late.complete_since_ms, Some(epoch));
 }
@@ -102,7 +102,7 @@ fn ephemeral_proven_start_follows_the_prune_cutoff() {
         ephemeral.complete_since_ms,
         Some(prune_ms - 672 * 3_600_000)
     );
-    let durable = coverage(&live, Some(epoch), &["reign_checkin".to_string()]);
+    let durable = coverage(&live, Some(epoch), &["lead_checkin".to_string()]);
     assert_eq!(durable.status, "complete", "{durable:?}");
     assert_eq!(durable.complete_since_ms, Some(epoch));
 }

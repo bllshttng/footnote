@@ -75,7 +75,7 @@ fn effective_difficulty(node_difficulty: Option<&str>) -> (String, Option<String
     }
 }
 
-fn row_value<'a>(row: &'a Value, key: &str) -> String {
+pub(crate) fn row_value<'a>(row: &'a Value, key: &str) -> String {
     row.get(key)
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -87,7 +87,7 @@ fn row_value<'a>(row: &'a Value, key: &str) -> String {
 /// when it survives, record it on the candidate. An effort with no surface on
 /// the harness is dropped with a chain line. The grid and pin legs both call
 /// this so the rule lives once.
-fn validated_effort(
+pub(crate) fn validated_effort(
     out: &mut Map<String, Value>,
     harness: &str,
     effort: &str,
@@ -172,6 +172,14 @@ fn fold(
                     }
                     if !v.is_string() {
                         return Err(fault(&rung, format!(".{k} must be a string; got {v}")));
+                    }
+                    if k == "utc_hours" && v.as_str().and_then(parse_utc_hours).is_none() {
+                        return Err(fault(
+                            &rung,
+                            format!(
+                                ".utc_hours must be H-H with 0 <= H <= 23 and start != end; got {v}"
+                            ),
+                        ));
                     }
                 }
                 let get = |k: &str| {
@@ -307,6 +315,13 @@ fn outdated_lane_count(
         .filter(|(_, row_name)| rows.contains_key(row_name))
         .filter_map(|(_, row_name)| rows.get(row_name))
         .filter(|r| {
+            // A lane the clock already closes this hour is not walking, so
+            // its staleness never arms the refresh pass.
+            if let Some((start, end)) = parse_utc_hours(&row_value(r, "utc_hours")) {
+                if !hour_in_utc_window(utc_hour_now(), start, end) {
+                    return false;
+                }
+            }
             let harness = row_value(r, "harness");
             let (state, window, _age) = row_capacity(r, capacity.get(&harness));
             state == "unknown" && (window == "stale" || window == "absent")
@@ -378,6 +393,31 @@ fn allowed(value: &str, enum_values: &[&str]) -> bool {
 }
 
 const BAND_RANK_KEYS: [&str; 4] = ["low", "medium", "high", "max"];
+
+/// A lane's `utc_hours` window `H-H` in UTC hours; the end may wrap midnight
+/// (`15-01`). `start == end` refuses as empty: a lane that is always open
+/// omits the field.
+fn parse_utc_hours(spec: &str) -> Option<(u8, u8)> {
+    let (a, b) = spec.split_once('-')?;
+    let hour = |s: &str| s.trim().parse::<u8>().ok().filter(|h| *h <= 23);
+    let start = hour(a)?;
+    let end = hour(b)?;
+    (start != end).then_some((start, end))
+}
+
+fn utc_hour_now() -> u8 {
+    ((slot_now() as u64) / 3600 % 24) as u8
+}
+
+/// Start-inclusive, end-exclusive; `15-01` spans 15:00-01:00 UTC across
+/// midnight.
+fn hour_in_utc_window(hour: u8, start: u8, end: u8) -> bool {
+    if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
+}
 
 /// A row's strength rank; a band outside the vocabulary (including unbanded)
 /// ranks -1, below every banded row.
@@ -1170,6 +1210,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             );
         }
     }
+    crate::route_node_pin::attach_effort_pin(&mut out, payload);
     out
 }
 
@@ -1429,114 +1470,22 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         || explicit_route_name.is_some()
         || explicit_vendor_name.is_some()
     {
-        // A typed --model whose routing.models row declares exactly one
-        // harness resolves that row instead of falling through to a
-        // config-scalar harness: the row IS the model's own
-        // declaration. A typed --route or -P, or a typed -H (payload
-        // explicit_lane), keeps the plain override - the operator already
-        // named those axes. Zero row matches also keep it: no vendor
-        // inference here.
-        let model_only =
-            explicit_route_name.is_none() && explicit_vendor_name.is_none() && !explicit_lane;
-        let matched: Vec<(String, Value)> = if model_only {
-            let model = explicit_model_name.as_deref().unwrap_or("");
-            payload
-                .get("declared_rows")
-                .and_then(Value::as_object)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|(_, row)| row_value(row, "model") == model)
-                        .map(|(name, row)| (name.clone(), row.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let declared_harnesses: Vec<String> = matched
-            .iter()
-            .map(|(_, row)| row_value(row, "harness"))
-            .filter(|h| !h.is_empty())
-            .collect();
-        let harness_set: std::collections::BTreeSet<String> =
-            declared_harnesses.iter().cloned().collect();
-        if model_only && harness_set.len() > 1 {
-            let model = explicit_model_name.as_deref().unwrap_or("");
-            let list = matched
-                .iter()
-                .map(|(name, row)| format!("{} (harness {})", name, row_value(row, "harness")))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            let remedies = {
-                let mut hs: Vec<&str> = declared_harnesses.iter().map(|s| s.as_str()).collect();
-                hs.sort();
-                hs.dedup();
-                hs.iter()
-                    .map(|h| format!("-H {h}"))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            };
-            chain.push(json!(
-                "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
-            ));
-            chain.push(json!(format!(
-                "slot=strict-refusal --model {model} matches routing.models rows {list}; pass {remedies}"
-            )));
-            return refused_decision(
-                chain,
-                "pin-model-ambiguous-harness",
-                "the typed model's declared rows name different harnesses",
-            );
+        if let Some(decision) = crate::route_node_pin::operator_pin_leg(
+            payload,
+            explicit_model_name,
+            explicit_route_name,
+            explicit_vendor_name,
+            explicit_lane,
+            &mut chain,
+        ) {
+            return decision;
         }
-        if model_only && harness_set.len() == 1 {
-            let (row_name, row) = &matched[0];
-            let harness = declared_harnesses[0].clone();
-            let mut out = Map::new();
-            out.insert("harness".into(), json!(harness));
-            out.insert("model".into(), json!(explicit_model_name.clone().unwrap()));
-            out.insert("pin_row".into(), json!(row_name));
-            let route_set: std::collections::BTreeSet<String> = matched
-                .iter()
-                .map(|(_, row)| row_value(row, "route"))
-                .filter(|s| !s.is_empty())
-                .collect();
-            if route_set.len() == 1 {
-                out.insert(
-                    "route".into(),
-                    json!(route_set.iter().next().unwrap().to_string()),
-                );
-            }
-            let account_set: std::collections::BTreeSet<String> = matched
-                .iter()
-                .map(|(_, row)| row_value(row, "account"))
-                .filter(|s| !s.is_empty())
-                .collect();
-            if account_set.len() == 1 {
-                let account = account_set.iter().next().unwrap().clone();
-                out.insert("account".into(), json!(account));
-            }
-            let effort_ok = payload.get("effort_ok").cloned().unwrap_or(json!({}));
-            validated_effort(
-                &mut out,
-                &harness,
-                &row_value(row, "effort"),
-                &effort_ok,
-                &mut chain,
-                "pin",
-            );
-            chain.push(json!(format!(
-                "slot=operator-pin-override row={row_name} harness={harness} (the typed model's declared row names its harness)"
-            )));
-            return json!({
-                "status": "pick",
-                "candidate": Value::Object(out),
-                "chain": chain,
-            });
-        }
-        chain.push(json!(
-            "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
-        ));
-        return none(chain);
+    }
+
+    // A node's own pin is the standing ruling one rung below a typed flag;
+    // the leg lives beside the typed leg in route_node_pin.
+    if let Some(decision) = crate::route_node_pin::node_pin_leg(payload, &mut chain) {
+        return decision;
     }
 
     if lanes_arr.is_empty() {
@@ -1690,6 +1639,36 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
             }
         };
         let harness = row_value(&row, "harness");
+        // A windowed lane gates on its own clock before anything else: the
+        // window IS its availability model, so an out-of-window lane is
+        // skipped without a capacity read, and inside the window an unprobed
+        // capacity read is not evidence against it (checked at the unknown
+        // branch below).
+        let mut windowed = false;
+        let utc_hours_spec = row_value(&row, "utc_hours");
+        if !utc_hours_spec.is_empty() {
+            let Some((start, end)) = parse_utc_hours(&utc_hours_spec) else {
+                chain.push(json!(format!(
+                    "slot=config {rung} utc_hours {utc_hours_spec:?} is not H-H with 0 <= H <= 23 and start != end"
+                )));
+                return none(chain);
+            };
+            // utc_now_hour pins the clock for tests; the dispatch seam and
+            // the readout never set it, so production judges the real hour.
+            let hour = payload
+                .get("utc_now_hour")
+                .and_then(Value::as_u64)
+                .map(|h| (h % 24) as u8)
+                .unwrap_or_else(utc_hour_now);
+            if !hour_in_utc_window(hour, start, end) {
+                chain.push(json!(format!(
+                    "slot skip {} outside utc_hours({utc_hours_spec}) now={hour}z",
+                    lane_label(rung, row_name),
+                )));
+                continue;
+            }
+            windowed = true;
+        }
         if !candidate_supported(&harness, substrate, permission_mode, &thread_seatable) {
             chain.push(json!(format!(
                 "slot skip {} harness {harness:?} cannot carry substrate({}) permission({})",
@@ -1889,7 +1868,7 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
             continue;
         }
         if state != "ok" && state != "low" && state != "available" {
-            if on_unknown == "skip" {
+            if on_unknown == "skip" && !windowed {
                 capacity_unknown_skips += 1;
                 chain.push(json!(format!(
                     "slot skip {} capacity={state} (on_unknown=skip){}",
@@ -2071,6 +2050,9 @@ fn pick(
     let mut lane_fields = Map::new();
     if let Some(inline) = fields_by_rung.get(rung).and_then(Value::as_object) {
         lane_fields = inline.clone();
+        // utc_hours gates the walk; it is not a spawn field, so it never
+        // rides the candidate the way the passthrough fields do.
+        lane_fields.remove("utc_hours");
     } else {
         for (k, v) in [
             ("provider", &harness),
@@ -2126,7 +2108,7 @@ fn pick(
     })
 }
 
-fn none(chain: Vec<Value>) -> Value {
+pub(crate) fn none(chain: Vec<Value>) -> Value {
     // The terminal line classifies a no-candidate walk-out exactly as the
     // readout always has: a config fault or a strict refusal is a policy
     // hold, a capacity stand-down is capacity-held, anything else is the
@@ -2290,7 +2272,7 @@ fn exhausted_decision(chain: Vec<Value>) -> Value {
 /// A strict-policy refusal: the decision path is named, the candidate is
 /// Null, and `reason_kind` tells machine consumers this apart from a
 /// capacity queue or an unarmed legacy no-candidate.
-fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
+pub(crate) fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
     let mut out = json!({
         "status": "none",
         "verdict": "policy-held",
@@ -4265,7 +4247,7 @@ mod tests {
         // A typed model on a verb no slot row declares is the operator's own
         // pin: it lands instead of refusing, and the refusal text never fires.
         let out = resolve_slot_payload(&strict_payload(json!({
-            "work_verb": "reign",
+            "work_verb": "lead",
             "explicit_model_value": "gpt-6-astra",
         })));
         assert_eq!(out["status"], "none");
@@ -4885,6 +4867,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "route_slot_utc_hours_tests.rs"]
+mod utc_hours_tests;
 
 #[cfg(test)]
 #[path = "route_slot_capacity_tests.rs"]

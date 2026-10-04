@@ -157,9 +157,9 @@ pub(crate) fn render_report(md_path: &Path) -> Result<RenderOutcome, String> {
     let dir = md_path.parent().unwrap_or(Path::new("."));
     let stamped = md_path.with_extension("html");
     let latest = dir.join("latest.html");
-    crate::king_ledger::write_atomic(&stamped, &page)
+    crate::rundown::write_atomic(&stamped, &page)
         .map_err(|e| format!("fno-agents intel --render: {}: {e}", stamped.display()))?;
-    crate::king_ledger::write_atomic(&latest, &page)
+    crate::rundown::write_atomic(&latest, &page)
         .map_err(|e| format!("fno-agents intel --render: {}: {e}", latest.display()))?;
 
     let pruned = prune_stamped(dir);
