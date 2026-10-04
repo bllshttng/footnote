@@ -439,6 +439,7 @@ pub fn emit_paths_sh_live(cwd: &Path) -> Result<String, String> {
                 match cfg_str(cwd, &["project", "id"]).filter(|p| !p.is_empty()) {
                     Some(pid) => format!("$STATE_DIR/handoffs/{pid}"),
                     None => return Ok(finish_live_stub(
+                        cwd,
                         lines,
                         "export HANDOFFS_DIR=\"$STATE_DIR/handoffs/$(basename \"$REPO_ROOT\")\"",
                     )),
@@ -470,7 +471,6 @@ fn finish_live_stub(cwd: &Path, mut lines: Vec<String>, handoffs_line: &str) -> 
         "export CONFIG_FILE={}",
         bash_quote(&config_file.to_string_lossy())
     ));
-    lines.push(String::new());
     lines.extend(functions_lines());
     lines.push(String::new());
     lines.join("\n")
@@ -697,34 +697,18 @@ mod tests {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = LiveFx::new("regen", "");
         let _env = EnvGuard::new(&fx.pins());
-        assert_eq!(run(&["shell-stub".to_string()]), 0);
-        let before = std::env::temp_dir()
-            .read_dir()
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("fno-paths-"))
-            .map(|e| (e.path(), fs::read_to_string(e.path()).unwrap_or_default()))
-            .collect::<Vec<_>>();
-        assert!(!before.is_empty());
-        let first_len = before[0].1.len();
+        let p1 = write_shell_stub(&fx.root).unwrap();
+        let first = fs::read_to_string(&p1).unwrap();
+        let _ = fs::remove_file(&p1);
 
         fx.body("plans_dir = '.fno/my-custom-plans'\n");
-        assert_eq!(run(&["shell-stub".to_string()]), 0);
-        let after = fs::read_to_string(
-            std::env::temp_dir()
-                .read_dir()
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().starts_with("fno-paths-"))
-                .map(|e| e.path())
-                .max_by_key(|p| p.metadata().unwrap().modified().unwrap()),
-        )
-        .unwrap();
-        assert!(after.contains("my-custom-plans"), "stub:\n{after}");
-        assert!(after.len() != first_len || after != before[0].1);
-        for (p, _) in &before {
-            let _ = fs::remove_file(p);
-        }
+        let p2 = write_shell_stub(&fx.root).unwrap();
+        let second = fs::read_to_string(&p2).unwrap();
+        let _ = fs::remove_file(&p2);
+
+        assert_ne!(p1, p2, "each call writes a fresh temp file");
+        assert_ne!(first, second, "each call regenerates from live settings");
+        assert!(second.contains("my-custom-plans"), "stub:\n{second}");
     }
 
     #[test]
@@ -739,13 +723,11 @@ mod tests {
     #[test]
     fn live_stub_resolves_vault_template_in_state_dir() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let fx = LiveFx::new(
-            "vault",
-            &format!(
-                "state_dir = '{{vault}}/state'\n[obsidian]\nenabled = true\nvault = '{}'\n",
-                fx.base.display()
-            ),
-        );
+        let fx = LiveFx::new("vault", "");
+        fx.body(&format!(
+            "state_dir = '{{vault}}/state'\n[obsidian]\nenabled = true\nvault = '{}'\n",
+            fx.base.display()
+        ));
         let _env = EnvGuard::new(&fx.pins());
         let stub = emit_paths_sh_live(&fx.root).unwrap();
         let expected = format!("{}/state", fx.base.display());
@@ -806,13 +788,11 @@ mod tests {
     #[test]
     fn live_stub_handoffs_vault_path() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let fx = LiveFx::new(
-            "handvault",
-            &format!(
-                "[project]\nid = 'testproj'\n[obsidian]\nenabled = true\nvault = '{}'\n",
-                fx.base.display()
-            ),
-        );
+        let fx = LiveFx::new("handvault", "");
+        fx.body(&format!(
+            "[project]\nid = 'testproj'\n[obsidian]\nenabled = true\nvault = '{}'\n",
+            fx.base.display()
+        ));
         let _env = EnvGuard::new(&fx.pins());
         let stub = emit_paths_sh_live(&fx.root).unwrap();
         let line = line_with(&stub, "export HANDOFFS_DIR=");
