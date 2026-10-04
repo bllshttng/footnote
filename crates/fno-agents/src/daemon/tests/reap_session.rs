@@ -338,6 +338,36 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
     assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
+    // x-ff06: the recorded merge is the LAST ship, never the delivery. A
+    // nine-ship plan whose one recorded PR merged keeps its worker, here in
+    // the registry sweep; the roster sweep reads the same verdict field.
+    let plan = transcripts.path().join("nine.md");
+    std::fs::write(
+        &plan,
+        "---\nstatus: in_review\nexpected_url_count: 9\n---\n# nine ships\n",
+    )
+    .unwrap();
+    let mut multi = x2774_open_node("N1", "in_review", &["s-lag"]);
+    multi["merge_status"] = json!("merged");
+    multi["pr_number"] = json!(2980);
+    multi["plan_path"] = json!(plan.to_string_lossy());
+    stage_graph(dir.path(), json!([multi]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
+    // An unreadable plan is an unknown promise, and unknown keeps the row.
+    multi["plan_path"] = json!(transcripts.path().join("gone.md").to_string_lossy());
+    stage_graph(dir.path(), json!([multi]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert!(summary.retired.is_empty(), "{summary:?}");
     std::fs::remove_dir_all(home.root()).ok();
 }
 

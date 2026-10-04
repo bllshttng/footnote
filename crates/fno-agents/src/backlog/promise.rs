@@ -422,6 +422,73 @@ fn count_merged_refs(
     (merged, failure)
 }
 
+/// The plan's declared ship count, tri-state: `Absent` (single-ship by
+/// default), `Count(n)`, or `Unreadable` (present but not an integer).
+/// The reaper's delivery predicate needs the third state - a declared
+/// count that cannot be read is unknown, never one ship.
+pub(crate) enum DeclaredShips {
+    Absent,
+    Count(i64),
+    Unreadable,
+}
+
+pub(crate) fn declared_ships(fields: &crate::plan_doc::codec::Fields) -> DeclaredShips {
+    match fields.get("expected_url_count") {
+        None => DeclaredShips::Absent,
+        Some(crate::plan_doc::codec::Value::Scalar(s)) => match s.trim().parse::<i64>() {
+            Ok(n) => DeclaredShips::Count(n),
+            Err(_) => DeclaredShips::Unreadable,
+        },
+        Some(_) => DeclaredShips::Unreadable,
+    }
+}
+
+/// The reaper side of the same delivery rule the close gate runs
+/// (x-ff06): a recorded merge_status is the LAST ship, never the whole
+/// delivery. The plan completion stamp decides: no plan, or a single-ship
+/// promise, settles with the recorded merge; a multi-ship plan keeps its
+/// worker until recorded refs cover the promise; an unreadable or
+/// unparseable plan reads as unknown, and unknown keeps the row - unknown
+/// is never done. No network: recorded refs are an upper bound on merged
+/// refs, so a promise they cannot cover is unmet by construction. The
+/// close gate itself is [`resolve_promise_evidence`].
+pub(crate) fn merged_delivery_settled(
+    plan_path: Option<&str>,
+    recorded_refs: usize,
+    cwd: Option<&str>,
+) -> bool {
+    let Some(plan_path) = plan_path.filter(|p| !p.is_empty()) else {
+        return true;
+    };
+    let path = match plan_path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => std::path::PathBuf::from(home).join(rest),
+            Err(_) => return false,
+        },
+        None => PathBuf::from(plan_path),
+    };
+    let path = if path.is_relative() {
+        match cwd {
+            Some(cwd) => Path::new(cwd).join(path),
+            None => return false,
+        }
+    } else {
+        path
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(frontmatter) = crate::plan_doc::codec::parse_frontmatter(&text) else {
+        return false;
+    };
+    match declared_ships(&frontmatter.fields) {
+        DeclaredShips::Absent => true,
+        DeclaredShips::Count(n) if n < 2 => true,
+        DeclaredShips::Count(n) => recorded_refs >= n as usize,
+        DeclaredShips::Unreadable => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

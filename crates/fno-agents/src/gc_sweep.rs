@@ -480,6 +480,10 @@ pub struct GraphRead {
     /// [`gh_pr_is_open`]; tests stage answers here so no test touches the
     /// network.
     pub pr_reads: HashMap<(String, u64), Option<bool>>,
+    /// Node id -> the node's declared `plan_path`, verbatim from the graph
+    /// row. The merged-lag release reads delivery through it: the last
+    /// merge is one ship, the plan's promise is the whole delivery.
+    pub plan_paths: HashMap<String, String>,
 }
 
 /// Does the node's `plan_path` name an existing file (marker 2)? A leading
@@ -655,6 +659,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut statuses: HashMap<String, String> = HashMap::new();
     let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
     let mut pr_number: HashMap<String, Option<u64>> = HashMap::new();
+    let mut plan_paths: HashMap<String, String> = HashMap::new();
     let mut do_nodes: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let primaries = crate::additional_prs::primary_index(&entries);
     for entry in &entries {
@@ -693,6 +698,11 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                 additional_open,
             ),
         );
+        if let Some(plan) = entry.get("plan_path").and_then(Value::as_str) {
+            if !plan.is_empty() {
+                plan_paths.insert(node_id.to_string(), plan.to_string());
+            }
+        }
         let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
             continue;
         };
@@ -803,6 +813,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         statuses,
         pr_state,
         pr_number,
+        plan_paths,
         do_nodes,
         pr_reads: HashMap::new(),
     })
@@ -1410,11 +1421,22 @@ pub fn provenance_verdict(
         // be fenced inside the AllDone arm, so the merge evidence already
         // loaded for every node was discarded on the one branch that needs
         // it. Recorded merged is positive evidence the work shipped; only
-        // Some("merged") counts, everything else keeps the row.
+        // Some("merged") counts, everything else keeps the row. A recorded
+        // merge is the LAST ship, never the whole delivery: the plan
+        // completion stamp (x-ff06) must also settle, or a nine-ship node
+        // reads exactly like a finished one-ship node.
         WorkState::Open { node, .. } => {
-            let (merge_status, _total, _open) =
+            let (merge_status, total, _open) =
                 graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
-            if merge_status.as_deref() == Some("merged") {
+            let recorded =
+                usize::from(graph.pr_number.get(node).copied().flatten().is_some()) + total;
+            if merge_status.as_deref() == Some("merged")
+                && crate::backlog::promise::merged_delivery_settled(
+                    graph.plan_paths.get(node).map(String::as_str),
+                    recorded,
+                    Some(e.cwd.as_str()),
+                )
+            {
                 merged_but_open = Some(node.clone());
             }
         }
