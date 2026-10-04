@@ -499,7 +499,7 @@ class AgentEntry:
     keeper_child_pid: Optional[int] = None
     # The substrate this row was spawned on (v23): "pane", "thread" or
     # "headless", stored under the public names the capability table keys on
-    # (never "bg", the deprecated alias for thread). Stamped once at birth by
+    # (never the retired "bg" spelling). Stamped once at birth by
     # the writer that resolved the lane. None on rows whose writer cannot know
     # (adopt, manifest synthesis) - ABSENCE MEANS UNKNOWN, never "pane",
     # because a silent default would tell restore to resurrect a session that

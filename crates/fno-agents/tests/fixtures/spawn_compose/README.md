@@ -48,6 +48,10 @@ The `slot-exhausted-queue` stub and the planted `node_row`s are the only
 non-live inputs; every other expected value was produced by the unmodified
 merge-base Python and binary.
 
+## The verbose field
+
+The compose owns the routing-provenance line (`applied axis=value (source) (routing), ...`). A spawn prints what the user acts on. Only inputs carrying `verbose: true` get the line. Cases captured before that gate keep their captured stderr and carry `verbose: true`. `slot-pin-pick-quiet` is the same pin case without it, pinning the silent default.
+
 ## Post-capture drift applied
 
 One case was refreshed after main moved under the capture: main merged

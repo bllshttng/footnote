@@ -42,6 +42,10 @@ pub struct Inputs {
     /// The resolved node id (flag/env/seed) and its graph row.
     pub node: Option<String>,
     pub node_row: Option<Value>,
+    /// Print the routing provenance line (`applied axis=value (source) ...`).
+    /// Default false: a spawn prints what the user acts on; the provenance
+    /// rides `--verbose`.
+    pub verbose: bool,
 }
 
 /// Production read side: config subtrees, the node and its row, the ambient
@@ -98,6 +102,7 @@ pub fn gather(ask: &Value, cwd: &Path) -> Inputs {
         profiles: cfg(&["agents", "profiles"]),
         roster: crate::provider::footnote_verbs().into_iter().collect(),
         scan,
+        verbose: ask.get("verbose").and_then(Value::as_bool).unwrap_or(false),
     }
 }
 
@@ -1445,7 +1450,7 @@ fn apply_axes_answer(seam: &mut Seam, answer: &Value) {
 /// Assembly: the applied line, the head inject, the bundle tail, the vendor
 /// check over the FINAL argv, and the journal row.
 fn assemble(stage: &mut Stage, seam: &mut Seam) {
-    if !seam.applied.is_empty() {
+    if !seam.applied.is_empty() && stage.inputs.verbose {
         let parts: Vec<String> = seam
             .applied
             .iter()
@@ -1753,6 +1758,7 @@ mod tests {
             facts: serde_json::json!({"role_resolves": null}),
             node: None,
             node_row: None,
+            verbose: false,
         };
         let answer = compose(&inputs);
         drop(guard);
@@ -1797,6 +1803,7 @@ mod tests {
             facts: serde_json::json!({"role_resolves": false}),
             node: None,
             node_row: None,
+            verbose: false,
         };
         let answer = compose(&inputs);
         drop(guard);

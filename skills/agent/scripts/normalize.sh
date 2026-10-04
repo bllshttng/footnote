@@ -63,8 +63,8 @@ EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
 ALLOW_MERGE=""
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
-SUBSTRATE=""       # ""|pane|thread|headless; `bg` is a deprecated
-                   # alias for `thread`. Empty = the default `pane` (owned-PTY).
+SUBSTRATE=""       # ""|pane|thread|headless. The retired `bg` spelling
+                   # refuses. Empty = the default `pane` (owned-PTY).
 YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
 PROJECT=""         # cross-project target: a registry project name/short_name to
@@ -88,11 +88,8 @@ set_substrate() {
   local _substrate="$1"
   case "$_substrate" in
     pane|thread|headless) SUBSTRATE="$_substrate" ;;
-    bg)
-      SUBSTRATE="thread"
-      printf "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release\n" >&2
-      ;;
-    *) emit_error "invalid substrate '$_substrate'; valid: pane, thread, bg, headless" ;;
+    bg) emit_error "substrate 'bg' was retired; use 'thread'" ;;
+    *) emit_error "invalid substrate '$_substrate'; valid: pane, thread, headless" ;;
   esac
 }
 
@@ -283,7 +280,9 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
     bg|headless)
       _rest="${msg#"${msg%%[[:space:]]*}"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
       if [[ "$_rest" == /* ]]; then
-        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_first_lc}'. (A leading '${_first_lc}' would otherwise bury the '${_rest%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
+        _hint="$_first_lc"
+        [[ "$_first_lc" == bg ]] && _hint="thread"  # bg is retired; the redirect teaches the survivor
+        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_hint}'. (A leading '${_first_lc}' would otherwise bury the '${_rest%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
       fi
       ;;
     substrate)
@@ -970,7 +969,6 @@ printf 'effort=%s\n' "$EFFORT"
 printf 'mode=%s\n' "$MODE"
 # the spawn substrate (empty=pane default). The SKILL forwards a
 # non-empty value to `spawn.sh --substrate`; thread -> persistent thread,
-# bg -> deprecated alias for thread,
 # headless -> one-shot (claude -p / codex --exec / agy -p).
 printf 'substrate=%s\n' "$SUBSTRATE"
 printf 'yolo=%s\n' "$YOLO"

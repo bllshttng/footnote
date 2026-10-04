@@ -1353,8 +1353,8 @@ def resolve_dispatch(
         raise DispatchResolveError(
             f"substrate 'thread' is unsupported on harness {chosen_harness!r}: "
             f"its features.spawn state reads {spawn_state(chosen_harness)!r}, "
-            f"so fno has not built the {thread_lane(chosen_harness)} lane yet "
-            f"(bg is a deprecated alias); use 'headless'"
+            f"so fno has not built the {thread_lane(chosen_harness)} lane yet; "
+            f"use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay

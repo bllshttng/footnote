@@ -349,18 +349,21 @@ def _census(
     together. The gap rides as its own field for the same reason.
     Full rule: docs/architecture/resource-meter.md.
     """
-    # The caller's own share reading, from the ONE gate's probe
-    # answer - the same share the gate refuses on; None when it cannot be read.
+    # The ONE gate's probe answer: the share the gate refuses on (None when
+    # unreadable) plus the advisory notes the spawn path no longer prints.
     try:
         from fno.agents.spawn_gate import probe_capacity
 
-        share = probe_capacity().get("share")
+        probe = probe_capacity()
+        share = probe.get("share")
     except Exception:
+        probe = {}
         share = None
     census: dict[str, Any] = {
         "kings": None, "king_conflicts": None, "workers": None,
         "tests": None if reading is None else reading.test_process_count,
         "roster_rows": None if rows is None else len(rows),
+        "gate_notes": list(probe.get("warnings") or []),
         "attribution_gap": None if reading is None else reading.attribution_gap,
         # Top fleet consumers by program name, aggregated from the ps read
         # this census already sits on. The panel renders them in its expanded
@@ -489,6 +492,8 @@ def _census_lines(census: dict) -> list[str]:
         )
     if census.get("roster_error"):
         lines.append(f"  roster: {n['roster_error']} - the counts above are unread")
+    for note in census.get("gate_notes") or []:
+        lines.append(f"  {note}")
     if census.get("attribution_gap"):
         lines.append(
             f"  attribution gap: {n['attribution_gap']} - the fleet CPU share is "

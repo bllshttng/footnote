@@ -3983,14 +3983,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                         params.insert("substrate".into(), v);
                     }
                     Some("bg") => {
-                        eprintln!(
-                            "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                        return Err(
+                            "substrate 'bg' was retired; use --substrate thread".to_string()
                         );
-                        params.insert("substrate".into(), Value::String("thread".into()));
                     }
                     other => {
                         return Err(format!(
-                            "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {})",
+                            "--substrate must be one of: pane, thread, headless (got {})",
                             other.unwrap_or("")
                         ));
                     }
@@ -4128,13 +4127,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if sx == "pane" || sx == "thread" || sx == "headless" {
                 params.insert("substrate".into(), Value::String(sx.clone()));
             } else if sx == "bg" {
-                eprintln!(
-                    "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
-                );
-                params.insert("substrate".into(), Value::String("thread".into()));
+                return Err("substrate 'bg' was retired; use --substrate thread".to_string());
             } else {
                 return Err(format!(
-                    "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {sx})"
+                    "--substrate must be one of: pane, thread, headless (got {sx})"
                 ));
             }
         }
