@@ -523,9 +523,9 @@ def test_whoami_renders_a_crown_line() -> None:
     row = AgentEntry(
         name="king-epic", cwd="/w", log_path="", harness="claude",
         short_id="deadbeef", crown_level=1, crown_scope="epic-x",
-        crown_grantor="human",
+        crown_grantor="human", harness_session_id="s-king",
     )
-    result = resolve_self(env={"FNO_AGENT_SELF": "king-epic"}, registry=[row])
+    result = resolve_self(env={"FNO_AGENT_SESSION": "s-king"}, registry=[row])
     assert result.crown == "L1 epic-x (by human)"
     assert "crown:       L1 epic-x (by human)" in render_human(result)
 
@@ -534,8 +534,11 @@ def test_whoami_no_crown_line_for_uncrowned() -> None:
     from fno.agents.registry import AgentEntry
     from fno.agents.whoami import render_human, resolve_self
 
-    row = AgentEntry(name="worker", cwd="/w", log_path="", harness="claude", short_id="abc")
-    result = resolve_self(env={"FNO_AGENT_SELF": "worker"}, registry=[row])
+    row = AgentEntry(
+        name="worker", cwd="/w", log_path="", harness="claude", short_id="abc",
+        harness_session_id="s-worker",
+    )
+    result = resolve_self(env={"FNO_AGENT_SESSION": "s-worker"}, registry=[row])
     assert result.crown is None
     assert "crown:" not in render_human(result)
 
