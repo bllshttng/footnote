@@ -155,8 +155,13 @@ def resolve_binary() -> Optional[Path]:
 def call_binary_json(
     verb: str, args: Sequence[str] = (), *, timeout: Optional[float] = 60,
     binary: Optional[Path] = None,
+    input_text: Optional[str] = None,
 ) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
+
+    ``input_text`` feeds the child's stdin when given, so a large payload
+    rides stdin instead of an argv entry (the OS per-argument cap would
+    otherwise become an undocumented body cap).
 
     Returns ``(error, parsed)``: ``error`` is None on success; a missing
     binary, non-zero exit, timeout, or unparseable stdout yields a short error
@@ -174,7 +179,8 @@ def call_binary_json(
         return ("fno-agents binary not found", None)
     try:
         proc = subprocess.run(
-            [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout
+            [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout,
+            input=input_text,
         )
     except subprocess.TimeoutExpired:
         bound = f"{timeout:.1f}s" if timeout is not None else "the caller's bound"
@@ -187,6 +193,49 @@ def call_binary_json(
         return (None, json.loads(proc.stdout or "null"))
     except ValueError:
         return ("unreadable JSON receipt", None)
+
+
+def style_receipt(
+    text: str, surface: str, word_cap: Optional[int] = None
+) -> tuple[Optional[str], Any]:
+    """One style-gate read through the door: ``(error, receipt)``.
+
+    The body rides stdin, so the OS per-argument cap never becomes an
+    undocumented body cap. The receipt carries ``exception``, ``word_count``,
+    ``violations`` and ``report``. An error tuple means the gate could not
+    run, and the caller keeps its own failure posture.
+    """
+    argv = ["--surface", surface, "--stdin", "--json"]
+    if word_cap is not None:
+        argv += ["--word-cap", str(word_cap)]
+    return call_binary_json("style-check", argv, input_text=text)
+
+
+def style_word_count(text: str) -> int:
+    """Masked word count through the style door; 0 when the door fails.
+
+    The counting sites are advisory (a ledger row, a long-note nudge), so a
+    door failure counts zero rather than blocking the send.
+    """
+    err, receipt = call_binary_json("style-check", ["--stdin", "--json"], input_text=text)
+    if err or not isinstance(receipt, dict):
+        return 0
+    return int(receipt.get("word_count") or 0)
+
+
+def style_word_count_checked(text: str) -> int:
+    """Masked word count for an ENFORCING site: raises
+    ``budget.BudgetCountUnavailable`` on a door failure instead of answering a
+    silent zero (a zero would read as unlimited traffic under the control
+    lane's rolling cap). Imported lazily: budget.py never imports this module,
+    so there is no cycle.
+    """
+    from fno.mail.budget import BudgetCountUnavailable
+
+    err, receipt = call_binary_json("style-check", ["--stdin", "--json"], input_text=text)
+    if err or not isinstance(receipt, dict):
+        raise BudgetCountUnavailable(f"style count unavailable: {err or 'no receipt'}")
+    return int(receipt.get("word_count") or 0)
 
 
 def mint_fno_id() -> str:

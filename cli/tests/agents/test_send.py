@@ -3380,7 +3380,9 @@ def _team_invoke(monkeypatch, args: list[str]):
     return CliRunner().invoke(mail_app, args)
 
 
-def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr: str = ""):
+def _team_fake_writer(
+    monkeypatch, returncode: int = 0, stdout: str = "", stderr: str = "", style_receipt=None
+):
     """Capture the announce send subprocess; returns the list of invocations."""
     import shutil
     import subprocess
@@ -3391,6 +3393,22 @@ def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr
         shutil, "which", lambda name: f"/tmp/{name}" if name == "fno-agents" else None
     )
 
+    # The style gate rides the same binary. The writer-focused tests pass a
+    # clean stub here (they exercise the shim, not the gate); the gate's own
+    # refusal test passes the REAL door, whose fail-closed posture refuses
+    # when the environment answers with nothing usable.
+    from fno import rust_binary
+
+    if style_receipt is None:
+
+        def style_receipt(text, surface, word_cap=None):
+            return (
+                None,
+                {"exception": None, "word_count": 0, "violations": [], "report": ""},
+            )
+
+    monkeypatch.setattr(rust_binary, "style_receipt", style_receipt)
+
     calls: list[dict[str, object]] = []
 
     class _Proc:
@@ -3399,9 +3417,10 @@ def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr
     real_run = subprocess.run
 
     def fake_run(args, **kwargs):
-        if {"doctor", "event"} <= set(args):
-            # Event emission rides the same subprocess seam; let it reach the
-            # real binary so only true writer calls land in `calls`.
+        if {"doctor", "event"} <= set(args) or "style-check" in args:
+            # Event emission and the style gate ride the same subprocess seam;
+            # let them reach the real binary so only true writer calls land
+            # in `calls`.
             return real_run(args, **kwargs)
         calls.append({
             "args": args,
@@ -3510,7 +3529,9 @@ def test_team_style_refusal_fires_before_the_writer(
     """AC2-ERR: a body failing the style lint exits non-zero and the Rust
     writer is never invoked."""
     use_tmpdir(monkeypatch, tmp_path)
-    calls = _team_fake_writer(monkeypatch)
+    from fno import rust_binary
+
+    calls = _team_fake_writer(monkeypatch, style_receipt=rust_binary.style_receipt)
     bad_body = "Stop work; report where you are."
 
     result = _team_invoke(
