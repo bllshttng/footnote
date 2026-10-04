@@ -1470,6 +1470,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // transaction (classified, claims-held, pane-stopped, hand-off,
     // resumed, flipped, rolled-back), carrying the name and strategy.
     "agent_convert_phase",
+    // Spawn gate: registry writer-floor incompatibility, latched by the
+    // writer/floor/reader tuple so repeated refusals emit once.
+    "version_skew",
     "agent_stopped",
     // Stop/rm claims release: the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.
