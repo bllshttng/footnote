@@ -1,0 +1,1 @@
+{"schema_version": 2, "key": "session:par-nopid", "holder": "pty:par", "pid": null, "has_ttl": true, "machine_id": true, "reason": null, "pid_provenance": "ambient", "metadata": null}
