@@ -53,6 +53,7 @@ where
                     row.fno_id.as_deref() == Some(id)
                         || row.harness_session_id.as_deref() == Some(id)
                         || row.related_session_id.as_deref() == Some(id)
+                        || row.predecessor_session_ids.iter().any(|sid| sid == id)
                 }
                 Key::Name(name) => {
                     row.name == name
@@ -107,69 +108,60 @@ mod tests {
     }
 
     #[test]
-    fn an_id_matches_identity_never_a_name() {
+    fn the_identity_tiers_resolve_and_refuse() {
+        // Key::Id answers identity only: a row NAMED like another row's id
+        // never answers, and a predecessor session id still finds the row
+        // that succeeded it.
         let rows = vec![
             entry("king", "sess-1", serde_json::json!({"fno_id": "f-1"})),
-            // A row NAMED like another row's id must not answer an Id key.
             entry("f-1", "sess-2", serde_json::json!({})),
+            entry(
+                "heir",
+                "sess-3",
+                serde_json::json!({"predecessor_session_ids": ["sess-0"]}),
+            ),
         ];
         let got = resolve(&rows, Key::Id("f-1"), |_| true);
         assert!(matches!(got, Join::One(row) if std::ptr::eq(row, &rows[0])));
         assert!(matches!(
-            resolve(&rows, Key::Id("sess-2"), |_| true),
-            Join::One(_)
+            resolve(&rows, Key::Id("sess-0"), |_| true),
+            Join::One(row) if std::ptr::eq(row, &rows[2])
         ));
         assert!(matches!(
             resolve(&rows, Key::Id("nobody"), |_| true),
             Join::None
         ));
-    }
-
-    #[test]
-    fn a_shared_name_refuses() {
-        let rows = vec![
-            entry("dupe", "sess-1", serde_json::json!({})),
-            entry("dupe", "sess-2", serde_json::json!({})),
-        ];
-        assert!(matches!(
-            resolve(&rows, Key::Name("dupe"), |_| true),
-            Join::Ambiguous
-        ));
-    }
-
-    #[test]
-    fn an_alias_and_a_short_id_answer_at_the_name_tier() {
-        let rows = vec![entry(
+        // Key::Name is an edge input: the label, an alias, and the 8-hex
+        // short id answer; a second match refuses rather than guessing.
+        let labeled = vec![entry(
             "new",
             "sess-1",
             serde_json::json!({"aliases": ["old"], "short_id": "abcd1234"}),
         )];
         assert!(matches!(
-            resolve(&rows, Key::Name("old"), |_| true),
+            resolve(&labeled, Key::Name("old"), |_| true),
             Join::One(_)
         ));
         assert!(matches!(
-            resolve(&rows, Key::Name("abcd1234"), |_| true),
+            resolve(&labeled, Key::Name("abcd1234"), |_| true),
             Join::One(_)
         ));
-    }
-
-    #[test]
-    fn the_liveness_filter_decides_who_answers() {
-        let rows = vec![
+        let twins = vec![
             entry("dupe", "sess-1", serde_json::json!({})),
             entry("dupe", "sess-2", serde_json::json!({"status": "exited"})),
         ];
-        let got = resolve(&rows, Key::Name("dupe"), |row| {
+        assert!(matches!(
+            resolve(&twins, Key::Name("dupe"), |_| true),
+            Join::Ambiguous
+        ));
+        let got = resolve(&twins, Key::Name("dupe"), |row| {
             row.status != AgentStatus::Exited
         });
         assert!(
             matches!(got, Join::One(row) if row.harness_session_id.as_deref() == Some("sess-1"))
         );
-    }
-
-    #[test]
-    fn an_address_resolves_and_a_cross_tier_second_match_refuses() {
+        // An untagged address resolves across the tiers and refuses a
+        // cross-tier second match.
         let one = vec![entry("king", "sess-1", serde_json::json!({}))];
         assert!(matches!(
             resolve_address(&one, "sess-1", |_| true),

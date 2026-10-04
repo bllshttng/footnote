@@ -206,6 +206,43 @@ pub fn upsert_identity(
     fno_id: Option<&str>,
     display_name: Option<&str>,
 ) -> Result<(), String> {
+    // The harness parent must exist before the FK insert: the parent-making
+    // triggers fire on the REFERENCING tables, never here, so a harness no
+    // backlog row has named yet would fail the foreign key.
+    if let Some(harness) = harness.filter(|h| !h.is_empty()) {
+        connection
+            .execute(
+                "INSERT INTO harnesses(id) VALUES (?1) ON CONFLICT(id) DO NOTHING;",
+                rusqlite::params![harness],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())?;
+    }
+    // A succession keeps the fno_id and remints the session: the stored
+    // identity MOVES to the successor row instead of colliding on the
+    // unique index, which the id-conflict clause cannot catch.
+    if let Some(fno) = fno_id {
+        let held: Option<String> = connection
+            .query_row(
+                "SELECT id FROM agent_sessions WHERE fno_id = ?1",
+                rusqlite::params![fno],
+                |row| row.get(0),
+            )
+            .ok();
+        if held.as_deref().is_some_and(|held| held != session_id) {
+            return connection
+                .execute(
+                    "UPDATE agent_sessions
+                       SET id = ?1,
+                           harness_id = COALESCE(harness_id, ?2),
+                           display_name = COALESCE(?4, display_name)
+                     WHERE fno_id = ?3",
+                    rusqlite::params![session_id, harness, fno, display_name],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+    }
     connection
         .execute(
             "INSERT INTO agent_sessions(id, harness_id, fno_id, display_name)
@@ -384,6 +421,74 @@ mod tests {
             .unwrap();
         assert_eq!(harnesses, vec!["codex".to_string()]);
         assert_eq!(harness_of(&connection, "abc"), Some("codex".into()));
+        // The identity contract: a pre-identity store gains the columns in
+        // place and idempotently; the projection seeds the harness parent
+        // (FK on), the display name follows a rename while harness and
+        // fno_id keep their first values, and a succession (same fno_id,
+        // reminted session) MOVES the stored identity instead of colliding
+        // on the unique index.
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE agent_sessions;
+                 CREATE TABLE agent_sessions (
+                   id TEXT PRIMARY KEY, harness_id TEXT
+                 );
+                 INSERT INTO agent_sessions(id, harness_id) VALUES ('abc', 'claude');
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        crate::backlog::entities::migrate_identity(&connection).unwrap();
+        for column in ["fno_id", "display_name", "links"] {
+            assert!(column_names(&connection).iter().any(|name| name == column));
+        }
+        crate::backlog::entities::migrate_identity(&connection).unwrap();
+        crate::backlog::entities::upsert_identity(
+            &connection,
+            "abc",
+            Some("claude"),
+            Some("f-1"),
+            Some("old"),
+        )
+        .unwrap();
+        crate::backlog::entities::upsert_identity(
+            &connection,
+            "abc",
+            Some("codex"),
+            Some("f-1"),
+            Some("new"),
+        )
+        .unwrap();
+        assert_eq!(
+            identity_row(&connection, "abc"),
+            (
+                Some("claude".into()),
+                Some("f-1".into()),
+                Some("new".into())
+            )
+        );
+        crate::backlog::entities::upsert_identity(
+            &connection,
+            "sid-b",
+            Some("claude"),
+            Some("f-1"),
+            Some("newer"),
+        )
+        .unwrap();
+        assert_eq!(
+            identity_row(&connection, "sid-b"),
+            (
+                Some("claude".into()),
+                Some("f-1".into()),
+                Some("newer".into())
+            )
+        );
+        assert!(connection
+            .query_row("SELECT 1 FROM agent_sessions WHERE id = 'abc'", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .is_err());
     }
 
     #[test]
@@ -439,89 +544,6 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
-    }
-
-    #[test]
-    fn a_pre_identity_store_gains_the_columns_in_place() {
-        let (_dir, connection) = store();
-        connection
-            .execute_batch(
-                "DROP TABLE agent_sessions;
-                 CREATE TABLE agent_sessions (
-                   id TEXT PRIMARY KEY, harness_id TEXT
-                 );
-                 INSERT INTO agent_sessions(id, harness_id) VALUES ('abc', 'claude');",
-            )
-            .unwrap();
-        crate::backlog::entities::migrate_identity(&connection).unwrap();
-        for column in ["fno_id", "display_name", "links"] {
-            assert!(column_names(&connection).iter().any(|name| name == column));
-        }
-        assert_eq!(
-            identity_row(&connection, "abc"),
-            (Some("claude".into()), None, None)
-        );
-        // Idempotent: a second pass changes nothing and raises nothing.
-        crate::backlog::entities::migrate_identity(&connection).unwrap();
-    }
-
-    #[test]
-    fn upsert_identity_sets_identity_and_follows_the_rename() {
-        let (_dir, connection) = store();
-        connection
-            .execute_batch("INSERT INTO harnesses(id) VALUES ('claude'), ('codex');")
-            .unwrap();
-        crate::backlog::entities::upsert_identity(
-            &connection,
-            "abc",
-            Some("claude"),
-            Some("f-1"),
-            Some("old"),
-        )
-        .unwrap();
-        // A rename: display_name follows; harness and fno_id are identity
-        // and keep their first values.
-        crate::backlog::entities::upsert_identity(
-            &connection,
-            "abc",
-            Some("codex"),
-            Some("f-1"),
-            Some("new"),
-        )
-        .unwrap();
-        assert_eq!(
-            identity_row(&connection, "abc"),
-            (
-                Some("claude".into()),
-                Some("f-1".into()),
-                Some("new".into())
-            )
-        );
-    }
-
-    #[test]
-    fn a_second_session_cannot_take_a_held_fno_id() {
-        let (_dir, connection) = store();
-        connection
-            .execute_batch("INSERT INTO harnesses(id) VALUES ('claude');")
-            .unwrap();
-        crate::backlog::entities::upsert_identity(
-            &connection,
-            "abc",
-            Some("claude"),
-            Some("f-1"),
-            Some("a"),
-        )
-        .unwrap();
-        let error = crate::backlog::entities::upsert_identity(
-            &connection,
-            "def",
-            Some("claude"),
-            Some("f-1"),
-            Some("b"),
-        )
-        .unwrap_err();
-        assert!(error.contains("UNIQUE"), "{error}");
     }
 
     #[test]

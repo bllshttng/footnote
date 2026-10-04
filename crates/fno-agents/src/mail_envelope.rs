@@ -417,16 +417,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
-    }
-
-    #[test]
-    fn a_renamed_sender_renders_its_current_name() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("registry.json");
-        // The sender row was RENAMED after the envelope was written; the
-        // envelope still carries the session id it was sent under.
+        // A sender row RENAMED after the envelope was written still renders
+        // its CURRENT name: the header resolves the stored session id.
+        let renamed_path = tmp.path().join("renamed-registry.json");
         std::fs::write(
-            &path,
+            &renamed_path,
             serde_json::json!({"schema_version": 11, "agents": [
                 {"name":"renamed-folio", "short_id":"folio-short", "status":"live",
                  "harness":"claude", "cwd":"/repo",
@@ -436,16 +431,16 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let rendered = render_at(
-            &serde_json::json!({
+        let renamed = render_at(
+            &json!({
                 "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
                 "from_session":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
                 "harness":"claude", "to":"x", "id":"msg-9"
             }),
-            &path,
+            &renamed_path,
         )
         .unwrap();
-        assert!(rendered.contains("@renamed-folio"), "{rendered}");
+        assert!(renamed.contains("@renamed-folio"), "{renamed}");
     }
 
     #[test]

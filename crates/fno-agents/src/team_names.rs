@@ -1958,44 +1958,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_renamed_heir_still_keeps_through_heir_session() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // The heir row was renamed after the succession carried: the
-        // session-keyed join still finds it, and the succession stays.
-        write_registry(
-            tmp.path(),
-            json!([team_row("renamed-heir", "other", 1, "sess-heir")]),
-        );
-        let mut pending = pending_record("original-name", "lead-old", Some("sess-old"), old_ts());
-        pending.pending_succession.as_mut().unwrap().heir_session = Some("sess-heir".into());
-        let store = store_path(tmp.path());
-        write(
-            &store,
-            &Store {
-                version: 1,
-                teams: BTreeMap::from([("fno".into(), pending)]),
-            },
-        )
-        .unwrap();
-        let (reverted, kept) = revert_stale_pending(
-            &store,
-            &registry_path(tmp.path()),
-            chrono::Utc::now(),
-            3_600,
-            true,
-        )
-        .unwrap();
-        assert!(reverted.is_empty(), "{reverted:?}");
-        assert!(
-            kept.iter()
-                .any(|k| k.contains("renamed-heir") && k.contains("still")),
-            "{kept:?}"
-        );
-        let dump = snapshot(&store).unwrap();
-        assert!(dump["teams"]["fno"]["pending_succession"].is_object());
-    }
-
     fn old_ts() -> &'static str {
         "2026-08-01T00:00:00Z"
     }
@@ -2009,6 +1971,7 @@ mod tests {
         write_registry(
             tmp.path(),
             json!([
+                team_row("renamed-heir", "other", 1, "sess-heir"),
                 json!({
                     "name": "lead-old", "status": "exited", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-old",
@@ -2068,6 +2031,16 @@ mod tests {
                         "x-twin".into(),
                         pending_record("heir-twin", "lead-six", Some("sess-6"), old_ts()),
                     ),
+                    // The id tier: a record carrying heir_session keeps its
+                    // succession even though the heir row was RENAMED after
+                    // the settle wrote it.
+                    ("x-sess".into(), {
+                        let mut pending =
+                            pending_record("original-name", "lead-seven", Some("sess-7"), old_ts());
+                        pending.pending_succession.as_mut().unwrap().heir_session =
+                            Some("sess-heir".into());
+                        pending
+                    }),
                 ]),
             },
         )
@@ -2081,12 +2054,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reverted.len(), 2, "{reverted:?}");
+        // The session-keyed heir keeps its succession through the rename.
+        assert!(
+            kept.iter()
+                .any(|k| k.contains("renamed-heir") && k.contains("still")),
+            "{kept:?}"
+        );
         assert_eq!(reverted[0].scope, "fno");
         assert_eq!(reverted[0].heir_name, "jolly-finch");
         assert_eq!(reverted[0].evidence, "heir row removed");
         assert_eq!(reverted[1].scope, "x-tttt");
         assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
-        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert_eq!(kept.len(), 4, "{kept:?}");
         assert!(kept.iter().any(|k| k.contains("heir-live")), "{kept:?}");
         // A name two live rows answer is ambiguous: keep, never guess.
         assert!(

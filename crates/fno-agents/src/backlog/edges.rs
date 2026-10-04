@@ -66,19 +66,21 @@ impl EdgeKind {
 }
 
 pub fn ddl() -> String {
-    "CREATE TABLE IF NOT EXISTS edges (
-       seq INTEGER PRIMARY KEY,
-       src_kind TEXT NOT NULL,
-       src_id TEXT NOT NULL,
-       dst_kind TEXT NOT NULL,
-       dst_id TEXT NOT NULL,
-       kind TEXT NOT NULL,
-       valid_from TEXT NOT NULL,
-       valid_to TEXT
-     );
-     CREATE INDEX IF NOT EXISTS edges_src_kind ON edges(src_id, kind);
-     CREATE INDEX IF NOT EXISTS edges_dst_kind ON edges(dst_id, kind);"
-        .to_string()
+    format!(
+        "CREATE TABLE IF NOT EXISTS edges (
+           seq INTEGER PRIMARY KEY,
+           src_kind TEXT NOT NULL,
+           src_id TEXT NOT NULL,
+           dst_kind TEXT NOT NULL,
+           dst_id TEXT NOT NULL,
+           kind TEXT NOT NULL,
+           valid_from TEXT NOT NULL,
+           valid_to TEXT{}
+         );
+         CREATE INDEX IF NOT EXISTS edges_src_kind ON edges(src_id, kind);
+         CREATE INDEX IF NOT EXISTS edges_dst_kind ON edges(dst_id, kind);",
+        super::schema_v4::stamps("edges")
+    )
 }
 
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
@@ -183,46 +185,6 @@ mod tests {
     #[test]
     fn an_appended_edge_reads_back_open_and_closes() {
         let (_dir, connection) = store();
-        let seq = append(
-            &connection,
-            &EntityRef::agent("p-1"),
-            &EntityRef::agent("c-1"),
-            EdgeKind::Spawn,
-        )
-        .unwrap();
-        let (kind, src, valid_to): (String, String, Option<String>) = connection
-            .query_row(
-                "SELECT kind, src_id, valid_to FROM edges WHERE seq = ?1",
-                [seq],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(kind, "spawn");
-        assert_eq!(src, "p-1");
-        assert!(valid_to.is_none());
-        let closed = close(
-            &connection,
-            &EntityRef::agent("p-1"),
-            &EntityRef::agent("c-1"),
-            EdgeKind::Spawn,
-        )
-        .unwrap();
-        assert_eq!(closed, 1);
-        // A re-open appends a new row; the closed one stays closed.
-        let again = append(
-            &connection,
-            &EntityRef::agent("p-1"),
-            &EntityRef::agent("c-1"),
-            EdgeKind::Spawn,
-        )
-        .unwrap();
-        assert_ne!(seq, again);
-        assert_eq!(open_rows(&connection), 1);
-    }
-
-    #[test]
-    fn close_touches_only_its_own_endpoints() {
-        let (_dir, connection) = store();
         append(
             &connection,
             &EntityRef::agent("p-1"),
@@ -237,6 +199,20 @@ mod tests {
             EdgeKind::Spawn,
         )
         .unwrap();
+        let seq: i64 = connection
+            .query_row("SELECT seq FROM edges WHERE src_id = 'p-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let (kind, valid_to): (String, Option<String>) = connection
+            .query_row(
+                "SELECT kind, valid_to FROM edges WHERE seq = ?1",
+                [seq],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "spawn");
+        assert!(valid_to.is_none());
         let closed = close(
             &connection,
             &EntityRef::agent("p-1"),
@@ -245,6 +221,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(closed, 1);
-        assert_eq!(open_rows(&connection), 1);
+        // A re-open appends a new row; the closed one stays closed, and a
+        // close touches only its own endpoints.
+        let again = append(
+            &connection,
+            &EntityRef::agent("p-1"),
+            &EntityRef::agent("c-1"),
+            EdgeKind::Spawn,
+        )
+        .unwrap();
+        assert_ne!(seq, again);
+        assert_eq!(open_rows(&connection), 2);
     }
 }

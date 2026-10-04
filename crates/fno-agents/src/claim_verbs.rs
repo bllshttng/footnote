@@ -2197,6 +2197,44 @@ mod tests {
                 ));
             },
         );
+        // The id tier: a holder minted after the id change names the
+        // worker's fno_id and resolves even after a rename; the legacy
+        // name tier resolves unchanged.
+        with_registry(
+            serde_json::json!([{
+                "name": "renamed-worker", "status": "live", "cwd": "/w",
+                "created_at": "2026-10-04T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "s-worker",
+                "fno_id": "f-worker",
+            }]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:f-worker", "s-king");
+                assert_eq!(
+                    resolve_subject_session(&rec, &index).as_deref(),
+                    Some("s-worker")
+                );
+            },
+        );
+        with_registry(
+            serde_json::json!([{
+                "name": "w-legacy", "status": "live", "cwd": "/w",
+                "created_at": "2026-10-04T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "s-legacy",
+            }]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:w-legacy", "s-king");
+                assert_eq!(
+                    resolve_subject_session(&rec, &index).as_deref(),
+                    Some("s-legacy")
+                );
+            },
+        );
     }
 
     #[test]
@@ -2249,48 +2287,6 @@ mod tests {
                 load_session_registry_index(&index);
                 let rec = witness_rec("spawn-gate:1:twin", "s-king");
                 assert!(resolve_subject_session(&rec, &index).is_none());
-            },
-        );
-    }
-
-    #[test]
-    fn a_handover_holder_resolves_through_fno_id_and_a_name_still_resolves() {
-        // The id tier: a holder minted after the id change names the
-        // worker's fno_id and resolves even after a rename.
-        with_registry(
-            serde_json::json!([{
-                "name": "renamed-worker", "status": "live", "cwd": "/w",
-                "created_at": "2026-10-04T00:00:00Z",
-                "harness": "claude",
-                "harness_session_id": "s-worker",
-                "fno_id": "f-worker",
-            }]),
-            || {
-                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
-                    std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:f-worker", "s-king");
-                assert_eq!(
-                    resolve_subject_session(&rec, &index).as_deref(),
-                    Some("s-worker")
-                );
-            },
-        );
-        // The legacy name tier, unchanged.
-        with_registry(
-            serde_json::json!([{
-                "name": "w-legacy", "status": "live", "cwd": "/w",
-                "created_at": "2026-10-04T00:00:00Z",
-                "harness": "claude",
-                "harness_session_id": "s-legacy",
-            }]),
-            || {
-                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
-                    std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:w-legacy", "s-king");
-                assert_eq!(
-                    resolve_subject_session(&rec, &index).as_deref(),
-                    Some("s-legacy")
-                );
             },
         );
     }

@@ -40,7 +40,7 @@ fn count_type(store: &Path, event_type: &str) -> i64 {
 }
 
 #[test]
-fn an_appended_cause_reads_back_as_caused_by() {
+fn a_cause_stores_reads_back_and_migrates_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let journal = dir.path().join("events.jsonl");
     let envelope = json!({
@@ -77,18 +77,7 @@ fn an_appended_cause_reads_back_as_caused_by() {
         )
         .unwrap();
     assert!(caused.is_none());
-}
-
-#[test]
-fn a_pre_cause_store_gains_the_column_in_place() {
-    let dir = tempfile::tempdir().unwrap();
-    let journal = dir.path().join("events.jsonl");
-    append_envelope(
-        &journal,
-        &checkin("2026-10-04T00:00:00Z", "x", "c").to_string(),
-        None,
-    )
-    .unwrap();
+    // A store created before the column existed gains it in place.
     let store = store_path(&journal);
     {
         let conn = open_store(&store).unwrap();
