@@ -75,7 +75,7 @@ fn effective_difficulty(node_difficulty: Option<&str>) -> (String, Option<String
     }
 }
 
-fn row_value<'a>(row: &'a Value, key: &str) -> String {
+pub(crate) fn row_value<'a>(row: &'a Value, key: &str) -> String {
     row.get(key)
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -87,7 +87,7 @@ fn row_value<'a>(row: &'a Value, key: &str) -> String {
 /// when it survives, record it on the candidate. An effort with no surface on
 /// the harness is dropped with a chain line. The grid and pin legs both call
 /// this so the rule lives once.
-fn validated_effort(
+pub(crate) fn validated_effort(
     out: &mut Map<String, Value>,
     harness: &str,
     effort: &str,
@@ -1210,6 +1210,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             );
         }
     }
+    crate::route_node_pin::attach_effort_pin(&mut out, payload);
     out
 }
 
@@ -1469,114 +1470,22 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         || explicit_route_name.is_some()
         || explicit_vendor_name.is_some()
     {
-        // A typed --model whose routing.models row declares exactly one
-        // harness resolves that row instead of falling through to a
-        // config-scalar harness: the row IS the model's own
-        // declaration. A typed --route or -P, or a typed -H (payload
-        // explicit_lane), keeps the plain override - the operator already
-        // named those axes. Zero row matches also keep it: no vendor
-        // inference here.
-        let model_only =
-            explicit_route_name.is_none() && explicit_vendor_name.is_none() && !explicit_lane;
-        let matched: Vec<(String, Value)> = if model_only {
-            let model = explicit_model_name.as_deref().unwrap_or("");
-            payload
-                .get("declared_rows")
-                .and_then(Value::as_object)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|(_, row)| row_value(row, "model") == model)
-                        .map(|(name, row)| (name.clone(), row.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let declared_harnesses: Vec<String> = matched
-            .iter()
-            .map(|(_, row)| row_value(row, "harness"))
-            .filter(|h| !h.is_empty())
-            .collect();
-        let harness_set: std::collections::BTreeSet<String> =
-            declared_harnesses.iter().cloned().collect();
-        if model_only && harness_set.len() > 1 {
-            let model = explicit_model_name.as_deref().unwrap_or("");
-            let list = matched
-                .iter()
-                .map(|(name, row)| format!("{} (harness {})", name, row_value(row, "harness")))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            let remedies = {
-                let mut hs: Vec<&str> = declared_harnesses.iter().map(|s| s.as_str()).collect();
-                hs.sort();
-                hs.dedup();
-                hs.iter()
-                    .map(|h| format!("-H {h}"))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            };
-            chain.push(json!(
-                "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
-            ));
-            chain.push(json!(format!(
-                "slot=strict-refusal --model {model} matches routing.models rows {list}; pass {remedies}"
-            )));
-            return refused_decision(
-                chain,
-                "pin-model-ambiguous-harness",
-                "the typed model's declared rows name different harnesses",
-            );
+        if let Some(decision) = crate::route_node_pin::operator_pin_leg(
+            payload,
+            explicit_model_name,
+            explicit_route_name,
+            explicit_vendor_name,
+            explicit_lane,
+            &mut chain,
+        ) {
+            return decision;
         }
-        if model_only && harness_set.len() == 1 {
-            let (row_name, row) = &matched[0];
-            let harness = declared_harnesses[0].clone();
-            let mut out = Map::new();
-            out.insert("harness".into(), json!(harness));
-            out.insert("model".into(), json!(explicit_model_name.clone().unwrap()));
-            out.insert("pin_row".into(), json!(row_name));
-            let route_set: std::collections::BTreeSet<String> = matched
-                .iter()
-                .map(|(_, row)| row_value(row, "route"))
-                .filter(|s| !s.is_empty())
-                .collect();
-            if route_set.len() == 1 {
-                out.insert(
-                    "route".into(),
-                    json!(route_set.iter().next().unwrap().to_string()),
-                );
-            }
-            let account_set: std::collections::BTreeSet<String> = matched
-                .iter()
-                .map(|(_, row)| row_value(row, "account"))
-                .filter(|s| !s.is_empty())
-                .collect();
-            if account_set.len() == 1 {
-                let account = account_set.iter().next().unwrap().clone();
-                out.insert("account".into(), json!(account));
-            }
-            let effort_ok = payload.get("effort_ok").cloned().unwrap_or(json!({}));
-            validated_effort(
-                &mut out,
-                &harness,
-                &row_value(row, "effort"),
-                &effort_ok,
-                &mut chain,
-                "pin",
-            );
-            chain.push(json!(format!(
-                "slot=operator-pin-override row={row_name} harness={harness} (the typed model's declared row names its harness)"
-            )));
-            return json!({
-                "status": "pick",
-                "candidate": Value::Object(out),
-                "chain": chain,
-            });
-        }
-        chain.push(json!(
-            "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
-        ));
-        return none(chain);
+    }
+
+    // A node's own pin is the standing ruling one rung below a typed flag;
+    // the leg lives beside the typed leg in route_node_pin.
+    if let Some(decision) = crate::route_node_pin::node_pin_leg(payload, &mut chain) {
+        return decision;
     }
 
     if lanes_arr.is_empty() {
@@ -2199,7 +2108,7 @@ fn pick(
     })
 }
 
-fn none(chain: Vec<Value>) -> Value {
+pub(crate) fn none(chain: Vec<Value>) -> Value {
     // The terminal line classifies a no-candidate walk-out exactly as the
     // readout always has: a config fault or a strict refusal is a policy
     // hold, a capacity stand-down is capacity-held, anything else is the
@@ -2363,7 +2272,7 @@ fn exhausted_decision(chain: Vec<Value>) -> Value {
 /// A strict-policy refusal: the decision path is named, the candidate is
 /// Null, and `reason_kind` tells machine consumers this apart from a
 /// capacity queue or an unarmed legacy no-candidate.
-fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
+pub(crate) fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
     let mut out = json!({
         "status": "none",
         "verdict": "policy-held",
