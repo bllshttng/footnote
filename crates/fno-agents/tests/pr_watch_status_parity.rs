@@ -218,9 +218,9 @@ fn pin_env(dir: &Path) -> Vec<(String, String)> {
             "FNO_AGENTS_BIN".into(),
             env!("CARGO_BIN_EXE_fno-agents").to_string(),
         ),
-        ("FNO_PR_WATCH_TEST_LOADED".into(), "1".into()),
+        ("FNO_TEST_PR_WATCH_LOADED".into(), "1".into()),
         (
-            "FNO_PR_WATCH_TEST_LAUNCH_AGENTS_DIR".into(),
+            "FNO_TEST_PR_WATCH_LAUNCH_AGENTS_DIR".into(),
             dir.join("LaunchAgents").display().to_string(),
         ),
         ("PATH".into(), "/usr/bin:/bin:/usr/sbin".into()),
