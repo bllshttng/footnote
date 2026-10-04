@@ -358,8 +358,7 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
     from fno.mail import budget
 
     if budget.is_control(body):
-        # A control body is terse operational fragments, and refusing it for
-        # prose style re-creates the wall the lane exists to remove.
+        # A control body is terse operational fragments; refusing it re-creates the wall the lane removes.
         return
 
     err, receipt = rust_binary.style_receipt(body, "mail", load_settings().style.word_cap.mail)
