@@ -268,13 +268,30 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-attempt") {
         std::process::exit(fno_agents::eval_attempt::run_evals_attempt(&args[1..]));
     }
-    // `pr-park`: the park-record owner behind `fno do pr watch`; dispatches
-    // here like evals-arm because the shrink law bars a new `run` arm.
+    // `pr-park` and `pr-watch`: the two verb families behind `fno do pr
+    // watch`; both dispatch here like evals-arm because the shrink law bars
+    // a new `run` arm. Their module docs carry the per-verb contract.
     if args.first().map(String::as_str) == Some("pr-park") {
         std::process::exit(fno_agents::pr_park::run(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("pr-watch") {
+        std::process::exit(fno_agents::pr_watch::run(&args[1..]));
+    }
     let code = rt.block_on(run(args));
     std::process::exit(code);
+}
+
+/// Per-column widths in chars, not bytes: the `{:<width$}` pad counts chars,
+/// so a byte width on non-ASCII text (a CJK cwd, an emoji message) pads past
+/// the intended column and shoves the rest of the row wide.
+fn display_widths<const N: usize>(headers: [&str; N], display: &[[String; N]]) -> [usize; N] {
+    let mut widths = headers.map(str::len);
+    for row in display {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    widths
 }
 
 async fn run(args: Vec<String>) -> i32 {
@@ -4802,15 +4819,7 @@ fn render_list_table(
         })
         .collect();
 
-    let mut widths = headers.map(str::len);
-    for row in &display {
-        for (i, cell) in row.iter().enumerate() {
-            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
-            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
-            // past the intended column and shoves the rest of the row wide.
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
+    let widths = display_widths(headers, &display);
 
     let mut lines = Vec::new();
     // The instrument's receipt, in the artifact itself: a total
@@ -4869,21 +4878,7 @@ fn render_discovered_section(discovered: &[Value]) -> String {
         })
         .collect();
 
-    let mut widths = [
-        headers[0].len(),
-        headers[1].len(),
-        headers[2].len(),
-        headers[3].len(),
-        headers[4].len(),
-    ];
-    for row in &display {
-        for (i, cell) in row.iter().enumerate() {
-            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
-            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
-            // past the intended column and shoves the rest of the row wide.
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
+    let widths = display_widths(headers, &display);
 
     let mut lines = Vec::new();
     lines.push(String::new()); // blank separator line

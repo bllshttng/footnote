@@ -129,8 +129,6 @@ def _rest_fail(stderr: str):
 # ---------------------------------------------------------------------------
 
 
-
-
 class TestTrackedStateBatch:
     """The production sweep reads each repository once and fails closed.
 
@@ -1847,32 +1845,6 @@ class TestDispatchEntryGuards:
         failed = [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"]
         assert len(failed) == 1
         assert failed[0]["data"]["retries"] == 1
-
-
-class TestInstallParkedPrsGuards:
-    """AC-gemini-medium _install.py:367: dict-guard parsed events/state.
-
-    The `_parked_prs` store-reader guards moved to the Rust action's own
-    tests (pr_park::tests) when the parked block was ported; the watermark
-    guard stays.
-    """
-
-    def test_watermark_scan_non_dict_event_line_skipped(self, tmp_path):
-        """AC-gemini-medium _install:367: non-dict JSON line in events.jsonl -> skipped, no crash."""
-        from fno.pr_watch._install import _tick_watermarks
-
-        events_path = tmp_path / "events.jsonl"
-        valid_line = json.dumps({"type": "pr_watch_tick", "ts": "2026-06-14T03:00:00Z"})
-        # Mix valid line with non-dict lines (null, array, bare string)
-        events_path.write_text("\n".join([
-            "null",
-            "[1, 2, 3]",
-            valid_line,
-            '"a string"',
-        ]))
-
-        result = _tick_watermarks(events_path)["last_tick"]
-        assert result == "2026-06-14T03:00:00Z"
 
 
 # ---------------------------------------------------------------------------
