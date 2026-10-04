@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// The parity fixture: the checked-in stub this emitter must reproduce.
+/// Test-only: the include path leaves the crate, which packaging forbids.
+#[cfg(test)]
 const FIXTURE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../scripts/lib/paths.sh"
