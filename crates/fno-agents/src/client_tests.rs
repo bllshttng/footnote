@@ -265,7 +265,7 @@ fn schema_rows() {
     assert!(
         schema["envelope"]["properties"]["source"]["anyOf"][0]["enum"]
             .as_array()
-            .is_some_and(|sources| sources.iter().any(|source| source == "rust")),
+            .is_some_and(|sources| sources.iter().any(|source| source.as_str() == Some("rust"))),
         "Rust registry event source is absent from the emitted envelope"
     );
 
