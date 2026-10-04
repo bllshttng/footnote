@@ -65,9 +65,9 @@ fn build_fixture(active_backlog_extra: &str, graph: Value, registry_rows: Value)
     Fixture { tmp, registry }
 }
 
-fn crown_registry() -> Value {
+fn team_registry() -> Value {
     json!({"schema_version": fno_agents::state::REGISTRY_SCHEMA_VERSION, "agents": [
-        {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+        {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
          "cwd": "/", "harness": "claude", "created_at": "2026-09-07T00:00:00Z", "log_path": ""},
         {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/", "harness": "claude",
          "created_at": "2026-09-07T00:00:00Z", "log_path": "", "pid": std::process::id()}
@@ -78,7 +78,7 @@ fn empty_registry() -> Value {
     json!({"schema_version": fno_agents::state::REGISTRY_SCHEMA_VERSION, "agents": []})
 }
 
-/// The fixture graph: one epic crown over e-1 (rooted in alpha), ideas inside
+/// The fixture graph: one epic team over e-1 (rooted in alpha), ideas inside
 /// the scope, one loose idea, one blocked node, one already-fed node.
 fn base_graph(plan_path: &Path) -> Value {
     let plan = plan_path.to_string_lossy();
@@ -182,7 +182,7 @@ fn drain_receipt_two_territories() {
     let plan = tempfile::TempDir::new().unwrap();
     let plan_doc = plan.path().join("idea-plan.md");
     std::fs::write(&plan_doc, "---\nstatus: design\n---\n").unwrap();
-    let fixture = build_fixture("", base_graph(&plan_doc), crown_registry());
+    let fixture = build_fixture("", base_graph(&plan_doc), team_registry());
     assert_case("drain_two_territories", &fixture, || rust_drain(&fixture));
 
     // Dispatch credit (dispatch_credit): the live crown whose scope covers
@@ -259,12 +259,12 @@ fn drain_receipt_two_territories() {
 }
 
 #[test]
-fn drain_receipt_kingless_only() {
+fn drain_receipt_leadless_only() {
     let plan = tempfile::TempDir::new().unwrap();
     let plan_doc = plan.path().join("idea-plan.md");
     std::fs::write(&plan_doc, "---\nstatus: design\n---\n").unwrap();
     let fixture = build_fixture("", base_graph(&plan_doc), empty_registry());
-    assert_case("drain_kingless_only", &fixture, || rust_drain(&fixture));
+    assert_case("drain_leadless_only", &fixture, || rust_drain(&fixture));
 }
 
 #[test]
@@ -275,7 +275,7 @@ fn drain_receipt_per_project_disabled() {
     let fixture = build_fixture(
         "enabled = { alpha = false }\n",
         base_graph(&plan_doc),
-        crown_registry(),
+        team_registry(),
     );
     assert_case("drain_per_project_disabled", &fixture, || {
         rust_drain(&fixture)
@@ -302,7 +302,7 @@ fn rows_projection() {
     let plan = tempfile::TempDir::new().unwrap();
     let plan_doc = plan.path().join("idea-plan.md");
     std::fs::write(&plan_doc, "---\nstatus: design\n---\n").unwrap();
-    let fixture = build_fixture("", base_graph(&plan_doc), crown_registry());
+    let fixture = build_fixture("", base_graph(&plan_doc), team_registry());
     seed_live_node_claim(&fixture, "e-1a");
     assert_case("rows_projection", &fixture, || rust_rows(&fixture));
 }

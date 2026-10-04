@@ -419,7 +419,7 @@ fi
 # The env grant is the OPERATOR's lever (codex P1 on PR 1131):
 # TARGET_AUTO_MERGE reaches a child only by inheritance, and a mesh-spawned
 # worker can export it before init to mint merge authority no config
-# granted. The bar here is the crown's own (cli/src/fno/agents/crown.py:
+# granted. The bar here is the team's own (cli/src/fno/agents/team.py:
 # no FNO_AGENT_SELF = an attended human) plus the unattended derivation,
 # so spawned and unattended runs cannot stamp the grant. The autonomous
 # grant is auto_merge.grant = dispatch, never this variable. Residual,
@@ -1434,7 +1434,7 @@ PYEOF
 
   # A two-node payload used to take ZERO claims. That is the worst of the three
   # options available: the work is real, two nodes are being built, and the store
-  # recorded neither, so both read free to every king that checked.
+  # recorded neither, so both read free to every lead that checked.
   #
   # The ambiguity refusal was written for `graph_node_id` and the in_review
   # guard, which genuinely need ONE node. A claim does not: a session building
@@ -1515,7 +1515,7 @@ PYEOF
       fi
     done
     # All or nothing. Half a session's work recorded is a worse lie than none:
-    # a king reading the claimed half would conclude the unclaimed half is free
+    # a lead reading the claimed half would conclude the unclaimed half is free
     # and staff it, which is the duplicate this whole change exists to stop.
     if [[ "$_MULTI_OK" -ne 1 ]]; then
       _MULTI_KEPT=""
@@ -1842,7 +1842,7 @@ PYEOF
     # `join: auto` in the plan frontmatter hands the plan's remaining waves
     # to `fno backlog join` here, at init: this session is the holder (one
     # worker) and join spawns the remainder into this worktree. The key is
-    # opt-in - absent or `manual` waits for a person or a king
+    # opt-in - absent or `manual` waits for a person or a lead
     # session to run the verb and does nothing here, so plans written before
     # the key keep their behavior. Both facts come from the canonical probes
     # in fno.backlog.join_trigger: bash re-implementing the auto-continue
@@ -1871,7 +1871,7 @@ PYEOF
       if [[ -z "$_jt_fm" ]]; then
         _jt_old="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^orchestration:[[:space:]]*//p' | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d '"' | tr -d "'" | xargs)"
         if [[ -n "$_jt_old" ]]; then
-          echo "target: plan carries the retired key 'orchestration: $_jt_old'; it is now 'join: manual|auto' (mechanical -> auto, king -> manual) and join did NOT fire. Update the plan's frontmatter." >&2
+          echo "target: plan carries the retired key 'orchestration: $_jt_old'; it is now 'join: manual|auto' (mechanical -> auto, lead -> manual) and join did NOT fire. Update the plan's frontmatter." >&2
         fi
       fi
       if [[ "${_jt_fm:-manual}" == "auto" ]]; then

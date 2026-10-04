@@ -38,11 +38,11 @@ pub(crate) struct LoopCheckArgs {
     /// on a stdin read.
     pub(super) hook_input_stdin: bool,
     /// Which driver's `done()` this fire evaluates. `target` asks whether one
-    /// deliverable shipped; `king` asks whether the board is clean. They share
-    /// the engine and nothing else, so `king` routes to its own decision path
+    /// deliverable shipped; `lead` asks whether the board is clean. They share
+    /// the engine and nothing else, so `lead` routes to its own decision path
     /// before the target-shaped manifest read rather than branching inside it.
     pub(super) driver: String,
-    /// Override for the `fno` binary the king arm shells for its board. Same
+    /// Override for the `fno` binary the lead arm shells for its board. Same
     /// idiom as `gh_bin` / `git_bin`, and for the same reason: a test may not
     /// depend on what happens to be installed.
     pub(super) fno_bin: String,
@@ -153,9 +153,9 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     // Fail closed on an unknown driver. Tolerating one would run the target
     // gate against a manifest it cannot satisfy and burn to NoProgress while
     // looking like it was working.
-    if driver != "target" && driver != "king" {
+    if driver != "target" && driver != "lead" {
         return Err(format!(
-            "unknown --driver '{driver}'; supported: 'target', 'king'"
+            "unknown --driver '{driver}'; supported: 'target', 'lead'"
         ));
     }
 

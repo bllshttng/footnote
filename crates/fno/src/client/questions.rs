@@ -43,7 +43,7 @@ pub(super) struct Detail {
     pub(super) focus: bool,
     /// The page line the detail pane windows to when it holds focus.
     pub(super) scroll: usize,
-    /// `a` picked "agents decide": Enter hands the question to the crown.
+    /// `a` picked "agents decide": Enter hands the question to the team.
     pub(super) delegate: bool,
     /// The first `X` armed archive-all; the second sends it.
     pub(super) archive_armed: bool,
@@ -220,7 +220,7 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
     ));
     if d.delegate {
         s.push_str(
-            "## answer\n\nagents decide: the crown over the node decides a reversible call\n\n",
+            "## answer\n\nagents decide: the team over the node decides a reversible call\n\n",
         );
     }
     if let Some(notes) = &d.notes {
@@ -1131,7 +1131,7 @@ mod tests {
         let d = v.question_detail.as_ref().unwrap();
         assert_eq!(d.notice.as_deref(), Some("a pin has no delegate"));
 
-        // `a` then Enter hands the question to the crown.
+        // `a` then Enter hands the question to the team.
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
         v.open_detail_on("q-1");

@@ -6376,14 +6376,14 @@ fn subline_with_title_joins_the_harness_title_beside_the_label() {
     // subline; a title that EQUALS the label renders nothing (the label
     // already says it), and no title falls back to the base subline.
     let mut a = bg_row("w1", "/tmp/repos/footnote", Some("j1"));
-    a.harness_title = Some("king-title".into());
+    a.harness_title = Some("lead-title".into());
     assert_eq!(
         subline_with_title(&a, Some("main · footnote".into())),
-        Some("king-title · main · footnote".into())
+        Some("lead-title · main · footnote".into())
     );
     assert_eq!(
         subline_with_title(&a, None),
-        Some("king-title".into()),
+        Some("lead-title".into()),
         "no base subline -> title alone"
     );
     a.harness_title = Some("w1".into());

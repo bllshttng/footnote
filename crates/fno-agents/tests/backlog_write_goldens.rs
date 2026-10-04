@@ -188,7 +188,7 @@ fn seed_entries() -> Vec<Value> {
                "type": "feature", "domain": "code", "project": "fno", "difficulty": "medium",
                "difficulty_history": [{"value": "medium", "source": "claim",
                                        "ts": "2026-09-10T00:00:00+00:00"}],
-               "model_tier": "crown", "created_at": created}),
+               "model_tier": "team", "created_at": created}),
         json!({"id": "x-cafe1111", "title": "Plan bound", "status": "ready", "priority": "p2",
                "type": "feature", "domain": "code", "project": "fno",
                "plan_path": "plans/owned/00-INDEX.md", "created_at": created}),

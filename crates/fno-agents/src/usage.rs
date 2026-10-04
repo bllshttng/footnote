@@ -29,7 +29,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // because this line is what `restart --help` prints.
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
-    "rename <name> --name <new-label>   -- renames the registry label and, for a crowned session, its crown name (regnal restarts at 1); old label stays an alias; harness session is untouched",
+    "rename <name> --name <new-label>   -- renames the registry label and, for a teamed session, its team name (regnal restarts at 1); old label stays an alias; harness session is untouched",
     "rename --from-journal [--apply]    -- plan registry label rebuilds from the agents journal; --apply renames",
     "stop <name> [--force] [--cross-project]   --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
@@ -45,7 +45,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // converts a live pane into a persistent thread under the same session
     // id. The three flags that belong to it are spelled out here because
     // this line is what `resume --help` prints.
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and crown; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a crowned row). Both need --substrate thread",
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and team; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a teamed row). Both need --substrate thread",
     "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",
@@ -85,7 +85,7 @@ pub fn verb_usage(verb: &str) -> Option<&'static str> {
 /// top-level list.
 pub const LOOP_CHECK_USAGE: &str = "\
 usage: fno-agents loop-check --state <manifest> --transcript <transcript.jsonl> --cwd <project-root>
-       [--driver target|king] [--events <p>] [--global-events <p>] [--settings <p>]
+       [--driver target|lead] [--events <p>] [--global-events <p>] [--settings <p>]
        [--global-settings <p>] [--ledger <p>] [--gh-budget-ledger <p>] [--now <rfc3339>]
        [--author-harness <h>] [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>]
        [--fno-bin <p>] [--read-timeout-ms <n>] [--harness <h>] [--harness-session <id>]
@@ -97,8 +97,8 @@ session's own claim of done is not an input.
 
 --driver selects the arm and the manifest kind --state points at. target
 (the default) reads a target manifest (target-state.md) and asks whether
-its one deliverable shipped. king reads a king manifest (frontmatter
-scope) and asks whether the crown scope drained. The arm is chosen by the
+its one deliverable shipped. lead reads a lead manifest (frontmatter
+scope) and asks whether the team scope drained. The arm is chosen by the
 flag, never by sniffing the file, and any other value is refused.
 
 --harness and --harness-session name the harness and harness session id
@@ -181,6 +181,6 @@ mod tests {
         assert!(verb_help("loop-check").is_some());
         assert!(one_line.contains("target (the default)"));
         assert!(one_line.contains("target manifest"));
-        assert!(one_line.contains("king manifest"));
+        assert!(one_line.contains("lead manifest"));
     }
 }

@@ -1,7 +1,7 @@
 //! `fno-agents pr-park` -- a parked PR is a board fact, not a watcher fact.
 //!
 //! A parked record stopped polling and, after one OS notice, the PR was
-//! invisible to merge scan, heal and the king. Red CI is the state a working
+//! invisible to merge scan, heal and the lead. Red CI is the state a working
 //! session is in while it pushes fixes, so "retries exhausted" read as
 //! "forgotten until a human noticed": six open PRs parked in one afternoon,
 //! with 17 finished delivery records cluttering the list above them.
@@ -16,7 +16,7 @@
 
 use crate::authorized_merge::Probes;
 use crate::events::EventEmitter;
-use crate::king_board::scope::graph_json_path;
+use crate::org_board::scope::graph_json_path;
 use crate::paths::AgentsHome;
 use crate::tick_ledger::parse_rfc3339_unix;
 use serde_json::{json, Map, Value};
@@ -232,7 +232,7 @@ fn node_for(entries: &[Value], slug: &str, pr: u64) -> (String, String) {
 
 /// The newest `merge_grant_execution` row for this PR in the store, or the
 /// newest err-log line naming it, or empty. Both reads are bounded: the
-/// keyed store query is indexed, and the king reads this list every beat.
+/// keyed store query is indexed, and the lead reads this list every beat.
 fn reason_detail(paths: &Paths, pr: u64) -> String {
     if let Some(detail) = grant_detail(&paths.events, pr, |data| {
         let mut bits = Vec::new();

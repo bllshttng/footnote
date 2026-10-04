@@ -1,6 +1,6 @@
 //! `fno-agents state plans-dirs [cwd]` - every REGISTERED project's plans dir,
 //! one per line, for the plan-location guard. A session anchored outside a
-//! project (a king in `~/.fno`, a subagent in an unrelated checkout) still
+//! project (a lead in `~/.fno`, a subagent in an unrelated checkout) still
 //! writes that project's plans, so the guard must judge a target against the
 //! plans dirs of every project in `work.workspaces`, not only the one its own
 //! cwd resolves to.

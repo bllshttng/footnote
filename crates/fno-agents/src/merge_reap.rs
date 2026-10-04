@@ -18,8 +18,8 @@
 //! This is the ONLY bound the machine has on registry row count: spawn_gate
 //! counts a row only while its pid is alive (or its short id is in the live
 //! roster), so the dead population is invisible to every cap. Grace is a
-//! clock, never a liveness probe: an idle KING reads state=done, so candidacy
-//! never keys on roster state, and crowned and operator-origin rows are
+//! clock, never a liveness probe: an idle LEAD reads state=done, so candidacy
+//! never keys on roster state, and teamed and operator-origin rows are
 //! excluded by name in the receipt.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -230,7 +230,7 @@ pub(crate) fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
 /// (`candidate_row_names` - the reaper never re-derives a name the
 /// producer did not propose, so a prefix can never widen the removal), or
 /// whose name resolves to one of the closed nodes through the shared
-/// `name_route` vocabulary, so the operator's `t-`/`bp-`/`king-`/`target-`
+/// `name_route` vocabulary, so the operator's `t-`/`bp-`/`lead-`/`target-`
 /// worker names all join (a `target-{node}-` literal would see 5 of 29
 /// rows). Sorted by name. A request-named row the registry no longer
 /// carries is ALREADY gone, so it is not a candidate: a re-pass after a
@@ -446,9 +446,9 @@ fn run_request(
         emit_hold_once_per_hour(home, emitter, request, &reason, now);
         return (0, true);
     }
-    // 3. Candidates, with the crowned and operator-origin rows named out: an
-    // idle king reads state=done, so exclusion is by NAME, never by roster
-    // state. Crowned/operator rows are settled keeps; a refusal below is a
+    // 3. Candidates, with the teamed and operator-origin rows named out: an
+    // idle lead reads state=done, so exclusion is by NAME, never by roster
+    // state. Teamed/operator rows are settled keeps; a refusal below is a
     // HOLD - the request matched the row and must come back for it.
     // The pass precomputed these exact candidates for the batched age
     // probe; reuse them so the registry is read once per request, not twice.
@@ -459,7 +459,7 @@ fn run_request(
     let mut kept: Vec<String> = Vec::new();
     let mut rows: Vec<state::RegistryEntry> = Vec::new();
     for entry in joined {
-        if entry.crown_level.is_some() || crate::loop_reign::row_holds_manifest_live_crown(&entry) {
+        if entry.crown_level.is_some() || crate::lead_state::row_holds_manifest_live_team(&entry) {
             kept.push(format!("{}:kept_crowned", entry.name));
             continue;
         }
@@ -1467,7 +1467,7 @@ mod tests {
     /// an unknown hold never masquerades as a named one.
 
     /// A registry with one claude candidate row (plus, optionally, one
-    /// crowned row the reaper must name and keep).
+    /// teamed row the reaper must name and keep).
     fn write_registry(home: &AgentsHome, entries: &[Value]) {
         std::fs::create_dir_all(home.root()).unwrap();
         let registry = json!({"schema_version": 10, "agents": entries});
@@ -1478,7 +1478,7 @@ mod tests {
         .unwrap();
     }
 
-    fn claude_row(name: &str, crowned: bool) -> Value {
+    fn claude_row(name: &str, teamed: bool) -> Value {
         let mut row = json!({
             "name": name,
             "cwd": "/repo/wt",
@@ -1489,7 +1489,7 @@ mod tests {
             "short_id": "abc123",
             "origin": "spawn",
         });
-        if crowned {
+        if teamed {
             row["crown_level"] = json!(1);
         }
         row
@@ -1608,14 +1608,14 @@ mod tests {
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
 
-        // AC2-CROWN: an idle king reads state=done; exclusion is by name.
-        let home = temp_home("crown");
+        // AC2-TEAM: an idle lead reads state=done; exclusion is by name.
+        let home = temp_home("team");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(
             &home,
             &[
                 claude_row("target-x-1-worker", false),
-                claude_row("king-x-1", true),
+                claude_row("lead-x-1", true),
             ],
         );
         let request = settled_request("/repo/wt");
@@ -1652,8 +1652,8 @@ mod tests {
             .collect();
         assert!(
             kept.iter()
-                .any(|k| k.as_str().starts_with("king-x-1:kept_crowned")),
-            "the crowned row must be named under kept_crowned: {kept:?}"
+                .any(|k| k.as_str().starts_with("lead-x-1:kept_crowned")),
+            "the teamed row must be named under kept_crowned: {kept:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
 
@@ -1915,7 +1915,7 @@ mod tests {
 
     #[test]
     fn pass_rows() {
-        // The operator's naming convention mints t-, bp-, king- and target-
+        // The operator's naming convention mints t-, bp-, lead- and target-
         // rows; the join must read all four from the node hex. The cwd leg
         // stays out of the way: no row's cwd matches the request worktree.
         let home = temp_home("prefixes");
@@ -1924,7 +1924,7 @@ mod tests {
             &[
                 claude_row("t-aaaa-idle-glm", false),
                 claude_row("bp-aaaa-arm-timeout", false),
-                claude_row("king-aaaa", false),
+                claude_row("lead-aaaa", false),
                 claude_row("target-x-aaaa-worker", false),
                 // Another node's worker: never a candidate.
                 claude_row("t-docs-3prs-glm", false),
@@ -1937,7 +1937,7 @@ mod tests {
         for expected in [
             "t-aaaa-idle-glm",
             "bp-aaaa-arm-timeout",
-            "king-aaaa",
+            "lead-aaaa",
             "target-x-aaaa-worker",
         ] {
             assert!(
@@ -2254,7 +2254,7 @@ mod tests {
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
 
         // the widened name vocabulary joins wrapper-prefixed rows
-        // too - a king-spawned row for a closed node is reaped, not left.
+        // too - a lead-spawned row for a closed node is reaped, not left.
         let home = temp_home("wrapped-cleanup");
         write_registry(&home, &[claude_row("k-bp-x-1-cargo", false)]);
         let mut request = settled_request("/repo/other-wt");

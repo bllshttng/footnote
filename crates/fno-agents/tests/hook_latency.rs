@@ -100,8 +100,8 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The king/target/visitor sids, stable so registry rows can name them.
-const KING_SID: &str = "00000000-0000-4000-8000-00000000kingsid";
+/// The lead/target/visitor sids, stable so registry rows can name them.
+const LEAD_SID: &str = "00000000-0000-4000-8000-00000000leadsid";
 const TARGET_SID: &str = "00000000-0000-4000-8000-000000targetsid";
 const WATCH_SID: &str = "00000000-0000-4000-8000-000000watchsid";
 const VISITOR_SID: &str = "00000000-0000-4000-8000-000000visitsid";
@@ -159,7 +159,7 @@ fn build_bench() -> Bench {
     let global = space.join("global.jsonl");
     let config = base.join("config.toml");
     let config_body = format!(
-        "state_dir = {:?}\nplans_dir = {:?}\n[paths]\nspaces_dir = {:?}\n[king]\nimplementation_guard = \"refuse\"\n[review]\nrequired_bots = []\nreviewers = []\nposture = \"no_review\"\n",
+        "state_dir = {:?}\nplans_dir = {:?}\n[paths]\nspaces_dir = {:?}\n[lead]\nimplementation_guard = \"refuse\"\n[review]\nrequired_bots = []\nreviewers = []\nposture = \"no_review\"\n",
         space,
         space.join("plans"),
         spaces
@@ -196,14 +196,14 @@ fn build_bench() -> Bench {
     );
 
     // Registry: 200 filler rows (the measured baseline's density) plus the
-    // fixture rows the king/court paths resolve.
+    // fixture rows the lead/org paths resolve.
     let mut rows = Vec::new();
     for i in 0..200 {
         rows.push(
             json!({"name": format!("fixture-{i}"), "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": format!("session-{i}"), "status": "live"}),
         );
     }
-    rows.push(json!({"name": "fixture-king", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": KING_SID, "status": "live", "crown_level": 2, "crown_scope": "latency-fixture"}));
+    rows.push(json!({"name": "fixture-lead", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": LEAD_SID, "status": "live", "crown_level": 2, "crown_scope": "latency-fixture"}));
     rows.push(json!({"name": "fixture-target", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": TARGET_SID, "status": "live"}));
     rows.push(json!({"name": "fixture-watch", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": WATCH_SID, "status": "live"}));
     write(
@@ -211,11 +211,11 @@ fn build_bench() -> Bench {
         &json!({"schema_version": 26, "agents": rows}).to_string(),
     );
 
-    // The court manifest the king paths resolve.
+    // The org manifest the lead paths resolve.
     write(
         &space.join("kings/latency-fixture.md"),
         &format!(
-            "---\nfno_id: 20260915T190000Z-lg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: court\nharness: claude\nharness_session_id: {KING_SID}\n---\n"
+            "---\nfno_id: 20260915T190000Z-lg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
         ),
     );
 
@@ -683,7 +683,7 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
     } else {
         None
     };
-    let control_script = b.base.join("king-guard-control.sh");
+    let control_script = b.base.join("lead-guard-control.sh");
     let control_args = if normalize_runner {
         write(
             &control_script,
@@ -1076,19 +1076,19 @@ fn latency_stop_target_promise_green() {
     );
 }
 
-/// A king fire whose journal already holds a newer termination row: allow,
+/// A lead fire whose journal already holds a newer termination row: allow,
 /// no board read. AC5-HP.
 #[test]
 #[ignore]
-fn latency_stop_king_terminal_repeat() {
+fn latency_stop_lead_terminal_repeat() {
     let manifest = format!(
-        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: court\nharness: claude\nharness_session_id: {KING_SID}\n---\n"
+        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
     );
     run_fixture(
-        "stop_king_terminal_repeat",
+        "stop_lead_terminal_repeat",
         "hooks/target-stop-hook.sh",
         &FixtureSpec {
-            payload: stop_payload(KING_SID, Some("Work continues.")),
+            payload: stop_payload(LEAD_SID, Some("Work continues.")),
             manifest: &manifest,
             claims: &[],
             extra_env: &[],
@@ -1098,16 +1098,16 @@ fn latency_stop_king_terminal_repeat() {
             max_git: None,
         },
         |code, stdout, stderr| {
-            // Allowed: a terminal reign is not re-judged. On the current main
+            // Allowed: a terminal lead is not re-judged. On the current main
             // hooks this full board read may answer differently; the fixture
             // pins the FINISHED branch's contract.
-            assert_eq!(code, 0, "king terminal allow exits 0: {stderr}");
+            assert_eq!(code, 0, "lead terminal allow exits 0: {stderr}");
             if !stdout.trim().is_empty() {
                 let v: Value = serde_json::from_str(stdout)
                     .unwrap_or_else(|e| panic!("{stdout:?} not JSON: {e}"));
                 assert_ne!(
                     v["decision"], "block",
-                    "terminal reign must not block: {stdout}"
+                    "terminal lead must not block: {stdout}"
                 );
             }
         },
@@ -1138,16 +1138,16 @@ fn hook_budget_bash_pretooluse_dispatch() {
     repeated_ceiling_violations.extend([245.0; 6]);
     assert!(p95(&mut repeated_ceiling_violations) > 200.0);
 
-    // Keep the no-write King path in the same owner: it must allow before any
+    // Keep the no-write Lead path in the same owner: it must allow before any
     // registry read, and this sample used to live in a duplicate ignored test.
     let manifest = format!(
-        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: court\nharness: claude\nharness_session_id: {KING_SID}\n---\n"
+        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
     );
     run_fixture(
         "guard_bash_no_write",
-        "hooks/king-delegation-guard.sh",
+        "hooks/lead-delegation-guard.sh",
         &FixtureSpec {
-            payload: guard_payload(KING_SID, "Bash", json!({"command": "git status --short"})),
+            payload: guard_payload(LEAD_SID, "Bash", json!({"command": "git status --short"})),
             manifest: &manifest,
             claims: &[],
             extra_env: &[],
@@ -1325,7 +1325,7 @@ fn assert_subsequence(order: &[String], stream: &[String], msg: &str) {
 fn latency_guard_uncrowned_edit() {
     run_fixture(
         "guard_uncrowned_edit",
-        "hooks/king-delegation-guard.sh",
+        "hooks/lead-delegation-guard.sh",
         &FixtureSpec {
             payload: guard_payload(
                 VISITOR_SID,
@@ -1347,19 +1347,19 @@ fn latency_guard_uncrowned_edit() {
     );
 }
 
-/// Court Edit outside every allowed root: today's deny JSON. AC8-HP.
+/// Org Edit outside every allowed root: today's deny JSON. AC8-HP.
 #[test]
 #[ignore]
-fn latency_guard_court_edit_deny() {
+fn latency_guard_org_edit_deny() {
     let manifest = format!(
-        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: court\nharness: claude\nharness_session_id: {KING_SID}\n---\n"
+        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
     );
     run_fixture(
-        "guard_court_edit_deny",
-        "hooks/king-delegation-guard.sh",
+        "guard_org_edit_deny",
+        "hooks/lead-delegation-guard.sh",
         &FixtureSpec {
             payload: guard_payload(
-                KING_SID,
+                LEAD_SID,
                 "Edit",
                 json!({"file_path": "src/example.rs", "old_string": "a", "new_string": "b"}),
             ),
@@ -1392,24 +1392,24 @@ fn latency_guard_court_edit_deny() {
     );
 }
 
-/// Court Write into the plans directory: allowed within the same budget.
+/// Org Write into the plans directory: allowed within the same budget.
 /// AC8-HP second leg.
 #[test]
 #[ignore]
-fn latency_guard_court_plan_allow() {
+fn latency_guard_org_plan_allow() {
     let manifest = format!(
-        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: court\nharness: claude\nharness_session_id: {KING_SID}\n---\n"
+        "---\nfno_id: 20260915T190000Z-kg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
     );
     let b = bench();
     let plans = b.base.join("state/plans");
     fs::create_dir_all(&plans).unwrap();
     let plan_file = plans.join("quick-note.md");
     run_fixture(
-        "guard_court_plan_allow",
-        "hooks/king-delegation-guard.sh",
+        "guard_org_plan_allow",
+        "hooks/lead-delegation-guard.sh",
         &FixtureSpec {
             payload: guard_payload(
-                KING_SID,
+                LEAD_SID,
                 "Write",
                 json!({"file_path": plan_file.display().to_string(), "content": "plan"}),
             ),
@@ -1523,8 +1523,8 @@ fn hook_sources_stay_small() {
         "target-stop-hook.sh must stay a tiny exec wrapper"
     );
     assert!(
-        physical(&format!("{repo}/hooks/king-delegation-guard.sh")) <= 40,
-        "king-delegation-guard.sh must stay a tiny exec wrapper"
+        physical(&format!("{repo}/hooks/lead-delegation-guard.sh")) <= 40,
+        "lead-delegation-guard.sh must stay a tiny exec wrapper"
     );
     // Main re-inlined the unit tests, so the physical ceiling follows the
     // merged file; the net-shrink obligation is check-file-budget's, which
@@ -1542,8 +1542,8 @@ fn hook_sources_stay_small() {
     // Growth past the ceiling is answered by refactoring the file in the
     // same PR, never by re-setting the number (law d-4b39ad4c).
     assert!(
-        nbnc(&format!("{root}/src/hook/king_guard.rs"), true) <= 630,
-        "hook/king_guard.rs grew past its ceiling"
+        nbnc(&format!("{root}/src/hook/lead_guard.rs"), true) <= 630,
+        "hook/lead_guard.rs grew past its ceiling"
     );
     assert!(
         fn_nbnc(&format!("{root}/src/loopcheck.rs"), "decide_with_payload") <= 1_090,

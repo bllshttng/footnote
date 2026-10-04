@@ -2046,7 +2046,7 @@ mod tests {
         std::fs::write(
             &plan,
             format!(
-                "---\nstatus: ready\ndispatch_hold:\n  reason: Blocking finding\n  release_when: Finding fixed\n  review_on: {review_on}\n  set_by: king:119e3c52\n---\n"
+                "---\nstatus: ready\ndispatch_hold:\n  reason: Blocking finding\n  release_when: Finding fixed\n  review_on: {review_on}\n  set_by: lead:119e3c52\n---\n"
             ),
         )
         .unwrap();
@@ -2064,7 +2064,7 @@ mod tests {
         assert_eq!(read.reason, "Blocking finding");
         assert_eq!(read.release_when, "Finding fixed");
         assert_eq!(read.review_on, "2099-08-20");
-        assert_eq!(read.set_by, "king:119e3c52");
+        assert_eq!(read.set_by, "lead:119e3c52");
         past_review_note_contract();
         malformed_blocks_contract();
         unreadable_plan_contract();
@@ -2087,8 +2087,8 @@ mod tests {
         let shapes = [
             serde_json::json!("blocked"),
             serde_json::json!({"reason": "why"}),
-            serde_json::json!({"reason": "why", "release_when": "fixed", "review_on": "soon", "set_by": "king"}),
-            serde_json::json!({"reason": "   ", "release_when": "fixed", "review_on": "2026-08-20", "set_by": "king"}),
+            serde_json::json!({"reason": "why", "release_when": "fixed", "review_on": "soon", "set_by": "lead"}),
+            serde_json::json!({"reason": "   ", "release_when": "fixed", "review_on": "2026-08-20", "set_by": "lead"}),
             serde_json::json!({"reason": "why", "release_when": "fixed", "review_on": "2026-08-20", "set_by": "   "}),
         ];
         for shape in shapes {
@@ -2123,7 +2123,7 @@ mod tests {
         let read = hold_read(&serde_json::json!({
             "id": "x-mid",
             "plan_path": unmounted.display().to_string(),
-            "dispatch_hold": {"reason": "r", "release_when": "w", "review_on": "2099-01-01", "set_by": "king"},
+            "dispatch_hold": {"reason": "r", "release_when": "w", "review_on": "2099-01-01", "set_by": "lead"},
         }));
         assert!(matches!(read.state, HoldState::Held), "{:?}", read);
     }
@@ -2131,7 +2131,7 @@ mod tests {
     fn node_field_contract() {
         let read = hold_read(&serde_json::json!({
             "id": "x-n",
-            "dispatch_hold": {"reason": "rc freeze", "release_when": "lift", "review_on": "2099-01-01", "set_by": "king"},
+            "dispatch_hold": {"reason": "rc freeze", "release_when": "lift", "review_on": "2099-01-01", "set_by": "lead"},
         }));
         assert!(matches!(read.state, HoldState::Held));
         assert_eq!(read.reason, "rc freeze");
@@ -2143,7 +2143,7 @@ mod tests {
     fn the_verdict_walks_parent_and_contained_owner_and_names_the_owner() {
         let owner = serde_json::json!({
             "id": "x-owner",
-            "dispatch_hold": {"reason": "r", "release_when": "w", "review_on": "2099-01-01", "set_by": "king"},
+            "dispatch_hold": {"reason": "r", "release_when": "w", "review_on": "2099-01-01", "set_by": "lead"},
         });
         let parent = serde_json::json!({"id": "x-parent", "parent": "x-owner"});
         let child = serde_json::json!({"id": "x-child", "contained_in": "x-parent"});

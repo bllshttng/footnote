@@ -1,5 +1,5 @@
 //! The activity-feed shell-out leg : a bounded, fail-open shell-out to
-//! `fno agents feed --json`, in the same shape as [`crate::court_overlay`]'s
+//! `fno agents feed --json`, in the same shape as [`crate::org_overlay`]'s
 //! fold (: the 800ms cap it first copied was half the projection's
 //! measured runtime, so the feed could never render).
 //!
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 
-/// Ten seconds, court_overlay's budget for a comparable multi-store read.
+/// Ten seconds, org_overlay's budget for a comparable multi-store read.
 /// The feed joins three stores and serialises 200 rows; its measured runtime
 /// is 1.6s against the 800ms this file inherited from needs_overlay's cheap
 /// reads, so under the old cap it could not succeed at all. A long budget
@@ -66,14 +66,14 @@ pub struct FeedItem {
     /// recorded cause, verbatim.
     #[serde(default)]
     pub reason: Option<String>,
-    /// `L{level} {scope}` for the crown kinds and a crowned removal.
+    /// `L{level} {scope}` for the team kinds and a teamed removal.
     #[serde(default)]
     pub crown: Option<String>,
     /// The crowned worker's name on the crown kinds; the feed search
     /// answers `l:` through it.
     #[serde(default)]
     pub holder: Option<String>,
-    /// The king or epic the row rolls up to; the panel groups on it.
+    /// The lead or epic the row rolls up to; the panel groups on it.
     #[serde(default)]
     pub owner: Option<String>,
     /// The session that spawned this row's session, from the birth event.

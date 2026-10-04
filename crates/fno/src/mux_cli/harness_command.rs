@@ -492,7 +492,7 @@ fn provider_receipt_matches(
                 return false;
             }
             if let Some(scope) = scope.filter(|scope| !scope.trim().is_empty()) {
-                if owner != format!("king:{}", scope.trim()) {
+                if owner != format!("lead:{}", scope.trim()) {
                     return false;
                 }
             }
@@ -515,12 +515,12 @@ fn provider_receipt_matches(
                     objective.to_string()
                 };
                 let expected_owner = if !scope.unwrap_or_default().trim().is_empty() {
-                    format!("king:{}", scope.unwrap_or_default().trim())
+                    format!("lead:{}", scope.unwrap_or_default().trim())
                 } else if let Some(scope) = objective
                     .strip_prefix("$fno:lead ")
-                    .or_else(|| objective.strip_prefix("$fno:reign "))
+                    .or_else(|| objective.strip_prefix("$fno:lead "))
                 {
-                    format!("king:{}", scope.trim())
+                    format!("lead:{}", scope.trim())
                 } else {
                     format!("target:{session_id}")
                 };
@@ -534,7 +534,7 @@ fn provider_receipt_matches(
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("");
                     answered == format!("$fno:lead {scope_txt}")
-                        || answered == format!("$fno:reign {scope_txt}")
+                        || answered == format!("$fno:lead {scope_txt}")
                 } else {
                     receipt.get("objective").and_then(serde_json::Value::as_str)
                         == Some(objective.as_str())
@@ -1155,7 +1155,7 @@ mod tests {
     fn retry_receipt_is_bound_to_the_current_session_identity() {
         let receipt = CommandReceipt {
             request_id: "request-1".into(),
-            selector: "king".into(),
+            selector: "lead".into(),
             session_id: "thread-1".into(),
             harness: "codex".into(),
             transport: "app-server".into(),
@@ -1172,10 +1172,10 @@ mod tests {
         };
 
         assert!(receipt_matches_request(
-            &receipt, "king", "thread-1", "codex", "/compact", "compact", None, None
+            &receipt, "lead", "thread-1", "codex", "/compact", "compact", None, None
         ));
         assert!(!receipt_matches_request(
-            &receipt, "king", "thread-2", "codex", "/compact", "compact", None, None
+            &receipt, "lead", "thread-2", "codex", "/compact", "compact", None, None
         ));
     }
 
@@ -1241,16 +1241,16 @@ mod tests {
             "action": "goal_set",
             "thread_id": "thread-1",
             "status": "active",
-            "objective": "$fno:reign court",
-            "continuation_owner": "king:court",
+            "objective": "$fno:lead org",
+            "continuation_owner": "lead:org",
             "usage": valid_goal_usage()
         });
         assert!(provider_receipt_matches(
             "thread/goal/set",
             "goal-active",
             "thread-1",
-            Some("court"),
-            "/goal $fno:reign court",
+            Some("org"),
+            "/goal $fno:lead org",
             &receipt
         ));
         let mut usage_missing = receipt.clone();
@@ -1259,16 +1259,16 @@ mod tests {
             "thread/goal/set",
             "goal-active",
             "thread-1",
-            Some("court"),
-            "/goal $fno:reign court",
+            Some("org"),
+            "/goal $fno:lead org",
             &usage_missing
         ));
         assert!(!provider_receipt_matches(
             "thread/goal/set",
             "goal-active",
             "thread-2",
-            Some("court"),
-            "/goal $fno:reign court",
+            Some("org"),
+            "/goal $fno:lead org",
             &receipt
         ));
         let wrong_owner = serde_json::json!({
@@ -1276,16 +1276,16 @@ mod tests {
             "action": "goal_set",
             "thread_id": "thread-1",
             "status": "active",
-            "objective": "$fno:reign court",
-            "continuation_owner": "king:other",
+            "objective": "$fno:lead org",
+            "continuation_owner": "lead:other",
             "usage": valid_goal_usage()
         });
         assert!(!provider_receipt_matches(
             "thread/goal/set",
             "goal-active",
             "thread-1",
-            Some("court"),
-            "/goal $fno:reign court",
+            Some("org"),
+            "/goal $fno:lead org",
             &wrong_owner
         ));
         let wrong_objective = serde_json::json!({
@@ -1293,16 +1293,16 @@ mod tests {
             "action": "goal_set",
             "thread_id": "thread-1",
             "status": "active",
-            "objective": "$fno:reign other",
-            "continuation_owner": "king:court",
+            "objective": "$fno:lead other",
+            "continuation_owner": "lead:org",
             "usage": valid_goal_usage()
         });
         assert!(!provider_receipt_matches(
             "thread/goal/set",
             "goal-active",
             "thread-1",
-            Some("court"),
-            "/goal $fno:reign court",
+            Some("org"),
+            "/goal $fno:lead org",
             &wrong_objective
         ));
 
@@ -1311,15 +1311,15 @@ mod tests {
             "action": "goal_get",
             "thread_id": "thread-1",
             "status": "active",
-            "objective": "$fno:reign court",
-            "continuation_owner": "king:court",
+            "objective": "$fno:lead org",
+            "continuation_owner": "lead:org",
             "usage": valid_goal_usage()
         });
         assert!(provider_receipt_matches(
             "thread/goal/get",
             "goal-active",
             "thread-1",
-            Some("court"),
+            Some("org"),
             "/goal status",
             &get_receipt
         ));
@@ -1338,15 +1338,15 @@ mod tests {
             "thread_id": "thread-1",
             "status": "active",
             "previous_status": "paused",
-            "objective": "$fno:reign court",
-            "continuation_owner": "king:court",
+            "objective": "$fno:lead org",
+            "continuation_owner": "lead:org",
             "usage": valid_goal_usage()
         });
         assert!(provider_receipt_matches(
             "thread/goal/set",
             "goal-active",
             "thread-1",
-            Some("court"),
+            Some("org"),
             "/goal resume",
             &resumed_receipt
         ));
@@ -1355,15 +1355,15 @@ mod tests {
             "action": "goal_set",
             "thread_id": "thread-1",
             "status": "active",
-            "objective": "$fno:reign court",
-            "continuation_owner": "king:court",
+            "objective": "$fno:lead org",
+            "continuation_owner": "lead:org",
             "usage": valid_goal_usage()
         });
         assert!(!provider_receipt_matches(
             "thread/goal/set",
             "goal-active",
             "thread-1",
-            Some("court"),
+            Some("org"),
             "/goal resume",
             &missing_pause
         ));
@@ -1376,8 +1376,8 @@ mod tests {
             "action": "goal_set",
             "thread_id": "thread-1",
             "status": "active",
-            "objective": "$fno:reign court",
-            "continuation_owner": "king:court",
+            "objective": "$fno:lead org",
+            "continuation_owner": "lead:org",
             "usage": valid_goal_usage(),
         });
         let receipt = CommandReceipt {
@@ -1387,7 +1387,7 @@ mod tests {
             harness: "codex".into(),
             transport: "app-server".into(),
             expected_identity: "thread-1".into(),
-            command: "/goal $fno:reign court".into(),
+            command: "/goal $fno:lead org".into(),
             proof: "goal-active".into(),
             expected_screen: None,
             empty_composer: None,

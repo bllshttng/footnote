@@ -4,7 +4,7 @@
 
 /// Wall-clock ceiling for ONE synchronous stop-gate read: PR metadata,
 /// checks, reviews, inline comments, commits, quota, coverage reads,
-/// fingerprint reads, nudges/coverage writes, the king board, and every
+/// fingerprint reads, nudges/coverage writes, the lead board, and every
 /// local `git` read the gate makes. One named bound so a single wedged child
 /// can never outlive the stop fire; the fidelity ceiling (60s) and the
 /// advisory-hint ceiling (10s) stay separate because they gate different
@@ -34,7 +34,7 @@ pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration
 pub(crate) const STOPGATE_PRE_DRAIN_SPENT_BOUND: std::time::Duration =
     std::time::Duration::from_millis(1);
 
-/// King fires hold this much of the fire budget back for the drain read, the
+/// Lead fires hold this much of the fire budget back for the drain read, the
 /// last read and the one that decides completion. Drain cost scales with
 /// graph rows: measured standalone 4.5s to 7.9s on one scope and 8.8s to
 /// 11.2s on the largest. 16s is 1.4x that worst measurement; the multiplier
@@ -58,9 +58,9 @@ thread_local! {
         const { std::cell::RefCell::new((0, None, 0)) };
 }
 
-/// Re-arm the drain reserve on a fire that reached `king_decide` stamped with
-/// reserve 0. The Crown route (a bound harness session whose row is crowned)
-/// enters the king path under a fire the `--driver` string called target, and
+/// Re-arm the drain reserve on a fire that reached `lead_decide` stamped with
+/// reserve 0. The Team route (a bound harness session whose row is teamed)
+/// enters the lead path under a fire the `--driver` string called target, and
 /// the entry stamp is driver-blind now precisely so the route, not the
 /// string, decides. Mutates the already-stamped fire; override and deadline
 /// stay.
@@ -116,7 +116,7 @@ pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
 }
 
 /// The drain's own floor: the smallest bound a drain read can still meet.
-/// `fno agents king drain` answers in 1.5s to 1.7s warm on this machine
+/// `fno agents lead drain` answers in 1.5s to 1.7s warm on this machine
 /// (the bare CLI cold start alone costs 1.36s), so the generic 250ms floor
 /// was five to seven times under the cost of STARTING the drain - a
 /// deterministic kill no cache warmth or quiet fire could pass. 5s is about
@@ -246,8 +246,8 @@ mod tests {
     #[test]
     fn holding_the_reserve_on_a_reserve_zero_fire_arms_the_drain_slice() {
         // AC3: the entry stamp is reserve-blind (0) the way every fire is
-        // stamped now; the hold on `king_decide` arms the drain slice, so a
-        // Crown-route fire gets exactly what a native king fire always had.
+        // stamped now; the hold on `lead_decide` arms the drain slice, so a
+        // Team-route fire gets exactly what a native lead fire always had.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
         STOPGATE_READS.with(|cell| {
             *cell.borrow_mut() = (0, Some(deadline), 0);
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn the_drain_reserve_holds_pre_drain_reads_back_and_spares_the_drain() {
-        // King fires stamp the reserve; every read before the drain sees
+        // Lead fires stamp the reserve; every read before the drain sees
         // remaining-minus-reserve, the drain sees the full remaining.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         STOPGATE_READS.with(|cell| {

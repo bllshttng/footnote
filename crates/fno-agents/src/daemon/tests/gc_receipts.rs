@@ -746,9 +746,9 @@ fn an_open_do_row_on_a_done_node_holds_the_retirement_and_a_closed_one_retires_b
     }
 }
 
-/// The origin and crown protections, and the tree buckets on a retired row.
+/// The origin and team protections, and the tree buckets on a retired row.
 #[test]
-fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
+fn operator_and_teamed_rows_never_retire_and_tree_buckets_only_keep_trees() {
     let home = tmp_home("gc-protect");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let transcripts = tempfile::tempdir().unwrap();
@@ -815,7 +815,7 @@ fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
         &|_| None,
     );
     assert_eq!(summary.kept_operator, vec!["rowo".to_string()]);
-    assert_eq!(summary.kept_crowned, vec!["rowk".to_string()]);
+    assert_eq!(summary.kept_teamed, vec!["rowk".to_string()]);
     assert_eq!(
         summary
             .retired
@@ -880,24 +880,24 @@ fn the_truth_batch_includes_unstamped_rows() {
 /// A past-grace dead row with no ledger entry still reaps, and the receipt
 /// on disk is built from the ROW: resume command included, fields the
 /// ledger never carried for this row present. This is the 12-of-26
-/// population (kings, blueprint and rescue sessions) the ledger reader
+/// population (leads, blueprint and rescue sessions) the ledger reader
 /// cannot serve.
 #[test]
 fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
     let home = tmp_home("gc-receipt-row");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let transcripts = tempfile::tempdir().unwrap();
-    let quiet = quiet_transcript(transcripts.path(), "king.jsonl", 2 * 3600);
+    let quiet = quiet_transcript(transcripts.path(), "lead.jsonl", 2 * 3600);
     state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("king-mux", None);
-        e.short_id = "kingmux".into();
-        e.log_path = Some("/tmp/king-mux.log".into());
+        let mut e = ask_row("lead-mux", None);
+        e.short_id = "leadmux".into();
+        e.log_path = Some("/tmp/lead-mux.log".into());
         e.origin = Some("spawn".into());
         r.entries.push(e);
     })
     .unwrap();
 
-    let graph = graph_read(&[("king-mux-sess", "N1", "done")], &[]);
+    let graph = graph_read(&[("lead-mux-sess", "N1", "done")], &[]);
     let summary = gc_sweep::run(
         &home,
         &emitter,
@@ -921,26 +921,26 @@ fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
             .iter()
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>(),
-        vec!["kingmux".to_string()]
+        vec!["leadmux".to_string()]
     );
     assert!(summary.kept_no_receipt.is_empty());
     // The row is gone AND the record of how to come back is on disk.
     let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(reg.entries.iter().all(|e| e.name != "king-mux"));
+    assert!(reg.entries.iter().all(|e| e.name != "lead-mux"));
     let path = home
         .root()
         .join("reap-receipts")
-        .join("claude-king-mux-sess.json");
+        .join("claude-lead-mux-sess.json");
     let raw = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("receipt must be durable before the row leaves: {e}"));
     let receipt: Value = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(receipt["row_name"], "king-mux");
+    assert_eq!(receipt["row_name"], "lead-mux");
     assert_eq!(receipt["harness"], "claude");
-    assert_eq!(receipt["harness_session_id"], "king-mux-sess");
+    assert_eq!(receipt["harness_session_id"], "lead-mux-sess");
     assert_eq!(receipt["cwd"], "/tmp");
-    assert_eq!(receipt["log_path"], "/tmp/king-mux.log");
+    assert_eq!(receipt["log_path"], "/tmp/lead-mux.log");
     assert_eq!(receipt["created_at"], "2020-01-01T00:00:00Z");
-    assert_eq!(receipt["resume"], "claude --resume king-mux-sess");
+    assert_eq!(receipt["resume"], "claude --resume lead-mux-sess");
     assert!(
         receipt.get("ledger").is_none(),
         "no ledger entry exists for this session; none may be invented"

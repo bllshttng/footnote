@@ -1,7 +1,7 @@
 //! Why a red arm is red, the one verb that repairs it, and who runs that verb.
 //!
 //! One cause table for every reader (`fno agents status`, the arm_watch
-//! notice, the king check-in). `annotate` classifies each red row and ends its
+//! notice, the lead check-in). `annotate` classifies each red row and ends its
 //! line with `repair: <verb>` and `heal=auto|operator`. `heal` runs the
 //! `heal=auto` repairs from the arm_watch tick, before anything pages.
 
@@ -584,7 +584,7 @@ pub fn run_repair(action: &str, cwd: &Path) -> bool {
         "refresh" => {
             let mut cmd = vec![crate::scrape::fno_py().to_string_lossy().into_owned()];
             cmd.extend(["do", "pr", "watch", "refresh"].map(str::to_string));
-            crate::king_board::budget::run_with_timeout(
+            crate::org_board::budget::run_with_timeout(
                 &cmd,
                 cwd,
                 std::time::Duration::from_secs(120),
@@ -1043,7 +1043,7 @@ mod tests {
         assert!(install_off_main(Some(
             r#"{"worktree_kind":"linked_worktree","eligibility":"eligible"}"#
         )));
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.failing = true;
         kw.skip_reason = Some("timeout".into());
         let mut rows = vec![kw];
@@ -1056,12 +1056,11 @@ mod tests {
     // blaming the step the clock happened to land in.
     #[test]
     fn budget_spent_row_names_the_count_and_timeout_names_the_clock() {
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.failing = true;
         kw.skip_reason = Some("budget_spent".into());
-        kw.detail = Some(
-            "crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns".into(),
-        );
+        kw.detail =
+            Some("teams=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 teams".into());
         let mut rows = vec![kw];
         annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
         assert_eq!(rows[0].cause.as_deref(), Some("budget_spent"));
@@ -1074,10 +1073,10 @@ mod tests {
             rows[0].line
         );
 
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.failing = true;
         kw.skip_reason = Some("timeout".into());
-        kw.detail = Some("phase slice 45s spent at king_wake:mail".into());
+        kw.detail = Some("phase slice 45s spent at lead_wake:mail".into());
         let mut rows = vec![kw];
         annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
         assert_eq!(rows[0].cause.as_deref(), Some("timeout"));
@@ -1092,15 +1091,15 @@ mod tests {
 
     #[test]
     fn a_stale_cause_keeps_its_hint_and_gains_repair_and_owner() {
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.stale = true;
         kw.cause = Some("tick_overdue".into());
-        kw.line = "king_wake STALE cause=tick_overdue (evidence)".into();
+        kw.line = "lead_wake STALE cause=tick_overdue (evidence)".into();
         let mut rows = vec![kw];
         annotate(&mut rows, &facts(false));
         assert_eq!(
             rows[0].line,
-            "king_wake STALE cause=tick_overdue (evidence) repair: fno do pr watch refresh heal=auto"
+            "lead_wake STALE cause=tick_overdue (evidence) repair: fno do pr watch refresh heal=auto"
         );
         // Configured off is not a fault: no suffix.
         let mut off = row("watchdog", SCHED_LAUNCHD);
@@ -1179,7 +1178,7 @@ mod tests {
     fn heal_refreshes_once_per_episode() {
         let td = tempfile::TempDir::new().unwrap();
         let store = td.path().join("signals.json");
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.stale = true;
         kw.cause = Some("tick_overdue".into());
         kw.age_s = Some(2400);
@@ -1206,7 +1205,7 @@ mod tests {
     fn heal_installs_at_most_once_per_six_hours() {
         let td = tempfile::TempDir::new().unwrap();
         let store = td.path().join("signals.json");
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.failing = true;
         kw.cause = Some("stale_build".into());
         let rows = vec![kw];
@@ -1231,7 +1230,7 @@ mod tests {
     // and carries no heal owner.
     #[test]
     fn a_paused_row_reads_the_incident_verb_and_no_heal() {
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.cause = Some("fleet_stop".into());
         kw.line = format!(
             "{} cause=fleet_stop (fleet incident stopped at generation 5: two cargo runs; \
@@ -1256,7 +1255,7 @@ mod tests {
     fn heal_runs_nothing_under_a_pause() {
         let td = tempfile::TempDir::new().unwrap();
         let store = td.path().join("signals.json");
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.cause = Some("fleet_stop".into());
         kw.age_s = Some(3000);
         let rows = vec![kw];
@@ -1272,7 +1271,7 @@ mod tests {
     // AC7-EDGE: a hand-pause names the loops verb.
     #[test]
     fn a_hand_paused_row_names_the_loops_verb() {
-        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        let mut kw = row("lead_wake", SCHED_LAUNCHD);
         kw.cause = Some("loops_paused".into());
         kw.line = format!(
             "{} cause=loops_paused (loops paused by hand; \
