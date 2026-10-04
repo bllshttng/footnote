@@ -160,6 +160,18 @@ The user ruled: "the key is consistency. i hope the trials all have similiar con
 - No setting, image or environment changes mid-arm from here, unless the machine is at risk.
 - Every other rule stays.
 
+## Amendment 12 (2026-10-04, one retry for every rate-limited trial, after the first results commit)
+
+The user ruled that the rate-limited Run 0 trials run again before the results ship. The reason is the same as for Amendment 11: the arms should be graded under similar conditions. The first results excluded 54 Run 0 trials under the 1302 rule: 7 pi, 27 claude-code, 7 opencode and 13 Terminus 2. So the arms were graded on different task sets.
+
+- Rule. Every Run 0 trial excluded under the 1302 rule, in every arm, runs once more. It runs in the same job, with the same model, effort, Claude Code pin and concurrency. The original attempt is set aside, as Amendment 11 does.
+- One retry. A re-run that ends in a 1302 timeout again stays excluded. It does not run a third time.
+- Spend. The cost tables count the attempts in the final record, as they did after Amendment 11. The set-aside attempts and their spend are reported apart in run-0.md. decision.md shows the cost margin both with and without them.
+- Order. The arms run again one at a time, in the seeded order: pi, claude-code, opencode, Terminus 2.
+- When it was set. The rule was set after the first results were written and read, and before any re-run started. No re-run outcome existed when it was committed. run-0.md and decision.md keep the first results as a labelled section beside the new ones.
+- Run 1. Nothing changes. Its top-up already refilled every rate-limited attempt.
+- Every other rule stays, including the Amendment 11 load rule, which also applies to the re-runs.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.
