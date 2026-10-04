@@ -424,7 +424,7 @@ impl MessagesBoard {
             .sel_thread
             .as_deref()
             .is_some_and(|s| s.starts_with("channel:") || s.starts_with("system:"));
-        let wrap_w = ((w * 7) / 10).clamp(12, w.saturating_sub(2).max(1));
+        let wrap_w = w.saturating_sub(2).min(((w * 7) / 10).max(12)).max(1);
         let mut last_ts = String::new();
         let mut last_sender = String::new();
         for (index, r) in rows.iter().enumerate() {
