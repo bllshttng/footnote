@@ -1,4 +1,4 @@
-//! The ruling-hold arm of DoneAwaitingMerge: a crown's `dispatch_hold`
+//! The ruling-hold arm of DoneAwaitingMerge: a team's `dispatch_hold`
 //! terminates the loop on its own, without waiting on review.
 
 use super::*;
@@ -35,9 +35,9 @@ fn write_graph_with_hold_node(fno_home: &Path, node_id: &str, plan_path: &str) {
     .unwrap();
 }
 
-/// AC6-HP: a valid crown ruling on the session's node terminates
+/// AC6-HP: a valid team ruling on the session's node terminates
 /// DoneAwaitingMerge on a CI-red, UNREVIEWED PR - the ruling is proof on its
-/// own, so this does not wait on a review the crown's hold already outranks.
+/// own, so this does not wait on a review the team's hold already outranks.
 #[test]
 fn ruling_hold_terminates_awaiting_merge_unreviewed() {
     let _env = env_lock();
@@ -239,11 +239,11 @@ fn a_green_pr_under_per_run_no_merge_parks_on_doneprgreen_naming_the_owner() {
     assert!(d.message.contains("--authority operator"), "{}", d.message);
 }
 
-/// AC1-ERR: the same park under a valid crown dispatch hold on a GREEN PR -
+/// AC1-ERR: the same park under a valid team dispatch hold on a GREEN PR -
 /// the red-CI DoneAwaitingMerge arm cannot fire (it requires !ci_ok), so the
 /// delegated park is the only terminal. Two fires on one head agree.
 #[test]
-fn a_green_pr_under_a_crown_hold_parks_on_doneprgreen_naming_the_ruling() {
+fn a_green_pr_under_a_team_hold_parks_on_doneprgreen_naming_the_ruling() {
     let (_tmp, manifest_path, cwd, fno_home, stub_dir) = delegated_fixture(
         "sess-held-green",
         "x-held-green",

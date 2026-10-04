@@ -1,4 +1,4 @@
-//! Reads the king's last 20 end-of-turn replies and names asks repeated there.
+//! Reads the lead's last 20 end-of-turn replies and names asks repeated there.
 //! An ask belongs on a question page, never in chat.
 
 use std::{
@@ -9,7 +9,7 @@ use std::{
 use regex::Regex;
 use serde_json::{json, Value};
 
-use crate::king_checkin::OwnTranscript::*;
+use crate::lead_checkin::OwnTranscript::*;
 
 const REPLY_WINDOW: usize = 20;
 const REPEAT_FLOOR: usize = 3;
@@ -49,7 +49,7 @@ const NOT_ASK: &[&str] = &[
 ];
 
 pub(crate) fn reading() -> Result<Value, String> {
-    match crate::king_checkin::own_transcript() {
+    match crate::lead_checkin::own_transcript() {
         Ok(Text {
             harness: "claude",
             text,
@@ -141,7 +141,7 @@ fn codex_assistant_text(row: &Value) -> Option<String> {
     }
     if payload.get("role").and_then(Value::as_str) == Some("assistant") {
         let text =
-            crate::reign_hygiene::message_text(payload.get("content").unwrap_or(&Value::Null));
+            crate::lead_hygiene::message_text(payload.get("content").unwrap_or(&Value::Null));
         if !text.trim().is_empty() {
             return Some(text);
         }
@@ -293,7 +293,7 @@ fn fold(replies: &[String]) -> Value {
     })
 }
 
-pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+pub(crate) fn lines(readings: &[crate::lead_checkin::Reading]) -> Vec<String> {
     let Some(reading) = readings
         .iter()
         .find(|reading| reading.name == "repeated_asks")
@@ -336,7 +336,7 @@ pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::king_checkin::Reading;
+    use crate::lead_checkin::Reading;
     use std::io::Write;
     use tempfile::NamedTempFile;
 

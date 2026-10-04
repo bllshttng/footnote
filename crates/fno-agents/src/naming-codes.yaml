@@ -17,7 +17,7 @@ sources:
   - gr   # groom
   - ro   # restart orphan revive
   - ev   # evals runner
-  - kl   # king loop
+  - kl   # lead loop
   - oh   # provider outage handoff
   - sh   # target self-handoff
   - ex   # execute foreign wave
@@ -66,7 +66,7 @@ provenance:
   - { site: "groom (_spawn_groom_worker)",         source: gr,  verb: th }
   - { site: "restart (_revive_orphans)",           source: ro,  verb: resolved }
   - { site: "evals runner",                        source: ev,  verb: th }
-  - { site: "king loop",                           source: kl,  verb: th }
+  - { site: "lead loop",                           source: kl,  verb: th }
   - { site: "outage handoff",                      source: oh,  verb: t }
   - { site: "target self-handoff",                 source: sh,  verb: t }
   - { site: "execute foreign wave",                source: ex,  verb: t }

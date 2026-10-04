@@ -271,7 +271,7 @@ pub(crate) fn scan_and_emit(
 /// Emit the `blocked` event natively and push it to the
 /// parent handle. The push leg and the emit-CLI auto-push shipped with zero
 /// emitters (the advisory `--emit-boundary blocked` instruction demonstrably
-/// never fires, so a king got swept on a timeout instead of being told). The
+/// never fires, so a lead got swept on a timeout instead of being told). The
 /// stop hook is the one surface that mechanically reads every session's
 /// message, which makes it the emitter that cannot be skipped. Envelope mirrors
 /// finalize's run_summary; the push shells the same Python resolver finalize

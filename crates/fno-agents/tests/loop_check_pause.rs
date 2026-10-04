@@ -108,7 +108,7 @@ fn fire(args: &[&str]) -> Decision {
 }
 
 #[test]
-fn paused_target_and_king_allow_without_terminal_reason() {
+fn paused_target_and_lead_allow_without_terminal_reason() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let _env = setup(tmp.path(), &home);
@@ -118,7 +118,7 @@ fn paused_target_and_king_allow_without_terminal_reason() {
     )
     .unwrap();
 
-    for driver in ["target", "king"] {
+    for driver in ["target", "lead"] {
         let state = tmp.path().join(format!("{driver}-state.md"));
         let transcript = tmp.path().join(format!("{driver}-transcript.jsonl"));
         let decision = fire(&[

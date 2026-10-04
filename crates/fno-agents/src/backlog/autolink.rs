@@ -1,5 +1,5 @@
 //! Rollup resolution: which epic does a plan-less filing serve, ported from
-//! `cli/src/fno/graph/rollup.py` (`resolve` + `receipt_lines` + the crown
+//! `cli/src/fno/graph/rollup.py` (`resolve` + `receipt_lines` + the team
 //! ladder). Metadata-only: writes `parent` and nothing else, and an orphan
 //! is never refused. The caller applies a linked result inside the locked
 //! write; this module only scores and decides.
@@ -32,7 +32,7 @@ pub fn is_retired_epic_status(status: Option<&str>) -> bool {
 /// Outcome of the rollup ladder for one node.
 #[derive(Debug, Clone)]
 pub struct Resolution {
-    pub kind: &'static str, // exempt | linked | suggest | orphan | crown
+    pub kind: &'static str, // exempt | linked | suggest | orphan | team
     pub epic_id: Option<String>,
     pub score: f64,
     pub candidates: Vec<(String, f64, String)>,
@@ -100,10 +100,10 @@ pub fn is_orphan(entry: &Value, id_to_entry: &BTreeMap<String, Value>) -> bool {
     !has_epic_ancestor(entry, id_to_entry)
 }
 
-/// The one epic a crown scope names, or None. Only a scope that IS one live
+/// The one epic a team scope names, or None. Only a scope that IS one live
 /// epic can parent: a project portfolio names no node, and a multi-member
 /// epic set names several.
-pub fn crown_epic_from_scope(scope: Option<&str>, entries: &[Value]) -> Option<String> {
+pub fn team_epic_from_scope(scope: Option<&str>, entries: &[Value]) -> Option<String> {
     let scope = scope?;
     let members: Vec<&str> = scope
         .split(',')
@@ -129,11 +129,11 @@ fn id(e: &Value) -> &str {
     e.get("id").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// The crown outcome for a crowned filer's unlinked node, or None. The guess
+/// The team outcome for a teamed filer's unlinked node, or None. The guess
 /// rides `reason` and the caller prints the receipt, so the edge is never
 /// silent. Nesting and cycle guards match the auto-link path.
-fn crown_resolution(node: &Value, entries: &[Value], crown_scope: &str) -> Option<Resolution> {
-    let epic_id = crown_epic_from_scope(Some(crown_scope), entries)?;
+fn team_resolution(node: &Value, entries: &[Value], crown_scope: &str) -> Option<Resolution> {
+    let epic_id = team_epic_from_scope(Some(crown_scope), entries)?;
     let target = find_node(entries, &epic_id)?;
     if would_exceed_epic_depth(entries, node, &target) {
         return None;
@@ -143,17 +143,17 @@ fn crown_resolution(node: &Value, entries: &[Value], crown_scope: &str) -> Optio
         return None;
     }
     Some(Resolution {
-        kind: "crown",
+        kind: "team",
         epic_id: Some(target["id"].as_str().expect("target id").to_string()),
         score: 0.0,
         candidates: Vec::new(),
-        reason: "filing session crown scope".into(),
+        reason: "filing session team scope".into(),
     })
 }
 
-/// This session's crown scope, or None - never raises. The Python leg read
-/// the same registry row through `current_crown`.
-fn current_crown_scope() -> Option<String> {
+/// This session's team scope, or None - never raises. The Python leg read
+/// the same registry row through `current_team`.
+fn current_team_scope() -> Option<String> {
     let get = |name: &str| std::env::var(name).ok();
     let ident = crate::spawn_context::resolve_self_identity(
         &get,
@@ -176,7 +176,7 @@ fn current_crown_scope() -> Option<String> {
 /// Run the rollup ladder for a node that already exists in `entries`.
 /// Pure: scores and decides, never mutates. `crown_scope` overrides the
 /// ambient registry read when the caller already holds one; None resolves
-/// the caller's own crown lazily on the suggest/orphan tail only.
+/// the caller's own team lazily on the suggest/orphan tail only.
 pub fn resolve(node: &Value, entries: &[Value], crown_scope: Option<String>) -> Resolution {
     if !ROLLUP_TYPES.contains(&node.get("type").and_then(Value::as_str).unwrap_or_default())
         || node
@@ -215,7 +215,7 @@ pub fn resolve(node: &Value, entries: &[Value], crown_scope: Option<String>) -> 
         if !any_live_epic {
             return exempt_with("no epics in graph");
         }
-        return crown_or_orphan(node, entries, crown_scope, candidates);
+        return team_or_orphan(node, entries, crown_scope, candidates);
     }
     let top = candidates[0].clone();
     let runner_up = candidates.get(1).map(|c| c.1).unwrap_or(0.0);
@@ -228,7 +228,7 @@ pub fn resolve(node: &Value, entries: &[Value], crown_scope: Option<String>) -> 
             reason: top.2,
         };
     }
-    crown_or_orphan(node, entries, crown_scope, candidates)
+    team_or_orphan(node, entries, crown_scope, candidates)
 }
 
 fn exempt_with(reason: &str) -> Resolution {
@@ -241,7 +241,7 @@ fn exempt_with(reason: &str) -> Resolution {
     }
 }
 
-fn crown_or_orphan(
+fn team_or_orphan(
     node: &Value,
     entries: &[Value],
     crown_scope: Option<String>,
@@ -249,12 +249,12 @@ fn crown_or_orphan(
 ) -> Resolution {
     let scope = match crown_scope {
         Some(scope) => Some(scope),
-        None => current_crown_scope(),
+        None => current_team_scope(),
     };
     if let Some(scope) = scope {
         if !scope.is_empty() {
-            if let Some(crowned) = crown_resolution(node, entries, &scope) {
-                return crowned;
+            if let Some(teamed) = team_resolution(node, entries, &scope) {
+                return teamed;
             }
         }
     }
@@ -305,10 +305,10 @@ pub fn receipt_lines(resolution: &Resolution, node_id: &str, entries: &[Value]) 
                 fmt(resolution.score)
             )]
         }
-        "crown" => {
+        "team" => {
             let eid = resolution.epic_id.as_deref().unwrap_or_default();
             vec![format!(
-                "rollup: crown-linked {node_id} -> {eid} \"{}\" (filing session crown scope); undo: fno backlog update {node_id} --parent null",
+                "rollup: team-linked {node_id} -> {eid} \"{}\" (filing session team scope); undo: fno backlog update {node_id} --parent null",
                 title(entries, eid)
             )]
         }
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn crown_scope_links_a_single_live_epic() {
+    fn team_scope_links_a_single_live_epic() {
         let epic_row = epic(
             "x-epic0001",
             "A very distinctive mission name",
@@ -413,10 +413,10 @@ mod tests {
                           "domain": "code"});
         let entries = vec![epic_row, node.clone()];
         let r = resolve(&node, &entries, Some("x-epic0001".into()));
-        assert_eq!(r.kind, "crown");
+        assert_eq!(r.kind, "team");
         assert_eq!(r.epic_id.as_deref(), Some("x-epic0001"));
         let lines = receipt_lines(&r, "ab-new", &entries);
-        assert!(lines[0].starts_with("rollup: crown-linked"), "{lines:?}");
+        assert!(lines[0].starts_with("rollup: team-linked"), "{lines:?}");
     }
 
     #[test]

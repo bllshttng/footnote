@@ -1,9 +1,9 @@
 //! Refusal rate over the trailing N tool calls: the cheapest available proxy
 //! for context degradation, no model introspection needed. Feeds the
-//! `refusal_rate` reading in `king_checkin.rs`.
+//! `refusal_rate` reading in `lead_checkin.rs`.
 //!
 //! The bucket set is the union of the 7 patterns proven against a live
-//! reign transcript (gate
+//! lead transcript (gate
 //! refusals, usage errors, style-lint refusals, fno guard refusals,
 //! timeouts, parse errors, operator rejections). The reading reports one
 //! rate, not a per-bucket breakdown.
@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 
 pub(crate) const REFUSAL_BUCKETS: [(&str, &str); 7] = [
     ("style_lint", r"style-exception|rule \d+ \("),
-    ("fno_guard", r"guard\]|king-delegation-guard"),
+    ("fno_guard", r"guard\]|lead-delegation-guard"),
     (
         "gate_refusal",
         r#""status": "refused"|spawn-gate:|provider_cap|gate_mutex|cpu_share_undecidable|registry_schema|refused:"#,
@@ -39,7 +39,7 @@ pub(crate) const REFUSAL_BUCKETS: [(&str, &str); 7] = [
 ];
 
 /// The first N chars of a tool_result's content text that the regex reads.
-/// Matches the 4000-char lead the reign-control retro measured against.
+/// Matches the 4000-char lead the lead-control retro measured against.
 const CONTENT_LEAD_CHARS: usize = 4000;
 
 static BUCKET_SET: OnceLock<regex::RegexSet> = OnceLock::new();
@@ -90,7 +90,7 @@ fn claude_trailing_calls(text: &str, window: usize) -> Vec<Option<String>> {
             continue;
         };
         let mut entries = Vec::new();
-        crate::reign_hygiene::claude_row_entries(&value, &mut entries);
+        crate::lead_hygiene::claude_row_entries(&value, &mut entries);
         order.extend(
             entries
                 .iter()

@@ -4,8 +4,8 @@
 //! Ownership follows the seam rule (rust-python-seam.md): the active-backlog
 //! supervisor is a Rust loop that must not stop, and it owns the drain
 //! decision. The whole fact set therefore lives beside it - graph membership
-//! (moved here from `king_board::scope`, which calls this home), the live
-//! crown list from the registry cache, the workspace project map, the
+//! (moved here from `org_board::scope`, which calls this home), the live
+//! team list from the registry cache, the workspace project map, the
 //! mission's root project from the graph, and the `active_backlog` config
 //! block. Python reads the territory receipt only
 //! through `fno config active-backlog*`, which prints this module's output.
@@ -14,7 +14,7 @@
 //! source, never an empty territory list and never a silently-drained scope.
 
 use crate::agents_config::config_lookup;
-use crate::king_board::{graph_json_path, project_map};
+use crate::org_board::{graph_json_path, project_map};
 use crate::paths::AgentsHome;
 use crate::state::{load_registry, Registry, RegistryEntry};
 use serde_json::{json, Value};
@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Scope compilation (moved from king_board::scope - the board and the drain
+// Scope compilation (moved from org_board::scope - the board and the drain
 // call the same home)
 // ---------------------------------------------------------------------------
 
@@ -34,7 +34,7 @@ pub(crate) fn member_not_found(member: &str, entries: &[Value], absent: String) 
     }
 }
 
-/// Compile a canonical crown scope into the graph node ids it contains
+/// Compile a canonical team scope into the graph node ids it contains
 /// (board.compile_scope_ids).
 pub(crate) fn compile_scope_ids(
     scope: &str,
@@ -54,7 +54,7 @@ pub(crate) fn compile_territory(
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
 ) -> Result<(String, HashSet<String>), String> {
-    use crate::king_board::s_str;
+    use crate::org_board::s_str;
     let canonical_scope = |scopes: &[String]| {
         let mut sorted: Vec<String> = scopes.to_vec();
         sorted.sort();
@@ -67,7 +67,7 @@ pub(crate) fn compile_territory(
         .filter(|s| !s.is_empty())
         .collect();
     if members.is_empty() {
-        return Err("a crown needs a scope: name an epic or a project".to_string());
+        return Err("a team needs a scope: name an epic or a project".to_string());
     }
     let projects = projects.clone()?;
 
@@ -77,9 +77,9 @@ pub(crate) fn compile_territory(
             .find(|e| s_str(e, "id").map(|i| i == id).unwrap_or(false))
     };
 
-    // resolve_crown: the (level, canonical) pair, derived together. A
+    // resolve_team: the (level, canonical) pair, derived together. A
     // multi-member scope is a project portfolio OR a rung-2 SET of epics -
-    // the Python twin (king/scope.py) rules both; mixed is a refusal, and an
+    // the Python twin (lead/scope.py) rules both; mixed is a refusal, and an
     // epic-set member must be a live epic exactly as a single-epic scope must.
     let (level_two, canonical): (bool, String) = if members.len() > 1 {
         let mut project_members: Vec<String> = Vec::new();
@@ -92,7 +92,7 @@ pub(crate) fn compile_territory(
         }
         if !project_members.is_empty() && !epic_members.is_empty() {
             return Err(format!(
-                "a multi-scope crown rules PROJECTS or EPICS, never both at once: {}. \
+                "a multi-scope team rules PROJECTS or EPICS, never both at once: {}. \
                  Name projects only (a portfolio) or epics only (a set).",
                 members
                     .iter()
@@ -122,15 +122,15 @@ pub(crate) fn compile_territory(
                             entries,
                             format!(
                                 "{m:?} is neither a configured project nor a backlog node; \
-                                 nothing to reign over (check for a typo)"
+                                 nothing to lead over (check for a typo)"
                             ),
                         ))
                     }
                     Some(entry) => {
                         if s_str(entry, "type") != Some("epic") {
                             return Err(format!(
-                                "{m:?} is a {}, not an epic. Implementers get no crowns - \
-                                 a single node is work, not a territory. Crown the epic \
+                                "{m:?} is a {}, not an epic. Implementers get no teams - \
+                                 a single node is work, not a territory. Team the epic \
                                  above it, or its project.",
                                 s_str(entry, "type").unwrap_or("node")
                             ));
@@ -154,13 +154,13 @@ pub(crate) fn compile_territory(
                         entries,
                         format!(
                             "{raw:?} is neither a configured project nor a backlog node; \
-                             nothing to reign over (check for a typo)"
+                             nothing to lead over (check for a typo)"
                         ),
                     ))
                 }
                 Some(entry) => {
                     if s_str(entry, "type") != Some("epic") {
-                        return Err(format!("crown scope {raw:?} is not an epic in the graph"));
+                        return Err(format!("team scope {raw:?} is not an epic in the graph"));
                     }
                     (true, raw.to_string())
                 }
@@ -190,12 +190,12 @@ pub(crate) fn compile_territory(
                     return Err(member_not_found(
                         root_id,
                         entries,
-                        format!("crown scope {root_id:?} is not an epic in the graph"),
+                        format!("team scope {root_id:?} is not an epic in the graph"),
                     ))
                 }
                 Some(entry) if s_str(entry, "type") != Some("epic") => {
                     return Err(format!(
-                        "crown scope {root_id:?} is not an epic in the graph"
+                        "team scope {root_id:?} is not an epic in the graph"
                     ));
                 }
                 _ => {}
@@ -273,11 +273,11 @@ impl std::fmt::Display for TerritoryUnknown {
 pub struct Territory {
     /// The canonical comma-joined scope string.
     pub key: String,
-    /// The crown rung of the scope's holder: 2 for an epic set, 1 for a
+    /// The team rung of the scope's holder: 2 for an epic set, 1 for a
     /// project (portfolio or loose), 0 when the row carried no level.
     pub rung: u8,
-    /// No live crown holds the scope; the drain continues regardless.
-    pub kingless: bool,
+    /// No live team holds the scope; the drain continues regardless.
+    pub leadless: bool,
     /// Epic ids at rung 2, project names at rungs 0/1.
     pub members: Vec<String>,
     /// The root project the drain journal roots at: the first member epic's
@@ -287,11 +287,11 @@ pub struct Territory {
     pub cwd: String,
 }
 
-/// One live crown row: the canonical scope, its rung, its holder's name and
-/// the holder's harness session id (the crown-name store binds its record by
+/// One live team row: the canonical scope, its rung, its holder's name and
+/// the holder's harness session id (the team-name store binds its record by
 /// session id, law d-e952ed19 - never by the mutable row name).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Crown {
+pub struct Team {
     pub scope: String,
     pub level: u8,
     pub holder: String,
@@ -438,11 +438,11 @@ impl ActiveBacklogFacts {
     }
 }
 
-/// Live crown scopes from the registry cache, one per DISTINCT canonical
-/// scope, in scope order - the read the court and the drain share. A registry
-/// read fault is `TerritoryUnknown`, never an empty crown list (the daemon
-/// must not read "no kings" out of an unreadable registry).
-pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown> {
+/// Live team scopes from the registry cache, one per DISTINCT canonical
+/// scope, in scope order - the read the org and the drain share. A registry
+/// read fault is `TerritoryUnknown`, never an empty team list (the daemon
+/// must not read "no leads" out of an unreadable registry).
+pub fn live_teams(registry_path: &Path) -> Result<Vec<Team>, TerritoryUnknown> {
     let rows: Vec<RegistryEntry> = match load_registry(registry_path) {
         Ok(Registry { entries, .. }) => entries,
         Err(e) => {
@@ -451,7 +451,7 @@ pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown>
             )))
         }
     };
-    let mut out: Vec<Crown> = Vec::new();
+    let mut out: Vec<Team> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for row in rows {
         let raw = row.crown_scope.as_deref().unwrap_or("").trim();
@@ -463,7 +463,7 @@ pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown>
             continue;
         }
         let level = row.crown_level.unwrap_or(0).clamp(0, 255) as u8;
-        out.push(Crown {
+        out.push(Team {
             scope: canon,
             level,
             holder: row.name.clone(),
@@ -474,28 +474,28 @@ pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown>
     Ok(out)
 }
 
-/// Which live crown answers for each node: the deepest crown level whose
-/// scope holds the node, then the lowest canonical scope on a tie. A crown
+/// Which live team answers for each node: the deepest team level whose
+/// scope holds the node, then the lowest canonical scope on a tie. A team
 /// whose scope does not compile owns nothing; it comes back in the second
 /// list with its reason, and each caller decides whether that blind spot
 /// refuses.
 pub(crate) fn node_owners(
-    crowns: &[Crown],
+    teams: &[Team],
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
 ) -> (HashMap<String, String>, Vec<(String, String)>) {
-    let mut sorted: Vec<&Crown> = crowns.iter().collect();
+    let mut sorted: Vec<&Team> = teams.iter().collect();
     sorted.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.scope.cmp(&b.scope)));
     let mut owners: HashMap<String, String> = HashMap::new();
     let mut failures: Vec<(String, String)> = Vec::new();
-    for crown in sorted {
-        match compile_territory(&crown.scope, entries, projects) {
+    for team in sorted {
+        match compile_territory(&team.scope, entries, projects) {
             Ok((_, ids)) => {
                 for id in ids {
-                    owners.entry(id).or_insert_with(|| crown.scope.clone());
+                    owners.entry(id).or_insert_with(|| team.scope.clone());
                 }
             }
-            Err(e) => failures.push((crown.scope.clone(), e)),
+            Err(e) => failures.push((team.scope.clone(), e)),
         }
     }
     (owners, failures)
@@ -608,9 +608,9 @@ pub(crate) fn graph_entries(config_cwd: &Path) -> Result<Vec<Value>, TerritoryUn
     })
 }
 
-/// One territory per live crown scope, plus one kingless rung-1 territory per
-/// workspace project no live project-rung crown rules - the crown list seeds
-/// the mission list, machinery never needs a king to dispatch. Territories
+/// One territory per live team scope, plus one leadless rung-1 territory per
+/// workspace project no live project-rung team rules - the team list seeds
+/// the mission list, machinery never needs a lead to dispatch. Territories
 /// come back in canonical scope order. A rung-2 territory whose first member
 /// epic has no graph entry, or whose root project is unmapped in the
 /// workspace, still resolves - with `project`/`cwd` empty - so the readout
@@ -619,12 +619,12 @@ pub fn resolve_territories(
     config_cwd: &Path,
     registry_path: &Path,
 ) -> Result<Vec<Territory>, TerritoryUnknown> {
-    let crowns = live_crowns(registry_path)?;
+    let teams = live_teams(registry_path)?;
     let entries = graph_entries(config_cwd)?;
-    Ok(territories_in(&crowns, &entries, config_cwd))
+    Ok(territories_in(&teams, &entries, config_cwd))
 }
 
-fn territories_in(crowns: &[Crown], entries: &[Value], config_cwd: &Path) -> Vec<Territory> {
+fn territories_in(teams: &[Team], entries: &[Value], config_cwd: &Path) -> Vec<Territory> {
     let paths = workspace_paths(config_cwd);
 
     let epic_project = |epic_id: &str| -> Option<String> {
@@ -638,19 +638,19 @@ fn territories_in(crowns: &[Crown], entries: &[Value], config_cwd: &Path) -> Vec
 
     let mut territories: Vec<Territory> = Vec::new();
     let mut ruled_projects: HashSet<String> = HashSet::new();
-    for crown in crowns {
-        let members: Vec<String> = crown
+    for team in teams {
+        let members: Vec<String> = team
             .scope
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if crown.level != 2 {
+        if team.level != 2 {
             ruled_projects.extend(members.iter().cloned());
         }
         // Root at the first member epic's own project; the converge core
         // fans out across projects at dispatch time.
-        let (project, cwd) = if crown.level == 2 {
+        let (project, cwd) = if team.level == 2 {
             match members.first().and_then(|m| epic_project(m)) {
                 Some(p) => (p.clone(), paths.get(&p).cloned().unwrap_or_default()),
                 None => (String::new(), String::new()),
@@ -661,9 +661,9 @@ fn territories_in(crowns: &[Crown], entries: &[Value], config_cwd: &Path) -> Vec
             (p, cwd)
         };
         territories.push(Territory {
-            key: crown.scope.clone(),
-            rung: crown.level,
-            kingless: false,
+            key: team.scope.clone(),
+            rung: team.level,
+            leadless: false,
             members,
             project,
             cwd,
@@ -679,14 +679,14 @@ fn territories_in(crowns: &[Crown], entries: &[Value], config_cwd: &Path) -> Vec
         territories.push(Territory {
             key: name.clone(),
             rung: 1,
-            kingless: true,
+            leadless: true,
             members: vec![name.clone()],
             project: name.clone(),
             cwd,
         });
     }
-    // Python-order contract: crowned territories in scope order first, then
-    // the kingless loose territories in project order (the readout renders
+    // Python-order contract: teamed territories in scope order first, then
+    // the leadless loose territories in project order (the readout renders
     // rows in exactly this order).
     territories
 }
@@ -768,17 +768,17 @@ pub(crate) fn live_held_in(node_ids: &HashSet<String>, held: &HashSet<String>) -
     node_ids.intersection(held).count()
 }
 
-/// One readout row per territory: scope, membership state, rung, kingless
-/// state, crown holder, mission, and live count against the cap. The
+/// One readout row per territory: scope, membership state, rung, leadless
+/// state, team holder, mission, and live count against the cap. The
 /// projection the status payload, the hidden config
-/// verb, the king check-in, and the operational probe share, so none of them
+/// verb, the lead check-in, and the operational probe share, so none of them
 /// can disagree. Fail-safe per row: an unreadable source shrinks that row's
 /// answer (membership "unknown", live null), never the whole
 /// projection.
 pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
     let cap = territory_cap(config_cwd);
-    let crowns = match live_crowns(registry_path) {
-        Ok(crowns) => crowns,
+    let teams = match live_teams(registry_path) {
+        Ok(teams) => teams,
         Err(TerritoryUnknown(reason)) => {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
@@ -789,22 +789,22 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
     };
-    let territories = territories_in(&crowns, &entries, config_cwd);
+    let territories = territories_in(&teams, &entries, config_cwd);
     let live_node_claims = match live_node_claims() {
         Ok(claims) => claims,
         Err(TerritoryUnknown(reason)) => {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
     };
-    let holders: HashMap<String, String> = crowns
+    let holders: HashMap<String, String> = teams
         .iter()
         .map(|c| (c.scope.clone(), c.holder.clone()))
         .collect();
-    // Exclusive membership: a node counts for the one live crown that owns
-    // it - the deepest crown holding it, the same rule `node_owners` gives
-    // the spawn gate and the court - so a worker can never cost two
+    // Exclusive membership: a node counts for the one live team that owns
+    // it - the deepest team holding it, the same rule `node_owners` gives
+    // the spawn gate and the org - so a worker can never cost two
     // territories at once. An unowned node stays loose.
-    let (owners, _) = node_owners(&crowns, &entries, &project_map(config_cwd));
+    let (owners, _) = node_owners(&teams, &entries, &project_map(config_cwd));
 
     let memberships: Vec<(&Territory, Result<(String, HashSet<String>), String>)> = territories
         .iter()
@@ -825,7 +825,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
             };
             let mut ids = ids;
             if membership == "ok" {
-                if territory.kingless {
+                if territory.leadless {
                     ids.retain(|id| !owners.contains_key(id));
                 } else {
                     ids.retain(|id| owners.get(id) == Some(&territory.key));
@@ -840,7 +840,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
                 "scope": territory.key,
                 "membership": membership,
                 "rung": territory.rung,
-                "kingless": territory.kingless,
+                "leadless": territory.leadless,
                 "holder": holders.get(&territory.key),
                 "mission": if territory.rung == 2 { territory.members.first() } else { None },
                 "live": live_count,
@@ -910,11 +910,11 @@ mod moved_scope_tests {
     }
 
     #[test]
-    fn a_multi_scope_crown_of_epics_compiles_as_the_union() {
-        // The Python twin (king/scope.py) rules a rung-2 SET of epics: the
+    fn a_multi_scope_team_of_epics_compiles_as_the_union() {
+        // The Python twin (lead/scope.py) rules a rung-2 SET of epics: the
         // board sees the nodes under EVERY member, not just the first. This
         // twin refused any multi-scope that was not all projects, so a set
-        // crown never resolved its board.
+        // team never resolved its board.
         let entries = vec![
             json!({"id": "e-1", "type": "epic", "status": "ready", "priority": "p1"}),
             json!({"id": "e-1a", "parent": "e-1", "status": "ready", "priority": "p1"}),
@@ -1060,7 +1060,7 @@ path = \"/repo/alpha\"
 
     fn registry_fixture() -> Value {
         let mut v = json!({"agents": [
-            {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+            {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
              "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
             {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
              "pid": std::process::id()},
@@ -1081,22 +1081,22 @@ path = \"/repo/alpha\"
     }
 
     #[test]
-    fn resolve_returns_crowned_and_kingless_territories_in_scope_order() {
+    fn resolve_returns_teamed_and_leadless_territories_in_scope_order() {
         let _env = env_guard();
         let (_tmp, cwd, registry) = fixture_env();
         let ts = resolve_territories(&cwd, &registry).unwrap();
         let scopes: Vec<&str> = ts.iter().map(|t| t.key.as_str()).collect();
-        // The rung-2 crown over e-1 (rooted in alpha) plus alpha's loose
-        // rung-1 territory: the crown rules its descendants, not the
-        // project's parentless nodes. Crowns come first in scope order, then
-        // the kingless loose territories sorted - the recorded Python order.
+        // The rung-2 team over e-1 (rooted in alpha) plus alpha's loose
+        // rung-1 territory: the team rules its descendants, not the
+        // project's parentless nodes. Teams come first in scope order, then
+        // the leadless loose territories sorted - the recorded Python order.
         assert_eq!(scopes, ["e-1", "alpha"]);
         assert_eq!(ts[0].rung, 2);
-        assert!(!ts[0].kingless);
+        assert!(!ts[0].leadless);
         assert_eq!(ts[0].members, ["e-1"]);
         assert_eq!(ts[0].project, "alpha");
         assert_eq!(ts[1].rung, 1);
-        assert!(ts[1].kingless);
+        assert!(ts[1].leadless);
         assert_eq!(ts[1].project, "alpha");
         assert_eq!(ts[1].cwd, "/repo/alpha");
     }
@@ -1133,7 +1133,7 @@ path = \"/repo/alpha\"
     }
 
     #[test]
-    fn an_unreadable_registry_is_unknown_never_no_kings() {
+    fn an_unreadable_registry_is_unknown_never_no_leads() {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
@@ -1153,7 +1153,7 @@ path = \"/repo/alpha\"
     }
 
     #[test]
-    fn a_levelless_crown_row_still_resolves_at_rung_zero() {
+    fn a_levelless_team_row_still_resolves_at_rung_zero() {
         let _env = env_guard();
         let (_tmp, cwd, registry) = fixture_env();
         std::fs::write(
@@ -1165,9 +1165,9 @@ path = \"/repo/alpha\"
         )
         .unwrap();
         let ts = resolve_territories(&cwd, &registry).unwrap();
-        assert_eq!(ts.len(), 1, "the rung-0 crown rules alpha: no loose copy");
+        assert_eq!(ts.len(), 1, "the rung-0 team rules alpha: no loose copy");
         assert_eq!(ts[0].rung, 0);
-        assert!(!ts[0].kingless);
+        assert!(!ts[0].leadless);
     }
 
     #[test]
@@ -1266,35 +1266,35 @@ path = "/repo/alpha"
         let rows = territory_rows(&cwd, &registry);
         assert_eq!(rows.len(), 2);
         let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
-        let crowned = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
-        assert_eq!(loose["kingless"], true);
+        let teamed = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
+        assert_eq!(loose["leadless"], true);
         assert_eq!(loose["rung"], 1);
         assert_eq!(loose["live"], 0);
         assert_eq!(loose["cap"], 4);
-        assert_eq!(crowned["holder"], "king-a");
-        assert_eq!(crowned["mission"], "e-1");
-        assert_eq!(crowned["live"], 1, "w-1 works e-1a inside the crown scope");
+        assert_eq!(teamed["holder"], "lead-a");
+        assert_eq!(teamed["mission"], "e-1");
+        assert_eq!(teamed["live"], 1, "w-1 works e-1a inside the team scope");
     }
 
     fn owners_from_registry(
         cwd: &Path,
         registry: &Path,
     ) -> (HashMap<String, String>, Vec<(String, String)>) {
-        let crowns = live_crowns(registry).unwrap();
+        let teams = live_teams(registry).unwrap();
         let entries: Vec<Value> = graph_fixture()["entries"].as_array().unwrap().clone();
-        node_owners(&crowns, &entries, &project_map(cwd))
+        node_owners(&teams, &entries, &project_map(cwd))
     }
 
     #[test]
-    fn node_owners_maps_each_node_to_its_deepest_live_crown() {
+    fn node_owners_maps_each_node_to_its_deepest_live_team() {
         let _env = env_guard();
         let (_tmp, cwd, registry) = fixture_env();
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "king-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                {"name": "lead-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
@@ -1305,7 +1305,7 @@ path = "/repo/alpha"
         assert_eq!(owners.get("e-1"), Some(&"e-1".to_string()));
         assert_eq!(owners.get("e-1a"), Some(&"e-1".to_string()));
         assert_eq!(owners.get("e-loose"), Some(&"alpha".to_string()));
-        assert_eq!(owners.get("e-outs"), None, "beta has no crown");
+        assert_eq!(owners.get("e-outs"), None, "beta has no team");
     }
 
     #[test]
@@ -1315,9 +1315,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "king-01", "status": "live", "crown_scope": "e-0,e-1", "crown_level": 2,
+                {"name": "lead-01", "status": "live", "crown_scope": "e-0,e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "king-1", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-1", "status": "live", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
@@ -1330,7 +1330,7 @@ path = "/repo/alpha"
             json!({"id": "e-loose", "project": "alpha", "status": "ready", "priority": "p1"}),
         ];
         let (owners, failures) = node_owners(
-            &live_crowns(&registry).unwrap(),
+            &live_teams(&registry).unwrap(),
             &entries,
             &project_map(&cwd),
         );
@@ -1340,15 +1340,15 @@ path = "/repo/alpha"
     }
 
     #[test]
-    fn an_exited_crown_row_owns_nothing() {
+    fn an_exited_team_row_owns_nothing() {
         let _env = env_guard();
         let (_tmp, cwd, registry) = fixture_env();
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "king-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                {"name": "lead-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "king-a", "status": "exited", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "exited", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
@@ -1371,9 +1371,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "king-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                {"name": "lead-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
                  "pid": std::process::id()},
@@ -1385,9 +1385,9 @@ path = "/repo/alpha"
         .unwrap();
         let rows = territory_rows(&cwd, &registry);
         let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
-        let crowned = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
+        let teamed = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
         assert_eq!(
-            crowned["live"], 1,
+            teamed["live"], 1,
             "e-1a's worker counts for e-1 only: {rows:?}"
         );
         assert_eq!(
@@ -1437,7 +1437,7 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "w-1", "status": "live", "node": null, "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
                  "pid": std::process::id()},
@@ -1464,10 +1464,10 @@ path = "/repo/alpha"
         );
 
         let rows = territory_rows(&cwd, &registry);
-        let crowned = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
+        let teamed = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
         let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
         assert_eq!(
-            crowned["live"], 2,
+            teamed["live"], 2,
             "live and suspect node claims count: {rows:?}"
         );
         assert_eq!(
@@ -1499,16 +1499,16 @@ path = "/repo/alpha"
     }
 
     #[test]
-    fn a_non_epic_crown_scope_reads_unknown_while_others_stay_ok() {
+    fn a_non_epic_team_scope_reads_unknown_while_others_stay_ok() {
         let _env = env_guard();
         let (tmp, cwd, registry) = fixture_env();
         acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "king-bad", "status": "live", "crown_scope": "e-loose", "crown_level": 2,
+                {"name": "lead-bad", "status": "live", "crown_scope": "e-loose", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
                  "pid": std::process::id()}

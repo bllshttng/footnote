@@ -162,7 +162,7 @@ FAILED_LEG_SCOPES=""
 if [[ $RETRY_FAILED -eq 1 && -r "$LEG_RECORD" ]]; then
     while read -r _leg_line; do
         [[ -z "$_leg_line" ]] && continue
-        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e squads-leak-guard:fno tracker-gates:fno file-budget:fno reign-arms:fno " in
+        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e squads-leak-guard:fno tracker-gates:fno file-budget:fno lead-arms:fno " in
             *" $_leg_line "*)
                 case " $FAILED_LEG_SCOPES " in
                     *" $_leg_line "*) ;;
@@ -1027,7 +1027,7 @@ exit_if_void() {
         # squads store, and the receipt validator rejected the step mismatch).
         [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
         [[ "${FILE_BUDGET_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(file-budget:fno)
-        [[ "${REIGN_ARMS_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(reign-arms:fno)
+        [[ "${LEAD_ARMS_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(lead-arms:fno)
         REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
         REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
         EXECUTED_COUNT=$REQUIRED_EXECUTED
@@ -1144,7 +1144,7 @@ echo ""
 REQUIRED_EXECUTED=0
 SQUADS_INCLUDED=0
 TG_INCLUDED=0
-REIGN_ARMS_INCLUDED=0
+LEAD_ARMS_INCLUDED=0
 RECEIPT_UNAVAILABLE=0
 if retry_run_leg smoke; then
     echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
@@ -1223,26 +1223,26 @@ else
     record_leg "" "file budget (fno)" skipped 0
 fi
 
-# reign arm-list signal guard (every named event kind has a producer) --------
+# lead arm-list signal guard (every named event kind has a producer) --------
 # Static, seconds-fast. Runs from the candidate tree: the arm list and its
 # guard are one surface, and a branch naming a new kind lands its producer in
 # the same tree the grep reads.
-if retry_run_leg reign-arms:fno; then
-    echo "preflight: === reign arm signals (arm-list kinds have producers) ==="
+if retry_run_leg lead-arms:fno; then
+    echo "preflight: === lead arm signals (arm-list kinds have producers) ==="
     ra0="$SECONDS"
-    run_hermetic bash scripts/ci/check-reign-arm-signals.sh
+    run_hermetic bash scripts/ci/check-lead-arm-signals.sh
     ra=$?
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    REIGN_ARMS_INCLUDED=1
+    LEAD_ARMS_INCLUDED=1
     if [[ $ra -eq 0 ]]; then
-        record_leg reign-arms:fno "reign arm signals (fno)" pass $(( SECONDS - ra0 ))
+        record_leg lead-arms:fno "lead arm signals (fno)" pass $(( SECONDS - ra0 ))
     else
-        record_leg reign-arms:fno "reign arm signals (fno)" fail $(( SECONDS - ra0 ))
+        record_leg lead-arms:fno "lead arm signals (fno)" fail $(( SECONDS - ra0 ))
         FAIL=1
     fi
 else
-    echo "preflight: === reign arm signals (skipped - not in the retry leg record) ==="
-    record_leg "" "reign arm signals (fno)" skipped 0
+    echo "preflight: === lead arm signals (skipped - not in the retry leg record) ==="
+    record_leg "" "lead arm signals (fno)" skipped 0
 fi
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
@@ -1535,7 +1535,7 @@ REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
 [[ "${FILE_BUDGET_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(file-budget:fno)
-[[ "${REIGN_ARMS_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(reign-arms:fno)
+[[ "${LEAD_ARMS_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(lead-arms:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether

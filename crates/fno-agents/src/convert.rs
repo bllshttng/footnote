@@ -494,7 +494,7 @@ mod tests {
 
     fn pane_row(harness: &str, session_id: &str, pid: u32) -> RegistryEntry {
         let mut entry = RegistryEntry {
-            name: "king-delivery".to_string(),
+            name: "lead-delivery".to_string(),
             cwd: "/repo".to_string(),
             status: AgentStatus::Live,
             created_at: "2026-09-20T00:00:00Z".to_string(),

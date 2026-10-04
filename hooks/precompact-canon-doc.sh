@@ -11,7 +11,7 @@
 # command/http/mcp_tool, not prompt/agent), so the two judgment sections -
 # merge order, open decisions - are left as empty headings filled by the
 # session at full context (the context-nudge asks for that). This is a
-# backstop that reaches every compacting session, including the king passes and
+# backstop that reaches every compacting session, including the lead passes and
 # non-target sessions that the manifest-gated arm-handoff hook never reaches.
 #
 # NEVER blocks. Compaction triggered to recover from a context-limit error must
@@ -94,8 +94,8 @@ fi
 SHORT="${SID: -8}"
 
 # ---------------------------------------------------------------------------
-# Crowned-ness + crown scope, read before the doc-path resolution because a
-# crowned session keys its doc on the SCOPE (a crown outlives its sessions; a
+# Teamed-ness + team scope, read before the doc-path resolution because a
+# teamed session keys its doc on the SCOPE (a team outlives its sessions; a
 # successor resolves the same rolling doc). Computed once from the registry
 # read and handed into the heredoc below via env: the heredoc's stdout carries
 # ONLY the auto block text, matching every other fact in this script. An
@@ -111,15 +111,15 @@ if command -v fno >/dev/null 2>&1; then
   # here has leaked off a spawned worker: strip it for this read, keep the
   # exit code, and let a failed read read as `unknown`, never as uncrowned
   # (under the pin the silent `|| true` took the failure for "no
-  # registry row" and a crowned king got a plain session doc).
+  # registry row" and a teamed lead got a plain session doc).
   REG_ROWS="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
   REG_RC=$?
   if [[ "$REG_RC" -ne 0 ]]; then
-    echo "precompact-canon-doc.sh: fno agents registry-json exited $REG_RC; the doc's crown line reads unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
+    echo "precompact-canon-doc.sh: fno agents registry-json exited $REG_RC; the doc's team line reads unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
   fi
 fi
 
-CROWN_INFO="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
+TEAM_INFO="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
 import json, os
 sid = os.environ.get("SID", "")
 try:
@@ -136,15 +136,15 @@ scp = r.get("crown_scope")
 print("1" if (mine and (lvl is not None or scp is not None)) else "0")
 print(scp if isinstance(scp, str) else "")
 ' 2>/dev/null || true)"
-IS_CROWNED="$(printf '%s' "$CROWN_INFO" | sed -n 1p)"
-CROWN_SCOPE="$(printf '%s' "$CROWN_INFO" | sed -n 2p)"
-[[ "$IS_CROWNED" == "1" ]] || IS_CROWNED=0
+IS_TEAMED="$(printf '%s' "$TEAM_INFO" | sed -n 1p)"
+TEAM_SCOPE="$(printf '%s' "$TEAM_INFO" | sed -n 2p)"
+[[ "$IS_TEAMED" == "1" ]] || IS_TEAMED=0
 
 # ---------------------------------------------------------------------------
 # Resolve the canon doc path. A manual /compact <path> carries a path the
 # session deliberately chose - enrich THAT file rather than minting a sibling.
-# Otherwise fall back to fno config paths handoff: --scope for a crowned
-# session (the newest doc for that crown, else today's scope-keyed name), the
+# Otherwise fall back to fno config paths handoff: --scope for a teamed
+# session (the newest doc for that team, else today's scope-keyed name), the
 # session-keyed form otherwise. Only treat custom_instructions as a path when
 # it plainly is one (ends in .md); prose instructions fall through.
 # ---------------------------------------------------------------------------
@@ -160,8 +160,8 @@ case "$_ci" in
   /*.md|./*.md|../*.md) DOC_PATH="$_ci" ;;
   *.md) [[ -f "$_ci" ]] && DOC_PATH="$_ci" ;;
 esac
-if [[ -z "$DOC_PATH" && -n "$CROWN_SCOPE" ]]; then
-  DOC_PATH="$(fno config paths handoff --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+if [[ -z "$DOC_PATH" && -n "$TEAM_SCOPE" ]]; then
+  DOC_PATH="$(fno config paths handoff --scope "$TEAM_SCOPE" 2>/dev/null || true)"
 fi
 if [[ -z "$DOC_PATH" ]]; then
   DOC_PATH="$(fno config paths handoff --session-id "$SID" 2>/dev/null || true)"
@@ -216,7 +216,7 @@ fi
 # with an EOF error that names an unrelated later line.
 # ---------------------------------------------------------------------------
 AUTO_BLOCK="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
-             REG_ROWS="$REG_ROWS" REG_RC="$REG_RC" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
+             REG_ROWS="$REG_ROWS" REG_RC="$REG_RC" PR_RAW="$PR_RAW" IS_TEAMED="$IS_TEAMED" python3 <<'PY' 2>/dev/null || true
 import json
 import os
 import subprocess
@@ -242,16 +242,16 @@ r = mine[0] if mine else {}
 
 lvl = r.get("crown_level")
 scp = r.get("crown_scope")
-crowned = os.environ.get("IS_CROWNED") == "1"
+teamed = os.environ.get("IS_TEAMED") == "1"
 reg_rc = os.environ.get("REG_RC", "")
 if reg_rc not in ("", "0"):
-    crown = "unknown (registry-json exit %s)" % reg_rc
+    team = "unknown (registry-json exit %s)" % reg_rc
 elif not mine:
-    crown = "none (no registry row for this session)"
-elif not crowned:
-    crown = "none (uncrowned)"
+    team = "none (no registry row for this session)"
+elif not teamed:
+    team = "none (uncrowned)"
 else:
-    crown = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
+    team = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
 
 # The stored `status` word lies (a dead row can read `live`
 # indefinitely), so this reads the SERVED `liveness` field instead - `fno
@@ -293,7 +293,7 @@ else:
 
 out = ["## Identity (auto)",
        "- mail handle (tail-8): `%s`" % short,
-       "- crown: %s" % crown,
+       "- team: %s" % team,
        "",
        "## Live workers (auto)",
        workers,
@@ -324,12 +324,12 @@ def _epic_children(epic_id):
 
 
 def nodes_under_purview(scope):
-    """The crown scope's children, id plus status, via the existing epic
-    status read. A portfolio crown stores its scope as a comma-joined set of
-    epics (fno.agents.crown.canonical_scope) - query each member and merge,
-    so a level-2 king over more than one epic sees every member's children,
+    """The team scope's children, id plus status, via the existing epic
+    status read. A portfolio team stores its scope as a comma-joined set of
+    epics (fno.agents.team.canonical_scope) - query each member and merge,
+    so a level-2 lead over more than one epic sees every member's children,
     not just the first. Bounded (5s per member) and degrade-only: a member
-    that is not a queryable epic (a level-1 whole-project crown, an
+    that is not a queryable epic (a level-1 whole-project team, an
     unreadable graph) contributes nothing rather than failing the whole
     read; this whole block is skipped only when EVERY member yields nothing."""
     if not scope:
@@ -353,22 +353,22 @@ def nodes_under_purview(scope):
     )
 
 
-# A king additionally holds its nodes under purview and its own live workers -
-# facts no other session has. Skipped whole when uncrowned so a non-king canon
+# A lead additionally holds its nodes under purview and its own live workers -
+# facts no other session has. Skipped whole when uncrowned so a non-lead canon
 # doc stays byte-identical to the prior output (AC2-EDGE).
-if crowned:
+if teamed:
     nodes = nodes_under_purview(scp) or "_(nodes under purview: unavailable)_"
     out += [
         "",
-        "## King: nodes under purview (auto)",
+        "## Lead: nodes under purview (auto)",
         "level %s over %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-"),
         "",
         nodes,
         "",
-        # `workers` is spawned_by_session, not crown-scope-filtered: a
+        # `workers` is spawned_by_session, not team-scope-filtered: a
         # successor omits a predecessor workers list, and unrelated-territory
         # workers of this session leak in. Follow-up under.
-        "## King: live workers in scope (auto)",
+        "## Lead: live workers in scope (auto)",
         workers,
     ]
 
@@ -397,7 +397,7 @@ _session_block_raw() {
 _session_block() {
   # $1 = heading label substring, $2 = default instruction text. Matched by
   # the "## <label>" heading immediately above each marker, not by ordinal
-  # position: a king who hand-writes only the two crown headings on a first
+  # position: a lead who hand-writes only the two team headings on a first
   # compaction (the doc did not exist yet to hold headings 1/2) still binds
   # correctly, instead of silently landing in the wrong slot.
   local label="$1" default="$2" preserved=""
@@ -415,7 +415,7 @@ _unowned_session_blocks() {
   # Every fno:session-marked section whose heading is NOT one of the four the
   # writer regenerates below, captured verbatim (heading + markers + body).
   # The assembly re-emits only the four known sections, so without this pass a
-  # refresh deletes a king's hand-written "## HANDOFF (session)" whole. Only
+  # refresh deletes a lead's hand-written "## HANDOFF (session)" whole. Only
   # content below the hook's own title line is ours to keep: above it, PRIOR
   # already preserves the body verbatim, and both passes would duplicate it.
   awk -v k1="Merge order and why" -v k2="Open decisions awaiting the operator" \
@@ -452,8 +452,8 @@ _unowned_session_blocks() {
 
 DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this. The session fills it at full context._"
 DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._"
-DEFAULT_GAPS="_Gaps and open thinking only this crown holds. Nothing external knows this. The session fills it at full context._"
-DEFAULT_WORKAROUNDS="_Workarounds in force only this crown is running. Nothing external knows this. The session fills it at full context._"
+DEFAULT_GAPS="_Gaps and open thinking only this team holds. Nothing external knows this. The session fills it at full context._"
+DEFAULT_WORKAROUNDS="_Workarounds in force only this team is running. Nothing external knows this. The session fills it at full context._"
 
 # Capture the preserved-or-defaulted session blocks BEFORE opening the doc for
 # write. The assembly below redirects to $DOC_PATH, which truncates it on open;
@@ -461,7 +461,7 @@ DEFAULT_WORKAROUNDS="_Workarounds in force only this crown is running. Nothing e
 SB1="$(_session_block "Merge order and why" "$DEFAULT_MERGE")"
 SB2="$(_session_block "Open decisions awaiting the operator" "$DEFAULT_DECISIONS")"
 SB3="" SB4=""
-if [[ "$IS_CROWNED" == "1" ]]; then
+if [[ "$IS_TEAMED" == "1" ]]; then
   SB3="$(_session_block "Gaps and open thinking" "$DEFAULT_GAPS")"
   SB4="$(_session_block "Workarounds in force" "$DEFAULT_WORKAROUNDS")"
 fi
@@ -477,7 +477,7 @@ if [[ -f "$DOC_PATH" ]]; then
 fi
 
 # Unowned session sections (any marked "## X (session)" heading beyond the
-# four regenerated above, e.g. a king's "## HANDOFF (session)") captured
+# four regenerated above, e.g. a lead's "## HANDOFF (session)") captured
 # before the truncate like the blocks above and re-emitted verbatim, so a
 # refresh keeps session-owned content instead of deleting it silently.
 EXTRA_SESSIONS=""
@@ -505,7 +505,7 @@ fi
 # real judgment captured back as its default placeholder. That combination
 # only happens when the capture misread - a read racing another refresh, a
 # doc briefly vanishing - and writing would stamp placeholders over judgment
-# (the 2026-09-13 crown-doc loss). Leaving the doc untouched is always safe:
+# (the 2026-09-13 team-doc loss). Leaving the doc untouched is always safe:
 # the next fire reads again. Never blocks: the pointer below still prints.
 # ---------------------------------------------------------------------------
 WRITE_REFUSED=0
@@ -521,7 +521,7 @@ _gate_block() { # $1 label, $2 captured value, $3 default text
 }
 _gate_block "Merge order and why" "$SB1" "$DEFAULT_MERGE"
 _gate_block "Open decisions awaiting the operator" "$SB2" "$DEFAULT_DECISIONS"
-if [[ "$IS_CROWNED" == "1" ]]; then
+if [[ "$IS_TEAMED" == "1" ]]; then
   _gate_block "Gaps and open thinking" "$SB3" "$DEFAULT_GAPS"
   _gate_block "Workarounds in force" "$SB4" "$DEFAULT_WORKAROUNDS"
 fi
@@ -569,10 +569,10 @@ if [[ -n "$_TMP_OUT" ]]; then
   if [[ -n "$(printf '%s' "$PRIOR" | tr -d '[:space:]')" ]]; then
     printf '%s\n\n' "$PRIOR"
   fi
-  # A crowned session's doc is the crown's rolling doc (scope-keyed name), so
-  # the title names the crown; a successor reading it is not session ${SHORT}.
-  if [[ "$IS_CROWNED" == "1" && -n "$CROWN_SCOPE" ]]; then
-    echo "# Canon doc: crown ${CROWN_SCOPE}"
+  # A teamed session's doc is the team's rolling doc (scope-keyed name), so
+  # the title names the team; a successor reading it is not session ${SHORT}.
+  if [[ "$IS_TEAMED" == "1" && -n "$TEAM_SCOPE" ]]; then
+    echo "# Canon doc: team ${TEAM_SCOPE}"
   else
     echo "# Canon doc: session ${SHORT}"
   fi
@@ -598,7 +598,7 @@ if [[ -n "$_TMP_OUT" ]]; then
   printf '%s\n' "$SB2"
   echo "<!-- /fno:session -->"
   echo ""
-  if [[ "$IS_CROWNED" == "1" ]]; then
+  if [[ "$IS_TEAMED" == "1" ]]; then
     echo "## Gaps and open thinking (session)"
     echo "<!-- fno:session -->"
     printf '%s\n' "$SB3"

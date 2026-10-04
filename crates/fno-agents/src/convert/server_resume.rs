@@ -79,7 +79,7 @@ mod tests {
 
     fn codex_pane() -> RegistryEntry {
         let mut entry = RegistryEntry {
-            name: "king-delivery".to_string(),
+            name: "lead-delivery".to_string(),
             cwd: "/repo".to_string(),
             status: AgentStatus::Live,
             created_at: "2026-09-20T00:00:00Z".to_string(),
@@ -89,7 +89,7 @@ mod tests {
         entry.harness_session_id = Some("01a09bcd-8b5f-7391-83f8-d9ed91b00ac5".to_string());
         entry.substrate = Some("pane".to_string());
         entry.host_mode = Some("exec".to_string());
-        entry.short_id = "kingdeli".to_string();
+        entry.short_id = "leaddeli".to_string();
         entry.mux = Some(MuxRef {
             session: "fno".to_string(),
             pane_id: 2313,

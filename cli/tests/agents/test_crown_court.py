@@ -514,9 +514,9 @@ def test_render_court_table_names_scope_holder_and_agreement(
 
 
 def _stub_reign_reader(monkeypatch, tmp_path: Path, payload: dict, orphans=None, sweep_fail=False) -> None:
-    """Answer reign-state with a canned payload and court-orphans with a
+    """Answer lead-state with a canned payload and org-vacancies with a
     canned array (test_crown_court pins the RENDER, not the reader;
-    loop_reign.rs pins the comparison and the sweep). The sweep answer honors
+    lead_state.rs pins the comparison and the sweep). The sweep answer honors
     --held like the real binary (a held scope is filtered out) and can be
     made to fail, pinning the ran-marker."""
     import stat
@@ -528,7 +528,7 @@ def _stub_reign_reader(monkeypatch, tmp_path: Path, payload: dict, orphans=None,
         f"REIGN = {json.dumps(json.dumps(payload))}\n"
         f"FAIL = {repr(bool(sweep_fail))}\n"
         f"ORPHANS = {json.dumps(orphans or [])}\n"
-        "if 'court-orphans' not in sys.argv:\n"
+        "if 'org-vacancies' not in sys.argv:\n"
         "    print(REIGN, end='')\n"
         "    sys.exit(0)\n"
         "if FAIL:\n"
@@ -758,7 +758,7 @@ def test_total_counts_row_crowns_only_so_the_census_keeps_its_arithmetic(
 def test_a_sweep_that_cannot_run_is_an_absence_never_zero_orphans(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A stale binary without the court-orphans verb exits non-zero; reading
+    """A stale binary without the org-vacancies verb exits non-zero; reading
     that as [] would print a clean court. The ran marker must say it never ran."""
     from fno.agents.court import gather_court, render_court
 
@@ -1046,8 +1046,8 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
 
 
 def _stub_court_fold(monkeypatch, tmp_path: Path, scope_nodes: dict, fail: bool = False) -> None:
-    """A stub fno-agents binary that answers `court-fold` from a canned
-    scope_nodes map and court-orphans from an empty list (the fold tests pin
+    """A stub fno-agents binary that answers `org-fold` from a canned
+    scope_nodes map and org-vacancies from an empty list (the fold tests pin
     the RELAY, not the fold computation; court_fold.rs pins that)."""
     import stat
 
@@ -1060,12 +1060,12 @@ def _stub_court_fold(monkeypatch, tmp_path: Path, scope_nodes: dict, fail: bool 
         "REIGN = json.dumps({'crowned': True, 'scope': 'x', 'shape': 'pass',\n"
         "    'manifest_session': 's', 'registry_session': 's', 'live': True,\n"
         "    'split': False, 'unknown_reason': None, 'crown_on_manifest': False})\n"
-        "if 'court-fold' in sys.argv:\n"
+        "if 'org-fold' in sys.argv:\n"
         "    if FAIL:\n"
         "        sys.exit(3)\n"
         "    print(json.dumps({'scope_nodes': NODES}), end='')\n"
         "    sys.exit(0)\n"
-        "if 'court-orphans' in sys.argv:\n"
+        "if 'org-vacancies' in sys.argv:\n"
         "    print('[]', end='')\n"
         "    sys.exit(0)\n"
         "print(REIGN, end='')\n"

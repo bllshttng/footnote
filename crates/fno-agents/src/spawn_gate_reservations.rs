@@ -159,7 +159,7 @@ mod tests {
         std::fs::write(
             &lock,
             format!(
-                "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n  reserved_reason: four parked PRs\n",
+                "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n  reserved_reason: four parked PRs\n",
                 claims::SCHEMA_VERSION,
                 now + 600_000,
                 me,

@@ -227,7 +227,7 @@ pub(crate) fn apply_opencode_variant_at(
 /// ...`, either sigil) is a command dispatch, not a conversational message, so
 /// it rides WITHOUT the `[from:]` envelope (`opencode run --command`; an
 /// envelope would demote it to prose no-op). A prose message keeps the
-/// courtesy envelope.
+/// orgesy envelope.
 pub fn opencode_envelope(effective_message: &str, from_name: &str) -> String {
     let first = effective_message.split_whitespace().next().unwrap_or("");
     if crate::provider::parse_verb_token(first).is_some() {

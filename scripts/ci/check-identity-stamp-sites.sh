@@ -118,7 +118,7 @@ if [[ -n "$ADDED" ]]; then
     printf '  %s\n' "$(grep -m1 -F "$key " "$FOUND" | awk '{print $2}') ($key)" >&2
   done
   echo "  If the resolved harness or session id is WRITTEN to a claim, a mail record," >&2
-  echo "  an event, an agent-state row, a registry row, a crown grant, a decision" >&2
+  echo "  an event, an agent-state row, a registry row, a team grant, a decision" >&2
   echo "  record or a graph session record, use fno.claims.self_identity" >&2
   echo "  instead - the precedence primitive launders an inherited marker into" >&2
   echo "  ownership. If it only reads to display or branch, add it to" >&2

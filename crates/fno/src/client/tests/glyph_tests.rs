@@ -236,7 +236,7 @@ fn wide_glyph_name_keeps_the_pr_column_aligned() {
     wide.tail = Some("the message".into());
     wide.pr = Some(1);
     let mut ascii = tab_agent(None, None, false);
-    ascii.name = "king".into();
+    ascii.name = "lead".into();
     ascii.tail = Some("the message".into());
     ascii.pr = Some(1);
     ascii.pane_id = Some(2);

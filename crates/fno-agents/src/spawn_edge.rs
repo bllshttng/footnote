@@ -1,10 +1,10 @@
 //! The kind of a spawn edge. A CHILD edge means the spawner orchestrates
-//! and waits: a king over its court, a lead over its join workers. A PEER
+//! and waits: a lead over its org, a lead over its join workers. A PEER
 //! edge is a handoff: a blueprint launching its target, an advance dispatch
 //! starting the next node. A PEER spawner is done and waits on nothing.
 //!
 //! The kind is derived, never stored at mint time: a CHILD is a row with a
-//! joiner name, or a row whose spawner was crowned. Everything else reads
+//! joiner name, or a row whose spawner was teamed. Everything else reads
 //! PEER. This module is the rule's single owner; the reaper calls
 //! [`lineage_kind`] through [`live_child_of`] directly, and the liveness
 //! sweep stamps the derived word onto rows through [`stamp_lineage_kinds`]
@@ -29,12 +29,12 @@ impl LineageKind {
     }
 }
 
-/// The kind of the edge from `parent_crowned` to the row named
-/// `child_name`: crowned spawners hold their court, join workers
+/// The kind of the edge from `parent_teamed` to the row named
+/// `child_name`: teamed spawners hold their org, join workers
 /// (`jn-t-`, legacy `j-`) hold their lead, and every other edge is a
 /// handoff that holds nobody.
-pub fn lineage_kind(child_name: &str, parent_crowned: bool) -> LineageKind {
-    if parent_crowned || child_name.starts_with("jn-t-") || child_name.starts_with("j-") {
+pub fn lineage_kind(child_name: &str, parent_teamed: bool) -> LineageKind {
+    if parent_teamed || child_name.starts_with("jn-t-") || child_name.starts_with("j-") {
         LineageKind::Child
     } else {
         LineageKind::Peer
@@ -120,7 +120,7 @@ pub fn birth_event(name: &str, lineage: &Lineage, extras: serde_json::Value) -> 
 /// on fno-agents). The liveness sweep calls this inside its lock window;
 /// nothing else writes the field.
 pub(crate) fn stamp_lineage_kinds(r: &mut crate::state::Registry) {
-    let crowned: std::collections::HashSet<String> = r
+    let teamed: std::collections::HashSet<String> = r
         .entries
         .iter()
         .filter(|e| e.crown_level.is_some())
@@ -140,7 +140,7 @@ pub(crate) fn stamp_lineage_kinds(r: &mut crate::state::Registry) {
         else {
             continue;
         };
-        let kind = lineage_kind(&row.name, crowned.contains(&edge.to_ascii_lowercase()));
+        let kind = lineage_kind(&row.name, teamed.contains(&edge.to_ascii_lowercase()));
         if row.lineage_kind.as_deref() != Some(kind.as_str()) {
             row.lineage_kind = Some(kind.as_str().to_string());
         }
@@ -223,30 +223,30 @@ mod tests {
     }
 
     #[test]
-    fn a_crowned_parent_reads_its_court_as_child() {
-        let mut king = row("king-x-5", "s-king", None);
-        king.crown_level = Some(1);
-        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
-        court.status = crate::AgentStatus::Busy;
-        let entries = vec![king.clone(), court.clone()];
-        let found = live_child_of(&king, &entries).expect("the court row is a child");
+    fn a_teamed_parent_reads_its_org_as_child() {
+        let mut lead = row("lead-x-5", "s-lead", None);
+        lead.crown_level = Some(1);
+        let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
+        org.status = crate::AgentStatus::Busy;
+        let entries = vec![lead.clone(), org.clone()];
+        let found = live_child_of(&lead, &entries).expect("the org row is a child");
         assert_eq!(found.name, "node-x-demo2-g2");
     }
 
     #[test]
     fn stamp_writes_child_peer_and_leaves_edgeless_rows_silent() {
         let mut r = crate::state::Registry::default();
-        let mut king = row("king-x-6", "s-king", None);
-        king.crown_level = Some(1);
-        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
-        court.status = crate::AgentStatus::Busy;
-        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        let mut lead = row("lead-x-6", "s-lead", None);
+        lead.crown_level = Some(1);
+        let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
+        org.status = crate::AgentStatus::Busy;
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-other"));
         joiner.status = crate::AgentStatus::Busy;
-        let mut handoff = row("sob-t-x-2-glm", "s-t", Some(" s-lead "));
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some(" s-other "));
         handoff.status = crate::AgentStatus::Busy;
         let orphan = row("sob-t-x-3-glm", "s-t3", Some("s-gone"));
         let plain = row("solo-x-7", "s-solo", None);
-        r.entries = vec![king, court, joiner, handoff, orphan, plain];
+        r.entries = vec![lead, org, joiner, handoff, orphan, plain];
         stamp_lineage_kinds(&mut r);
         let kinds: Vec<Option<&str>> = r
             .entries
