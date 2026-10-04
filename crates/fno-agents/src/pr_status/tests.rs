@@ -395,6 +395,39 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
     );
 }
 
+/// The fetched log is stripped of the ANSI escapes Actions colors every line
+/// with, before the scan and the cache row see it: a failing step named
+/// through color codes reads as its bare name.
+#[test]
+fn a_colored_log_is_stripped_before_the_scan_sees_it() {
+    let _guard = super::cache_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("FNO_PR_STATUS_CACHE_DIR", dir.path());
+    let colored = format!(
+        "2026-10-03T18:00:00.0000000Z {}step failed, stopping (fail-fast):{} cargo-test-shard{}\n",
+        "\u{1b}[31;1m", "\u{1b}[0m", "\u{1b}[K"
+    );
+    let fake = FakeGh {
+        raw: serde_json::json!({ "job_logs": { "3001": colored } }),
+        log_reads: AtomicUsize::new(0),
+        log_args: std::sync::Mutex::new(Vec::new()),
+        pulls_fail: None,
+    };
+    let log = job_log(
+        &fake,
+        Path::new("/tmp"),
+        "Owner--Repo",
+        "Owner",
+        "Repo",
+        "3001",
+    )
+    .unwrap();
+    assert!(!log.contains('\u{1b}'), "escape-free: {log:?}");
+    assert_eq!(failing_step(&log).as_deref(), Some("cargo-test-shard"));
+    let cached = std::fs::read_to_string(dir.path().join("job-Owner--Repo-3001.json")).unwrap();
+    assert!(!cached.contains('\u{1b}'), "the cached row is escape-free");
+}
+
 /// The settled-marker rule: a cancelled run is red AND unsettled; an
 /// in-progress run is pending, never red.
 #[test]

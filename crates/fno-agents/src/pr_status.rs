@@ -603,6 +603,9 @@ pub(crate) fn job_log<P: GhProbe>(
             stderr.trim().to_string()
         });
     }
+    // Actions logs carry ANSI color on nearly every line; strip once here so
+    // the failing-test scans and every cache consumer read clean text.
+    let log = crate::claude_ask::strip_ansi_csi(&stdout).into_owned();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -611,9 +614,9 @@ pub(crate) fn job_log<P: GhProbe>(
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(mut f) = std::fs::File::create(&path) {
-        let _ = f.write_all(json!({"ts": ts, "log": stdout}).to_string().as_bytes());
+        let _ = f.write_all(json!({"ts": ts, "log": log}).to_string().as_bytes());
     }
-    Ok(stdout)
+    Ok(log)
 }
 
 /// Detail entries for the failing rollup rows, loudest facts first. The log
