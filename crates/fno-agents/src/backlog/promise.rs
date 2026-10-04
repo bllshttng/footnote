@@ -441,6 +441,117 @@ fn count_merged_refs(
     (merged, failure)
 }
 
+/// The plan's declared ship count, tri-state: `Absent` (single-ship by
+/// default), `Count(n)`, or `Unreadable` (present but not an integer).
+/// The reaper's delivery predicate needs the third state - a declared
+/// count that cannot be read is unknown, never one ship.
+pub(crate) enum DeclaredShips {
+    Absent,
+    Count(i64),
+    Unreadable,
+}
+
+pub(crate) fn declared_ships(fields: &crate::plan_doc::codec::Fields) -> DeclaredShips {
+    match fields.get("expected_url_count") {
+        None => DeclaredShips::Absent,
+        Some(crate::plan_doc::codec::Value::Scalar(s)) => match s.trim().parse::<i64>() {
+            Ok(n) => DeclaredShips::Count(n),
+            Err(_) => DeclaredShips::Unreadable,
+        },
+        Some(_) => DeclaredShips::Unreadable,
+    }
+}
+
+/// The deduplicated MERGED ref count one graph row carries: the primary
+/// when its merge_status reads merged, plus every numbered additional_prs
+/// entry recorded merged. A duplicate recording of the primary, or of an
+/// already-counted extra, never counts twice, an unrecorded extra never
+/// inflates the count, and a ref with no number is unverifiable evidence
+/// that never counts - this is the local confirmed-merged evidence the
+/// merged-lag delivery predicate reads, never a promise count.
+pub(crate) fn delivery_merged_refs(entry: &Value) -> usize {
+    let primary_merged = entry.get("merge_status").and_then(Value::as_str) == Some("merged");
+    let primary_number = entry.get("pr_number").and_then(Value::as_i64);
+    let mut merged = usize::from(primary_merged);
+    let mut seen: Vec<i64> = Vec::new();
+    for extra in entry
+        .get("additional_prs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if extra.get("merge_status").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        // A ref with no number cannot be told apart from any other ref, so
+        // it is unverifiable evidence and never counts.
+        let Some(number) = extra.get("number").and_then(Value::as_i64) else {
+            continue;
+        };
+        if primary_merged && Some(number) == primary_number {
+            continue;
+        }
+        if seen.contains(&number) {
+            continue;
+        }
+        seen.push(number);
+        merged += 1;
+    }
+    merged
+}
+
+/// The one plan-path resolver: a `#wave-1` fragment is stripped first (the
+/// module's reader convention), `~/` expands against `$HOME`, a relative
+/// path joins the close or sweep cwd, and an unresolvable path is None -
+/// the caller decides what None reads as. One resolver so two readers can
+/// never resolve the same plan_path to two different files.
+pub(crate) fn resolve_plan_path(plan_path: &str, cwd: Option<&str>) -> Option<std::path::PathBuf> {
+    let plan_path = plan_path.split('#').next().unwrap_or(plan_path);
+    let path = match plan_path.strip_prefix("~/") {
+        Some(rest) => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(rest),
+        None => PathBuf::from(plan_path),
+    };
+    if path.is_relative() {
+        Some(Path::new(cwd?).join(path))
+    } else {
+        Some(path)
+    }
+}
+
+/// The reaper side of the same delivery rule the close gate runs: a
+/// recorded merge_status is the LAST ship, never the whole delivery. The
+/// plan completion stamp decides: no plan, or a single-ship promise,
+/// settles with the recorded merge; a multi-ship plan keeps its worker
+/// until MERGED refs cover the promise; an unreadable or unparseable plan
+/// reads as unknown, and unknown keeps the row - unknown is never done.
+/// No network: the count arrives deduplicated from the graph's recorded
+/// merge evidence, so a promise it cannot cover is unmet by construction.
+/// The close gate itself is [`resolve_promise_evidence`].
+pub(crate) fn merged_delivery_settled(
+    merged_refs: usize,
+    plan_path: Option<&str>,
+    cwd: Option<&str>,
+) -> bool {
+    let Some(plan_path) = plan_path.filter(|p| !p.is_empty()) else {
+        return true;
+    };
+    let Some(path) = resolve_plan_path(plan_path, cwd) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(frontmatter) = crate::plan_doc::codec::parse_frontmatter(&text) else {
+        return false;
+    };
+    match declared_ships(&frontmatter.fields) {
+        DeclaredShips::Absent => true,
+        DeclaredShips::Count(n) if n < 2 => true,
+        DeclaredShips::Count(n) => merged_refs >= n as usize,
+        DeclaredShips::Unreadable => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

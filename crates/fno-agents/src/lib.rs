@@ -124,6 +124,7 @@ pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
+pub mod codex_watch;
 pub mod compaction;
 mod completion_output;
 pub mod component_update;

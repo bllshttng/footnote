@@ -308,10 +308,11 @@ def _passing_mail_body(word_total: int) -> str:
         sentence_index += 1
         remaining -= size
     body = " ".join(sentences)
-    from fno import style
+    from fno import rust_binary
 
-    assert style.word_count(body) == word_total
-    assert style.check(body, surface="mail") == []
+    assert rust_binary.style_word_count(body) == word_total
+    err, receipt = rust_binary.style_receipt(body, "mail")
+    assert not err and not receipt.get("violations")
     return body
 
 

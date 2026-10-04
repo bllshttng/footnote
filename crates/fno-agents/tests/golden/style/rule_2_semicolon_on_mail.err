@@ -1,0 +1,8 @@
+style: inspected 1 line(s) across 1 input(s).
+message blocked by the style rules.
+
+rule 2 (semicolon): sentence 1 has a semicolon. Split it into two sentences. "Do this; do that."
+
+add a style-exception line with a reason, or pass --style-exception.
+
+run "fno doctor lint style --stdin --surface pr-body" to check a rewrite first.

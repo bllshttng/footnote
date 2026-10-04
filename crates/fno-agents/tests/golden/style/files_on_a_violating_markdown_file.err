@@ -1,0 +1,13 @@
+message blocked by the style rules.
+
+rule 3 (modal): sentence 1 uses "should". Write "can", "will", or "must" instead. "You should do this."
+
+A quoted word is a mention, not a use.
+
+Wrap "should" in double quotes or backticks to name it.
+
+This refusal does that with every word it names.
+
+add a style-exception line with a reason, or pass --style-exception.
+
+run "fno doctor lint style --stdin --surface pr-body" to check a rewrite first.
