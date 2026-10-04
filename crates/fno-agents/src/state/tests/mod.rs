@@ -2005,28 +2005,66 @@ fn the_same_unknown_status_stays_fatal_at_our_own_schema() {
 }
 
 #[test]
-fn update_registry_refuses_to_write_over_a_newer_schema() {
-    // The write block is what makes reading forward safe here.
+fn update_registry_respects_writer_floor_and_preserves_unknown_fields() {
+    // An additive future schema is writable when this build meets its floor.
     let dir = tmpdir("version-write-guard");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
-    // Derived from the constant so a bump cannot make "newer" mean "ours".
     let newer_version = REGISTRY_SCHEMA_VERSION + 1;
-    let newer = format!(r#"{{"schema_version":{newer_version},"agents":[]}}"#);
-    std::fs::write(&path, &newer).unwrap();
-
-    match update_registry(&path, |reg| reg.entries.clear()) {
-        Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-            assert_eq!(found, newer_version);
-            assert_eq!(max, REGISTRY_SCHEMA_VERSION);
-        }
-        other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
-    }
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        newer,
-        "the refused write must leave the newer file byte-identical"
+    let additive = format!(
+        r#"{{"schema_version":{newer_version},"min_writer_version":{},"writer_rev":"writer-ahead","future_top":"kept","agents":[{{"name":"worker","cwd":"/x","log_path":"/l","harness":"claude","status":"live","created_at":"2026-01-01T00:00:00Z","future_row":"kept"}}]}}"#,
+        REGISTRY_SCHEMA_VERSION
     );
+    std::fs::write(&path, additive).unwrap();
+
+    assert!(
+        update_registry(&path, |reg| reg.entries[0].status = AgentStatus::Idle).is_ok(),
+        "an additive schema ahead of this writer's floor must remain writable"
+    );
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["schema_version"], newer_version);
+    assert_eq!(written["min_writer_version"], REGISTRY_SCHEMA_VERSION);
+    assert_eq!(written["writer_rev"], env!("FNO_AGENTS_GIT_REV"));
+    assert_eq!(written["future_top"], "kept");
+    assert_eq!(written["agents"][0]["future_row"], "kept");
+    assert_eq!(written["agents"][0]["status"], "idle");
+
+    let breaking = format!(
+        r#"{{"schema_version":{},"min_writer_version":{},"writer_rev":"future-writer","agents":[]}}"#,
+        newer_version + 1,
+        REGISTRY_SCHEMA_VERSION + 1
+    );
+    std::fs::write(&path, &breaking).unwrap();
+    let error = update_registry(&path, |_| ()).unwrap_err();
+    match &error {
+        StateError::WriterTooOld {
+            min_writer,
+            understood,
+            writer_rev,
+            reader_rev,
+            ..
+        } => {
+            assert_eq!(*min_writer, REGISTRY_SCHEMA_VERSION + 1);
+            assert_eq!(*understood, REGISTRY_SCHEMA_VERSION);
+            assert_eq!(writer_rev.as_deref(), Some("future-writer"));
+            assert_eq!(reader_rev, env!("FNO_AGENTS_GIT_REV"));
+        }
+        other => panic!("expected WriterTooOld, got {other:?}"),
+    }
+    assert!(error.to_string().contains("fno doctor update"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), breaking);
+
+    let incomplete = format!(
+        r#"{{"schema_version":{newer_version},"min_writer_version":{},"writer_rev":"writer-ahead","agents":[{{"name":"future","cwd":"/x","log_path":"/l","harness":"claude","status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},{{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude","status":"live","created_at":"2026-01-01T00:00:00Z"}}]}}"#,
+        REGISTRY_SCHEMA_VERSION
+    );
+    std::fs::write(&path, &incomplete).unwrap();
+    assert!(matches!(
+        update_registry(&path, |_| ()),
+        Err(StateError::WriterTooOld { .. })
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), incomplete);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2680,134 +2718,12 @@ fn update_registry_never_dates_an_old_exit_and_keeps_a_closure_stamp() {
 /// between the two merges called itself v33, read the new rows as its own
 /// version, and Python's strict reader refused the whole registry. This test
 /// pins the struct's serde field set to `registry_schema.toml`'s `fields`
-/// array; scripts/ci/check-registry-schema-bump.sh turns a `fields` change
-/// without a version bump into a CI refusal.
+/// array. A complete struct literal catches newly added fields at compile time;
+/// its serialized keys catch wire drift, while read-only legacy aliases are
+/// accounted for explicitly. The schema-bump guard makes field changes require
+/// a version bump.
 #[test]
 fn registry_schema_fields() {
-    use serde::de::value::Error as DeError;
-    use serde::de::Error as _;
-    use serde::de::Visitor;
-    use serde::Deserializer;
-
-    /// Captures the `fields` slice serde_derive passes to
-    /// `deserialize_struct`. Every value method refuses: only the declared
-    /// field names matter here, never a value.
-    #[derive(Default)]
-    struct FieldCapture {
-        fields: Option<&'static [&'static str]>,
-    }
-
-    macro_rules! refuse {
-        ($($name:ident),* $(,)?) => {
-            $(
-                fn $name<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
-                where
-                    V: Visitor<'de>,
-                {
-                    Err(DeError::custom("field names captured"))
-                }
-            )*
-        };
-    }
-
-    impl<'de> Deserializer<'de> for &mut FieldCapture {
-        type Error = DeError;
-
-        fn deserialize_struct<V>(
-            self,
-            _name: &'static str,
-            fields: &'static [&'static str],
-            _visitor: V,
-        ) -> Result<V::Value, Self::Error>
-        where
-            V: Visitor<'de>,
-        {
-            self.fields = Some(fields);
-            Err(DeError::custom("field names captured"))
-        }
-
-        fn deserialize_enum<V>(
-            self,
-            _name: &'static str,
-            _variants: &'static [&'static str],
-            _visitor: V,
-        ) -> Result<V::Value, Self::Error>
-        where
-            V: Visitor<'de>,
-        {
-            Err(DeError::custom("field names captured"))
-        }
-
-        fn deserialize_newtype_struct<V>(
-            self,
-            _name: &'static str,
-            _visitor: V,
-        ) -> Result<V::Value, Self::Error>
-        where
-            V: Visitor<'de>,
-        {
-            Err(DeError::custom("field names captured"))
-        }
-
-        fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
-        where
-            V: Visitor<'de>,
-        {
-            Err(DeError::custom("field names captured"))
-        }
-
-        fn deserialize_tuple_struct<V>(
-            self,
-            _name: &'static str,
-            _len: usize,
-            _visitor: V,
-        ) -> Result<V::Value, Self::Error>
-        where
-            V: Visitor<'de>,
-        {
-            Err(DeError::custom("field names captured"))
-        }
-
-        fn deserialize_unit_struct<V>(
-            self,
-            _name: &'static str,
-            _visitor: V,
-        ) -> Result<V::Value, Self::Error>
-        where
-            V: Visitor<'de>,
-        {
-            Err(DeError::custom("field names captured"))
-        }
-
-        refuse!(
-            deserialize_any,
-            deserialize_bool,
-            deserialize_i8,
-            deserialize_i16,
-            deserialize_i32,
-            deserialize_i64,
-            deserialize_i128,
-            deserialize_u8,
-            deserialize_u16,
-            deserialize_u32,
-            deserialize_u64,
-            deserialize_u128,
-            deserialize_f32,
-            deserialize_f64,
-            deserialize_char,
-            deserialize_str,
-            deserialize_string,
-            deserialize_bytes,
-            deserialize_byte_buf,
-            deserialize_option,
-            deserialize_unit,
-            deserialize_seq,
-            deserialize_map,
-            deserialize_identifier,
-            deserialize_ignored_any
-        );
-    }
-
     let raw = include_str!("../../registry_schema.toml");
     let parsed: toml::Value = toml::from_str(raw).expect("registry_schema.toml must parse as TOML");
     let toml_names: Vec<String> = parsed
@@ -2822,32 +2738,144 @@ fn registry_schema_fields() {
         })
         .collect();
 
-    let mut cap = FieldCapture::default();
-    let _ = RegistryEntry::deserialize(&mut cap);
-    let mut struct_names: Vec<String> = cap
-        .fields
-        .expect("serde_derive must pass RegistryEntry's fields to deserialize_struct")
-        .iter()
-        .map(|s| (*s).to_string())
+    // This exhaustive literal makes a newly added named field a compile error
+    // here. Populating skipped optionals makes serialization expose the full
+    // wire-key inventory; three legacy aliases are deliberately read-only.
+    let entry = RegistryEntry {
+        name: "inventory".into(),
+        aliases: vec!["alias".into()],
+        short_id: "short".into(),
+        legacy_provider: "legacy".into(),
+        provider: Some("value".into()),
+        model: Some("value".into()),
+        model_basis: Some("value".into()),
+        effort: Some("value".into()),
+        liveness: Some("value".into()),
+        liveness_measured_at: Some("value".into()),
+        context_used_pct: Some(1),
+        context_used_tokens: Some(1),
+        context_window_tokens: Some(1),
+        context_measured_at: Some("value".into()),
+        mail_unread: Some(1),
+        harness_title: Some("value".into()),
+        cwd: "/tmp".into(),
+        project_root: "/tmp".into(),
+        session_id: Some("value".into()),
+        claude_session_uuid: Some("legacy".into()),
+        harness: Some("value".into()),
+        harness_session_id: Some("value".into()),
+        predecessor_session_ids: vec!["value".into()],
+        forked_from_session_id: Some("value".into()),
+        launch_account: Some("value".into()),
+        launch_account_source: Some("value".into()),
+        related_session_id: Some("value".into()),
+        transcript_path: Some("value".into()),
+        start_source: Some("value".into()),
+        node: Some("value".into()),
+        node_reason: Some("value".into()),
+        pending_session_row: Some(serde_json::json!({})),
+        requested_model: Some("value".into()),
+        requested_provider: Some("value".into()),
+        requested_effort: Some("value".into()),
+        harness_args: vec!["value".into()],
+        route_provider_id: Some("value".into()),
+        model_name: Some("value".into()),
+        account_record_id: Some("value".into()),
+        messaging_socket_path: Some("value".into()),
+        codex_session_id: Some("value".into()),
+        gemini_session_id: Some("value".into()),
+        mcp_channel_id: Some("value".into()),
+        host_mode: Some("value".into()),
+        cc_session_id: Some("value".into()),
+        status: AgentStatus::Live,
+        last_message_at: Some("value".into()),
+        created_at: "value".into(),
+        pid: Some(1),
+        pid_start_time: Some(1),
+        keeper_child_pid: Some(1),
+        substrate: Some("value".into()),
+        log_path: Some("value".into()),
+        last_reconciled_at: Some("value".into()),
+        inside_leg: Some(InsideLegReport::default()),
+        exited_at: Some("value".into()),
+        stop: Some(StopRecord {
+            by: "test".into(),
+            at: "value".into(),
+            reason: None,
+        }),
+        mux: Some(MuxRef {
+            session: "value".into(),
+            pane_id: 1,
+        }),
+        screen_state: Some(ScreenStateReport {
+            state: "idle".into(),
+            rule: "test".into(),
+            seq: 1,
+            at: "value".into(),
+            ttl_ms: None,
+            answerable: None,
+        }),
+        crown_level: Some(1),
+        crown_scope: Some("value".into()),
+        crown_grantor: Some("value".into()),
+        route_settings_path: Some("value".into()),
+        fno_id: Some("value".into()),
+        delivery_policy: Some("value".into()),
+        sandbox_posture: Some("value".into()),
+        git_grant: Some("value".into()),
+        origin: Some("value".into()),
+        spawn_trigger: Some("value".into()),
+        spawned_by_session: Some("value".into()),
+        spawned_by_harness: Some("value".into()),
+        spawned_by_cwd: Some("value".into()),
+        lineage_kind: Some("value".into()),
+        lineage_reason: Some("value".into()),
+        adopted_by_session: Some("value".into()),
+        resolved_sandbox: Some("value".into()),
+        granted_writable_roots: vec!["value".into()],
+        requested_permission_mode: Some("value".into()),
+        turn_policy_source: Some("value".into()),
+        legacy_claude_short_id: Some("legacy".into()),
+        spawn_id: Some("value".into()),
+        spawn_provenance: Some(crate::spawn_contract::SpawnProvenance {
+            origin: crate::spawn_contract::SpawnOrigin::NonSession {
+                source: crate::spawn_contract::NonSessionSource::TestScript {
+                    path: "test".into(),
+                    run_id: "test".into(),
+                },
+            },
+            owner: crate::spawn_contract::SpawnOwner::TestRun {
+                script: "test".into(),
+                run_id: "test".into(),
+            },
+        }),
+        extra: Default::default(),
+    };
+    let serialized =
+        serde_json::to_value(&entry).expect("full registry entry fixture must serialize");
+    let mut struct_names: Vec<String> = serialized
+        .as_object()
+        .expect("registry entry serializes as an object")
+        .keys()
+        .cloned()
         .collect();
     struct_names.sort();
-    struct_names.dedup();
 
-    let mut pinned = toml_names.clone();
+    let read_only = [
+        "claude_session_uuid",
+        "claude_short_id",
+        "codex_session_id",
+        "gemini_session_id",
+        "legacy_provider",
+    ];
+    let mut pinned: Vec<String> = toml_names
+        .into_iter()
+        .filter(|name| !read_only.contains(&name.as_str()))
+        .collect();
     pinned.sort();
-    pinned.dedup();
-
-    let added: Vec<&String> = struct_names
-        .iter()
-        .filter(|n| !pinned.contains(n))
-        .collect();
-    let removed: Vec<&String> = pinned
-        .iter()
-        .filter(|n| !struct_names.contains(n))
-        .collect();
-    assert!(
-        added.is_empty() && removed.is_empty(),
-        "RegistryEntry's serde field set no longer matches `fields` in crates/fno-agents/src/registry_schema.toml.\n  added to the struct: {added:?}\n  removed from the struct: {removed:?}\n  Fix: update `fields`, then bump `version` in crates/fno-agents/src/registry_schema.toml in the same PR, so an fno built before the field landed can never read the new rows as its own version."
+    assert_eq!(
+        struct_names, pinned,
+        "serialized RegistryEntry keys must match schema `fields` (minus read-only legacy aliases)"
     );
 }
 
