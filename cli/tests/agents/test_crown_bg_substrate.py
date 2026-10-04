@@ -354,6 +354,15 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
 
+    # The spawn gate is not this test's contract, and its codex/thread lane
+    # consults fleet state a dev-build CI run does not carry: admit ungated,
+    # the same posture the test env gives every other spawn axis.
+    from fno.agents.spawn_gate import GateGuard
+
+    import fno.agents.spawn_gate as spawn_gate_mod
+
+    monkeypatch.setattr(spawn_gate_mod, "run_gate", lambda *a, **k: GateGuard())
+
     result = _spawn(
         "spawn", "--name", "king-codex", "-H", "codex", "reign",
         "--substrate", "thread", "--cwd", str(bg_home), "--crown", "epic-x",
