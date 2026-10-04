@@ -262,6 +262,12 @@ fn schema_rows() {
         schema.get("event_kinds").is_some(),
         "missing 'event_kinds' key"
     );
+    assert!(
+        schema["envelope"]["properties"]["source"]["anyOf"][0]["enum"]
+            .as_array()
+            .is_some_and(|sources| sources.iter().any(|source| source == "rust")),
+        "Rust registry event source is absent from the emitted envelope"
+    );
 
     let schema = emit_schema_json();
     let s = serde_json::to_string(&schema).expect("schema must serialize");
