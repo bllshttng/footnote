@@ -437,8 +437,62 @@ fn stop_rows() {
 /// AC1-HP: stop fallback when short_id absent -> "stopped: <name>"
 
 /// A verified Claude cascade names both surfaces in the receipt.
-#[test]
-fn rm_flow_rows() {
+#[tokio::test]
+async fn rm_flow_rows() {
+    // Authoring gate: (1) protects the observable ordering that rm repairs a
+    // proven drift before issuing the RPC; (2) a regression that skips repair,
+    // repairs on Unknown, or calls rm after a failed repair breaks the counts;
+    // (3) existing rm formatting tests do not reach this lifecycle boundary;
+    // (4) the helper uses restart and RPC closures that production also needs
+    // to order the real operations, so this is not a test-only seam.
+    use std::cell::Cell;
+
+    let drifted = DriftState::Drifted {
+        running: fno_agents::drift::ExeFingerprint {
+            path: "/old/fno-agents-daemon".into(),
+            mtime_nanos: 1,
+            size: 1,
+        },
+        on_disk: fno_agents::drift::ExeFingerprint {
+            path: "/new/fno-agents-daemon".into(),
+            mtime_nanos: 2,
+            size: 2,
+        },
+    };
+    for (state, should_restart) in [
+        (drifted.clone(), true),
+        (DriftState::Fresh, false),
+        (DriftState::DaemonDown, false),
+        (DriftState::Unknown, false),
+    ] {
+        let restart_calls = Cell::new(0);
+        let rm_calls = Cell::new(0);
+        let result = rm_after_drift_repair(
+            &state,
+            async {
+                restart_calls.set(restart_calls.get() + 1);
+                0
+            },
+            async {
+                rm_calls.set(rm_calls.get() + 1);
+                "removed"
+            },
+        )
+        .await;
+        assert_eq!(result, Ok("removed"));
+        assert_eq!(restart_calls.get(), usize::from(should_restart));
+        assert_eq!(rm_calls.get(), 1);
+    }
+
+    let rm_calls = Cell::new(0);
+    let result = rm_after_drift_repair(&drifted, async { 7 }, async {
+        rm_calls.set(rm_calls.get() + 1);
+        "removed"
+    })
+    .await;
+    assert_eq!(result, Err(7));
+    assert_eq!(rm_calls.get(), 0, "failed repair must not issue rm");
+
     let result = json!({
         "removed": true,
         "registry_removed": true,
