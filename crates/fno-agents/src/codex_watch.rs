@@ -211,9 +211,17 @@ pub(crate) fn run_pass_with(
         }
         // The expiry arm's eligibility rule, shared: a wake goes only to a
         // session that still owns the same live node claim, so a settled PR
-        // never burns a turn into a session whose node moved on. A read
-        // error keeps the watch (retry next tick), never a wake.
-        let node = match claims.get(&w.session_id).cloned().unwrap_or(Ok(None)) {
+        // never burns a turn into a session whose node moved on. The claims
+        // map indexes by the registry's harness_session_id (the codex thread
+        // id), which a target session's manifest session_id need not equal,
+        // so both identities answer. A read error keeps the watch (retry
+        // next tick), never a wake.
+        let claim = claims
+            .get(&w.session_id)
+            .or_else(|| claims.get(&watch.codex_thread_id))
+            .cloned()
+            .unwrap_or(Ok(None));
+        let node = match claim {
             Ok(Some(node)) => node,
             _ => continue,
         };
@@ -310,8 +318,14 @@ pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
             })
         },
         &|thread, text| {
-            crate::codex_inject::deliver_via_codex_daemon_sync(thread, text)
-                .map_err(|e| format!("{e:?}"))
+            match crate::codex_inject::deliver_via_codex_daemon_sync(thread, text) {
+                Ok(()) => Ok(()),
+                // The wire send succeeded and only the response was lost, so
+                // the turn may already run: a receipt here suppresses the
+                // redelivery that would start a duplicate turn every tick.
+                Err(crate::codex_inject::ReviewStartError::Reason("turn-start-unacked")) => Ok(()),
+                Err(e) => Err(format!("{e:?}")),
+            }
         },
         &crate::events::EventEmitter::new(crate::daemon::global_events_path(home), "daemon"),
     )
@@ -348,8 +362,10 @@ mod tests {
     /// A temp agents home plus its global journal path, the fixture the
     /// evidence reader and the receipt emitter share. The session's claims
     /// root moves into the temp dir for the test's life, and one live node
-    /// claim (`node:x-codexwt`, holder `target-session:codex-sess`) is staged
-    /// beside a Live registry row, the eligibility pair the wake gate reads.
+    /// claim (`node:x-codexwt`) is staged beside a Live registry row whose
+    /// harness_session_id (`thread-a`) DIVERGES from the watch's manifest
+    /// session_id (`codex-sess`): the eligibility lookup must answer through
+    /// the thread-id identity, the shape a real target session presents.
     fn staged() -> (AgentsHome, std::path::PathBuf, tempfile::TempDir) {
         let td = tempfile::TempDir::new().unwrap();
         let claims_root = td.path().join("claims-root");
@@ -359,17 +375,17 @@ mod tests {
         let _ = home.ensure_root();
         let mut entry = crate::state::RegistryEntry::default();
         entry.name = "codex-worker".into();
-        entry.harness_session_id = Some("codex-sess".into());
+        entry.harness_session_id = Some("thread-a".into());
         entry.status = crate::AgentStatus::Live;
         let mut registry = crate::state::Registry::default();
         registry.entries.push(entry);
         std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
         let acquired = crate::claims::acquire(
             "node:x-codexwt",
-            "target-session:codex-sess",
+            "target-session:thread-a",
             crate::claims::AcquireOpts {
                 pid: Some(std::process::id()),
-                identity: Some(("codex-sess".into(), "codex".into())),
+                identity: Some(("thread-a".into(), "codex".into())),
                 root: None,
                 events_dir: Some(td.path().join("claim-events")),
                 ..Default::default()
