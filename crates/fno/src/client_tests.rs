@@ -2120,10 +2120,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     assert_eq!(panel_w, 28);
     let frame = view.compose();
     let cols = frame.cols as usize;
-    // Row 0 in the sideline columns is the strip: the lead pad, then the
-    // Agents word. The squad-1 caret moved to row 1.
-    assert_eq!(frame.cells[0].c, ' ', "row 0 col 0 pads the strip");
-    assert_eq!(frame.cells[2].c, 'A', "row 0 col 2 starts the Agents word");
+    // Row 0 in the sideline columns is the strip: the words right-align now,
+    // so the Agents word reads at its span. The squad-1 caret moved to row 1.
+    let agents_start = view.top_row_spans()[0].0;
+    assert_eq!(
+        frame.cells[agents_start].c, 'A',
+        "row 0 starts the Agents word at its span"
+    );
     assert_eq!(frame.cells[cols].c, '▾', "row 1 col 0 is the squad-1 caret");
     // The divider column runs full height, including row 0.
     assert_eq!(frame.cells[panel_w - 1].c, '│', "divider at row 0");
@@ -2137,7 +2140,10 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     );
     // A row-0 click on the Agents word switches views; the squad-header
     // click moved to row 1.
-    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
+    assert!(matches!(
+        view.chrome_hit(0, agents_start as u16),
+        Some(ChromeHit::TopRow(_))
+    ));
     assert!(matches!(
         view.chrome_hit(1, 2),
         Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
