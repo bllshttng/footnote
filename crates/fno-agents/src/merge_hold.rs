@@ -1,7 +1,7 @@
 //! The merge-hold writer behind the `authorized-merge` verb's `op` field.
 //!
-//! A crown or worker pipes `{"op": "hold-set"|"hold-release", ...}` straight
-//! into `fno-agents authorized-merge` (taught in the king and blueprint
+//! A team or worker pipes `{"op": "hold-set"|"hold-release", ...}` straight
+//! into `fno-agents authorized-merge` (taught in the lead and blueprint
 //! skills). The block it writes is the same
 //! `dispatch_hold` frontmatter every merge path already reads; the write is
 //! proven by the same reader ready selection uses, and a failed readback
@@ -117,7 +117,7 @@ fn receipt(outcome: &str, code: i32, detail: impl Into<String>) -> Value {
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Exclusive flock serializing concurrent hold ops on one plan: the
-/// read-modify-write is not atomic as a whole, and a crown setting while a
+/// read-modify-write is not atomic as a whole, and a team setting while a
 /// worker releases would silently drop one ruling.
 struct PlanLock {
     /// Held for the lock's lifetime; the flock dies with this handle.
@@ -720,7 +720,7 @@ mod tests {
             "node": "t-0001",
             "reason": "condition R",
             "release_when": "when W",
-            "set_by": "crown",
+            "set_by": "team",
             "graph": graph_path,
         })
     }
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(receipt["exit_code"], 0);
         assert_eq!(receipt["hold"]["reason"], "condition R");
         let entry = crate::graph_store::read_rows(&graph).unwrap()[0].clone();
-        assert_eq!(entry["dispatch_hold"]["set_by"], "crown");
+        assert_eq!(entry["dispatch_hold"]["set_by"], "team");
         assert!(matches!(dispatch_hold(&entry), HoldState::Held));
         set_twice_refuses_contract();
         release_clears_contract();

@@ -1508,7 +1508,7 @@ async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
 
         let params = json!({
             "to": "t",
-            "from": "king",
+            "from": "lead",
             "body": "hello thread",
             "mirror": false,
             "recipient_identity": {
@@ -1574,7 +1574,7 @@ async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
 
         let params = json!({
             "to": "t",
-            "from": "king",
+            "from": "lead",
             "body": "wake up",
             "mirror": false,
             "recipient_identity": {
@@ -1847,14 +1847,14 @@ fn gate_inside_leg_onto_row_notifies_once_per_done_episode() {
     assert_eq!(n, None);
 }
 
-/// A crowned row's done is a turn end under its reign: the gate carries no
+/// A teamed row's done is a turn end under its lead: the gate carries no
 /// notify intent, the report still lands and reads done, and a blocked
 /// report still pages the operator.
 #[test]
-fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
+fn gate_inside_leg_onto_row_teamed_done_is_quiet_but_lands() {
     let mut registry = state::Registry::default();
-    let mut row = thread_entry("t-king", AgentStatus::Live, None);
-    row.codex_session_id = Some("sid-king".into());
+    let mut row = thread_entry("t-lead", AgentStatus::Live, None);
+    row.codex_session_id = Some("sid-lead".into());
     row.crown_level = Some(2);
     registry.entries.push(row);
 
@@ -1870,7 +1870,7 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
     // Working at seq 1 lands with no intent.
     let n = gate_inside_leg_onto_row(
         &mut registry,
-        "sid-king",
+        "sid-lead",
         rep(1, state::InsideLegState::Working, None),
     );
     assert_eq!(n, None);
@@ -1878,10 +1878,10 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
     // Done at seq 2: no intent, but the row reads done at seq 2.
     let n = gate_inside_leg_onto_row(
         &mut registry,
-        "sid-king",
+        "sid-lead",
         rep(2, state::InsideLegState::Done, None),
     );
-    assert_eq!(n, None, "a crowned row's done carries no notify intent");
+    assert_eq!(n, None, "a teamed row's done carries no notify intent");
     assert_eq!(registry.entries[0].inside_leg.as_ref().unwrap().seq, 2);
     assert_eq!(
         registry.entries[0].inside_leg.as_ref().unwrap().state,
@@ -1891,7 +1891,7 @@ fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
     // Blocked at seq 3 still pages the operator.
     let n = gate_inside_leg_onto_row(
         &mut registry,
-        "sid-king",
+        "sid-lead",
         rep(
             3,
             state::InsideLegState::Blocked,
@@ -1914,11 +1914,11 @@ fn badge_lane_table() {
 
     // The toast argv matches the Python dispatch's escaping (AC3).
     assert_eq!(
-        toast_argv("macos", "king \"a\"", "c:\\d"),
+        toast_argv("macos", "lead \"a\"", "c:\\d"),
         vec![
             "osascript".to_string(),
             "-e".to_string(),
-            "display notification \"c:\\\\d\" with title \"king \\\"a\\\"\"".to_string(),
+            "display notification \"c:\\\\d\" with title \"lead \\\"a\\\"\"".to_string(),
         ]
     );
     assert_eq!(

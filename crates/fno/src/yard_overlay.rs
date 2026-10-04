@@ -5,7 +5,7 @@
 //! layout it already holds) and derives the eye from those values at render
 //! time - one status value feeds both the row and the sprite. This module
 //! supplies the identity leg the layout cannot see (species, rarity tier,
-//! crown, first-sighting), which the Python fold computes over the registry
+//! team, first-sighting), which the Python fold computes over the registry
 //! and the graph archive. The call runs off the UI loop on a spawned task
 //! and reports back over a channel, so a slow `fno` never blocks the
 //! overlay from opening.
@@ -141,7 +141,7 @@ pub(crate) fn overlay_lines(
         }
         lines.push(pad_to("", YARD_OVERLAY_W));
         let sel = sel.min(crowd.len() - 1);
-        let (name, eye, crown) = crowd[sel];
+        let (name, eye, team) = crowd[sel];
         match identity {
             Some(id) => {
                 let mut caption =
@@ -149,16 +149,16 @@ pub(crate) fn overlay_lines(
                 if !id.rarity.is_empty() {
                     caption.push_str(&format!(" · {}", id.rarity));
                 }
-                if crown >= 1 {
-                    caption.push_str(&format!(" · crown {crown}"));
+                if team >= 1 {
+                    caption.push_str(&format!(" · team {team}"));
                 }
                 if id.first_sighting {
                     caption.push_str(" · NEW");
                 }
                 lines.push(pad_to(&caption, YARD_OVERLAY_W));
-                if crown >= 1 {
+                if team >= 1 {
                     lines.push(pad_to(
-                        &format!("  {}", crate::sprites::HAT_CROWN),
+                        &format!("  {}", crate::sprites::HAT_TEAM),
                         YARD_OVERLAY_W,
                     ));
                 }

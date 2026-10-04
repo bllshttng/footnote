@@ -39,7 +39,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 
-use super::king_guard::lex;
+use super::lead_guard::lex;
 use super::test_run_guard::{basename, head_of, stages};
 
 /// Prose does not fire at the moment of a tool call; a refusal does.

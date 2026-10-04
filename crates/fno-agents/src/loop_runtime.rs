@@ -57,10 +57,10 @@ const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct ProjectJournalPath(pub PathBuf);
 
 /// One health read of `loop_unit_dispatched`: how many rows carry a fixture
-/// title and how many name a real crown scope.
+/// title and how many name a real team scope.
 ///
 /// Measured 2026-09-02 across both journals on the reference machine: 757
-/// rows, 756 of them fixture-titled, exactly one real (`king reign over fno`,
+/// rows, 756 of them fixture-titled, exactly one real (`lead lead over fno`,
 /// iteration 1). A raw COUNT of this event therefore reads as a busy
 /// subsystem while the loop has never autonomously dispatched anything - any
 /// health check must separate the two through [`is_fixture_dispatch_title`]
@@ -70,16 +70,16 @@ pub struct ProjectJournalPath(pub PathBuf);
 pub struct DispatchCensus {
     pub fixture: u64,
     pub real: u64,
-    /// Real crown-scope dispatches at iteration 2 or higher. Iteration 1
+    /// Real team-scope dispatches at iteration 2 or higher. Iteration 1
     /// already happened once under a board that could not be read twice, so
     /// it is not evidence the loop works.
     pub real_at_iteration_two_or_later: u64,
 }
 
-/// Whether a dispatch title names a test fixture rather than a real crown
+/// Whether a dispatch title names a test fixture rather than a real team
 /// scope. The discriminator is the TITLE - nothing else in the row separates
 /// a fixture run from a real one. These are the titles the repo's own suites
-/// mint (`crates/fno-agents/tests/loop_target.rs` manifests plus the king
+/// mint (`crates/fno-agents/tests/loop_target.rs` manifests plus the lead
 /// fixture scope `epic-x`); a new fixture title must be added here, and a
 /// health read built on this predicate reports zero real dispatches - never
 /// 756 - for a journal of only fixture rows.
@@ -89,7 +89,7 @@ pub fn is_fixture_dispatch_title(title: &str) -> bool {
         return true;
     }
     const FIXTURE_TITLES: [&str; 6] = [
-        "king reign over epic-x",
+        "lead lead over epic-x",
         "persist history test",
         "ceiling mission",
         "real driver test",
@@ -185,7 +185,7 @@ pub struct Unit {
     /// For target sessions this is the session identifier written into the
     /// target-state.md manifest; for other drivers it is whatever key the
     /// dispatcher embeds in its events. A driver whose sessions terminate
-    /// under a stable id that ALSO terminates across runs (the king's
+    /// under a stable id that ALSO terminates across runs (the lead's
     /// manifest `fno_id`) must mint this per invocation, or the resume guard
     /// below closes every unit after the first on a prior run's terminal.
     pub session_key: String,

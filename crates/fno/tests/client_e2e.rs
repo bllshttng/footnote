@@ -17,7 +17,7 @@ use common::{
 fn client_e2e_prompt_appears_and_echo_roundtrips() {
     // AC1-HP + AC2-HP: bare `fno` on a TTY comes up with a shell, and typed
     // input round-trips to rendered output. (The 500ms latency target is not
-    // asserted - CI wall-clock is not a fairness court; presence is.)
+    // asserted - CI wall-clock is not a fairness org; presence is.)
     let scratch = Scratch::new("echo");
     let mut h = ClientHarness::spawn(&scratch);
     // A prompt renders.

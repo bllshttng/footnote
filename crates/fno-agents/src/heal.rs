@@ -1107,7 +1107,7 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
 /// stripped, tokens split on whitespace and comma, malformed tokens making
 /// the line prose. The grammar `pr_closure::parse` reads.
 fn closure_line_ids(line: &str) -> Vec<String> {
-    crate::king_board::pr_closure::line_ids(line)
+    crate::org_board::pr_closure::line_ids(line)
 }
 
 /// The remedy's own node ids, across every EditBody finding, in order.
@@ -1399,10 +1399,10 @@ pub(crate) fn open_pr_numbers(pages: &[Value]) -> Vec<String> {
 // ── the drive loop (--all --apply) ───────────────────────────────────────────
 
 /// Node ids a PR head ref names, as delimiter-bounded segments. Re-exported
-/// from the shared `king_board::prs` predicate, so the heal drive loop, the
+/// from the shared `org_board::prs` predicate, so the heal drive loop, the
 /// board, and the merge owner all read one rule (parity with
 /// `cli/src/fno/pr/closure.py`).
-pub(crate) use crate::king_board::prs::branch_node_ids;
+pub(crate) use crate::org_board::prs::branch_node_ids;
 
 /// Every worktree of this checkout's repo, as (branch, path) pairs parsed
 /// from `git worktree list --porcelain`. Detached worktrees carry no `branch`
@@ -2777,7 +2777,7 @@ mod tests {
         // The shape ruff actually prints: code first, location beneath.
         let log = strip_timestamps(concat!(
             "2026-09-03T07:15:29.7310174Z F821 Undefined name `Callable`\n",
-            "2026-09-03T07:15:29.7310931Z    --> src/fno/king/board.py:886:21\n",
+            "2026-09-03T07:15:29.7310931Z    --> src/fno/lead/board.py:886:21\n",
             "2026-09-03T07:15:29.7322711Z Found 1 error.\n",
         ));
         let f = classify(&ctx("Python static correctness (495 sources)", &log), false);

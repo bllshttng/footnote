@@ -265,7 +265,7 @@ fn replay_after_cursor_loss_does_not_double_count() {
     );
     let checkins: i64 = conn
         .query_row(
-            "SELECT count(*) FROM events WHERE type = 'reign_checkin'",
+            "SELECT count(*) FROM events WHERE type = 'lead_checkin'",
             [],
             |r| r.get(0),
         )

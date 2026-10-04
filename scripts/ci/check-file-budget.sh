@@ -36,7 +36,7 @@
 # exception with the file-budget-exception label; agents never apply it, and
 # it waives the tree tally alone, never a per-file grow. Two cases need no
 # label: a change whose Python tree net is negative (a port that deletes more
-# than it adds forward passes the tally), and a king-approved blocking-bug
+# than it adds forward passes the tally), and a lead-approved blocking-bug
 # repair to existing Python, no new verb, flag or feature, within the
 # thirty-added-line budget.
 #

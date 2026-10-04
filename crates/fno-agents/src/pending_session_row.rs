@@ -96,7 +96,7 @@ fn payload_graph(payload: &Value) -> PathBuf {
         .filter(|s| !s.is_empty())
     {
         Some(g) => PathBuf::from(g),
-        None => crate::king_board::scope::graph_json_path(
+        None => crate::org_board::scope::graph_json_path(
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         ),
     }

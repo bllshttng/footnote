@@ -46,7 +46,7 @@ fn lease_record(
     ClaimRecord {
         key: "post-merge-sync".into(),
         holder: "sync-canonical:2033".into(),
-        session_id: Some("s-crown".into()),
+        session_id: Some("s-team".into()),
         pid_provenance: Some(provenance.into()),
         ..gate_record(pid, acquired_at, expires_at)
     }

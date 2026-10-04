@@ -18,7 +18,7 @@ pub struct DayInputs {
     /// (path, state) pairs parallel to `event_journals`: `read`, `missing` or
     /// `unreadable`. Empty means every provided journal was read.
     pub journal_states: Vec<(String, String)>,
-    /// Precomputed `king_history::scan_scopes(paths, None)` payload, read by
+    /// Precomputed `lead_history::scan_scopes(paths, None)` payload, read by
     /// the IO layer. `fold_day` stays pure: it filters this Value to the
     /// window and never opens a store itself.
     pub checkin_scan: Option<Value>,
@@ -207,9 +207,9 @@ fn collect_retractions(raw: &str, kind: &str, out: &mut Vec<Value>) {
     }
 }
 
-/// Filter the precomputed `king_history::scan_scopes(paths, None)` payload to
+/// Filter the precomputed `lead_history::scan_scopes(paths, None)` payload to
 /// the window and group its canonical rows by scope. The canonical/legacy
-/// classification stays in king_history: this reads its verdict, never a
+/// classification stays in lead_history: this reads its verdict, never a
 /// second classifier over raw journal text.
 fn checkin_summary(
     scan: Option<&Value>,
@@ -600,7 +600,7 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     let (checkin_scan, checkin_state) = if event_paths.is_empty() {
         (None, "missing".to_string())
     } else {
-        match crate::king_history::scan_scopes(&event_paths, None) {
+        match crate::lead_history::scan_scopes(&event_paths, None) {
             Ok(scan) => (Some(scan), "read".to_string()),
             Err(_) => (None, "unreadable".to_string()),
         }
@@ -893,9 +893,9 @@ mod tests {
             "matched": 3,
             "rejected": 1,
             "events": [
-                {"ts":"2026-09-10T08:10:00Z","type":"reign_checkin","data":{"scope":"fno","change":"green"}},
-                {"ts":"2026-09-10T09:10:00Z","type":"reign_checkin","data":{"scope":"x-bbbb","change":"stalled"}},
-                {"ts":"2026-09-09T23:00:00Z","type":"reign_checkin","data":{"scope":"fno","change":"early"}}
+                {"ts":"2026-09-10T08:10:00Z","type":"lead_checkin","data":{"scope":"fno","change":"green"}},
+                {"ts":"2026-09-10T09:10:00Z","type":"lead_checkin","data":{"scope":"x-bbbb","change":"stalled"}},
+                {"ts":"2026-09-09T23:00:00Z","type":"lead_checkin","data":{"scope":"fno","change":"early"}}
             ]
         }));
         let payload = fold_day(&input).unwrap();

@@ -43,13 +43,13 @@ pub(crate) fn render(report: &FleetReport, generated: &str, reload_s: i64) -> St
     );
     out.push_str(&format!(
         "<script data-fno-reload=\"{reload_s}\">{}</script></body></html>",
-        crate::king_ledger::PAGE_RELOAD_JS
+        crate::rundown::PAGE_RELOAD_JS
     ));
     out
 }
 
 pub(crate) fn write_page(path: &Path, body: &str) -> Result<(), String> {
-    crate::king_ledger::write_atomic(&path.to_path_buf(), body)
+    crate::rundown::write_atomic(&path.to_path_buf(), body)
 }
 
 fn run_page(config_cwd: &Path) -> Result<String, String> {
@@ -67,7 +67,7 @@ fn run_page(config_cwd: &Path) -> Result<String, String> {
         window_days: fleet_load::DEFAULT_WINDOW_DAYS,
         budget: Some(TICK_READ_BUDGET),
     });
-    let reload_s = crate::king_ledger::reload_secs(crate::agents_config::config_lookup(
+    let reload_s = crate::rundown::reload_secs(crate::agents_config::config_lookup(
         config_cwd,
         &["backlog", "page_reload_s"],
     ));
