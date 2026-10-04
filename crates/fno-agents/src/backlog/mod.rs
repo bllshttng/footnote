@@ -20,6 +20,7 @@ pub mod decisions_cli;
 pub mod done_evidence;
 pub(crate) mod drift_emit;
 pub(crate) mod drift_scan;
+pub mod edges;
 pub mod encounters;
 pub mod entities;
 pub mod epic_cap;
@@ -100,6 +101,7 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("harnesses", "backlog/entities.rs"),
     ("models", "backlog/entities.rs"),
     ("agent_sessions", "backlog/entities.rs"),
+    ("edges", "backlog/edges.rs"),
 ];
 
 /// The store's key-value table, with the schema-4 stamps every table has.
@@ -335,6 +337,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     relations::ensure_table(&connection)?;
     costs::ensure_table(&connection)?;
     decisions::ensure_table(&connection)?;
+    edges::ensure_table(&connection)?;
     ensure_triggers(&connection)?;
     search::ensure_table(&connection)?;
     import_if_needed(&mut connection)?;
