@@ -13,7 +13,7 @@ identically to a close claim to a prose scanner. The exact line is the only
 runtime-recognized closure grammar, so a claim is either the literal line or
 it does not exist.
 
-The LINE FORMAT lives in one leg: the Rust parser `king_board/pr_closure.rs` (verbs
+The LINE FORMAT lives in one leg: the Rust parser `org_board/pr_closure.rs` (verbs
 `pr-closure-parse` / `pr-closure-render`); the forwarders below speak for Python.
 Writers emit only `Fixes`; readers accept the retired `Backlog-Closure:` spelling.
 """
