@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::loop_lead::territory_members;
-use crate::org_board::project_map;
+use crate::org_board::scope::project_map;
 
 /// The mail budget: a wrapped notice, never a `--raw` command.
 const MAIL_TIMEOUT: Duration = Duration::from_secs(30);
