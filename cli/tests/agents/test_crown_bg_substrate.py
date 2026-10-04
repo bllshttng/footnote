@@ -321,10 +321,16 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
         "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents")
     )
     session_uuid = str(_uuid.uuid4())
+    seen = {}
 
-    def fake_run(argv, capture_output, text, timeout, env):
+    def fake_run(*args, **kwargs):
         # The Rust lane's registry write, simulated: the row exists BEFORE the
-        # Python settlement runs, with all three crown fields unset.
+        # Python settlement runs, with all three crown fields unset. The fake
+        # takes any call shape: the emit path also runs subprocess.run under
+        # this patch when a native binary is present (it passes input=).
+        argv = args[0]
+        if "--" in argv:
+            seen["seed"] = argv[argv.index("--") + 1]
         update_registry(
             lambda rows: rows
             + [
@@ -353,6 +359,9 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
         "--substrate", "thread", "--cwd", str(bg_home), "--crown", "epic-x",
     )
     assert result.exit_code == 0, result.output
+    # Codex spells the plugin verb with $; a /fno:lead seed would hand the
+    # king's first turn a command its harness cannot invoke.
+    assert seen["seed"].splitlines()[0] == "$fno:lead epic-x"
 
     row = _row("king-codex")
     assert row.crown_level == 2, "an epic is a Director"

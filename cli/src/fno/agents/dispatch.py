@@ -2642,10 +2642,15 @@ def dispatch_spawn(
             if crown_refusal is not None:
                 raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
             # The king's first turn is the reign verb itself, the same typing
-            # _claude_create_path does for the claude bg lane.
+            # _claude_create_path does for the claude bg lane, normalized to
+            # the receiving harness's verb spelling ($fno:lead for codex).
             message, reign_typed = _reign_typed_message(
                 message, crown_level, crown_scope, revive=False
             )
+            if reign_typed:
+                from fno.agents.harness_map import normalize_command
+
+                message = normalize_command(message, harness)
         session_id = _codex_thread_spawn(
             name=name,
             message=message,
