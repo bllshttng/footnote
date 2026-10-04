@@ -24,6 +24,10 @@ use crate::loop_king::territory_members;
 /// The mail budget: a wrapped notice, never a `--raw` command.
 const MAIL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The system sender for the launch notice; the bare `fno` name refuses at
+/// the mail door (R13), so the arm spells itself.
+const MAIL_SENDER: &str = "fno/dispatch-credit";
+
 /// The node row's territory member: its epic (parent), else the node id
 /// itself. Crown scopes are epic-member sets, so a node under an epic
 /// answers to whatever crown holds that epic.
@@ -106,7 +110,17 @@ pub fn covering_crown_in(
     if member.is_empty() {
         return kingless();
     }
+    // The node answers to an epic crown through its territory member and to
+    // a project or portfolio crown through its project, aliases
+    // canonicalized both ways.
     let project = node_project(row);
+    let canonical_project = projects.get(project.as_str()).cloned();
+    let covers = |members: &HashSet<String>| {
+        members.contains(&member)
+            || canonical_project
+                .as_ref()
+                .is_some_and(|p| members.contains(p))
+    };
     // Live rows holding a scope whose canonical members cover the node's
     // territory. Terminal rows are dead crowns, never a covering lead.
     let mut best: Option<(&Value, String, HashSet<String>)> = None;
@@ -121,7 +135,7 @@ pub fn covering_crown_in(
             continue;
         }
         let members: HashSet<String> = territory_members(scope, projects).into_iter().collect();
-        if !members.contains(&member) {
+        if !covers(&members) {
             continue;
         }
         // Most specific crown wins: the smallest covering member set, so a
@@ -207,7 +221,7 @@ pub fn launch_credit_mail(payload: &Value) -> Value {
         "mail".to_string(),
         "send".to_string(),
         "--from-name".to_string(),
-        "fno".to_string(),
+        MAIL_SENDER.to_string(),
         "--origin".to_string(),
         "scheduler".to_string(),
         session.clone(),

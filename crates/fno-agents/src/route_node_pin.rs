@@ -269,14 +269,8 @@ pub(crate) fn attach_effort_pin(decision: &mut Value, payload: &Value) {
     let Some(cand) = obj.get_mut("candidate").and_then(Value::as_object_mut) else {
         return;
     };
-    let has_effort = cand
-        .get("effort")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
-    if has_effort {
-        return;
-    }
+    // The node pin outranks a lane-contributed effort: overwrite it. When
+    // the pin arm already applied this same pin the write is a no-op.
     let harness = cand.get("harness").and_then(Value::as_str).unwrap_or("");
     let valid = payload
         .get("effort_ok")
