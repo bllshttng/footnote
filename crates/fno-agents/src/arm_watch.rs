@@ -104,8 +104,8 @@ pub fn tick_arm_watch(
 }
 
 /// One heal-then-page pass: classify the rows, run the safe repairs, read the
-/// stuck work and the crowns, and page only what is still red. `collect` is
-/// the stuck work read, `crowns` the crown read, and `run` executes a repair,
+/// stuck work and the teams, and page only what is still red. `collect` is
+/// the stuck work read, `teams` the team read, and `run` executes a repair,
 /// all handed in so a test drives the whole tick. The detail leads with the
 /// heal token, so the 200-char cap never cuts it.
 #[allow(clippy::too_many_arguments)]
@@ -117,17 +117,17 @@ pub fn tick_with_heal(
     store: &Path,
     now_unix: u64,
     collect: impl Fn() -> Result<Vec<Finding>, String>,
-    crowns: impl Fn() -> Result<(Vec<Finding>, String), String>,
+    teams: impl Fn() -> Result<(Vec<Finding>, String), String>,
     run: &mut dyn FnMut(&str) -> bool,
     send: impl FnOnce(&str, &str) -> bool,
 ) -> WatchOutcome {
     let (findings, mut note) = split(collect());
-    // The crown read runs ONCE, before the heal: a release touches claims,
-    // not crowns, so the re-collect below never repeats the seconds-long
-    // court read.
-    let (crown_findings, crown_note) = match crowns() {
+    // The team read runs ONCE, before the heal: a release touches claims,
+    // not teams, so the re-collect below never repeats the seconds-long
+    // org read.
+    let (team_findings, team_note) = match teams() {
         Ok((found, note)) => (found, note),
-        Err(reason) => (Vec::new(), format!("crown unread: {reason}")),
+        Err(reason) => (Vec::new(), format!("team unread: {reason}")),
     };
     crate::arm_repair::annotate(
         rows,
@@ -149,13 +149,13 @@ pub fn tick_with_heal(
     } else {
         findings
     };
-    findings.extend(crown_findings);
+    findings.extend(team_findings);
     let mut outcome = tick_arm_watch(rows, &findings, threshold_s, store, now_unix, send);
     let mut detail = heal;
     for part in [
         Some(outcome.detail.clone()),
         note,
-        Some(crown_note).filter(|n| !n.is_empty()),
+        Some(team_note).filter(|n| !n.is_empty()),
     ]
     .into_iter()
     .flatten()
@@ -212,7 +212,7 @@ fn notice_body(overdue: &[&ArmStatus], findings: &[crate::stuck_work::Finding]) 
 }
 
 /// The overdue set: the arms failing, stale-past-cause, or receipt-less past
-/// the threshold. The tick and the king check-in read the same predicate, so
+/// the threshold. The tick and the lead check-in read the same predicate, so
 /// a page and a check-in line can never disagree about who is overdue.
 pub fn overdue_arms(rows: &[ArmStatus], threshold_s: u64) -> Vec<&ArmStatus> {
     rows.iter()
@@ -312,10 +312,10 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         let threshold = crate::agents_config::notify_arm_failing_after_s(&config_cwd);
         let store = crate::operator_notice::notify_signals_path();
         let install_off_main = crate::arm_repair::RepairFacts::live(&[]).install_off_main;
-        // The court read runs ONCE and feeds both readers: the crown alarm's
+        // The org read runs ONCE and feeds both readers: the team alarm's
         // judge and the settle pass. A second read doubles the seconds the
         // beat already spends.
-        let court = crate::crown_alarm::read_court_payload(&config_cwd);
+        let org = crate::team_alarm::read_org_payload(&config_cwd);
         let outcome = tick_with_heal(
             &mut rows,
             install_off_main,
@@ -324,7 +324,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             &store,
             now_unix,
             || crate::stuck_work::collect(&config_cwd),
-            || crate::crown_alarm::collect_from(&court, &store, now_unix),
+            || crate::team_alarm::collect_from(&org, &store, now_unix),
             &mut |action| crate::arm_repair::run_repair(action, &config_cwd),
             |title, body| {
                 crate::operator_notice::notify_operator_confirmed(
@@ -347,15 +347,15 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             Some(&outcome.detail),
             interval.as_secs(),
         );
-        // The settle pass rides the court read this beat already paid for.
-        // One king_settle row per beat: the detail names what was mailed, so
+        // The settle pass rides the org read this beat already paid for.
+        // One lead_settle row per beat: the detail names what was mailed, so
         // no per-PR event kind is needed.
-        let (settle_acted, settle_skip, settle_detail) = match &court {
-            Err(reason) => (0, Some("error"), short(&format!("crown unread: {reason}"))),
+        let (settle_acted, settle_skip, settle_detail) = match &org {
+            Err(reason) => (0, Some("error"), short(&format!("team unread: {reason}"))),
             Ok(payload) => {
-                let outcome = crate::king_settle::run(payload, &config_cwd, now_unix);
-                let crowns = payload
-                    .get("crowns")
+                let outcome = crate::lead_settle::run(payload, &config_cwd, now_unix);
+                let teams = payload
+                    .get("teams")
                     .and_then(serde_json::Value::as_array)
                     .map(|list| list.len())
                     .unwrap_or(0);
@@ -373,7 +373,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                     outcome.mailed,
                     skip,
                     short(&format!(
-                        "crowns={crowns} reads={} mailed={}{}",
+                        "teams={teams} reads={} mailed={}{}",
                         outcome.reads, outcome.mailed, extra
                     )),
                 )
@@ -381,7 +381,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         };
         crate::tick_ledger::emit_tick(
             &journal,
-            "king_settle",
+            "lead_settle",
             crate::tick_ledger::SCHED_DAEMON,
             settle_acted,
             settle_skip,

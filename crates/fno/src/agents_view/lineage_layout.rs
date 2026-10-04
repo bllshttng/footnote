@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 /// Rendering cap on lineage depth: a pathological chain must not push
-/// rows off-screen (same bounded-steps posture `crown_indent` held).
+/// rows off-screen (same bounded-steps posture `team_indent` held).
 pub const MAX_LINEAGE_DEPTH: usize = 8;
 
 /// Join rows into a lineage forest and lay it out for rendering.

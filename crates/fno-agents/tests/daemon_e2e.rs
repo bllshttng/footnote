@@ -1064,7 +1064,7 @@ fn daemon_on_sandbox_home_runs_no_fleet_arm() {
     // The leak shape this guards: a daemon on a throwaway home must not run
     // ANY fleet arm. The active-backlog supervisor would work the operator's
     // board from a tempdir and pin ab_live true forever; every tick arm
-    // (retirement sweep, crown ledger, machine watch, question pages, ...)
+    // (retirement sweep, team ledger, machine watch, question pages, ...)
     // resolves its targets from the real cwd, real graph, mux, ps and fno
     // porcelain, so it acts on the shared fleet from a throwaway home. One
     // fleet_scope row names the scope; zero arm rows say the supervisor never

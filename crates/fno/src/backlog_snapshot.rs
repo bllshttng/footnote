@@ -98,7 +98,7 @@ struct Receipt {
 
 fn render_request(request: &Request) -> Result<Receipt, String> {
     // Leads are read once at render time from the agent registry and
-    // stamped: the page header says when the crowns were read, and a crown
+    // stamped: the page header says when the leads were read, and a lead
     // change alone does not re-render the page. A public render drops the
     // roster here: inputs_from_rows rebuilds the inputs without one, and
     // the payload allowlist strips `leads_at`.

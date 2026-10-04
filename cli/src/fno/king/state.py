@@ -374,7 +374,7 @@ def reign_state(
     *,
     state_root: Optional[Path] = None,
 ) -> ReignState:
-    """Ask the Rust reign reader (``fno-agents reign-state``) who reigns;
+    """Ask the Rust reign reader (``fno-agents lead-state``) who reigns;
     Python never derives its own answer. Failures answer unknown, named.
     """
     import subprocess
@@ -399,7 +399,7 @@ def reign_state(
             "fno-agents binary not found: the reign reader lives in Rust. "
             "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
         )
-    argv = [str(binary), "reign-state", "--root", str(root)]
+    argv = [str(binary), "lead-state", "--root", str(root)]
     # Alias map resolves from the checkout, not the space dir (no config.toml
     # there); without this a repo-declared short_name misses its own king.
     argv += ["--cwd", str(Path.cwd())]

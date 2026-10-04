@@ -139,11 +139,11 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
              {open} open children and the cap is {cap} (config backlog.epic_max_open_children). \
              An epic stays small enough to finish, so new work starts a new epic. Next: \
              fno backlog idea \"EPIC: <theme>\" --type epic --difficulty <low|medium|high>, \
-             then point this write at the new epic id. If a king leads '{epic}', it adds the \
+             then point this write at the new epic id. If a lead leads '{epic}', it adds the \
              new epic to its own team: fno agents org promote <its handle> --scope <each epic \
              it \
-             holds> --scope '<new-epic-id>'. That works for an epic the king's own session \
-             created. Any other epic needs an attended shell or a crown that contains both."
+             holds> --scope '<new-epic-id>'. That works for an epic the lead's own session \
+             created. Any other epic needs an attended shell or a team that contains both."
         ));
     }
     Ok(())

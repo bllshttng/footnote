@@ -1,15 +1,15 @@
 //! The lineage paint families: the sideline nests a CHILD under its
 //! spawner, keeps subtrees together across sorts and densities, and roots
 //! a child whose parent row does not render. Shared fixtures
-//! (`crowned_row`, `rendered_depth`, ...) resolve through the parent
+//! (`teamed_row`, `rendered_depth`, ...) resolve through the parent
 //! tests module.
 
 use super::*;
 
-/// A crowned_row carrying a lineage edge: `parent` names another row's
+/// A teamed_row carrying a lineage edge: `parent` names another row's
 /// harness_session_id (None = a root). The row's own id is "sid-<name>".
 fn lineage_row(name: &str, pane: u64, parent: Option<&str>) -> AgentRow {
-    let mut r = crowned_row(name, pane, None, None);
+    let mut r = teamed_row(name, pane, None, None);
     r.harness_session_id = Some(format!("sid-{name}"));
     r.spawned_by_session = parent.map(str::to_string);
     // A named parent in these fixtures is a CHILD edge: that is the edge
@@ -54,52 +54,52 @@ fn extended_table_preserves_lineage_depth_in_rendered_agent_names() {
 #[test]
 fn lineage_child_sorts_beneath_its_parent_within_squad() {
     let v = view_with_agents(vec![
-        lineage_row("worker-a", 2, Some("sid-king")),
-        lineage_row("king", 3, None),
-        lineage_row("worker-b", 4, Some("sid-king")),
+        lineage_row("worker-a", 2, Some("sid-lead")),
+        lineage_row("lead", 3, None),
+        lineage_row("worker-b", 4, Some("sid-lead")),
     ]);
     // Pre-order: the parent first, its children beneath it keeping input
     // order among siblings. Authority rank (crown_level) no longer moves a
     // row; lineage does.
-    assert_eq!(agent_order(&v), vec!["king", "worker-a", "worker-b"]);
+    assert_eq!(agent_order(&v), vec!["lead", "worker-a", "worker-b"]);
 }
 
 #[test]
 fn lineage_grandchild_renders_between_parent_and_later_sibling() {
     let v = view_with_agents(vec![
-        lineage_row("king", 2, None),
-        lineage_row("child-a", 3, Some("sid-king")),
-        lineage_row("child-b", 4, Some("sid-king")),
+        lineage_row("lead", 2, None),
+        lineage_row("child-a", 3, Some("sid-lead")),
+        lineage_row("child-b", 4, Some("sid-lead")),
         lineage_row("grandchild", 5, Some("sid-child-a")),
     ]);
     // Pre-order nests the grandchild under ITS parent, ahead of the
     // parent's later sibling.
     assert_eq!(
         agent_order(&v),
-        vec!["king", "child-a", "grandchild", "child-b"]
+        vec!["lead", "child-a", "grandchild", "child-b"]
     );
 }
 
 #[test]
 fn lineage_indent_is_depth_within_squad() {
     let v = view_with_agents(vec![
-        lineage_row("king", 2, None),
-        lineage_row("dir", 3, Some("sid-king")),
+        lineage_row("lead", 2, None),
+        lineage_row("dir", 3, Some("sid-lead")),
         lineage_row("ic", 4, Some("sid-dir")),
     ]);
     let steps = |name: &str| rendered_depth(&v, name);
-    assert_eq!(steps("king"), 0);
+    assert_eq!(steps("lead"), 0);
     assert_eq!(steps("dir"), 1);
     assert_eq!(steps("ic"), 2);
 
     // A parent and a stranger leaf: the leaf is a ROOT (absent parent),
     // never nested under a row it has no edge to.
     let v2 = view_with_agents(vec![
-        lineage_row("king", 2, None),
+        lineage_row("lead", 2, None),
         lineage_row("stranger", 3, None),
     ]);
     let steps2 = |name: &str| rendered_depth(&v2, name);
-    assert_eq!(steps2("king"), 0);
+    assert_eq!(steps2("lead"), 0);
     assert_eq!(steps2("stranger"), 0);
 }
 

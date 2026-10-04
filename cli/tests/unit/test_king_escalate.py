@@ -41,7 +41,7 @@ def _fake_render(
     contract where the fold tests depend on it: the marker+key leads, and a
     session in SCOPES scopes both the marker and the needle key."""
     crown_scope = SCOPES.get(session_id or "")
-    marker = f"king-escalation:{crown_scope}" if crown_scope else "king-escalation"
+    marker = f"lead-escalation:{crown_scope}" if crown_scope else "lead-escalation"
     return {
         "ok": True,
         "question": (
@@ -119,7 +119,7 @@ def test_one_stalled_board_sends_one_task_payload(
     assert second_id == first_id
     assert len(captured) == 2
     assert captured[0]["key"] == captured[1]["key"] == dedupe_key(sorted(STALLED))
-    assert captured[0]["lane"] == "king-escalation"
+    assert captured[0]["lane"] == "lead-escalation"
     assert captured[0]["empty"] is False
     # The rendered question text flows through as the task text.
     assert captured[0]["text"] == _fake_render(
@@ -331,7 +331,7 @@ def test_two_reigning_kings_send_distinct_scoped_lanes(
     _escalate_as(tmp_path, "king-b-session", ["unheld_progress:x-9"])
 
     lanes = [p["lane"] for p in captured]
-    assert lanes == ["king-escalation:fno", "king-escalation:reaper"]
+    assert lanes == ["lead-escalation:fno", "lead-escalation:reaper"]
 
 
 def test_a_scopeless_caller_stays_on_the_shared_marker(
@@ -342,7 +342,7 @@ def test_a_scopeless_caller_stays_on_the_shared_marker(
         monkeypatch, answer={"outcome": "asked", "id": "ft-shared00"}
     )
     _escalate_as(tmp_path, "k-test", STALLED)
-    assert captured[0]["lane"] == "king-escalation"
+    assert captured[0]["lane"] == "lead-escalation"
 
 
 # --- the reign verdict rides the renderer (x-4d4f) ------------------------------

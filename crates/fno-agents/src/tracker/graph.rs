@@ -20,7 +20,7 @@ pub struct GraphTracker {
 impl GraphTracker {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::with_path(crate::king_board::scope::graph_json_path(&cwd))
+        Self::with_path(crate::org_board::scope::graph_json_path(&cwd))
     }
 
     pub fn with_path(path: PathBuf) -> Self {

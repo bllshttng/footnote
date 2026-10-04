@@ -38,9 +38,9 @@ pub(crate) fn allow_output(
 }
 
 pub(crate) fn paused_output(driver: &str, message: &str) -> String {
-    if driver == "king" {
+    if driver == "lead" {
         return serde_json::json!({
-            "driver": "king",
+            "driver": "lead",
             "decision": "allow",
             "termination_reason": null,
             "reason": message,

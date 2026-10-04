@@ -2387,7 +2387,7 @@ mod tests {
             "parked-w",
             "/tmp/x",
             message,
-            "king-g6",
+            "lead-g6",
             home,
             Some(claims_root.as_path()),
             move |_| roster_state.map(|s| s.to_string()),
@@ -2433,7 +2433,7 @@ mod tests {
         assert_eq!(revives.get(), 0);
         let sent = injects.borrow();
         assert_eq!(sent.len(), 1);
-        assert!(sent[0].contains("<cross-session-message from-name=\"king-g6\">"));
+        assert!(sent[0].contains("<cross-session-message from-name=\"lead-g6\">"));
         assert!(sent[0].contains("rebase your PR"));
         let events = parked_events(&home);
         assert!(events.contains("\"agent_resumed\""));
@@ -2577,7 +2577,7 @@ mod tests {
             "parked-w",
             "/tmp/x",
             Some("go"),
-            "king-g6",
+            "lead-g6",
             &home,
             None,
             |_| Some("done".to_string()),
@@ -2602,7 +2602,7 @@ mod tests {
                 "parked-w",
                 "/tmp/x",
                 Some("go"),
-                "king-g6",
+                "lead-g6",
                 &home,
                 None,
                 |_| Some("done".to_string()),

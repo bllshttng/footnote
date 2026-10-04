@@ -1,4 +1,4 @@
-//! main's CI verdict: the workflow-run reduction the king check-in renders,
+//! main's CI verdict: the workflow-run reduction the lead check-in renders,
 //! the same token the merge gate (`authorized_merge`) reads behind a short
 //! TTL row cache, and the red-run shape accessor both share.
 
@@ -153,7 +153,7 @@ pub(crate) fn main_ci_render(v: Option<&Value>) -> String {
                 None => field("verdict").to_string(),
             }
         }
-        other => crate::king_checkin::dash(other),
+        other => crate::lead_checkin::dash(other),
     }
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn r_main_ci() -> Result<Value, String> {
     main_ci_reading(&cwd)
 }
 
-/// The live reading for any cwd: the king check-in renders it per beat, and
+/// The live reading for any cwd: the lead check-in renders it per beat, and
 /// the merge gate reads it behind the TTL cache below.
 pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
     // Judge at main's current head: the verdict reduces only rows whose head
@@ -213,7 +213,7 @@ pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
         .map_err(|error| {
             format!(
                 "gh api failed: {}",
-                crate::king_checkin::gh_error_cause(&error)
+                crate::lead_checkin::gh_error_cause(&error)
             )
         })?;
     let head_sha = serde_json::from_str::<Value>(&head_raw)
@@ -233,7 +233,7 @@ pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
         let raw = crate::pr_push::gh_api("gh", &cwd, query, &[]).map_err(|error| {
             format!(
                 "gh api failed: {}",
-                crate::king_checkin::gh_error_cause(&error)
+                crate::lead_checkin::gh_error_cause(&error)
             )
         })?;
         let runs = serde_json::from_str::<Value>(&raw)

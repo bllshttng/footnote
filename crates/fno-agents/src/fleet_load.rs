@@ -5,7 +5,7 @@
 //! rows written by the Rust machine_watch arm, machine_watch tick rows (a hot
 //! row says `crosses band` and load_15m can read `unavailable`), flat
 //! `spawn_gate_refused` rows
-//! (`kind`, top-level `ts`), `reign_checkin` rows whose `data.live_workers`
+//! (`kind`, top-level `ts`), `lead_checkin` rows whose `data.live_workers`
 //! is numeric (34 of 138 stored rows carry it), and the incremental transcript
 //! fold in [crate::transcript_activity].
 //!
@@ -98,7 +98,7 @@ fn percentile_25(mut values: Vec<f64>) -> Option<f64> {
 const EVENT_TYPES: &[&str] = &[
     "control_plane_tick",
     "spawn_gate_refused",
-    "reign_checkin",
+    "lead_checkin",
     "machine_sample",
 ];
 
@@ -156,7 +156,7 @@ struct SamplePoint {
     ts_ms: i64,
     top_rss: Vec<Value>,
     sessions: Vec<Value>,
-    kings: Option<f64>,
+    leads: Option<f64>,
     workers: Option<f64>,
     usable: bool,
 }
@@ -224,7 +224,7 @@ fn read_event_line(line: &str, pass: &mut EventPass) {
                 value: 1.0,
             });
         }
-        "reign_checkin" => {
+        "lead_checkin" => {
             if let Some(live) = data.get("live_workers").and_then(|v| v.as_f64()) {
                 pass.live_rows.note(&ts_string);
                 pass.live.push(Point {
@@ -248,7 +248,7 @@ fn read_event_line(line: &str, pass: &mut EventPass) {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default(),
-                kings: data.get("kings").and_then(|v| v.as_f64()),
+                leads: data.get("leads").and_then(|v| v.as_f64()),
                 workers: data.get("workers").and_then(|v| v.as_f64()),
                 usable: data.get("sessions").and_then(|v| v.as_array()).is_some(),
             });
@@ -307,10 +307,10 @@ pub struct StageRow {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FleetShape {
-    pub kings_median: Option<f64>,
+    pub leads_median: Option<f64>,
     pub workers_median: Option<f64>,
-    pub king_ratio: Option<f64>,
-    pub king_ratio_review: Option<bool>,
+    pub lead_ratio: Option<f64>,
+    pub lead_ratio_review: Option<bool>,
     pub merges: Option<u64>,
     pub worker_seats_mean: Option<f64>,
     pub merges_per_worker_seat_day: Option<f64>,
@@ -704,16 +704,16 @@ fn summarize_samples(
             cpu_pct_median: median_f64(&mut cpu).unwrap_or(0.0),
         });
     }
-    let mut kings: Vec<f64> = samples.iter().filter_map(|s| s.kings).collect();
+    let mut leads: Vec<f64> = samples.iter().filter_map(|s| s.leads).collect();
     let mut workers: Vec<f64> = samples.iter().filter_map(|s| s.workers).collect();
-    let kings_median = median_f64(&mut kings);
+    let leads_median = median_f64(&mut leads);
     let workers_median = median_f64(&mut workers);
-    report.shape.kings_median = kings_median;
+    report.shape.leads_median = leads_median;
     report.shape.workers_median = workers_median;
-    report.shape.king_ratio = kings_median
+    report.shape.lead_ratio = leads_median
         .zip(workers_median)
         .and_then(|(k, w)| (w > 0.0).then_some(k / w));
-    report.shape.king_ratio_review = kings_median.zip(workers_median).map(|(k, w)| k * 4.0 > w);
+    report.shape.lead_ratio_review = leads_median.zip(workers_median).map(|(k, w)| k * 4.0 > w);
     report.shape.worker_seats_mean = if workers.is_empty() {
         None
     } else {
@@ -1036,7 +1036,7 @@ pub fn run_fleet_cli(args: &[String]) -> i32 {
     let report = analyze(&inputs);
     if html {
         let path = out.unwrap_or_else(|| crate::state_layout::place(&state_dir, "fleet.html"));
-        let reload_s = crate::king_ledger::reload_secs(crate::agents_config::config_lookup(
+        let reload_s = crate::rundown::reload_secs(crate::agents_config::config_lookup(
             &cwd,
             &["backlog", "page_reload_s"],
         ));
@@ -1234,12 +1234,12 @@ pub(crate) fn render_text(report: &FleetReport) -> String {
             ));
         }
     }
-    match (report.shape.king_ratio, report.shape.worker_seats_mean) {
+    match (report.shape.lead_ratio, report.shape.worker_seats_mean) {
         (Some(ratio), Some(seats)) => out.push_str(&format!(
-            "fleet shape: {:.2} kings per worker seat; {:.1} seats; review={}\n",
+            "fleet shape: {:.2} leads per worker seat; {:.1} seats; review={}\n",
             ratio,
             seats,
-            report.shape.king_ratio_review.unwrap_or(false)
+            report.shape.lead_ratio_review.unwrap_or(false)
         )),
         _ => out.push_str(&format!("fleet shape: {}\n", report.shape.reason)),
     }
@@ -1458,7 +1458,7 @@ mod tests {
         ));
         // One live point, one memory point.
         journal.push_str(&format!(
-            "{{\"ts\":\"{}\",\"type\":\"reign_checkin\",\"source\":\"loop\",\"data\":{{\"live_workers\":7}}}}\n",
+            "{{\"ts\":\"{}\",\"type\":\"lead_checkin\",\"source\":\"loop\",\"data\":{{\"live_workers\":7}}}}\n",
             stamp(0, 45)
         ));
         journal.push_str(&format!(

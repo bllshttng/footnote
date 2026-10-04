@@ -626,9 +626,21 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
             return 2;
         }
     };
-    // A `node_seed` field routes the payload to the node-seed decision
-    // instead of the axes plan (law d-fe66560a: a field on an existing
-    // action, never a new action).
+    // A `dispatch_credit` field answers who answers for a node dispatch:
+    // the covering crown owner plus, when the crown row carries a live
+    // session, the lead to mail at launch (same field-on-a-verb shape as
+    // node_seed).
+    if let Some(ask) = parsed.get("dispatch_credit") {
+        println!("{}", crate::dispatch_credit::covering_crown(ask));
+        return 0;
+    }
+    // A `launch_credit_mail` ask delivers the one launch notice to the
+    // covering lead. Best-effort: the answer names a delivery fault, and
+    // the caller never fails a launch over it.
+    if let Some(ask) = parsed.get("launch_credit_mail") {
+        println!("{}", crate::dispatch_credit::launch_credit_mail(ask));
+        return 0;
+    }
     if let Some(seed) = parsed.get("node_seed") {
         println!("{}", crate::node_seed::decide(seed));
         return 0;
