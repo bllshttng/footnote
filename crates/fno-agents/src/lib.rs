@@ -215,7 +215,6 @@ pub mod lead_checkin;
 pub mod lead_checkin_blueprint;
 pub mod lead_checkin_lineup;
 pub mod lead_checkin_machine;
-pub mod lead_checkin_watch_projection;
 pub mod lead_escalation;
 pub mod lead_eval;
 pub mod lead_goal;
