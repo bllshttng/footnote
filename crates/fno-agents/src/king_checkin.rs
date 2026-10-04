@@ -212,11 +212,17 @@ pub(crate) fn crown_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<Path
 
 pub(crate) fn sanitize_scope_key(scope: &str) -> String {
     let mut out = String::new();
+    let mut in_run = false;
     for ch in scope.trim().chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
             out.push(ch);
-        } else {
+            in_run = false;
+        } else if !in_run {
+            // One dash per unsafe RUN, the Python writer's
+            // re.sub(r"[^A-Za-z0-9._-]+", "-") shape, so reader keys match
+            // the docs the verb wrote.
             out.push('-');
+            in_run = true;
         }
     }
     out.trim_matches('-').to_string()
@@ -2811,6 +2817,7 @@ mod tests {
         assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
+        assert_eq!(sanitize_scope_key("a, b"), "a-b");
     }
 
     /// A repo fixture whose escalations dir resolves deterministically through

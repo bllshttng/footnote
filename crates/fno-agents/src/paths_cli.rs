@@ -1,13 +1,18 @@
 //! `fno config paths emit-shell`: generate scripts/lib/paths.sh natively.
 //!
-//! One verb per PR (law d-450caaeb): this file serves `emit-shell`; the
-//! other three paths verbs still answer in Python (cli/src/fno/paths_cli.py)
-//! until their child nodes port. The defaults emitter reproduces the
+//! One verb per PR (law d-450caaeb): this file serves `emit-shell` and
+//! `handoff`; shell-stub and verify still answer in Python
+//! (cli/src/fno/paths_cli.py) until their child nodes port. The defaults
+//! emitter reproduces the
 //! checked-in scripts/lib/paths.sh byte for byte; the include_bytes! parity
 //! test fails the build the moment the two drift.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::finalize::resolve_handoffs_dir;
+use crate::identity::canonical_handle;
+use crate::king_checkin::sanitize_scope_key;
 
 /// The parity fixture: the checked-in stub this emitter must reproduce.
 const FIXTURE: &[u8] = include_bytes!(concat!(
@@ -257,12 +262,127 @@ fn write_stub(out: &std::path::Path) -> i32 {
     0
 }
 
+/// Today's local date as YYYYMMDD, the Python `datetime.now().strftime`
+/// filename prefix.
+fn local_date() -> String {
+    chrono::Local::now().format("%Y%m%d").to_string()
+}
+
+/// `handoff [--session-id S | --slug S | --scope S] [--name-only]`: print the
+/// save path for a canon handoff doc (Python `paths_cli.handoff` parity). The
+/// filename key is the session's canonical handle (first-8) unless --slug
+/// overrides. --scope keys the doc on the crown instead -- a crown outlives
+/// its sessions -- and returns the newest existing doc for that scope, so a
+/// successor session resolves its predecessor's doc; today's dated name when
+/// none exists yet. Every argv refusal exits 2, the typer BadParameter code.
+fn handoff_out(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<String, String> {
+    let mut session_id: Option<String> = None;
+    let mut slug: Option<String> = None;
+    let mut scope: Option<String> = None;
+    let mut name_only = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--session-id" => match it.next() {
+                Some(v) => session_id = Some(v.clone()),
+                None => return Err("--session-id needs a value".into()),
+            },
+            "--slug" => match it.next() {
+                Some(v) => slug = Some(v.clone()),
+                None => return Err("--slug needs a value".into()),
+            },
+            "--scope" => match it.next() {
+                Some(v) => scope = Some(v.clone()),
+                None => return Err("--scope needs a value".into()),
+            },
+            "--name-only" => name_only = true,
+            "--help" | "-h" => {
+                return Ok(
+                    "usage: fno config paths handoff [--session-id S | --slug S | --scope S] [--name-only]"
+                        .into(),
+                )
+            }
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+    }
+    let directory = resolve_handoffs_dir(None, None, cwd, home);
+    if let Some(scope) = scope {
+        if session_id.is_some() || slug.is_some() {
+            return Err("--scope cannot be combined with --session-id/--slug".into());
+        }
+        let key = format!("crown-{}", sanitize_scope_key(&scope));
+        if key == "crown-" {
+            return Err("a crown scope is required (--scope)".into());
+        }
+        let suffix = format!("-{key}.md");
+        let mut best: Option<(std::time::SystemTime, String)> = None;
+        if let Ok(rd) = std::fs::read_dir(&directory) {
+            for entry in rd.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if !name.ends_with(&suffix) || !entry.path().is_file() {
+                    continue;
+                }
+                // A concurrent refresh can unlink between read_dir and stat;
+                // a vanished candidate sorts oldest and the writer recreates
+                // the file anyway (Python `_mtime` parity).
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+                    best = Some((mtime, name.to_string()));
+                }
+            }
+        }
+        let filename = best
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| format!("{}-{key}.md", local_date()));
+        return Ok(render_handoff(&directory, &filename, name_only));
+    }
+    let Some(session_id) = session_id else {
+        return Err("a session id is required (--session-id), or a crown scope (--scope)".into());
+    };
+    let key = slug.unwrap_or_else(|| canonical_handle(session_id.trim()));
+    let filename = format!("{}-{key}.md", local_date());
+    Ok(render_handoff(&directory, &filename, name_only))
+}
+
+/// The printed answer: just the filename under --name-only, else the full path.
+fn render_handoff(directory: &Path, filename: &str, name_only: bool) -> String {
+    if name_only {
+        filename.to_string()
+    } else {
+        directory.join(filename).display().to_string()
+    }
+}
+
+fn run_handoff(args: &[String], cwd: &Path, home: Option<&Path>) -> i32 {
+    match handoff_out(args, cwd, home) {
+        Ok(line) => {
+            println!("{line}");
+            0
+        }
+        Err(msg) => {
+            eprintln!("fno config paths handoff: {msg}");
+            2
+        }
+    }
+}
+
 /// Worker lane entry for `--paths-exec <verb> [args...]`.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("emit-shell") => run_emit_shell(&args[1..]),
+        Some("handoff") => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            run_handoff(&args[1..], &cwd, home.as_deref())
+        }
         _ => {
-            eprintln!("usage: fno-agents-worker --paths-exec emit-shell [--output P]");
+            eprintln!("usage: fno-agents-worker --paths-exec emit-shell|handoff [args...]");
             2
         }
     }
@@ -309,5 +429,196 @@ mod tests {
     #[test]
     fn run_refuses_unknown_verb() {
         assert_eq!(run(&["bogus".to_string()]), 2);
+    }
+
+    // ── handoff ─────────────────────────────────────────────────────────────
+
+    /// A uuid whose first-8 handle is unambiguous and not equal to its last-8.
+    const SID: &str = "c35abbca-bd2d-4407-8365-cf468baa7eea";
+
+    /// An isolated cwd/home pair; with no settings in either, the handoffs
+    /// dir resolves to `<home>/.fno/handoffs/<cwd-basename>` (the resolution
+    /// itself is pinned by finalize.rs's resolve_handoffs_dir tests).
+    fn handoff_fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fno-paths-ho-{tag}-{}", std::process::id()));
+        let cwd = dir.join("repo");
+        let home = dir.join("home");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        (cwd, home)
+    }
+
+    fn handoff_dir(cwd: &Path, home: &Path) -> PathBuf {
+        resolve_handoffs_dir(None, None, cwd, Some(home))
+    }
+
+    fn stamp_mtime(p: &Path, secs: u64) {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[test]
+    fn handoff_name_only_uses_canonical_handle_first_eight() {
+        let (cwd, home) = handoff_fixture("first8");
+        let out = handoff_out(
+            &["--session-id".into(), SID.into(), "--name-only".into()],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        // Guards the both-ends truncation hazard: the key must be the head
+        // (c35abbca), never the tail (8baa7eea).
+        let (date, rest) = out.split_once('-').unwrap();
+        assert!(
+            date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()),
+            "{out}"
+        );
+        assert_eq!(rest, "c35abbca.md");
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_full_path_joins_the_handoffs_dir() {
+        let (cwd, home) = handoff_fixture("fullpath");
+        let dir = handoff_dir(&cwd, &home);
+        let full = handoff_out(&["--session-id".into(), SID.into()], &cwd, Some(&home)).unwrap();
+        let name = handoff_out(
+            &["--session-id".into(), SID.into(), "--name-only".into()],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&full).parent().unwrap(), dir);
+        assert_eq!(
+            Path::new(&full).file_name().unwrap().to_str().unwrap(),
+            name
+        );
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_slug_overrides_handle_key() {
+        let (cwd, home) = handoff_fixture("slug");
+        let out = handoff_out(
+            &[
+                "--session-id".into(),
+                SID.into(),
+                "--slug".into(),
+                "my-feature".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with("-my-feature.md"), "{out}");
+        assert!(!out.contains("c35abbca"), "{out}");
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_argv_validation_refusals() {
+        let (cwd, home) = handoff_fixture("refuse");
+        // The hidden --session alias was removed to pay the flag-surface
+        // ratchet (operator ruling 2026-09-12); --session-id is the one
+        // spelling.
+        assert!(handoff_out(
+            &["--session".into(), SID.into(), "--name-only".into()],
+            &cwd,
+            Some(&home)
+        )
+        .is_err());
+        let scope = ["--scope".to_string(), "x-aaaa1111".into()];
+        let mut v = scope.to_vec();
+        v.extend(["--session-id".into(), SID.into()]);
+        assert!(handoff_out(&v, &cwd, Some(&home)).is_err());
+        let mut v = scope.to_vec();
+        v.extend(["--slug".into(), "s".into()]);
+        assert!(handoff_out(&v, &cwd, Some(&home)).is_err());
+        assert!(handoff_out(&[], &cwd, Some(&home)).is_err());
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_scope_mints_a_dated_crown_keyed_name() {
+        let (cwd, home) = handoff_fixture("scope-mint");
+        let scope = "x-1234abcd";
+        let out = handoff_out(
+            &["--scope".into(), scope.into(), "--name-only".into()],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        let (date, rest) = out.split_once('-').unwrap();
+        assert!(
+            date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()),
+            "{out}"
+        );
+        assert_eq!(rest, format!("crown-{scope}.md"));
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_scope_returns_the_newest_existing_doc() {
+        let (cwd, home) = handoff_fixture("scope-newest");
+        let scope = "x-2222bbbb";
+        let dir = handoff_dir(&cwd, &home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join(format!("20260901-crown-{scope}.md"));
+        let new = dir.join(format!("20260909-crown-{scope}.md"));
+        std::fs::write(&old, "predecessor").unwrap();
+        std::fs::write(&new, "successor").unwrap();
+        stamp_mtime(&old, 1_000_000);
+        stamp_mtime(&new, 2_000_000);
+        let full = handoff_out(&["--scope".into(), scope.into()], &cwd, Some(&home)).unwrap();
+        assert_eq!(Path::new(&full), new);
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_scope_newest_ignores_other_scopes_and_session_keys() {
+        let (cwd, home) = handoff_fixture("scope-filter");
+        let scope = "x-3333cccc";
+        let dir = handoff_dir(&cwd, &home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("20260909-crown-x-9999zzzz.md");
+        let session_key = dir.join("20260909-c35abbca.md");
+        let mine = dir.join(format!("20260901-crown-{scope}.md"));
+        for p in [&other, &session_key, &mine] {
+            std::fs::write(p, "x").unwrap();
+        }
+        stamp_mtime(&other, 9_999_999);
+        stamp_mtime(&session_key, 9_999_999);
+        stamp_mtime(&mine, 1_000_000);
+        let full = handoff_out(&["--scope".into(), scope.into()], &cwd, Some(&home)).unwrap();
+        assert_eq!(Path::new(&full), mine);
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
+    }
+
+    #[test]
+    fn handoff_scope_sanitizes_runs_into_one_dash() {
+        // A portfolio crown stores its scope comma-joined; commas and spaces
+        // are not filename-safe, so each unsafe RUN collapses into one key
+        // separator (Python re.sub(r"[^A-Za-z0-9._-]+", "-") parity).
+        let (cwd, home) = handoff_fixture("scope-sanitize");
+        let out = handoff_out(
+            &[
+                "--scope".into(),
+                "x-aaaa1111, x-bbbb2222".into(),
+                "--name-only".into(),
+            ],
+            &cwd,
+            Some(&home),
+        )
+        .unwrap();
+        assert!(out.ends_with(".md") && out.contains("-crown-x-"), "{out}");
+        assert!(!out.contains(',') && !out.contains(' '), "{out}");
+        assert!(!out.contains("--"), "{out}");
+        let _ = std::fs::remove_dir_all(cwd.parent().unwrap());
     }
 }
