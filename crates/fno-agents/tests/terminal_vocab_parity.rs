@@ -26,6 +26,7 @@ fn run_rust() -> (i32, String) {
     let bin = env!("CARGO_BIN_EXE_fno-agents");
     let out = Command::new(bin)
         .arg("terminals")
+        .envs(fno_agents::test_run::self_owner_env())
         .output()
         .expect("run fno-agents terminals");
     if out.status.code() != Some(0) {
