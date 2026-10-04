@@ -4010,14 +4010,8 @@ impl View {
     /// button and keeps the gesture.
     fn density_button_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
         let tw = panel_w.saturating_sub(1); // last column is the divider
-        let bell = bell::button_range(self, tw);
-        let end = if bell.is_empty() {
-            tw
-        } else {
-            bell.start.saturating_sub(1)
-        };
-        let start = end.checked_sub(DENSITY_BTN_W)?;
-        (tw >= DENSITY_BTN_W + 6 && start >= bell::top_row_words_end(self)).then_some(start..end)
+        let start = tw.checked_sub(DENSITY_BTN_W)?;
+        (tw >= DENSITY_BTN_W + 6).then_some(start..tw)
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -5828,6 +5822,11 @@ impl View {
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
         // event handler already sounded); painted by row_stamp.
         paint_notice_overlay(cells, cols, self.notice_overlay(cols));
+        // The bell keeps the rightmost seat of the bar (the operator's
+        // 2026-10-04 move out of the sideline strip): painted after the
+        // notice so a transient notice yields, and its hit routes first in
+        // chrome_hit for the same reason.
+        bell::paint_button(self, cells, cols);
     }
 
     /// The hosting-tab context for an agent row, resolved inside-out (

@@ -662,7 +662,7 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     let lead = frame.cells[2 * cols]; // outer row 2, col 0
     assert_ne!(
         lead.c, '▎',
-        "the ▎ gutter is retired; the band is the signal"
+        "the list layout keeps no ▎ gutter; the card layout owns the bar"
     );
     assert_eq!(
         lead.bg,

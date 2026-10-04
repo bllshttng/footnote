@@ -18,6 +18,9 @@ use super::*;
 /// the solver's answer beside the paint use `worker_column_rects`, the same
 /// constraints the paint feeds: one geometry authority, and it is the solver.
 const SIDELINE_RIGHT_SLOT_W: u16 = 6;
+/// The card edge bar: leads every card line, accent-toned on the chosen
+/// card, theme-dim on a resting one.
+const CARD_EDGE_BAR: char = '\u{258e}';
 const CARD_COLUMNS: [Constraint; 5] = [
     Constraint::Length(5),
     Constraint::Min(22),
@@ -234,22 +237,36 @@ impl View {
     }
 
     /// The strip row's words with their column spans, shared by the paint
-    /// and the click map so the two cannot drift (R15).
+    /// and the click map so the two cannot drift (R15). The toggle
+    /// right-aligns in the strip (the operator's 2026-10-04 ask, after the
+    /// bell moved to the tab bar): it ends before the density button's seat
+    /// when one is reserved.
     pub(super) fn top_row_spans(&self) -> Vec<(usize, usize, crate::view_store::SidelineView)> {
+        let words = self.top_row_words();
+        let gap = 3usize;
+        let total: usize = words.iter().map(|(w, _)| w.chars().count()).sum::<usize>()
+            + gap * words.len().saturating_sub(1);
+        let limit = self.sideline_paint_w().saturating_sub(1);
+        let reserved = self
+            .density_button_range(self.panel_w() as usize)
+            .map_or(limit, |r| r.start.min(limit));
+        let mut c = reserved.saturating_sub(total + 1).max(2);
         let mut out = Vec::new();
-        let mut c = 2usize;
-        for (word, view) in self.top_row_words() {
+        for (word, view) in words {
             let w = word.chars().count();
             out.push((c, w, view));
-            c += w + 3;
+            c += w + gap;
         }
         out
     }
 
-    /// Paint the strip row at the slice's row 0: `Agents  Messages`, the
-    /// current view's word bold.
+    /// Paint the strip row at the slice's row 0: `Agents  Messages`
+    /// right-aligned. The active word wears the brand accent with an
+    /// underline and the resting word sits muted, so the pair reads as tabs
+    /// (the operator's 2026-10-04 ruling) instead of bold-versus-plain.
     pub(super) fn paint_top_row(&self, cells: &mut [Cell], cols: usize, text_w: usize) {
         let limit = text_w.min(cols.saturating_sub(1));
+        let rest_fg = crate::theme::dim_fg(&self.theme);
         for ((start, _, view), (word, _)) in
             self.top_row_spans().into_iter().zip(self.top_row_words())
         {
@@ -261,13 +278,16 @@ impl View {
                 }
                 cells[col] = Cell {
                     c: ch,
-                    fg: Color::Default,
+                    fg: if active { self.theme.brand } else { rest_fg },
                     bg: Color::Default,
-                    flags: if active { cell_flags::BOLD } else { 0 },
+                    flags: if active {
+                        cell_flags::BOLD | cell_flags::UNDERLINE
+                    } else {
+                        0
+                    },
                 };
             }
         }
-        bell::paint_button(self, cells, limit, cols);
     }
 
     pub(super) fn draw_sideline(
@@ -437,19 +457,6 @@ impl View {
         // The strip row owns row 0 (R15), so its words go down after the
         // one blit that would otherwise erase them.
         self.paint_top_row(cells, cols, text_w);
-        let mut card_index = if card {
-            display[..off.min(display.len())]
-                .iter()
-                .filter(|row| matches!(row, DisplayRow::Agent(_)))
-                .count()
-        } else {
-            0
-        };
-        let mut card_tint = matches!(
-            display.get(off),
-            Some(DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..))
-        ) && card_index > 0
-            && (card_index - 1) % 2 == 1;
         // Per-row overlays the widget cannot express: the full-width rows
         // (bands, sublines, the idle fold, the footer, the empty state - see
         // the catch-all in `sideline_table_row`), the active-squad caret
@@ -467,10 +474,6 @@ impl View {
                 DisplayRow::Sel(row)
                     if row.tab.is_none() && row.squad == self.layout.active_squad
             );
-            if card && matches!(drow, DisplayRow::Agent(_)) {
-                card_tint = card_index % 2 == 1;
-                card_index += 1;
-            }
             let band_w = if r == 0 { btn_reserved } else { text_w };
             let legacy = match drow {
                 DisplayRow::Sel(row) => {
@@ -521,11 +524,26 @@ impl View {
                     header_band_text(&format!("{}{label}", view_caret(*view)), rollup, band_w),
                     header_band_flags(false),
                 )),
-                DisplayRow::CardDetail(a) => {
-                    Some((self.card_detail_text(a, now, text_w), cell_flags::DIM))
-                }
+                // Card lines 2 and 3 carry one leading space: the edge bar
+                // paints into it, so the bar never eats a text cell (line 1
+                // already leads with its mark column).
+                DisplayRow::CardDetail(a) => Some((
+                    format!(
+                        " {}",
+                        self.card_detail_text(a, now, text_w.saturating_sub(1))
+                    ),
+                    cell_flags::DIM,
+                )),
                 DisplayRow::CardMetrics(a) => Some((
-                    card_line::metrics(a, row_message_text(a).as_deref(), text_w),
+                    format!(
+                        " {}",
+                        card_line::metrics(
+                            a,
+                            now,
+                            row_message_text(a).as_deref(),
+                            text_w.saturating_sub(1),
+                        )
+                    ),
                     0,
                 )),
                 DisplayRow::Agent(a) if density == Density::Slim => {
@@ -564,11 +582,12 @@ impl View {
                 if matches!(drow, DisplayRow::CardDetail(..)) {
                     // Card line 2 on a light terminal: DIM washes the default
                     // fg toward a light background until it vanishes. The
-                    // palette's own dim gray (index 8) dims a dark scheme and
-                    // stays a readable gray on a light one - the fg follows
-                    // the terminal instead of fighting it.
+                    // theme's muted tone (the palette's own gray under the
+                    // inherit theme) is tested at 4.5:1 against the base in
+                    // both theme twins, so the line reads at rest.
+                    let dim = crate::theme::dim_fg(&self.theme);
                     for cell in &mut cells[r * cols..r * cols + text_w] {
-                        cell.fg = Color::Indexed(8);
+                        cell.fg = dim;
                         cell.flags &= !cell_flags::DIM;
                         cell.flags &= !cell_flags::BOLD;
                     }
@@ -581,17 +600,6 @@ impl View {
                             cell.fg = fg;
                         }
                     }
-                }
-            }
-            if card
-                && card_tint
-                && matches!(
-                    drow,
-                    DisplayRow::Agent(_) | DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)
-                )
-            {
-                for cell in &mut cells[r * cols..r * cols + text_w] {
-                    cell.bg = self.theme.sel;
                 }
             }
             if mark_caret && text_w >= 1 {
@@ -615,11 +623,26 @@ impl View {
                 && matches!(drow, DisplayRow::Agent(a) | DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a)
                     if a.pane_id == Some(self.layout.focus) && !a.exited);
             if card_chosen {
-                // The chosen card paints its color across BOTH lines, full
-                // width, hover included: the chosen color wins on hover.
+                // The chosen card fills all 3 lines, full width, hover
+                // included: the chosen fill wins on hover.
                 highlit = true;
             }
-            if highlit {
+            if highlit && card_chosen {
+                // The chosen card fills all 3 lines with the theme accent
+                // plus a left bar (the operator's 2026-10-04 sideline
+                // ruling): the fill wins on hover, and no lane accent rides
+                // over it. The bar paints after the fill so the fill's own
+                // bg backs it.
+                let (fg, bg, flags) = crate::theme::chosen_card_style(&self.theme);
+                for cell in &mut cells[r * cols..r * cols + text_w] {
+                    cell.bg = bg;
+                    cell.fg = fg;
+                    cell.flags = flags;
+                }
+                if text_w >= 1 && cells[r * cols].c != '*' {
+                    cells[r * cols].c = CARD_EDGE_BAR;
+                }
+            } else if highlit {
                 // One solid band across the full width of the row, gaps
                 // included: an explicit background and an explicit fg picked
                 // to contrast with it, never per-span inversion, so a span's
@@ -654,6 +677,16 @@ impl View {
             let row_stamp = self.row_stamp_for(drow);
             paint_row_stamp(cells, r, cols, text_w, row_stamp);
             if card {
+                if card_pair && !card_chosen && !highlit && text_w >= 1 && cells[r * cols].c != '*'
+                {
+                    // The edge bar brackets every resting card's 3 lines, so
+                    // adjacent cards read as separate blocks (the operator's
+                    // 2026-10-04 separation ask). The chosen card's bar came
+                    // with its fill, a highlight supersedes the bar, and a
+                    // recruit-marked line 1 keeps its star.
+                    cells[r * cols].c = CARD_EDGE_BAR;
+                    cells[r * cols].fg = crate::theme::dim_fg(&self.theme);
+                }
                 self.paint_card_identity(cells, r, cols, text_w, drow);
             }
         }
@@ -826,11 +859,10 @@ impl View {
                     Some(TabContext::Named(ctx)) => suffix.push_str(&format!(" \u{b7}{ctx}")),
                     Some(TabContext::Ordinal(ord)) => suffix.push_str(&format!(" \u{b7}{ord}")),
                     None => {
-                        if a.squad.is_none() {
-                            if let Some(base) = a.cwd_base.as_deref() {
-                                suffix.push_str(&format!(" ({base})"));
-                            }
-                        }
+                        // A squad-less row's cwd base is a per-node worktree
+                        // name - a node id, not a disambiguation - so it
+                        // prints nothing. Squad members keep the foreign-base
+                        // parenthetical further down.
                     }
                 }
                 if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
@@ -1052,11 +1084,16 @@ impl View {
             )
         };
         let spans = card_line::identity_spans(agent, text_w);
+        // On the chosen card the accent fill owns the line: the node and PR
+        // spans read in the fill's base tone (brand-on-brand text would
+        // vanish - the composed contrast test pins this at 3:1).
+        let (fill_fg, _, _) = crate::theme::chosen_card_style(&self.theme);
+        let on_chosen_fill = agent.pane_id == Some(self.layout.focus) && !agent.exited;
         if let (Some(node), Some(span)) = (agent.node.as_deref(), spans.node) {
             let node_start = span.start;
             for (cell, ch) in line[span].iter_mut().zip(node.chars()) {
                 cell.c = ch;
-                cell.fg = status_fg;
+                cell.fg = if on_chosen_fill { fill_fg } else { status_fg };
                 cell.flags = cell_flags::BOLD;
             }
             // The name yields before the node: an ellipsis marks the cut
@@ -1087,7 +1124,11 @@ impl View {
                 .zip(format!("#{}", agent.pr.unwrap()).chars())
             {
                 cell.c = ch;
-                cell.fg = self.theme.brand;
+                cell.fg = if on_chosen_fill {
+                    fill_fg
+                } else {
+                    self.theme.brand
+                };
                 cell.flags = 0;
             }
         }

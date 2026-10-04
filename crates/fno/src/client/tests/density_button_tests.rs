@@ -1,4 +1,5 @@
-//! Density-button behavior and spacing beside the notifications bell.
+//! Density-button behavior and spacing at the strip's right end; the bell
+//! now lives on the mux tab bar.
 
 use super::*;
 
@@ -39,18 +40,18 @@ fn density_button_preserves_the_top_header_rollup() {
         lines[0]
     );
     assert!(
-        lines[0].contains("🔔"),
-        "bell remains visible: {:?}",
+        lines[0].contains('\u{f0f3}'),
+        "bell glyph shows in the tab bar: {:?}",
         lines[0]
     );
 }
 
 #[test]
-fn density_button_glyph_sits_before_the_bell() {
+fn the_strip_presents_tabs_density_and_the_tab_bar_bell() {
     let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
     let pw = v.panel_w() as usize;
     let range = v.density_button_range(pw).unwrap();
-    let bell = bell::button_range(&v, pw.saturating_sub(1));
+    let bell = bell::button_range(&v);
     let frame = v.compose();
     let glyph_cell = &frame.cells[range.start];
     let pad_cell = &frame.cells[range.end - 1];
@@ -58,6 +59,41 @@ fn density_button_glyph_sits_before_the_bell() {
     assert_eq!(glyph_cell.flags, cell_flags::INVERSE, "glyph is clickable");
     assert_eq!(pad_cell.c, ' ', "plain pad before the gap");
     assert_eq!(pad_cell.flags, 0, "pad stays plain");
-    assert_eq!(range.end.saturating_add(1), bell.start, "gap before bell");
-    assert_eq!(bell.end, pw - 1, "bell ends before divider");
+    assert_eq!(range.end, pw - 1, "the density button ends the strip");
+    assert_eq!(bell.end, v.term.1 as usize, "the bell ends the tab bar");
+    assert!(
+        matches!(
+            v.chrome_hit(0, (v.term.1 - 1) as u16),
+            Some(ChromeHit::Bell(bell::Hit::Toggle))
+        ),
+        "the tab-bar bell toggles"
+    );
+    // The strip tabs read as tabs (the operator's 2026-10-04 ruling): the
+    // active word wears the brand with a bold underline, the resting one
+    // sits muted - and the words right-align ahead of the density button.
+    let words = v.top_row_words();
+    let spans = v.top_row_spans();
+    let mut last_end = 0;
+    for ((start, w, view), (word, _)) in spans.iter().zip(words.iter()) {
+        assert_eq!(*w, word.chars().count(), "span width matches the word");
+        last_end = last_end.max(start + w);
+        for j in *start..*start + *w {
+            let cell = &frame.cells[j];
+            if v.sideline_view == *view {
+                assert_eq!(cell.fg, v.theme.brand, "active tab wears the brand");
+                assert_eq!(
+                    cell.flags & (cell_flags::BOLD | cell_flags::UNDERLINE),
+                    cell_flags::BOLD | cell_flags::UNDERLINE,
+                    "active tab is bold and underlined"
+                );
+            } else {
+                assert_eq!(
+                    cell.fg,
+                    crate::theme::dim_fg(&v.theme),
+                    "resting tab is muted"
+                );
+            }
+        }
+    }
+    assert!(last_end < range.start, "the words end before the button");
 }

@@ -199,7 +199,8 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(
         frame.cells[(worker_i - offset) * cols..(worker_i - offset) * cols + width]
             .iter()
-            .all(|cell| cell.bg == v.theme.sel)
+            .all(|cell| cell.bg == Color::Default),
+        "no zebra: a resting card keeps the plain ground"
     );
     assert!(text.contains("x-4310"), "{text:?}");
     assert!(!text.contains("Work") && !text.contains(" up "), "{text:?}");
@@ -217,10 +218,21 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].compaction_count = None;
     v.layout.agents[1].session_cost_cents = None;
     v.layout.agents[1].session_tokens = None;
+    // The pulse contract is a fresh row's: past 10s a Loading field holds a
+    // static dash (row_meter's own tests pin the boundary).
+    v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs());
     let unmeasured = frame_text(&v.compose());
     assert!(
         unmeasured.contains("░░░░░░░░ · ░░░ · ░░░░░░ · ░░░░░░░░"),
         "a claude card whose fold has not landed pulses every field: {unmeasured:?}"
+    );
+    // Past 10s the fold-less row gives up the pulse: static dashes at the
+    // fields' own widths, so the line never reflows.
+    v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs() - 11);
+    let gave_up = frame_text(&v.compose());
+    assert!(
+        gave_up.contains("-        · -   · -      · -        "),
+        "a row past 10s holds static dashes: {gave_up:?}"
     );
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
@@ -373,7 +385,7 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
     assert_eq!(
         frame.cells[row * cols + pr_span.start].fg,
         v.theme.brand,
-        "PR number uses the theme's complementary brand color"
+        "PR number uses the theme's brand accent, kept distinct from the lane signal"
     );
     assert_ne!(
         frame.cells[row * cols + pr_span.start].fg,
@@ -534,55 +546,52 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
 }
 
 #[test]
-fn chosen_card_paints_accent_across_both_lines() {
-    // x-b5b8: the focused card wears the same surface band as selection -
-    // accent text on the sel surface, never a full brand fill. The lane
-    // accent survives on the status and word columns of line 1.
+fn chosen_card_fills_all_three_lines_with_the_accent_and_a_left_bar() {
+    // The operator's 2026-10-04 ruling: the focused card fills all 3 lines
+    // with the theme accent plus a left bar, unmistakable against resting
+    // neighbors; the old surface-band selection is retired for cards. The
+    // fill is monochrome: the node and PR spans read in the fill's base tone
+    // too, because brand-on-brand text would vanish (the composed contrast
+    // test pins the fill at 3:1 on both lens themes).
     let mut v = card_view(king_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     v.layout.focus = 5;
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let (band_fg, band_bg, _) = crate::theme::band_style(&v.theme);
+    let (fill_fg, fill_bg, _) = crate::theme::chosen_card_style(&v.theme);
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
-    let rects = v.worker_column_rects(text_w as u16);
-    let in_col =
-        |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
-    let rows = v.painted_rows();
-    let (node_span, pr_span) = match rows.get(agent_i) {
-        Some(DisplayRow::Agent(a)) => {
-            let spans = card_line::identity_spans(a, text_w);
-            (spans.node, spans.pr)
-        }
-        _ => (None, None),
-    };
     for display_i in [agent_i, detail_i, detail_i + 1] {
         let row = display_i - offset + 1; // the strip row owns row 0
-        for (j, cell) in frame.cells[row * cols..row * cols + text_w]
-            .iter()
-            .enumerate()
-        {
-            assert_eq!(cell.bg, band_bg, "the surface band fills the card line");
-            let keeps_identity_color = display_i == agent_i
-                && (node_span.as_ref().is_some_and(|span| span.contains(&j))
-                    || pr_span.as_ref().is_some_and(|span| span.contains(&j)));
-            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
-                assert_eq!(cell.fg, band_fg, "the band's accent text everywhere");
-            }
+        for cell in &frame.cells[row * cols..row * cols + text_w] {
+            assert_eq!(cell.bg, fill_bg, "the accent fill covers the card line");
+            assert_eq!(cell.fg, fill_fg, "the fill's base text everywhere");
             assert_eq!(
                 cell.flags & (cell_flags::INVERSE | cell_flags::DIM),
                 0,
-                "no INVERSE and no DIM inside the band"
+                "no INVERSE and no DIM inside the fill"
             );
+        }
+        assert_eq!(
+            frame.cells[row * cols].c,
+            '\u{258e}',
+            "the left bar leads the card line"
+        );
+    }
+    // A resting neighbor keeps the plain ground: no zebra, no fill.
+    let (king_agent_i, king_detail_i) = card_rows_for(&v, "king-a");
+    for display_i in [king_agent_i, king_detail_i, king_detail_i + 1] {
+        let row = display_i - offset + 1;
+        for cell in &frame.cells[row * cols..row * cols + text_w] {
+            assert_eq!(cell.bg, Color::Default, "no zebra and no fill next door");
         }
     }
 }
 
 #[test]
-fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
+fn hovering_the_chosen_card_keeps_the_chosen_color_on_all_three_lines() {
     let mut v = card_view(king_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
@@ -590,14 +599,14 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     v.hover_row = Some(detail_i);
     let frame = v.compose();
-    let (_, band_bg, _) = crate::theme::band_style(&v.theme);
+    let (_, fill_bg, _) = crate::theme::chosen_card_style(&v.theme);
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
     for display_i in [agent_i, detail_i, detail_i + 1] {
         let row = display_i - offset + 1; // the strip row owns row 0
         for cell in &frame.cells[row * cols..row * cols + text_w] {
-            assert_eq!(cell.bg, band_bg, "the band wins on hover");
+            assert_eq!(cell.bg, fill_bg, "the chosen fill wins on hover");
         }
     }
 }

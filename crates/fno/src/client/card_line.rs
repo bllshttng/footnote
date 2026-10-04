@@ -86,25 +86,44 @@ pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
     ]
 }
 
+/// Past this age a Loading field gives up the pulse and holds a static dash.
+const LOADING_DASH_AFTER_S: u64 = 10;
+
 /// Whether any field still waits on the fold: the breathe timer's arm signal.
-pub(super) fn has_loading(a: &AgentRow) -> bool {
+/// A row whose Loading fields are all past [`LOADING_DASH_AFTER_S`] holds a
+/// static dash and arms no more frames.
+pub(super) fn has_loading(a: &AgentRow, now: u64) -> bool {
     metric_cells(a)
         .iter()
         .any(|c| matches!(c, MetricCell::Loading))
+        && !loading_gave_up(a, now)
+}
+
+/// Past 10s a row's Loading fields hold a static dash: the pulse gave up. A
+/// row with no `started_at` reads as fully aged - reportable rows set it at
+/// spawn, so this covers a wire gap rather than a real case.
+pub(super) fn loading_gave_up(a: &AgentRow, now: u64) -> bool {
+    now.saturating_sub(a.started_at.unwrap_or(0)) > LOADING_DASH_AFTER_S
 }
 
 /// Skeleton widths mirror each field's served width (spark+percent, count,
 /// cost, tokens) so a landing fold does not reflow the line.
 const LOADING_W: [usize; 4] = [8, 3, 6, 8];
 
-pub(super) fn metrics(a: &AgentRow, message: Option<&str>, width: usize) -> String {
+pub(super) fn metrics(a: &AgentRow, now: u64, message: Option<&str>, width: usize) -> String {
     let phase = crate::lattice::spin_epoch().map(|t0| t0.elapsed().as_millis() as u64);
+    let gave_up = loading_gave_up(a, now);
     let fields: Vec<String> = metric_cells(a)
         .iter()
         .enumerate()
         .filter_map(|(i, c)| match c {
             MetricCell::Value(v) => Some(v.clone()),
-            MetricCell::Loading => Some(super::row_meter::skeleton_cell(LOADING_W[i], phase)),
+            MetricCell::Loading if !gave_up => {
+                Some(super::row_meter::skeleton_cell(LOADING_W[i], phase))
+            }
+            // The fold never landed: a static dash at the field's own width
+            // keeps the line from reflowing while it stops the pulse.
+            MetricCell::Loading => Some(format!("{:<w$}", "-", w = LOADING_W[i])),
             MetricCell::Hidden => None,
         })
         .collect();
