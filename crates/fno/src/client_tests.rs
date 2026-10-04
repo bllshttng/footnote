@@ -1998,8 +1998,7 @@ fn chrome_hit_rows() {
     // The squad-name label is inert.
     assert!(view.chrome_hit(0, 41).is_none());
 
-    // Rows (x-cd67 US1; the strip owns terminal row 0 since R15): the words
-    // right-align now, so the word column reads from the shared span table.
+    // Rows (x-cd67 US1): the words right-align now, so the word column reads from the shared span table.
     let view = two_pane_view();
     let word_start = view.top_row_spans()[0].0;
     let word_hit = view.chrome_hit(0, word_start as u16);
