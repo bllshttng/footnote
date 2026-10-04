@@ -100,13 +100,14 @@ def _holder_hosts_caller(pid: object) -> bool:
     import psutil
 
     try:
-        proc = psutil.Process(os.getpid())
+        cur = psutil.Process(os.getpid())
         for _ in range(32):
-            proc = proc.parent()
-            if proc is None:
+            nxt = cur.parent()
+            if nxt is None:
                 return False
-            if proc.pid == pid:
+            if nxt.pid == pid:
                 return True
+            cur = nxt
     except Exception:  # noqa: BLE001 - dead/unreadable chain: not provably ours
         return False
     return False
