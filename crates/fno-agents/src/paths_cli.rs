@@ -285,8 +285,52 @@ fn glob_check(field: &str, raw: &str) -> Result<(), String> {
     }
 }
 
+/// One config value, format-agnostic like the Python loader: `$FNO_CONFIG`
+/// may pin a legacy YAML file the Python loader parses by suffix, and the
+/// smoke suite pins exactly that shape for this verb, so the emitter reads
+/// both formats where the TOML-only getters read one.
+fn live_lookup(cwd: &Path, keys: &[&str]) -> Option<Result<toml::Value, ()>> {
+    if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|v| !v.is_empty()) {
+        let path = PathBuf::from(&explicit);
+        if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml")
+        ) {
+            let content = std::fs::read_to_string(&path).ok()?;
+            let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content).ok()?;
+            // A legacy settings.yaml wraps every key in a `config:` block;
+            // try the bare walk first, then the envelope.
+            fn walk<'a>(
+                doc: &'a serde_yaml_ng::Value,
+                keys: &[&str],
+            ) -> Option<&'a serde_yaml_ng::Value> {
+                let mut cur = doc.get(keys[0])?;
+                for k in &keys[1..] {
+                    cur = cur.get(k)?;
+                }
+                Some(cur)
+            }
+            let hit = walk(&doc, keys).or_else(|| {
+                let mut full = Vec::with_capacity(keys.len() + 1);
+                full.push("config");
+                full.extend_from_slice(keys);
+                walk(&doc, &full)
+            })?;
+            let cur = hit;
+            return Some(match cur {
+                serde_yaml_ng::Value::String(s) => Ok(toml::Value::String(s.clone())),
+                serde_yaml_ng::Value::Bool(b) => Ok(toml::Value::Boolean(*b)),
+                _ => Err(()),
+            });
+        }
+    }
+    crate::agents_config::config_lookup(cwd, keys).map(Ok)
+}
+
 fn cfg_str(cwd: &Path, keys: &[&str]) -> Option<String> {
-    crate::agents_config::config_lookup(cwd, keys).and_then(|v| v.as_str().map(str::to_string))
+    live_lookup(cwd, keys)
+        .and_then(|r| r.ok())
+        .and_then(|v| v.as_str().map(str::to_string))
 }
 
 /// Python `paths.state_dir()`'s chain: `FNO_STATE_DIR` first, then the
@@ -399,18 +443,15 @@ pub fn emit_paths_sh_live(cwd: &Path) -> Result<String, String> {
     let handoffs = match cfg_str(cwd, &["paths", "handoffs_dir"]) {
         Some(raw) => resolve_override(&raw)?,
         None => {
-            let enabled = crate::agents_config::config_lookup(cwd, &["obsidian", "enabled"])
+            let enabled = live_lookup(cwd, &["obsidian", "enabled"])
+                .and_then(|r| r.ok())
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let vault = cfg_str(cwd, &["obsidian", "vault"]);
             if enabled {
                 match &vault {
                     Some(v) => glob_check("obsidian.vault", v)?,
-                    None => {
-                        return Err(
-                            "obsidian.enabled is true but obsidian.vault is not set".to_string()
-                        )
-                    }
+                    None => return Err("obsidian is enabled with no vault path set".to_string()),
                 }
                 let root = vault_root(cwd)?;
                 let name = project_name(Some(cwd))?;
@@ -456,8 +497,15 @@ fn finish_live_stub(cwd: &Path, mut lines: Vec<String>, handoffs_line: &str) -> 
     let config_file = crate::agents_config::config_candidates(cwd)
         .into_iter()
         .find(|p| {
+            let yaml = matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"));
             std::fs::read_to_string(p)
-                .map(|c| c.parse::<toml::Table>().is_ok())
+                .map(|c| {
+                    if yaml {
+                        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&c).is_ok()
+                    } else {
+                        c.parse::<toml::Table>().is_ok()
+                    }
+                })
                 .unwrap_or(false)
         })
         .unwrap_or_else(|| {
@@ -796,6 +844,33 @@ mod tests {
         let line = line_with(&stub, "export HANDOFFS_DIR=");
         let expected = format!("{}/internal/testproj/handoffs", fx.base.display());
         assert!(line.contains(&expected), "HANDOFFS_DIR: {line}");
+    }
+
+    #[test]
+    fn live_stub_reads_a_pinned_yaml_config() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = LiveFx::new("yamlpin", "");
+        let yaml = fx.base.join("alt-settings.yaml");
+        fs::write(
+            &yaml,
+            format!(
+                "schema_version: 1\nconfig:\n  state_dir: {}/\n",
+                fx.base.join("alt-state").display()
+            ),
+        )
+        .unwrap();
+        let mut pins = fx.pins();
+        pins.push(("FNO_CONFIG", yaml.display().to_string()));
+        let _env = EnvGuard::new(&pins);
+        let stub = emit_paths_sh_live(&fx.root).unwrap();
+        let line = line_with(&stub, "export STATE_DIR=");
+        let expected = fx.base.join("alt-state").display().to_string();
+        assert!(line.contains(&expected), "STATE_DIR: {line}");
+        let conf = line_with(&stub, "export CONFIG_FILE=");
+        assert!(
+            conf.contains(&yaml.display().to_string()),
+            "CONFIG_FILE: {conf}"
+        );
     }
 
     #[test]
