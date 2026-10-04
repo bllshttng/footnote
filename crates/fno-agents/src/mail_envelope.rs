@@ -420,6 +420,35 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_sender_renders_its_current_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("registry.json");
+        // The sender row was RENAMED after the envelope was written; the
+        // envelope still carries the session id it was sent under.
+        std::fs::write(
+            &path,
+            serde_json::json!({"schema_version": 11, "agents": [
+                {"name":"renamed-folio", "short_id":"folio-short", "status":"live",
+                 "harness":"claude", "cwd":"/repo",
+                 "harness_session_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                 "created_at":"2026-09-23T20:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let rendered = render_at(
+            &serde_json::json!({
+                "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
+                "from_session":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                "harness":"claude", "to":"x", "id":"msg-9"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert!(rendered.contains("@renamed-folio"), "{rendered}");
+    }
+
+    #[test]
     fn render_refusals_and_classify_labels_hold() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("missing-registry.json");

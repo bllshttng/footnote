@@ -129,10 +129,16 @@ fn find_effective_entry(
     now: u64,
 ) -> Result<Option<(RegistryEntry, EffState, &'static str)>, String> {
     let reg = state::load_registry(&home.registry_json()).map_err(|e| e.to_string())?;
-    Ok(reg.entries.iter().find(|e| e.name == name).map(|e| {
-        let (state, authority) = effective_state(e, now);
-        (e.clone(), state, authority)
-    }))
+    // A CLI-supplied name: the resolver refuses a second match rather than
+    // letting the first row answer for a shared label.
+    Ok(match crate::agent_ref::resolve(&reg.entries, crate::agent_ref::Key::Name(name), |_| true)
+    {
+        crate::agent_ref::Join::One(e) => {
+            let (state, authority) = effective_state(e, now);
+            Some((e.clone(), state, authority))
+        }
+        _ => None,
+    })
 }
 
 /// `fno-agents wait --agent <name> --state idle|blocked|done [--timeout-ms N] [--json]`

@@ -61,8 +61,15 @@ impl BgRoster {
     pub(crate) fn serve_listing(&self, entries: &[RegistryEntry], changes: &mut [ReconcileChange]) {
         let readable = self.listing.is_known() && self.listing.warning_text().is_empty();
         for change in changes.iter_mut() {
-            let Some(e) = entries.iter().find(|e| e.name == change.name) else {
-                continue;
+            // The listing's row name is an edge input: one live match
+            // answers, a second match (or none) skips the row.
+            let e = match crate::agent_ref::resolve(
+                entries,
+                crate::agent_ref::Key::Name(&change.name),
+                |_| true,
+            ) {
+                crate::agent_ref::Join::One(e) => e,
+                _ => continue,
             };
             if e.harness_name() != "claude"
                 || !e.is_one_shot_ask()
