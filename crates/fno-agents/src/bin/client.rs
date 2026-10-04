@@ -92,7 +92,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "plugin-install",
     "recover",
     "registry-json",
-    "registry-commit",
     "reentry-plan",
     "rename",
     "reign-shape",
