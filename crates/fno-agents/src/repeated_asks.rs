@@ -3,14 +3,13 @@
 
 use std::{
     collections::{HashSet, VecDeque},
-    fs::File,
-    io::{BufRead, BufReader},
-    path::Path,
     sync::OnceLock,
 };
 
 use regex::Regex;
 use serde_json::{json, Value};
+
+use crate::king_checkin::OwnTranscript::*;
 
 const REPLY_WINDOW: usize = 20;
 const REPEAT_FLOOR: usize = 3;
@@ -50,20 +49,38 @@ const NOT_ASK: &[&str] = &[
 ];
 
 pub(crate) fn reading() -> Result<Value, String> {
-    let path = crate::king_checkin::own_claude_transcript()?;
-    Ok(fold(&last_replies(&path)?))
+    match crate::king_checkin::own_transcript() {
+        Ok(Text {
+            harness: "claude",
+            text,
+            ..
+        }) => Ok(fold(&claude_last_replies(&text)?)),
+        Ok(Text {
+            harness: "codex",
+            text,
+            ..
+        }) => Ok(fold(&codex_last_replies(&text))),
+        Ok(Text { harness, .. }) => Ok(unmeasured(&format!(
+            "the {harness} transcript carries no end-of-turn assistant rows"
+        ))),
+        Ok(Unmeasured { reason, .. }) => Ok(unmeasured(&reason)),
+        Err(e) => Err(e),
+    }
 }
 
-fn last_replies(path: &Path) -> Result<Vec<String>, String> {
+/// The reading shape for a reader that cannot run on this harness: an
+/// explicit unmeasured value, never a silent zero.
+pub(crate) fn unmeasured(reason: &str) -> Value {
+    json!({ "unmeasured": reason })
+}
+fn claude_last_replies(raw: &str) -> Result<Vec<String>, String> {
     // ponytail: reads the whole transcript each beat, as refusal_rate does; seek to a tail window if the check-in's reader time matters.
-    let file = File::open(path).map_err(|e| format!("transcript unreadable: {e}"))?;
     let mut replies = VecDeque::with_capacity(REPLY_WINDOW);
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|e| format!("transcript unreadable: {e}"))?;
+    for line in raw.lines() {
         if !line.contains("\"end_turn\"") {
             continue;
         }
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         let message = row.get("message").unwrap_or(&Value::Null);
@@ -82,6 +99,54 @@ fn last_replies(path: &Path) -> Result<Vec<String>, String> {
         }
     }
     Ok(replies.into_iter().collect())
+}
+/// The codex rollout: an end-of-turn reply is the last assistant message
+/// before the next user turn (rollouts carry no end_turn marker).
+fn codex_last_replies(raw: &str) -> Vec<String> {
+    let mut replies = VecDeque::with_capacity(REPLY_WINDOW);
+    let mut pending: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if crate::provenance::is_user_turn(&row) && !pending.is_empty() {
+            if let Some(reply) = pending.pop() {
+                if !reply.trim().is_empty() {
+                    replies.push_back(reply);
+                    if replies.len() > REPLY_WINDOW {
+                        replies.pop_front();
+                    }
+                }
+            }
+            pending.clear();
+        }
+        if let Some(text) = codex_assistant_text(&row) {
+            pending.push(text);
+        }
+    }
+    // The session's final turn never sees a following user row.
+    if let Some(reply) = pending.pop() {
+        if !reply.trim().is_empty() {
+            replies.push_back(reply);
+        }
+    }
+    replies.into_iter().collect()
+}
+
+/// The text of one codex assistant message row, None for every other row.
+fn codex_assistant_text(row: &Value) -> Option<String> {
+    let payload = row.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    if payload.get("role").and_then(Value::as_str) == Some("assistant") {
+        let text =
+            crate::reign_hygiene::message_text(payload.get("content").unwrap_or(&Value::Null));
+        if !text.trim().is_empty() {
+            return Some(text);
+        }
+    }
+    None
 }
 
 fn asks_in(reply: &str) -> Vec<String> {
@@ -238,6 +303,9 @@ pub(crate) fn lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
     if !reading.ok {
         return vec![format!("READER FAILED repeated_asks: {}", reading.error)];
     }
+    if let Some(reason) = reading.value.get("unmeasured").and_then(Value::as_str) {
+        return vec![format!("repeated asks: unmeasured ({reason})")];
+    }
     let asks = reading
         .value
         .get("asks")
@@ -307,7 +375,8 @@ mod tests {
             writeln!(file, "{row}").unwrap();
         }
         drop(file);
-        let folded = fold(&last_replies(&transcript).unwrap());
+        let raw = std::fs::read_to_string(&transcript).unwrap();
+        let folded = fold(&claude_last_replies(&raw).unwrap());
         assert_eq!(folded["replies"], 20);
         assert_eq!(
             folded["asks"],
@@ -341,5 +410,34 @@ mod tests {
             ["READER FAILED repeated_asks: transcript unreadable"]
         );
         assert!(lines(&[]).is_empty());
+
+        // The codex rollout: one reply per turn, the last assistant message
+        // before the next user row, and the unmeasured render names why.
+        let codex_row = |role: &str, text: &str| {
+            json!({
+                "payload": {"type": "message", "role": role, "content": text},
+            })
+            .to_string()
+        };
+        let mut codex = Vec::new();
+        for _ in 0..3 {
+            codex.push(codex_row("user", "next"));
+            codex.push(codex_row("assistant", "step one done"));
+            codex.push(codex_row("assistant", "Should I merge PR 2558?"));
+        }
+        let codex_folded = fold(&codex_last_replies(&codex.join("\n")));
+        assert_eq!(codex_folded["replies"], 3);
+        assert_eq!(
+            codex_folded["asks"],
+            json!([{"text":"should i merge pr 2558?", "count":3}])
+        );
+        let unmeasured_row = Reading::took(
+            "repeated_asks",
+            unmeasured("the opencode transcript carries no end-of-turn assistant rows"),
+        );
+        assert_eq!(
+            lines(&[unmeasured_row]),
+            ["repeated asks: unmeasured (the opencode transcript carries no end-of-turn assistant rows)"]
+        );
     }
 }
