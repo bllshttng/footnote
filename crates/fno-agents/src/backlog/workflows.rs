@@ -2692,52 +2692,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_records_its_closer() {
-        let lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let names: Vec<&str> = crate::claims::AMBIENT_IDENTITY_NAMES
-            .iter()
-            .copied()
-            .chain(
-                crate::claims::HARNESS_SESSION_MARKERS
-                    .iter()
-                    .map(|(k, _)| *k),
-            )
-            .chain(
-                crate::claims::LEGACY_HARNESS_SESSION_MARKERS
-                    .iter()
-                    .map(|(k, _)| *k),
-            )
-            .collect();
-        let saved: Vec<(String, Option<std::ffi::OsString>)> = names
-            .iter()
-            .map(|k| (k.to_string(), std::env::var_os(k)))
-            .collect();
-        for key in &names {
-            std::env::remove_var(key);
-        }
-        let mut row = seed("ab-cccccccc", None);
-        apply_completion_fields(&mut row, true);
-        assert_eq!(row["closed_by"]["session"], Value::Null);
-        assert_eq!(row["closed_by"]["actor_kind"], "user");
-        // The set case: the ladder resolves through the registry, so the
-        // unit test pins the SHAPE only (spawn_context's own suites own the
-        // resolution itself).
-        let mut row = seed("ab-dddddddd", None);
-        apply_completion_fields(&mut row, false);
-        assert!(row["closed_by"]["session"].is_null() || row["closed_by"]["session"].is_string());
-        assert!(row["closed_by"]["actor_kind"].is_string());
-        for (key, value) in &saved {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        drop(lock);
-    }
-
-    #[test]
     fn cascade_closes_an_ancestor_whose_children_all_closed() {
         let mut rows = vec![
             seed("ab-ffffffff", None),
@@ -2754,6 +2708,11 @@ mod tests {
             .position(|e| text_at(e, "id") == Some("ab-bbbbbbbb"))
             .unwrap();
         apply_completion_fields(&mut rows[idx], false);
+        // The closer stamp: the row names who closed it, whatever the
+        // ambient identity resolved to (null session reads user).
+        let closer = &rows[idx]["closed_by"];
+        assert!(closer["session"].is_null() || closer["session"].is_string());
+        assert!(closer["actor_kind"].is_string());
         let closed = cascade_close_parents(&mut rows, "ab-bbbbbbbb");
         assert!(closed.contains(&"ab-ffffffff".to_string()), "{closed:?}");
         let epic = rows

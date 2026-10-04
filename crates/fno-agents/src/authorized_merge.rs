@@ -3962,6 +3962,7 @@ mod tests {
     #[test]
     fn an_arm_receipt_names_the_head_and_is_never_merged() {
         // AC2-EDGE. A queue entry is not a landed merge.
+        let journal = crate::merge_provenance::TestJournal::opt_in();
         let fake = clean();
         let outcome = run(&fake, &request(Effect::Arm));
         assert_eq!(
@@ -3976,10 +3977,24 @@ mod tests {
         assert!(calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
         assert!(calls[0].contains(&"abc123".to_string()));
+        // An arm records merge_armed, never a landed merge.
+        let journal_rows = journal.rows();
+        let armed: Vec<_> = journal_rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_armed")
+            .collect();
+        assert_eq!(armed.len(), 1, "{journal_rows:?}");
+        assert_eq!(armed[0]["data"]["pr"], 7);
+        let landed: Vec<_> = journal_rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_landed")
+            .collect();
+        assert!(landed.is_empty(), "{journal_rows:?}");
     }
 
     #[test]
     fn an_immediate_merge_never_passes_auto() {
+        let journal = crate::merge_provenance::TestJournal::opt_in();
         let fake = clean();
         let outcome = run(&fake, &request(Effect::Merge));
         assert_eq!(
@@ -3994,12 +4009,8 @@ mod tests {
         let calls = fake.gh_calls.borrow();
         assert!(!calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
-    }
-
-    #[test]
-    fn a_merge_writes_one_merge_landed_span() {
-        let journal = crate::merge_provenance::TestJournal::opt_in();
-        assert_eq!(run(&clean(), &request(Effect::Merge)).word(), "merged");
+        // The owner's record: one merge_landed span for the run, naming the
+        // verb lane and the merged PR.
         let spans: Vec<_> = journal
             .rows()
             .into_iter()

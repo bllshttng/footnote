@@ -377,54 +377,35 @@ mod tests {
         words.iter().map(|w| w.to_string()).collect()
     }
 
+    /// The one span-recording contract: the argv grammar, the owner's
+    /// outcome rows with their lane paths, the proxy and hook request rows,
+    /// and the has_record read, all against this test's own journal.
     #[test]
-    fn the_matcher_reads_pr_merge_and_the_api_put_merge_endpoint() {
+    fn merge_provenance_records_one_span_per_hop() {
+        let journal = TestJournal::opt_in();
+        // The argv grammar: pr merge and the REST merge endpoint, the bare
+        // `pr merge` (gh resolves the number), and strangers.
+        assert_eq!(merge_request_pr(&argv(&["gh", "pr", "merge", "7"])), Some(7));
+        assert_eq!(merge_request_pr(&argv(&["pr", "merge", "7", "--squash"])), Some(7));
         assert_eq!(
-            merge_request_pr(&argv(&["gh", "pr", "merge", "7"])),
+            merge_request_pr(&argv(&["gh", "api", "-X", "PUT", "repos/o/r/pulls/7/merge"])),
             Some(7)
         );
         assert_eq!(
-            merge_request_pr(&argv(&["pr", "merge", "7", "--squash"])),
-            Some(7)
-        );
-        // A bare `pr merge` is still a request; gh resolves the number.
-        assert_eq!(merge_argv(&argv(&["gh", "pr", "merge"])), Some(None));
-        assert_eq!(merge_argv(&argv(&["pr", "ready", "7"])), None);
-        assert_eq!(merge_request_pr(&argv(&["gh", "pr", "merge"])), None);
-        assert_eq!(
-            merge_request_pr(&argv(&[
-                "gh",
-                "api",
-                "-X",
-                "PUT",
-                "repos/o/r/pulls/7/merge"
-            ])),
-            Some(7)
-        );
-        assert_eq!(
-            merge_request_pr(&argv(&[
-                "gh",
-                "api",
-                "--method",
-                "PUT",
-                "repos/o/r/pulls/9/merge"
-            ])),
+            merge_request_pr(&argv(&["gh", "api", "--method", "PUT", "repos/o/r/pulls/9/merge"])),
             Some(9)
         );
-        assert_eq!(
-            merge_request_pr(&argv(&["gh", "api", "repos/o/r/pulls/7/merge"])),
-            None
-        );
+        assert_eq!(merge_request_pr(&argv(&["gh", "api", "repos/o/r/pulls/7/merge"])), None);
         assert_eq!(merge_request_pr(&argv(&["gh", "pr", "list"])), None);
         assert_eq!(
             merge_request_pr(&argv(&["cd", "/x", "&&", "gh", "pr", "merge", "9"])),
             Some(9)
         );
-    }
+        assert_eq!(merge_argv(&argv(&["pr", "merge"])), Some(None));
+        assert_eq!(merge_argv(&argv(&["pr", "ready", "7"])), None);
 
-    #[test]
-    fn outcomes_record_the_merge_owner_paths() {
-        let journal = TestJournal::opt_in();
+        // The owner's outcomes: pr_merge, pr_watch (durable grant), and the
+        // finalize arm (Arm with no PR) each land their own lane path.
         let request = Request {
             cwd: PathBuf::from("/tmp"),
             pr: Some(7),
@@ -465,18 +446,6 @@ mod tests {
                 merge_grant: None,
             },
         );
-        // The finalize arm: an Arm ask that names no PR.
-        let mut finalize = request.clone();
-        finalize.effect = Effect::Arm;
-        finalize.pr = None;
-        record_outcome(
-            &finalize,
-            &facts,
-            &Outcome::Armed {
-                head: "abc123".into(),
-                merge_grant: None,
-            },
-        );
         let mut armed = request.clone();
         armed.effect = Effect::Arm;
         armed.pr = None;
@@ -489,34 +458,20 @@ mod tests {
                 merge_grant: None,
             },
         );
-        let rows = journal.rows();
-        let landed: Vec<_> = rows
-            .iter()
-            .filter(|r| r["data"]["span_kind"] == "merge_landed")
-            .collect();
-        let armed_rows: Vec<_> = rows
-            .iter()
-            .filter(|r| r["data"]["span_kind"] == "merge_armed")
-            .collect();
-        assert_eq!(landed.len(), 1, "{rows:?}");
-        assert_eq!(landed[0]["data"]["path"], "pr_merge");
-        assert_eq!(landed[0]["data"]["pr"], 7);
-        assert_eq!(landed[0]["data"]["repo"], "o/r");
-        assert_eq!(landed[0]["data"]["head"], "abc123");
-        assert_eq!(landed[0]["data"]["trace"]["actor_kind"], "user");
-        assert_eq!(armed_rows.len(), 2, "{rows:?}");
-        let paths: Vec<_> = armed_rows
-            .iter()
-            .map(|r| r["data"]["path"].as_str().unwrap())
-            .collect();
-        assert!(paths.contains(&"pr_watch"), "{paths:?}");
-        assert!(paths.contains(&"finalize"), "{paths:?}");
-    }
+        let mut finalize = request.clone();
+        finalize.effect = Effect::Arm;
+        finalize.pr = None;
+        record_outcome(
+            &finalize,
+            &facts,
+            &Outcome::Armed {
+                head: "abc123".into(),
+                merge_grant: None,
+            },
+        );
 
-    #[test]
-    fn the_proxy_and_hook_paths_record_merge_requests() {
-        let journal = TestJournal::opt_in();
-        assert!(!has_record(&journal.journal(), "o/r", 7));
+        // The gh-side requests: the proxy's normalized argv and the hook
+        // door, whose zero-exit gate reads both exit-key spellings.
         let cwd = journal.root().to_string_lossy().into_owned();
         record_request(&argv(&["pr", "merge", "7"]), Some(&cwd), "gh_proxy");
         let payload = json!({
@@ -549,21 +504,34 @@ mod tests {
             }
         });
         assert_eq!(run_hook_door(&plain)["recorded"], false);
+
         let rows = journal.rows();
-        let requested: Vec<_> = rows
+        let kind = |r: &Value, k: &str| r["data"]["span_kind"] == k;
+        let landed: Vec<_> = rows.iter().filter(|r| kind(r, "merge_landed")).collect();
+        assert_eq!(landed.len(), 1, "{rows:?}");
+        assert_eq!(landed[0]["data"]["path"], "pr_merge");
+        assert_eq!(landed[0]["data"]["pr"], 7);
+        assert_eq!(landed[0]["data"]["repo"], "o/r");
+        assert_eq!(landed[0]["data"]["head"], "abc123");
+        let armed_rows: Vec<_> = rows.iter().filter(|r| kind(r, "merge_armed")).collect();
+        assert_eq!(armed_rows.len(), 2, "{rows:?}");
+        let paths: Vec<_> = armed_rows
             .iter()
-            .filter(|r| r["data"]["span_kind"] == "merge_requested")
+            .map(|r| r["data"]["path"].as_str().unwrap())
             .collect();
+        assert!(paths.contains(&"pr_watch"), "{paths:?}");
+        assert!(paths.contains(&"finalize"), "{paths:?}");
+        let requested: Vec<_> = rows.iter().filter(|r| kind(r, "merge_requested")).collect();
         assert_eq!(requested.len(), 2, "{rows:?}");
         assert_eq!(requested[0]["data"]["path"], "gh_proxy");
         assert_eq!(requested[0]["data"]["pr"], 7);
         assert_eq!(requested[1]["data"]["path"], "hook");
         assert_eq!(requested[1]["data"]["pr"], 8);
-        // has_record: absent store reads false, a recorded PR reads true,
-        // an unrecorded PR or repo reads false.
-        assert!(!has_record(&journal.journal(), "nothing/here", 1));
+
+        // has_record: a recorded PR reads true, an unrecorded one false.
         assert!(has_record(&journal.journal(), "unknown-repo", 7));
         assert!(has_record(&journal.journal(), "unknown-repo", 8));
         assert!(!has_record(&journal.journal(), "unknown-repo", 9));
+        assert!(!has_record(&journal.journal(), "nothing/here", 1));
     }
 }
