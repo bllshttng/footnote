@@ -724,7 +724,7 @@ def test_no_bg_or_merged_wrapper_in_production_post_merge():
     import fno.post_merge_route as pmr
 
     body = inspect.getsource(pmr)
-    assert "--substrate bg" not in body
+    assert "--substrate thread" not in body
     assert "pr-merged-" not in body
     assert "fno do pr ritual" in body  # the verb-first cold + warm command
     assert "/fno:ship pr merged" not in body  # no whole-ritual LLM wrapper

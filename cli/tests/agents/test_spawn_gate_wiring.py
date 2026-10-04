@@ -85,7 +85,7 @@ def test_bg_spawn_gates_as_bg_and_receipt_is_byte_identical(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread"],
     )
     assert result.exit_code == 0, result.output
     assert calls == [
@@ -140,7 +140,7 @@ def test_succeed_passes_the_crown_scope_to_the_gate(runner, gate_calls, monkeypa
         agents_app,
         [
             "spawn", "--name", "w1", "hi", "--harness", "claude",
-            "--substrate", "bg", "--crown", "x-epic", "--succeed",
+            "--substrate", "thread", "--crown", "x-epic", "--succeed",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -166,7 +166,7 @@ def test_crown_without_succeed_does_not_send_a_succession_scope(
             "--harness",
             "claude",
             "--substrate",
-            "bg",
+            "thread",
             "--crown",
             "x-epic",
         ],
@@ -193,7 +193,7 @@ def test_gate_refusal_propagates_exit_code(runner, monkeypatch):
     result = runner.invoke(
         agents_app,
         [
-            "spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+            "spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
             "--no-wait",
         ],
     )
@@ -230,7 +230,7 @@ def test_force_and_no_wait_flags_reach_the_gate(runner, gate_calls, monkeypatch)
     result = runner.invoke(
         agents_app,
         [
-            "spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+            "spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
             "--force", "--no-wait",
         ],
     )

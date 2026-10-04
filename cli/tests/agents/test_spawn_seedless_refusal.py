@@ -47,7 +47,7 @@ def test_the_seam_refuses_an_explicit_thread_substrate(capsys):
 
 def test_the_seam_leaves_a_resume_alone():
     rust_runtime._refuse_seedless_thread_spawn(
-        ["spawn", "--name", "w", "--harness", "claude", "--substrate", "bg", "--resume", RESUME]
+        ["spawn", "--name", "w", "--harness", "claude", "--substrate", "thread", "--resume", RESUME]
     )
 
 

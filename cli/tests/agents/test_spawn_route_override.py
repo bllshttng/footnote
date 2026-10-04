@@ -189,7 +189,7 @@ def test_route_missing_key_refused_before_gate(monkeypatch: pytest.MonkeyPatch) 
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -217,7 +217,7 @@ def test_route_unknown_provider_refused(monkeypatch: pytest.MonkeyPatch) -> None
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--route", "nope,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -241,7 +241,7 @@ def test_route_on_non_claude_harness_names_harness_not_provider(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "thread",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -268,7 +268,7 @@ def test_route_via_dash_p_on_non_claude_harness_names_dash_p_not_route(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "thread",
          "-P", "zai", "--model", "glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -419,7 +419,7 @@ def test_bg_receipt_carries_route_provider_and_effective_model(
     monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--route", "zai,glm-5.2", "--model", "opus"],
     )
     assert result.exit_code == 0, result.output
@@ -526,7 +526,7 @@ def test_route_threads_resolved_env_to_dispatch(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
@@ -921,7 +921,7 @@ def test_account_threads_overlay_to_bg_dispatch(monkeypatch: pytest.MonkeyPatch)
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--account", "acct"],
     )
     assert result.exit_code == 0, result.output
@@ -1084,7 +1084,7 @@ def test_provider_and_model_build_the_route(monkeypatch: pytest.MonkeyPatch) -> 
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--substrate", "bg", "--provider", "zai", "--model", "glm-5.2"],
+        ["spawn", "--name", "w1", "hi", "--substrate", "thread", "--provider", "zai", "--model", "glm-5.2"],
     )
     assert result.exit_code == 0, result.output
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
@@ -1100,7 +1100,7 @@ def test_provider_without_model_is_refused(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hi", "--substrate", "bg", "--provider", "zai"])
+    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hi", "--substrate", "thread", "--provider", "zai"])
     assert result.exit_code == 2, result.output
     assert "--model" in result.output
 
@@ -1115,7 +1115,7 @@ def test_provider_and_route_together_are_refused(monkeypatch: pytest.MonkeyPatch
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--substrate", "bg", "--provider", "zai",
+        ["spawn", "--name", "w1", "hi", "--substrate", "thread", "--provider", "zai",
          "--model", "glm-5.2", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -1169,7 +1169,7 @@ def test_route_under_managed_without_account_composes(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "thread",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output

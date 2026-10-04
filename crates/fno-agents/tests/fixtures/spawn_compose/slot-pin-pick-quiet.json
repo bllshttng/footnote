@@ -3,43 +3,41 @@
   "argv": [
     "spawn",
     "--name",
-    "w17",
-    "--role",
-    "research",
-    "/fno:target x-15"
+    "w6",
+    "-m",
+    "gpt-pin-x",
+    "/fno:target x-4"
   ],
-  "config_toml": "[agents.defaults]\nmodel = \"m-role\"\n",
+  "config_toml": "[[routing.models]]\nname = \"pin-x\"\nharness = \"codex\"\nmodel = \"gpt-pin-x\"\nband = \"high\"\n[agents.profiles.target]\nlanes = [{provider = \"codex\", model = \"luna-pin\"}]\n",
   "env_node": null,
   "expect": {
     "argv": [
       "spawn",
-      "--model",
-      "m-role",
-      "--permission-mode",
-      "bypassPermissions",
+      "--harness",
+      "codex",
       "--name",
-      "w17",
-      "--role",
-      "research",
-      "/fno:target x-15"
+      "w6",
+      "-m",
+      "gpt-pin-x",
+      "/fno:target x-4"
     ],
     "exit": 0,
     "journal": {
       "applied": [
         [
-          "model",
-          "m-role",
-          "agents.defaults.model"
+          "slot",
+          "operator-pin-override row=pin-x harness=codex (the typed model's declared row names its harness)",
+          "routing"
         ],
         [
-          "permission_mode",
-          "bypassPermissions",
-          "builtin.autonomous.permission_mode"
+          "harness",
+          "codex",
+          "routing.models.pin-x"
         ]
       ],
-      "fingerprint": "",
+      "fingerprint": "cf12555d74fb",
       "kind": "spawn_defaults_applied",
-      "name": "w17",
+      "name": "w6",
       "resolved": {
         "account": {
           "rung": null,
@@ -50,8 +48,8 @@
           "value": ""
         },
         "model": {
-          "rung": "agents.defaults",
-          "value": "m-role"
+          "rung": null,
+          "value": ""
         },
         "pane_group": {
           "rung": null,
@@ -74,12 +72,19 @@
           "value": ""
         }
       },
-      "seed": "/fno:target x-15",
-      "suppressed": [],
+      "seed": "/fno:target x-4",
+      "suppressed": [
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous",
+          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
+        ]
+      ],
       "verb": "target"
     },
     "stderr": [
-      "fno agents spawn: applied model=m-role (agents.defaults.model), permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"
+      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored"
     ],
     "stdout": null
   },
@@ -99,25 +104,24 @@
     "flag_node": null,
     "has_effort": false,
     "has_harness": false,
-    "has_model": false,
+    "has_model": true,
     "has_permission": false,
-    "model_value": null,
-    "name": "w17",
+    "model_value": "gpt-pin-x",
+    "name": "w6",
     "permission_value": null,
     "positional_present": true,
-    "role": "research",
+    "role": null,
     "route_value": null,
-    "seed": "/fno:target x-15",
+    "seed": "/fno:target x-4",
     "seed_form": "positional",
     "seed_index": 5,
     "spawn_tokens": [
       "--name",
-      "w17",
-      "--role",
-      "research",
-      "/fno:target x-15"
+      "w6",
+      "-m",
+      "gpt-pin-x",
+      "/fno:target x-4"
     ],
     "tab_flag_present": false
-  },
-  "verbose": true
+  }
 }
