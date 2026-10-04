@@ -561,16 +561,14 @@ pub fn keep_from(
         }
         store.crowns.remove(&old);
         // The theme belongs to the lead, not the scope: a re-scope carries
-        // it, and the title it titles, so growing the epic list never drops
-        // the rank back to the raw scope text. An un-themed record keeps a
-        // scope-derived title, which recomputes for the new scope, and an
-        // L1 takes no theme at all (set_theme refuses one) - a re-scope
-        // that lands on a Head row drops the carried theme with it.
+        // it, so growing the epic list never drops the rank back to the raw
+        // scope text. The title always rebuilds from the landing crown's
+        // level and the carried theme - the same string when the level is
+        // unchanged, the right rank on a level change - and an L1 takes no
+        // theme at all (set_theme refuses one), so a re-scope that lands on
+        // a Head row drops the carried theme with it.
         let carried_theme = rec.theme.clone().filter(|_| crown.level != 1);
-        let carried_title = match carried_theme {
-            Some(_) => rec.title.clone(),
-            None => Some(title(crown.level as u32, &new, None)),
-        };
+        let carried_title = Some(title(crown.level as u32, &new, carried_theme.as_deref()));
         store.crowns.insert(
             new.clone(),
             CrownNameRecord {
@@ -1382,13 +1380,26 @@ mod tests {
                 "x-aaaa,x-bbbb",
             )
             .unwrap();
+            // A level change rebuilds the title: the themed L2 lead landing
+            // on an L0 Chief row reads Chief of the same theme.
+            write_registry(
+                tmp.path(),
+                json!([crown_row("kestrel", "x-cccc", 0, "sess-k")]),
+            );
+            keep_from(&store, &registry, "x-aaaa,x-bbbb", "x-cccc").unwrap();
+            let dump = snapshot(&store).unwrap();
+            assert_eq!(dump["crowns"]["x-cccc"]["theme"], json!("native backlog"));
+            assert_eq!(
+                dump["crowns"]["x-cccc"]["title"],
+                json!("Chief of native backlog")
+            );
             // A re-scope that lands on an L1 row drops the theme: a Head
             // takes no theme, and its title recomputes from the project.
             write_registry(
                 tmp.path(),
                 json!([crown_row("kestrel", "fno", 1, "sess-k")]),
             );
-            keep_from(&store, &registry, "x-aaaa,x-bbbb", "fno").unwrap();
+            keep_from(&store, &registry, "x-cccc", "fno").unwrap();
             let dump = snapshot(&store).unwrap();
             assert!(dump["crowns"]["fno"].get("theme").is_none());
             assert_eq!(dump["crowns"]["fno"]["title"], json!("Head of fno"));
