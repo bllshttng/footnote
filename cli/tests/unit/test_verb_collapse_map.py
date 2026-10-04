@@ -281,8 +281,9 @@ def test_map_covers_current_surface_once():
     # two decide-shim rows with the registrations they kept: 599 -> 593.
     # The two daemon-free read projections (sessions-map, revival-check)
     # allocated their rows: 593 -> 595. The reconcile port retired the
-    # `backlog reconcile` KEEP row with the verb: 595 -> 594.
-    assert len(mapped) == 594, (
+    # `backlog reconcile` KEEP row with the verb: 595 -> 594. The emit-shell
+    # port retires `paths emit-shell` from the Python surface: 594 -> 593.
+    assert len(mapped) == 593, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
