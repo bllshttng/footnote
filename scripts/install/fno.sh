@@ -611,15 +611,17 @@ main() {
 						return 0
 					fi
 					say "installed fno ${FNO_VERIFIED_VERSION:-<unreadable>} is not this tree's ${FNO_CHANNEL} ${FNO_DECLARED_VERSION}; replacing it."
-				fi
-				# Only a VERIFIABLE stranger is refused (the Rust adopt arm's
-				# invariant: a complete foreign answer is never
-				# --force-installed over). An instrument failure - torn
-				# metadata, a missing venv python - falls through on purpose:
-				# the force install below is this script's repair path for a
-				# broken-but-ours install, and refusing here would leave a
-				# half-removed install with no automated repair.
-				if [ -n "$FNO_VERIFY_STABLE" ]; then
+				elif [ -n "$FNO_VERIFY_STABLE" ]; then
+					# Only a VERIFIABLE stranger is refused (the Rust adopt arm's
+					# invariant: a complete foreign answer is never
+					# --force-installed over). An instrument failure - torn
+					# metadata, a missing venv python - falls through on purpose:
+					# the force install below is this script's repair path for a
+					# broken-but-ours install, and refusing here would leave a
+					# half-removed install with no automated repair. The check
+					# guards a FAILED verify only: a successful verify leaves
+					# FNO_VERIFY_STABLE=1, and the version-mismatch repair above
+					# must reach the install, not this refusal.
 					die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to install over a foreign fno."
 				fi
 			fi
