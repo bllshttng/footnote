@@ -48,6 +48,15 @@ def test_missing_report_keys_do_not_raise_and_produce_no_lines():
             },
             "sh.fno.groom",
         ),
+        (
+            {
+                "launch_agents": {
+                    "applicable": True,
+                    "dead": [{"label": "sh.fno.groom"}],
+                }
+            },
+            "exit unknown",
+        ),
         ({"fd_limit": {"verdict": "low", "launchd_soft": 256}}, "256"),
         ({"plugin_hooks": {"failed": 2}}, "2 plugin hook"),
         ({"plugin_cache": {"status": "stale"}}, "plugin cache is stale"),

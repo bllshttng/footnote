@@ -1206,6 +1206,22 @@ mod tests {
             vec!["sh.fno.pr-watcher", "com.user.autocorrect-watcher"],
             "the autocorrect labels the sh.fno. prefix filter missed now count"
         );
+        let watcher_row = serde_json::to_value(fold.dead[0].clone()).unwrap();
+        assert_eq!(
+            watcher_row["exit"], 78,
+            "doctor reads entry['exit'], never last_exit"
+        );
+        assert!(watcher_row.get("last_exit").is_none());
+        let unmeasured = fold
+            .labels
+            .iter()
+            .find(|f| f.label == "sh.fno.sync-backlog")
+            .unwrap();
+        let row = serde_json::to_value(unmeasured).unwrap();
+        assert!(
+            row["exit"].is_null(),
+            "a label launchctl gave no exit for serializes null"
+        );
     }
 
     #[test]
