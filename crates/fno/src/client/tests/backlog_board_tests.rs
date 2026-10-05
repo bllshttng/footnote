@@ -1397,7 +1397,7 @@ fn board_remembers_filters_search_view_and_selection_across_reopen() {
     rederive(&mut b);
     focus_card(&mut b, Some("x-2"));
     assert_eq!(cursor_card_id(&b).as_deref(), Some("x-2"), "fixture cursor");
-    save_board_prefs(&b);
+    save_board_prefs(&mut b);
     drop(b);
     // Close, reopen through the real open path: the query comes back, the
     // saved card rides along as the pending focus.

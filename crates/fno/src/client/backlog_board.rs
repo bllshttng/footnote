@@ -74,12 +74,7 @@ pub(crate) struct QueryState {
 impl QueryState {
     /// The model's parsed query for this state.
     pub(crate) fn to_query(&self) -> Result<backlog_model::Query, String> {
-        let lanes = match self.lanes {
-            backlog_model::LanesBy::Project => "project",
-            backlog_model::LanesBy::Epic => "epic",
-            backlog_model::LanesBy::None => "none",
-        };
-        let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes.into())];
+        let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes_name(&self.lanes).into())];
         for (k, vals) in &self.sets {
             for v in vals {
                 p.push((k.to_string(), v.clone()));
@@ -521,13 +516,20 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
             b.force = false;
             b.last_gather = Some(Instant::now());
             b.stamp = inputs.version;
-            let focus = b.pending_focus.take().or_else(|| cursor_card_id(b));
             b.inputs = Some(inputs);
             let Ok(q) = b.query.to_query() else {
                 return;
             };
             let board = backlog_model::board(b.inputs.as_ref().expect("set one line above"), &q);
             b.errors = board.errors.clone();
+            // The restored selection waits for a board that actually has
+            // lanes; a failed read keeps it waiting instead of spending it.
+            let focus = if board.lanes.is_empty() {
+                b.pending_focus.clone()
+            } else {
+                b.pending_focus.take()
+            }
+            .or_else(|| cursor_card_id(b));
             // A failed read (errors with no lanes) never repaints a good
             // board empty; a filter matching nothing (empty errors) does.
             if !board.lanes.is_empty() || board.errors.is_empty() || b.body.is_none() {
@@ -610,25 +612,50 @@ fn first_card(b: &mut BoardView) {
     }
 }
 
+/// The query string spelling of the lane grouping, shared by the URL
+/// fold and the store's save/restore.
+fn lanes_name(lanes: &backlog_model::LanesBy) -> &'static str {
+    match lanes {
+        backlog_model::LanesBy::Project => "project",
+        backlog_model::LanesBy::Epic => "epic",
+        backlog_model::LanesBy::None => "none",
+    }
+}
+
+/// The inverse of [`lanes_name`]; an unknown name reads as the default.
+fn lanes_from_name(name: Option<&str>) -> backlog_model::LanesBy {
+    match name {
+        Some("epic") => backlog_model::LanesBy::Epic,
+        Some("none") => backlog_model::LanesBy::None,
+        _ => backlog_model::LanesBy::Project,
+    }
+}
+
+/// The query string spelling of the view mode, shared like [`lanes_name`].
+fn view_name(view: &backlog_model::View) -> &'static str {
+    match view {
+        backlog_model::View::Kanban => "kanban",
+        backlog_model::View::List => "list",
+    }
+}
+
+/// The inverse of [`view_name`]; an unknown name reads as kanban.
+fn view_from_name(name: Option<&str>) -> backlog_model::View {
+    match name {
+        Some("list") => backlog_model::View::List,
+        _ => backlog_model::View::Kanban,
+    }
+}
+
 /// Write the board's query and selection to the view store, so the next
-/// open and the next client restart come back to them.
-fn save_board_prefs(b: &BoardView) {
+/// open and the next client restart come back to them. A gesture with a
+/// save in it also cancels the restore-in-waiting: the operator moved
+/// first, so the stored card no longer wins the first gather.
+fn save_board_prefs(b: &mut BoardView) {
+    b.pending_focus = None;
     let prefs = crate::view_store::BoardQueryPrefs {
-        lanes: Some(
-            match b.query.lanes {
-                backlog_model::LanesBy::Project => "project",
-                backlog_model::LanesBy::Epic => "epic",
-                backlog_model::LanesBy::None => "none",
-            }
-            .to_string(),
-        ),
-        view: Some(
-            match b.query.view {
-                backlog_model::View::Kanban => "kanban",
-                backlog_model::View::List => "list",
-            }
-            .to_string(),
-        ),
+        lanes: Some(lanes_name(&b.query.lanes).to_string()),
+        view: Some(view_name(&b.query.view).to_string()),
         q: b.query.q.clone(),
         sets: b
             .query
@@ -656,17 +683,10 @@ fn restore_board_prefs(b: &mut BoardView) {
         })
         .collect();
     let candidate = QueryState {
-        lanes: match p.lanes.as_deref() {
-            Some("epic") => backlog_model::LanesBy::Epic,
-            Some("none") => backlog_model::LanesBy::None,
-            _ => backlog_model::LanesBy::Project,
-        },
+        lanes: lanes_from_name(p.lanes.as_deref()),
         sets,
         q: p.q.filter(|q| !q.is_empty()),
-        view: match p.view.as_deref() {
-            Some("list") => backlog_model::View::List,
-            _ => backlog_model::View::Kanban,
-        },
+        view: view_from_name(p.view.as_deref()),
     };
     if candidate.to_query().is_err() {
         return;
