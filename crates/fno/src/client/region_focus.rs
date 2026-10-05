@@ -632,6 +632,13 @@ pub(super) async fn mouse_pre_pass(
                     && !over_chrome_row
                 {
                     view.region_owner = RegionOwner::Feed;
+                    // The footer's `↑ N new` marker acts before row
+                    // resolution: a click there jumps home, it never opens a
+                    // row underneath (no new ChromeHit variant).
+                    if view.feed_new_marker_hit(rep.row, rep.col) {
+                        view.feed_home();
+                        continue;
+                    }
                     if let Some(hit) = view.chrome_hit_feed(rep.row, rep.col) {
                         apply_hit(view, hit, sock_w).await?;
                     }

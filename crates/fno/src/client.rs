@@ -770,7 +770,7 @@ fn is_blocked_row(a: &AgentRow) -> bool {
 
 /// Everything the client renders from. Pure state - `compose` turns it into
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
-struct View {
+pub(crate) struct View {
     term: (u16, u16), // full terminal (rows, cols)
     /// The session name, for the status row. Fixed for the connection's life
     /// (sessions cannot rename), so the row can never go stale.
@@ -1340,7 +1340,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // reuses join_fold_row's join keys for its deep link.
 mod bell;
 mod feed_detail;
-mod feed_view;
+pub(crate) mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;
@@ -8872,7 +8872,7 @@ async fn attach_and_run(
     }
 }
 
-enum StdinFlow {
+pub(crate) enum StdinFlow {
     Continue,
     Detach,
 }

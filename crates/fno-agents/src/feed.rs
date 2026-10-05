@@ -89,6 +89,19 @@ pub struct FeedRow {
     /// The PR URL, on a ship row. The mux's provenance action opens it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Which slice of the fleet the row belongs to: mail, backlog, ship,
+    /// agents, mux, fleet or ci. A pure function of the kind, so no migration
+    /// ever backfills it.
+    pub area: String,
+    /// The crown holder the row rolls up to, when the row's scope is held.
+    /// The search answers `l:` through it, else through `owner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
+    /// The row's position in the total order, as a six-string JSON array
+    /// (`[ts, kind, node, session_id, ref, title]`, absent fields as "").
+    /// The `--before` / `--after` flags take one back. Always serialized:
+    /// the client pages by it without parsing anything else.
+    pub cursor: String,
 }
 
 /// Rows plus what the projection had to skip. Malformed question lines and
@@ -165,6 +178,49 @@ pub(crate) fn ts_key(ts: &str) -> (u8, i64) {
     }
 }
 
+/// The total row order: parsed time first, then kind, node, session, ref and
+/// title as strings. Hundreds of rows share a ts, so the ts alone cannot
+/// bound a page; this key can, and the cursor is exactly its string half.
+pub(crate) fn order_key(r: &FeedRow) -> ((u8, i64), &str, &str, &str, &str, &str) {
+    (
+        ts_key(&r.ts),
+        &r.kind,
+        r.node.as_deref().unwrap_or(""),
+        r.session_id.as_deref().unwrap_or(""),
+        r.r#ref.as_deref().unwrap_or(""),
+        &r.title,
+    )
+}
+
+/// The cursor string for a row: the six order strings as one JSON array.
+fn cursor_of(r: &FeedRow) -> String {
+    serde_json::to_string(&[
+        r.ts.clone(),
+        r.kind.clone(),
+        r.node.clone().unwrap_or_default(),
+        r.session_id.clone().unwrap_or_default(),
+        r.r#ref.clone().unwrap_or_default(),
+        r.title.clone(),
+    ])
+    .expect("serializing six strings never fails")
+}
+
+/// Decode a cursor into the six strings it must carry. The ts element is
+/// re-parsed through `ts_key` when the key is compared, so a decoded cursor
+/// orders exactly as the rows around it do.
+fn parse_cursor(raw: &str) -> Result<[String; 6], String> {
+    let v: Value = serde_json::from_str(raw).map_err(|_| "not a JSON array".to_string())?;
+    let arr = v.as_array().ok_or("not a JSON array")?;
+    if arr.len() != 6 {
+        return Err(format!("expected six elements, got {}", arr.len()));
+    }
+    let mut out = [const { String::new() }; 6];
+    for (slot, v) in out.iter_mut().zip(arr) {
+        *slot = v.as_str().ok_or("element is not a string")?.to_string();
+    }
+    Ok(out)
+}
+
 /// The pure projection: questions text + graph entries + removals + the
 /// agents journal's spawn events + the team events (both journals) ->
 /// ordered rows. Ascending by ts, so a consumer reads history forward and
@@ -176,6 +232,8 @@ pub fn project(
     spawns_raw: &str,
     team_raw: &str,
     closes_raw: &str,
+    main_raw: &str,
+    node_set: Option<&[String]>,
 ) -> Projection {
     let mut rows = Vec::new();
     let mut skipped_lines = 0usize;
@@ -317,6 +375,12 @@ pub fn project(
             skipped_entries += 1;
             continue;
         };
+        // A node filter cuts the graph leg before any row derives: the entry
+        // set is the operator's whole backlog, and only the asked-for nodes
+        // pay the derivation.
+        if node_set.is_some_and(|set| !set.iter().any(|n| n == node_id)) {
+            continue;
+        }
         let node_title = graph_store::s_str(entry, "title")
             .unwrap_or(node_id)
             .to_string();
@@ -417,8 +481,9 @@ pub fn project(
             }
         }
 
-        // node_ended: completed_at is the statement; the newest do/ship row
-        // supplies the session the deep link lands in.
+        // Completion: a merged node reads pr_merged (the merge IS the end);
+        // everything else reads node_ended. completed_at is the statement;
+        // the newest do/ship row supplies the session the deep link lands in.
         if let Some(completed) = s_field(entry, "completed_at") {
             let status = graph_store::s_str(entry, "status")
                 .unwrap_or("done")
@@ -426,15 +491,32 @@ pub fn project(
             let (sid, harness) = latest_session
                 .map(|(_, sid, harness)| (sid, harness))
                 .unwrap_or((None, None));
-            rows.push(FeedRow {
-                ts: completed,
-                kind: "node_ended".into(),
-                node: Some(node_id.to_string()),
-                session_id: sid,
-                harness,
-                title: status,
-                ..FeedRow::default()
-            });
+            let merged = graph_store::s_str(entry, "merge_status").as_deref() == Some("merged");
+            let pr = entry.get("pr_number").and_then(Value::as_i64);
+            if let (true, Some(pr)) = (merged, pr) {
+                let url = graph_store::s_str(entry, "pr_url").unwrap_or(node_id);
+                rows.push(FeedRow {
+                    ts: completed,
+                    kind: "pr_merged".into(),
+                    node: Some(node_id.to_string()),
+                    session_id: sid,
+                    harness,
+                    title: format!("PR {pr} merged - {url}"),
+                    r#ref: Some(pr.to_string()),
+                    url: Some(url.to_string()),
+                    ..FeedRow::default()
+                });
+            } else {
+                rows.push(FeedRow {
+                    ts: completed,
+                    kind: "node_ended".into(),
+                    node: Some(node_id.to_string()),
+                    session_id: sid,
+                    harness,
+                    title: status,
+                    ..FeedRow::default()
+                });
+            }
         }
     }
 
@@ -500,7 +582,8 @@ pub fn project(
                 k @ ("pane_closed"
                 | "server_stopped"
                 | "composer_shell_ran"
-                | "composer_shell_refused"),
+                | "composer_shell_refused"
+                | "daemon_started"),
             ) => k,
             _ => continue,
         };
@@ -508,6 +591,17 @@ pub fn project(
         let Some(ts) = s_field(&v, "ts") else {
             continue;
         };
+        if kind == "daemon_started" {
+            let version = s_field(data, "version").unwrap_or_default();
+            let pid = data.get("pid").and_then(Value::as_u64).unwrap_or(0);
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "daemon_restarted".into(),
+                title: format!("daemon {version} pid {pid}"),
+                ..FeedRow::default()
+            });
+            continue;
+        }
         if kind == "server_stopped" {
             let cause = s_field(data, "cause").unwrap_or_else(|| "unknown".into());
             rows.push(FeedRow {
@@ -615,6 +709,109 @@ pub fn project(
         });
     }
 
+    // Coverage kinds from the durable main store. spawn_gate_refused keeps
+    // the session_spawn_refused kind and carries the gate axis as its reason;
+    // the update trio folds into update_started / update_finished.
+    for line in main_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let kind = match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
+            Some(
+                k @ ("spawn_gate_refused"
+                | "worker_silent"
+                | "blocked"
+                | "fno_update_started"
+                | "fno_update_installed"
+                | "fno_update_failed"),
+            ) => k,
+            _ => continue,
+        };
+        let Some(data) = v.get("data") else { continue };
+        let Some(ts) = s_field(&v, "ts") else {
+            continue;
+        };
+        match kind {
+            "spawn_gate_refused" => {
+                let reason = s_field(data, "reason").unwrap_or_else(|| "unknown".into());
+                let name = s_field(data, "name").unwrap_or_default();
+                rows.push(FeedRow {
+                    ts,
+                    kind: "session_spawn_refused".into(),
+                    title: format!("spawn refused ({reason}): {name}"),
+                    reason: Some(reason),
+                    ..FeedRow::default()
+                });
+            }
+            "worker_silent" => {
+                let handle = s_field(data, "handle").unwrap_or_default();
+                let age = data.get("age_s").map(|v| v.to_string()).unwrap_or_default();
+                rows.push(FeedRow {
+                    ts,
+                    kind: "worker_stalled".into(),
+                    node: s_field(data, "node"),
+                    harness: s_field(data, "harness"),
+                    title: format!("{handle} silent {age}s"),
+                    ..FeedRow::default()
+                });
+            }
+            "blocked" => {
+                let bkind = s_field(data, "kind").unwrap_or_default();
+                let reason = s_field(data, "reason").unwrap_or_default();
+                let title = if reason.is_empty() {
+                    bkind
+                } else {
+                    format!("{bkind}: {}", one_line(&reason))
+                };
+                rows.push(FeedRow {
+                    ts,
+                    kind: "help_emitted".into(),
+                    node: s_field(&v, "node"),
+                    harness: s_field(&v, "harness"),
+                    reason: if reason.is_empty() {
+                        None
+                    } else {
+                        Some(one_line(&reason))
+                    },
+                    title,
+                    ..FeedRow::default()
+                });
+            }
+            "fno_update_started" | "fno_update_installed" => {
+                let rev = s_field(data, "new_rev").unwrap_or_default();
+                let short: String = rev.chars().take(8).collect();
+                let started = kind == "fno_update_started";
+                rows.push(FeedRow {
+                    ts,
+                    kind: if started {
+                        "update_started".into()
+                    } else {
+                        "update_finished".into()
+                    },
+                    title: format!(
+                        "fno update {} ({short})",
+                        if started { "started" } else { "installed" }
+                    ),
+                    ..FeedRow::default()
+                });
+            }
+            _ => {
+                let reason = s_field(data, "reason").unwrap_or_else(|| "failed".into());
+                rows.push(FeedRow {
+                    ts,
+                    kind: "update_finished".into(),
+                    title: format!("fno update failed ({})", one_line(&reason)),
+                    reason: Some(one_line(&reason)),
+                    ..FeedRow::default()
+                });
+            }
+        }
+    }
+
     // Team rows from the team events, which land in BOTH journals, so rows
     // dedupe on (ts, scope, holder, cause). The same parse feeds the owner
     // assignment below.
@@ -683,8 +880,76 @@ pub fn project(
         }
     }
 
-    rows.sort_by(|a, b| ts_key(&a.ts).cmp(&ts_key(&b.ts)));
-    assign_owners(&mut rows, &team_events, graph_entries);
+    rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+
+    // session -> harness, from the graph's session rows and the spawn events.
+    // A row whose source names no harness reads the lane its session ran, at
+    // event time; a session in neither source stays absent (no guess).
+    let mut harness_by_session: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for entry in graph_entries {
+        for row in entry
+            .get("sessions")
+            .and_then(Value::as_array)
+            .unwrap_or(&vec![])
+        {
+            if let (Some(sid), Some(h)) = (s_field(row, "session_id"), s_field(row, "harness")) {
+                harness_by_session.insert(sid, h);
+            }
+        }
+    }
+    for line in spawns_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
+            continue;
+        }
+        let Some(data) = v.get("data") else { continue };
+        if let (Some(sid), Some(h)) = (
+            s_field(data, "harness_session_id").filter(|s| is_session_handle(s)),
+            s_field(data, "harness").or_else(|| s_field(data, "provider")),
+        ) {
+            harness_by_session.entry(sid).or_insert(h);
+        }
+    }
+    for r in &mut rows {
+        if r.harness.is_none() {
+            if let Some(sid) = r.session_id.as_deref() {
+                r.harness = harness_by_session.get(sid).cloned();
+            }
+        }
+    }
+
+    // spawn session -> worker name, for the lead rollup of node-less rows.
+    let mut spawn_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for line in spawns_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
+            continue;
+        }
+        let Some(data) = v.get("data") else { continue };
+        if let (Some(sid), Some(name)) = (
+            s_field(data, "harness_session_id").filter(|s| is_session_handle(s)),
+            s_field(data, "name"),
+        ) {
+            spawn_names.insert(sid, name);
+        }
+    }
+    assign_owners(
+        &mut rows,
+        &team_events,
+        graph_entries,
+        &themes,
+        &spawn_names,
+    );
+    for r in &mut rows {
+        r.area = area_of(&r.kind).to_string();
+        r.cursor = cursor_of(r);
+    }
     Projection {
         rows,
         skipped_lines,
@@ -783,22 +1048,28 @@ fn parse_team_events(team_raw: &str) -> Vec<TeamEvent> {
 /// clears its scope at its own ts. A row whose node, or that node's graph
 /// parent, sits in a held scope gets `lead {holder} L{level}`; otherwise a
 /// row whose node has a graph parent gets `epic {parent} {parent title}`.
-fn assign_owners(rows: &mut [FeedRow], team_events: &[TeamEvent], graph_entries: &[Value]) {
+fn assign_owners(
+    rows: &mut [FeedRow],
+    team_events: &[TeamEvent],
+    graph_entries: &[Value],
+    themes: &std::collections::BTreeMap<String, String>,
+    spawn_names: &std::collections::HashMap<String, String>,
+) {
     if rows.is_empty() {
         return;
     }
-    // node -> parent / title lookups, one linear scan each (the entry set is
-    // the operator's backlog, not a hot path).
-    let parent_of = |node: &str| -> Option<String> {
-        graph_entries
-            .iter()
-            .find(|e| graph_store::entry_id(e) == Some(node))
-            .and_then(|e| s_field(e, "parent"))
-    };
+    // One id -> entry map replaces a linear scan per row; the projection
+    // runs on every page read, so the walk is O(entries) once, not O(rows x
+    // entries).
+    let by_id: std::collections::HashMap<&str, &Value> = graph_entries
+        .iter()
+        .filter_map(|e| graph_store::entry_id(e).map(|id| (id, e)))
+        .collect();
+    let parent_of =
+        |node: &str| -> Option<String> { by_id.get(node).and_then(|e| s_field(e, "parent")) };
     let title_of = |node: &str| -> Option<String> {
-        graph_entries
-            .iter()
-            .find(|e| graph_store::entry_id(e) == Some(node))
+        by_id
+            .get(node)
             .and_then(|e| graph_store::s_str(e, "title"))
             .map(str::to_string)
     };
@@ -866,10 +1137,27 @@ fn assign_owners(rows: &mut [FeedRow], team_events: &[TeamEvent], graph_entries:
                 })
                 .map(|(s, _, _)| s.clone())
                 .unwrap_or_default();
-            let theme = crate::paths::AgentsHome::from_env_opt()
-                .and_then(|home| crate::team_names::theme_for(&home.team_names_json(), &scope));
+            let theme = themes
+                .get(crate::territory::canonical_scope(&scope).as_str())
+                .cloned();
             let rank = crate::team_names::title(*level as u32, &scope, theme.as_deref());
+            r.lead = Some(holder.clone());
             r.owner = Some(format!("{rank} ({holder})"));
+        } else if r.node.is_none() {
+            // A node-less row whose parent session IS a held crown holder's
+            // session rolls up to that holder: the question a lead's own
+            // session asked belongs to the lead it holds.
+            let named = r.parent.as_deref().and_then(|p| spawn_names.get(p));
+            if let Some(name) = named {
+                if let Some((scope, holder, level)) = held.iter().find(|(_, h, _)| h == name) {
+                    let theme = themes
+                        .get(crate::territory::canonical_scope(scope).as_str())
+                        .cloned();
+                    let rank = crate::team_names::title(*level as u32, scope, theme.as_deref());
+                    r.lead = Some(holder.clone());
+                    r.owner = Some(format!("{rank} ({holder})"));
+                }
+            }
         } else if let Some(p) = parent {
             let title = title_of(&p).unwrap_or_default();
             r.owner = Some(if title.is_empty() {
@@ -888,21 +1176,117 @@ fn scope_holds(scope: &str, node: &str) -> bool {
 
 /// The filters the CLI flags express, applied after ordering: `--node`,
 /// `--session`, `--kind`, `--since-epoch` (unparseable ts rows survive a since
-/// filter), then `--limit` from the newest end, output kept ascending. Pure so
-/// the flags are testable without files.
-pub fn filter_rows(
+/// filter), then the page bounds. `--before` keeps the rows strictly below
+/// the cursor key and trims to the newest `limit`; `--after` keeps the rows
+/// strictly above and trims to the OLDEST `limit`, so the page stays
+/// contiguous with its cursor. Without a cursor `--limit` keeps the newest,
+/// as it always has. Output stays ascending. Pure so the flags are testable
+/// without files.
+pub(crate) fn filter_rows(
     rows: Vec<FeedRow>,
-    node: Option<&str>,
-    session: Option<&str>,
-    kind: Option<&str>,
+    page: &Page,
+    pre: &Prefilter,
     since_epoch: Option<u64>,
-    limit: Option<usize>,
+    until_epoch: Option<u64>,
 ) -> Vec<FeedRow> {
+    // The parsed cursors stay in locals; the comparison keys borrow from
+    // them, so a page bound costs no per-row allocation.
+    let before_cur = page
+        .before
+        .as_deref()
+        .and_then(|raw| parse_cursor(raw).ok());
+    let after_cur = page.after.as_deref().and_then(|raw| parse_cursor(raw).ok());
+    let before = before_cur.as_ref().map(|c| {
+        (
+            ts_key(&c[0]),
+            c[1].as_str(),
+            c[2].as_str(),
+            c[3].as_str(),
+            c[4].as_str(),
+            c[5].as_str(),
+        )
+    });
+    let after = after_cur.as_ref().map(|c| {
+        (
+            ts_key(&c[0]),
+            c[1].as_str(),
+            c[2].as_str(),
+            c[3].as_str(),
+            c[4].as_str(),
+            c[5].as_str(),
+        )
+    });
+    // One flag, comma-OR over exact segments. An empty segment never
+    // matches, so a trailing comma cannot widen the filter to everything.
+    let in_set = |v: &str, set: &str| {
+        set.split(',')
+            .filter(|seg| !seg.is_empty())
+            .any(|seg| seg == v)
+    };
+    // One flag, comma-OR over prefix segments. An exact kind is its own
+    // prefix, so today's exact `--kind` keeps matching.
+    let prefix_set = |v: &str, set: &str| {
+        set.split(',')
+            .filter(|seg| !seg.is_empty())
+            .any(|seg| v.starts_with(seg))
+    };
     let mut rows: Vec<FeedRow> = rows
         .into_iter()
-        .filter(|r| node.is_none_or(|n| r.node.as_deref() == Some(n)))
-        .filter(|r| session.is_none_or(|s| r.session_id.as_deref() == Some(s)))
-        .filter(|r| kind.is_none_or(|k| r.kind == k))
+        .filter(|r| {
+            pre.node
+                .as_deref()
+                .filter(|n| !n.is_empty())
+                .is_none_or(|n| r.node.as_deref().is_some_and(|v| in_set(v, &n)))
+        })
+        .filter(|r| {
+            pre.kind
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .is_none_or(|k| prefix_set(&r.kind, &k))
+        })
+        .filter(|r| {
+            pre.area
+                .as_deref()
+                .filter(|a| !a.is_empty())
+                .is_none_or(|a| in_set(&r.area, &a))
+        })
+        .filter(|r| {
+            pre.session
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_none_or(|s| {
+                    r.session_id
+                        .as_deref()
+                        .is_some_and(|v| v.starts_with(&s) || v.ends_with(&s))
+                })
+        })
+        .filter(|r| {
+            pre.agent
+                .as_deref()
+                .filter(|a| !a.is_empty())
+                .is_none_or(|a| r.name.as_deref().is_some_and(|v| v.starts_with(&a)))
+        })
+        .filter(|r| {
+            pre.harness
+                .as_deref()
+                .filter(|h| !h.is_empty())
+                .is_none_or(|h| {
+                    r.harness
+                        .as_deref()
+                        .is_some_and(|v| h.split(',').any(|seg| v.eq_ignore_ascii_case(seg)))
+                })
+        })
+        .filter(|r| {
+            pre.lead
+                .as_deref()
+                .filter(|l| !l.is_empty())
+                .is_none_or(|l| {
+                    r.lead
+                        .as_deref()
+                        .or(r.owner.as_deref())
+                        .is_some_and(|v| v.contains(&l))
+                })
+        })
         .filter(|r| match since_epoch {
             Some(since) => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
                 Ok(t) => t.timestamp() >= since as i64,
@@ -910,32 +1294,159 @@ pub fn filter_rows(
             },
             None => true,
         })
+        .filter(|r| match until_epoch {
+            Some(until) => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
+                Ok(t) => t.timestamp() <= until as i64,
+                Err(_) => true,
+            },
+            None => true,
+        })
+        .filter(|r| before.is_none_or(|b| order_key(r) < b))
+        .filter(|r| after.is_none_or(|a| order_key(r) > a))
         .collect();
-    if let Some(limit) = limit {
+    if let Some(limit) = page.limit {
         let keep = limit.min(rows.len());
-        let start = rows.len() - keep;
-        rows.drain(0..start);
+        if page.after.is_some() {
+            rows.truncate(keep);
+        } else {
+            let start = rows.len() - keep;
+            rows.drain(0..start);
+        }
     }
     rows
 }
 
+/// Which slice of the fleet a kind belongs to. A pure function of the kind,
+/// so no migration ever backfills it; an unknown kind maps to `other`, and a
+/// unit test fails if any kind the projection emits lands there.
+pub(crate) fn area_of(kind: &str) -> &'static str {
+    match kind {
+        "question_asked" | "question_closed" | "decision_recorded" => "mail",
+        "node_created" | "node_started" | "node_ended" => "backlog",
+        "node_shipped" | "pr_merged" => "ship",
+        "session_spawned"
+        | "session_spawn_refused"
+        | "session_reaped"
+        | "worker_stalled"
+        | "help_emitted"
+        | "team_granted"
+        | "team_vacated" => "agents",
+        "pane_closed" | "server_stopped" | "composer_shell_ran" | "composer_shell_refused" => "mux",
+        "day_boundary" | "daemon_restarted" | "update_started" | "update_finished" => "fleet",
+        "main_ci_changed" => "ci",
+        _ => "other",
+    }
+}
+
+/// The kinds each store leg can emit, so a prefilter that excludes them all
+/// skips the read entirely.
+pub(crate) const QUESTION_KINDS: &[&str] = &[
+    "question_asked",
+    "question_closed",
+    "decision_recorded",
+    "day_boundary",
+];
+pub(crate) const GRAPH_KINDS: &[&str] = &[
+    "node_created",
+    "node_started",
+    "node_ended",
+    "node_shipped",
+    "pr_merged",
+];
+pub(crate) const REMOVAL_KINDS: &[&str] = &["session_reaped"];
+/// The feed kinds the main store leg derives (its store kinds are
+/// spawn_gate_refused, worker_silent, blocked and the fno_update_* trio).
+pub(crate) const MAIN_KINDS: &[&str] = &[
+    "session_spawn_refused",
+    "worker_stalled",
+    "help_emitted",
+    "update_started",
+    "update_finished",
+];
+pub(crate) const SPAWN_KINDS: &[&str] = &["session_spawned", "session_spawn_refused"];
+pub(crate) const CLOSE_KINDS: &[&str] = &[
+    "pane_closed",
+    "server_stopped",
+    "composer_shell_ran",
+    "composer_shell_refused",
+    "daemon_restarted",
+];
+pub(crate) const TEAM_KINDS: &[&str] = &["team_granted", "team_vacated"];
+
+/// True when the prefilter cannot match any kind this leg emits, so the leg
+/// is not read at all. An empty leg is never skipped.
+pub(crate) fn leg_skipped(pre: &Prefilter, kinds: &[&str]) -> bool {
+    if kinds.is_empty() {
+        return false;
+    }
+    if let Some(k) = pre.kind.as_deref() {
+        let wanted: Vec<&str> = k.split(',').filter(|s| !s.is_empty()).collect();
+        if !kinds
+            .iter()
+            .any(|kd| wanted.iter().any(|w| kd.starts_with(w)))
+        {
+            return true;
+        }
+    }
+    if let Some(a) = pre.area.as_deref() {
+        let wanted: Vec<&str> = a.split(',').filter(|s| !s.is_empty()).collect();
+        if !kinds
+            .iter()
+            .any(|kd| wanted.iter().any(|w| area_of(kd) == *w))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// One keyset page request: the cursor bounds and the size. `--before` keeps
+/// the rows strictly below the cursor key, newest `limit` of them; `--after`
+/// keeps the rows strictly above, OLDEST `limit`. Both at once is refused.
+#[derive(Debug, Default)]
+pub(crate) struct Page {
+    before: Option<String>,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+/// The flat WHERE clause the client may send: every flag ANDs, and the
+/// values inside one flag are comma-OR. No grammar, no negation, no OR
+/// across flags: the client sends only what one positive group can say.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Prefilter {
+    /// Exact node ids, comma-OR.
+    node: Option<String>,
+    /// Kind prefixes, comma-OR.
+    kind: Option<String>,
+    /// Area names, exact, comma-OR.
+    area: Option<String>,
+    /// Session id prefix or tail.
+    session: Option<String>,
+    /// Worker name prefix.
+    agent: Option<String>,
+    /// Harness names, case-insensitive, comma-OR.
+    harness: Option<String>,
+    /// Substring of the lead, else the owner.
+    lead: Option<String>,
+}
+
+#[derive(Debug)]
 struct FeedArgs {
     json: bool,
     since_epoch: Option<u64>,
-    limit: Option<usize>,
-    node: Option<String>,
-    session: Option<String>,
-    kind: Option<String>,
+    until_epoch: Option<u64>,
+    page: Page,
+    pre: Prefilter,
 }
 
 fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
     let mut args = FeedArgs {
         json: false,
         since_epoch: None,
-        limit: None,
-        node: None,
-        session: None,
-        kind: None,
+        until_epoch: None,
+        page: Page::default(),
+        pre: Prefilter::default(),
     };
     let mut it = crate::client_verbs::expand_eq(rest).into_iter();
     while let Some(a) = it.next() {
@@ -949,18 +1460,50 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
                 )
             }
             "--limit" => {
-                args.limit = Some(
+                args.page.limit = Some(
                     it.next()
                         .and_then(|v| v.parse::<usize>().ok())
                         .ok_or("--limit needs a positive integer")?,
                 )
             }
-            "--node" => args.node = Some(it.next().ok_or("--node needs an id")?),
-            "--session" => args.session = Some(it.next().ok_or("--session needs an id")?),
-            "--kind" => args.kind = Some(it.next().ok_or("--kind needs a kind name")?),
+            "--before" => {
+                let raw = it.next().ok_or("--before needs a cursor")?;
+                parse_cursor(&raw).map_err(|e| format!("--before: {e}"))?;
+                args.page.before = Some(raw);
+            }
+            "--after" => {
+                let raw = it.next().ok_or("--after needs a cursor")?;
+                parse_cursor(&raw).map_err(|e| format!("--after: {e}"))?;
+                args.page.after = Some(raw);
+            }
+            "--until-epoch" => {
+                args.until_epoch = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or("--until-epoch needs a non-negative integer")?,
+                )
+            }
+            "--node" => args.pre.node = Some(it.next().ok_or("--node needs an id")?),
+            "--session" => args.pre.session = Some(it.next().ok_or("--session needs an id")?),
+            "--kind" => args.pre.kind = Some(it.next().ok_or("--kind needs a kind name")?),
+            "--area" => args.pre.area = Some(it.next().ok_or("--area needs a name")?),
+            "--agent" => args.pre.agent = Some(it.next().ok_or("--agent needs a name")?),
+            "--harness" => args.pre.harness = Some(it.next().ok_or("--harness needs a name")?),
+            "--lead" => args.pre.lead = Some(it.next().ok_or("--lead needs a name")?),
             other => return Err(format!("unknown feed flag: {other}")),
         }
     }
+    if args.page.before.is_some() && args.page.after.is_some() {
+        return Err("--before and --after cannot combine: page from one edge".into());
+    }
+    let live = |v: Option<String>| v.filter(|s| !s.is_empty());
+    args.pre.node = live(args.pre.node);
+    args.pre.kind = live(args.pre.kind);
+    args.pre.area = live(args.pre.area);
+    args.pre.session = live(args.pre.session);
+    args.pre.agent = live(args.pre.agent);
+    args.pre.harness = live(args.pre.harness);
+    args.pre.lead = live(args.pre.lead);
     Ok(args)
 }
 
@@ -983,9 +1526,15 @@ pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
 /// `since_epoch` (seconds), or empty when the store is unreadable (the
 /// removal leg's notes name the store when THAT store fails; the spawn leg
 /// degrades to no rows, in step with the questions leg's posture).
-fn agents_journal(home: &AgentsHome, types: &[&str], since_epoch: Option<u64>) -> String {
+fn agents_journal(
+    home: &AgentsHome,
+    types: &[&str],
+    since_epoch: Option<u64>,
+    until_epoch: Option<u64>,
+) -> String {
     let query = crate::event_store::EventQuery {
         since_ms: since_epoch.map(|s| s as i64 * 1000),
+        until_ms: until_epoch.map(|u| u as i64 * 1000),
         ..crate::event_store::EventQuery::of_types(types)
     };
     crate::event_store::journal_text_checked(&home.events_jsonl(), &query).unwrap_or_default()
@@ -997,7 +1546,7 @@ fn agents_journal(home: &AgentsHome, types: &[&str], since_epoch: Option<u64>) -
 /// events it owns.
 fn team_journals(home: &AgentsHome) -> String {
     let types = ["agent_teamed", "agent_team_vacated"];
-    let mut raw = agents_journal(home, &types, None);
+    let mut raw = agents_journal(home, &types, None, None);
     if let Some(parent) = home.root().parent() {
         let path = parent.join("events.jsonl");
         if let Ok(text) = crate::event_store::journal_text_checked(
@@ -1009,6 +1558,44 @@ fn team_journals(home: &AgentsHome) -> String {
         }
     }
     raw
+}
+
+/// The main store's typed read for the coverage kinds. `events.jsonl` routes
+/// to db/events.db, the durable store; a store neither present nor readable
+/// notes its skip once and yields no rows (AC7-EDGE).
+fn main_store_journal(
+    home: &AgentsHome,
+    since_epoch: Option<u64>,
+    until_epoch: Option<u64>,
+) -> (String, Option<String>) {
+    let Some(parent) = home.root().parent() else {
+        return (String::new(), None);
+    };
+    let path = parent.join("events.jsonl");
+    if !path.is_file() && !crate::event_store::store_path(&path).is_file() {
+        return (
+            String::new(),
+            Some(format!("main store skipped (absent): {}", path.display())),
+        );
+    }
+    match crate::event_store::journal_text_checked(
+        &path,
+        &crate::event_store::EventQuery {
+            since_ms: since_epoch.map(|s| s as i64 * 1000),
+            until_ms: until_epoch.map(|u| u as i64 * 1000),
+            ..crate::event_store::EventQuery::of_types(&[
+                "spawn_gate_refused",
+                "worker_silent",
+                "blocked",
+                "fno_update_started",
+                "fno_update_installed",
+                "fno_update_failed",
+            ])
+        },
+    ) {
+        Ok(text) => (text, None),
+        Err(e) => (String::new(), Some(format!("main store skipped ({e})"))),
+    }
 }
 
 /// The `fno-agents feed` verb. A missing or unreadable store is not fatal: the
@@ -1029,17 +1616,31 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let questions_path = fno_dir.join("questions.jsonl");
-    let questions_raw = match crate::event_store::journal_text_checked(
-        &questions_path,
-        &crate::event_store::EventQuery::of_types(&[]),
-    ) {
-        Ok(raw) => raw,
-        Err(e) => {
-            eprintln!(
-                "fno-agents feed: questions store unreadable, skipped: {} ({e})",
-                questions_path.display()
-            );
-            String::new()
+    // Typed read: the four question kinds plus the empty type (corrupt rows
+    // still count). The store's other kinds, 119k+ attention_delivery rows
+    // alone, never reach the parser, so they stop reading as malformed.
+    let questions_query = crate::event_store::EventQuery {
+        since_ms: args.since_epoch.map(|s| s as i64 * 1000),
+        until_ms: args.until_epoch.map(|u| u as i64 * 1000),
+        ..crate::event_store::EventQuery::of_types(&[
+            "operator_question",
+            "operator_question_closed",
+            "operator_decision",
+            "day_boundary",
+        ])
+    };
+    let questions_raw = if leg_skipped(&args.pre, QUESTION_KINDS) {
+        String::new()
+    } else {
+        match crate::event_store::journal_text_checked(&questions_path, &questions_query) {
+            Ok(raw) => raw,
+            Err(e) => {
+                eprintln!(
+                    "fno-agents feed: questions store unreadable, skipped: {} ({e})",
+                    questions_path.display()
+                );
+                String::new()
+            }
         }
     };
 
@@ -1049,7 +1650,9 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         // should know the lifecycle leg is absent, so its absence keeps its
         // own note (AC3) where a present-but-empty store is just empty.
         let path = graph_path(home);
-        if !crate::backlog::database_path(&path).exists() {
+        if leg_skipped(&args.pre, GRAPH_KINDS) {
+            (Vec::new(), None)
+        } else if !crate::backlog::database_path(&path).exists() {
             (Vec::new(), Some("graph store skipped (absent)".to_string()))
         } else {
             match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
@@ -1062,28 +1665,62 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         eprintln!("fno-agents feed: {note}");
     }
 
-    let (removals, removal_notes) =
-        crate::removals::read(home, args.since_epoch.map(|s| s as i64 * 1000));
+    let (removals, removal_notes) = if leg_skipped(&args.pre, REMOVAL_KINDS) {
+        (Vec::new(), Vec::new())
+    } else {
+        crate::removals::read(home, args.since_epoch.map(|s| s as i64 * 1000))
+    };
     for note in &removal_notes {
         eprintln!("fno-agents feed: {note}");
     }
-    let spawns_raw = agents_journal(
-        home,
-        &["agent_spawned", "agent_spawn_refused"],
-        args.since_epoch,
-    );
-    let team_raw = team_journals(home);
-    let closes_raw = agents_journal(
-        home,
-        &[
-            "pane_closed",
-            "server_stopped",
-            "composer_shell_ran",
-            "composer_shell_refused",
-        ],
-        args.since_epoch,
-    );
+    let spawns_raw = if leg_skipped(&args.pre, SPAWN_KINDS) {
+        String::new()
+    } else {
+        agents_journal(
+            home,
+            &["agent_spawned", "agent_spawn_refused"],
+            args.since_epoch,
+            args.until_epoch,
+        )
+    };
+    let team_raw = if leg_skipped(&args.pre, TEAM_KINDS) {
+        String::new()
+    } else {
+        team_journals(home)
+    };
+    let closes_raw = if leg_skipped(&args.pre, CLOSE_KINDS) {
+        String::new()
+    } else {
+        agents_journal(
+            home,
+            &[
+                "pane_closed",
+                "server_stopped",
+                "composer_shell_ran",
+                "composer_shell_refused",
+                "daemon_started",
+            ],
+            args.since_epoch,
+            args.until_epoch,
+        )
+    };
+    let (main_raw, main_note) = if leg_skipped(&args.pre, MAIN_KINDS) {
+        (String::new(), None)
+    } else {
+        main_store_journal(home, args.since_epoch, args.until_epoch)
+    };
+    if let Some(note) = main_note {
+        eprintln!("fno-agents feed: {note}");
+    }
 
+    // The projection sees the node set so the graph leg can skip whole
+    // entries; the other legs filter after projection (node_id is sparse in
+    // the stores).
+    let node_set: Option<Vec<String>> = args
+        .pre
+        .node
+        .as_deref()
+        .map(|s| s.split(',').map(str::to_string).collect());
     let Projection {
         rows,
         skipped_lines,
@@ -1095,6 +1732,8 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         &spawns_raw,
         &team_raw,
         &closes_raw,
+        &main_raw,
+        node_set.as_deref(),
     );
     if skipped_lines > 0 {
         eprintln!("fno-agents feed: skipped {skipped_lines} malformed question line(s)");
@@ -1103,14 +1742,10 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         eprintln!("fno-agents feed: skipped {skipped_entries} non-object graph entr(ies)");
     }
 
-    let rows = filter_rows(
-        rows,
-        args.node.as_deref(),
-        args.session.as_deref(),
-        args.kind.as_deref(),
-        args.since_epoch,
-        Some(args.limit.unwrap_or(200)),
-    );
+    let mut page = args.page;
+    // A page the caller did not size is the head page: the newest 200.
+    page.limit = page.limit.or(Some(200));
+    let rows = filter_rows(rows, &page, &args.pre, args.since_epoch, args.until_epoch);
 
     if args.json {
         println!(
@@ -1144,12 +1779,12 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
 mod tests {
     use super::*;
 
-    // The x-aaaa shape: a blueprint row with only ended_at, a do row and a
+    // The nd-aaaa shape: a blueprint row with only ended_at, a do row and a
     // ship row each with started_at, on a node carrying pr_number and
     // completed_at.
     fn graph_fixture() -> Vec<Value> {
         vec![serde_json::json!({
-            "id": "x-aaaa",
+            "id": "nd-aaaa",
             "status": "done",
             "title": "feed marker node",
             "pr_number": 1395,
@@ -1178,7 +1813,7 @@ mod tests {
 
     fn questions_fixture() -> String {
         [
-            r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"line one\nline two","session_id":"s-ask","node":"x-aaaa"}}"#,
+            r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"line one\nline two","session_id":"s-ask","node":"nd-aaaa"}}"#,
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"operator","data":{"question_id":"q-1","answer":"ruling: yes\ndo it","closed_by":"s-op"}}"#,
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"operator","data":{"decision_id":"d-1","decision":"strict equality stands","subject":"revert-dispute","decided_by":"s-op"}}"#,
         ]
@@ -1191,13 +1826,13 @@ mod tests {
 
     #[test]
     fn life_rows() {
-        let p = project("", &graph_fixture(), &[], "", "", "");
+        let p = project("", &graph_fixture(), &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_shipped", "node_ended"]
         );
         let started = &p.rows[1];
-        assert_eq!(started.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(started.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
         let pr = &p.rows[2];
         assert_eq!(pr.session_id.as_deref(), Some("s-ship"));
@@ -1209,24 +1844,33 @@ mod tests {
         // The marker: a projection fed only an events-style stream yields none
         // of the three lifecycle rows - they derive from the graph and nowhere
         // else.
-        let p = project(&questions_fixture(), &[], &[], "", "", "");
+        let p = project(&questions_fixture(), &[], &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["question_asked", "question_closed", "decision_recorded"]
         );
 
         let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
-        let p = project(questions, &[], &[], "", "", "");
+        let p = project(questions, &[], &[], "", "", "", "", None);
         assert_eq!(p.skipped_lines, 0);
         assert_eq!(kinds(&p.rows), ["day_boundary"]);
         assert_eq!(p.rows[0].title, "day start");
         assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
+        let p = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
-        assert_eq!(asked.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(asked.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(asked.title, "line one");
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.r#ref.as_deref(), Some("q-1"));
@@ -1234,7 +1878,7 @@ mod tests {
         // offers no attach target. The node comes from the asking row.
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("s-op"));
-        assert_eq!(closed.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(closed.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(closed.title, "ruling: yes");
         let decision = p
             .rows
@@ -1244,7 +1888,16 @@ mod tests {
         assert_eq!(decision.r#ref.as_deref(), Some("d-1"));
         assert_eq!(decision.title, "revert-dispute: strict equality stands");
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
+        let p = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
         assert_eq!(
             kinds(&p.rows),
             [
@@ -1264,7 +1917,7 @@ mod tests {
                 + &questions_fixture();
         let mut entries = vec![serde_json::json!("a bare string")];
         entries.extend(graph_fixture());
-        let p = project(&questions, &entries, &[], "", "", "");
+        let p = project(&questions, &entries, &[], "", "", "", "", None);
         assert_eq!(p.skipped_lines, 2);
         assert_eq!(p.skipped_entries, 1);
         assert!(p.rows.iter().all(|r| matches!(
@@ -1280,18 +1933,42 @@ mod tests {
         )));
 
         let questions = r#"{"ts":"yesterday-ish","type":"operator_question","source":"t","data":{"question_id":"q-0","question":"odd stamp","session_id":"s-x"}}"#.to_string();
-        let p = project(&questions, &[], &[], "", "", "");
+        let p = project(&questions, &[], &[], "", "", "", "", None);
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
-        let kept = filter_rows(p.rows, None, None, None, Some(1_700_000_000), None);
+        let kept = filter_rows(
+            p.rows,
+            &Page::default(),
+            &Prefilter::default(),
+            Some(1_700_000_000),
+            None,
+        );
         assert_eq!(kept.len(), 1);
     }
 
     #[test]
     fn filter_gate_rows() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
-        let node_rows = filter_rows(p.rows.clone(), Some("x-aaaa"), None, None, None, None);
-        // The fixture question carries node x-aaaa, so a node filter keeps it
+        let p = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
+        let node_rows = filter_rows(
+            p.rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                node: Some("nd-aaaa".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        // The fixture question carries node nd-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
         // closure inherits the association from the row that asked.
         assert_eq!(
@@ -1305,7 +1982,16 @@ mod tests {
                 "node_ended"
             ]
         );
-        let ship_rows = filter_rows(p.rows.clone(), None, Some("s-ship"), None, None, None);
+        let ship_rows = filter_rows(
+            p.rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                session: Some("s-ship".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(kinds(&ship_rows), ["node_shipped", "node_ended"]);
         let shipped = ship_rows.iter().find(|r| r.kind == "node_shipped").unwrap();
         assert_eq!(
@@ -1313,7 +1999,16 @@ mod tests {
             Some("https://github.com/bllshttng/footnote/pull/1395"),
             "the ship row carries the PR URL the provenance action opens"
         );
-        let newest_two = filter_rows(p.rows, None, None, None, None, Some(2));
+        let newest_two = filter_rows(
+            p.rows,
+            &Page {
+                limit: Some(2),
+                ..Page::default()
+            },
+            &Prefilter::default(),
+            None,
+            None,
+        );
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
 
         // The live shape: `decided_by` is the literal verb on every decision
@@ -1324,7 +2019,7 @@ mod tests {
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"d","data":{"decision_id":"d-1","decision":"stands","subject":"s","question_id":"q-1","decided_by":"fno agents stale-escalate"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[], "", "", "");
+        let p = project(&questions, &[], &[], "", "", "", "", None);
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("stale-escalate"));
@@ -1343,13 +2038,440 @@ mod tests {
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"d","data":{"question_id":"q-1","answer":"yes","closed_by":"20260904T151442Z-cl54345-58af0c"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[], "", "", "");
+        let p = project(&questions, &[], &[], "", "", "", "", None);
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(
             closed.session_id.as_deref(),
             Some("20260904T151442Z-cl54345-58af0c")
         );
         assert_eq!(closed.actor, None);
+
+        // Keyset pages: 450 rows, 20 sharing each ts stamp, pages of 200
+        // chained by --before concatenate to the whole set in order with no
+        // row read twice or skipped.
+        let mut rows = Vec::new();
+        for i in 0..450usize {
+            rows.push(FeedRow {
+                ts: format!("2026-09-01T00:{:02}:00Z", i / 20),
+                kind: format!("k{i:03}"),
+                title: format!("row {i}"),
+                ..FeedRow::default()
+            });
+        }
+        rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+        for r in &mut rows {
+            r.cursor = cursor_of(r);
+        }
+        let back = parse_cursor(&rows[0].cursor).unwrap();
+        assert_eq!(back[1], rows[0].kind, "cursor round-trips the key strings");
+        let mut before: Option<String> = None;
+        let mut chain: Vec<Vec<FeedRow>> = Vec::new();
+        loop {
+            let got = filter_rows(
+                rows.clone(),
+                &Page {
+                    before: before.clone(),
+                    limit: Some(200),
+                    ..Page::default()
+                },
+                &Prefilter::default(),
+                None,
+                None,
+            );
+            assert!(!got.is_empty(), "page chain ended empty");
+            chain.push(got);
+            before = Some(chain.last().unwrap()[0].cursor.clone());
+            if chain.last().unwrap().len() < 200 {
+                break;
+            }
+        }
+        assert_eq!(chain.len(), 3, "450 rows page into three");
+        // The chain runs newest page first and every page is internally
+        // ascending; the client prepends each older page, so the window is
+        // the chain walked oldest page first.
+        let all: Vec<FeedRow> = chain.iter().rev().flatten().cloned().collect();
+        assert_eq!(all.len(), 450, "no row read twice or skipped");
+        for (i, r) in all.iter().enumerate() {
+            assert_eq!(r.kind, rows[i].kind, "row {i} out of order");
+        }
+
+        // --after keeps the rows strictly above the cursor, trimmed to the
+        // OLDEST limit, so the page stays contiguous with its cursor.
+        let got = filter_rows(
+            rows.clone(),
+            &Page {
+                after: Some(rows[10].cursor.clone()),
+                limit: Some(200),
+                ..Page::default()
+            },
+            &Prefilter::default(),
+            None,
+            None,
+        );
+        assert_eq!(got.len(), 200);
+        assert_eq!(
+            got[0].kind, rows[11].kind,
+            "after starts just past the cursor"
+        );
+
+        // Both cursors at once is refused; an unparseable cursor names its flag.
+        let err = parse_args(&[
+            "--before".into(),
+            r#"["a","b","c","d","e","f"]"#.into(),
+            "--after".into(),
+            r#"["a","b","c","d","e","f"]"#.into(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--before") && err.contains("--after"), "{err}");
+        let err = parse_args(&["--before".into(), "not json".into()]).unwrap_err();
+        assert!(err.starts_with("--before"), "{err}");
+        let err = parse_args(&["--after".into(), "[1,2]".into()]).unwrap_err();
+        assert!(err.starts_with("--after"), "{err}");
+
+        // AC3-HP: the flat flags AND together; kinds match by prefix, and a
+        // page bound still applies under a filter.
+        let mk = |ts: &str, kind: &str, harness: Option<&str>| FeedRow {
+            ts: ts.to_string(),
+            kind: kind.to_string(),
+            harness: harness.map(str::to_string),
+            title: format!("{kind} title"),
+            ..FeedRow::default()
+        };
+        let mut rows = vec![
+            mk("2026-09-02T17:00:00Z", "question_asked", Some("claude")),
+            mk("2026-09-02T18:00:00Z", "question_closed", Some("codex")),
+            mk("2026-09-02T19:00:00Z", "node_started", Some("codex")),
+            mk("2026-09-02T20:00:00Z", "session_spawned", None),
+        ];
+        rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+        for r in &mut rows {
+            r.cursor = cursor_of(r);
+        }
+        let pre = Prefilter {
+            harness: Some("codex".into()),
+            kind: Some("question".into()),
+            ..Default::default()
+        };
+        let got = filter_rows(rows.clone(), &Page::default(), &pre, None, None);
+        assert_eq!(kinds(&got), ["question_closed"]);
+        let got = filter_rows(
+            rows.clone(),
+            &Page {
+                before: Some(rows[3].cursor.clone()),
+                ..Default::default()
+            },
+            &pre,
+            None,
+            None,
+        );
+        assert_eq!(kinds(&got), ["question_closed"], "filter still pages");
+        let got = filter_rows(
+            rows.clone(),
+            &Page {
+                before: Some(rows[1].cursor.clone()),
+                ..Default::default()
+            },
+            &pre,
+            None,
+            None,
+        );
+        assert!(got.is_empty(), "the bound cuts under the filter too");
+
+        // AC3-EDGE: an empty value is ignored, an unknown area answers empty
+        // (an empty answer, not an error), and a harness set is
+        // case-insensitive.
+        let got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                kind: Some(String::new()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(got.len(), 4, "empty --kind filters nothing");
+        let got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                area: Some("nosuch".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(got.len(), 0, "unknown area matches no row");
+        let got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                harness: Some("CODEX,pi".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(kinds(&got), ["question_closed", "node_started"]);
+        let until_got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter::default(),
+            None,
+            Some(1_788_372_000), /* 2026-09-02T18:00:00Z */
+        );
+        assert_eq!(
+            kinds(&until_got),
+            ["question_asked", "question_closed"],
+            "--until-epoch bounds the newer end"
+        );
+        // AC4-HP (projection half): the graph leg skips entries outside the
+        // node set before deriving; the other legs filter after projection.
+        let entries = vec![
+            serde_json::json!({"id": "nd-aaaa", "title": "a", "created_at": "2026-09-02T08:00:00Z"}),
+            serde_json::json!({"id": "nd-bbbb", "title": "b", "created_at": "2026-09-02T09:00:00Z"}),
+        ];
+        let spawns = r#"{"ts":"2026-09-02T10:00:00Z","type":"agent_spawned","source":"python","data":{"node":"nd-bbbb","name":"w","substrate":"pane"}}"#;
+        let set = vec!["nd-aaaa".to_string()];
+        let p = project(
+            &questions_fixture(),
+            &entries,
+            &[],
+            spawns,
+            "",
+            "",
+            "",
+            Some(&set),
+        );
+        assert!(
+            !p.rows
+                .iter()
+                .any(|r| r.kind == "node_created" && r.node.as_deref() == Some("nd-bbbb")),
+            "a filtered entry derives no rows"
+        );
+        let pre = Prefilter {
+            node: Some("nd-aaaa".into()),
+            ..Default::default()
+        };
+        let got = filter_rows(p.rows, &Page::default(), &pre, None, None);
+        assert!(
+            got.iter().all(|r| r.node.as_deref() != Some("nd-bbbb")),
+            "legs without a store node filter after projection"
+        );
+        assert!(got.iter().any(|r| r.node.as_deref() == Some("nd-aaaa")));
+
+        // AC5: area is a pure function of kind, and nothing the projection
+        // emits lands in `other`.
+        for k in [
+            "question_asked",
+            "question_closed",
+            "decision_recorded",
+            "node_created",
+            "node_started",
+            "node_ended",
+            "node_shipped",
+            "session_spawned",
+            "session_spawn_refused",
+            "session_reaped",
+            "worker_stalled",
+            "help_emitted",
+            "team_granted",
+            "team_vacated",
+            "pane_closed",
+            "server_stopped",
+            "composer_shell_ran",
+            "composer_shell_refused",
+            "day_boundary",
+            "daemon_restarted",
+            "update_started",
+            "update_finished",
+            "main_ci_changed",
+            "pr_merged",
+        ] {
+            assert_ne!(area_of(k), "other", "{k} has no area");
+        }
+        assert_eq!(area_of("question_asked"), "mail");
+        assert_eq!(area_of("node_shipped"), "ship");
+        assert_eq!(area_of("pane_closed"), "mux");
+        let projected = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
+        assert!(
+            projected
+                .rows
+                .iter()
+                .all(|r| area_of(&r.kind) == r.area && r.area != "other"),
+            "every projected row carries its area"
+        );
+
+        // A prefilter that excludes a leg's kinds skips the read entirely.
+        let pre = Prefilter {
+            area: Some("mux,backlog".into()),
+            ..Default::default()
+        };
+        assert!(
+            leg_skipped(&pre, QUESTION_KINDS),
+            "questions leg excluded by --area mux,backlog"
+        );
+        assert!(
+            !leg_skipped(&pre, GRAPH_KINDS),
+            "the graph leg emits backlog kinds, so it stays"
+        );
+        let pre = Prefilter {
+            kind: Some("question".into()),
+            ..Default::default()
+        };
+        assert!(leg_skipped(&pre, SPAWN_KINDS));
+        assert!(!leg_skipped(&pre, QUESTION_KINDS));
+        assert!(!leg_skipped(&Prefilter::default(), QUESTION_KINDS));
+
+        // AC6-HP: a question row whose session spawned through a codex
+        // agent_spawned reads harness codex, and --harness codex returns it.
+        let spawns = r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"w","provider":null,"harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"s-op"}}"#;
+        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","node":"nd-aaaa"}}"#;
+        let p = project(questions, &[], &[], spawns, "", "", "", None);
+        let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
+        assert_eq!(asked.harness.as_deref(), Some("codex"));
+        let pre = Prefilter {
+            harness: Some("codex".into()),
+            ..Default::default()
+        };
+        let got = filter_rows(p.rows, &Page::default(), &pre, None, None);
+        assert!(
+            got.iter().any(|r| r.kind == "question_asked"),
+            "the question row returns under --harness codex"
+        );
+
+        // AC6-EDGE: a session in no spawn or graph row stays absent, and the
+        // harness filter does not guess it in.
+        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"s-orphan","node":"nd-aaaa"}}"#;
+        let p = project(questions, &[], &[], "", "", "", "", None);
+        let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
+        assert_eq!(asked.harness, None);
+        let got = filter_rows(
+            p.rows,
+            &Page::default(),
+            &Prefilter {
+                harness: Some("codex".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert!(got.is_empty(), "no harness, no return");
+
+        // The lead route: a node-less row whose parent session is a held
+        // crown holder's spawn rolls up to that holder; the node route keeps
+        // setting lead beside owner.
+        let team = r#"{"ts":"2026-09-02T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"nd-aaaa"}}"#;
+        let spawns = concat!(
+            r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"heir","harness":"claude","harness_session_id":"20260904T151442Z-cl54345-58af0c","substrate":"pane","spawned_by_session":"s-op"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-02T17:30:00Z","type":"agent_spawned","source":"python","data":{"name":"w1","harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"20260904T151442Z-cl54345-58af0c"}}"#,
+        );
+        let p = project("", &[], &[], spawns, team, "", "", None);
+        let child = p
+            .rows
+            .iter()
+            .find(|r| r.session_id.as_deref() == Some("00847995-e0db-47c2-ab5b-24468ba1a4f5"))
+            .unwrap();
+        assert_eq!(child.lead.as_deref(), Some("heir"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of nd-aaaa (heir)"));
+        let holder_row = p
+            .rows
+            .iter()
+            .find(|r| r.session_id.as_deref() == Some("20260904T151442Z-cl54345-58af0c"))
+            .unwrap();
+        assert_eq!(
+            holder_row.lead, None,
+            "the holder's own birth rolls to nobody"
+        );
+
+        // AC7-HP: one row of each new main-store type projects its kind and
+        // area, and a merged node reads pr_merged instead of node_ended.
+        let main = concat!(
+            r#"{"ts":"2026-09-30T10:00:00Z","type":"spawn_gate_refused","source":"agents","data":{"reason":"king_share","name":"t-w-glm","substrate":"bg","gate":"python"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:01:00Z","type":"worker_silent","source":"daemon","data":{"handle":"t-w","harness":"claude","age_s":802,"deadline_s":600,"node":null}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:02:00Z","type":"blocked","source":"target","data":{"reason":"need a lever","kind":"help"},"node":"nd-aaaa","harness":"claude"}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:03:00Z","type":"fno_update_started","source":"python","data":{"new_rev":"55f04eda70a99c3f4e72a3cfe62e80d219c66d6f"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:04:00Z","type":"fno_update_installed","source":"python","data":{"new_rev":"55f04eda70a99c3f4e72a3cfe62e80d219c66d6f"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:05:00Z","type":"fno_update_failed","source":"python","data":{"rc":"1","stage":"install","reason":"install exited 1"}}"#,
+        );
+        let daemon = r#"{"ts":"2026-09-30T10:06:00Z","type":"daemon_started","source":"daemon","data":{"pid":15714,"version":"0.4.1","recovery_mode":"preserve"}}"#;
+        let p = project("", &[], &[], "", "", daemon, main, None);
+        let find = |k: &str| {
+            p.rows
+                .iter()
+                .find(|r| r.kind == k)
+                .unwrap_or_else(|| panic!("no {k} row"))
+        };
+        assert_eq!(
+            find("session_spawn_refused").title,
+            "spawn refused (king_share): t-w-glm"
+        );
+        assert_eq!(
+            find("session_spawn_refused").reason.as_deref(),
+            Some("king_share")
+        );
+        assert_eq!(find("worker_stalled").title, "t-w silent 802s");
+        assert_eq!(find("worker_stalled").area, "agents");
+        assert_eq!(find("help_emitted").node.as_deref(), Some("nd-aaaa"));
+        assert_eq!(find("help_emitted").title, "help: need a lever");
+        assert_eq!(
+            find("update_started").title,
+            "fno update started (55f04eda)"
+        );
+        assert_eq!(find("update_finished").area, "fleet");
+        assert_eq!(
+            p.rows
+                .iter()
+                .filter(|r| r.kind == "update_finished")
+                .count(),
+            2,
+            "installed and failed both fold into update_finished"
+        );
+        assert_eq!(find("daemon_restarted").title, "daemon 0.4.1 pid 15714");
+
+        let mut entry = graph_fixture().remove(0);
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("merge_status".to_string(), serde_json::json!("merged"));
+        let p = project("", &[entry], &[], "", "", "", "", None);
+        assert!(
+            kinds(&p.rows).contains(&"pr_merged"),
+            "{:?}",
+            kinds(&p.rows)
+        );
+        assert!(!kinds(&p.rows).contains(&"node_ended"));
+        let merged = p.rows.iter().find(|r| r.kind == "pr_merged").unwrap();
+        assert_eq!(merged.r#ref.as_deref(), Some("1395"));
+        assert_eq!(merged.area, "ship");
+
+        let a = parse_args(&[
+            "--kind".to_string(),
+            String::new(),
+            "--harness".into(),
+            "codex".into(),
+            "--until-epoch".into(),
+            "123".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.pre.kind, None, "an empty flag value is dropped");
+        assert_eq!(a.pre.harness.as_deref(), Some("codex"));
+        assert_eq!(a.until_epoch, Some(123));
     }
 
     fn removal_fixture() -> crate::removals::Removal {
@@ -1359,10 +2481,10 @@ mod tests {
             short_id: Some("d145".into()),
             harness: Some("claude".into()),
             session_id: Some("00847995-e0db-47c2-ab5b-24468ba1a4f5".into()),
-            node: Some("x-aaaa".into()),
+            node: Some("nd-aaaa".into()),
             removed_by: "gc-sweep".into(),
             verb: None,
-            reason: Some("every named node done: x-aaaa".into()),
+            reason: Some("every named node done: nd-aaaa".into()),
             cause: Some("agent_row_reaped".into()),
             cause_at: Some("2026-09-06T10:00:00Z".into()),
             team: None,
@@ -1377,7 +2499,7 @@ mod tests {
     #[test]
     fn reap_rows() {
         let r = removal_fixture();
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1388,23 +2510,35 @@ mod tests {
         assert_eq!(row.title, "t-d145 removed", "title was {}", row.title);
         assert_eq!(row.name.as_deref(), Some("t-d145"));
         assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
-        assert_eq!(row.reason.as_deref(), Some("every named node done: x-aaaa"));
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("every named node done: nd-aaaa")
+        );
         assert_eq!(
             row.detail.as_deref(),
             Some("resume: claude --resume 00847995 - cwd /tmp/wt - trigger unattended")
         );
-        assert_eq!(row.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(row.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(
             row.session_id.as_deref(),
             Some("00847995-e0db-47c2-ab5b-24468ba1a4f5")
         );
-        let only_reaped = filter_rows(p.rows, None, None, Some("session_reaped"), None, None);
+        let only_reaped = filter_rows(
+            p.rows,
+            &Page::default(),
+            &Prefilter {
+                kind: Some("session_reaped".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(only_reaped.len(), 1);
 
         let mut r = removal_fixture();
         r.removed_by.clear();
         r.trigger = None;
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1422,7 +2556,7 @@ mod tests {
 
         let mut r = removal_fixture();
         r.model = Some("glm-5.3-flash[1m]".into());
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1437,6 +2571,8 @@ mod tests {
             "",
             "",
             "",
+            "",
+            None,
         );
         let bare = p
             .rows
@@ -1468,13 +2604,13 @@ mod tests {
 
     #[test]
     fn proj_rows() {
-        let p = project("", &graph_fixture(), &[], "", "", "");
+        let p = project("", &graph_fixture(), &[], "", "", "", "", None);
         let created = p
             .rows
             .iter()
             .find(|r| r.kind == "node_created")
             .expect("created_at projects with no emitter");
-        assert_eq!(created.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(created.node.as_deref(), Some("nd-aaaa"));
         // The birth stamps: the creating session's registry lane facts,
         // taken at write time.
         assert_eq!(created.model.as_deref(), Some("claude-opus-5"));
@@ -1488,7 +2624,7 @@ mod tests {
         );
         let mut cwdless_entry = graph_fixture().remove(0);
         cwdless_entry.as_object_mut().unwrap().remove("cwd");
-        let cwdless = project("", &[cwdless_entry], &[], "", "", "");
+        let cwdless = project("", &[cwdless_entry], &[], "", "", "", "", None);
         let cwdless_created = cwdless
             .rows
             .iter()
@@ -1510,7 +2646,7 @@ mod tests {
             .unwrap()
             .remove("pr_number")
             .expect("fixture carries pr_number");
-        let p = project("", &[entry], &[], "", "", "");
+        let p = project("", &[entry], &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
@@ -1531,6 +2667,45 @@ mod tests {
         .unwrap();
         assert!(raw.contains("q-feed-1"), "{raw}");
 
+        // AC2-EDGE: the typed questions read keeps the parser to the four
+        // question kinds. Attention rows never reach it, so they stop reading
+        // as malformed; an empty-type corrupt line still counts, once.
+        let dir = tempfile::tempdir().unwrap();
+        let questions = dir.path().join("questions.jsonl");
+        for i in 0..3 {
+            let row = serde_json::json!({
+                "ts": "2026-09-17T11:00:00Z", "type": "attention_delivery", "source": "test",
+                "data": {"attention_id": format!("a-{i}"), "item_id": format!("it-{i}"), "rung": "inbox", "outcome": "delivered"}
+            });
+            crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();
+        }
+        let q = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "test",
+            "data": {"question_id": "q-typed", "question": "still read?", "blocks": []}
+        });
+        crate::event_store::append_envelope(&questions, &q.to_string(), None).unwrap();
+        let raw = crate::event_store::journal_text_checked(
+            &questions,
+            &crate::event_store::EventQuery::of_types(&[
+                "operator_question",
+                "operator_question_closed",
+                "operator_decision",
+                "day_boundary",
+            ]),
+        )
+        .unwrap();
+        assert!(raw.contains("q-typed"));
+        assert!(
+            !raw.contains("a-1"),
+            "attention rows never reach the questions parser"
+        );
+        let text = format!("{raw}\nnot json\n");
+        let p = project(&text, &[], &[], "", "", "", "", None);
+        assert_eq!(
+            p.skipped_lines, 1,
+            "the corrupt line is the only malformed count"
+        );
+
         // AC1: the jolly-finch shape, projected. The removal is recovered from
         // its registry_row_removed event; the feed row carries the deeper
         // uncaptured reason, the team it held, and no detail (a recovered
@@ -1547,7 +2722,7 @@ mod tests {
         r.resume = None;
         r.cwd = None;
         r.trigger = None;
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1568,7 +2743,7 @@ mod tests {
         // AC4: agent_spawned carries provider (not harness), so the fallback
         // is load-bearing.
         let spawns = r#"{"ts":"2026-09-28T16:48:35Z","type":"agent_spawned","source":"python","data":{"cwd":"/repo","model":"gpt-6-sol","name":"jolly-finch","provider":"codex","spawned_by_session":"49a80492-388e-44a3-bd91-017be26bcaa0","substrate":"pane"}}"#;
-        let p = project("", &[], &[], spawns, "", "");
+        let p = project("", &[], &[], spawns, "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1584,7 +2759,7 @@ mod tests {
         // A pre-birth refusal used to write nothing, so the feed showed
         // nothing for a launch the operator watched refuse.
         let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"daemon","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
-        let p = project("", &[], &[], refused, "", "");
+        let p = project("", &[], &[], refused, "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1602,7 +2777,7 @@ mod tests {
         ]
         .join("\n");
         let both = format!("{team}\n{team}");
-        let p = project("", &[], &[], "", &both, "");
+        let p = project("", &[], &[], "", &both, "", "", None);
         let granted: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_granted").collect();
         let vacated: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_vacated").collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
@@ -1629,7 +2804,7 @@ mod tests {
             }),
         ];
         let team = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-epic"}}"#;
-        let p = project("", &entries, &[], "", team, "");
+        let p = project("", &entries, &[], "", team, "", "", None);
         let child = p
             .rows
             .iter()
@@ -1650,7 +2825,7 @@ mod tests {
             .unwrap();
         assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // Without a team the child rolls up to its epic by the graph parent.
-        let p = project("", &entries, &[], "", "", "");
+        let p = project("", &entries, &[], "", "", "", "", None);
         let child = p
             .rows
             .iter()
@@ -1680,7 +2855,7 @@ mod tests {
             "\n",
             "{not json",
         );
-        let p = project("", &[], &[], "", "", closes);
+        let p = project("", &[], &[], "", "", closes, "", None);
         assert_eq!(
             p.skipped_lines, 0,
             "unrelated malformed lines do not count here"
