@@ -272,11 +272,13 @@ def _record_mail_origin(
 
         pairs = (("--origin", origin), ("--lane", lane), ("--sender", sender),
                  ("--target-session", target_session), ("--reply-to", reply_to))
-        flags = [x for pair in pairs if pair[1] for x in pair]
-        subprocess.run(
-            [shutil.which("fno-agents"), "mail-record", *flags],
-            input=body or "", timeout=2, capture_output=True,
-        )
+        flags = [x for pair in pairs if pair[1] for x in pair if x is not None]
+        binary = shutil.which("fno-agents")
+        if binary is not None:
+            subprocess.run(
+                [binary, "mail-record", *flags],
+                input=body or "", timeout=2, capture_output=True,
+            )
     except Exception:
         pass
 
