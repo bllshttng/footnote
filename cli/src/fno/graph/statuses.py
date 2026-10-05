@@ -399,7 +399,6 @@ def _live_rows(reading: RosterReading) -> list[dict[str, object]]:
 
 
 def _worked_nodes_reply(rows: list[dict[str, object]]) -> dict[str, list[str]]:
-    """One fno-agents worked-nodes call; any failure fails the overlay."""
     import json
 
     from fno.rust_binary import call_binary_json
