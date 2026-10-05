@@ -234,6 +234,7 @@ pub(crate) enum RelayKind {
     CrossSession,
     TaskNotification,
     BusRow,
+    NativePeer,
 }
 
 impl RelayKind {
@@ -244,6 +245,7 @@ impl RelayKind {
             RelayKind::CrossSession => "relay_cross_session",
             RelayKind::TaskNotification => "relay_task_notification",
             RelayKind::BusRow => "relay_bus_row",
+            RelayKind::NativePeer => "relay_native_peer",
         }
     }
 }
@@ -315,6 +317,7 @@ impl Provenance {
                 RelayKind::CrossSession,
                 RelayKind::TaskNotification,
                 RelayKind::BusRow,
+                RelayKind::NativePeer,
             ]
             .into_iter()
             .map(RelayKind::label),
@@ -343,6 +346,17 @@ impl Provenance {
 pub(crate) fn classify_turn(obj: &Value, bus: &BusIndex, session: &str) -> Provenance {
     if !is_user_turn(obj) {
         return meta_kind(&turn_text(obj));
+    }
+    if obj
+        .get("origin")
+        .and_then(|o| o.get("kind"))
+        .and_then(Value::as_str)
+        == Some("peer")
+    {
+        // A native peer row carries the verified origin on the row itself; no
+        // chats row is ever minted for one, so it cannot pass store-verified
+        // mail trust either. It is a teammate speaking, never the operator.
+        return Provenance::Relay(RelayKind::NativePeer);
     }
     match classify_text(&turn_text(obj), Some((bus, session))) {
         Verdict::Operator(_) => Provenance::Unknown,
@@ -1005,6 +1019,12 @@ mod tests {
                 "Another Claude session sent a message:\n<teammate-message>hi</teammate-message>",
             ),
             user_row("[cache-keepalive] Ping 2/4"),
+            // A native peer row (origin.kind == "peer" on the transcript row
+            // itself) is its own relay kind, never an operator turn.
+            json!({
+                "type": "user", "origin": {"kind": "peer", "name": "king-a1"},
+                "message": {"role": "user", "content": "hi from a peer"}
+            }),
         ];
         let mut counters: std::collections::BTreeMap<String, u64> =
             std::collections::BTreeMap::new();
@@ -1017,6 +1037,16 @@ mod tests {
         assert_eq!(counters.get("relay_fno_mail"), Some(&1));
         assert_eq!(counters.get("relay_teammate_message"), Some(&1));
         assert_eq!(counters.get("keepalive"), Some(&1));
+        assert_eq!(counters.get("relay_native_peer"), Some(&1));
+        // A human origin is unchanged: unshaped text reads unknown.
+        let human = json!({
+            "type": "user", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": "hi"}
+        });
+        assert_eq!(
+            classify_turn(&human, &BusIndex { rows: Vec::new() }, "s"),
+            Provenance::Unknown
+        );
     }
 
     #[test]

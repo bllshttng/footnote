@@ -115,12 +115,16 @@ def test_ac5_claude_hop_carries_peer_stamp(bus, events):
     rec = _Recorder()
     daemon.route_message(e, deliver=rec, index=_idx(), events_path=events, seen=set())
     _, framed = rec.calls[0]
-    parsed = env.parse(framed)
-    # The relay tag converged to <fno_mail>. The v2 tag
-    # carries the harness again, spelled through harness_for_provider; the
-    # model stays on the bus row only.
-    assert parsed["from_session"] == "A" and parsed["body"] == "ping"
-    assert 'harness="claude-code"' in framed  # explicit peer tag, wire vocabulary
+    # The hop rides the delivered header: the sender names itself, the body
+    # follows the glyph, and the legacy tag reader sees none of it; the model
+    # stays on the bus row only.
+    from fno.mail.envelope import mail_shape
+
+    shape = mail_shape([framed])[0]
+    assert shape["framing"] == "header"
+    assert shape["relay_parse"] is None
+    assert framed.startswith("`@A · ")
+    assert framed.endswith(" ⏎ ping")
     assert "model=" not in framed
 
 
