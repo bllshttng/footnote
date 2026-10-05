@@ -428,6 +428,7 @@ pub mod stuck_work;
 pub mod subagent_hold;
 pub mod subprocess_ask;
 pub mod subscribe;
+pub mod succession_txn;
 pub mod supervisor;
 pub mod surface_check;
 pub mod sync_canonical;

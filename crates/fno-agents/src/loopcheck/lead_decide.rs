@@ -506,13 +506,10 @@ fn stale_team_doc_gate(
     if scope.is_empty() {
         return None;
     }
-    let ceiling = match crate::agents_config::config_lookup(cwd, &["lead", "compaction_ceiling"]) {
-        Some(v) => v
-            .as_integer()
-            .filter(|n| *n >= 0)
-            .unwrap_or(crate::lead_verdict_inputs::DEFAULT_COMPACTION_CEILING),
-        None => crate::lead_verdict_inputs::DEFAULT_COMPACTION_CEILING,
-    } as u64;
+    let harness = manifest.harness.as_deref().unwrap_or("claude");
+    let ceiling = crate::lead_verdict_inputs::compaction_ceiling_for(cwd, harness)
+        .unwrap_or_else(|_| crate::lead_verdict_inputs::default_ceiling(harness))
+        as u64;
     // Count first: a scan of the transcript this fire already holds. The doc
     // resolution (a subprocess) is paid only past the ceiling, so the common
     // path adds no cost to the board read.

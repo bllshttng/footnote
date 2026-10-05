@@ -100,7 +100,14 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
     let effect = match outcome {
         Some("succeeded") => {
             let pending = succession_pending(payload);
-            crate::team_names::carry_succession(store, scope, pending)
+            let result = crate::team_names::carry_succession(store, scope, pending.clone());
+            if result.is_ok() {
+                if let Some(p) = pending.as_ref() {
+                    crate::succession_txn::announce(scope, p);
+                    crate::succession_txn::transferred(scope, p);
+                }
+            }
+            result
         }
         Some("granted") => crate::team_names::forget(store, scope),
         _ => Ok(()),
@@ -951,6 +958,28 @@ mod tests {
 
     #[test]
     fn record_rows() {
+        // The transaction receipts land under a pinned nested home for the
+        // heir settle; the lock keeps the env mutation off parallel tests.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bus_home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(bus_home.path().join("home")).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", bus_home.path().join("home"));
+        // The fleet announce needs one live recipient in the home registry.
+        std::fs::write(
+            bus_home.path().join("home/registry.json"),
+            serde_json::to_string(&json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "agents": [{
+                    "name": "lead-heir", "status": "live", "cwd": "/repo", "log_path": "/repo/lead-heir.log",
+                    "harness": "claude", "harness_session_id": "sess-new",
+                    "created_at": "2026-10-04T00:00:00Z",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let _reg = team_registry(tmp.path(), agents_with_succession_rows());
         named_record_fixture(tmp.path());
@@ -1002,6 +1031,36 @@ mod tests {
         assert_eq!(pending["predecessor_name"], json!("lead-old"));
         assert_eq!(pending["predecessor_session"], json!("sess-old"));
         assert!(pending["ts"].is_string());
+        // AC2-HP: exactly one announce row and one transfer receipt for the
+        // succeeded settle. The store commit is the write boundary: query
+        // the store; the raw journal bytes are only a fallback.
+        let journal = crate::paths::AgentsHome::from_env().events_jsonl();
+        let raw = match crate::event_store::query_events(&journal, &Default::default()) {
+            Ok(rows) => rows
+                .iter()
+                .map(|r| r.line.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(_) => std::fs::read_to_string(&journal).unwrap_or_default(),
+        };
+        assert_eq!(
+            raw.matches("team_succession_transferred").count(),
+            1,
+            "one transfer receipt: {raw}"
+        );
+        assert_eq!(
+            raw.matches("team_succession_announced").count(),
+            1,
+            "one announce receipt: {raw}"
+        );
+        let bus =
+            std::fs::read_to_string(bus_home.path().join("bus/messages.jsonl")).unwrap_or_default();
+        assert_eq!(
+            bus.matches("succession: x-aaaa").count(),
+            1,
+            "one fleet announcement: {bus}"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
         // Without the heir key (an old caller) today's shape holds: no
         // pending record is written.
         named_record_fixture(tmp.path());

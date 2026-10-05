@@ -490,6 +490,7 @@ pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool
                             "evidence": r.evidence,
                         }),
                     );
+                    crate::succession_txn::rolled_back(r);
                 }
             }
             out.successions_reverted = reverted;
@@ -1097,6 +1098,20 @@ mod tests {
         let old_home = std::env::var("FNO_AGENTS_HOME").ok();
         let seeded = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_AGENTS_HOME", seeded.path());
+        // The rollback announce needs one live recipient in the home registry.
+        std::fs::write(
+            seeded.path().join("registry.json"),
+            serde_json::to_string(&json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "agents": [{
+                    "name": "lead-old", "status": "live", "cwd": "/repo", "log_path": "/repo/lead-old.log",
+                    "harness": "claude", "harness_session_id": "sess-old",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let dir = tmp("sweep-revert");
         pin_window(&dir, None);
         // The predecessor row survives (exited, resumable); the heir's row
@@ -1152,6 +1167,13 @@ mod tests {
             .collect();
         assert_eq!(receipts.len(), 1, "{:?}", events);
         assert_eq!(receipts[0]["data"]["scope"], "x-sweep");
+        // AC4-HP: one rollback announcement beside the revert receipt.
+        let announces: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "team_succession_announced")
+            .collect();
+        assert_eq!(announces.len(), 1, "{:?}", events);
+        assert_eq!(announces[0]["data"]["scope"], "x-sweep");
         let _ = registry;
         match old_home {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
