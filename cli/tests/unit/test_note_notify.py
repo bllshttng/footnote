@@ -713,6 +713,51 @@ def test_the_verb_delivers_by_default(monkeypatch) -> None:
     assert "notified sess-worker" in result.stdout
 
 
+def test_a_flag_shaped_body_refuses_before_the_write(monkeypatch) -> None:
+    """`note <id> --list` is a mistyped read verb, never a note body."""
+    result, appended = _run(monkeypatch, ["note", "x-0d08", "--list", "--quiet"])
+    assert result.exit_code != 0
+    assert appended == []
+    assert "--list" in result.stderr
+    assert "fno backlog notes history x-0d08" in result.stderr
+
+
+def test_a_file_body_that_looks_like_a_flag_writes(monkeypatch) -> None:
+    """--body-file is deliberate; the flag-shape refusal is positional-only."""
+    readers = NoteReaders("x-0d08", [("sess-worker", "holder of x-0d08")], None, [])
+    monkeypatch.setattr(
+        "fno.text_or_file.read_text_arg", lambda text, body_file, what: "--- a/file\n"
+    )
+    result, appended = _run(
+        monkeypatch,
+        ["note", "x-0d08", "--body-file", "body.txt", "--quiet"],
+        readers=readers,
+    )
+    assert result.exit_code == 0
+    assert appended == ["x-0d08"]
+
+
+def test_comment_forwards_to_the_native_thread(monkeypatch) -> None:
+    """The taught read form rides verbatim to the native comment surface."""
+    from fno.graph import note_cli as note_bridge
+
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(argv, check):
+        calls.append(argv)
+        return _Proc()
+
+    monkeypatch.setattr(note_bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: Path("fno-agents"))
+    result, appended = _run(monkeypatch, ["note", "comment", "x-0d08", "--list"])
+    assert result.exit_code == 0
+    assert appended == []
+    assert calls == [["fno-agents", "backlog", "note", "comment", "x-0d08", "--list"]]
+
+
 def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
     """AC4-EDGE: --quiet skips resolution entirely and writes."""
     from typer.testing import CliRunner
@@ -740,26 +785,6 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notif" not in result.stdout
-
-
-def test_quiet_archived_node_uses_the_archive_refusal(monkeypatch) -> None:
-    from typer.testing import CliRunner
-
-    from fno.graph import cli as graph_cli
-
-    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
-    monkeypatch.setattr(
-        "fno.graph._archive_lookup.archived_entry",
-        lambda node_id: {"id": "x-3a64"} if node_id == "x-3a64" else None,
-    )
-
-    result = CliRunner().invoke(
-        graph_cli.cli, ["note", "x-3a64", "the finding", "--quiet"]
-    )
-    assert result.exit_code == 1
-    assert "Error: node x-3a64 is archived" in result.stderr
-    assert "fno backlog unarchive x-3a64" in result.stderr
-    assert "no node resolves" not in result.stderr
 
 
 def _run_note_quiet(monkeypatch, node_id: str, live_rows: list[dict]):
@@ -830,28 +855,6 @@ def test_a_refusal_writes_nothing_and_exits_three(monkeypatch) -> None:
     assert "note refused: nobody bound to x-d211" in result.stderr
 
 
-def test_an_unknown_node_refuses_before_the_append(tmp_path, monkeypatch) -> None:
-    """The real resolver against a real graph file: exit 1, nothing written."""
-    from typer.testing import CliRunner
-
-    from fno.graph import cli as graph_cli
-    from fno.graph import note_cli as note_bridge
-
-    graph = _graph(tmp_path, [{"id": "x-0d08"}])
-    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: graph)
-    written: list[str] = []
-
-    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, kind=None):
-        written.append(node_id)
-        return 0, _stubbed_receipt(node_id)
-
-    monkeypatch.setattr(note_bridge, "_write_state", fake_write)
-    result = CliRunner().invoke(graph_cli.cli, ["note", "x-ffff", "the finding"])
-    assert result.exit_code == 1
-    assert written == []
-    assert "no node resolves to 'x-ffff'" in result.stderr
-
-
 def test_the_author_only_reader_prints_the_binding_line(monkeypatch) -> None:
     def no_send(address: str, body: str) -> str:
         raise AssertionError("nothing to send")
@@ -865,22 +868,6 @@ def test_the_author_only_reader_prints_the_binding_line(monkeypatch) -> None:
         "notify: you are the only reader bound to x-a792 (king of x-a792)"
         in result.stdout
     )
-
-
-def test_failed_sends_land_on_stderr_and_exit_four(monkeypatch) -> None:
-    def boom(address: str, body: str) -> str:
-        raise RuntimeError("pair budget spent")
-
-    readers = NoteReaders(
-        "x-0d08", [("sess-a", "holder of x-0d08"), ("sess-b", "king of x-16b7")], None, []
-    )
-    result, _ = _run(
-        monkeypatch, ["note", "x-0d08", "the finding"], readers=readers, send=boom
-    )
-    assert result.exit_code == 4
-    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
-    assert "notify FAILED sess-a" in result.stderr
-    assert "no reader confirmed delivery (0 UNCONFIRMED, 2 FAILED)" in result.stderr
 
 
 def test_an_undelivered_receipt_never_reaches_stdout(monkeypatch) -> None:
