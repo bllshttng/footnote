@@ -23,7 +23,9 @@ pub fn unfilled_part4s(cwd: &Path) -> Vec<PathBuf> {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let head = &text[..text.len().min(64)];
+        // get, not slice: byte 64 can land inside a multibyte character,
+        // and a panic here would take the whole check-in beat down.
+        let head = text.get(..64).unwrap_or(&text);
         if head.contains("status: pending") {
             unfilled.push(path);
         }
@@ -50,6 +52,7 @@ mod tests {
         let kings = plans.join("evals").join("kings");
         std::fs::create_dir_all(kings.join("lead-a-11111111")).unwrap();
         std::fs::create_dir_all(kings.join("lead-b-22222222")).unwrap();
+        std::fs::create_dir_all(kings.join("lead-c-33333333")).unwrap();
         std::fs::write(
             kings.join("lead-a-11111111/part4-reforms.md"),
             "---\nstatus: pending\n---\n\n# Part 4: reforms\n",
@@ -60,9 +63,17 @@ mod tests {
             "---\nstatus: done\n---\n\n# Part 4: reforms\n",
         )
         .unwrap();
+        // A multibyte character straddles byte 64 (27 header bytes + 36
+        // ASCII): reading the head must not panic and must still find the
+        // status line.
+        let straddle = format!("---\nstatus: pending\n---\n\n# {}部after\n", "a".repeat(36));
+        std::fs::write(kings.join("lead-c-33333333/part4-reforms.md"), straddle).unwrap();
         assert_eq!(
             unfilled_part4s(&repo),
-            vec![kings.join("lead-a-11111111/part4-reforms.md")]
+            vec![
+                kings.join("lead-a-11111111/part4-reforms.md"),
+                kings.join("lead-c-33333333/part4-reforms.md"),
+            ]
         );
     }
 }
