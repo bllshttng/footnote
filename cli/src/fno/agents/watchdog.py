@@ -1363,12 +1363,20 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     out: list[Row] = []
     unmapped_states: set[str] = set()
     skipped_no_sid = 0
+    # A crowned lead is never a node worker, so its name never seeds the
+    # unmeasurable fold either - that fold is the one place a row with no
+    # session id could still read as the occupant.
+    crowned_lead_names = {
+        str(getattr(e, "name", "") or "")
+        for e in registry_rows
+        if getattr(e, "crown_level", None) is not None
+    }
     for r in raw:
         sid = str(r.get("sessionId") or r.get("session_id") or "")
         if not sid:
             cwd = str(r.get("cwd") or "")
             node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
-            if node:
+            if node and str(r.get("name") or "") not in crowned_lead_names:
                 warnings.append(
                     f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
                     f"harness=claude node={node} name={r.get('name') or 'unknown'}"
@@ -1433,7 +1441,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             name = str(getattr(entry, "name", None) or "") or "unknown"
             if not node:
                 skipped_nonclaude_no_id += 1
-            else:
+            elif getattr(entry, "crown_level", None) is None:
                 warnings.append(
                     f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
                     f"harness={getattr(entry, 'harness', None) or 'unknown'} "

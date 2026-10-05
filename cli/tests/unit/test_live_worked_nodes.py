@@ -472,3 +472,43 @@ def test_read_roster_threads_crown_and_node_to_the_join(monkeypatch):
     assert reading.row_for_session("s-1")["crowned"] is False
     assert reading.row_for_session("s-1")["node"] == "x-node"
     assert reading.row_for_session("s-2")["crowned"] is True
+
+
+def test_a_crowned_row_without_a_session_id_never_reads_unmeasurable(monkeypatch):
+    """The unmeasurable fold is the one place a row with no session id could
+    still read as the occupant, and it carries no crown field - so the
+    producer refuses to seed it with a crowned lead's name at all. The
+    non-crowned control row still warns."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.claude_agents_rows",
+        lambda *a, **kw: (
+            [
+                {"cwd": "/wt/x-node", "name": "finch"},
+                {"cwd": "/wt/x-node", "name": "drifter"},
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda: [
+            SimpleNamespace(harness="claude", name="finch", crown_level=2,
+                            harness_session_id=None),
+            SimpleNamespace(harness="claude", name="drifter", crown_level=None,
+                            harness_session_id=None),
+        ],
+    )
+    monkeypatch.setattr("fno.agents.watchdog._is_linked_worktree", lambda p: True)
+    monkeypatch.setattr("fno.agents.watchdog._node_id_from_worktree", lambda p: "x-node")
+
+    from fno.agents.watchdog import fleet_rows
+
+    rows, warnings = fleet_rows()
+
+    assert rows == []
+    seeded = [w for w in warnings if "unmeasurable-row" in w and "drifter" in w]
+    crowned = [w for w in warnings if "unmeasurable-row" in w and "finch" in w]
+    assert seeded, "non-crowned control row must still seed the fold"
+    assert not crowned, "a crowned lead never seeds the unmeasurable fold"
