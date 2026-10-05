@@ -524,6 +524,14 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         return Err(Outcome::Held { reason: blocked });
     }
 
+    // The user's look: the same gate the preview carries, held so the user
+    // answering the page clears it on the next read.
+    if let Some(blocker) = crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number) {
+        return Err(Outcome::Held {
+            reason: blocker.detail,
+        });
+    }
+
     // The pin. An unreadable covered head refuses instead of falling back to an
     // unpinned effect: an unpinned arm lets a racing push land an unreviewed
     // head through GitHub's queue, which is the failure this owner exists for.
@@ -876,6 +884,13 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     };
     if let Some(reason) = review_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("review_in_flight", reason));
+    }
+
+    // (4b) the user's look: a PR touching the configured paint surface holds
+    // until an answered question page names it. Held, not refused: the user
+    // answering the page clears it on the next read.
+    if let Some(blocker) = crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number) {
+        blockers.push(blocker);
     }
 
     // (5) the pin.
@@ -4980,5 +4995,51 @@ mod tests {
         crate::event_store::append_envelope(&events, &line, None).unwrap();
         let covered = covered_head_from_event(cwd);
         assert_eq!(covered.as_deref(), Some("aaaaaaaaaa"), "{covered:?}");
+    }
+    #[test]
+    fn a_paint_pr_holds_until_an_answered_page_names_it() {
+        let tmp = std::env::temp_dir().join(format!("xc129-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".fno")).unwrap();
+        std::fs::write(
+            tmp.join(".fno/config.toml"),
+            "merge.visual_paint_paths = [\"crates/fno/src/client/**\"]\n",
+        )
+        .unwrap();
+        let mut fake = clean();
+        fake.gh_output = "crates/fno/src/client/theme.rs\nREADME.md\n".to_string();
+        let held = crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).expect("held");
+        assert_eq!(held.code, "visual_approval");
+        assert!(held
+            .detail
+            .contains("crates/fno/src/client/theme.rs"), "{}", held.detail);
+        // An OPEN page naming the PR never clears the hold.
+        let qdir = crate::escalation::questions_dir(&tmp);
+        std::fs::create_dir_all(&qdir).unwrap();
+        let page = qdir.join("q-xc129test.md");
+        std::fs::write(
+            &page,
+            "---\nquestion_id: q-xc129\nstatus: open\ntitle: May PR 7 merge?\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_some());
+        // The page answers, the hold clears.
+        std::fs::write(
+            &page,
+            "---\nquestion_id: q-xc129\nstatus: answered\ntitle: May PR 7 merge?\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_none());
+        // No paint paths in any candidate config: the gate is disarmed and
+        // spends no gh read.
+        let bare = std::env::temp_dir().join(format!("xc129-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).unwrap();
+        let mut off = clean();
+        off.gh_output = "crates/fno/src/client/theme.rs\n".to_string();
+        assert!(crate::merge_gates::visual_approval_blocker(&off, &bare, 7).is_none());
+        assert!(off.gh_calls.borrow().is_empty());
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::remove_dir_all(&bare).ok();
     }
 }

@@ -3902,6 +3902,20 @@ class PreflightBlock(BaseModel):
     required: bool = False
 
 
+class MergeBlock(BaseModel):
+    """Per-project merge-gate keys (nested under 'config.merge').
+
+    `visual_paint_paths` lists the render-surface paths whose PRs hold for the
+    user's visual approval until an answered question page names the PR. The
+    Rust merge gates read it (crates/fno-agents/src/merge_gates.rs); Python
+    validates and carries it. Empty (the default) disarms the gate.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    visual_paint_paths: list[str] = Field(default_factory=list)
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -3946,6 +3960,7 @@ class ConfigBlock(BaseModel):
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
+    merge: MergeBlock = Field(default_factory=MergeBlock)
     auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     groom: GroomBlock = Field(default_factory=GroomBlock)

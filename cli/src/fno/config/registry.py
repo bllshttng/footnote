@@ -484,6 +484,16 @@ FIELD_META: dict[str, Meta] = {
     "auto_merge.require_fresh_ci": Meta("advanced", "Require green pull_request checks to have run against the current base tip."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
+    # --- config.merge.* ---
+    "merge.visual_paint_paths": Meta(
+        "advanced",
+        "Render-surface paths whose PRs hold for the user's visual approval: a PR "
+        "touching a listed path carries a `visual_approval` merge blocker until an "
+        "answered question page names the PR. Path shapes: `dir/**` subtree, bare "
+        "file name (any directory), or an exact path. Empty (default) disarms the "
+        "gate. Read by `fno do pr status` and the merge verb (crates/fno-agents "
+        "merge_gates).",
+    ),
     # --- config.pr_watch.* ---
     "pr_watch.enabled": Meta("advanced", "Enable the global PR-state watcher daemon."),
     "pr_watch.interval_seconds": Meta("never", "PR-watcher poll interval (seconds)."),
