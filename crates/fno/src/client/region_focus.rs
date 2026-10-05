@@ -229,7 +229,7 @@ pub(super) async fn mouse_pre_pass(
         // link, else the details pane) - the sideline card tap's cascade.
         if view.backlog_board.is_some() && view.board_full {
             if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-                if let Some(id) = node_link::span_at(view, rep.row, rep.col) {
+                if let Some(id) = node_link::span_at(rep.row, rep.col) {
                     node_link::open(view, id).await;
                 }
             }
@@ -663,7 +663,7 @@ pub(super) async fn mouse_pre_pass(
                 && !(rep.row as usize == view.term.0 as usize - 1 && view.bottom_row_is_chrome())
             {
                 view.region_owner = RegionOwner::Board;
-                if let Some(id) = node_link::span_at(view, rep.row, rep.col) {
+                if let Some(id) = node_link::span_at(rep.row, rep.col) {
                     node_link::open(view, id).await;
                 }
                 continue;

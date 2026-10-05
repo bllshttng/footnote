@@ -1119,10 +1119,6 @@ pub(crate) struct View {
     /// The esc-close spans the last compose painted: the one list a tap
     /// checks, whichever overlay drew them.
     close_chips: std::cell::RefCell<Vec<chrome::CloseSpan>>,
-    /// The node-id spans the last compose painted on the backlog surfaces:
-    /// the one list a board tap checks, so a press opens the plan like the
-    /// sideline card's node tap.
-    node_spans: std::cell::RefCell<Vec<backlog_style::NodeSpan>>,
     /// The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to `overlay_keys::create_keys`: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -2057,7 +2053,6 @@ impl View {
             confirm: None,
             modal_release_swallow: false,
             close_chips: Default::default(),
-            node_spans: Default::default(),
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -4659,41 +4654,6 @@ impl View {
 
     /// A squad's view state by id (test convenience: the production paths all
     /// hold the `&Squad` and key by name directly).
-    #[cfg(test)]
-    fn squad_view(&self, id: u64) -> SectionView {
-        match squad_key(&self.layout, id) {
-            Some(key) => self.section_view(&key),
-            None => SectionView::Collapsed,
-        }
-    }
-
-    /// Cycle a squad's section by id (test convenience for [`Self::cycle_section`]).
-    #[cfg(test)]
-    fn cycle_squad(&mut self, id: u64) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.cycle_section(key);
-        }
-    }
-
-    /// Force a squad's view state by id WITHOUT persisting - tests set up
-    /// state, they do not simulate an operator gesture.
-    #[cfg(test)]
-    fn set_squad_view(&mut self, id: u64, view: SectionView) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.section_view.insert(key, view);
-        }
-    }
-
-    /// Force the pull-section open so a test that exercises orphan
-    /// (`~ elsewhere`) rows renders them past their new
-    /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
-    /// about orphan rows should not silently lose them.
-    #[cfg(test)]
-    fn expand_pull_sections(&mut self) {
-        self.section_view
-            .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    }
-
     /// Agents matched to no live squad - the `~ elsewhere` section's membership.
     /// One predicate so `display_rows` and the dead-row fold never diverge.
     fn orphans(&self) -> Vec<&AgentRow> {
@@ -5208,7 +5168,7 @@ impl View {
             // The board's whole surface - docked column, drill-down,
             // pickers, centered or full-screen overlay - paints from its
             // own module (the file-budget gate keeps client.rs shrinking).
-            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
+            self.draw_board(&mut cells, rows, cols);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -5291,7 +5251,7 @@ impl View {
             }
         }
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
-        *self.node_spans.borrow_mut() = backlog_style::node_spans_end();
+        backlog_style::node_spans_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,

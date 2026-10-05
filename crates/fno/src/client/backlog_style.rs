@@ -247,6 +247,11 @@ thread_local! {
     /// [`node_spans_begin`] and [`node_spans_end`]; `None` outside them.
     static NODE_SPANS: std::cell::RefCell<Option<Vec<NodeSpan>>> =
         const { std::cell::RefCell::new(None) };
+    /// The last compose's recorded spans: the one store a board tap reads.
+    /// The client holds one view, so last-compose-wins is the same
+    /// freshness the esc-chip store has.
+    static PAINTED: std::cell::RefCell<Vec<NodeSpan>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Start collecting the node-id spans the backlog painters put on screen.
@@ -254,9 +259,26 @@ pub(crate) fn node_spans_begin() {
     NODE_SPANS.with(|c| *c.borrow_mut() = Some(Vec::new()));
 }
 
-/// Stop collecting and return what the frame painted.
-pub(crate) fn node_spans_end() -> Vec<NodeSpan> {
-    NODE_SPANS.with(|c| c.borrow_mut().take().unwrap_or_default())
+/// Stop collecting and park what the frame painted for the taps.
+pub(crate) fn node_spans_end() {
+    let recorded = NODE_SPANS.with(|c| c.borrow_mut().take().unwrap_or_default());
+    PAINTED.with(|p| *p.borrow_mut() = recorded);
+}
+
+/// The spans the last compose painted (tests read them to find a target).
+#[cfg(test)]
+pub(crate) fn painted_spans() -> Vec<NodeSpan> {
+    PAINTED.with(|p| p.borrow().clone())
+}
+
+/// The node id painted at `(row, col)` by the last compose, if any.
+pub(crate) fn span_at(row: usize, col: usize) -> Option<String> {
+    PAINTED.with(|p| {
+        p.borrow()
+            .iter()
+            .find(|s| s.row == row && col >= s.col && col < s.col + s.len)
+            .map(|s| s.id.clone())
+    })
 }
 
 /// Whether a Label run reads as a backlog node id: `<prefix>-<hex>` with a
@@ -599,39 +621,5 @@ pub(crate) fn paint_title_row(
             &[Role::PanelMeta],
             theme,
         );
-    }
-}
-
-#[cfg(test)]
-mod span_probe_tests {
-    use super::*;
-
-    #[test]
-    fn span_probe() {
-        node_spans_begin();
-        let theme = crate::theme::Theme::from_name("terminal").0;
-        let line = BLine::of(&[
-            BSeg {
-                text: "a ".into(),
-                role: BRole::Body,
-            },
-            BSeg {
-                text: "x-24c8".into(),
-                role: BRole::Label,
-            },
-            BSeg {
-                text: " tail".into(),
-                role: BRole::Body,
-            },
-        ]);
-        let lines = vec![line];
-        let mut cells = vec![crate::proto::Cell::default(); 10 * 40];
-        paint_panel(&mut cells, 10, 40, 0, 40, 5, &lines, None, &theme);
-        let spans = node_spans_end();
-        assert_eq!(spans.len(), 1, "spans: {spans:?}");
-        assert_eq!(spans[0].id, "x-24c8");
-        assert_eq!(spans[0].row, 0);
-        assert_eq!(spans[0].col, 2);
-        assert_eq!(spans[0].len, 6);
     }
 }

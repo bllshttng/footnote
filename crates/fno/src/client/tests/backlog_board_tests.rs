@@ -837,7 +837,7 @@ async fn compose_rows() {
     v.sideline_view = crate::view_store::SidelineView::Backlog;
     v.board_full = true;
     v.compose();
-    let s = painted_id(&mut v, "x-24c8");
+    let s = painted_id("x-24c8");
     let (off_row, off_col) = (s.row, s.col - 1);
     press_span(&mut v, s.row, s.col).await;
     let d = v
@@ -849,17 +849,16 @@ async fn compose_rows() {
         .expect("the tap drills in");
     assert_eq!(d.node_id, "x-24c8");
     assert!(
-        !v.node_spans
-            .borrow()
+        !backlog_style::painted_spans()
             .iter()
-            .any(|sp| sp.row == off_row && off_col >= sp.col && off_col < sp.col + sp.len),
+            .any(|sp| { sp.row == off_row && off_col >= sp.col && off_col < sp.col + sp.len }),
         "the glyph column records no span"
     );
 
     v.board_full = false;
     v.backlog_board.as_mut().expect("board open").detail = None;
     v.compose();
-    let s = painted_id(&mut v, "x-24c8");
+    let s = painted_id("x-24c8");
     press_span(&mut v, s.row, s.col).await;
     let d = v
         .backlog_board
@@ -945,9 +944,8 @@ async fn tap_recorded_chip(v: &mut View) -> usize {
 }
 
 /// The recorded span of one painted node id.
-fn painted_id(v: &mut View, id: &str) -> backlog_style::NodeSpan {
-    v.node_spans
-        .borrow()
+fn painted_id(id: &str) -> backlog_style::NodeSpan {
+    backlog_style::painted_spans()
         .iter()
         .find(|s| s.id == id)
         .cloned()

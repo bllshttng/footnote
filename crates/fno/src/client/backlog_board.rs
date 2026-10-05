@@ -1070,14 +1070,7 @@ impl View {
     /// full-screen board. Windowed, the backlog paints inside the sideline
     /// column (the sideline's own draw path), so this paints nothing.
     /// The compose branch in `client.rs` is this one call.
-    pub(super) fn draw_board(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        _overlay_origin: (usize, usize),
-        _overlay_dims: (usize, usize),
-    ) {
+    pub(super) fn draw_board(&self, cells: &mut [Cell], rows: usize, cols: usize) {
         let Some(b) = &self.backlog_board else {
             return;
         };

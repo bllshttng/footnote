@@ -46,13 +46,8 @@ pub(super) async fn open(view: &mut View, id: String) {
 
 /// The node id painted at `(row, col)`, from the spans the last compose
 /// recorded - the one board-tap check, whichever backlog pane drew them.
-pub(super) fn span_at(view: &View, row: u16, col: u16) -> Option<String> {
-    let (row, col) = (row as usize, col as usize);
-    view.node_spans
-        .borrow()
-        .iter()
-        .find(|s| s.row == row && col >= s.col && col < s.col + s.len)
-        .map(|s| s.id.clone())
+pub(super) fn span_at(row: u16, col: u16) -> Option<String> {
+    backlog_style::span_at(row as usize, col as usize)
 }
 
 /// The node in the backlog details pane. The pane lives on the

@@ -417,3 +417,51 @@ fn classify_guard_registry_fails_closed_on_a_present_but_unparseable_mux() {
         "refusal names the row-level cause: {err}"
     );
 }
+
+#[test]
+fn card_ready_gate_only_passes_ready_cards() {
+    // x-a496 (codex peer review): a targeted dispatch only proceeds for a
+    // READY card named by id or slug; blocked / in-flight / unknown ids are
+    // refused, so a click can't start work prefix+g would skip.
+    let card = |id: &str, slug: &str, state| BacklogCard {
+        id: id.into(),
+        slug: slug.into(),
+        priority: "p2".into(),
+        state,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+        link: None,
+    };
+    let backlog = [
+        card("x-rdy", "ready-slug", CardState::Ready),
+        card("x-blk", "blk-slug", CardState::Blocked),
+        card("x-fly", "fly-slug", CardState::InFlight),
+    ];
+    assert!(card_ready_to_dispatch(&backlog, "x-rdy"), "ready by id");
+    assert!(
+        card_ready_to_dispatch(&backlog, "ready-slug"),
+        "ready by slug"
+    );
+    assert!(
+        !card_ready_to_dispatch(&backlog, "x-blk"),
+        "blocked refused"
+    );
+    assert!(
+        !card_ready_to_dispatch(&backlog, "x-fly"),
+        "in-flight refused"
+    );
+    assert!(
+        !card_ready_to_dispatch(&backlog, "x-nope"),
+        "unknown refused"
+    );
+    assert!(!card_ready_to_dispatch(&backlog, ""), "empty refused");
+    assert!(
+        !card_ready_to_dispatch(&[], "x-rdy"),
+        "empty backlog refused"
+    );
+}
