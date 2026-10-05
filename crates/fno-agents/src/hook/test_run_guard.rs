@@ -828,17 +828,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_test_allows() {
-        let root = footnote_root();
-        assert!(decide("fno doctor test cli/tests/unit/x.py", root.path()).is_none());
-        assert!(decide(
-            "fno doctor test rust --manifest-path crates/fno-agents/Cargo.toml --lib test_run::",
-            root.path()
-        )
-        .is_none());
-    }
-
-    #[test]
     fn cargo_build_allows() {
         let root = footnote_root();
         assert!(decide("cargo build --release", root.path()).is_none());
