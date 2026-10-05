@@ -487,6 +487,17 @@ mod tests {
             assert!(text.contains(g.name), "group {} missing from help", g.name);
         }
         assert!(text.contains("forward to the Python surface"), "{text}");
+        // The append contract (older comments stay) is the fact agents
+        // keep missing; the help row is where a fresh session reads it.
+        let note = GROUPS
+            .iter()
+            .find(|g| g.name == "note")
+            .expect("note group");
+        assert!(
+            note.purpose.contains("append") && note.purpose.contains("older comments stay"),
+            "note purpose must teach append: {}",
+            note.purpose
+        );
     }
 
     #[test]
