@@ -1710,12 +1710,20 @@ mod tests {
         }
     }
 
-    // The sccache cache sits directly under the base. Its internals can look
-    // like tagged cache dirs; the 2-hex shard guard keeps them off the lane.
+    // The fleet cache resolves under the same base precedence as build dirs
+    // and sits directly under the base, where its internals can look like
+    // tagged cache dirs; the 2-hex shard guard keeps it off the lane.
     #[test]
-    fn inventory_skips_non_shard_base_dirs() {
+    fn sccache_under_the_base_is_off_the_lane() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let base = temp_root("sccache-guard");
+        let root = temp_root("sccache-guard");
+        let base = root.join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("FNO_CARGO_TARGETS_BASE", &base);
+        assert_eq!(
+            sccache_dir(Path::new("/any/worktree")),
+            base.join("sccache")
+        );
         let inner = base.join("sccache").join("ab").join("cd");
         std::fs::create_dir_all(&inner).unwrap();
         std::fs::write(
@@ -1727,22 +1735,6 @@ mod tests {
         let (rows, empty) = inventory(&base);
         assert_eq!(rows, vec![base.join("00").join("aaaa11")]);
         assert!(empty.is_empty());
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    // The fleet cache resolves under the same base precedence as build dirs,
-    // so one reclaim lane owns the whole tree.
-    #[test]
-    fn sccache_dir_follows_the_build_base() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let root = temp_root("sccache-dir");
-        let base = root.join("base");
-        std::fs::create_dir_all(&base).unwrap();
-        std::env::set_var("FNO_CARGO_TARGETS_BASE", &base);
-        assert_eq!(
-            sccache_dir(Path::new("/any/worktree")),
-            base.join("sccache")
-        );
         std::env::remove_var("FNO_CARGO_TARGETS_BASE");
         let _ = std::fs::remove_dir_all(&root);
     }
