@@ -121,7 +121,9 @@ mod tests {
             .execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('row');")
             .unwrap();
         let reader = open_read(&path).unwrap();
-        let value: String = reader.query_row("SELECT v FROM t", [], |row| row.get(0)).unwrap();
+        let value: String = reader
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(value, "row");
         assert!(reader.execute_batch("INSERT INTO t VALUES ('no')").is_err());
 
