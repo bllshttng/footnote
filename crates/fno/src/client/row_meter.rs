@@ -33,16 +33,6 @@ pub(super) fn ctx_cell(pct: Option<u8>) -> String {
     ctx_meter_text(pct, 3)
 }
 
-/// A four-cell context sparkline whose ramp shifts with the measured load.
-pub(super) fn ctx_sparkline(pct: u8) -> &'static str {
-    match pct.min(100) {
-        0..=12 => "▁▁▂▂",
-        13..=32 => "▂▃▄▅",
-        33..=65 => "▃▄▅▆",
-        _ => "▄▅▆▇",
-    }
-}
-
 /// The loading skeleton's breathe: one shade step up and back down, every
 /// unserved cell on the shared spin clock so the column pulses together.
 /// `None` (reduced motion, or the clock never started) holds the lightest.
@@ -142,7 +132,7 @@ impl View {
 
 #[cfg(test)]
 mod tests {
-    use super::{cost_cell, ctx_sparkline, name_w, skeleton_cell, token_cell};
+    use super::{cost_cell, name_w, skeleton_cell, token_cell};
     #[test]
     fn cost_is_dollars_and_tokens_compact() {
         assert_eq!(cost_cell(42), "~$0.42");
@@ -155,10 +145,6 @@ mod tests {
         assert_eq!(token_cell(367_000_000), "367M tok");
         assert_eq!(token_cell(1_416_159_173), "1.4B tok");
         assert_eq!(token_cell(1_000_000_000), "1B tok");
-        assert_eq!(ctx_sparkline(10), "▁▁▂▂");
-        assert_eq!(ctx_sparkline(16), "▂▃▄▅");
-        assert_eq!(ctx_sparkline(49), "▃▄▅▆");
-        assert_eq!(ctx_sparkline(129), "▄▅▆▇");
         assert_eq!(skeleton_cell(3, None), "░░░");
         assert_eq!(skeleton_cell(2, Some(0)), "░░");
         assert_eq!(skeleton_cell(2, Some(250)), "▒▒");

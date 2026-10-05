@@ -217,7 +217,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
     let over_window = frame_text(&over_frame);
-    assert!(over_window.contains("▄▅▆▇ 129%"), "{over_window:?}");
+    assert!(over_window.contains("█████ 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
     v.layout.agents[1].compaction_count = None;
     v.layout.agents[1].session_cost_cents = None;
@@ -245,8 +245,8 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▄▅ 26% · 3c · 12.3k tok · one message"),
-        "the compact sparkline line matches its display contract: {text:?}"
+        text.contains("█▍    26% · 3c · 12.3k tok · one message"),
+        "the compact metrics line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
     // A worker names its lead, and a teamed row names its role.
@@ -284,7 +284,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "500 tok"));
     // The history ramp's bar math (pct -> bar height); the full ramp itself
-    // only paints under the spin clock, so the static cell stands in tests.
+    // only paints under the spin clock, so the fill bar stands in tests.
     assert_eq!(card_line::ramp_char(0), '▁');
     assert_eq!(card_line::ramp_char(50), '▄');
     assert_eq!(card_line::ramp_char(100), '▇');

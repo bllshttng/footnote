@@ -84,11 +84,13 @@ pub(super) fn metric_cells(a: &AgentRow, now: u64) -> [MetricCell; 3] {
 
 /// The line-3 context cell's history: paint-time samples of
 /// `context_used_pct`, one per 5s the sideline paints the row, capped at 8,
-/// replacing the static sparkline once two samples exist. Sampled only under
-/// the spin clock (tests and snapshots stay on the static sparkline), keyed
-/// by session id, name fallback.
+/// drawn one ramp cell per sample once two exist. Before that, and whenever
+/// the spin clock is absent (tests and snapshots), the cell is a narrow 5-cell
+/// fill bar: it measures the current percent instead of decorating it.
+/// Sampled only under the spin clock, keyed by session id, name fallback.
 const SAMPLE_EVERY_S: u64 = 5;
 const RAMP_CAP: usize = 8;
+const FILL_BAR_CELLS: usize = 5;
 const RAMP_CHARS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
 pub(super) fn ramp_char(p: u8) -> char {
@@ -100,7 +102,7 @@ static HISTORY: OnceLock<Mutex<HashMap<String, (u64, VecDeque<u8>)>>> = OnceLock
 fn history_cell(a: &AgentRow, now: u64) -> Option<String> {
     let p = a.context_used_pct?;
     if crate::lattice::spin_epoch().is_none() {
-        return Some(format!("{} {p}%", super::row_meter::ctx_sparkline(p)));
+        return Some(super::row_meter::ctx_meter_text(p, FILL_BAR_CELLS));
     }
     let key = a
         .harness_session_id
@@ -119,7 +121,7 @@ fn history_cell(a: &AgentRow, now: u64) -> Option<String> {
         }
     }
     if e.1.len() < 2 {
-        return Some(format!("{} {p}%", super::row_meter::ctx_sparkline(p)));
+        return Some(super::row_meter::ctx_meter_text(p, FILL_BAR_CELLS));
     }
     let ramp: String = std::iter::repeat(ramp_char(e.1[0]))
         .take(RAMP_CAP - e.1.len())
