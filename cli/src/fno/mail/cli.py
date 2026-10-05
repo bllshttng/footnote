@@ -4671,9 +4671,8 @@ def cmd_hold(
         raise typer.Exit(code=2)
 
     if status:
-        # The record, not the gate: the gate's own-pass answers deliverable
-        # for the session's own hold, so --status once read "no hold" while
-        # the check-in read bus-only off the same row.
+        # The record, not the gate: its own-pass answers deliverable for the
+        # session's own hold, so --status once read "no hold" off the same row.
         from fno.agents.dispatch import BUS_ONLY_POLICY
 
         entry = hold_mod.resolve_entry(handle)

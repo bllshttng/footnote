@@ -42,8 +42,7 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
-# The mark the Rust conversation arm writes on a clock it armed itself.
-CONVERSATION_SOURCE = "conversation"
+CONVERSATION_SOURCE = "conversation"  # the Rust conversation arm's mark
 
 
 @dataclass(frozen=True)
@@ -115,14 +114,13 @@ def read(handle: str) -> Optional[Hold]:
     ceiling = _parse(ceiling_raw) if isinstance(ceiling_raw, str) else None
     if isinstance(ceiling_raw, str) and ceiling is None:
         return None
-    source_raw = raw.get("source")
     return Hold(
         handle=handle,
         until=until,
         window_s=window if isinstance(window, int) else None,
         clock_kind=clock_kind,
         ceiling=ceiling,
-        source=source_raw if isinstance(source_raw, str) else None,
+        source=raw.get("source") if isinstance(raw.get("source"), str) else None,
     )
 
 
@@ -136,7 +134,7 @@ def _write(hold: Hold) -> Hold:
         "clock_kind": hold.clock_kind,
         "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
     }
-    # Only when set: Python-written clocks keep their exact legacy bytes.
+    # Only when set: Python-written clocks keep their legacy bytes.
     if hold.source:
         fields["source"] = hold.source
     payload = json.dumps(fields)
