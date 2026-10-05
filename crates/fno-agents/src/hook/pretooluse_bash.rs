@@ -99,6 +99,12 @@ pub fn run(_args: &[String]) -> i32 {
         refusals.extend(effect_refusal);
     }
 
+    if crate::agents_config::preset_runs(preset, "refusal-streak") {
+        let streak_refusal = super::refusal_streak::judge_pre(&payload);
+        super::emit_guard_decision(&cwd, "refusal-streak", "Bash", streak_refusal.is_some());
+        refusals.extend(streak_refusal);
+    }
+
     if refusals.is_empty() {
         super::emit_allow()
     } else {

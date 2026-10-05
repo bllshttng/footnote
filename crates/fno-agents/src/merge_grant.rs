@@ -719,9 +719,9 @@ pub(crate) fn read_bound_manifest(wt: &Path) -> BoundRead {
     }
     hits.sort();
     hits.dedup();
-    for path in hits.into_iter().rev() {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => return parse_bound_content(&content, &path, false),
+    if let Some(path) = hits.last() {
+        match std::fs::read_to_string(path) {
+            Ok(content) => return parse_bound_content(&content, path, false),
             Err(e) => {
                 return BoundRead::Unreadable(format!("{}: {e}", path.display()));
             }

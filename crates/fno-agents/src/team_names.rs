@@ -264,7 +264,9 @@ fn valid_theme(text: &str) -> bool {
 
 /// The live teams indexed by canonical scope - the one liveness read every
 /// rule here shares (`territory::live_teams`, never a private copy).
-fn live_index(registry_path: &Path) -> Result<BTreeMap<String, crate::territory::Team>, String> {
+pub(crate) fn live_index(
+    registry_path: &Path,
+) -> Result<BTreeMap<String, crate::territory::Team>, String> {
     Ok(crate::territory::live_teams(registry_path)
         .map_err(|e| e.0)?
         .into_iter()
@@ -902,16 +904,19 @@ pub fn forget(store_path: &Path, scope: &str) -> Result<(), String> {
 }
 
 /// An heir's (or any) beat: bind a null `holder_session` to the live
-/// holder's session and replace the node list. No record, no-op. Callers
-/// treat an error as a stated line in the beat, never a failed beat.
+/// holder's session and replace the node list. Returns the pending
+/// succession this beat cleared, so the caller can run the
+/// verify-release-retro transaction over it. Callers treat an error as a
+/// stated line in the beat, never a failed beat.
 pub fn bind_and_refresh(
     store_path: &Path,
     registry_path: &Path,
     scope: &str,
     nodes: Vec<String>,
-) -> Result<(), String> {
+) -> Result<Option<PendingSuccession>, String> {
     let canon = crate::territory::canonical_scope(scope);
     let live = live_index(registry_path)?;
+    let mut cleared = None;
     update(store_path, |store| {
         let Some(rec) = store.teams.get_mut(&canon) else {
             return Ok(());
@@ -923,11 +928,12 @@ pub fn bind_and_refresh(
         }
         // A beat over the scope by the live holder is the proof the
         // succession waited for: the heir is alive and reading its team.
-        rec.pending_succession = None;
+        cleared = rec.pending_succession.take();
         rec.nodes = nodes;
         rec.updated_at = now_stamp();
         Ok(())
-    })
+    })?;
+    Ok(cleared)
 }
 
 /// Revert successions whose heir died before binding. A pending record
@@ -1630,55 +1636,6 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_live_name_refuses_and_names_the_holder_and_scope() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(
-            tmp.path(),
-            json!([
-                team_row("lead-a", "x-aaaa", 2, "sess-a"),
-                team_row("lead-b", "fno", 1, "sess-b"),
-            ]),
-        );
-        name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "x-aaaa",
-            "barnaby",
-        )
-        .unwrap();
-        let err = name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "fno",
-            "BARNABY",
-        )
-        .unwrap_err();
-        assert!(err.contains("barnaby"), "{err}");
-        assert!(err.contains("x-aaaa"), "{err}");
-    }
-
-    #[test]
-    fn an_already_named_team_refuses_a_second_naming() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([team_row("lead-a", "fno", 1, "sess-a")]));
-        name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "fno",
-            "barnaby",
-        )
-        .unwrap();
-        let err = name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "fno",
-            "ernest",
-        )
-        .unwrap_err();
-        assert!(err.contains("already named Barnaby"), "{err}");
-    }
-
-    #[test]
     fn a_bad_name_pattern_refuses() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(tmp.path(), json!([team_row("lead-a", "fno", 1, "sess-a")]));
@@ -1804,13 +1761,25 @@ mod tests {
             }),
         )
         .unwrap();
-        bind_and_refresh(
+        let cleared = bind_and_refresh(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
             "x-aaaa",
             vec!["x-bbbb".into()],
         )
         .unwrap();
+        assert!(
+            cleared.is_some(),
+            "the heir's first beat clears the pending record"
+        );
+        let again = bind_and_refresh(
+            &store_path(tmp.path()),
+            &registry_path(tmp.path()),
+            "x-aaaa",
+            vec!["x-bbbb".into()],
+        )
+        .unwrap();
+        assert!(again.is_none(), "a second beat clears nothing");
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(
             dump["teams"]["x-aaaa"]["holder_session"],

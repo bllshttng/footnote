@@ -656,6 +656,7 @@ fn send_announcement(
 /// test hold). Same line, rate limit and supersede as `announce send`.
 pub(crate) fn announce_all(from: &str, subject: &str, body: &str) -> Result<String, String> {
     let paths = AnnouncePaths::from_env_opt().ok_or("no agents home")?;
+    fence_test_bus(&paths.bus_live)?;
     let args = SendArgs {
         scope: "all".into(),
         subject: subject.into(),
@@ -669,6 +670,25 @@ pub(crate) fn announce_all(from: &str, subject: &str, body: &str) -> Result<Stri
     send_announcement(&args, body, &paths, None)
         .map(|receipt| receipt.id)
         .map_err(|(_, message)| message)
+}
+
+/// A test build must never mail the live fleet: the bus has to sit under the
+/// temp dir, which every pinned agents home in a test resolves to. An
+/// unpinned test that reaches this door hears the fence instead of writing
+/// the operator's `~/.fno/bus`. Production (the daemon, a lead session) is
+/// never a test build, so the fence is dead weight there.
+fn fence_test_bus(bus_live: &Path) -> Result<(), String> {
+    if !cfg!(test) {
+        return Ok(());
+    }
+    let temp = std::env::temp_dir();
+    if bus_live.ancestors().any(|a| a == temp) {
+        return Ok(());
+    }
+    Err(format!(
+        "announce fenced under test: {} is not under the temp dir; pin FNO_AGENTS_HOME to a temp home in the test",
+        bus_live.display()
+    ))
 }
 
 pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {

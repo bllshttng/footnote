@@ -1,18 +1,17 @@
-//! `fno config paths emit-shell`, `shell-stub` and `verify`: the paths verbs
-//! answered natively.
+//! `fno config paths emit-shell`, `shell-stub`, `verify` and `handoff`: the
+//! paths verbs answered natively.
 //!
-//! One verb per PR (law d-450caaeb): `emit-shell`, `shell-stub` and `verify`
-//! landed; `handoff` still forwards to the Python paths group until its child
-//! node ports. The route execs the worker's `--paths-exec` lane
-//! (worker_binary resolution like the law door), argv and exit code
+//! One verb per PR (law d-450caaeb): all four landed across four PRs; the
+//! Python paths group is gone. The route execs the worker's `--paths-exec`
+//! lane (worker_binary resolution like the law door), argv and exit code
 //! pass through unchanged.
 
 use std::ffi::OsString;
 use std::process::Command;
 
-/// The verbs the native lane serves. One per PR (law d-450caaeb):
-/// emit-shell, shell-stub and verify landed; the rest forward to Python.
-pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell", "shell-stub", "verify"];
+/// All four paths verbs, one per PR (law d-450caaeb): emit-shell,
+/// shell-stub, verify, handoff. The Python group is retired whole.
+pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell", "shell-stub", "verify", "handoff"];
 
 /// Classify the paths verb for the front door: `fno config paths <v> ...`
 /// and its deprecated top-level spelling `fno paths <v> ...` both route
@@ -75,8 +74,24 @@ mod tests {
     }
 
     #[test]
+    fn classify_claims_handoff() {
+        let rest = classify(&oss(&[
+            "config",
+            "paths",
+            "handoff",
+            "--scope",
+            "fno-x-aaaa",
+        ]))
+        .unwrap();
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest[0], OsString::from("handoff"));
+        let rest = classify(&oss(&["paths", "handoff", "--scope", "s"])).unwrap();
+        assert_eq!(rest[0], OsString::from("handoff"));
+    }
+
+    #[test]
     fn classify_leaves_other_verbs_to_python() {
-        for verb in ["handoff", "bogus"] {
+        for verb in ["bogus"] {
             assert!(classify(&oss(&["config", "paths", verb])).is_none());
             assert!(classify(&oss(&["paths", verb])).is_none());
         }

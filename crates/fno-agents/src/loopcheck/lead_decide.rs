@@ -506,13 +506,10 @@ fn stale_team_doc_gate(
     if scope.is_empty() {
         return None;
     }
-    let ceiling = match crate::agents_config::config_lookup(cwd, &["lead", "compaction_ceiling"]) {
-        Some(v) => v
-            .as_integer()
-            .filter(|n| *n >= 0)
-            .unwrap_or(crate::lead_verdict_inputs::DEFAULT_COMPACTION_CEILING),
-        None => crate::lead_verdict_inputs::DEFAULT_COMPACTION_CEILING,
-    } as u64;
+    let harness = manifest.harness.as_deref().unwrap_or("claude");
+    let ceiling = crate::lead_verdict_inputs::compaction_ceiling_for(cwd, harness)
+        .unwrap_or_else(|_| crate::lead_verdict_inputs::default_ceiling(harness))
+        as u64;
     // Count first: a scan of the transcript this fire already holds. The doc
     // resolution (a subprocess) is paid only past the ceiling, so the common
     // path adds no cost to the board read.
@@ -679,7 +676,7 @@ mod stale_team_doc_tests {
 
     fn seed_doc(handoffs_dir: &Path) {
         std::fs::create_dir_all(handoffs_dir).unwrap();
-        std::fs::write(handoffs_dir.join("20260916-team-footnote.md"), "# canon").unwrap();
+        std::fs::write(handoffs_dir.join("20260916-crown-footnote.md"), "# canon").unwrap();
     }
 
     #[test]
@@ -774,7 +771,7 @@ mod stale_team_doc_tests {
         // A clock stepped back after the doc's write leaves its mtime in the
         // future; the doc IS fresh, so the gate must not read it as ancient.
         let future = std::time::SystemTime::now() + Duration::from_secs(3600);
-        let doc = handoffs.join("20260916-team-footnote.md");
+        let doc = handoffs.join("20260916-crown-footnote.md");
         let mut f = std::fs::File::options().write(true).open(&doc).unwrap();
         f.set_times(std::fs::FileTimes::new().set_modified(future))
             .unwrap();
