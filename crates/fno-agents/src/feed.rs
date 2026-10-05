@@ -749,6 +749,7 @@ pub fn project(
     rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
     assign_owners(&mut rows, &team_events, graph_entries, &themes);
     for r in &mut rows {
+        r.area = area_of(&r.kind).to_string();
         r.cursor = cursor_of(r);
     }
     Projection {
@@ -1050,6 +1051,69 @@ pub fn filter_rows(
     rows
 }
 
+/// Which slice of the fleet a kind belongs to. A pure function of the kind,
+/// so no migration ever backfills it; an unknown kind maps to `other`, and a
+/// unit test fails if any kind the projection emits lands there.
+pub(crate) fn area_of(kind: &str) -> &'static str {
+    match kind {
+        "question_asked" | "question_closed" | "decision_recorded" => "mail",
+        "node_created" | "node_started" | "node_ended" => "backlog",
+        "node_shipped" | "pr_merged" => "ship",
+        "session_spawned" | "session_spawn_refused" | "session_reaped" | "worker_stalled"
+        | "help_emitted" | "team_granted" | "team_vacated" => "agents",
+        "pane_closed" | "server_stopped" | "composer_shell_ran" | "composer_shell_refused" => {
+            "mux"
+        }
+        "day_boundary" | "daemon_restarted" | "update_started" | "update_finished" => "fleet",
+        "main_ci_changed" => "ci",
+        _ => "other",
+    }
+}
+
+/// The kinds each store leg can emit, so a prefilter that excludes them all
+/// skips the read entirely.
+pub(crate) const QUESTION_KINDS: &[&str] = &[
+    "question_asked",
+    "question_closed",
+    "decision_recorded",
+    "day_boundary",
+];
+pub(crate) const GRAPH_KINDS: &[&str] =
+    &["node_created", "node_started", "node_ended", "node_shipped"];
+pub(crate) const REMOVAL_KINDS: &[&str] = &["session_reaped"];
+pub(crate) const SPAWN_KINDS: &[&str] = &["session_spawned", "session_spawn_refused"];
+pub(crate) const CLOSE_KINDS: &[&str] = &[
+    "pane_closed",
+    "server_stopped",
+    "composer_shell_ran",
+    "composer_shell_refused",
+];
+pub(crate) const TEAM_KINDS: &[&str] = &["team_granted", "team_vacated"];
+
+/// True when the prefilter cannot match any kind this leg emits, so the leg
+/// is not read at all. An empty leg is never skipped.
+pub(crate) fn leg_skipped(pre: &Prefilter, kinds: &[&str]) -> bool {
+    if kinds.is_empty() {
+        return false;
+    }
+    if let Some(k) = pre.kind.as_deref() {
+        let wanted: Vec<&str> = k.split(',').collect();
+        if !kinds
+            .iter()
+            .any(|kd| wanted.iter().any(|w| kd.starts_with(w)))
+        {
+            return true;
+        }
+    }
+    if let Some(a) = pre.area.as_deref() {
+        let wanted: Vec<&str> = a.split(',').collect();
+        if !kinds.iter().any(|kd| wanted.iter().any(|w| area_of(kd) == *w)) {
+            return true;
+        }
+    }
+    false
+}
+
 /// One keyset page request: the cursor bounds and the size. `--before` keeps
 /// the rows strictly below the cursor key, newest `limit` of them; `--after`
 /// keeps the rows strictly above, OLDEST `limit`. Both at once is refused.
@@ -1241,9 +1305,12 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
             "day_boundary",
         ])
     };
-    let questions_raw = match crate::event_store::journal_text_checked(
-        &questions_path, &questions_query,
-    ) {
+    let questions_raw = if leg_skipped(&args.pre, QUESTION_KINDS) {
+        String::new()
+    } else {
+        match crate::event_store::journal_text_checked(
+            &questions_path, &questions_query,
+        ) {
         Ok(raw) => raw,
         Err(e) => {
             eprintln!(
@@ -1251,6 +1318,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
                 questions_path.display()
             );
             String::new()
+        }
         }
     };
 
@@ -1260,7 +1328,9 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         // should know the lifecycle leg is absent, so its absence keeps its
         // own note (AC3) where a present-but-empty store is just empty.
         let path = graph_path(home);
-        if !crate::backlog::database_path(&path).exists() {
+        if leg_skipped(&args.pre, GRAPH_KINDS) {
+            (Vec::new(), None)
+        } else if !crate::backlog::database_path(&path).exists() {
             (Vec::new(), Some("graph store skipped (absent)".to_string()))
         } else {
             match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
@@ -1273,19 +1343,33 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         eprintln!("fno-agents feed: {note}");
     }
 
-    let (removals, removal_notes) =
-        crate::removals::read(home, args.since_epoch.map(|s| s as i64 * 1000));
+    let (removals, removal_notes) = if leg_skipped(&args.pre, REMOVAL_KINDS) {
+        (Vec::new(), Vec::new())
+    } else {
+        crate::removals::read(home, args.since_epoch.map(|s| s as i64 * 1000))
+    };
     for note in &removal_notes {
         eprintln!("fno-agents feed: {note}");
     }
-    let spawns_raw = agents_journal(
-        home,
-        &["agent_spawned", "agent_spawn_refused"],
-        args.since_epoch,
-        args.until_epoch,
-    );
-    let team_raw = team_journals(home);
-    let closes_raw = agents_journal(
+    let spawns_raw = if leg_skipped(&args.pre, SPAWN_KINDS) {
+        String::new()
+    } else {
+        agents_journal(
+            home,
+            &["agent_spawned", "agent_spawn_refused"],
+            args.since_epoch,
+            args.until_epoch,
+        )
+    };
+    let team_raw = if leg_skipped(&args.pre, TEAM_KINDS) {
+        String::new()
+    } else {
+        team_journals(home)
+    };
+    let closes_raw = if leg_skipped(&args.pre, CLOSE_KINDS) {
+        String::new()
+    } else {
+    agents_journal(
         home,
         &[
             "pane_closed",
@@ -1293,9 +1377,10 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
             "composer_shell_ran",
             "composer_shell_refused",
         ],
-        args.since_epoch,
-        args.until_epoch,
-    );
+            args.since_epoch,
+            args.until_epoch,
+        )
+    };
 
     // The projection sees the node set so the graph leg can skip whole
     // entries; the other legs filter after projection (node_id is sparse in
@@ -1776,6 +1861,69 @@ mod tests {
             "legs without a store node filter after projection"
         );
         assert!(got.iter().any(|r| r.node.as_deref() == Some("x-aaaa")));
+
+        // AC5: area is a pure function of kind, and nothing the projection
+        // emits lands in `other`.
+        for k in [
+            "question_asked",
+            "question_closed",
+            "decision_recorded",
+            "node_created",
+            "node_started",
+            "node_ended",
+            "node_shipped",
+            "session_spawned",
+            "session_spawn_refused",
+            "session_reaped",
+            "worker_stalled",
+            "help_emitted",
+            "team_granted",
+            "team_vacated",
+            "pane_closed",
+            "server_stopped",
+            "composer_shell_ran",
+            "composer_shell_refused",
+            "day_boundary",
+            "daemon_restarted",
+            "update_started",
+            "update_finished",
+            "main_ci_changed",
+            "pr_merged",
+        ] {
+            assert_ne!(area_of(k), "other", "{k} has no area");
+        }
+        assert_eq!(area_of("question_asked"), "mail");
+        assert_eq!(area_of("node_shipped"), "ship");
+        assert_eq!(area_of("pane_closed"), "mux");
+        let projected = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
+        assert!(
+            projected
+                .rows
+                .iter()
+                .all(|r| area_of(&r.kind) == r.area && r.area != "other"),
+            "every projected row carries its area"
+        );
+
+        // A prefilter that excludes a leg's kinds skips the read entirely.
+        let pre = Prefilter {
+            area: Some("mux,backlog".into()),
+            ..Default::default()
+        };
+        assert!(
+            leg_skipped(&pre, QUESTION_KINDS),
+            "questions leg excluded by --area mux,backlog"
+        );
+        assert!(
+            !leg_skipped(&pre, GRAPH_KINDS),
+            "the graph leg emits backlog kinds, so it stays"
+        );
+        let pre = Prefilter {
+            kind: Some("question".into()),
+            ..Default::default()
+        };
+        assert!(leg_skipped(&pre, SPAWN_KINDS));
+        assert!(!leg_skipped(&pre, QUESTION_KINDS));
+        assert!(!leg_skipped(&Prefilter::default(), QUESTION_KINDS));
 
         let a = parse_args(&[
             "--kind".to_string(),
