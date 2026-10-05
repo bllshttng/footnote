@@ -152,17 +152,17 @@ check(publish_job.get("environment") == "release",
       "release.yml's publish job sits behind the release approval environment")
 check((publish_job.get("needs") or []) == ["resolve", "binaries", "wheels"],
       "release.yml's publish job runs after resolve and both build workflows")
-# Channel routing resolved through the resolve job's outputs; the scheduled
-# weekly run claims its own rc-weekly lane in the concurrency group.
+# Channel routing resolved through the resolve job's outputs; the group is
+# per channel and the nightly-dispatched rc cancels the parked candidate.
 publish_if = str(publish_job.get("if", ""))
 check("needs.resolve.outputs.channel != 'nightly'" in publish_if,
       "release.yml's publish job runs only for rc or stable")
 nightly_if = str((release_jobs.get("publish-nightly") or {}).get("if", ""))
 check("needs.resolve.outputs.channel == 'nightly'" in nightly_if,
       "release.yml's nightly job runs only for the nightly channel")
-check(str((release.get("concurrency") or {}).get("group", ""))
-      == "release-${{ inputs.channel || (github.event.schedule == '43 6 * * 1' && 'rc-weekly' || 'nightly') }}",
-      "release.yml serializes per channel so an approval wait never parks the nightly")
+check(str((release.get("concurrency") or {}).get("group", "")) == "release-${{ inputs.channel || 'nightly' }}"
+      and str((release.get("concurrency") or {}).get("cancel-in-progress", "")) == "${{ inputs.channel == 'rc' && inputs.from_nightly == true }}",
+      "release.yml serializes per channel; the dispatched rc cancels in progress")
 
 # Build workflows are callable and build-only: release.yml calls them and owns
 # every publish leg behind the release-environment approval.
