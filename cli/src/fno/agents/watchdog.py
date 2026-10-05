@@ -47,8 +47,10 @@ Verdict = namedtuple(
 #: ``pid``/``pid_start_time``/``mux`` ride for the reachability falsifiers.
 Row = namedtuple(
     "Row",
-    "row_id name state node cwd agent pid pid_start_time mux stopped_at",
-    defaults=(None, "", "claude", None, None, None, None),
+    "row_id name state node cwd agent pid pid_start_time mux stopped_at crowned",
+    # crowned: the registry entry carries a crown level. A crowned lead row is
+    # never a node worker, whatever its attribution reads (x-a1c0).
+    defaults=(None, "", "claude", None, None, None, None, False),
 )
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -1395,6 +1397,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             cwd=cwd,
             agent="claude",
             stopped_at=(getattr(match, "stop", None) or {}).get("at"),
+            crowned=getattr(match, "crown_level", None) is not None,
         ))
     for sid, entry in by_sid.items():  # fno-first: vendor-omitted rows list (d-e096c669)
         state, state_warning = _row_state({"status": str(getattr(entry, "status", "") or "")})
@@ -1460,6 +1463,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
                 pid=getattr(entry, "pid", None),
                 pid_start_time=getattr(entry, "pid_start_time", None),
                 mux=getattr(entry, "mux", None),
+                crowned=getattr(entry, "crown_level", None) is not None,
             )
         )
         seen_row_ids.add(row_id)

@@ -78,6 +78,8 @@ def read_roster(
             "state": r.state,
             "cwd": r.cwd,
             "row_id": str(r.row_id or ""),
+            "node": r.node,
+            "crowned": getattr(r, "crowned", False),
             "pid": getattr(r, "pid", None),
             "pid_start_time": getattr(r, "pid_start_time", None),
             "mux": getattr(r, "mux", None),

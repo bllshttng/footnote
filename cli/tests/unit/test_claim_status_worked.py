@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from typer.testing import CliRunner
 
 from fno.agents.reachability import REACHABLE, UNREACHABLE
@@ -15,6 +17,14 @@ from fno.graph.statuses import live_worked_node_ids as _real_live_worked_node_id
 
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_node_claims(monkeypatch):
+    """Hermetic overlay: no claims root read unless a test provides one."""
+    monkeypatch.setattr(
+        "fno.graph.statuses._node_claim_sessions", lambda: {}
+    )
 
 
 def _stop_row(stopped_at=None, state="working") -> dict:
@@ -134,13 +144,16 @@ def test_ac6_edge_claim_status_names_live_worker(monkeypatch):
 def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     """The reproduced case as a fixture: a row with no node field whose
     row_id matches an open-phase session row on this node. 68 unresolved of
-    133 scanned is the measured wedge shape, and the verdict still turns on
-    the one row that names THIS node, never on the ratio."""
+    133 scanned is the measured wedge shape. Since x-a1c0 a bare seat record
+    is a witness, never ownership: this row proves itself the way a real
+    worker does when its registry row is missing - it holds the node claim."""
     s1 = {
         "name": "king-a792-control",
         "state": "working",
         "cwd": "/Users/bb16/code/footnote/footnote",
         "row_id": "s-1",
+        "node": None,
+        "crowned": False,
     }
     unresolved = tuple(
         {**s1, "row_id": f"s-other-{i}", "cwd": f"/wt/other-{i}"}
@@ -149,6 +162,10 @@ def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     reading = RosterReading(True, 133, {}, "", {"s-1": s1}, 68, (s1,) + unresolved)
     monkeypatch.setattr("fno.claims.cli.read_roster", lambda **_kw: reading)
     _graph_entry(monkeypatch, session_id="s-1")
+    monkeypatch.setattr(
+        "fno.graph.statuses._node_claim_sessions",
+        lambda: {"ac1-node": {"s-1"}},
+    )
     monkeypatch.setattr(
         "fno.claims.cli._claims_core.claim_status",
         lambda **_kw: {"key": "node:ac1-node", "state": "free"},
@@ -173,7 +190,8 @@ def test_ac5_err_registry_only_probe_still_answers_the_join(monkeypatch):
     )
     row = SimpleNamespace(
         name="reg-worker", state="working", cwd="/worktrees/ac1-node",
-        row_id="s-1", pid=None, pid_start_time=None, mux=None, node=None,
+        row_id="s-1", pid=None, pid_start_time=None, mux=None, node="ac1-node",
+        crowned=False,
     )
     monkeypatch.setattr(
         "fno.agents.watchdog.fleet_rows", lambda **_kw: ([row], [fallback])

@@ -308,6 +308,25 @@ def settle_released_node(node_id: str):
     return _settle
 
 
+def _node_claim_sessions() -> dict[str, set[str]]:
+    """``node:<id>`` -> holding session ids (live + suspect), read once per
+    call. Best-effort: a claims outage drops the supplement, never the
+    overlay - the roster attribution path still proves real workers."""
+    try:
+        from fno.claims.core import list_claims
+        from fno.claims.io import global_claims_root
+
+        out: dict[str, set[str]] = {}
+        for c in list_claims(prefix="node:", include_stale=False, root=global_claims_root()):
+            node = str(c.get("key") or "").removeprefix("node:")
+            sid = c.get("session_id")
+            if node and sid:
+                out.setdefault(node, set()).add(sid)
+        return out
+    except Exception:
+        return {}
+
+
 def closed_worker_session_ids(entry: dict) -> set[str]:
     """Session ids whose own phase row closed and none is open (the
     receipt): finished with THIS node ahead of the predicate."""
@@ -357,6 +376,7 @@ def live_worked_node_ids(
             raise RuntimeError(reading.reason or "roster not consulted")
 
         worked: dict[str, list[str]] = {}
+        claim_sessions = _node_claim_sessions()
         # One store-wide listing for every transcript resolution in this batch:
         # per-session globs over ~2000 project dirs measured 4.32s for 31
         # sessions.
@@ -390,11 +410,28 @@ def live_worked_node_ids(
                     roster_row = reading.row_for_session(row["session_id"])
                     if roster_row is None or roster_row.get("row_id") in closed_ids:
                         continue
+                    # A crowned lead row is never a node worker (x-a1c0): the
+                    # crown's own dispatch stamp opens a session row, and the
+                    # seat record must not read the crown as the occupant.
+                    if roster_row.get("crowned"):
+                        continue
+                    # A seat record alone is a witness, never ownership (the
+                    # gate PR 3030 gave the reap keep): the session needs its
+                    # own dispatch attribution or the node claim.
+                    if (
+                        roster_row.get("node") != node_id
+                        and row["session_id"] not in claim_sessions.get(node_id, ())
+                    ):
+                        continue
                     verdict = _worker_reachability(roster_row).verdict
                     if verdict in (REACHABLE, UNKNOWN):
                         _admit(roster_row.get("name"), verdict)
                 for extra in reading.workers_on(node_id):
                     if extra.get("row_id") in closed_ids:
+                        continue
+                    # The fold already reads dispatch attribution; a crown
+                    # still never counts (x-a1c0).
+                    if extra.get("crowned"):
                         continue
                     verdict = _worker_reachability(extra).verdict
                     if verdict in (REACHABLE, UNKNOWN):

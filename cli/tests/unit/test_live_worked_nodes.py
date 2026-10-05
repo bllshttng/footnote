@@ -7,6 +7,14 @@ from fno.claims.roster import RosterReading
 from fno.graph.statuses import live_worked_node_ids
 
 
+@pytest.fixture(autouse=True)
+def _no_node_claims(monkeypatch):
+    """Hermetic overlay: no claims root read unless a test provides one."""
+    monkeypatch.setattr(
+        "fno.graph.statuses._node_claim_sessions", lambda: {}
+    )
+
+
 def _entry(node_id: str, *, status: str = "ready") -> dict:
     return {
         "id": node_id,
@@ -22,12 +30,13 @@ def _entry(node_id: str, *, status: str = "ready") -> dict:
     }
 
 
-def _reading(state: str) -> RosterReading:
+def _reading(state: str, node: str = "ac1-node") -> RosterReading:
     row = {
         "name": "bp-worker",
         "state": state,
         "cwd": "/worktrees/ac1-node",
         "row_id": "session-1",
+        "node": node,
     }
     return RosterReading(True, 1, {}, "", {"session-1": row}, 0, ())
 
@@ -192,6 +201,7 @@ def test_a_closed_blueprint_with_an_open_do_row_still_occupies(monkeypatch):
     row = {
         "name": "bp-worker", "state": "working",
         "cwd": "/worktrees/x-edge", "row_id": "session-1",
+        "node": "x-edge",
     }
     reading = RosterReading(True, 1, {"x-edge": [row]}, "", {}, 0, ())
     monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
@@ -271,7 +281,10 @@ def test_ac1_err_an_open_do_row_beside_the_ship_row_still_occupies(monkeypatch):
         }
     )
     monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
-    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: _reading("working"))
+    monkeypatch.setattr(
+        "fno.claims.roster.read_roster",
+        lambda **_kw: _reading("working", node="x-e221"),
+    )
 
     assert live_worked_node_ids() == {"x-e221": ["bp-worker"]}
 
@@ -346,3 +359,116 @@ def test_a_registry_only_fallback_answers_the_overlay(monkeypatch):
         lambda *_a, **_kw: [_entry("x-6d3c")],
     )
     assert live_worked_node_ids(strict=True) == {}
+
+
+def _crown_entry(node_id: str) -> dict:
+    """The crown's own dispatch stamp: an open execute row naming the lead."""
+    return {
+        "id": node_id,
+        "status": "in_progress",
+        "sessions": [
+            {
+                "phase": "execute",
+                "harness": "claude",
+                "session_id": "crown-session",
+                "started_at": "2026-10-04T22:27:02Z",
+            }
+        ],
+    }
+
+
+def test_a_crowned_lead_row_is_never_the_node_worker(monkeypatch):
+    """x-a1c0: the crown that seated the worker carries an open session row
+    on the node, and the join read it as the occupant. A crowned row is
+    never a node worker, even with full attribution."""
+    reading = RosterReading(
+        True, 1, {}, "", {"crown-session": {
+            "name": "finch", "state": "working", "cwd": "/Users/x/canonical",
+            "row_id": "crown-session", "node": "x-f02d", "crowned": True,
+        }}, 0, (),
+    )
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_crown_entry("x-f02d")]
+    )
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
+def test_a_crowned_row_on_the_node_fold_is_also_never_the_worker(monkeypatch):
+    """The same refusal at the dispatch-attributed fold: crown wins there
+    too."""
+    entries = [{"id": "x-f02d", "status": "in_progress", "sessions": []}]
+    reading = RosterReading(
+        True, 1,
+        {"x-f02d": [{"name": "finch", "state": "working", "cwd": "/canon",
+                     "row_id": "crown-session", "crowned": True}]},
+    )
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: entries)
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
+def test_a_seat_record_without_provenance_is_a_witness(monkeypatch):
+    """A live non-crowned row whose only tie to the node is the open session
+    row: no registry attribution, no claim. Mention is not ownership."""
+    entry = _entry("x-drift")
+    entry["sessions"][0]["session_id"] = "drifter-session"
+    reading = RosterReading(
+        True, 1, {}, "", {"drifter-session": {
+            "name": "drifter", "state": "working", "cwd": "/elsewhere",
+            "row_id": "drifter-session", "node": None, "crowned": False,
+        }}, 0, (),
+    )
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry]
+    )
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
+def test_a_node_claim_proves_a_seat_record(monkeypatch):
+    """The claim supplement: no registry attribution, but the session holds
+    the live node claim - the provenance the gate accepts."""
+    entry = _entry("x-drift")
+    entry["sessions"][0]["session_id"] = "drifter-session"
+    reading = RosterReading(
+        True, 1, {}, "", {"drifter-session": {
+            "name": "drifter", "state": "working", "cwd": "/elsewhere",
+            "row_id": "drifter-session", "node": None, "crowned": False,
+        }}, 0, (),
+    )
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry]
+    )
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+    monkeypatch.setattr(
+        "fno.graph.statuses._node_claim_sessions",
+        lambda: {"x-drift": {"drifter-session"}},
+    )
+
+    assert live_worked_node_ids(strict=True) == {"x-drift": ["drifter"]}
+
+
+def test_read_roster_threads_crown_and_node_to_the_join(monkeypatch):
+    """The producer stamps both gate fields onto its session rows."""
+    from fno.agents.watchdog import Row
+
+    rows = [
+        Row("s-1", "t-worker", "working", "x-node", "/worktrees/x-node", "claude"),
+        Row("s-2", "finch", "working", "x-node", "/canon", "claude",
+            None, None, None, None, True),
+    ]
+    monkeypatch.setattr(
+        "fno.agents.watchdog.fleet_rows", lambda **_kw: (rows, [])
+    )
+
+    from fno.claims.roster import read_roster
+
+    reading = read_roster()
+
+    assert reading.row_for_session("s-1")["crowned"] is False
+    assert reading.row_for_session("s-1")["node"] == "x-node"
+    assert reading.row_for_session("s-2")["crowned"] is True
