@@ -495,6 +495,7 @@ fi
 # second copy of either rule.
 if [[ -n "$findings_file" ]] && jq -e '((.dispositions // []) | length) > 0' \
     <<<"$findings_json" >/dev/null 2>&1; then
+  FNO_REVIEW_ROUND="$review_round" \
   "${FNO:-fno}" do review post-dispositions --findings-file "$findings_file" \
     --head "$head_sha" --reviewer "$reviewer" >/dev/null 2>&1 || true
 fi
