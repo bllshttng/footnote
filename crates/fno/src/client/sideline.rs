@@ -1142,14 +1142,10 @@ impl View {
         text_w: usize,
         panel_w: usize,
     ) {
-        let base = if self.marks.is_empty() {
-            FOOTER_NEW_LABEL.to_string()
-        } else {
-            format!("{FOOTER_NEW_LABEL}   {} marked \u{b7}R", self.marks.len())
-        };
-        let label = match self.footer_menu_range(panel_w) {
+        let (base, menu, range) = self.footer_labels(panel_w);
+        let label = match range {
             Some(range) => format!(
-                "{}{FOOTER_MENU}",
+                "{}{menu}",
                 pad_to(&crate::chrome::clip(&base, range.start), range.start)
             ),
             None => base,

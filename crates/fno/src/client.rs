@@ -877,14 +877,6 @@ pub(crate) struct View {
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
-    /// The [`View::selector`] was armed by a pointer resting in the
-    /// panel, not by an explicit `prefix+w`. Pointer-in-panel arms the selector
-    /// so `x`/`X`/`r`/`space` act on the pointed-at row (one regime, closes the
-    /// old PTY leak where a bare `x` fell through to the focused pane). A
-    /// hover-arm is motion-fresh: only the action-verb set acts on it, and the
-    /// first key OUTSIDE that set disarms and forwards, so a pointer parked over
-    /// the sideline never swallows typing into the focused pane (AC2-EDGE).
-    sel_hover_armed: bool,
     /// First-visible [`View::display_rows`] index in the sideline:
     /// follow-the-cursor scroll offset so rows below the fold render and take
     /// the mouse. 0 (top-anchored) whenever the catalog fits the height. The
@@ -1965,7 +1957,6 @@ impl View {
             idle_expanded: HashSet::new(),
             selector: None,
             sel_esc: Vec::new(),
-            sel_hover_armed: false,
             sideline_state: std::cell::Cell::new(TableState::new()),
             answers: None,
             ans_esc: Vec::new(),
@@ -2458,7 +2449,6 @@ impl View {
     /// reachable by mouse-clicking a card while prefix+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
         self.selector = None;
-        self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
         self.search = None;
@@ -3987,18 +3977,47 @@ impl View {
         })
     }
 
-    /// The column range of the footer's `☰ menu` button (US4), shared by
-    /// the renderer and the hit-test so a click lands where it draws. `None` when
-    /// the panel is too narrow to add the button beside the `+ new workspace`
-    /// affordance, or a recruit-mark tally is competing for the row.
-    fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+    /// The footer's two labels with their live key hints, and the menu
+    /// button's column range - one fn so the paint and the hit-test cannot
+    /// diverge. The hinted forms (`+ new workspace (N)`, `menu (M)`) resolve
+    /// through the live chord table (`key_for`), so a rebind relabels the
+    /// row; when the row cannot fit the hints, the bare forms keep the
+    /// button's seat (the density-button rule: the hint drops, the affordance
+    /// stays). A `None` range means no button at all: the panel is too
+    /// narrow, or a recruit-mark tally is competing for the row.
+    fn footer_labels(&self, panel_w: usize) -> (String, String, Option<std::ops::Range<usize>>) {
         // last column is the divider
         let tw = panel_w.saturating_sub(1);
-        // Display columns, not char count: the menu trigram (U+2630) is two display columns, so a
-        // char-count range under-reserves by one and the button crosses the
-        // divider into the pane.
-        let mw = FOOTER_MENU.chars().map(glyph_cols).sum::<usize>();
-        (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
+        let hint = |action: &str, bare: &str| match crate::keys::key_for(action) {
+            Some(k) => format!("{bare} ({k})"),
+            None => bare.to_string(),
+        };
+        let new_hinted = hint("new-workspace", FOOTER_NEW_LABEL);
+        let menu_hinted = hint("sideline-menu", FOOTER_MENU);
+        for (new_label, menu) in [
+            (&new_hinted, &menu_hinted),
+            (&FOOTER_NEW_LABEL.to_string(), &FOOTER_MENU.to_string()),
+        ] {
+            // Display columns, not char count: the menu trigram (U+2630) is
+            // two display columns, so a char-count range under-reserves by
+            // one and the button crosses the divider into the pane.
+            let mw = menu.chars().map(glyph_cols).sum::<usize>();
+            if self.marks.is_empty() && tw >= new_label.len() + 2 + mw {
+                return (new_label.clone(), menu.clone(), Some((tw - mw)..tw));
+            }
+        }
+        let bare_new = if self.marks.is_empty() {
+            FOOTER_NEW_LABEL.to_string()
+        } else {
+            format!("{FOOTER_NEW_LABEL}   {} marked \u{b7}R", self.marks.len())
+        };
+        (bare_new, FOOTER_MENU.to_string(), None)
+    }
+
+    /// The column range of the footer's `menu` button, shared by the
+    /// renderer and the hit-test so a click lands where it draws.
+    fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+        self.footer_labels(panel_w).2
     }
 
     /// The column range of the density button on the sideline's top
@@ -4253,33 +4272,13 @@ impl View {
     /// `now` records the landing instant for that timer's deadline.
     fn on_hover(&mut self, row: u16, col: u16, now: Instant) {
         // Highlight is highlight-only and always on (never switches the view);
-        // a cell off the sideline text column clears it.
+        // a cell off the sideline text column clears it. Hover moves NEITHER
+        // the selector NOR the scroll: the bottom-anchored footer row must
+        // stay put under the pointer, and only a click or a key selects
+        // (operator, 2026-10-05 - the old hover-arm scrolled the list the
+        // moment the pointer rested on the footer, so the row jumped away
+        // from the click).
         self.hover_row = self.sideline_row_at(row, col);
-
-        // Pointer-in-panel ARMS the selector to the hovered actionable
-        // row - one regime, so x/X/r/space act on the row under the pointer and
-        // a bare verb no longer leaks into the focused pane. Only touch a free or
-        // already-hover-armed selector; an explicit prefix+w selector keeps
-        // keyboard control. Off an actionable row (a spacer, header label, or the
-        // pane), a hover-arm disarms, so a pointer parked off the rows never holds
-        // the keys. `selector_anchor(i) == Some(i)` is true only when i itself is
-        // an actionable (non-inert) row.
-        if self.selector.is_none() || self.sel_hover_armed {
-            match self
-                .hover_row
-                .filter(|&i| self.selector_anchor(i) == Some(i))
-            {
-                Some(i) => {
-                    self.selector = Some(i);
-                    self.sel_hover_armed = true;
-                }
-                None if self.sel_hover_armed => {
-                    self.selector = None;
-                    self.sel_hover_armed = false;
-                }
-                None => {}
-            }
-        }
 
         // Accent whatever grabbable chrome sits under the pointer (independent
         // of the focus-follow off-switch below).
@@ -4827,10 +4826,14 @@ impl View {
     }
 
     /// Follow-the-cursor sideline scroll: move the TableState's offset the
-    /// least it takes to keep the selector (or hover) row on screen, then
-    /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
+    /// least it takes to keep the selector row on screen, then clamp into
+    /// `[0, rows - visible]` so a shrunk catalog never scrolls past the
     /// last row. Everything-fits (or an empty window) resets the offset to 0, so
     /// the common case renders byte-identically to a non-scrolling sideline.
+    /// The hover highlight never drives this: a pointer resting on the
+    /// pinned footer (whose hit resolves to the scrolled-away `NewSquad`
+    /// index) would otherwise scroll the list and move the row out from
+    /// under the click.
     fn clamp_sideline_scroll(&mut self) {
         let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
@@ -4839,7 +4842,7 @@ impl View {
             self.set_sideline_offset(0);
             return;
         }
-        if let Some(cur) = self.selector.or(self.hover_row) {
+        if let Some(cur) = self.selector {
             if cur < off {
                 self.set_sideline_offset(cur);
             } else if cur >= off + visible {
@@ -4885,17 +4888,10 @@ impl View {
         self.set_sideline_offset(off.min(total - visible));
     }
 
-    /// Wheel-scroll the sideline list by one row. With an EXPLICIT selector open
-    /// it walks the cursor (reusing the j/k path so the highlight and offset stay
+    /// Wheel-scroll the sideline list by one row. With the selector open it
+    /// walks the cursor (reusing the j/k path so the highlight and offset stay
     /// coherent); otherwise it nudges the scroll offset directly, bounded to the
     /// catalog. A sideline that already fits its height is a no-op.
-    ///
-    /// A HOVER-armed selector is a transient pointer-follow, not a modal
-    /// cursor, so the wheel must scroll the list rather than walk it - otherwise
-    /// the wheel moves the selector away from the pointer, leaving `hover_row` and
-    /// `selector` on two different rows (codex P2). Scrolling shifts the rows out
-    /// from under the pointer, so the arm is disarmed here; the next pointer Move
-    /// re-hit-tests and re-arms.
     fn scroll_sideline(&mut self, down: bool) {
         let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
@@ -4903,7 +4899,7 @@ impl View {
             return;
         }
         match self.selector {
-            Some(cur) if !self.sel_hover_armed => {
+            Some(cur) => {
                 self.selector = Some(if down {
                     self.selector_down(cur)
                 } else {
@@ -4911,11 +4907,7 @@ impl View {
                 });
                 self.clamp_sideline_scroll();
             }
-            _ => {
-                if self.sel_hover_armed {
-                    self.selector = None;
-                    self.sel_hover_armed = false;
-                }
+            None => {
                 let off = self.sideline_offset();
                 self.set_sideline_offset(if down {
                     (off + 1).min(total - visible)
@@ -6266,18 +6258,6 @@ fn view_caret(v: SectionView) -> char {
         SectionView::LiveOnly => '▿',
         SectionView::Collapsed => '▸',
     }
-}
-
-/// The action-verb keys a HOVER-ARMED selector captures on the
-/// pointed-at row: remove/stop (`x`), bulk reap (`X`), rename (`r`), peek
-/// (space), recruit-mark (tab). Everything else - navigation, and any typing -
-/// disarms the hover-arm and forwards to the focused pane, so a parked pointer
-/// never swallows shell input (AC2-EDGE). Enter is deliberately absent: a lone
-/// Enter is far likelier to be shell input than an attach gesture. Verbs that
-/// mutate are already confirm-gated at the row, so a stray leading verb at most
-/// opens a dismissable prompt.
-fn is_sideline_verb(b: u8) -> bool {
-    matches!(b, b'x' | b'X' | b'r' | b' ' | b'\t')
 }
 
 fn row_is_inert(drow: &DisplayRow) -> bool {
@@ -9062,10 +9042,6 @@ async fn dispatch_event(
                     .agent_row_index_for_pane(view.layout.focus)
                     .unwrap_or(0);
                 view.selector = view.selector_anchor(seed);
-                // An explicit open is a full modal, never a motion-fresh
-                // hover-arm - clear any stale hover flag so j/k and typing are
-                // owned by the selector, not disarmed on the first non-verb key.
-                view.sel_hover_armed = false;
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
                 // not hide row 0. Then re-follow the SEEDED cursor -
@@ -9233,6 +9209,15 @@ async fn dispatch_event(
         }
         Event::OpenSweepThreads => {
             execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
+        Event::OpenSidelineMenu => {
+            // The footer `menu` button's popup, on the keyboard.
+            view.open_sideline_menu(Anchor::Center);
+        }
+        Event::OpenCreate => {
+            // The `+ new workspace` footer's name-input overlay, on the
+            // keyboard.
+            view.open_create();
         }
         Event::BlockJump(dir) => {
             write_msg(

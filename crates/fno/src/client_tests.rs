@@ -610,10 +610,10 @@ fn xf331_rows() {
     );
     assert_eq!(cell.fg, LATTICE_ACCENT, "still the accent colour");
 
-    // x-f331 (codex P2): a hover-armed selector is a pointer-follow, so a
-    // wheel event scrolls the list and disarms - it must NOT walk the selector
-    // away from the pointer (which would strand hover_row and selector on two
-    // different rows and misdirect the next x/r/space).
+    // Hovering the PINNED footer used to scroll the list: its hit resolves
+    // to the scrolled-away NewSquad index, and a scroll that followed the
+    // hover yanked the row out from under the pointer (operator,
+    // 2026-10-05). Hover moves neither the selector nor the offset.
     let mut view = two_pane_view();
     for p in 100..140u64 {
         view.layout.agents.push(AgentRow {
@@ -632,21 +632,25 @@ fn xf331_rows() {
         view.display_rows().len() > view.sideline_visible_rows(),
         "sanity: the sideline exceeds the viewport so scroll is live"
     );
-    view.selector = Some(1);
-    view.sel_hover_armed = true;
-    view.hover_row = Some(1);
+    let top = view.sideline_top();
+    let list_rows = (view.term.0 as usize) - 1 - view.org_block_rows();
+    let pinned_row = (top + list_rows - 2) as u16;
+    let footer = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::NewSquad))
+        .unwrap();
+    assert_eq!(
+        view.sideline_row_at(pinned_row, 5),
+        Some(footer),
+        "the pinned position hit-tests to the footer row"
+    );
+    view.set_sideline_offset(3);
     let before = view.sideline_offset();
-    view.scroll_sideline(true);
-    assert!(!view.sel_hover_armed, "the wheel disarms the hover-arm");
-    assert_eq!(
-        view.selector, None,
-        "the wheel does not walk a hover-armed selector"
-    );
-    assert_eq!(
-        view.sideline_offset(),
-        before + 1,
-        "the wheel scrolls the list instead of moving the cursor"
-    );
+    view.on_hover(pinned_row, 5, Instant::now());
+    assert_eq!(view.selector, None, "hover never selects");
+    assert_eq!(view.sideline_offset(), before, "hover never scrolls");
+    assert_eq!(view.hover_row, Some(footer), "the highlight still tracks");
 }
 
 #[test]
@@ -1783,60 +1787,45 @@ fn hover_focus_rows() {
 }
 
 #[test]
-fn hover_arm_rows() {
-    // (x-f331 US1, was hover_highlights_sideline_row_without_switching_squad):
-    // hovering an ACTIONABLE sideline row now ARMS the selector to it (one
-    // regime, so x/X/r act on the pointed-at row), the highlight is still set,
-    // and the active squad/tab never change. A spacer or the pane disarms.
-    // Rows (two_pane_view): idx 0 footnote header (actionable), idx 1 Blank
-    // spacer (inert), idx 2 notes header (actionable). Display row i paints
-    // at terminal row i + 1 (the strip owns terminal row 0).
+fn hover_highlight_rows() {
+    // Hover is highlight-only (operator, 2026-10-05): the pointer never
+    // moves the selector, so the bottom-anchored footer row stays put under
+    // it and only a click or a key selects. The active squad never changes
+    // either. Rows (two_pane_view): idx 0 footnote header (actionable), idx 1
+    // Blank spacer (inert), idx 2 notes header (actionable). Display row i
+    // paints at terminal row i + 1 (the strip owns terminal row 0).
     let mut view = two_pane_view();
     let before = view.layout.active_squad;
 
     view.on_hover(1, 5, Instant::now()); // terminal row 1 = footnote squad header
     assert_eq!(view.hover_row, Some(0));
-    assert_eq!(view.selector, Some(0), "hover arms the selector to the row");
-    assert!(
-        view.sel_hover_armed,
-        "the arm is motion-fresh (hover-armed)"
-    );
+    assert_eq!(view.selector, None, "hover never selects");
     assert_eq!(
         view.layout.active_squad, before,
         "hover never switches squad"
     );
 
-    // Hover onto the inert spacer: highlight tracks the cell, but nothing
-    // actionable is there, so the hover-arm disarms rather than pointing the
-    // verbs at a spacer.
     view.on_hover(2, 5, Instant::now());
-    assert_eq!(view.hover_row, Some(1));
-    assert_eq!(view.selector, None, "an inert row disarms the hover-arm");
-    assert!(!view.sel_hover_armed);
-
-    // Re-arm on a fresh actionable row (pointer motion re-arms).
-    view.on_hover(3, 5, Instant::now());
-    assert_eq!(view.selector, Some(2), "motion re-arms to the new row");
-    assert!(view.sel_hover_armed);
+    assert_eq!(
+        view.hover_row,
+        Some(1),
+        "the highlight tracks inert rows too"
+    );
 
     view.on_hover(5, 40, Instant::now()); // onto pane content
     assert_eq!(view.hover_row, None, "off the panel clears the highlight");
-    assert_eq!(view.selector, None, "off the panel disarms the selector");
-    assert!(!view.sel_hover_armed);
+    assert_eq!(view.selector, None, "hover never opened a selector");
 
-    // (x-f331) An explicit prefix+w selector (sel_hover_armed=false) keeps
-    // keyboard control: a stray hover does not demote it to a motion-fresh arm
-    // that j/k would disarm.
+    // An explicit selector is untouched by pointer motion: hover neither
+    // moves it to the hovered row nor clears it.
     let mut view = two_pane_view();
-    view.selector = Some(2); // opened explicitly, not hover-armed
-    view.sel_hover_armed = false;
+    view.selector = Some(2);
     view.on_hover(1, 5, Instant::now()); // hover a different actionable row
     assert_eq!(
         view.selector,
         Some(2),
         "explicit selector is not moved by hover"
     );
-    assert!(!view.sel_hover_armed, "explicit selector stays fully modal");
 
     // change #3 AC3-FR: a layout push that drops the hovered row must not
     // leave the highlight on a now-out-of-range index.
@@ -12712,55 +12701,61 @@ async fn jump_to_a_number_that_names_no_tab_sets_a_notice_and_sends_nothing() {
 }
 
 #[tokio::test]
-async fn xf331_hover_armed_x_acts_on_the_row_not_the_pane() {
-    // x-f331 AC1-HP: with the pointer over a squad header, x opens the
-    // close-workspace confirm on THAT row and no `x` leaks to the focused
-    // pane's PTY (the old bare-key leak this node closes).
+async fn sideline_menu_and_new_workspace_chords() {
+    // The footer's two affordances each have a chord, shipped in the table
+    // the keybindings modal renders, and both chords open their surface.
+    let rows = crate::keys::key_bindings();
+    let menu = rows
+        .iter()
+        .find(|kb| kb.action == "sideline-menu")
+        .expect("sideline-menu ships bound");
+    assert_eq!(menu.key, b'M');
+    assert!(matches!(menu.event, crate::keys::Event::OpenSidelineMenu));
+    let new_ws = rows
+        .iter()
+        .find(|kb| kb.action == "new-workspace")
+        .expect("new-workspace ships bound");
+    assert_eq!(new_ws.key, b'N');
+    assert!(matches!(new_ws.event, crate::keys::Event::OpenCreate));
+
     let mut v = two_pane_view();
-    let mut scanner = Scanner::default();
-    let mut carry = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
-    v.on_hover(1, 5, Instant::now()); // hover-arm the footnote squad header
-    assert_eq!(v.selector, Some(0));
-    assert!(v.sel_hover_armed);
-    handle_stdin(&mut v, &mut scanner, &mut carry, b"x", &mut buf)
+    dispatch_event(&mut v, Event::OpenCreate, &mut buf)
         .await
         .unwrap();
     assert!(
-        matches!(
-            v.confirm.as_ref().map(|c| &c.action),
-            Some(ConfirmKind::RemoveSquad { .. })
-        ),
-        "x on the hovered squad header opens the close-workspace confirm"
+        v.create.is_some(),
+        "the chord opens the new-workspace overlay"
     );
-    assert!(buf.is_empty(), "no x reaches the focused pane's PTY");
-    let anchor = v.confirm_anchor_row(v.term.0 as usize, v.confirm.as_ref().unwrap());
-    assert_eq!(anchor, 0, "the confirm anchors at the hovered squad's row");
+    dispatch_event(&mut v, Event::OpenSidelineMenu, &mut buf)
+        .await
+        .unwrap();
+    assert!(v.aux.is_some(), "the chord opens the sideline menu");
 }
 
 #[tokio::test]
-async fn xf331_hover_armed_non_verb_key_disarms_and_forwards() {
-    // x-f331 AC2-EDGE: a pointer parked over the sideline hover-arms the
-    // selector, but the first NON-verb key disarms the arm and forwards to the
-    // focused pane - typing into the shell is never swallowed.
+async fn xf331_pointer_over_sideline_keeps_keys_on_the_pane() {
+    // Hover is highlight-only (operator, 2026-10-05): a pointer parked over
+    // the sideline never selects a row, so every bare key - the old
+    // hover-verb `x` included - forwards to the focused pane untouched.
     let mut v = two_pane_view();
     let mut scanner = Scanner::default();
     let mut carry = Vec::new();
-    let mut buf: Vec<u8> = Vec::new();
-    v.on_hover(1, 5, Instant::now()); // hover-arm the header row
-    assert_eq!(v.selector, Some(0));
-    assert!(v.sel_hover_armed);
-    handle_stdin(&mut v, &mut scanner, &mut carry, b"l", &mut buf)
-        .await
-        .unwrap();
-    assert_eq!(v.selector, None, "a non-verb key disarms the hover-arm");
-    assert!(!v.sel_hover_armed);
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Input(bytes) => {
-            assert_eq!(bytes, b"l", "the key forwards to the focused pane")
+    v.on_hover(1, 5, Instant::now()); // park the pointer on the squad header
+    assert_eq!(v.selector, None, "hover never selects");
+    for b in [b"x", b"l"] {
+        let mut buf: Vec<u8> = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b, &mut buf)
+            .await
+            .unwrap();
+        assert!(v.confirm.is_none(), "no verb fired off a hover");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Input(bytes) => {
+                assert_eq!(bytes, *b, "the key forwards to the focused pane")
+            }
+            other => panic!("a parked pointer must not swallow keys, got {other:?}"),
         }
-        other => panic!("a non-verb key should forward to the pane, got {other:?}"),
     }
 }
 
