@@ -611,9 +611,7 @@ fn xf331_rows() {
     assert_eq!(cell.fg, LATTICE_ACCENT, "still the accent colour");
 
     // Hovering the PINNED footer used to scroll the list: its hit resolves
-    // to the scrolled-away NewSquad index, and a scroll that followed the
-    // hover yanked the row out from under the pointer (operator,
-    // 2026-10-05). Hover moves neither the selector nor the offset.
+    // to the scrolled-away NewSquad index (operator, 2026-10-05).
     let mut view = two_pane_view();
     for p in 100..140u64 {
         view.layout.agents.push(AgentRow {
@@ -652,8 +650,8 @@ fn xf331_rows() {
     assert_eq!(view.sideline_offset(), before, "hover never scrolls");
     assert_eq!(view.hover_row, Some(footer), "the highlight still tracks");
 
-    // And a click at the pinned row is the footer's row - the same resolver
-    // hover answers - so the covered display row beneath it never wins.
+    // A click at the pinned row is the footer's row - the same resolver
+    // hover answers - so the covered row beneath it never wins.
     let hit = view.chrome_hit(pinned_row, 2);
     assert!(
         matches!(hit, Some(ChromeHit::OpenCreate)),
@@ -1804,11 +1802,8 @@ fn hover_focus_rows() {
 #[test]
 fn hover_highlight_rows() {
     // Hover is highlight-only (operator, 2026-10-05): the pointer never
-    // moves the selector, so the bottom-anchored footer row stays put under
-    // it and only a click or a key selects. The active squad never changes
-    // either. Rows (two_pane_view): idx 0 footnote header (actionable), idx 1
-    // Blank spacer (inert), idx 2 notes header (actionable). Display row i
-    // paints at terminal row i + 1 (the strip owns terminal row 0).
+    // moves the selector, and only a click or a key selects. Rows: 0 header
+    // (actionable), 1 spacer (inert), 2 header; row i paints at i + 1.
     let mut view = two_pane_view();
     let before = view.layout.active_squad;
 
@@ -1831,8 +1826,7 @@ fn hover_highlight_rows() {
     assert_eq!(view.hover_row, None, "off the panel clears the highlight");
     assert_eq!(view.selector, None, "hover never opened a selector");
 
-    // An explicit selector is untouched by pointer motion: hover neither
-    // moves it to the hovered row nor clears it.
+    // An explicit selector: hover neither moves it nor clears it.
     let mut view = two_pane_view();
     view.selector = Some(2);
     view.on_hover(1, 5, Instant::now()); // hover a different actionable row
@@ -1842,12 +1836,9 @@ fn hover_highlight_rows() {
         "explicit selector is not moved by hover"
     );
 
-    // change #3 AC3-FR: a layout push that drops the hovered row must not
-    // leave the highlight on a now-out-of-range index.
+    // A layout push that drops the hovered row clears the stale index:
+    // display_rows is [squad, tab, tab, + new workspace] (len 4) here.
     let mut view = two_pane_view();
-    // With one squad (auto-expanded: 2 tab rows), display_rows is
-    // [squad, tab, tab, + new workspace] (len 4), so a hover on index 4
-    // is now stale and must be cleared by the push.
     view.hover_row = Some(4);
     view.set_layout(LayoutView {
         squads: vec![meta(1, "footnote", 2, 1)], // second squad dropped
@@ -12717,19 +12708,18 @@ async fn jump_to_a_number_that_names_no_tab_sets_a_notice_and_sends_nothing() {
 
 #[tokio::test]
 async fn sideline_menu_and_new_workspace_chords() {
-    // The footer's two affordances each have a chord, shipped in the table
-    // the keybindings modal renders, and both chords open their surface.
+    // The footer's affordances ship bound in the modal's table and open.
     let rows = crate::keys::key_bindings();
     let menu = rows
         .iter()
         .find(|kb| kb.action == "sideline-menu")
-        .expect("sideline-menu ships bound");
+        .expect("bound");
     assert_eq!(menu.key, b'M');
     assert!(matches!(menu.event, crate::keys::Event::OpenSidelineMenu));
     let new_ws = rows
         .iter()
         .find(|kb| kb.action == "new-workspace")
-        .expect("new-workspace ships bound");
+        .expect("bound");
     assert_eq!(new_ws.key, b'N');
     assert!(matches!(new_ws.event, crate::keys::Event::OpenCreate));
 
@@ -12750,9 +12740,8 @@ async fn sideline_menu_and_new_workspace_chords() {
 
 #[tokio::test]
 async fn xf331_pointer_over_sideline_keeps_keys_on_the_pane() {
-    // Hover is highlight-only (operator, 2026-10-05): a pointer parked over
-    // the sideline never selects a row, so every bare key - the old
-    // hover-verb `x` included - forwards to the focused pane untouched.
+    // Hover is highlight-only: a pointer parked over the sideline selects
+    // nothing, so every bare key forwards to the focused pane untouched.
     let mut v = two_pane_view();
     let mut scanner = Scanner::default();
     let mut carry = Vec::new();
