@@ -673,7 +673,7 @@ def history_cmd(
     """Read this crown's recorded reign: its check-ins, newest first, verbatim.
 
     ``fno agents court -n`` answers who rules NOW; this answers what
-    happened across the reign. Contract: docs/architecture/reign.md.
+    happened across the reign. Contract: docs/architecture/lead.md.
     """
     from fno.king.history import run_native
     from fno.paths import event_journals
@@ -758,7 +758,7 @@ def ledger_cmd(
     """Render the reign ledger page: every crown, its territory, its nodes.
 
     The page assembly is the native ``lead-rundown`` verb; this shell resolves
-    the court and the paths. Contract: docs/architecture/reign.md.
+    the court and the paths. Contract: docs/architecture/lead.md.
     """
     from fno.king.ledger import build_ledger_data, write_ledger
 

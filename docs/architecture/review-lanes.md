@@ -95,7 +95,7 @@ On a prompt-line lane it injects the payload UNWRAPPED. No `<fno_mail>` envelope
 
 That sidesteps any model-invocation refusal. The prompt-line injection IS the user-invocation path.
 
-Worker self-review runs through the inline fno review skill. Do not mail a king to fire a review command or inject a review verb into another session.
+Worker self-review runs through the inline fno review skill. Do not mail a lead to fire a review command or inject a review verb into another session.
 
 `<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno do target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
 
@@ -175,11 +175,11 @@ Do not conclude the lane is absent from an empty `--help` or an empty Python-tre
 
 ## The target ship loop and findings
 
-The target ship step runs the review round before the PR opens. The default round is `/fno:review <size> --comment` (Codex `$fno:review <size> --comment`) on the final local HEAD, invoked in the target session itself: no mail, no paste, no turn boundary. Size is medium under 300 changed lines, high above, xhigh for risky surfaces. With no PR yet, `--comment` holds the findings on branch and HEAD in the `review_attestation` journal row. Once the PR opens, `fno do pr publish-review` posts them as one PR comment, and `fno-agents finalize` re-runs that post as a backstop. The inline lane surfaces findings and emits a head-pinned attestation. A rebase with an unchanged code delta carries the attestation. Other HEAD changes require another review. Fixes take a new review while the round budget lasts. The flow uses no king, daemon stream, or external reader. The ledger is machine-local, so another machine cannot read the attestation.
+The target ship step runs the review round before the PR opens. The default round is `/fno:review <size> --comment` (Codex `$fno:review <size> --comment`) on the final local HEAD, invoked in the target session itself: no mail, no paste, no turn boundary. Size is medium under 300 changed lines, high above, xhigh for risky surfaces. With no PR yet, `--comment` holds the findings on branch and HEAD in the `review_attestation` journal row. Once the PR opens, `fno do pr publish-review` posts them as one PR comment, and `fno-agents finalize` re-runs that post as a backstop. The inline lane surfaces findings and emits a head-pinned attestation. A rebase with an unchanged code delta carries the attestation. Other HEAD changes require another review. Fixes take a new review while the round budget lasts. The flow uses no lead, daemon stream, or external reader. The ledger is machine-local, so another machine cannot read the attestation.
 
 ## Worker self-review
 
-Workers run the fno review skill inline in the session and worktree that built the diff: `$fno:review <level>` on Codex and `/fno:review <level>` on Claude. If that invocation refuses, report the literal refusal and stop. Do not mail a king to fire a review verb or spawn a reviewer.
+Workers run the fno review skill inline in the session and worktree that built the diff: `$fno:review <level>` on Codex and `/fno:review <level>` on Claude. If that invocation refuses, report the literal refusal and stop. Do not mail a lead to fire a review verb or spawn a reviewer.
 
 ## Why (wrapped) mail cannot carry a verb
 
@@ -187,7 +187,7 @@ A wrapped `fno agents mail send` cannot carry a verb. It writes an `<fno_mail ..
 
 ## Do not assert a cause for a refusal
 
-Invocation refusals have been observed, but no cause is confirmed. Do not invent a mechanism or ask workers to check speculative flags. If inline fno review refuses, report the exact refusal and stop. Do not retry through raw mail, a native verb, or another session. See [lead/references/review.md](../../skills/reign/references/review.md) for the worker contract.
+Invocation refusals have been observed, but no cause is confirmed. Do not invent a mechanism or ask workers to check speculative flags. If inline fno review refuses, report the exact refusal and stop. Do not retry through raw mail, a native verb, or another session. See [lead/references/review.md](../../skills/lead/references/review.md) for the worker contract.
 
 ## Counting invocations
 
@@ -206,8 +206,8 @@ A correct count unions a `<command-name>` probe with a `tool_use` probe
 for the skill name, and uses the counting session's own id as a
 positive control (it must find at least itself).
 This shape is general to any programmatic skill invocation, not just
-review: counting one-wave reigns by the `<command-name>` marker
-undercounts the same way, since a reign fired through the Skill tool is a
+review: counting one-wave tenures by the `<command-name>` marker
+undercounts the same way, since a lead fired through the Skill tool is a
 `tool_use`, not a typed command.
 
 ## Review freshness: one predicate, both producers
@@ -335,9 +335,9 @@ If a documentation-only PR's own diff is readable and non-empty, the PR has an e
 
 ### The dispatcher's own ordering matters as much as the carry rule
 
-The carry rule cannot save a review bought by an avoidable rebase. Measured one night: a king ordered about ten rebases on one PR. It requested a review after each one, buying ten reviews of code that changed once. `CarriedBaseSync` existed the whole time. It still cannot help here, because the carry only ever compares the CURRENT head against the LAST reviewed one. It has nothing to say about a review that was requested and completed before the next rebase moved the head again.
+The carry rule cannot save a review bought by an avoidable rebase. Measured one night: a lead ordered about ten rebases on one PR. It requested a review after each one, buying ten reviews of code that changed once. `CarriedBaseSync` existed the whole time. It still cannot help here, because the carry only ever compares the CURRENT head against the LAST reviewed one. It has nothing to say about a review that was requested and completed before the next rebase moved the head again.
 
-Any dispatcher (a king, `/fno:ship pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them. Batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake. It is the same mistake, since the next review request pays for it again.
+Any dispatcher (a lead, `/fno:ship pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them. Batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake. It is the same mistake, since the next review request pays for it again.
 
 ### Named, not closed: the derivation-latency window
 
@@ -522,7 +522,7 @@ Neither layer covers the specimens alone. The probe cannot see the window betwee
 | Site | Registers | Why it is the one that matters |
 |---|---|---|
 | `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own. The hold keys the named PR's head ref, resolved from GitHub, or a named branch; only an invocation with no target reads the cwd |
-| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, for a king or operator asking another session for a round; the ordinary pipeline review runs in-session through the Skill row above and never passes here. It takes nothing on a refused or unconfirmed send: no review is running. It passes the branch it resolved and takes no hold when the PR read has no head ref |
+| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, for a lead or operator asking another session for a round; the ordinary pipeline review runs in-session through the Skill row above and never passes here. It takes nothing on a refused or unconfirmed send: no review is running. It passes the branch it resolved and takes no hold when the PR read has no head ref |
 | `skills/review/scripts/emit-attestation.sh` | releases it | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
 | `fno do review classify --attest` | releases it | the Python producer of the same row. It emitted the verdict and left the hold standing for the full TTL |
 | the TTL | ages it out | the review did not attest inside its lease, whether or not its session still runs. See the receipt rule below |

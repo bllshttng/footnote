@@ -4,7 +4,7 @@
 
 ## The defect, measured
 
-On 2026-08-21 an operator read a king's instruction in pane 45 and asked why it had been sent `--raw`. It had not. `fno agents mail send` returned `queued (durable) [live-miss]`. The king fell back to `fno mux pane send --text ... --submit`. The message arrived with no sender, no message id, no reply handle, and no authority footer. In the pane it is indistinguishable from the operator typing. A worker cannot tell a peer's dispatch from an operator order. The two carry different authority. A peer cannot authorize an outward action the operator did not. The footer is the only thing that says so.
+On 2026-08-21 an operator read a lead's instruction in pane 45 and asked why it had been sent `--raw`. It had not. `fno agents mail send` returned `queued (durable) [live-miss]`. The lead fell back to `fno mux pane send --text ... --submit`. The message arrived with no sender, no message id, no reply handle, and no authority footer. In the pane it is indistinguishable from the operator typing. A worker cannot tell a peer's dispatch from an operator order. The two carry different authority. A peer cannot authorize an outward action the operator did not. The footer is the only thing that says so.
 
 The same night, mail live-missed repeatedly against a codex worker under both its registry name and its full session id. The pane path landed 4 of 4. So the transport that worked was the one carrying nothing. The design call is to wrap the durable path, not to route around it.
 
@@ -34,7 +34,7 @@ The three passthroughs rely on `_already_wrapped`, which tests the FIRST tag of 
 
 Before an enveloped or forced send types anything, the lane reads the pane and asks the manifest engine whether an option prompt is showing. A showing prompt refuses the send.
 
-A `--submit` against a showing prompt dismisses the payload and selects the highlighted default. Verified specimen: a king's option-3 ruling was typed and discarded. The return registered. The worker took option 1 and filed a node an operator freeze forbade. Every surface read normal.
+A `--submit` against a showing prompt dismisses the payload and selects the highlighted default. Verified specimen: a lead's option-3 ruling was typed and discarded. The return registered. The worker took option 1 and filed a node an operator freeze forbade. Every surface read normal.
 
 A detector that never ran refuses too. An absence of a detected prompt on an instrument that never ran is not evidence of an idle pane.
 
@@ -65,7 +65,7 @@ A thread-substrate row hosts no pane at any point in its life, so a pane send ha
 
 There is a fourth case, and it long had no receipt at all. `--submit` defaults to false. So `fno mux pane send <id> --text '<body>'` TYPES the body into the pane's prompt buffer and does not run it. A second call carrying `--submit` is what runs it. A non-submit send still prints nothing and exits clean. A confirmed submit prints `submitted` on stdout and exits 0, and an unconfirmed one exits 22 naming the failure. Before the `submitted` marker landed, `fno mux pane read` was the only evidence the text arrived, or that it was still sitting there unsubmitted.
 
-Both defaults are correct and neither changes here. A send that submitted by default is the read-back gate's own failure case. A stray submit against a showing prompt selects the highlighted default and discards the payload. What was missing is that the doc said so nowhere, while `skills/using-fno/SKILL.md` lists this verb beside mail as a handoff channel. Measured twice on 2026-08-22. A king sent a ruling to a busy pane and to an idle one. Both times it got silence and a clean exit, and had delivered nothing. That is the `queued (durable)` shape again, a transport whose surface reads normal while the message sits.
+Both defaults are correct and neither changes here. A send that submitted by default is the read-back gate's own failure case. A stray submit against a showing prompt selects the highlighted default and discards the payload. What was missing is that the doc said so nowhere, while `skills/using-fno/SKILL.md` lists this verb beside mail as a handoff channel. Measured twice on 2026-08-22. A lead sent a ruling to a busy pane and to an idle one. Both times it got silence and a clean exit, and had delivered nothing. That is the `queued (durable)` shape again, a transport whose surface reads normal while the message sits.
 
 ## The audit row: who told this worker to do that
 
@@ -139,7 +139,7 @@ Note what this does and does not cover. Because the seed usually rides in on arg
 
 ## The `fno_id` column answers identity, not idleness
 
-`fno mux pane ls` carries one column that says whether a pane belongs to fno, and it spent months lying in the direction that hid fno's own work. It printed `fno_id=-` for both "not an fno pane" and "an fno pane whose id never registered". Those demand opposite responses. The first is a pane to ignore or reuse. The second is a worker doing real work that every fno surface overlooks. Measured on 2026-09-02: 24 of 27 panes printed the dash, and 14 of those carried a populated fno worker `name` on the same line. That is how a live worker (pid 40859) read as untracked while a king declared workers dead.
+`fno mux pane ls` carries one column that says whether a pane belongs to fno, and it spent months lying in the direction that hid fno's own work. It printed `fno_id=-` for both "not an fno pane" and "an fno pane whose id never registered". Those demand opposite responses. The first is a pane to ignore or reuse. The second is a worker doing real work that every fno surface overlooks. Measured on 2026-09-02: 24 of 27 panes printed the dash, and 14 of those carried a populated fno worker `name` on the same line. That is how a live worker (pid 40859) read as untracked while a lead declared workers dead.
 
 The column now carries three states. `fno_id=<uuid>` is a resolved session id. `fno_id=unresolved:spawned-name` and `fno_id=unresolved:name-as-id` name why an fno pane's id is absent. Either the spawn captured a worker `name` but the registry join found no session id, or the identity slot holds a worker name. The dash is reserved for panes with no fno evidence at all, so an fno-spawned pane can never share it. The `--json` listing adds `fno_id_state` beside the raw `fno_id` for the same reason. `name-as-id` and a harness-valued `fno_id` are legacy states: the row's id is a footnote-minted UUID at birth now, so a new row never enters either.
 

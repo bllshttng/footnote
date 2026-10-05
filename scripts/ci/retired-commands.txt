@@ -65,3 +65,9 @@ fno mux block annotate|fno mux block annotate still shells note --blocking (inte
 # 2026-10-02: the bg substrate spelling is retired outright (user ruling, no
 # alias release). thread is the only spelling of the persistent lane.
 --substrate bg|--substrate thread|the bg alias retirement (user 2026-10-02)
+# The people-word rename: the spawn door answers --promote (the titled-role
+# grant) and --hand-off (the succession transfer). --promote/-k and --hand-off
+# still answer as hidden one-release aliases, but no caller-facing string may
+# teach them.
+--promote|--promote <scope>, the titled-role grant|the people-word rename
+--hand-off|--hand-off, the succession transfer|the people-word rename

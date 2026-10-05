@@ -1,13 +1,13 @@
-<!-- style-exception: canonical court prose predates the style rules; bundled into skills/lead verbatim -->
-# CLI commands: what the crown reaches for
+<!-- style-exception: canonical org prose predates the style rules; bundled into skills/lead verbatim -->
+# CLI commands: what the role reaches for
 
-Curated for the crown: the verbs an adjudicator actually uses, each with the one gotcha that makes it non-obvious.
+Curated for the role: the verbs an adjudicator actually uses, each with the one gotcha that makes it non-obvious.
 
 `fno help --all` is the source of truth for every verb this page does not list, and `fno help <group> --all` enumerates a subtree.
 
 A verb with no gotcha earns no line here, because the help surface already covers it.
 
-This page exists because a verb can ship and stay invisible. One reign filed work to build a pane-grouping capability that had already shipped. The placement flags were simply not findable from the skill.
+This page exists because a verb can ship and stay invisible. One lead filed work to build a pane-grouping capability that had already shipped. The placement flags were simply not findable from the skill.
 
 ## How to trust a line
 
@@ -32,17 +32,17 @@ Receipts and manifest snapshots have each lied about a live session. Three reads
 
 The fetch is the point: a stale local `origin/main` ref answers zero for a branch that is dozens of commits behind.
 
-## The crown's own verbs
+## The role's own verbs
 
-Verbs that exist only for a crowned session. One reign ran a whole territory without knowing three of these shipped.
+Verbs that exist only for a titled session. One lead ran a whole territory without knowing three of these shipped.
 
 | You are trying to | Verb | The gotcha |
 |---|---|---|
 | Run one check-in beat | `fno agents org checkin` | Runs the whole check-in body and emits the `reign_checkin` journal row itself. The row carries the numbers it just printed. A failed reader gets its own `READER FAILED` line and the beat continues. `--change "<sentence>"` records your finding on the same row. `--no-emit` prints and diffs without appending. |
 | Join nodes to PRs, sessions and workers | `fno agents org -n` | Returns the node, PR, session and worker join in one call. Replaces a hand-built join over `fno do pr list`, `fno agents registry-json` and a raw graph read. Implies JSON output. |
 | Count what is left to deliver | `fno agents org drain <scope>` | Answers delivery, not assignment: undelivered as one number. An unreadable graph exits non-zero on purpose, so the count can never read as drained. |
-| Leave an answer for the next king | `fno agents org faq add` | The only crown verb aimed at a successor. Refuses without `--exit`, the change that retires the entry. |
-| Read the reign back | `fno agents org history` | This crown's recorded check-ins, newest first, verbatim. Legacy alias rows count as rejected evidence and are never silently accepted. It never generates a summary. |
+| Leave an answer for the next lead | `fno agents org faq add` | The only role verb aimed at a successor. Refuses without `--exit`, the change that retires the entry. |
+| Read the lead back | `fno agents org history` | This role's recorded check-ins, newest first, verbatim. Legacy alias rows count as rejected evidence and are never silently accepted. It never generates a summary. |
 
 ## Observation and pointing
 
@@ -104,7 +104,7 @@ The `fno agents` verbs resolve the name to the short id for you. Reach for those
 
 `fno agents rm` talks to the Rust daemon, and a wedged daemon takes the verb down with it. The old in-process escape (`python -c "... rm_agent ..."`) is gone: rm has no Python implementation. The remedy is the daemon restart verb, `fno agents restart`: it SIGTERMs the stale daemon and lazy-starts a fresh one, and PTY workers survive the restart. Re-run the rm on the fresh daemon.
 
-`fno agents list` reads every transcript to derive per-row state. On a fleet of dozens it has taken over 120 seconds. Budget for that before you block a reign on the read.
+`fno agents list` reads every transcript to derive per-row state. On a fleet of dozens it has taken over 120 seconds. Budget for that before you block a lead on the read.
 
 `claude agents` lists claude sessions only. Diffing it against the fno registry as a death test marks every live codex worker dead.
 

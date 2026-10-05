@@ -2,7 +2,7 @@
 
 Identity, the court adjudication, and the paths stay in Python; the page
 assembly is the native ``reign-ledger`` verb (the king-history split), so
-the Python-tree ratchet holds. Contract: docs/architecture/reign.md.
+the Python-tree ratchet holds. Contract: docs/architecture/lead.md.
 """
 from __future__ import annotations
 

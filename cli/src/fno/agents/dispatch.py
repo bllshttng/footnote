@@ -1867,7 +1867,7 @@ def _claude_create_path(
             )
         if crown_declined:
             print(
-                f"spawn: crown declined (scope {crown_scope!r} already held by a "
+                f"spawn: role declined (scope {crown_scope!r} already held by a "
                 "live row); spawned uncrowned. The worker launched without a crown.",
                 file=sys.stderr,
             )

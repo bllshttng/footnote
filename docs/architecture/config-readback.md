@@ -64,4 +64,4 @@ The number came from a measurement, not from reasoning. `origin/main` is clean a
 
 ## Not here
 
-The `auto_continue` specimen had a second half. A control-plane arms readout printed `reason=disabled` from a stored tick stamp. The stamp was taken 37 minutes before the edit that flipped the setting, and a king read it three times as current. That line is written by the arms code, not the config resolver, so no change here reaches it. It is filed on its own.
+The `auto_continue` specimen had a second half. A control-plane arms readout printed `reason=disabled` from a stored tick stamp. The stamp was taken 37 minutes before the edit that flipped the setting, and a lead read it three times as current. That line is written by the arms code, not the config resolver, so no change here reaches it. It is filed on its own.

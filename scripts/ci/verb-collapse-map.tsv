@@ -16,7 +16,7 @@ agents claim session-pid	T1	agents claim session-pid	2
 agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents compaction	T1	agents compaction	1
-agents court	T1	agents court	3
+agents org	T1	agents org	3
 agents org-vacancies	T1	agents org-vacancies	0
 agents org-fold	T1	agents org-fold	0
 agents route-slot	T1	agents route-slot	0
@@ -25,7 +25,7 @@ agents spawn-overlay	T1	agents spawn-overlay	0
 agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
 agents authorized-merge	T1	agents authorized-merge	0
-agents crown	T1	agents crown	17
+agents role	T1	agents role	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents distress-scan	T1	agents distress-scan	0
@@ -41,19 +41,19 @@ agents history	T1	agents history	3
 agents incident	T1	agents incident	0
 agents judge	T1	agents judge	0
 agents kill-check	T1	agents kill-check	4
-agents king cancel	T1	agents king cancel	0
-agents king checkin	T1	agents king checkin	8
+agents lead cancel	T1	agents lead cancel	0
+agents lead checkin	T1	agents lead checkin	8
 agents lead-checkin	T1	agents lead-checkin	0
-agents king done	T1	agents king done	5
-agents king drain	T1	agents king drain	1
-agents king escalate	T1	agents king escalate	1
-agents king faq add	T1	agents king faq add	2
-agents king faq list	T1	agents king faq list	2
-agents king history	T1	agents king history	0
-agents king init	T1	agents king init	7
-agents king manifest-path	T1	agents king manifest-path	3
-agents king ledger	T1	agents king ledger	0
-agents king verdict	T1	agents king verdict	5
+agents lead done	T1	agents lead done	5
+agents lead drain	T1	agents lead drain	1
+agents lead escalate	T1	agents lead escalate	1
+agents lead faq add	T1	agents lead faq add	2
+agents lead faq list	T1	agents lead faq list	2
+agents lead history	T1	agents lead history	0
+agents lead init	T1	agents lead init	7
+agents lead manifest-path	T1	agents lead manifest-path	3
+agents lead ledger	T1	agents lead ledger	0
+agents lead verdict	T1	agents lead verdict	5
 agents lead-history	T1	agents lead-history	0
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
@@ -583,8 +583,8 @@ agents stale-escalate	T1	agents stale-escalate	6
 agents friction-escalate	T1	agents friction-escalate	5
 agents feed	T1	agents feed	13
 agents harness probe	T1	agents harness probe	0
-agents king shape	T1	agents king shape	5
-agents king term	T1	agents king term	7
+agents lead shape	T1	agents lead shape	5
+agents lead term	T1	agents lead term	7
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
 backlog version	T1	backlog version	19	
@@ -592,8 +592,8 @@ agents prove-it-verdicts	T1	agents prove-it-verdicts	1
 agents honesty-sweep	T1	agents honesty-sweep	0
 doctor intel	T1	doctor intel	0
 agents select-read	T1	agents select-read	1	
-agents court-fold	T1	agents court-fold	0	
-agents court-orphans	T1	agents court-orphans	0	
-agents king-checkin	T1	agents king-checkin	0	
-agents king-history	T1	agents king-history	0	
-agents reign-ledger	T1	agents reign-ledger	0	
+agents org fold	T1	agents org fold	0	
+agents org vacancies	T1	agents org vacancies	0	
+agents lead-checkin	T1	agents lead-checkin	0	
+agents lead-history	T1	agents lead-history	0	
+agents lead-ledger	T1	agents lead-ledger	0	

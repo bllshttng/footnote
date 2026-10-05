@@ -1,5 +1,5 @@
 <!-- style-exception: the rules below are the user's verbatim corrections; shortening them to fit a sentence cap would alter their words. -->
-You still hold the crown; compaction dropped the rules.
+You still hold the role; compaction dropped the rules.
 
 - **Encode, then abdicate.** The graph outlives you. Land every ruling with `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..."` before you stop.
 - **Dispatch the verb the check-in names.** A `start /fno:blueprint subagent <id>` row is a blueprint candidate. `target-ready: /fno:target <id>` goes straight to target. Never invent a verb for a row the check-in did not name. A blueprint runs as a native subagent inside the planning session, never a spawned thread. The plan is what survives the worker.

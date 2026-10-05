@@ -31,7 +31,7 @@ def classify(text: str) -> str:
         return "Goal check-in / /goal feedback"
     if "fno_mail" in lower or "fno mail" in lower:
         return "fno_mail"
-    if "lead check-in" in lower or "lead checkin" in lower or "king check-in" in lower or "king checkin" in lower:
+    if "lead check-in" in lower or "lead checkin" in lower or "lead check-in" in lower or "lead checkin" in lower:
         return "lead check-in loop"
     return "human"
 
@@ -99,7 +99,7 @@ def main() -> int:
     print(f"turn_prompts={prompts}")
     print(f"automated_prompts={automated}")
     print(f"automated_share={share:.2f}%")
-    for source in ("task-notification", "Goal check-in / /goal feedback", "fno_mail", "lead check-in loop", "king check-in loop", "human"):
+    for source in ("task-notification", "Goal check-in / /goal feedback", "fno_mail", "lead check-in loop", "lead check-in loop", "human"):
         print(f"source.{source}={sources[source]}")
     return 0
 
