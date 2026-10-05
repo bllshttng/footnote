@@ -653,6 +653,9 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         }
     };
     if let Err(e) = crate::event_store::append_envelope(&journal_path, &line, None) {
+        if route_span_id.is_some() {
+            eprintln!("outstanding: the route span landed alone; the question row did not");
+        }
         answer.lines.push(format!(
             "outstanding: failed to record question: failed to append question to project journal: {e}"
         ));

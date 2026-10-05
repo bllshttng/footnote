@@ -731,7 +731,6 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     // Mint and envelope. A key appears only when its value is set; the text
     // caps mirror the Python builder (2000 chars).
     let decision_id = mint_decision_id();
-    let ts = now_iso();
     let mut data = json!({
         "decision_id": decision_id,
         "decision": text_cap(&decision, 2000),
@@ -865,6 +864,9 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     if let Some(rows) = &read_rows {
         data["reads"] = json!(rows);
     }
+    // Minted after the route span: the row is the child, and its ts must not
+    // precede the parent the trace names.
+    let ts = now_iso();
     let envelope = json!({"ts": ts, "type": "operator_decision", "source": "target", "data": data});
     // Durability first: the project journal. A failed write here records
     // nothing anywhere (the Python generic handler's exit 1).
