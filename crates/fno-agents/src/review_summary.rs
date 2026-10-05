@@ -116,6 +116,25 @@ fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
         .unwrap_or_default()
 }
 
+/// The round a scoped fix-verification declares: the shell emitter's stamp
+/// rule (emit-attestation.sh) as one pure read. When the invocation flags
+/// carry `--verify-fixes`, the pass names the round it verified instead of
+/// counting as a fresh one, floored at 1 exactly like `review-hold round`.
+/// Any other flag set stamps nothing: a full pass IS a round.
+pub fn declared_round(
+    flags_json: &str,
+    events_text: &str,
+    branch: &str,
+    head: &str,
+) -> Option<u64> {
+    let flags: Vec<String> = serde_json::from_str(flags_json).ok()?;
+    if !flags.iter().any(|f| f == "--verify-fixes") {
+        return None;
+    }
+    let rounds = crate::loopcheck::rounds_since_last_pass(events_text, branch, head, None);
+    Some(rounds.max(1) as u64)
+}
+
 /// The display line for a branch/head pair, or `None` when the ledger does
 /// not hold a clean attestation at exactly that head. Events are read once
 /// and kept in append order, so the LAST row for the branch is the latest.
@@ -221,6 +240,27 @@ fn error_json(reason: &str) -> String {
     serde_json::json!({ "error": reason }).to_string()
 }
 
+/// The declared-round mode's one round-trip: `(output, exit_code)` in the
+/// `evidence_response` shape, so the receipt is testable without a process
+/// boundary. A declared verify prints one JSON object; any other flag set,
+/// or an unreadable ledger, prints nothing and exits 0 (fail-open: the pass
+/// counts as a fresh round, exactly as an undeclared pass always has).
+fn declared_round_response(
+    events_path: &Path,
+    flags: &str,
+    branch: &str,
+    head: &str,
+) -> (String, i32) {
+    let events_text = match crate::loopcheck::event_lines(events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => return (String::new(), 0),
+    };
+    match declared_round(flags, &events_text, branch, head) {
+        Some(n) => (serde_json::json!({ "declared_round": n }).to_string(), 0),
+        None => (String::new(), 0),
+    }
+}
+
 /// `fno-agents review-summary` entry: prints the line or nothing, exit 0
 /// either way, when branch+head name a head to display. A parse failure is
 /// deliberate silence (print nothing, exit 0). `--evidence` replaces that
@@ -238,6 +278,17 @@ pub fn run_review_summary(args: &[String]) -> i32 {
             if read_ok { Some(input.as_str()) } else { None },
         );
         println!("{out}");
+        return code;
+    }
+    if parsed.declared_round {
+        let (Some(branch), Some(head), Some(flags)) = (&parsed.branch, &parsed.head, &parsed.flags)
+        else {
+            return 0;
+        };
+        let (out, code) = declared_round_response(&events_path, flags, branch, head);
+        if !out.is_empty() {
+            println!("{out}");
+        }
         return code;
     }
     // SQL authority: the store's committed rows are the ledger; a missing or
@@ -298,38 +349,35 @@ mod tests {
     }
 
     #[test]
-    fn a_fail_verdict_prints_nothing() {
-        let events = format!(
+    fn a_clean_latest_pass_pinned_to_the_asked_head_or_nothing() {
+        // One contract, three arms: a fail verdict, a pass on another head,
+        // and another branch's pass all print nothing. The display claim can
+        // only ride the branch's latest pass at the asked head.
+        let fail = format!(
             "{}\n{}\n",
             attestation("feature/x", "aaa1111", "pass", Some(1), 0),
             attestation("feature/x", "bbb2222", "fail", Some(2), 1),
         );
-        assert_eq!(summary_line(&events, "feature/x", "bbb2222"), None);
-    }
-
-    #[test]
-    fn a_pass_on_another_head_prints_nothing() {
-        let events = format!(
+        assert_eq!(summary_line(&fail, "feature/x", "bbb2222"), None);
+        let other_head = format!(
             "{}\n",
             attestation("feature/x", "aaa1111", "pass", Some(1), 0),
         );
-        assert_eq!(summary_line(&events, "feature/x", "bbb2222"), None);
-    }
-
-    #[test]
-    fn another_branchs_passes_are_not_mine() {
-        let events = format!(
+        assert_eq!(summary_line(&other_head, "feature/x", "bbb2222"), None);
+        let other_branch = format!(
             "{}\n{}\n",
             attestation("feature/other", "aaa1111", "pass", Some(1), 5),
             attestation("feature/x", "bbb2222", "pass", Some(1), 0),
         );
-        let line = summary_line(&events, "feature/x", "bbb2222").expect("prints");
-        assert_eq!(line, "Reviewed at bbb2222: 1 rounds, 0 findings disposed.");
+        assert_eq!(
+            summary_line(&other_branch, "feature/x", "bbb2222"),
+            Some("Reviewed at bbb2222: 1 rounds, 0 findings disposed.".to_string())
+        );
     }
 
     #[test]
-    fn missing_file_prints_nothing_and_exits_zero() {
-        let code = run_review_summary(&[
+    fn degraded_invocations_stay_deliberately_silent_at_exit_zero() {
+        let missing_file = run_review_summary(&[
             "--events".to_string(),
             "/nonexistent/fno-review-summary-test/events.jsonl".to_string(),
             "--branch".to_string(),
@@ -337,11 +385,7 @@ mod tests {
             "--head".to_string(),
             "abc1234".to_string(),
         ]);
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn missing_args_print_nothing_and_exit_zero() {
+        assert_eq!(missing_file, 0);
         assert_eq!(run_review_summary(&[]), 0);
         assert_eq!(
             run_review_summary(&["--events".to_string(), "e.jsonl".to_string()]),
@@ -439,5 +483,75 @@ mod tests {
         );
         assert_eq!(code, 2);
         assert!(out.contains("\"error\""));
+    }
+
+    #[test]
+    fn verify_fixes_flags_name_the_declared_round() {
+        // The declared round wins as the running max; an empty chain still
+        // names round 1, floored exactly like review-hold round.
+        let events = format!(
+            "{}\n{}\n",
+            attestation("feature/x", "aaa1111", "fail", Some(1), 2),
+            attestation("feature/x", "bbb2222", "pass", Some(2), 0),
+        );
+        assert_eq!(
+            declared_round(
+                r#"["--verify-fixes","--comment"]"#,
+                &events,
+                "feature/x",
+                "bbb2222"
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            declared_round(r#"["--verify-fixes"]"#, "", "feature/x", "bbb2222"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn flags_without_verify_fixes_stamp_nothing() {
+        // Undeclared and malformed flag sets are the same None arm: a full
+        // pass IS a round, and an unreadable flags payload stamps nothing.
+        let events = attestation("feature/x", "aaa1111", "fail", Some(1), 2);
+        assert_eq!(
+            declared_round(r#"["--comment"]"#, &events, "feature/x", "aaa1111"),
+            None
+        );
+        assert_eq!(declared_round("--verify-fixes", "", "feature/x", "h"), None);
+    }
+
+    #[test]
+    fn declared_round_response_arbitrates_all_three_inputs() {
+        let dir = std::env::temp_dir().join("fno-declared-round-response-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let events = dir.join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                attestation("feature/x", "aaa1111", "fail", Some(1), 2)
+            ),
+        )
+        .expect("write events");
+        // A declared verify at the attested head prints the receipt.
+        let (out, code) =
+            declared_round_response(&events, r#"["--verify-fixes"]"#, "feature/x", "aaa1111");
+        assert_eq!(code, 0);
+        assert_eq!(out, r#"{"declared_round":1}"#);
+        // Any other flag set prints nothing at exit 0.
+        let (out, code) =
+            declared_round_response(&events, r#"["--comment"]"#, "feature/x", "aaa1111");
+        assert_eq!((out.as_str(), code), ("", 0));
+        // An unreadable ledger is the same deliberate silence.
+        let (out, code) = declared_round_response(
+            Path::new("/nonexistent/fno-declared-round-test/events.jsonl"),
+            r#"["--verify-fixes"]"#,
+            "feature/x",
+            "aaa1111",
+        );
+        assert_eq!((out.as_str(), code), ("", 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

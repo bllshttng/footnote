@@ -278,12 +278,15 @@ def _attest_from_record(
     # The invocation join, the shell producer's preference order: the live
     # hold's metadata first, then the session sidecar, then UNJOINED.
     invocation_id = ""
+    hold_flags: list = []
     try:
         from fno.claims.core import claim_status
         from fno.pr._review_hold import review_hold_key
 
         status = claim_status(review_hold_key(branch)) or {}
-        invocation_id = str((status.get("metadata") or {}).get("invocation_id") or "")
+        metadata = status.get("metadata") or {}
+        invocation_id = str(metadata.get("invocation_id") or "")
+        hold_flags = [f for f in (metadata.get("flags") or []) if isinstance(f, str)]
     except Exception:  # noqa: BLE001 - claims-root resolution shells out and can fail
         invocation_id = ""
     if not invocation_id and harness_session_id:
@@ -352,6 +355,26 @@ def _attest_from_record(
 
     repo_root = resolve_repo_root()
     events_path = project_log("events.jsonl", project_root=repo_root)
+
+    # The --verify-fixes round stamp, the shell emitter's rule carried through
+    # this emit; the rule lives in the Rust binary, this is the wiring.
+    # Fail-open: an unresolvable round stamps nothing and the pass counts as a
+    # fresh round, as an undeclared pass always has. An explicit --review-round
+    # already sits on the record and wins.
+    if "review_round" not in data and hold_flags:
+        from fno.rust_binary import call_binary_json
+
+        _err, row = call_binary_json(
+            "review-summary",
+            ["--declared-round", "--branch", str(data.get("branch") or branch),
+             "--head", head_sha, "--events", str(events_path),
+             "--flags", json.dumps(hold_flags)],
+        )
+        declared = row.get("declared_round") if isinstance(row, dict) else None
+        if isinstance(declared, int) and declared >= 0:
+            data["review_round"] = declared
+            record["review_round"] = declared
+
     try:
         event = _build("review_attestation", "target" if session_id else "test", data)
     except ValidationError as exc:
