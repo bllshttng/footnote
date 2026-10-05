@@ -4653,14 +4653,8 @@ def cmd_hold(
 
     While the hold is on, mail addressed to this session never pastes into the
     prompt line. It queues durable and the sender gets a receipt saying so.
-    ``--minutes`` runs the quiet-minutes idle clock and re-arms on every prompt,
-    with an absolute ceiling at twice the requested window. ``--for`` runs a
-    wall clock and never moves its deadline. Either lift DELIVERS without a new
-    prompt, so a hold whose only drain trigger is the operator cannot stall.
-
-    The hold reuses the ``delivery_policy = "bus-only"`` flag that already
-    exists on the agent row, so every injector lane refuses it before any
-    transport call. This verb owns the clock, not the enforcement.
+    Either clock DELIVERS without a new prompt, so a hold whose only drain
+    trigger is the operator cannot stall.
     """
     import shutil
     import subprocess
@@ -4677,12 +4671,19 @@ def cmd_hold(
         raise typer.Exit(code=2)
 
     if status:
-        # Ask the delivery gate, not the clock: a hand-stamped bus-only row
-        # has no clock, and the clock alone reported deliverable for held mail.
-        from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
+        # The record, not the gate: the gate's own-pass never refuses your own hold.
+        from fno.agents.dispatch import BUS_ONLY_POLICY
 
-        if _delivery_policy_refusal(handle) != BUS_ONLY_POLICY:
+        entry = hold_mod.resolve_entry(handle)
+        if getattr(entry, "delivery_policy", None) != BUS_ONLY_POLICY:
             print(f"{handle}: no hold - mail delivers normally")
+            return
+        clock = hold_mod.read_any(handle)
+        if clock is not None and clock.source == hold_mod.CONVERSATION_SOURCE:
+            print(
+                f"{handle}: holding mail, machine-armed while you talk "
+                f"({hold_mod.clock_description(clock)}), lifts about 2 min after your answer"
+            )
             return
         label = hold_mod.dnd_label(handle)
         if label == "held":
@@ -4695,7 +4696,6 @@ def cmd_hold(
                 "delivery gate - run `fno agents mail hold --off` to clear it"
             )
         else:
-            clock = hold_mod.read_any(handle)
             print(
                 f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
                 f"lifts in {label.lstrip('~')}"

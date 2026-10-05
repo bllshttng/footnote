@@ -197,6 +197,7 @@ pub mod harness_roster;
 pub mod harness_verbs;
 pub mod heal;
 pub mod heal_pid;
+pub mod hold_label;
 pub mod honesty_sweep;
 pub mod hook;
 pub mod identity;

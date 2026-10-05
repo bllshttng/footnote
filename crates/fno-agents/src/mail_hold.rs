@@ -176,6 +176,12 @@ pub(crate) fn self_status(session_id: &str) -> Result<serde_json::Value, String>
         "clock_live": clock.as_ref().is_some_and(|clock| clock.live(now)),
         "clock_until": until.map(|until| until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         "delivery_policy": delivery_policy,
+        // The machine-armed mark: a live clock the conversation
+        // rules wrote, so the check-in labels the hold as its own state
+        // instead of a DND the lead thinks it armed itself.
+        "conversation": clock
+            .as_ref()
+            .is_some_and(|clock| clock.live(now) && clock.source.as_deref() == Some(CONVERSATION_SOURCE)),
     }))
 }
 
@@ -1306,6 +1312,13 @@ pub(crate) mod tests {
             let status = self_status(SID).unwrap();
             assert_eq!(status["clock_live"], true);
             assert_eq!(status["delivery_policy"], "bus-only");
+            assert_eq!(status["conversation"], true);
+            // The check-in label rides the same fact: the conversation leg
+            // of the shared helper, at its live integration point.
+            assert_eq!(
+                crate::hold_label::hold_attention(&status).unwrap(),
+                "mail held while the user talks to you (machine-armed; lifts about 2 min after your answer)"
+            );
             // The status verb addresses the same hold by the canonical
             // short handle; the gate must hold on it, not deliver.
             let first8 = identity_key(SID).get(..8).unwrap().to_string();
@@ -1315,6 +1328,7 @@ pub(crate) mod tests {
             assert_eq!(status["clock_live"], false);
             assert!(status["clock_until"].is_null());
             assert_eq!(status["delivery_policy"], "bus-only");
+            assert_eq!(status["conversation"], false);
         });
     }
 
@@ -1447,6 +1461,15 @@ pub(crate) mod tests {
             )
             .unwrap();
             set_policy(SID, Some("bus-only"));
+            // A manual hold carries no source, so the same registry stamp
+            // reads as plain DND, never the machine-armed state - at the
+            // fact and at the label.
+            let status = self_status(SID).unwrap();
+            assert_eq!(status["conversation"], false);
+            assert_eq!(
+                crate::hold_label::hold_attention(&status).unwrap(),
+                "DND on"
+            );
             let before = std::fs::read_to_string(clock_path(dir, SID)).unwrap();
             witness_row(SID, now_ms() - 1_000);
             conversation_prompt(SID, "hello");

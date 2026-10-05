@@ -85,6 +85,30 @@ def test_arm_writes_a_readable_clock_and_clear_removes_it():
     assert read_back.until is not None
     assert hold_mod.remaining_label(HANDLE).endswith("m")
 
+    # The conversation-sourced clock is the machine's own hold; the column
+    # must not read it as a hold the user set on purpose.
+    auto = hold_mod.Hold(
+        handle=HANDLE,
+        until=armed.until,
+        window_s=armed.window_s,
+        clock_kind=armed.clock_kind,
+        ceiling=armed.ceiling,
+        source=hold_mod.CONVERSATION_SOURCE,
+    )
+    hold_mod._write(auto)
+    assert hold_mod.read(HANDLE).source == hold_mod.CONVERSATION_SOURCE
+    assert hold_mod.dnd_label(HANDLE).endswith(" (auto)")
+    bare = hold_mod.Hold(
+        handle=HANDLE,
+        until=armed.until,
+        window_s=armed.window_s,
+        clock_kind=armed.clock_kind,
+        ceiling=armed.ceiling,
+    )
+    hold_mod._write(bare)
+    assert hold_mod.dnd_label(HANDLE) == hold_mod.remaining_label(HANDLE)
+    assert not hold_mod.dnd_label(HANDLE).endswith(" (auto)")
+
     hold_mod.clear(HANDLE)
     assert hold_mod.read(HANDLE) is None
 
@@ -792,6 +816,38 @@ def test_cli_for_arms_wall_clock_and_names_it_in_the_receipt(monkeypatch, capsys
     output = capsys.readouterr().out
     assert "wall clock" in output
     assert "fixed deadline 20:08:00 UTC" in output
+
+    # The status leg reads the record, not the gate: the gate's own-pass
+    # answers deliverable for the session's own hold, which once made
+    # --status report "no hold" while the check-in read bus-only.
+    auto = hold_mod.Hold(
+        handle=HANDLE,
+        until=armed.until,
+        window_s=480,
+        clock_kind="wall",
+        source=hold_mod.CONVERSATION_SOURCE,
+    )
+    monkeypatch.setattr(
+        hold_mod, "resolve_entry", lambda _h: SimpleNamespace(delivery_policy="bus-only")
+    )
+    monkeypatch.setattr(hold_mod, "read_any", lambda _h: auto)
+    mail_cli.cmd_hold(minutes=None, for_minutes=None, off=False, status=True)
+    output = capsys.readouterr().out
+    assert "machine-armed while you talk" in output
+    assert "lifts about 2 min after your answer" in output
+
+    # A manual stamp keeps the old shape.
+    live_manual = hold_mod.Hold(
+        handle=HANDLE,
+        until=datetime.now(timezone.utc) + timedelta(minutes=8),
+        window_s=480,
+        clock_kind="wall",
+    )
+    monkeypatch.setattr(hold_mod, "read_any", lambda _h: live_manual)
+    mail_cli.cmd_hold(minutes=None, for_minutes=None, off=False, status=True)
+    output = capsys.readouterr().out
+    assert "lifts in" in output
+    assert "machine-armed" not in output
 
 
 def test_bounce_reason_is_silent_for_a_permanent_policy_and_for_no_hold():
