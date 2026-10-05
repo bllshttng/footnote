@@ -324,7 +324,7 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
         return (
             "stale",
             f"PR #{pr_number} is behind '{default}': its head does not contain the '{default}' "
-            f"tip ({tip[:8]}), so merging now lands code CI never ran on. Merge origin/{default} "
+            f"tip ({tip[:8]}), so merging now lands code CI never ran on; merge origin/{default} "
             f"into the branch and push, then merge once CI is green on the updated head. "
             f"Set {BYPASS_ENV}={BYPASS_VALUE} to acknowledge once.",
         )

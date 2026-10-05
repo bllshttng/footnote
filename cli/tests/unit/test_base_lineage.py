@@ -88,7 +88,11 @@ class FakeRun:
             if cmd[1] == "api" and "pulls?state=all" in endpoint:
                 if self.base_fails:
                     return Result(1, "", "gh: api error")
-                return Result(0, json.dumps([{"base": {"ref": self.base}}]), "")
+                return Result(
+                    0,
+                    json.dumps([{"base": {"ref": self.base}, "head": {"sha": self.pr_head}}]),
+                    "",
+                )
             if cmd[1] == "api" and "pulls?state=closed" in endpoint:
                 if self.list_fails:
                     return Result(1, "", "gh: api error")
@@ -232,7 +236,7 @@ def test_lineage_github_reads_never_use_graphql(patch_run):
 
 
 def test_branch_name_selector_keeps_rest_lineage_support(patch_run):
-    fake = patch_run(FakeRun(base="main"))
+    fake = patch_run(FakeRun(base="main", contained=True))
     verdict, _ = _base_lineage.lineage_verdict("feature/stack", "/repo")
     assert verdict == "ok"
     assert any("pulls?state=all" in call[-1] for call in fake.calls if call[0] == "gh")
