@@ -1176,9 +1176,12 @@ jobs:
     if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     name: cargo test integration (fno mux)
     runs-on: ubuntu-latest
-    # Companion half of the measured test-binary split. Keep the existing
-    # timeout cap; the cargo test + schema parity rollup waits for both shards.
-    timeout-minutes: 15
+    # Companion half of the measured test-binary split. A 15m cap cancelled
+    # the job at 15m17s on two consecutive main runs with every finished test
+    # passing, so the full serial suite needs more than 15. 25 keeps headroom
+    # over the observed span while the schema-parity rollup waits for both
+    # shards.
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
