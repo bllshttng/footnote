@@ -1,0 +1,1 @@
+review_attestation data.dispositions must be an array of {finding_key, disposition in ['fixed', 'declined', 'nonblocking'], reason} objects

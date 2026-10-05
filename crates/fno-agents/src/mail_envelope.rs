@@ -7,24 +7,19 @@ fn live_entry_for_address<'a>(
     address: Option<&str>,
 ) -> Option<&'a crate::state::RegistryEntry> {
     let address = address.filter(|s| !s.is_empty())?;
-    let mut matches = registry.entries.iter().filter(|entry| {
+    let keep = |entry: &crate::state::RegistryEntry| {
         !matches!(
             entry.status,
             crate::AgentStatus::Exited
                 | crate::AgentStatus::Orphaned
                 | crate::AgentStatus::Failed
                 | crate::AgentStatus::PermanentDead
-        ) && (entry.harness_session_id.as_deref() == Some(address)
-            || entry.related_session_id.as_deref() == Some(address)
-            || entry.name == address
-            || entry.short_id == address
-            || entry.aliases.iter().any(|alias| alias == address))
-    });
-    let row = matches.next()?;
-    if matches.next().is_some() {
-        return None;
+        )
+    };
+    match crate::agent_ref::resolve_address(&registry.entries, address, keep) {
+        crate::agent_ref::Join::One(row) => Some(row),
+        crate::agent_ref::Join::Ambiguous | crate::agent_ref::Join::None => None,
     }
-    Some(row)
 }
 
 fn team_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
@@ -479,6 +474,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
+        // A sender row RENAMED after the envelope was written still renders
+        // its CURRENT name: the header resolves the stored session id.
+        let renamed_path = tmp.path().join("renamed-registry.json");
+        std::fs::write(
+            &renamed_path,
+            serde_json::json!({"schema_version": 11, "agents": [
+                {"name":"renamed-folio", "short_id":"folio-short", "status":"live",
+                 "harness":"claude", "cwd":"/repo",
+                 "harness_session_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                 "created_at":"2026-09-23T20:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let renamed = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
+                "from_session":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                "harness":"claude", "to":"x", "id":"msg-9"
+            }),
+            &renamed_path,
+        )
+        .unwrap();
+        assert!(renamed.contains("@renamed-folio"), "{renamed}");
     }
 
     #[test]

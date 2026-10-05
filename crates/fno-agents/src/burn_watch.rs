@@ -1645,8 +1645,12 @@ mod tests {
                         "sha256:{:x}",
                         <sha2::Sha256 as sha2::Digest>::digest(genuine_watch.as_bytes())
                     ),
+                    "blocker": "ci",
+                    "task_id": null,
+                    "expires_at_ms": 0,
                     "delivered": true,
-                    "via": "mail"
+                    "via": "mail",
+                    "reason": "watch deadline expired"
                 }),
             )
             .unwrap();
@@ -1683,14 +1687,16 @@ mod tests {
             acquired_fresh,
             crate::claims::AcquireOutcome::Acquired(_)
         ));
-        let fresh_emitter = crate::events::EventEmitter::new(global_events.clone(), "daemon");
+        let fresh_emitter = crate::events::EventEmitter::new(global_events.clone(), "hook");
         fresh_emitter
             .emit(
                 "loop_check_watch_idle",
                 &serde_json::json!({
                     "session_id": "s-fresh",
                     "node": "x-fresh",
+                    "pr": null,
                     "blocker": "ci",
+                    "lease_ms": 60_000,
                     "expires_at_ms": std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -1732,14 +1738,16 @@ mod tests {
 
         // The error-path sections below need a due watch to reach the claims
         // read; the passes above consumed the replayed watches' receipts.
-        let errorpath_emitter = crate::events::EventEmitter::new(global_events.clone(), "daemon");
+        let errorpath_emitter = crate::events::EventEmitter::new(global_events.clone(), "hook");
         errorpath_emitter
             .emit(
                 "loop_check_watch_idle",
                 &serde_json::json!({
                     "session_id": "s-fresh",
                     "node": "x-fresh",
+                    "pr": null,
                     "blocker": "ci",
+                    "lease_ms": 60_000,
                     "expires_at_ms": std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()

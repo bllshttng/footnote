@@ -1,0 +1,1 @@
+event type claim_acquired pid_unavailable must be boolean

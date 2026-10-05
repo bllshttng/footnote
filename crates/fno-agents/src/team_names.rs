@@ -64,6 +64,11 @@ pub struct TeamNameRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSuccession {
     pub heir_name: String,
+    /// The heir row's session id at settle time, so the revert's join keys
+    /// on identity and a rename between write and read cannot break it.
+    /// Absent on legacy records, which keep the name join.
+    #[serde(default)]
+    pub heir_session: Option<String>,
     pub predecessor_name: String,
     #[serde(default)]
     pub predecessor_session: Option<String>,
@@ -970,11 +975,22 @@ pub fn revert_stale_pending(
     let reg = crate::state::load_registry(registry_path)
         .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
     for (scope, pending) in stale {
-        let evidence = match crate::lead_state::live_name_join(&reg.entries, &pending.heir_name) {
+        // Id-first: a record carrying heir_session resolves through the
+        // session id (a rename cannot break the join); a legacy record
+        // falls back to the name join and its ambiguity refusal, unchanged.
+        let join = match pending.heir_session.as_deref() {
+            Some(session) => {
+                crate::agent_ref::resolve(&reg.entries, crate::agent_ref::Key::Id(session), |row| {
+                    !crate::lead_state::is_terminal(row)
+                })
+            }
+            None => crate::lead_state::live_name_join(&reg.entries, &pending.heir_name),
+        };
+        let evidence = match join {
             crate::lead_state::NameJoin::One(row) => {
                 kept.push(format!(
                     "{scope}: heir row {} still {:?}",
-                    pending.heir_name, row.status
+                    row.name, row.status
                 ));
                 continue;
             }
@@ -986,12 +1002,20 @@ pub fn revert_stale_pending(
                 continue;
             }
             crate::lead_state::NameJoin::None => {
-                // No live row answers the heir name; the name's raw matches
-                // are all terminal by the join's construction, so the first
-                // names why the succession reverts.
-                match reg.entries.iter().find(|e| {
-                    e.name == pending.heir_name || e.aliases.iter().any(|a| *a == pending.heir_name)
-                }) {
+                // No live row answers the heir; the raw matches are all
+                // terminal by the join's construction, so the first names
+                // why the succession reverts.
+                let raw = match pending.heir_session.as_deref() {
+                    Some(session) => reg.entries.iter().find(|e| {
+                        e.harness_session_id.as_deref() == Some(session)
+                            || e.related_session_id.as_deref() == Some(session)
+                    }),
+                    None => reg.entries.iter().find(|e| {
+                        e.name == pending.heir_name
+                            || e.aliases.iter().any(|a| *a == pending.heir_name)
+                    }),
+                };
+                match raw {
                     None => "heir row removed".to_string(),
                     Some(row) => format!("heir row {:?}", row.status),
                 }
@@ -1720,6 +1744,7 @@ mod tests {
             "x-aaaa",
             Some(PendingSuccession {
                 heir_name: "lead-heir".into(),
+                heir_session: None,
                 predecessor_name: "lead-a".into(),
                 predecessor_session: Some("sess-a".into()),
                 ts: now_stamp(),
@@ -1772,6 +1797,7 @@ mod tests {
             "x-aaaa",
             Some(PendingSuccession {
                 heir_name: "lead-heir".into(),
+                heir_session: None,
                 predecessor_name: "lead-old".into(),
                 predecessor_session: Some("sess-old".into()),
                 ts: now_stamp(),
@@ -1923,6 +1949,7 @@ mod tests {
             title: None,
             pending_succession: Some(PendingSuccession {
                 heir_name: heir.into(),
+                heir_session: None,
                 predecessor_name: pred.into(),
                 predecessor_session: session.map(String::from),
                 ts: ts.into(),
@@ -1944,6 +1971,7 @@ mod tests {
         write_registry(
             tmp.path(),
             json!([
+                team_row("renamed-heir", "other", 1, "sess-heir"),
                 json!({
                     "name": "lead-old", "status": "exited", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-old",
@@ -2003,6 +2031,16 @@ mod tests {
                         "x-twin".into(),
                         pending_record("heir-twin", "lead-six", Some("sess-6"), old_ts()),
                     ),
+                    // The id tier: a record carrying heir_session keeps its
+                    // succession even though the heir row was RENAMED after
+                    // the settle wrote it.
+                    ("x-sess".into(), {
+                        let mut pending =
+                            pending_record("original-name", "lead-seven", Some("sess-7"), old_ts());
+                        pending.pending_succession.as_mut().unwrap().heir_session =
+                            Some("sess-heir".into());
+                        pending
+                    }),
                 ]),
             },
         )
@@ -2016,12 +2054,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reverted.len(), 2, "{reverted:?}");
+        // The session-keyed heir keeps its succession through the rename.
+        assert!(
+            kept.iter()
+                .any(|k| k.contains("renamed-heir") && k.contains("still")),
+            "{kept:?}"
+        );
         assert_eq!(reverted[0].scope, "fno");
         assert_eq!(reverted[0].heir_name, "jolly-finch");
         assert_eq!(reverted[0].evidence, "heir row removed");
         assert_eq!(reverted[1].scope, "x-tttt");
         assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
-        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert_eq!(kept.len(), 4, "{kept:?}");
         assert!(kept.iter().any(|k| k.contains("heir-live")), "{kept:?}");
         // A name two live rows answer is ambiguous: keep, never guess.
         assert!(

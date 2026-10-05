@@ -383,7 +383,7 @@ mod tests {
         let events = dir.path().join("events.jsonl");
         let line = serde_json::json!({
             "ts": "2026-06-06T00:00:00Z", "type": "termination", "source": "hook",
-            "data": {"session_id": "sess-a", "reason": "DoneAwaitingMerge"}
+            "data": {"session_id": "sess-a", "reason": "DoneAwaitingMerge", "message": "awaiting merge"}
         })
         .to_string();
         crate::event_store::append_envelope(&events, &line, None).unwrap();

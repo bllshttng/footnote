@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import time
+
 import pytest
 
 from fno.events import validate as validate_event
@@ -69,9 +71,24 @@ def journal(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 @pytest.fixture
 def tx(monkeypatch: pytest.MonkeyPatch):
-    """Wire a scratch graph to a fake client and record the backoff sleeps."""
+    """Wire a scratch graph to a fake client and record the backoff sleeps.
+
+    The clock is swapped on the store module's own reference, not on the
+    global ``time`` module: a shared global patch also captures every other
+    sleeper in the worker process (keeper handshakes, poll loops), and on a
+    loaded runner those swamp the four backoff sleeps this fixture counts.
+    """
     sleeps: list[float] = []
-    monkeypatch.setattr(store.time, "sleep", sleeps.append)
+
+    class _StoreClock:
+        """time stand-in: only sleep is captured; everything else delegates."""
+
+        sleep = staticmethod(sleeps.append)
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    monkeypatch.setattr(store, "time", _StoreClock())
 
     def _install(client: _FakeClient, graph: Path) -> None:
         monkeypatch.setattr(store, "_client_for", lambda path: client)

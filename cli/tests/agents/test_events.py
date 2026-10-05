@@ -88,7 +88,7 @@ def test_emit_ts_is_iso8601_utc(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.events import emit
 
     events_path = tmp_path / ".fno" / "events.jsonl"
-    emit("agent_ping", path=events_path)
+    emit("agent_ask_started", path=events_path)
     parsed = event_rows(events_path)[0]
     ts = parsed["ts"]
     # Must parse as ISO8601
@@ -105,10 +105,10 @@ def test_emit_default_path_under_state_dir(tmp_path: Path, monkeypatch) -> None:
     import fno.paths as paths
     from fno.agents.events import emit
 
-    emit("agent_test", name="x")
+    emit("agent_ask_started", name="x")
     expected = paths.state_dir() / "events.jsonl"
     parsed = event_rows(expected)[0]
-    assert parsed["kind"] == "agent_test"
+    assert parsed["kind"] == "agent_ask_started"
 
 
 def test_emit_creates_parent_dir_if_missing(tmp_path: Path, monkeypatch) -> None:
@@ -118,7 +118,7 @@ def test_emit_creates_parent_dir_if_missing(tmp_path: Path, monkeypatch) -> None
 
     deep_path = tmp_path / "nested" / "deeper" / "events.jsonl"
     assert not deep_path.parent.exists()
-    emit("agent_test", path=deep_path)
+    emit("agent_ask_started", path=deep_path)
     from fno.events.store_client import store_db_path
 
     assert store_db_path(deep_path).exists()
@@ -146,13 +146,13 @@ def test_emit_data_cannot_overwrite_ts(tmp_path: Path, monkeypatch) -> None:
 
     events_path = tmp_path / ".fno" / "events.jsonl"
     emit(
-        "agent_test",
+        "agent_ask_started",
         path=events_path,
         ts="HACKED",  # type: ignore[arg-type]
         useful_field="ok",
     )
     parsed = event_rows(events_path)[0]
-    assert parsed["kind"] == "agent_test"
+    assert parsed["kind"] == "agent_ask_started"
     # ts must be a real ISO timestamp, not the user's override
     assert parsed["ts"] != "HACKED"
     assert parsed["ts"].endswith("Z") or "+" in parsed["ts"]
@@ -175,13 +175,13 @@ def test_emit_swallows_oserror_and_warns(
 
     try:
         # Must not raise — telemetry failures cannot break primary ops.
-        emit("agent_test", path=target)
+        emit("agent_ask_started", path=target)
     finally:
         parent.chmod(0o700)  # let pytest clean up
 
     captured = capsys.readouterr()
     assert "warning" in captured.err.lower()
-    assert "agent_test" in captured.err
+    assert "agent_ask_started" in captured.err
 
 
 def test_emit_identity_resolution_records_markers_disposition_collision(

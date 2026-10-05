@@ -159,10 +159,10 @@ def test_deferred_child_shows_streak(graph_env):
         _node("x-c3", parent="x-epic", status="deferred", cwd=str(tmp_path)),
     ])
     _write_events(tmp_path, [
-        {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "hook",
-         "data": {"node_id": "x-c3"}},
-        {"ts": "2026-07-18T10:00:00Z", "type": "node_failed", "source": "hook",
-         "data": {"node_id": "x-c3"}},
+        {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "loop",
+         "data": {"session_id": "s", "unit_id": "x-c3", "iteration": 1, "exit_code": 1}},
+        {"ts": "2026-07-18T10:00:00Z", "type": "node_failed", "source": "loop",
+         "data": {"session_id": "s", "unit_id": "x-c3", "iteration": 2, "exit_code": 1}},
     ])
     r = _invoke(["backlog", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output
@@ -180,10 +180,10 @@ def test_streak_dedups_mirrored_events(graph_env, monkeypatch):
         _node("x-c3", parent="x-epic", status="deferred", cwd=str(tmp_path)),
     ])
     fails = [
-        {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "hook",
-         "data": {"node_id": "x-c3"}},
-        {"ts": "2026-07-18T10:00:00Z", "type": "node_failed", "source": "hook",
-         "data": {"node_id": "x-c3"}},
+        {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "loop",
+         "data": {"session_id": "s", "unit_id": "x-c3", "iteration": 1, "exit_code": 1}},
+        {"ts": "2026-07-18T10:00:00Z", "type": "node_failed", "source": "loop",
+         "data": {"session_id": "s", "unit_id": "x-c3", "iteration": 2, "exit_code": 1}},
     ]
     # Same envelopes in the project journal AND the global mirror.
     _write_events(tmp_path, fails)

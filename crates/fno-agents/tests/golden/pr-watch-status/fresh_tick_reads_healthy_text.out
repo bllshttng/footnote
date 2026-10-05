@@ -1,0 +1,12 @@
+Agent loaded: yes
+Plist path:   <CASE>/LaunchAgents/sh.fno.pr-watcher.plist (exists)
+Verdict:      healthy (last tick <AGE>s ago)
+Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)
+Last tick:    <TS>
+Last attempt: <TS>
+Last tick outcome: ok (12.3s)
+Completed tick: <TS> swept=1
+Merge scan:   completed_at=<TS> scanned=3
+Open PRs:     1
+Parked PRs (0 open, 0 finished, 2 foreign):
+  foreign: 2 (other repos, left alone)

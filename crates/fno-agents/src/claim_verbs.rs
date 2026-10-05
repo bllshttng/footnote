@@ -48,6 +48,13 @@ pub fn run_claim(args: &[String]) -> i32 {
         // contract.
         return crate::claim_cli::acquire::run(&args[1..]);
     }
+    if op == "release" {
+        // Wave 2 of the leaf port: the operator surface (plain, --lane,
+        // --force, and the do-row close/rollback) lives in claim_cli; goldens
+        // are the contract. The engine receipt core.release_claim parses
+        // rides --with-claim.
+        return crate::claim_cli::release::run(&args[1..]);
+    }
     if op == "lane-acquire" {
         return crate::claim_lanes_cli::run_lane_acquire(&args[1..]);
     }
@@ -149,48 +156,9 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
 
     match op {
-        // "acquire" dispatches to claim_cli::acquire above; the operator
-        // leaf owns the surface since the wave-1 port.
-        "release" => {
-            let Some(holder) = holder else {
-                eprintln!("fno-agents: claim release requires --holder");
-                return 2;
-            };
-            match crate::claims::release_with_receipt(
-                &key,
-                &holder,
-                opts.root.as_deref(),
-                opts.events_dir.as_deref(),
-            ) {
-                Ok(Some(claim)) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "released",
-                            "released": true,
-                            "key": key,
-                            "claim": claim,
-                        })
-                    );
-                    0
-                }
-                Ok(None) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "not_released",
-                            "released": false,
-                            "key": key,
-                        })
-                    );
-                    0
-                }
-                Err(error) => {
-                    eprintln!("fno-agents: claim release failed: {error}");
-                    2
-                }
-            }
-        }
+        // "acquire" and "release" dispatch to claim_cli above; the operator
+        // leaf owns the surface since the wave-1/2 ports ("release" keeps
+        // its engine receipt under --with-claim).
         "renew" => {
             let Some(holder) = holder else {
                 eprintln!("fno-agents: claim renew requires --holder");
@@ -896,11 +864,13 @@ fn resolve_subject_session(
     match holder_worker_name(&rec.holder) {
         Some(worker) => {
             load_session_registry_index(index);
-            index
-                .borrow()
-                .as_ref()
-                .and_then(|i| i.by_name.get(worker).cloned())
-                .flatten()
+            index.borrow().as_ref().and_then(|i| {
+                i.by_name
+                    .get(worker)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| i.by_fno_id.get(worker).cloned())
+            })
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
     }
@@ -975,6 +945,11 @@ struct SessionRegistryIndex {
     /// two live rows claim: the caller answers Unresolved, never a guessed
     /// session. Terminal rows never join.
     by_name: std::collections::HashMap<String, Option<String>>,
+    /// The id tier of the same join: fno_id to session id, for a holder
+    /// minted after the id change. A legacy name holder resolves through
+    /// `by_name` first, exactly as before; fno_id is unique per row, so
+    /// the first row wins.
+    by_fno_id: std::collections::HashMap<String, String>,
     /// The row's served `liveness` word and its measurement stamp, keyed by
     /// session id. No pid requirement: 33 of 33 thread rows carry pid None,
     /// and the served pair is the only liveness evidence they carry.
@@ -1017,6 +992,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     }
     let mut by_session = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
+    let mut by_fno_id = std::collections::HashMap::new();
     let mut served = std::collections::HashMap::new();
     let mut rows = std::collections::HashMap::new();
     let path = crate::paths::AgentsHome::from_env().registry_json();
@@ -1054,6 +1030,12 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
                         note_name(&mut by_name, alias.clone(), claim.clone());
                     }
                 }
+                if let (Some(fno), Some(sid)) = (e.fno_id.as_deref().filter(|v| !v.is_empty()), sid)
+                {
+                    by_fno_id
+                        .entry(fno.to_string())
+                        .or_insert_with(|| sid.to_string());
+                }
             }
         }
     }
@@ -1061,6 +1043,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
         known,
         by_session,
         by_name,
+        by_fno_id,
         served,
         rows,
     });
@@ -2182,6 +2165,44 @@ mod tests {
                 ));
             },
         );
+        // The id tier: a holder minted after the id change names the
+        // worker's fno_id and resolves even after a rename; the legacy
+        // name tier resolves unchanged.
+        with_registry(
+            serde_json::json!([{
+                "name": "renamed-worker", "status": "live", "cwd": "/w",
+                "created_at": "2026-10-04T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "s-worker",
+                "fno_id": "f-worker",
+            }]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:f-worker", "s-king");
+                assert_eq!(
+                    resolve_subject_session(&rec, &index).as_deref(),
+                    Some("s-worker")
+                );
+            },
+        );
+        with_registry(
+            serde_json::json!([{
+                "name": "w-legacy", "status": "live", "cwd": "/w",
+                "created_at": "2026-10-04T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "s-legacy",
+            }]),
+            || {
+                let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
+                    std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:w-legacy", "s-king");
+                assert_eq!(
+                    resolve_subject_session(&rec, &index).as_deref(),
+                    Some("s-legacy")
+                );
+            },
+        );
     }
 
     #[test]
@@ -2246,6 +2267,7 @@ mod tests {
             by_name: [("w-gate".to_string(), Some("s-worker".to_string()))]
                 .into_iter()
                 .collect(),
+            by_fno_id: std::collections::HashMap::new(),
             served: std::collections::HashMap::new(),
             rows: std::collections::HashMap::new(),
         }));
