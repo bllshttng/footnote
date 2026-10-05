@@ -69,8 +69,7 @@ pub(crate) fn paint(
     // detail pane takes the focus presentation while a drill-down is open.
     let focus_pane = owner && b.detail.is_some();
     // The hint sheet is sized first: its wrapped height is the layout's
-    // floor, and the cap keeps the panes their rows (change 4: nothing
-    // drops off the bottom unseen).
+    // floor, and the 4-row cap keeps the panes their rows.
     let hint = hint_lines(b, focus_pane, w);
     let hint_h = if h >= 6 { hint.len().min(4) } else { 0 };
     let laid_out = regions(rect, hint_h);
