@@ -876,8 +876,27 @@ mod tests {
             .unwrap();
     }
 
+    /// Serializes against the env-pinning fixtures and neutralizes the
+    /// ambient handoff pins for this test's scope: resolve_handoffs_dir reads
+    /// FNO_STATE_DIR/FNO_CONFIG/HANDOFFS_DIR, so a concurrent live-fixture
+    /// test's process env would reroute the resolution into its tree.
+    fn handoff_env_guards() -> (std::sync::MutexGuard<'static, ()>, [EnvVarGuard; 3]) {
+        let lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        (
+            lock,
+            [
+                EnvVarGuard::set("FNO_STATE_DIR", ""),
+                EnvVarGuard::set("FNO_CONFIG", ""),
+                EnvVarGuard::set("HANDOFFS_DIR", ""),
+            ],
+        )
+    }
+
+    use crate::claims::{test_env_lock, EnvVarGuard};
+
     #[test]
     fn handoff_key_derivation_first_eight_then_slug() {
+        let (_lock, _env) = handoff_env_guards();
         let (cwd, home) = handoff_fixture("first8");
         let out = handoff_out(
             &["--session-id".into(), SID.into(), "--name-only".into()],
@@ -925,6 +944,7 @@ mod tests {
 
     #[test]
     fn handoff_full_path_joins_the_handoffs_dir() {
+        let (_lock, _env) = handoff_env_guards();
         let (cwd, home) = handoff_fixture("fullpath");
         let dir = handoff_dir(&cwd, &home);
         let full = handoff_out(&["--session-id".into(), SID.into()], &cwd, Some(&home)).unwrap();
@@ -944,6 +964,7 @@ mod tests {
 
     #[test]
     fn handoff_empty_session_refuses_and_blank_slug_falls_back() {
+        let (_lock, _env) = handoff_env_guards();
         let (cwd, home) = handoff_fixture("refuse");
         // The hidden --session alias was removed to pay the flag-surface
         // ratchet (operator ruling 2026-09-12); --session-id is the one
@@ -990,6 +1011,7 @@ mod tests {
 
     #[test]
     fn handoff_scope_mints_a_dated_crown_keyed_name() {
+        let (_lock, _env) = handoff_env_guards();
         let (cwd, home) = handoff_fixture("scope-mint");
         let scope = "x-1234abcd";
         let out = handoff_out(
@@ -1009,6 +1031,7 @@ mod tests {
 
     #[test]
     fn handoff_scope_returns_the_newest_existing_doc() {
+        let (_lock, _env) = handoff_env_guards();
         let (cwd, home) = handoff_fixture("scope-newest");
         let scope = "x-2222bbbb";
         let dir = handoff_dir(&cwd, &home);
@@ -1026,6 +1049,7 @@ mod tests {
 
     #[test]
     fn handoff_scope_newest_ignores_other_scopes_and_session_keys() {
+        let (_lock, _env) = handoff_env_guards();
         let (cwd, home) = handoff_fixture("scope-filter");
         let scope = "x-3333cccc";
         let dir = handoff_dir(&cwd, &home);
@@ -1046,6 +1070,7 @@ mod tests {
 
     #[test]
     fn handoff_scope_sanitizes_runs_into_one_dash() {
+        let (_lock, _env) = handoff_env_guards();
         // A portfolio crown stores its scope comma-joined; commas and spaces
         // are not filename-safe, so each unsafe RUN collapses into one key
         // separator (Python re.sub(r"[^A-Za-z0-9._-]+", "-") parity).
