@@ -31,11 +31,34 @@ pub(super) async fn open(view: &mut View, id: String) {
             None => {}
         }
     }
+    // The cascade's middle leg (x-4310 item 4): no vault plan opens the
+    // GitHub-or-Linear link the node stores, through the PR tap's opener.
+    if let Some(link) = view
+        .backlog
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.link.clone())
+    {
+        return update_menu::open_pr(view, link).await;
+    }
     open_detail(view, id);
 }
 
+/// The node id painted at `(row, col)`, from the spans the last compose
+/// recorded - the one board-tap check, whichever backlog pane drew them.
+pub(super) fn span_at(view: &View, row: u16, col: u16) -> Option<String> {
+    let (row, col) = (row as usize, col as usize);
+    view.node_spans
+        .borrow()
+        .iter()
+        .find(|s| s.row == row && col >= s.col && col < s.col + s.len)
+        .map(|s| s.id.clone())
+}
+
 /// The node in the backlog details pane. The pane lives on the
-/// experimental board: off, the notice says where the jump would land.
+/// experimental board: off, the notice says where the jump would land. A
+/// board already open keeps its gathered state - the tap opens the detail
+/// ON it, never a fresh board that reads back to empty.
 pub(super) fn open_detail(view: &mut View, id: String) {
     if !view.experimental_backlog {
         view.set_notice(format!(
@@ -43,7 +66,9 @@ pub(super) fn open_detail(view: &mut View, id: String) {
         ));
         return;
     }
-    View::open(view);
+    if view.backlog_board.is_none() {
+        View::open(view);
+    }
     if let Some(b) = view.backlog_board.as_mut() {
         b.detail = Some(node_detail::NodeDetailOverlay {
             node_id: id,

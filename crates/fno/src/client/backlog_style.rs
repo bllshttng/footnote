@@ -228,6 +228,91 @@ pub(crate) fn role_of(role: BRole) -> Role {
         BRole::Pill => Role::PanelPill,
     }
 }
+
+/// One painted node-id span in screen cells, recorded at paint time so a
+/// press routes to what the last frame actually drew (the esc-chip
+/// precedent): the board's card rows and the detail's id and link rows
+/// paint node ids as Label segments, and the collector keeps their
+/// screen rectangles for the tap.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeSpan {
+    pub(crate) row: usize,
+    pub(crate) col: usize,
+    pub(crate) len: usize,
+    pub(crate) id: String,
+}
+
+thread_local! {
+    /// The node spans one compose painted, collected between
+    /// [`node_spans_begin`] and [`node_spans_end`]; `None` outside them.
+    static NODE_SPANS: std::cell::RefCell<Option<Vec<NodeSpan>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start collecting the node-id spans the backlog painters put on screen.
+pub(crate) fn node_spans_begin() {
+    NODE_SPANS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop collecting and return what the frame painted.
+pub(crate) fn node_spans_end() -> Vec<NodeSpan> {
+    NODE_SPANS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Whether a Label run reads as a backlog node id: `<prefix>-<hex>` with a
+/// hex tail of at least four (`x-0fd1`, `fno-a3f9`). The shape gate is what
+/// keeps every other Label run (a channel label) out of the taps.
+fn node_id_shape(s: &str) -> bool {
+    let Some((prefix, hex)) = s.split_once('-') else {
+        return false;
+    };
+    let prefix_ok = !prefix.is_empty()
+        && prefix.len() <= 8
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    prefix_ok && (4..=16).contains(&hex.len()) && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Record the node-id runs of one painted line: the screen rectangle of
+/// each maximal Label-role run whose text is node-id shaped and fully
+/// painted (a run the width cut in half is no tap target, and its id
+/// would not be the id the text shows).
+fn record_node_spans(r: usize, c0: usize, w: usize, line: &BLine, roles: &[Role]) {
+    NODE_SPANS.with(|c| {
+        let mut slot = c.borrow_mut();
+        let Some(spans) = slot.as_mut() else {
+            return;
+        };
+        let label = role_of(BRole::Label);
+        let mut col = c0;
+        let mut runs: Vec<(usize, String)> = Vec::new();
+        let mut open = false;
+        for (j, ch) in line.text.chars().enumerate() {
+            if roles.get(j).copied() == Some(label) {
+                if open {
+                    runs.last_mut().expect("an open run exists").1.push(ch);
+                } else {
+                    runs.push((col, ch.to_string()));
+                    open = true;
+                }
+            } else {
+                open = false;
+            }
+            col += char_w(ch);
+        }
+        for (start, text) in runs {
+            if node_id_shape(&text) && start + text.chars().count() <= c0 + w {
+                spans.push(NodeSpan {
+                    row: r,
+                    col: start,
+                    len: text.chars().count(),
+                    id: text,
+                });
+            }
+        }
+    });
+}
 /// Compress the per-char walk into `(start, len, theme Role)` spans for the
 /// chrome's per-char role resolution; unroled chars stay Body.
 pub(crate) fn to_body_line(line: &BLine) -> chrome::BodyLine {
@@ -388,6 +473,7 @@ fn paint_bline(
     if r >= rows {
         return;
     }
+    record_node_spans(r, c0, w, line, roles);
     let mut sc = c0;
     for (j, ch) in line.text.chars().enumerate() {
         if sc - c0 >= w || sc >= cols {
@@ -513,5 +599,39 @@ pub(crate) fn paint_title_row(
             &[Role::PanelMeta],
             theme,
         );
+    }
+}
+
+#[cfg(test)]
+mod span_probe_tests {
+    use super::*;
+
+    #[test]
+    fn span_probe() {
+        node_spans_begin();
+        let theme = crate::theme::Theme::from_name("terminal").0;
+        let line = BLine::of(&[
+            BSeg {
+                text: "a ".into(),
+                role: BRole::Body,
+            },
+            BSeg {
+                text: "x-24c8".into(),
+                role: BRole::Label,
+            },
+            BSeg {
+                text: " tail".into(),
+                role: BRole::Body,
+            },
+        ]);
+        let lines = vec![line];
+        let mut cells = vec![crate::proto::Cell::default(); 10 * 40];
+        paint_panel(&mut cells, 10, 40, 0, 40, 5, &lines, None, &theme);
+        let spans = node_spans_end();
+        assert_eq!(spans.len(), 1, "spans: {spans:?}");
+        assert_eq!(spans[0].id, "x-24c8");
+        assert_eq!(spans[0].row, 0);
+        assert_eq!(spans[0].col, 2);
+        assert_eq!(spans[0].len, 6);
     }
 }

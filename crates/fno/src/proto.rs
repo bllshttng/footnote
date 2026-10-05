@@ -368,7 +368,9 @@ fn default_true() -> bool {
 /// v103 removes `PanePlacement.human`: default admission leaves an opt-in machine gate
 /// for agent spawn; serde remains compatible with old and new placements. Floor stays 58.
 /// v104 adds `AgentRow.compaction_count`; v105 adds addressed pane input receipts; floor stays 58.
-pub const PROTO_VERSION: u32 = 105;
+/// v106 adds `BacklogCard.link` (serde default), the node's stored GitHub-or-Linear
+/// URL the node tap opens when no plan lives in the vault; floor stays 58.
+pub const PROTO_VERSION: u32 = 106;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1377,6 +1379,12 @@ pub struct BacklogCard {
     /// but an unranked board head is not a promise about the next dispatch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head: bool,
+    /// (v106) The link stored on the node (`pr_url`, a GitHub or Linear URL),
+    /// published for the node tap's middle leg: no plan in the vault opens
+    /// this instead of dead-ending at the details pane. `None` when the node
+    /// stores no link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 /// The queue state a card renders as. Classified from `status` alone
@@ -3770,6 +3778,7 @@ mod tests {
                         lane: Some("in-progress".into()),
                         plan_path: None,
                         head: false,
+                        link: None,
                     },
                     BacklogCard {
                         id: "ab-53c0".into(),
@@ -3783,6 +3792,7 @@ mod tests {
                         lane: None,
                         plan_path: None,
                         head: true,
+                        link: None,
                     },
                 ],
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
@@ -3952,7 +3962,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 105);
+        assert_eq!(PROTO_VERSION, 106);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

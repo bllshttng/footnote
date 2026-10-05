@@ -6198,6 +6198,7 @@ fn card_ready_gate_only_passes_ready_cards() {
         lane: None,
         plan_path: None,
         head: false,
+        link: None,
     };
     let backlog = [
         card("x-rdy", "ready-slug", CardState::Ready),

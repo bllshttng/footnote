@@ -194,6 +194,7 @@ fn routed_backlog_joins_attach_then_hint_and_leaves_ready_alone() {
         lane: None,
         plan_path: None,
         head: false,
+        link: None,
     };
     let mut core = empty_core();
     core.backlog = vec![
@@ -272,6 +273,7 @@ fn inflight_route_resolves_by_id_or_slug_and_fails_closed() {
             lane: None,
             plan_path: None,
             head: false,
+            link: None,
         },
         BacklogCard {
             id: "x-rdy".into(),
@@ -285,6 +287,7 @@ fn inflight_route_resolves_by_id_or_slug_and_fails_closed() {
             lane: None,
             plan_path: None,
             head: false,
+            link: None,
         },
     ];
     core.agents = vec![bg_row("tgt-x-aaa", "/w", Some("deadbee1"))];
@@ -326,6 +329,7 @@ fn inflight_hint_names_session_then_holder_then_default() {
         lane: None,
         plan_path: None,
         head: false,
+        link: None,
     }];
     // Nothing known at all: the default copy.
     assert_eq!(
@@ -368,6 +372,7 @@ fn plan_refusal_names_only_an_in_flight_node() {
         lane: None,
         plan_path: None,
         head: false,
+        link: None,
     }];
     // In flight: the refusal names the node and the hint.
     let refusal = core.plan_refusal("x-aaa").expect("in flight refuses");

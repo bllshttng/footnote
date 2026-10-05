@@ -1119,6 +1119,10 @@ pub(crate) struct View {
     /// The esc-close spans the last compose painted: the one list a tap
     /// checks, whichever overlay drew them.
     close_chips: std::cell::RefCell<Vec<chrome::CloseSpan>>,
+    /// The node-id spans the last compose painted on the backlog surfaces:
+    /// the one list a board tap checks, so a press opens the plan like the
+    /// sideline card's node tap.
+    node_spans: std::cell::RefCell<Vec<backlog_style::NodeSpan>>,
     /// The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to `overlay_keys::create_keys`: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -2053,6 +2057,7 @@ impl View {
             confirm: None,
             modal_release_swallow: false,
             close_chips: Default::default(),
+            node_spans: Default::default(),
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -4974,6 +4979,7 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
+        backlog_style::node_spans_begin();
 
         let agents_full =
             self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
@@ -5285,6 +5291,7 @@ impl View {
             }
         }
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
+        *self.node_spans.borrow_mut() = backlog_style::node_spans_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,

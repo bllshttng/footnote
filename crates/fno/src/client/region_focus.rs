@@ -224,8 +224,15 @@ pub(super) async fn mouse_pre_pass(
             continue;
         }
         // Full-screen board: the overlay owns every cell, so no press or
-        // wheel reaches the panes it covers. Keys stay with the board.
+        // wheel reaches the panes it covers. Keys stay with the board. A
+        // left press on a painted node id opens it (plan, else the node's
+        // link, else the details pane) - the sideline card tap's cascade.
         if view.backlog_board.is_some() && view.board_full {
+            if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                if let Some(id) = node_link::span_at(view, rep.row, rep.col) {
+                    node_link::open(view, id).await;
+                }
+            }
             continue;
         }
         // The new-agent composer owns presses that land inside its dock
@@ -647,7 +654,8 @@ pub(super) async fn mouse_pre_pass(
             }
             // The windowed board column is the board's surface: focus it and
             // resolve nothing else there - a stale agents row underneath must
-            // never act (no phantom drags, no phantom row actions).
+            // never act (no phantom drags, no phantom row actions). A press
+            // on a painted node id opens it, the sideline card tap's cascade.
             if view.backlog_board.is_some()
                 && !view.board_full
                 && view.sideline_view == crate::view_store::SidelineView::Backlog
@@ -655,6 +663,9 @@ pub(super) async fn mouse_pre_pass(
                 && !(rep.row as usize == view.term.0 as usize - 1 && view.bottom_row_is_chrome())
             {
                 view.region_owner = RegionOwner::Board;
+                if let Some(id) = node_link::span_at(view, rep.row, rep.col) {
+                    node_link::open(view, id).await;
+                }
                 continue;
             }
             // (G2/G3) a tab cell and a sideline agent row are DRAG SOURCES.

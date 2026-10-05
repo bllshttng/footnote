@@ -1633,6 +1633,7 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
         lane: None,
         plan_path: None,
         head: false,
+        link: None,
     }];
     type_message(&mut v, "plan ");
     let sock: Vec<u8> = Vec::new();
