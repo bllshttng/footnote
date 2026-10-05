@@ -498,8 +498,7 @@ def grant_error(
         return (
             f"this session already holds its own role over {requested_scope!r}; "
             "a same-scope spawn is a transfer, not a grant. Re-run with "
-            "`--hand-off` to name the succession explicitly, or choose a "
-            "different scope so this session keeps its role."
+            "`--hand-off`, or choose a different scope so this session keeps its role."
         )
     if not scope_contains(holder, requested_scope):
         return (
