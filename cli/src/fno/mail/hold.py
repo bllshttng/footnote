@@ -316,8 +316,7 @@ def dnd_label(handle) -> Optional[str]:
     ``None`` when mail flows despite the flag, which is the lapsed-timed-hold
     case and the one state where the flag is stale. ``"held"`` when the hold
     has no end to show. A duration whenever there is one, because a hold with
-    no visible end is what the operator asked to avoid. A machine-armed hold
-    reads with an ``(auto)`` suffix.
+    no visible end is what the operator asked to avoid.
     """
     if lapsed(handle):
         return None
