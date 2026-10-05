@@ -676,7 +676,7 @@ mod stale_team_doc_tests {
 
     fn seed_doc(handoffs_dir: &Path) {
         std::fs::create_dir_all(handoffs_dir).unwrap();
-        std::fs::write(handoffs_dir.join("20260916-team-footnote.md"), "# canon").unwrap();
+        std::fs::write(handoffs_dir.join("20260916-crown-footnote.md"), "# canon").unwrap();
     }
 
     #[test]
@@ -771,7 +771,7 @@ mod stale_team_doc_tests {
         // A clock stepped back after the doc's write leaves its mtime in the
         // future; the doc IS fresh, so the gate must not read it as ancient.
         let future = std::time::SystemTime::now() + Duration::from_secs(3600);
-        let doc = handoffs.join("20260916-team-footnote.md");
+        let doc = handoffs.join("20260916-crown-footnote.md");
         let mut f = std::fs::File::options().write(true).open(&doc).unwrap();
         f.set_times(std::fs::FileTimes::new().set_modified(future))
             .unwrap();

@@ -78,20 +78,26 @@ BINDIR="$(mktemp -d)"
 # masked registry-json's Rust port entirely, taking four AC31 assertions
 # down with it before this line existed).
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
-# The native paths verbs answer in the Rust front door (production `fno`);
-# the Python surface retired them. When this checkout's front is built, the
-# shim forwards exactly those verbs so the real hook reaches the native lane
-# the way production does. The not-yet-ported paths verbs (verify, handoff)
-# stay on the Python CLI.
-# The native paths verbs answer in the Rust front door (production `fno`);
-# the Python surface retired them. When this checkout's front is built, the
-# shim forwards exactly those verbs so the real hook reaches the native lane
-# the way production does. The not-yet-ported paths verbs (verify, handoff)
-# stay on the Python CLI.
-RUST_FRONT="$REPO_ROOT/crates/fno/target/debug/fno"
-if [ -x "$RUST_FRONT" ]; then
-  printf '#!/usr/bin/env bash\nif [ "$1" = config ] && [ "$2" = paths ] && { [ "$3" = emit-shell ] || [ "$3" = shell-stub ]; }; then\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$RUST_FRONT" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
+# The paths verbs emit-shell, shell-stub, verify and handoff answer natively
+# (crates/fno-agents/src/paths_cli.rs behind crates/fno/src/paths_route.rs):
+# the shim routes exactly those to the built Rust front + worker, the way
+# production resolves them, while every other verb keeps the worktree Python
+# front this suite pins. Without the routing, the retired Python legs die and
+# the canon ask names no doc (AC5). Spell
+# target/debug/fno contiguously: the smoke runner greps this file for
+# `target/debug/fno-agents` when it selects the harness's cargo build step,
+# and a split spelling selects the harness without its build (the red this
+# comment prevents).
+FRONT_BIN="$REPO_ROOT/crates/fno/target/debug/fno"
+WORKER_BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents-worker"
+if [ ! -x "$FRONT_BIN" ] || [ ! -x "$WORKER_BIN" ]; then
+  echo "FAIL: the native paths lane needs both built:" >&2
+  echo "      $FRONT_BIN" >&2
+  echo "      $WORKER_BIN" >&2
+  echo "      Fix: (cd crates/fno && cargo build --bin fno) && (cd crates/fno-agents && cargo build --bins)" >&2
+  exit 1
 fi
+printf '#!/usr/bin/env bash\nif [ "$1" = config ] && [ "$2" = paths ] && { [ "$3" = emit-shell ] || [ "$3" = shell-stub ] || [ "$3" = verify ] || [ "$3" = handoff ]; }; then\n  export FNO_AGENTS_WORKER="%s"\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$WORKER_BIN" "$FRONT_BIN" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
 # fno-py is the console script name; provide it too in case anything resolves it.
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
@@ -117,6 +123,12 @@ if [ ! -x "$AGENTS_BIN" ]; then
   exit 1
 fi
 export PATH="$AGENTS_BIN_DIR:$PATH"
+# Pin the optional-hook budget: this suite tests nudge LOGIC, and the runner's
+# load (four shards, one box) is a property of the shard, not of the code. A
+# busy-tier 1s bound fired twice on AC20's probe (2026-10-05, three runs) and
+# read as probe silence, which is indistinguishable here from a real death.
+# The tiers keep ruling in production; FNO_HOOK_BUDGET_SECS is unset there.
+export FNO_HOOK_BUDGET_SECS=30
 
 # --- sandbox: isolated state_dir + config + HOME so nothing leaks ----------
 SBX="$(mktemp -d)"
@@ -241,7 +253,10 @@ payload_compact() {  # payload_compact <transcript-path>
 }
 
 run_hook() {  # run_hook <payload> ; sets OUT, RC
-  OUT=$(printf '%s' "$1" | bash "$HOOK" 2>/dev/null); RC=$?
+  # stderr lands in a file, not /dev/null: a CI-only branch death (AC20 twice
+  # on 2026-10-05) was undiagnosable from PASS/FAIL lines alone. The file
+  # holds the LAST fire's stderr; the AC20 diagnostic dump reads it.
+  OUT=$(printf '%s' "$1" | bash "$HOOK" 2>"$SBX/hook-stderr.log"); RC=$?
 }
 
 # Same resolution order as scripts/lib/events.sh. The store commit is the
@@ -424,19 +439,36 @@ assert_absent "AC19: small window no quality block" "$OUT" '"decision":"block"'
 # === AC20: capacity branch fires on a small window near the floor ==============
 # Same 200k window, but 60k remaining (<= RESERVE): capacity fires even though
 # quality can never fire on this window. Latches once per band like the rest.
+# The two transcripts are the SAME LENGTH (only the digits differ), so when
+# both writes land in the same stat second the probe cache's size+mtime
+# fingerprint does NOT change and AC20's fire is served AC19's 55% copy (the
+# refire trace named it: measured 110000 at the 140000 case). sleep 1 forces
+# a later mtime; the production-granularity gap is filed for the hook.
+sleep 1
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/small.jsonl" 140000 "gpt-5-codex"   # 200k window, 70%, 60k left
 run_hook "$(payload "$SBX/small.jsonl")"
-# The probe rides the stale-while-revalidate cache whose busy tier may serve
-# the previous fingerprint's copy for one boundary under CI shard load; the
-# design's answer is the next Stop, which re-measures. Fire one boundary more
-# before asserting - never a third: a persistent probe death must stay red.
-if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
-  rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-  run_hook "$(payload "$SBX/small.jsonl")"
-fi
 assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
 assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
+if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
+  echo "--- AC20 diagnostics: rc, hook stderr + output of the last fire ---" >&2
+  printf 'RC: %s\nOUT: %s\n' "$RC" "$OUT" >&2
+  # >&2 LAST: `2>/dev/null >&2` would send stdout to wherever stderr now
+  # points, and the first dump round's evidence landed in /dev/null.
+  cat "$SBX/hook-stderr.log" >&2
+  "$AGENTS_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
+  # Fire #1 died between the latch touch and the emit (fire #2 is
+  # latch-silent, so OUT above cannot show it). Re-run its exact payload
+  # under bash -x with the latch cleared: the trace names the exit line.
+  rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null
+  printf '%s' "$(payload "$SBX/small.jsonl")" | bash -x "$HOOK" > "$SBX/diag-out.txt" 2> "$SBX/diag-trace.txt"
+  echo "REFIRE_RC=$? (137=SIGKILL, 143=SIGTERM, 124=timeout)" >&2
+  echo "--- AC20 diagnostic refire stdout ---" >&2
+  head -c 600 "$SBX/diag-out.txt" >&2
+  echo "" >&2
+  echo "--- AC20 diagnostic refire trace tail ---" >&2
+  tail -30 "$SBX/diag-trace.txt" >&2
+fi
 run_hook "$(payload "$SBX/small.jsonl")"
 assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
 

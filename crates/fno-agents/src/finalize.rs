@@ -1452,7 +1452,11 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 ///   4. vault-derived `<vault>/internal/<project>/handoffs/` when
 ///      `obsidian.enabled` + `obsidian.vault` are set (placement rule,
 ///      ab-f063 Wave 2 - mirrors `paths.handoffs_dir()` in the Python CLI)
-///   5. fallback `~/.fno/handoffs/<project>`
+///   5. fallback `<FNO_STATE_DIR>/handoffs/<project>` when the env names a
+///      state root, else `<home>/.fno/handoffs/<project>`. A configured
+///      `state_dir` key is deliberately not read here: the hermetic `home`
+///      parameter owns the bare default, and the ambient global config read
+///      broke every hermetic fixture on a machine that pins the key.
 ///
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
@@ -1471,6 +1475,12 @@ pub(crate) fn resolve_handoffs_dir(
     }
     let project = resolve_project_name(settings_override, home, cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // FNO_CONFIG is an explicit per-invocation pin (Python `_settings` reads
+    // it first); the ambient global config is deliberately NOT a candidate -
+    // that read broke every hermetic fixture on a machine pinning state_dir.
+    if let Some(cfg) = env_dir_unless_null("FNO_CONFIG") {
+        candidates.push(cfg);
+    }
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }
@@ -1492,10 +1502,28 @@ pub(crate) fn resolve_handoffs_dir(
             }
         }
     }
-    let base = home
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| cwd.to_path_buf());
-    base.join(".fno/handoffs").join(project)
+    // FNO_STATE_DIR pins an isolated lane's root outright, so its handoff
+    // docs land in its own state root (Python state_dir env parity). A
+    // configured `state_dir` is NOT honored here - the resolver's hermetic
+    // `home` parameter owns the bare default, and reading the ambient global
+    // config for it broke every hermetic fixture on a machine that pins the
+    // key. Named gap, not an accident.
+    let base = match std::env::var_os("FNO_STATE_DIR") {
+        Some(v)
+            if !v.is_empty()
+                && !v
+                    .to_str()
+                    .map(|s| s.eq_ignore_ascii_case("null"))
+                    .unwrap_or(false) =>
+        {
+            PathBuf::from(v)
+        }
+        _ => home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.to_path_buf())
+            .join(".fno"),
+    };
+    base.join("handoffs").join(project)
 }
 
 /// One file's `obsidian:` block, keyed per-field so a caller can merge across
@@ -2941,6 +2969,12 @@ fn resolve_postmortems_dir(
     }
     let project = resolve_project_name(settings_override, home, cwd);
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // FNO_CONFIG is an explicit per-invocation pin (Python `_settings` reads
+    // it first); the ambient global config is deliberately NOT a candidate -
+    // that read broke every hermetic fixture on a machine pinning state_dir.
+    if let Some(cfg) = env_dir_unless_null("FNO_CONFIG") {
+        candidates.push(cfg);
+    }
     if let Some(s) = settings_override {
         candidates.push(s.to_path_buf());
     }

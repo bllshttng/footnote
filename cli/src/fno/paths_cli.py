@@ -1,13 +1,11 @@
-"""CLI surface for path introspection: fno config paths handoff.
+"""CLI surface for path introspection: fno config paths (forwarder leaf).
 
-emit-shell, shell-stub and verify answer natively
-(crates/fno-agents/src/paths_cli.rs); this group still serves handoff until
-its child node ports (one verb per PR, d-450caaeb).
+All four verbs - emit-shell, shell-stub, verify and handoff - answer natively
+(crates/fno-agents/src/paths_cli.rs); this front keeps a forwarding leaf for
+handoff so `fno-py` and the test harnesses that wrap it reach the native lane
+through the one Rust classify.
 """
 from __future__ import annotations
-
-from pathlib import Path
-from typing import Optional
 
 import typer
 
@@ -18,72 +16,22 @@ app = typer.Typer(
 )
 
 
-@app.command(name="handoff")
-def handoff(
-    session_id: Optional[str] = typer.Option(
-        None,
-        "--session-id",
-        help=(
-            "Session id (full uuid or 8-hex short id). Names the canon "
-            "handoff doc unless --slug overrides."
-        ),
-    ),
-    slug: str = typer.Option(
-        "",
-        "--slug",
-        help="Human-readable slug; overrides the session-derived short id in the filename.",
-    ),
-    scope: Optional[str] = typer.Option(
-        None,
-        "--scope",
-        help=(
-            "Crown scope: name the doc after the crown, not a session. Prints "
-            "the newest existing handoff for that scope when one exists, so a "
-            "successor session resolves its predecessor's doc; today's name "
-            "when none does. Mutually exclusive with --session-id/--slug."
-        ),
-    ),
-    name_only: bool = typer.Option(
-        False, "--name-only", help="Print just the rendered filename, no directory."
-    ),
-) -> None:
-    """Print the save path for a session's canon handoff doc.
+def _forward_native(verb: str, ctx: typer.Context) -> None:
+    """Exec the Rust front with the same argv, propagating its exit code.
 
-    Backed by ``paths.handoffs_dir()``. The filename key is the session's mail
-    handle (``canonical_handle``, the last-8 of the session id) unless --slug
-    or --scope overrides. The PreCompact canon-doc hook and any session writing
-    a handoff doc shell this instead of composing a path, so the configured
-    location is the one door. A crowned session passes --scope: a crown
-    outlives its sessions, so its rolling doc keys on the scope.
+    The Rust front owns the classify (crates/fno/src/paths_route.rs) and the
+    worker_binary resolution; this front never re-states the native verb list.
     """
-    import datetime as _dt
-    import re
+    from fno.cli import _run_rust_front
 
-    from fno.harness_identity import canonical_handle
-    from fno.paths import handoffs_dir
+    _run_rust_front(["config", "paths", verb, *ctx.args])
 
-    if scope:
-        if session_id or slug:
-            raise typer.BadParameter("--scope cannot be combined with --session-id/--slug")
-        key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
-        if key == "crown-":
-            raise typer.BadParameter("a crown scope is required (--scope)")
-        directory = handoffs_dir()
 
-        def _mtime(path: Path) -> float:
-            # A concurrent refresh can unlink between glob and stat; a vanished
-            # candidate sorts oldest and the writer recreates the file anyway.
-            try:
-                return path.stat().st_mtime
-            except OSError:
-                return 0.0
-
-        existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
-        filename = existing[-1].name if existing else f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
-        typer.echo(filename if name_only else str(directory / filename))
-        return
-    if not session_id:
-        raise typer.BadParameter("a session id is required (--session-id), or a crown scope (--scope)")
-    key = slug or canonical_handle(session_id)
-    filename = f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
-    typer.echo(filename if name_only else str(handoffs_dir() / filename))
+@app.command(
+    "handoff",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    hidden=True,
+)
+def handoff(ctx: typer.Context) -> None:
+    """Forward to the native handoff verb (crates/fno-agents paths_cli.rs)."""
+    _forward_native("handoff", ctx)

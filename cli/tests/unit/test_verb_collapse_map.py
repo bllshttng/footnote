@@ -284,7 +284,10 @@ def test_map_covers_current_surface_once():
     # `backlog reconcile` KEEP row with the verb: 595 -> 594. The emit-shell
     # port retires `paths emit-shell` from the Python surface: 594 -> 593.
     # The shell-stub port retires `paths shell-stub` the same way: 593 -> 592.
-    # The verify port retires `paths verify` the same way: 592 -> 591.
+    # The handoff port retires `paths handoff` from the Python surface
+    # (592 -> 591), then re-registers the leaf as the native forwarder
+    # `fno-py` serves (591 -> 592). The verify port retires `paths verify`
+    # the same way (592 -> 591): counted from the merged file, 591.
     assert len(mapped) == 591, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
