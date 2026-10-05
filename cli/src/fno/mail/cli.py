@@ -4677,11 +4677,9 @@ def cmd_hold(
         raise typer.Exit(code=2)
 
     if status:
-        # Read the RECORD, not the gate: the gate's own-pass answers
-        # deliverable for the session's own hold, so a session asking about
-        # itself read "no hold" while the check-in read bus-only off the same
-        # row. A hand-stamped bus-only row has no clock, and the clock alone
-        # reported deliverable for held mail - the record answers both.
+        # The record, not the gate: the gate's own-pass answers deliverable
+        # for the session's own hold, so --status once read "no hold" while
+        # the check-in read bus-only off the same row.
         from fno.agents.dispatch import BUS_ONLY_POLICY
 
         entry = hold_mod.resolve_entry(handle)
@@ -4692,8 +4690,7 @@ def cmd_hold(
         if clock is not None and clock.source == hold_mod.CONVERSATION_SOURCE:
             print(
                 f"{handle}: holding mail, machine-armed while you talk "
-                f"({hold_mod.clock_description(clock)}), lifts about 2 min "
-                "after your answer"
+                f"({hold_mod.clock_description(clock)}), lifts about 2 min after your answer"
             )
             return
         label = hold_mod.dnd_label(handle)

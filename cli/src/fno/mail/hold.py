@@ -42,8 +42,7 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
-# The mark the Rust conversation arm writes on a clock it armed itself, so a
-# reader can tell a machine-armed hold from one the user set on purpose.
+# The mark the Rust conversation arm writes on a clock it armed itself.
 CONVERSATION_SOURCE = "conversation"
 
 
@@ -137,8 +136,7 @@ def _write(hold: Hold) -> Hold:
         "clock_kind": hold.clock_kind,
         "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
     }
-    # Only when set, so a clock Python writes keeps its exact legacy bytes;
-    # the Rust conversation arm writes the same key in the same position.
+    # Only when set: Python-written clocks keep their exact legacy bytes.
     if hold.source:
         fields["source"] = hold.source
     payload = json.dumps(fields)
@@ -321,13 +319,13 @@ def dnd_label(handle) -> Optional[str]:
     case and the one state where the flag is stale. ``"held"`` when the hold
     has no end to show. A duration whenever there is one, because a hold with
     no visible end is what the operator asked to avoid. A machine-armed hold
-    reads with an ``(auto)`` suffix, so nobody reads it as a hold they armed.
+    reads with an ``(auto)`` suffix.
     """
     if lapsed(handle):
         return None
     clock = read_any(handle)
-    suffix = " (auto)" if clock is not None and clock.source == CONVERSATION_SOURCE else ""
-    return (remaining_label(handle) or "held") + suffix
+    auto = clock is not None and clock.source == CONVERSATION_SOURCE
+    return (remaining_label(handle) or "held") + (" (auto)" if auto else "")
 
 
 def remaining_label(handle) -> Optional[str]:
