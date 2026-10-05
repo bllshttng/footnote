@@ -131,10 +131,11 @@ mod tests {
             keeps("ts:>=2026-10-01", &fs[0]),
             "the row after the date keeps"
         );
+        _refusal_case();
+        _prefilter_case();
     }
 
-    #[test]
-    fn node_only_key_refuses_on_the_feed_surface() {
+    fn _refusal_case() {
         // AC8-EDGE: the shared refusal names `s:` as node-only, and the
         // caller arms no fetch from a refused parse.
         let err = crate::search_query::parse(
@@ -146,8 +147,7 @@ mod tests {
         assert!(err.contains("s:"), "the refusal names the key: {err}");
     }
 
-    #[test]
-    fn prefilter_cases() {
+    fn _prefilter_case() {
         let pf = |q: &str| prefilter(&parse_query(q).unwrap());
         // h:codex k:question -> --harness codex --kind question
         let f = pf("h:codex k:question").expect("one positive group pushes");

@@ -79,18 +79,12 @@ fn overlay_in(
     items: Vec<crate::feed_overlay::FeedItem>,
     order: feed_view::FeedOrder,
 ) -> FeedOverlay {
-    let sel = feed_view::first_item_slot(&items, order);
-    FeedOverlay {
-        items,
-        sel,
-        error: None,
-        inflight: false,
-        want: false,
-        gen: 0,
-        hpan: 0,
-        last_fold: None,
-        order,
-    }
+    let mut f = feed_view::open_overlay(None, 0);
+    f.order = order;
+    f.win.items = items;
+    f.want_page = None;
+    f.sel = feed_view::first_item_slot(&f.win.items, order);
+    f
 }
 
 /// A pane-hosted row, so the joined case exercises agent_hit's FocusPane arm.
@@ -427,7 +421,7 @@ fn width_rows() {
             it
         })
         .collect();
-    v.feed.as_mut().unwrap().items = many;
+    v.feed.as_mut().unwrap().win.items = many;
     for _ in 0..visible + 20 {
         v.scroll_feed(true);
     }
@@ -436,7 +430,7 @@ fn width_rows() {
     assert_eq!(v.feed_offset, 10);
 
     let mut v = two_pane_view(); // 30 rows
-    let mut items = overlay(vec![]).items;
+    let mut items = overlay(vec![]).win.items;
     for i in 0..20 {
         let mut it = feed_item(Some("x-n"), Some("s-n"));
         it.title = format!("event {i}");
@@ -1115,8 +1109,10 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
     let mut v = view_with_rows(vec![]);
     let mut it = feed_item(Some("x-a"), Some("s-1"));
     it.ts = "2026-09-28T16:00:00Z".into();
+    it.cursor = "[\"a\"]".into();
     let mut other = feed_item(Some("x-b"), Some("s-2"));
     other.ts = "2026-09-28T17:00:00Z".into();
+    other.cursor = "[\"b\"]".into();
     v.feed = Some(overlay(vec![it.clone(), other.clone()]));
     v.feed.as_mut().unwrap().last_fold =
         Some(Instant::now() - feed_view::FEED_REFRESH_EVERY - std::time::Duration::from_secs(1));
