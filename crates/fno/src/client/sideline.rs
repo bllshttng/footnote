@@ -724,6 +724,9 @@ impl View {
                     cells[r * cols].fg = crate::theme::dim_fg(&self.theme);
                 }
                 self.paint_card_identity(cells, r, cols, text_w, drow);
+                if let DisplayRow::CardMetrics(a) = drow {
+                    self.paint_card_activity(cells, r, cols, text_w, a, card_indent + depth * 2);
+                }
             }
         }
         // The density button, painted LAST over the sideline's top row.
@@ -1227,6 +1230,36 @@ impl View {
                 };
                 cell.flags = 0;
             }
+        }
+    }
+
+    /// The activity ramp's failure colors: each glyph cell wears ok, warn
+    /// or error by its interval's failed share (the heights and the kinds
+    /// come from [`card_line::activity_cell`]). Painted over the metrics
+    /// row after the text lands, the same pass shape as the identity spans.
+    fn paint_card_activity(
+        &self,
+        cells: &mut [Cell],
+        row: usize,
+        cols: usize,
+        text_w: usize,
+        a: &AgentRow,
+        pad: usize,
+    ) {
+        let Some(cell) = card_line::activity_cell(a) else {
+            return;
+        };
+        let line = &mut cells[row * cols..row * cols + text_w];
+        for (n, kind) in cell.kinds.iter().enumerate() {
+            let col = pad + n;
+            if col >= text_w {
+                break;
+            }
+            line[col].fg = match kind {
+                0 => self.theme.ok,
+                1 => self.theme.warn,
+                _ => self.theme.error,
+            };
         }
     }
 

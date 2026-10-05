@@ -14,6 +14,12 @@ const EIGHTHS: [char; 8] = [
 /// blank. No brackets, no pipe, no ellipsis.
 pub(super) fn ctx_meter_text(pct: u8, cells: usize) -> String {
     let eighths = (usize::from(pct.min(100)) * cells * 8).div_ceil(100);
+    format!("{} {pct}%", bar_of(eighths, cells))
+}
+
+/// The bar alone: `eighths` total eighth-cells spread left to right over
+/// `cells` cells, a partial glyph in its own cell, the rest blank.
+pub(super) fn bar_of(eighths: usize, cells: usize) -> String {
     let mut bar = String::new();
     for i in 0..cells {
         let level = eighths.saturating_sub(i * 8).min(8);
@@ -23,7 +29,7 @@ pub(super) fn ctx_meter_text(pct: u8, cells: usize) -> String {
             bar.push(EIGHTHS[level - 1]);
         }
     }
-    format!("{bar} {pct}%")
+    bar
 }
 
 /// The list row's context meter: three cells, percent after the bar.

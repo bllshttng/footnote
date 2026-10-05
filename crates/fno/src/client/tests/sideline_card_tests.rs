@@ -183,6 +183,9 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     agents[1].last_activity_age_s = Some(36);
     agents[1].node = Some("x-4310".into());
     agents[1].model = Some("gpt-6.1-sol".into());
+    // The activity fixture: four intervals, the last idle, so the ramp
+    // scales to the card's own max (8) and grades one warn, one error.
+    agents[1].activity = Some(vec![(2, 0), (4, 1), (8, 4), (0, 0)]);
     agents[0].model = Some("claude-opus-5-5".into());
     agents[0].crown_title = Some("Lead of mux".into());
     let mut v = card_view(agents);
@@ -217,8 +220,9 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
     let over_window = frame_text(&over_frame);
-    assert!(over_window.contains("█████ 129%"), "{over_window:?}");
+    assert!(over_window.contains("▁▁▁▁▃▅█▁ · 129%"), "{over_window:?}");
     v.layout.agents[1].context_used_pct = None;
+    v.layout.agents[1].activity = None;
     v.layout.agents[1].compaction_count = None;
     v.layout.agents[1].session_cost_cents = None;
     v.layout.agents[1].session_tokens = None;
@@ -227,7 +231,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs());
     let unmeasured = frame_text(&v.compose());
     assert!(
-        unmeasured.contains("░░░░░░░░░░░░░ · ░░░ · ░░░░░░░░"),
+        unmeasured.contains("░░░░░░░░ · ░░░░ · ░░░ · ░░░░░░░░"),
         "a claude card whose fold has not landed pulses every field: {unmeasured:?}"
     );
     // Past 10s the fold-less row gives up the pulse: static dashes at the
@@ -235,7 +239,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs() - 11);
     let gave_up = frame_text(&v.compose());
     assert!(
-        gave_up.contains("-             · -   · -"),
+        gave_up.contains("-        · -    · -   · -"),
         "a row past 10s holds static dashes: {gave_up:?}"
     );
     assert!(text.contains("w1"), "{text:?}");
@@ -245,7 +249,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("█▍    26% · 3c · 12.3k tok · one message"),
+        text.contains("▁▁▁▁▃▅█▁ · 26% · 3c · 12.3k tok · one message"),
         "the compact metrics line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
@@ -257,37 +261,111 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     // skeletons, never `?`.
     let hidden = |c: &card_line::MetricCell| matches!(c, card_line::MetricCell::Hidden);
     let mut bare = agent_row("w9", 6, Some(AgentBadge::Working), false);
-    assert!(card_line::metric_cells(&bare, 0).iter().all(hidden));
+    assert!(card_line::metric_cells(&bare).iter().all(hidden));
     bare.harness = Some("claude".into());
     bare.harness_session_id = Some("sess-w9".into());
     bare.crown_level = Some(2);
     bare.context_used_pct = Some(26);
     bare.session_tokens = Some(999);
     bare.session_cost_cents = Some(77);
-    let cells = card_line::metric_cells(&bare, 0);
-    assert!(matches!(cells[0], card_line::MetricCell::Value(_)));
-    assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "999 tok"));
+    let cells = card_line::metric_cells(&bare);
+    assert!(
+        matches!(cells[0], card_line::MetricCell::Loading),
+        "an unserved activity waits on the fold, it never fakes a line"
+    );
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
     // Cost left the metrics line (it rides line 2, served-only): a crowned
     // lead's session_cost_cents never reach this line at all.
     // A codex row keeps the populated-paint contract off its unreportable
     // fields: context and compactions hide even when the wire carries them,
-    // while its tokens still arrive.
+    // while its tool activity and tokens still land.
     let mut cx = agent_row("w10", 7, Some(AgentBadge::Working), false);
     cx.harness = Some("codex".into());
     cx.harness_session_id = Some("sess-w10".into());
     cx.context_used_pct = Some(40);
     cx.session_tokens = Some(500);
-    let cells = card_line::metric_cells(&cx, 0);
+    let cells = card_line::metric_cells(&cx);
     assert!(
-        hidden(&cells[0]) && hidden(&cells[1]),
+        hidden(&cells[1]) && hidden(&cells[2]),
         "codex never reports context or compactions"
     );
-    assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "500 tok"));
-    // The history ramp's bar math (pct -> bar height); the full ramp itself
-    // only paints under the spin clock, so the fill bar stands in tests.
-    assert_eq!(card_line::ramp_char(0), '▁');
-    assert_eq!(card_line::ramp_char(50), '▄');
-    assert_eq!(card_line::ramp_char(100), '▇');
+    assert!(matches!(cells[0], card_line::MetricCell::Loading));
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "500 tok"));
+}
+
+/// The ramp math: heights scale to the card's own max over the served
+/// intervals (zero reads the flat baseline, the max reads the full block),
+/// fewer than two intervals read the narrow fill bar, and each cell's
+/// failed share grades its color kind (0 ok, 1 warn, 2 error).
+#[test]
+fn activity_ramp_scales_to_the_cards_own_max_and_grades_failures() {
+    let mut a = agent_row("act", 8, Some(AgentBadge::Working), false);
+    a.harness = Some("claude".into());
+    a.activity = Some(vec![(2, 0), (4, 1), (8, 4), (0, 0)]);
+    let cell = card_line::activity_cell(&a).expect("served intervals draw");
+    assert_eq!(
+        cell.text,
+        "\u{2581}\u{2581}\u{2581}\u{2581}\u{2583}\u{2585}\u{2588}\u{2581}"
+    );
+    assert_eq!(cell.kinds, vec![0, 0, 0, 0, 0, 1, 2, 0]);
+    // A full window slides the oldest cell out; eight cells stay eight.
+    a.activity = Some(vec![
+        (1, 0),
+        (1, 0),
+        (2, 0),
+        (3, 0),
+        (5, 0),
+        (8, 2),
+        (13, 5),
+        (0, 0),
+    ]);
+    let cell = card_line::activity_cell(&a).unwrap();
+    assert_eq!(cell.text.chars().count(), 8);
+    assert_eq!(cell.kinds[6], 1, "5 of 13 is under half: warn");
+    // One interval: the narrow fill bar, busy = full, idle = blank.
+    a.activity = Some(vec![(3, 0)]);
+    let cell = card_line::activity_cell(&a).unwrap();
+    assert_eq!(cell.text, "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}");
+    assert_eq!(cell.kinds, vec![0, 0, 0, 0, 0], "no failures: ok");
+    a.activity = Some(vec![(0, 0)]);
+    let cell = card_line::activity_cell(&a).unwrap();
+    assert_eq!(cell.text, "     ");
+    // An empty ring waits; nothing served hides for a bare pane.
+    a.activity = Some(vec![]);
+    assert!(card_line::activity_cell(&a).is_none());
+    a.activity = None;
+    assert!(card_line::activity_cell(&a).is_none());
+}
+
+/// The painter wears each ramp cell in its kind's theme color, error
+/// included, over the metrics row's own cells.
+#[test]
+fn the_activity_painter_colors_cells_by_failed_share() {
+    let mut agents = Vec::new();
+    let mut a = agent_row("act", 5, Some(AgentBadge::Working), false);
+    a.harness = Some("claude".into());
+    a.harness_session_id = Some("sess-act".into());
+    a.activity = Some(vec![(4, 3), (4, 0)]);
+    agents.push(a);
+    let mut v = card_view(agents);
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let theme = v.theme.clone();
+    let frame = v.compose();
+    let mut saw_ok = false;
+    let mut saw_error = false;
+    for cell in &frame.cells {
+        if cell.c == '\u{2588}' {
+            if cell.fg == theme.error {
+                saw_error = true;
+            }
+            if cell.fg == theme.ok {
+                saw_ok = true;
+            }
+        }
+    }
+    assert!(saw_error, "the majority-failed cell wears the error color");
+    assert!(saw_ok, "the clean cell wears the ok color");
 }
 
 #[test]

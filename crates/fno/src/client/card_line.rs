@@ -1,8 +1,6 @@
 //! Shared sideline card fields and hit ranges.
 
-use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::sync::{Mutex, OnceLock};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -53,15 +51,16 @@ pub(super) enum MetricCell {
     Hidden,
 }
 
-/// The three metrics-line fields in paint order: context, compactions,
-/// tokens. Cost moved to line 2 (the operator's 2026-10-04 mockup; ruled
-/// d-027912c6), where card_detail_text paints it served-only. Hidden
-/// outranks served: codex transcripts carry no context window or
-/// compaction boundaries. Only claude and codex transcripts resolve at all
-/// (`SessionTranscripts::find`), so any other harness - and a bare pane or
-/// an exited row - can never be measured, and its unserved fields hide
-/// instead of pulsing forever.
-pub(super) fn metric_cells(a: &AgentRow, now: u64) -> [MetricCell; 3] {
+/// The four metrics-line fields in paint order: activity, context,
+/// compactions, tokens. Cost moved to line 2 (the operator's 2026-10-04
+/// mockup; ruled d-027912c6), where card_detail_text paints it served-only.
+/// Hidden outranks served: codex transcripts carry no context window or
+/// compaction boundaries, so those two fields hide there, while its tool
+/// calls land like any other transcript. Only claude and codex transcripts
+/// resolve at all (`SessionTranscripts::find`), so any other harness shows
+/// a dash for the activity cell - never a fabricated flat line - and a
+/// bare pane or an exited row's unserved fields hide instead of pulsing.
+pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
     let reportable = !a.exited && matches!(a.harness.as_deref(), Some("claude" | "codex"));
     let codex = a.harness.as_deref() == Some("codex");
     let field = |value: Option<String>, hidden: bool| {
@@ -75,60 +74,93 @@ pub(super) fn metric_cells(a: &AgentRow, now: u64) -> [MetricCell; 3] {
             }
         }
     };
+    let activity = match a.harness.as_deref() {
+        Some("claude" | "codex") => match activity_cell(a) {
+            Some(cell) => MetricCell::Value(cell.text),
+            None => field(None::<String>, false),
+        },
+        // A transcriptless harness (opencode, pi): a dash, never a fake zero.
+        Some(_) => MetricCell::Value("-".into()),
+        // A bare pane has nothing that could ever land: hidden.
+        None => MetricCell::Hidden,
+    };
     [
-        field(history_cell(a, now), codex),
+        activity,
+        field(a.context_used_pct.map(|p| format!("{p}%")), codex),
         field(a.compaction_count.map(|n| format!("{n}c")), codex),
         field(a.session_tokens.map(super::row_meter::token_cell), false),
     ]
 }
 
-/// The line-3 context cell's history: paint-time samples of
-/// `context_used_pct`, one per 5s the sideline paints the row, capped at 8,
-/// drawn one ramp cell per sample once two exist. Before that, and whenever
-/// the spin clock is absent (tests and snapshots), the cell is a narrow 5-cell
-/// fill bar: it measures the current percent instead of decorating it.
-/// Sampled only under the spin clock, keyed by session id, name fallback.
-const SAMPLE_EVERY_S: u64 = 5;
-const RAMP_CAP: usize = 8;
+/// The line-3 activity cell: the served intervals from the server's ring,
+/// drawn as up to 8 ramp cells scaled to the card's own max, one height per
+/// refresh interval. Fewer than two intervals reads as the narrow 5-cell
+/// fill bar of the latest level; none reads as waiting (the skeleton). The
+/// ramp glyph set carries all eight block heights so one row still shows
+/// shape; the painter colors each cell by its failed share.
+const ACTIVITY_CELLS: usize = 8;
 const FILL_BAR_CELLS: usize = 5;
-const RAMP_CHARS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+const ACTIVITY_RAMP: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-pub(super) fn ramp_char(p: u8) -> char {
-    RAMP_CHARS[(usize::from(p.min(100)) * 7 / 101).min(6)]
+pub(super) struct ActivityCell {
+    /// The glyphs, no percent suffix: context is a plain number beside it.
+    pub text: String,
+    /// One color kind per glyph (0 ok, 1 warn, 2 error), same length.
+    pub kinds: Vec<u8>,
 }
 
-static HISTORY: OnceLock<Mutex<HashMap<String, (u64, VecDeque<u8>)>>> = OnceLock::new();
-
-fn history_cell(a: &AgentRow, now: u64) -> Option<String> {
-    let p = a.context_used_pct?;
-    if crate::lattice::spin_epoch().is_none() {
-        return Some(super::row_meter::ctx_meter_text(p, FILL_BAR_CELLS));
+/// The failed-share color stops: zero failures paints ok, any share under
+/// half paints warn, half or more paints error.
+fn color_kind(calls: u8, failed: u8) -> u8 {
+    if calls == 0 || failed == 0 {
+        0
+    } else if failed * 2 < calls {
+        1
+    } else {
+        2
     }
-    let key = a
-        .harness_session_id
-        .clone()
-        .unwrap_or_else(|| a.name.clone());
-    let mut g = HISTORY
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let e = g.entry(key).or_default();
-    if e.0 + SAMPLE_EVERY_S <= now {
-        e.0 = now;
-        e.1.push_back(p);
-        while e.1.len() > RAMP_CAP {
-            e.1.pop_front();
-        }
-    }
-    if e.1.len() < 2 {
-        return Some(super::row_meter::ctx_meter_text(p, FILL_BAR_CELLS));
-    }
-    let ramp: String = std::iter::repeat(ramp_char(e.1[0]))
-        .take(RAMP_CAP - e.1.len())
-        .chain(e.1.iter().map(|&s| ramp_char(s)))
-        .collect();
-    Some(format!("{ramp} {p}%"))
 }
+
+pub(super) fn activity_cell(a: &AgentRow) -> Option<ActivityCell> {
+    let pairs = a.activity.as_ref()?;
+    if pairs.is_empty() {
+        return None; // no interval closed yet: the skeleton waits
+    }
+    if pairs.len() < 2 {
+        // The narrow fill bar of the latest level: busy or idle at the
+        // coarsest resolution. One interval has no share to grade, so the
+        // bar paints in the color that pair earns and the rest stays ok.
+        let (calls, failed) = pairs[0];
+        let eighths = if calls == 0 { 0 } else { FILL_BAR_CELLS * 8 };
+        let bar = super::row_meter::bar_of(eighths, FILL_BAR_CELLS);
+        let kind = color_kind(calls, failed);
+        let kinds = bar
+            .chars()
+            .map(|c| if c == ' ' { 0 } else { kind })
+            .collect();
+        return Some(ActivityCell { text: bar, kinds });
+    }
+    let max = pairs.iter().map(|p| p.0).max().unwrap_or(0);
+    let pad = ACTIVITY_CELLS.saturating_sub(pairs.len());
+    let mut text: String = std::iter::repeat('▁').take(pad).collect();
+    let mut kinds: Vec<u8> = std::iter::repeat(0).take(pad).collect();
+    for (calls, failed) in pairs {
+        text.push(ramp_height(*calls, max));
+        kinds.push(color_kind(*calls, *failed));
+    }
+    Some(ActivityCell { text, kinds })
+}
+
+/// The height map: zero reads the flat baseline; everything else scales to
+/// the card's own max over the 8 cells.
+fn ramp_height(calls: u8, max: u8) -> char {
+    if calls == 0 || max == 0 {
+        ACTIVITY_RAMP[0]
+    } else {
+        ACTIVITY_RAMP[(usize::from(calls) * ACTIVITY_CELLS / usize::from(max)).clamp(1, 7)]
+    }
+}
+
 /// Past this age a Loading field gives up the pulse and holds a static dash.
 const LOADING_DASH_AFTER_S: u64 = 10;
 
@@ -136,7 +168,7 @@ const LOADING_DASH_AFTER_S: u64 = 10;
 /// A row whose Loading fields are all past [`LOADING_DASH_AFTER_S`] holds a
 /// static dash and arms no more frames.
 pub(super) fn has_loading(a: &AgentRow, now: u64) -> bool {
-    metric_cells(a, now)
+    metric_cells(a)
         .iter()
         .any(|c| matches!(c, MetricCell::Loading))
         && !loading_gave_up(a, now)
@@ -149,14 +181,14 @@ pub(super) fn loading_gave_up(a: &AgentRow, now: u64) -> bool {
     now.saturating_sub(a.started_at.unwrap_or(0)) > LOADING_DASH_AFTER_S
 }
 
-/// Skeleton widths mirror each field's served width (spark+percent, count,
+/// Skeleton widths mirror each field's served width (ramp, percent, count,
 /// tokens) so a landing fold does not reflow the line.
-const LOADING_W: [usize; 3] = [13, 3, 8];
+const LOADING_W: [usize; 4] = [8, 4, 3, 8];
 
 pub(super) fn metrics(a: &AgentRow, now: u64, message: Option<&str>, width: usize) -> String {
     let phase = crate::lattice::spin_epoch().map(|t0| t0.elapsed().as_millis() as u64);
     let gave_up = loading_gave_up(a, now);
-    let fields: Vec<String> = metric_cells(a, now)
+    let fields: Vec<String> = metric_cells(a)
         .iter()
         .enumerate()
         .filter_map(|(i, c)| match c {
