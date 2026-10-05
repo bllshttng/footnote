@@ -527,8 +527,27 @@ def ship_batch(
                 reason=base_msg or "stale base: refused to open batch PR",
                 members=members,
             )
-        # Push the batch branch first. `fno agents workspace worktree ensure` creates only a LOCAL
-        # branch and the batched worker commits locally, so `gh pr create --head`
+        # Duplicate guard before the push: the 2026-10-04 twins ran on an
+        # automated create path, so the batch lane scans open PRs through the
+        # same verb the ship create flow uses. Refuse via the abandon path;
+        # any skip reason prints and proceeds.
+        from fno.pr._preflight import check_duplicate_pr
+
+        dup_code, dup_msg = check_duplicate_pr(
+            cwd=worktree, base=f"origin/{base}", title=pr_title
+        )
+        if dup_msg and dup_code == 0:
+            import sys
+
+            print(f"batch.ship: {dup_msg}", file=sys.stderr)
+        if dup_code != 0:
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult(
+                "abandoned", domain,
+                reason=dup_msg or "duplicate PR: refused to open a twin",
+                members=members,
+            )
+        # Push the batch branch first. `fno agents workspace worktree ensure` creates only a LOCAL        # branch and the batched worker commits locally, so `gh pr create --head`
         # (which does NOT push) would fail on an unpublished branch and abandon
         # the batch (codex P1). Push explicitly, then create.
         push = run(["git", "push", "-u", "origin", branch], cwd=worktree)

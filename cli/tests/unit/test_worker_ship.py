@@ -106,6 +106,8 @@ def test_ac2_hp_ship_creates_pr(tmp_path, monkeypatch):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from fno.worker.ship import ship
         result = ship(
@@ -142,6 +144,8 @@ def test_ac2_hp_ship_writes_artifact(tmp_path, monkeypatch):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from fno.worker.ship import ship
         ship(
@@ -350,6 +354,8 @@ def test_ac1_hp_ship_does_not_arm_automerge(tmp_path, monkeypatch):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from importlib import reload
         import fno.worker.ship as ship_mod
@@ -399,6 +405,8 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path, monkeypatch):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from fno.worker.ship import ship
         result = ship(
@@ -441,6 +449,8 @@ def test_ac2_err_stamp_failure_reports_incomplete_delivery(tmp_path, monkeypatch
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from fno.worker.ship import ship
         result = ship(
@@ -473,6 +483,8 @@ def test_no_node_id_skips_stamp(tmp_path):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from fno.worker.ship import ship
         ship(
@@ -486,11 +498,11 @@ def test_no_node_id_skips_stamp(tmp_path):
     assert mock_run.call_count == 3
 
 
-# ---- AC1-UI: a stale base short-circuits before gh pr create ----
+# ---- AC1-UI: a guard refusal short-circuits before gh pr create ----
 
-def test_stale_base_refusal_blocks_pr_create(tmp_path, monkeypatch):
-    """A stale base makes ship() error out with the refusal text and never
-    reach gh pr create."""
+def test_guard_refusal_blocks_pr_create(tmp_path, monkeypatch):
+    """A guard refusal (stale base, or a duplicate PR) makes ship() error out
+    with the refusal text and never reach gh pr create."""
     monkeypatch.chdir(tmp_path)
     state_path = _make_state(tmp_path)
 
@@ -503,6 +515,8 @@ def test_stale_base_refusal_blocks_pr_create(tmp_path, monkeypatch):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(3, refusal)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from importlib import reload
         import fno.worker.ship as ship_mod
@@ -517,6 +531,37 @@ def test_stale_base_refusal_blocks_pr_create(tmp_path, monkeypatch):
     assert result["action"] == "error"
     assert refusal in result["error"]
     # gh pr create was never invoked (only git rev-parse + gh pr list ran).
+    assert mock_run.call_count == 2
+    assert not any("create" in str(c) for c in mock_run.call_args_list)
+
+    # The duplicate guard's refusal maps to the same error dict and the same
+    # never-create posture - the check that would have stopped the 2026-10-04
+    # twins on this path.
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
+        MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
+    ]
+    dup_refusal = (
+        "pr-create: REFUSED: an open PR already touches the same changed files"
+    )
+
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(1, dup_refusal)
+    ):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="feat: twin",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "error"
+    assert dup_refusal in result["error"]
     assert mock_run.call_count == 2
     assert not any("create" in str(c) for c in mock_run.call_args_list)
 
@@ -536,6 +581,8 @@ def test_non_full_verification_refuses_pr_create(tmp_path, monkeypatch):
 
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
     ):
         from fno.worker.ship import ship
 

@@ -6,9 +6,12 @@
 //! touches the same changed files with an overlapping subject. The refusal
 //! names the PR, its branch and its author; an explicit `--not-duplicate <n>`
 //! passes it. On pass it execs `gh pr create --title --body-file`.
+//! `--check-only` runs the scan alone (exit 0 clean, exit 3 twin) for callers
+//! that create through another door, such as the worker and batch ship paths.
 //!
 //! Exit codes:
-//! * `0` the PR was created (gh's output passes through)
+//! * `0` the PR was created (gh's output passes through), or the scan was
+//!   clean under `--check-only`
 //! * `3` a duplicate refused
 //! * `2` usage or local read error
 //! * `4` a GitHub read failed
@@ -23,7 +26,7 @@ const CREATE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Open-PR pages read before the scan gives up expanding (a warning names the
 /// bound); 100 rows per page.
 const MAX_PAGES: usize = 3;
-const USAGE: &str = "usage: fno do pr create --title <t> --body-file <path> [--base <branch>] [--not-duplicate <pr>]...";
+const USAGE: &str = "usage: fno do pr create --title <t> --body-file <path> [--base <branch>] [--not-duplicate <pr>]... | --check-only --title <t> [--base <branch>]";
 
 #[derive(Debug)]
 struct Args {
@@ -31,6 +34,7 @@ struct Args {
     body_file: String,
     base: String,
     not_duplicates: Vec<i64>,
+    check_only: bool,
     cwd: PathBuf,
 }
 
@@ -40,6 +44,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         body_file: String::new(),
         base: "main".to_string(),
         not_duplicates: Vec::new(),
+        check_only: false,
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
     let mut i = 0;
@@ -71,6 +76,11 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 a.not_duplicates.push(n);
                 i += 1;
             }
+            // The scan-only posture the worker and batch create sites run
+            // before their own `gh pr create`: refuse on a twin, never create.
+            "--check-only" => {
+                a.check_only = true;
+            }
             // Test seam, same as pr-body-check's.
             "--cwd" => {
                 a.cwd = PathBuf::from(take("--cwd")?);
@@ -83,7 +93,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if a.title.is_empty() {
         return Err(format!("--title is required\n{USAGE}"));
     }
-    if a.body_file.is_empty() {
+    if !a.check_only && a.body_file.is_empty() {
         return Err(format!("--body-file is required\n{USAGE}"));
     }
     Ok(a)
@@ -305,6 +315,9 @@ fn run(a: &Args, gh: Gh) -> i32 {
             3
         }
         Ok(None) => {
+            if a.check_only {
+                return 0;
+            }
             let cmd: Vec<String> = vec![
                 "gh".to_string(),
                 "pr".to_string(),
@@ -466,11 +479,12 @@ mod tests {
         std::fs::write(dir.path().join("f.txt"), "changed\n").unwrap();
         git(&["add", "f.txt"]);
         git(&["commit", "-q", "-m", "change"]);
-        let repo_args = Args {
+        let mut repo_args = Args {
             title: "fix: the guard subject".into(),
             body_file: "b".into(),
             base: "main".into(),
             not_duplicates: vec![],
+            check_only: false,
             cwd: dir.path().to_path_buf(),
         };
         let gh = |path: &str| {
@@ -478,12 +492,36 @@ mod tests {
             Err("HTTP 502".to_string())
         };
         assert_eq!(run(&repo_args, &gh), 4);
+        // --check-only never creates: a clean scan exits 0 without reaching
+        // the create leg, and a twin exits 3 with the same refusal.
+        repo_args.check_only = true;
+        repo_args.body_file = String::new();
+        let clean = |path: &str| {
+            assert!(path.contains("/pulls?state=open"));
+            Ok("[]".to_string())
+        };
+        assert_eq!(run(&repo_args, &clean), 0);
+        let twin = |path: &str| {
+            if path.contains("/pulls?state=open") {
+                Ok(json_array(vec![pr_json(
+                    9,
+                    "fix: the guard subject",
+                    "other",
+                    "someone",
+                )]))
+            } else {
+                assert!(path.contains("/pulls/9/files"));
+                Ok(json_array(vec![file_json("f.txt")]))
+            }
+        };
+        assert_eq!(run(&repo_args, &twin), 3);
         // Exit 2: a non-repo cwd fails the branch read before any gh call.
         let a = Args {
             title: "t".into(),
             body_file: "b".into(),
             base: "main".into(),
             not_duplicates: vec![],
+            check_only: false,
             cwd: PathBuf::from("/"),
         };
         let gh = |_: &str| Err("HTTP 502".to_string());
@@ -491,6 +529,9 @@ mod tests {
         assert_eq!(run(&a, &gh), 2);
         assert!(parse_args(&args(&["--nope"])).is_err());
         assert!(parse_args(&args(&["--title", "t"])).is_err());
+        // --check-only drops the --body-file requirement.
+        let only = parse_args(&args(&["--check-only", "--title", "t"])).unwrap();
+        assert!(only.check_only);
         assert!(parse_args(&args(&[
             "--title",
             "t",
