@@ -1,6 +1,6 @@
 # Run 0 results: Terminal-Bench 2 through Harbor
 
-This is the iMac run, the one that decides (Amendments 6, 7 and 10). The tables count the record Amendment 13 defines. A trial is a 1302 exclusion only when its agent log carries z.ai's rate-limit error. Two earlier sets of tables used a substring test that misread ordinary timeouts as rate limits. They sit in their own sections below, labelled. The arm64 pilot sits in its own section and fires no rule.
+This is the iMac run, the one that decides (Amendments 6, 7 and 10). The tables count the record Amendment 13 defines. A 1302 exclusion needs z.ai's rate-limit error in the trial's agent log. Two earlier sets of tables used a substring test that misread ordinary timeouts as rate limits. They sit in their own sections below, labelled. The arm64 pilot sits in its own section and fires no rule.
 
 The numbers come from `run/report_run0.py`. Its `final` mode prints the tables here. With `HARNESS_FIT_LEGACY_1302=1`, its `first` and `retried` modes reproduce both earlier sets exactly.
 
@@ -11,7 +11,7 @@ The numbers come from `run/report_run0.py`. Its `final` mode prints the tables h
 - Model: `glm-5.3-flash` through z.ai at effort high. The claude-code arm asks for `glm-5.3-flash[1m]` (Amendment 10).
 - Harness versions inside the task containers: Claude Code 2.1.286, opencode 1.18.34, pi 1.0.0. Two opencode trials and two pi trials recorded no version.
 - Arm order ran: pi, opencode, terminus-2, then claude-code. The seeded order put claude-code second. Its first smoke read as a false negative and the arm ran last (Amendment 10).
-- Retries of rate-limited trials ran on 2026-10-04 from 04:58Z to 12:31Z (Amendment 12) and on 2026-10-05 from 16:33Z to 17:51Z (Amendment 13).
+- Amendment 12 retries ran on 2026-10-04 from 04:58Z to 12:31Z. Amendment 13 retries ran on 2026-10-05 from 16:33Z to 17:51Z.
 - zcode is `unavailable`: the iMac has no ZCode.app, and the zcode adapter stays out of this repo (Amendment 6).
 
 ## Per arm
