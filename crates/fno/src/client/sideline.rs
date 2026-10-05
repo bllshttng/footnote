@@ -63,6 +63,13 @@ fn head_label(column: AgentSortColumn) -> &'static str {
 
 impl View {
     fn worker_columns(&self, text_w: u16) -> Vec<Constraint> {
+        // A card paints two live columns: the status glyph and the name.
+        // The list's five need ~42 and starve the default 28-col panel,
+        // which collapsed the glyph cell to zero and left lines 2-3 flush
+        // (the operator's 2026-10-04 screenshot). Two columns never starve.
+        if self.sideline_layout == sideline_color::SidelineLayout::Card {
+            return vec![Constraint::Length(2), Constraint::Min(8)];
+        }
         // The name takes a quarter of the surplus over the fixed cells, the
         // description first (d-36438ea4); the message keeps the Fill(3)
         // surplus. Both layouts use the same rule. `Min`, not `Length`: the
@@ -430,12 +437,18 @@ impl View {
         let rects = self.worker_column_rects(text_w as u16);
         if density != Density::Slim {
             let name_w = rects[1].width as usize;
+            // Card mode carries two columns; the meter slots it empties
+            // answer zero instead of indexing past the pair.
+            let slots = if card {
+                (name_w, 0, 0)
+            } else {
+                (name_w, rects[2].width as usize, rects[4].width as usize)
+            };
             let table_rows: Vec<RtRow> = display
                 .iter()
                 .enumerate()
                 .map(|(i, drow)| {
                     let depth = row_depths.get(i).copied().unwrap_or(0);
-                    let slots = (name_w, rects[2].width as usize, rects[4].width as usize);
                     self.sideline_table_row(drow, depth, slots, now)
                 })
                 .collect();
@@ -477,6 +490,7 @@ impl View {
             if r > table_h {
                 break;
             }
+            let depth = row_depths.get(i).copied().unwrap_or(0);
             let mark_caret = matches!(
                 drow,
                 DisplayRow::Sel(row)
@@ -532,30 +546,37 @@ impl View {
                     header_band_text(&format!("{}{label}", view_caret(*view)), rollup, band_w),
                     header_band_flags(false),
                 )),
-                // Card lines 2 and 3 indent under the name (the operator's
-                // 2026-10-04 mockup): their pad is the name column's x, so
-                // the edge bar paints into it and no line starts at column 0.
+                // Card lines 2 and 3 indent under the name TEXT (the
+                // operator's 2026-10-04 mockup): the name cell's own
+                // `{mark} ` prefix plus the row's lineage depth, on top of
+                // the name column's x.
                 DisplayRow::CardDetail(a) => Some((
-                    format!(
-                        "{:>iw$}{}",
-                        "",
-                        self.card_detail_text(a, now, text_w.saturating_sub(card_indent)),
-                        iw = card_indent
-                    ),
+                    {
+                        let pad = card_indent + depth * 2 + 2;
+                        format!(
+                            "{:>iw$}{}",
+                            "",
+                            self.card_detail_text(a, now, text_w.saturating_sub(pad)),
+                            iw = pad
+                        )
+                    },
                     cell_flags::DIM,
                 )),
                 DisplayRow::CardMetrics(a) => Some((
-                    format!(
-                        "{:>iw$}{}",
-                        "",
-                        card_line::metrics(
-                            a,
-                            now,
-                            row_message_text(a).as_deref(),
-                            text_w.saturating_sub(card_indent),
-                        ),
-                        iw = card_indent
-                    ),
+                    {
+                        let pad = card_indent + depth * 2 + 2;
+                        format!(
+                            "{:>iw$}{}",
+                            "",
+                            card_line::metrics(
+                                a,
+                                now,
+                                row_message_text(a).as_deref(),
+                                text_w.saturating_sub(pad),
+                            ),
+                            iw = pad
+                        )
+                    },
                     0,
                 )),
                 DisplayRow::Agent(a) if density == Density::Slim => {
@@ -994,20 +1015,41 @@ impl View {
                     sort if sort.direction == SortDirection::Ascending => "\u{2191}",
                     _ => "\u{2193}",
                 };
-                let cells = head_sorts(card).map(|sort| {
-                    let text = match sort {
-                        None => if card { "node · PR" } else { "ctx · node" }.to_string(),
-                        // No space before the age arrow: right-aligned or
-                        // spaced, it sits under the density button's two
-                        // overlay columns and the toggle reads dead.
-                        Some(AgentSortColumn::Age) => format!("age{}", arrow(AgentSortColumn::Age)),
-                        Some(c) if arrow(c).is_empty() => head_label(c).to_string(),
-                        Some(c) => format!("{} {}", head_label(c), arrow(c)),
-                    };
-                    let right = sort == Some(AgentSortColumn::Status);
-                    rt_cell(text, Color::Default, cell_flags::DIM, right)
-                });
-                (cells.to_vec(), 0)
+                // The card head names the two live columns: the glyph column
+                // stays blank and the identity caption rides the name cell's
+                // right edge, where node and PR paint.
+                let cells: Vec<RtCell> = if card {
+                    vec![
+                        rt_cell(String::new(), Color::Default, cell_flags::DIM, false),
+                        rt_cell(
+                            "node · PR".to_string(),
+                            Color::Default,
+                            cell_flags::DIM,
+                            true,
+                        ),
+                    ]
+                } else {
+                    head_sorts(false)
+                        .into_iter()
+                        .map(|sort| {
+                            let text = match sort {
+                                None => "ctx · node".to_string(),
+                                // No space before the age arrow: right-aligned or
+                                // spaced, it sits under the density button's two
+                                // overlay columns and the toggle reads dead.
+                                Some(AgentSortColumn::Age) => {
+                                    format!("age{}", arrow(AgentSortColumn::Age))
+                                }
+                                Some(c) if arrow(c).is_empty() => head_label(c).to_string(),
+                                Some(c) => format!("{} {}", head_label(c), arrow(c)),
+                            };
+                            let right = sort == Some(AgentSortColumn::Status)
+                                || sort == Some(AgentSortColumn::Pr);
+                            rt_cell(text, Color::Default, cell_flags::DIM, right)
+                        })
+                        .collect()
+                };
+                (cells, 0)
             }
         };
         if self

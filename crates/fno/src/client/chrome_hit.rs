@@ -157,8 +157,12 @@ impl View {
             return None;
         }
         let text_w = self.sideline_paint_w().checked_sub(1)?;
-        let rects = self.worker_column_rects(text_w as u16);
         let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
+        // The card head names two columns and sorts nothing.
+        if card {
+            return None;
+        }
+        let rects = self.worker_column_rects(text_w as u16);
         let i = rects
             .iter()
             .take(5)

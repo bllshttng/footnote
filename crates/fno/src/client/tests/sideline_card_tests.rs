@@ -27,6 +27,7 @@ fn lead_and_worker() -> Vec<AgentRow> {
     vec![lead, w1]
 }
 
+
 fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
     let rows = view.painted_rows();
     let agent = rows
@@ -507,7 +508,7 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
             let keeps_identity_color = display_i == agent_i
                 && (node_span.as_ref().is_some_and(|span| span.contains(&j))
                     || pr_span.as_ref().is_some_and(|span| span.contains(&j)));
-            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) && !keeps_identity_color {
+            if !(display_i == agent_i && in_col(j, 0)) && !keeps_identity_color {
                 assert_eq!(cell.fg, band_fg, "accent band text");
             }
             assert_eq!(
