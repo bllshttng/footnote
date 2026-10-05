@@ -298,7 +298,19 @@ row_claude_plugin_session() {
   }' "$tree/.claude-plugin/plugin.json" > "$tree/.claude-plugin/plugin.json.new"
   mv "$tree/.claude-plugin/plugin.json.new" "$tree/.claude-plugin/plugin.json"
   export CLAUDE_PLUGIN_DATA="$BASE/plugin-data"
-  bash "$tree/hooks/context-run.sh" claude-session-start >/dev/null 2>&1
+  # The session-start hook runs nothing: it prints the consent notice. This
+  # row is the consenting user: assert the notice (and that no installer
+  # started), then run the installer the way a consenting user does and score
+  # its captured output.
+  local notice="$BASE/notice.log"
+  bash "$tree/hooks/context-run.sh" claude-session-start >"$notice" 2>&1
+  if grep -q "Ask the user first" "$notice" && [ ! -e "$CLAUDE_PLUGIN_DATA/postinstall.log" ]; then
+    pass "notice" "session start printed the consent notice and started nothing"
+  else
+    miss "notice" "session start did not print the consent notice cleanly: $(head -3 "$notice")"
+  fi
+  mkdir -p "$CLAUDE_PLUGIN_DATA"
+  bash "$tree/.claude-plugin/postinstall.sh" >"$CLAUDE_PLUGIN_DATA/postinstall.log" 2>&1
   local py_bins="" d
   for d in "$HOME"/Library/Python/*/bin; do
     [ -d "$d" ] && py_bins="$py_bins $d"
@@ -342,7 +354,17 @@ row_codex_plugin_session() {
     miss "plugin-tree" "installed plugin tree has no hooks/context-run.sh"
     return 0
   fi
-  bash "$(dirname "$installed_hook")/context-run.sh" codex-session-start >/dev/null 2>&1
+  # Same consent shape as the claude row: assert the notice, then run the
+  # installer as the consenting user and score its captured output.
+  local notice="$BASE/notice-codex.log"
+  bash "$(dirname "$installed_hook")/context-run.sh" codex-session-start >"$notice" 2>&1
+  if grep -q "Ask the user first" "$notice" && [ ! -e "$HOME/.local/state/fno/plugin-install/postinstall.log" ]; then
+    pass "notice" "session start printed the consent notice and started nothing"
+  else
+    miss "notice" "session start did not print the consent notice cleanly: $(head -3 "$notice")"
+  fi
+  mkdir -p "$HOME/.local/state/fno/plugin-install"
+  bash "$tree/.claude-plugin/postinstall.sh" >"$HOME/.local/state/fno/plugin-install/postinstall.log" 2>&1
   local py_bins="" d
   for d in "$HOME"/Library/Python/*/bin; do
     [ -d "$d" ] && py_bins="$py_bins $d"

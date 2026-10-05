@@ -12,7 +12,7 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 ## Missing `fno` CLI
 
-Right after `/plugin install` the CLI installer can still run in the background. Read the last line of `${CLAUDE_PLUGIN_DATA:-$HOME/.local/state/fno/plugin-install}/postinstall.log`. `installer exit 0` means done. An absent or non-zero exit line means still installing or failed. When `fno` stays absent after a done log, run `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"` (the locked trigger) or `/fno:setup`, and tell the user which state you found.
+Nothing installs `fno` unasked: the session-start hook only prints the install plan. If `fno` is absent, tell the user it installs uv from astral.sh (edits the shell profile) then `fno` from PyPI, and ask. On a yes run `bash "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/postinstall.sh"`. Output ending `installer exit 0` means done. A non-zero exit line means failed. With `uv` present the run touches only the fno tool. While `fno` is absent its verbs fail: say what is blocked and stop cleanly.
 
 ## Relay compression contract
 
