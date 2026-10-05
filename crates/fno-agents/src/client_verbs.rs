@@ -3820,12 +3820,12 @@ mod tests {
             )
         );
 
-        // x-747b: a rebooted thread row has no pane and records no pid, so its
+        // A rebooted thread row has no pane and records no pid, so its
         // transcript reads stale-live or inconclusive forever and no falsifier
         // fires. With the job state on disk and the socket down, the re-seat
-        // arm returns the dead-relaunch plan the caller resolves to
-        // `claude respawn` (same session id, no terminal) - never the false
-        // attach, never the inconclusive refusal.
+        // arm returns the dead-relaunch plan the caller resolves to the
+        // same-id background relaunch (claude respawn, no terminal) - never
+        // the false attach, never the inconclusive refusal.
         let home3 = cv_tmpdir();
         let jobs = home3.path().join(".claude").join("jobs").join("7c5dcf5d");
         fs::create_dir_all(&jobs).unwrap();

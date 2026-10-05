@@ -84,23 +84,24 @@ where
 
     // A thread row (claude --bg worker) has no pane and records no pid, so a
     // rebooted one reads stale-live or inconclusive forever: no falsifier ever
-    // fires, and resume false-attaches or refuses naming terminal-only routes
-    // (x-747b). Its transport IS the job socket, so a thread row whose socket
-    // does not answer is down by construction. With the claude job state still
-    // on disk, `claude respawn` re-seats it on the thread substrate under the
-    // SAME session id, no terminal needed - the caller's reentry plan resolves
-    // this argv to mechanism=respawn and runs and confirms it. The respawned
-    // job relaunches from its own saved launch, so the route --settings splice
-    // the dead arm applies is not needed here. `spawn --resume --substrate
-    // thread` is not the door for this: that lane forks a new session id by
-    // design, and the re-seat contract is same-id.
+    // fires, and resume false-attaches or refuses naming terminal-only routes.
+    // Its transport IS the job socket, so a thread row whose socket does not
+    // answer is down by construction. With the claude job state still on disk,
+    // the caller's reentry plan re-seats it on the thread substrate under the
+    // SAME session id (respawn or bg-resume, both background, no terminal
+    // needed) and confirms it. The relaunched job replays its own saved
+    // launch, so the route --settings splice the dead arm applies is not
+    // needed here. `spawn --resume --substrate thread` is not the door for
+    // this: that lane forks a new session id by design, and the re-seat
+    // contract is same-id.
     let is_thread = entry.get("substrate").and_then(Value::as_str) == Some("thread");
-    let job_state_present = !short_id.is_empty()
+    let job_state_present = is_thread
+        && !short_id.is_empty()
         && claude_home
             .jobs_dir_for(short_id)
             .join("state.json")
             .is_file();
-    if is_thread && !socket_live && has_uuid && job_state_present {
+    if job_state_present && !socket_live && has_uuid {
         eprintln!(
             "fno agents resume: {name} is a thread worker whose job socket is down - \
              re-seating it on the thread substrate (claude respawn, same session id)"
