@@ -100,14 +100,7 @@ RUST_CLIENT_VERBS = frozenset(
         "stop",
         "rm",
         "reconcile",
-        # The worked-overlay join (seat records, crown exclusion, provenance):
-        # dispatched directly in client.rs; one JSON payload on stdin.
         "worked-nodes",
-        "court-fold",
-        "court-orphans",
-        "king-checkin",
-        "king-history",
-        "reign-ledger",
         # Daemon binary-version drift restart: a Rust-only verb
         # dispatched directly in client.rs before build_request (no daemon RPC).
         # SIGTERMs a stale daemon and lazy-starts a fresh one from the current
@@ -502,13 +495,6 @@ AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS
 #: future Rust-only verb cannot land without a help entry and re-introduce the
 #: gap.
 RUST_ONLY_VERB_HELP: dict[str, str] = {
-    # The court/king/reign spellings are aliases the dispatch lane rewrites to
-    # the org/lead verbs; the help names the alias target so a reader finds it.
-    "court-fold": "Alias of org-fold: --graph PATH [--cwd PATH] [--claims-dir PATH] --teams-json JSON [--format json].",
-    "court-orphans": "Alias of org-vacancies: --root PATH [--held SCOPE]... reads the unfilled org seats.",
-    "king-checkin": "Alias of lead-checkin: --scope SCOPE --events-path PATH [...] --graph PATH [--handoffs-dir PATH] [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] [--json].",
-    "king-history": "Alias of lead-history: [--scope SCOPE] --events-path PATH [...] [--json].",
-    "reign-ledger": "Alias of lead-rundown: --org-json PATH|- --graph PATH --generated TS --out PATH.",
     "worked-nodes": "The worked-overlay join: one JSON rows payload on stdin (--rows-file -); reads the graph, registry, and claims itself and answers the node-to-live-workers map with the crown and provenance gate.",
     # "spawn" is now Python-registered (Task 1.2): a Python cmd_spawn command
     # provides the --once / ephemeral lifecycle path and the claude plain-spawn
