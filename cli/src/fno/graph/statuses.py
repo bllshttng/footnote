@@ -317,8 +317,7 @@ def closed_worker_session_ids(entry: dict) -> set[str]:
         if not (isinstance(row, dict) and isinstance(row.get("session_id"), str)
                 and isinstance(row.get("phase"), str)):
             continue
-        # A ship row is a link event (see live_worked_node_ids): it must not
-        # reopen a session this node already saw finish.
+        # A ship row is a link event, never occupancy.
         if row["phase"] == "ship":
             continue
         (open_ids if is_open_phase_row(row, row["phase"]) else closed).add(row["session_id"])
@@ -330,7 +329,6 @@ def live_worked_node_ids(
     reading: RosterReading | None = None,
 ) -> dict[str, list[str]]:
     """Return open-phase nodes whose roster workers are live.
-
     The fleet read and transcript liveness stay here; the join is the Rust
     `fno-agents worked-nodes` verb. ``reading`` must be an already-paid read.
     """
