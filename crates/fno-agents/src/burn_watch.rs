@@ -3,11 +3,14 @@
 //! A worker can burn hours and dollars while its node's `touched_at` and its
 //! branch sit flat; nothing else in the fleet reads cost against progress.
 //! This arm samples every live session carrying an open execute phase: ledger
-//! spend, branch head and commit count (`git` in the row's own cwd), and the
-//! node's `touched_at` (graph). Progress on any axis resets the ladder; a
-//! flat sample where spend grew or the node aged past the idle ceiling wakes
-//! the worker, and three unanswered wakes file ONE fleet task through the
-//! same store the pr-nudge ladder escalates through.
+//! spend, branch head, commit count and newest commit time (`git` in the
+//! row's own cwd), and the node's `touched_at` (graph). Progress on any axis
+//! resets the ladder; a flat sample where spend grew, or where BOTH the node
+//! and the branch aged past the idle ceiling, wakes the worker (a fresh
+//! commit is progress even when the node row is ancient - the row only moves
+//! on backlog commands, never on a push), and three unanswered wakes file
+//! ONE fleet task through the same store the pr-nudge ladder escalates
+//! through.
 //!
 //! Scope is open execute sessions on purpose: a blueprint or think worker's
 //! deliverable is a plan document, so commits are not its progress signal.
@@ -64,6 +67,9 @@ pub struct Sample {
     /// Node `touched_at` as epoch seconds, when the node row carried a
     /// parsable stamp.
     pub touched_at: Option<i64>,
+    /// Newest commit time on the sampled HEAD as epoch seconds, read from
+    /// the same probe as `head`.
+    pub last_commit_at: Option<i64>,
 }
 
 /// Per-session ladder state, one JSON file under `burn-watch/`.
@@ -77,6 +83,8 @@ pub struct BurnState {
     pub commits: Option<u64>,
     #[serde(default)]
     pub touched_at: Option<i64>,
+    #[serde(default)]
+    pub last_commit_at: Option<i64>,
     #[serde(default)]
     pub attempts: u32,
     #[serde(default)]
@@ -164,6 +172,7 @@ pub fn decide(
         head: sample.head.clone(),
         commits: sample.commits,
         touched_at: sample.touched_at,
+        last_commit_at: sample.last_commit_at,
         ..BurnState::default()
     };
     let Some(prev) = prev else {
@@ -182,6 +191,7 @@ pub fn decide(
             head: prev.head.clone(),
             commits: prev.commits,
             touched_at: prev.touched_at,
+            last_commit_at: prev.last_commit_at,
             attempts: prev.attempts,
             escalated: prev.escalated,
             last_wake_at: prev.last_wake_at,
@@ -219,15 +229,23 @@ pub fn decide(
     let node_aged = sample
         .touched_at
         .is_some_and(|t| now_epoch.saturating_sub(t) >= idle_s);
+    // Both flat, or no alarm: a fresh commit on the branch IS progress even
+    // when the node row's touched_at is ancient, because the row only moves
+    // on backlog commands, never on a push. An unreadable commit time stays
+    // silent, matching the unparsable-touched_at rule.
+    let branch_aged = sample
+        .last_commit_at
+        .is_some_and(|t| now_epoch.saturating_sub(t) >= idle_s);
     let reason = if spend_grew {
         Some(format!(
             "spend grew to ${:.2} with no new commit and no node touch",
             sample.cost_usd.unwrap_or(0.0)
         ))
-    } else if node_aged {
+    } else if node_aged && branch_aged {
         Some(format!(
-            "node untouched {}h with no new commit",
-            now_epoch.saturating_sub(sample.touched_at.unwrap_or(0)) / 3600
+            "node untouched {}h with no new commit in {}h",
+            now_epoch.saturating_sub(sample.touched_at.unwrap_or(0)) / 3600,
+            now_epoch.saturating_sub(sample.last_commit_at.unwrap_or(0)) / 3600
         ))
     } else {
         None
@@ -401,15 +419,16 @@ pub(crate) fn run_command(argv: &[String], cwd: &str) -> (i32, String, String) {
     }
 }
 
-/// Branch progress at the row's own checkout: `(head, commit count)`.
-/// Either read failing reads None and can never count as progress.
-fn git_progress(cwd: &str, runner: Runner) -> (Option<String>, Option<u64>) {
-    let head = runner(
+/// Branch progress at the row's own checkout: `(head, commit count, newest
+/// commit time)`. A failed read reads None and can never count as progress
+/// or feed an age arm.
+fn git_progress(cwd: &str, runner: Runner) -> (Option<String>, Option<u64>, Option<i64>) {
+    let head_line = runner(
         &[
             "git".into(),
             "log".into(),
             "-1".into(),
-            "--format=%H".into(),
+            "--format=%H %ct".into(),
         ],
         cwd,
     )
@@ -418,6 +437,15 @@ fn git_progress(cwd: &str, runner: Runner) -> (Option<String>, Option<u64>) {
     .rev()
     .find(|l| !l.trim().is_empty())
     .map(|l| l.trim().to_string());
+    let (head, last_commit_at) = head_line
+        .map(|line| {
+            let mut parts = line.split_whitespace();
+            (
+                parts.next().map(str::to_string),
+                parts.next().and_then(|t| t.parse().ok()),
+            )
+        })
+        .unwrap_or((None, None));
     let count = runner(
         &[
             "git".into(),
@@ -432,7 +460,7 @@ fn git_progress(cwd: &str, runner: Runner) -> (Option<String>, Option<u64>) {
     .rev()
     .find(|l| !l.trim().is_empty())
     .and_then(|l| l.trim().parse().ok());
-    (head, count)
+    (head, count, last_commit_at)
 }
 
 /// The last non-empty stdout line, trimmed: a git word like a branch or a sha.
@@ -858,7 +886,7 @@ fn sample_session(
     home: &AgentsHome,
     runner: Runner,
 ) -> Sample {
-    let (head, commits) = git_progress(cwd, runner);
+    let (head, commits, last_commit_at) = git_progress(cwd, runner);
     Sample {
         cost_usd: session_cost_exact(
             &home.otel_dir().join("otel.db"),
@@ -867,6 +895,7 @@ fn sample_session(
         ),
         head,
         commits,
+        last_commit_at,
         touched_at: facts.get(node).and_then(|f| f.touched_at),
     }
 }
@@ -1207,6 +1236,7 @@ mod tests {
             head: head.map(str::to_string),
             commits: head.map(|_| 1),
             touched_at: touched,
+            last_commit_at: touched,
         }
     }
 
@@ -1246,6 +1276,35 @@ mod tests {
             0.01,
         );
         assert!(matches!(d, Decision::Wake(r) if r.contains("node untouched 2h")));
+    }
+
+    #[test]
+    fn a_recent_commit_on_a_flat_branch_is_progress_even_when_the_node_row_is_ancient() {
+        // x-09e3: the crown was woken twice over a node whose PR branch took
+        // a commit 30 minutes earlier. The node row's touched_at is not the
+        // branch: it moves on backlog commands, never on a push. A flat
+        // sample whose newest commit is younger than the idle ceiling stands
+        // down.
+        let prev = BurnState {
+            cost_usd: Some(1.0),
+            head: Some("a".into()),
+            commits: Some(1),
+            touched_at: Some(1000),
+            last_commit_at: Some(1000),
+            attempts: 1,
+            ..Default::default()
+        };
+        let now = 1000 + 7 * 3600; // the node row reads 7h stale
+        let flat = Sample {
+            cost_usd: Some(1.0),
+            head: Some("a".into()),
+            commits: Some(1),
+            touched_at: Some(1000),
+            last_commit_at: Some(now - 1800), // a commit landed 30 minutes ago
+        };
+        let (d, next) = decide(Some(&prev), &flat, now, 7200, 0.01);
+        assert_eq!(d, Decision::StandDown);
+        assert_eq!(next.last_commit_at, Some(now - 1800));
     }
 
     #[test]
@@ -1326,6 +1385,7 @@ mod tests {
             head: Some("a".into()),
             commits: Some(1),
             touched_at: Some(1000),
+            last_commit_at: Some(1000),
             attempts: 3,
             escalated: true,
             task_key: Some("burning worker on x-1".into()),
@@ -1338,6 +1398,7 @@ mod tests {
             head: None,
             commits: None,
             touched_at: Some(1000),
+            last_commit_at: None,
         };
         let (d, next) = decide(Some(&prev), &sample, 2000, 1000, 0.01);
         assert_eq!(d, Decision::Hold);
@@ -1345,6 +1406,7 @@ mod tests {
         assert!(next.escalated);
         assert_eq!(next.head.as_deref(), Some("a"));
         assert_eq!(next.cost_usd, Some(1.0));
+        assert_eq!(next.last_commit_at, Some(1000));
         assert_eq!(next.task_key.as_deref(), Some("burning worker on x-1"));
     }
 
@@ -1355,6 +1417,7 @@ mod tests {
             head: None,
             commits: None,
             touched_at: Some(1000),
+            last_commit_at: None,
             attempts: 2,
             ..Default::default()
         };
