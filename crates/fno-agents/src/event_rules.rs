@@ -143,9 +143,25 @@ fn table() -> &'static Vec<Row> {
     CELL.get_or_init(|| parse_table().expect("event_rules.toml must load"))
 }
 
-fn enabled(cwd: &Path, row: &Row) -> bool {
-    match crate::agents_config::config_value_deep(cwd, &["event_rules", &row.id]) {
-        Some(v) => v.as_bool().unwrap_or(row.default),
+/// One config read per fire: the whole `event_rules` table comes back
+/// once and each row's override is looked up in it.
+fn overrides(cwd: &Path) -> std::collections::HashMap<String, bool> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(table) = crate::agents_config::config_value_deep(cwd, &["event_rules"]) {
+        if let Some(map) = table.as_table() {
+            for (key, value) in map {
+                if let Some(flag) = value.as_bool() {
+                    out.insert(key.clone(), flag);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn enabled(overrides: &std::collections::HashMap<String, bool>, row: &Row) -> bool {
+    match overrides.get(&row.id) {
+        Some(v) => *v,
         None => row.default,
     }
 }
@@ -212,7 +228,10 @@ pub fn eval_stop_in(
     let turn_key = match (!turn_id.is_empty(), turn_ts) {
         (true, _) => turn_id,
         (false, Some(ts)) => format!("t{ts}"),
-        (false, None) => format!("b{}", now_ms / 1_800_000),
+        // No turn id and no readable transcript: a day bucket. The cap
+        // is the anti-loop bound, so the coarsest sticky key is the safe
+        // reading - a half-hour bucket re-armed the cap mid-conversation.
+        (false, None) => format!("b{}", now_ms / 86_400_000),
     };
     let matched_event = format!("stop:{session}:{turn_key}");
     let ctx = Ctx {
@@ -245,8 +264,9 @@ pub fn eval_stop_in(
     // ask and no journal event never scans the span table.
     let mut ledger: Option<Vec<(String, String, String)>> = None;
     let mut fires = Vec::new();
+    let overrides = overrides(cwd);
     for row in table() {
-        if !enabled(cwd, row) {
+        if !enabled(&overrides, row) {
             continue;
         }
         match row.event.as_str() {
