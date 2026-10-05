@@ -181,6 +181,8 @@ fn retro(scope: &str, cwd: &Path, cleared: &PendingSuccession, id: &str) {
     });
     if spawned.is_none() {
         eprintln!("succession: retro writer did not launch for session {session}");
+        retro_unmeasured(scope, id, "retro writer did not launch");
+        return;
     }
     if let Some(events) = emitter() {
         let _ = events.emit(
