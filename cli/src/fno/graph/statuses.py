@@ -332,8 +332,7 @@ def live_worked_node_ids(
     """Return open-phase nodes whose roster workers are live.
 
     The fleet read and transcript liveness stay here; the join is the Rust
-    `fno-agents worked-nodes` verb. ``reading`` hands in an already-paid
-    fleet read; callers that read the roster must pass it here.
+    `fno-agents worked-nodes` verb. ``reading`` must be an already-paid read.
     """
     try:
         from fno.claims.roster import read_roster
@@ -349,8 +348,7 @@ def live_worked_node_ids(
             reading = read_roster(require_live_probe=False)
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
-        live_rows = _live_rows(reading)
-        return _worked_nodes_reply(live_rows) if live_rows else {}
+        return _worked_nodes_reply(_live_rows(reading))
     except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
         if strict:
             raise
@@ -359,8 +357,7 @@ def live_worked_node_ids(
 
 
 def _live_rows(reading: RosterReading) -> list[dict[str, object]]:
-    """One reachability pass over every row the join may admit; attributed
-    rows first, so attribution survives the dedupe."""
+    """One reachability pass over the rows; attributed rows first."""
     from fno.agents.reachability import REACHABLE, UNKNOWN
     from fno.claims.roster import _worker_reachability
     from fno.provenance.resolver import transcript_listing
