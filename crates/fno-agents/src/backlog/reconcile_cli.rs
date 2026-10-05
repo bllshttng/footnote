@@ -2635,9 +2635,9 @@ mod tests {
             "ts": "2026-10-04T00:00:00Z",
             "type": "decision_span",
             "source": "target",
-            "data": {"span_kind": "merge_landed", "pr": 9, "repo": "o/r",
-                      "trace": {"trace_id": "ab-cccccccc", "span_id": "merge-9",
-                                 "actor_kind": "sweep", "comms": "chat"}}
+            "data": {"span_kind": "merge_landed", "pr": 9, "repo": "o/r", "trace": {
+                "trace_id": "none", "span_id": "s-seed", "actor_kind": "sweep", "comms": "mail"
+            }}
         });
         crate::event_store::append_envelope(&journal.journal(), &seed.to_string(), None)
             .expect("seed row");
