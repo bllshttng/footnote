@@ -1766,19 +1766,52 @@ pub fn export_jsonl(journal: &Path, out: &Path) -> Result<u64, String> {
     Ok(count)
 }
 
-/// Prune expired `ephemeral` rows immediately (the `gc` verb's primitive),
-/// bypassing the daily gate. Returns the deleted count. `durable`, `gate`,
-/// rejected, and migration rows never leave.
-pub fn prune_ephemeral_now(journal: &Path, now_ms: i64) -> Result<u64, String> {
-    let conn = open_store(&store_path(journal))?;
-    let cutoff = now_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
-    let n = conn
-        .execute(
-            "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
-            params![cutoff],
+/// What one gc pass over the store saw: every row, the rejected ones, and the
+/// expired `ephemeral` rows it deleted (or, on a dry run, would delete).
+#[derive(Debug, Default, Serialize)]
+pub struct GcReceipt {
+    pub scanned: i64,
+    pub malformed: i64,
+    pub expired: i64,
+}
+
+/// The `gc` verb's primitive: delete `ephemeral` rows older than `cutoff_ms`,
+/// bypassing the daily gate. `durable`, `gate`, rejected and migration rows
+/// never leave. A journal with no store reads as an empty receipt, and the
+/// store is not created.
+pub fn gc_ephemeral(journal: &Path, cutoff_ms: i64, dry_run: bool) -> Result<GcReceipt, String> {
+    let store = store_path(journal);
+    if !store.exists() {
+        return Ok(GcReceipt::default());
+    }
+    let conn = open_store(&store)?;
+    let named = |e: rusqlite::Error| format!("{}: {e}", store.display());
+    let (scanned, malformed) = conn
+        .query_row(
+            "SELECT count(*), coalesce(sum(reject_reason IS NOT NULL), 0) FROM events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|e| e.to_string())?;
-    Ok(n as u64)
+        .map_err(named)?;
+    let expired = if dry_run {
+        conn.query_row(
+            "SELECT count(*) FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
+            params![cutoff_ms],
+            |r| r.get(0),
+        )
+        .map_err(named)?
+    } else {
+        conn.execute(
+            "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
+            params![cutoff_ms],
+        )
+        .map_err(named)? as i64
+    };
+    Ok(GcReceipt {
+        scanned,
+        malformed,
+        expired,
+    })
 }
 
 mod observation;
