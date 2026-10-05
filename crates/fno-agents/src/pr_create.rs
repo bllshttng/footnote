@@ -336,6 +336,7 @@ fn run(a: &Args, gh: Gh) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
@@ -442,6 +443,43 @@ mod tests {
 
     #[test]
     fn a_failed_github_read_is_exit_4_and_a_usage_error_is_exit_2() {
+        // Exit 4: a real repo whose gh read fails, so the guard's refusal
+        // never silently degrades to a create.
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["remote", "add", "origin", "git@github.com:o/r.git"]);
+        std::fs::write(dir.path().join("f.txt"), "base\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["checkout", "-q", "-b", "feature/guard"]);
+        std::fs::write(dir.path().join("f.txt"), "changed\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "change"]);
+        let repo_args = Args {
+            title: "fix: the guard subject".into(),
+            body_file: "b".into(),
+            base: "main".into(),
+            not_duplicates: vec![],
+            cwd: dir.path().to_path_buf(),
+        };
+        let gh = |path: &str| {
+            assert!(path.contains("/pulls?state=open"));
+            Err("HTTP 502".to_string())
+        };
+        assert_eq!(run(&repo_args, &gh), 4);
+        // Exit 2: a non-repo cwd fails the branch read before any gh call.
         let a = Args {
             title: "t".into(),
             body_file: "b".into(),
