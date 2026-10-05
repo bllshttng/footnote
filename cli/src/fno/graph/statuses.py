@@ -410,9 +410,9 @@ def live_worked_node_ids(
                     roster_row = reading.row_for_session(row["session_id"])
                     if roster_row is None or roster_row.get("row_id") in closed_ids:
                         continue
-                    # A crowned lead row is never a node worker (x-a1c0): the
-                    # crown's own dispatch stamp opens a session row, and the
-                    # seat record must not read the crown as the occupant.
+                    # A crowned lead row is never a node worker: the crown's
+                    # own dispatch stamp opens a session row, and the seat
+                    # record must not read the crown as the occupant.
                     if roster_row.get("crowned"):
                         continue
                     # A seat record alone is a witness, never ownership (the
@@ -430,7 +430,7 @@ def live_worked_node_ids(
                     if extra.get("row_id") in closed_ids:
                         continue
                     # The fold already reads dispatch attribution; a crown
-                    # still never counts (x-a1c0).
+                    # still never counts.
                     if extra.get("crowned"):
                         continue
                     verdict = _worker_reachability(extra).verdict

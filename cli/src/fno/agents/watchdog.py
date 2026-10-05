@@ -48,8 +48,8 @@ Verdict = namedtuple(
 Row = namedtuple(
     "Row",
     "row_id name state node cwd agent pid pid_start_time mux stopped_at crowned",
-    # crowned: the registry entry carries a crown level. A crowned lead row is
-    # never a node worker, whatever its attribution reads (x-a1c0).
+    # crowned: the registry entry carries a crown level. A crowned lead row
+    # is never a node worker, whatever its attribution reads.
     defaults=(None, "", "claude", None, None, None, None, False),
 )
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the

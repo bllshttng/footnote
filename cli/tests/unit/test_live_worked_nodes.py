@@ -378,7 +378,7 @@ def _crown_entry(node_id: str) -> dict:
 
 
 def test_a_crowned_lead_row_is_never_the_node_worker(monkeypatch):
-    """x-a1c0: the crown that seated the worker carries an open session row
+    """The crown that seated the worker carries an open session row
     on the node, and the join read it as the occupant. A crowned row is
     never a node worker, even with full attribution."""
     reading = RosterReading(

@@ -144,9 +144,10 @@ def test_ac6_edge_claim_status_names_live_worker(monkeypatch):
 def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     """The reproduced case as a fixture: a row with no node field whose
     row_id matches an open-phase session row on this node. 68 unresolved of
-    133 scanned is the measured wedge shape. Since x-a1c0 a bare seat record
-    is a witness, never ownership: this row proves itself the way a real
-    worker does when its registry row is missing - it holds the node claim."""
+    133 scanned is the measured wedge shape. Under the crowned-lead gate a
+    bare seat record is a witness, never ownership: this row proves itself
+    the way a real worker does when its registry row is missing - it holds
+    the node claim."""
     s1 = {
         "name": "king-a792-control",
         "state": "working",
