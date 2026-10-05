@@ -599,11 +599,9 @@ def post_dispositions(
     finding, each naming its disposition or its absence. Idempotent at
     (pr, head) via the marker line; a round with no dispositions posts nothing.
     ``review_round`` is the emit-side pass-through: the attest flow hands the
-    round its stamp derived, so a --verify-fixes verify's comment names the
-    round it verified instead of reading as a fresh round 1. The shell
-    producer carries the same round through FNO_REVIEW_ROUND, the env door
-    the flag-surface ratchet leaves open (FNO_ATTEST_BRANCH rides the same
-    way).
+    round its stamp derived, the shell producer rides FNO_REVIEW_ROUND (the
+    env door the flag-surface ratchet keeps open), so a --verify-fixes
+    verify's comment names the round it verified, never a fresh round 1.
     """
     try:
         payload = json.loads(findings_file.read_text(encoding="utf-8"))
@@ -679,12 +677,7 @@ def post_dispositions(
         typer.echo(f"post-dispositions: round comment for {head[:9]} already posted")
         return
 
-    round_no = int(
-        review_round
-        or os.environ.get("FNO_REVIEW_ROUND", "").strip()
-        or record.get("review_round")
-        or 1
-    )
+    round_no = int(review_round or os.environ.get("FNO_REVIEW_ROUND", "").strip() or record.get("review_round") or 1)
     body = _render_round_comment(record, head, round_no, reviewer)
     write = run(
         [
