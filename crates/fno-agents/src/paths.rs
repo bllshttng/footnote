@@ -305,6 +305,12 @@ impl AgentsHome {
         self.root.join("fleet-stop.json")
     }
 
+    /// Durable incident-fix claims (`fleet-claims.d/`), one file per
+    /// incident, next to the breaker. See [`crate::incident_claim`].
+    pub fn fleet_claims_dir(&self) -> PathBuf {
+        self.root.join("fleet-claims.d")
+    }
+
     /// The running tests a `tests` hold ended, as legacy `(pid, birth)` pairs
     /// an OLDER build paused and its lift still resumes; new holds record
     /// nothing here. See [`crate::test_hold`].
