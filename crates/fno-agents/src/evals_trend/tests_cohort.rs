@@ -122,12 +122,27 @@ fn substituted_is_excluded_and_counted_never_scored() {
                 json!(null),
                 "other",
             ),
+            lane_row(
+                "t3",
+                false,
+                "c",
+                "unavailable",
+                "unavailable",
+                json!(null),
+                "m",
+            ),
         ],
     );
     let c = &fold["cohorts"]["c"];
     assert_eq!(c["accepted"], 1);
-    assert_eq!(c["excluded"]["total"], 1);
+    assert_eq!(c["excluded"]["total"], 2);
     assert_eq!(c["lane_status_counts"]["substituted"], 1);
+    // A row with no excluded_reason still lands in by_reason, under its lane
+    // status or row status.
+    assert_eq!(
+        c["excluded"]["by_reason"],
+        json!({"substituted": 1, "unavailable": 1})
+    );
 }
 
 fn unmeasured_when_any_scored_row_lacks_usage() {
@@ -165,7 +180,8 @@ fn measured_cost_with_prices() {
             "graded",
             "ok",
             json!({"input": 1000000, "output": 1000000}),
-            "glm",
+            // opencode observes provider/model; the bare price key still prices it.
+            "zai/glm",
         )],
     );
     let rows = super::read_rows(&h, None, None);
