@@ -590,3 +590,8 @@ agents prove-it-verdicts	T1	agents prove-it-verdicts	1
 agents honesty-sweep	T1	agents honesty-sweep	0
 doctor intel	T1	doctor intel	0
 agents select-read	T1	agents select-read	1	
+agents court-fold	T1	agents court-fold	0	
+agents court-orphans	T1	agents court-orphans	0	
+agents king-checkin	T1	agents king-checkin	0	
+agents king-history	T1	agents king-history	0	
+agents reign-ledger	T1	agents reign-ledger	0	
