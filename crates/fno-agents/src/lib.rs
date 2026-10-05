@@ -200,6 +200,7 @@ pub mod heal_pid;
 pub mod honesty_sweep;
 pub mod hook;
 pub mod identity;
+pub mod incident_claim;
 pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
