@@ -552,7 +552,7 @@ impl View {
                 // the name column's x.
                 DisplayRow::CardDetail(a) => Some((
                     {
-                        let pad = card_indent + depth * 2 + 2;
+                        let pad = card_indent + depth * 2;
                         format!(
                             "{:>iw$}{}",
                             "",
@@ -564,7 +564,7 @@ impl View {
                 )),
                 DisplayRow::CardMetrics(a) => Some((
                     {
-                        let pad = card_indent + depth * 2 + 2;
+                        let pad = card_indent + depth * 2;
                         format!(
                             "{:>iw$}{}",
                             "",
@@ -869,8 +869,15 @@ impl View {
                 } else {
                     ' '
                 };
+                // The card name sits right after the glyph column: a blank
+                // mark contributes no cell, so the icon column reads one
+                // glyph wide (the operator's 2026-10-04 tightening).
                 let prefix = if depth > 0 {
-                    format!("{}{mark} ", "  ".repeat(depth))
+                    format!("{}{mark}", "  ".repeat(depth))
+                } else if card && mark == ' ' {
+                    String::new()
+                } else if card {
+                    mark.to_string()
                 } else {
                     format!("{mark} ")
                 };
