@@ -90,14 +90,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(a)
 }
 
-fn base_ref(base: &str) -> String {
-    if base.contains('/') || (base.len() >= 7 && base.bytes().all(|b| b.is_ascii_hexdigit())) {
-        base.to_string()
-    } else {
-        format!("origin/{base}")
-    }
-}
-
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let (ok, out, err) = run_labeled("pr-create", "git", args, cwd, READ_TIMEOUT)?;
     if ok {
@@ -261,7 +253,7 @@ fn run(a: &Args, gh: Gh) -> i32 {
             return 2;
         }
     };
-    let base = base_ref(&a.base);
+    let base = crate::pr_body_check::base_ref(&a.base);
     let my_files = match git(&a.cwd, &["diff", "--name-only", &format!("{base}...HEAD")]) {
         Ok(f) if !f.is_empty() => f.lines().map(String::from).collect::<Vec<_>>(),
         Ok(_) => {
@@ -471,19 +463,8 @@ mod tests {
             "x",
         ]))
         .is_err());
-        assert!(parse_args(&args(&[
-            "--title",
-            "t",
-            "--body-file",
-            "b",
-            "--not-duplicate",
-            "7",
-        ]))
-        .is_ok());
-    }
-
-    #[test]
-    fn parse_shapes_base_and_own_branch_skips_in_scan() {
+        // The happy parse maps every flag, repeats --not-duplicate, and
+        // expands a bare base to origin/<base>.
         let a = parse_args(&args(&[
             "--title",
             "t",
@@ -499,16 +480,8 @@ mod tests {
         .unwrap();
         assert_eq!(a.base, "release/9");
         assert_eq!(a.not_duplicates, vec![7, 8]);
-        assert_eq!(base_ref("release/9"), "release/9");
-        assert_eq!(base_ref("main"), "origin/main");
-        // Scan skips the caller's own branch before any overlap work.
-        let prs = vec![OpenPr {
-            number: 9,
-            title: "identical title words shared".into(),
-            branch: "mine".into(),
-            author: "me".into(),
-        }];
-        assert_eq!(prs[0].branch, "mine");
+        assert_eq!(crate::pr_body_check::base_ref("release/9"), "release/9");
+        assert_eq!(crate::pr_body_check::base_ref("main"), "origin/main");
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────
