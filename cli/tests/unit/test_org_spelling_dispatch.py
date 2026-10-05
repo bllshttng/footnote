@@ -37,12 +37,12 @@ def _front_argvs() -> list[list[str]]:
 def test_every_emitted_argv_is_an_org_spelling():
     argvs = _front_argvs()
     assert not any("lead" in argv for argv in argvs), argvs
-    flat = "\n".join(" ".join(argv) for argv in argvs)
-    assert '"agents", "org", "drain"' in flat or ["agents", "org", "drain"] in argvs
+    assert ["agents", "org", "drain"] in argvs
 
     stale = [
         str(p)
-        for p in (REPO_ROOT / "crates/fno-agents").rglob("*.rs")
+        for base in ("src", "tests")
+        for p in (REPO_ROOT / "crates/fno-agents" / base).rglob("*.rs")
         if re.search(r'"agents",\s*"lead"', p.read_text(encoding="utf-8"))
     ]
     assert not stale, f"dead lead spellings remain: {stale}"

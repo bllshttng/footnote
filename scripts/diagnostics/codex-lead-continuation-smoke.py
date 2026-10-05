@@ -1172,7 +1172,7 @@ def _run_journey(root: Path) -> Path:
     init = _run([fno, "agents", "org", "init", "--scope", scope, "--harness-session-id", thread_id], env=env, cwd=repo)
     if init.returncode:
         raise RuntimeError(f"private lead init refused: {init.stderr.strip() or init.stdout.strip()}")
-    match = re.search(r"lead: manifest written: (.+)", init.stdout)
+    match = re.search(r"(?:king|org|lead): manifest written: (.+)", init.stdout)
     if not match:
         raise RuntimeError("malformed-output: lead init returned no manifest path")
     manifest = Path(match.group(1).strip())
