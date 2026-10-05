@@ -210,16 +210,27 @@ mod tests {
 
     #[test]
     fn a_terminal_row_is_stale_never_double_ruled() {
-        let rows = [
-            row("lead-live", Some("shared"), AgentStatus::Live),
-            row("lead-dead", Some("shared"), AgentStatus::Orphaned),
-        ];
+        // A decided-dead Orphaned row (reaped pid) stays stale; an
+        // undecided one (no pid evidence) holds live, so it double-rules
+        // beside a live holder - never read stale on the word alone.
+        let mut dead = row("lead-dead", Some("shared"), AgentStatus::Orphaned);
+        dead.pid = Some(crate::row_verdict::reaped_pid());
+        let rows = [row("lead-live", Some("shared"), AgentStatus::Live), dead];
         let out = read_team_splits(&rows);
         assert!(out.double_ruled.is_empty());
         assert_eq!(out.stale.len(), 1);
         assert_eq!(out.stale[0].row, "lead-dead");
         assert_eq!(out.stale[0].scope, "shared");
         assert_eq!(out.stale[0].stored_status, "orphaned");
+
+        let undecided = row("lead-old", Some("shared"), AgentStatus::Orphaned);
+        let rows = [
+            row("lead-live", Some("shared"), AgentStatus::Live),
+            undecided,
+        ];
+        let out = read_team_splits(&rows);
+        assert_eq!(out.double_ruled.len(), 1);
+        assert!(out.stale.is_empty());
     }
 
     #[test]

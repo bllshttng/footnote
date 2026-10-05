@@ -12,7 +12,6 @@
 //! rewrite, so the answer is verifiable by an external reader - the claim
 //! the self-team refusal guards.
 
-use crate::announce::TERMINAL_STATUSES;
 use serde_json::{json, Value};
 
 /// Split a comma-separated team scope into trimmed, non-blank members,
@@ -77,12 +76,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
     if name.is_empty()
         || held.is_empty()
         || sessions.is_empty()
-        || TERMINAL_STATUSES.contains(
-            &caller
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )
+        || crate::row_verdict::finished_json(&caller)
     {
         return Ok(refused(None));
     }
@@ -336,6 +330,19 @@ mod tests {
         p["caller"]["status"] = json!("exited");
         let out = resolve(&p).unwrap();
         assert_eq!(out["widen"], false);
+
+        // The reversible word never refuses a live caller: an Orphaned
+        // row with a live pid still widens its own team.
+        let mut p = payload(
+            "e-1,e-2",
+            "e-1",
+            json!([row("e-1", "human"), row("e-2", S)]),
+        );
+        p["caller"]["status"] = json!("orphaned");
+        p["caller"]["pid"] = json!(std::process::id());
+        let out = resolve(&p).unwrap();
+        assert_eq!(out["widen"], true);
+        assert_eq!(out["added"], json!(["e-2"]));
 
         // AC3-EDGE: no `requested` makes the verb exit 2.
         let error = resolve(&json!({

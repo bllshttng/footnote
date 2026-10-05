@@ -662,15 +662,7 @@ fn live_team_holder_in_with_projects(
     let config_unreadable = projects.is_err();
     let projects = projects.clone().unwrap_or_default();
     let scope_level = derived_scope_level(scope, &projects);
-    let is_terminal = |row: &crate::state::RegistryEntry| {
-        matches!(
-            row.status,
-            crate::AgentStatus::Orphaned
-                | crate::AgentStatus::Failed
-                | crate::AgentStatus::Exited
-                | crate::AgentStatus::PermanentDead
-        )
-    };
+    let is_terminal = |row: &crate::state::RegistryEntry| crate::lead_state::is_terminal(row);
     registry
         .entries
         .iter()

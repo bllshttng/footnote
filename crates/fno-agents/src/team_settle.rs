@@ -9,10 +9,11 @@
 //! could check). An agent caller may only succeed itself: every live holder
 //! of the scope must already be that agent.
 //!
-//! Rows arrive as plain JSON here, not a typed registry row, so a row's
-//! status is matched by string against `announce::TERMINAL_STATUSES`
-//! (itself `registry.py::TERMINAL_STATUSES`), the same string-match
-//! reasoning `announce.rs` documents for its own terminal check.
+//! Rows arrive as plain JSON here, not a typed registry row. A row's
+//! terminal read answers through `row_verdict::finished_json`, the
+//! crown-vacancy door: the reversible word (Orphaned) re-answers on
+//! process evidence, and every other status keeps the legacy
+//! `announce::TERMINAL_STATUSES` word list.
 //!
 //! Occupancy is the exact-scope holders plus ladder-aware rivals: through
 //! `loop_lead::team_rivals`, a live team over overlapping territory
@@ -24,7 +25,6 @@
 //! name and harness session id together because registry names are reclaimable.
 //! Rows that both lack a session id still compare by name alone.
 
-use crate::announce::TERMINAL_STATUSES;
 use crate::loop_lead::{same_territory, scopes_overlap, team_rivals_pub};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -178,13 +178,12 @@ fn occupancy(
     let mut rivals = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("");
         let row_scope = row.get("crown_scope").and_then(Value::as_str);
-        if row_scope == Some(scope) && TERMINAL_STATUSES.contains(&status) {
+        if row_scope == Some(scope) && crate::row_verdict::finished_json(row) {
             clear_terminal.push((index, name.to_string()));
             continue;
         }
-        if TERMINAL_STATUSES.contains(&status) || Some(name) == exclude_name {
+        if crate::row_verdict::finished_json(row) || Some(name) == exclude_name {
             continue;
         }
         if row_scope == Some(scope) {
@@ -493,8 +492,7 @@ fn apply_with_projects(
         rows.iter()
             .enumerate()
             .filter(|(_, row)| {
-                let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-                if TERMINAL_STATUSES.contains(&status) {
+                if crate::row_verdict::finished_json(row) {
                     return false;
                 }
                 if Some(row.get("name").and_then(Value::as_str).unwrap_or("")) == exclude_name {
@@ -631,6 +629,23 @@ mod tests {
         .unwrap();
         assert_eq!(out["clear_terminal"], json!(["dead-lead"]));
         assert_eq!(out["outcome"], "granted");
+
+        // The reversible word never hands a crown away: an Orphaned row
+        // with a live pid stays a holder, and the spawn declines naming it.
+        let quiet = json!({
+            "name": "quiet-lead", "crown_scope": "fno", "status": "orphaned",
+            "pid": std::process::id(),
+            "created_at": "2026-10-01T00:00:00Z",
+        });
+        let out = resolve(&json!({
+            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "caller": {"kind": "human"},
+            "rows": [quiet],
+        }))
+        .unwrap();
+        assert_eq!(out["outcome"], "declined");
+        assert_eq!(out["holders"], json!(["quiet-lead"]));
+        assert!(out["refusal"].as_str().unwrap().contains("quiet-lead"));
 
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
