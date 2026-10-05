@@ -49,7 +49,7 @@ mod tests {
             format!(r#"{{"plansDirectory": "{}"}}"#, plans.display()),
         )
         .unwrap();
-        let kings = plans.join("evals").join("kings");
+        let kings = plans.join("..").join("evals").join("kings");
         std::fs::create_dir_all(kings.join("lead-a-11111111")).unwrap();
         std::fs::create_dir_all(kings.join("lead-b-22222222")).unwrap();
         std::fs::create_dir_all(kings.join("lead-c-33333333")).unwrap();
