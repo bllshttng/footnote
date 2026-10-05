@@ -651,6 +651,21 @@ fn xf331_rows() {
     assert_eq!(view.selector, None, "hover never selects");
     assert_eq!(view.sideline_offset(), before, "hover never scrolls");
     assert_eq!(view.hover_row, Some(footer), "the highlight still tracks");
+
+    // And a click at the pinned row is the footer's row - the same resolver
+    // hover answers - so the covered display row beneath it never wins.
+    let hit = view.chrome_hit(pinned_row, 2);
+    assert!(
+        matches!(hit, Some(ChromeHit::OpenCreate)),
+        "a click on the pinned footer opens create, got {hit:?}"
+    );
+    if let Some(range) = view.footer_menu_range(view.panel_w() as usize) {
+        let hit = view.chrome_hit(pinned_row, range.start as u16);
+        assert!(
+            matches!(hit, Some(ChromeHit::OpenSidelineMenu { .. })),
+            "a click in the footer's menu range opens the menu, got {hit:?}"
+        );
+    }
 }
 
 #[test]

@@ -165,6 +165,29 @@ impl View {
         rows.saturating_sub(pinned as usize)
     }
 
+    /// The display index the sticky menu footer resolves to at terminal
+    /// `row`, or `None` when that row is not the pinned footer (or the list
+    /// does not pin). The one resolver behind hover, the row menus, and the
+    /// click map, so the gestures never disagree on the footer's row: when
+    /// the rows overflow, the footer pins directly above the org block, and
+    /// the row there is the footer's even though its display row has
+    /// scrolled away. The pinned test reads the same raw region
+    /// `sideline_visible_rows` starts from, so a list that exactly fits
+    /// never reads as pinned here.
+    pub(super) fn pinned_footer_row_index(&self, row: u16, top: usize) -> Option<usize> {
+        let list_rows = (self.term.0 as usize)
+            .saturating_sub(1) // the strip row
+            .saturating_sub(self.org_block_rows());
+        let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
+        if !pinned || row < top as u16 || row as usize != top + list_rows.saturating_sub(2) {
+            return None;
+        }
+        self.painted_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::NewSquad))
+    }
+
     /// The `display_rows()` index a hover cell falls on in the sideline, or
     /// `None` when the cell is not a sideline text cell - a pane, the divider
     /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
@@ -200,19 +223,9 @@ impl View {
         // menu/add-workspace row pins directly above the org block, so
         // a click or hover there is the footer's row even though its display
         // row has scrolled away. Checked ahead of the offset path: the
-        // covered display row must never win. The pinned test reads the same
-        // raw region `sideline_visible_rows` starts from, so a list that
-        // exactly fits never reads as pinned here.
-        let list_rows = (self.term.0 as usize)
-            .saturating_sub(1) // the strip row
-            .saturating_sub(self.org_block_rows());
-        let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
-        let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
-        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(2) {
-            return self
-                .painted_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::NewSquad));
+        // covered display row must never win.
+        if let Some(ns) = self.pinned_footer_row_index(row, top) {
+            return Some(ns);
         }
         let i = row as usize - top + self.sideline_offset();
         if i < self.painted_rows().len() {
