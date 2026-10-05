@@ -909,12 +909,13 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king", "kind"];
   // The remembered board: a bare URL (the usual open) comes back to the
   // last used filters, search, view, lanes and selection. A URL that
-  // carries filters (shared, bookmarked) wins as-is. Storage can refuse
+  // carries filters (shared, bookmarked) wins as-is, and a snapshot page
+  // is a fixed rendering that takes nobody's prefs. Storage can refuse
   // (private mode): a failed read just leaves the defaults.
   const PREFS_KEY = "fno-backlog-prefs";
   const hadUrlFilters = ["lanes", "view", "q", "all"].some((k) => initial.has(k)) ||
     FILTER_KEYS.some((k) => initial.has(k === "kind" ? "type" : k));
-  if (!hadUrlFilters) {
+  if (!hadUrlFilters && !SNAPSHOT) {
     let saved = null;
     try { saved = JSON.parse(lsGet(PREFS_KEY) || "null"); } catch (e) { saved = null; }
     if (saved && typeof saved === "object") {

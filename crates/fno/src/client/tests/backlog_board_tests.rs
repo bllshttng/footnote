@@ -1380,7 +1380,7 @@ fn paint_stats_flush_reports_count_avg_max() {
     assert_eq!(s.count, 0, "take resets the window");
 }
 
-/// x-5926: the board remembers its state. Set a filter, a search text, the
+/// The board remembers its state. Set a filter, a search text, the
 /// list view and a selection, close, reopen: the fresh board holds the same
 /// query, and its first gather parks the cursor back on the saved card.
 #[test]
@@ -1433,7 +1433,7 @@ fn board_remembers_filters_search_view_and_selection_across_reopen() {
     );
 }
 
-/// x-5926: `x` (reset filters) returns the query to `any` and the store's
+/// `x` (reset filters) returns the query to `any` and the store's
 /// memory to the defaults, so the next open starts clean too.
 #[test]
 fn reset_filters_returns_every_filter_to_any_and_clears_the_memory() {
