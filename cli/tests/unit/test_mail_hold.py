@@ -89,6 +89,49 @@ def test_arm_writes_a_readable_clock_and_clear_removes_it():
     assert hold_mod.read(HANDLE) is None
 
 
+def test_dnd_label_marks_a_machine_armed_hold_auto(monkeypatch):
+    # A conversation-sourced clock is the machine's own hold; the column must
+    # not read it as a hold the user set on purpose.
+    start = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(hold_mod, "_now", lambda: start)
+    hold_mod._write(
+        hold_mod.Hold(
+            handle=HANDLE,
+            until=start + timedelta(minutes=23),
+            window_s=3600,
+            clock_kind="wall",
+            ceiling=None,
+            source=hold_mod.CONVERSATION_SOURCE,
+        )
+    )
+    assert hold_mod.dnd_label(HANDLE) == "~23m (auto)"
+    hold_mod._write(
+        hold_mod.Hold(
+            handle=HANDLE,
+            until=start + timedelta(minutes=23),
+            window_s=3600,
+            clock_kind="wall",
+            ceiling=None,
+        )
+    )
+    assert hold_mod.dnd_label(HANDLE) == "~23m"
+    hold_mod._write(
+        hold_mod.Hold(
+            handle=HANDLE,
+            until=None,
+            window_s=None,
+            clock_kind="wall",
+            ceiling=None,
+            source=hold_mod.CONVERSATION_SOURCE,
+        )
+    )
+    assert hold_mod.dnd_label(HANDLE) == "held (auto)"
+    hold_mod.clear(HANDLE)
+    # No clock reads not-lapsed, so the label survives; the column's policy
+    # check above this function is what blanks the cell for a released row.
+    assert hold_mod.dnd_label(HANDLE) == "held"
+
+
 def test_wall_clock_arm_has_fixed_deadline_and_no_idle_ceiling(monkeypatch):
     start = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(hold_mod, "_now", lambda: start)

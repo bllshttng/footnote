@@ -42,6 +42,9 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
+# The mark the Rust conversation arm writes on a clock it armed itself, so a
+# reader can tell a machine-armed hold from one the user set on purpose.
+CONVERSATION_SOURCE = "conversation"
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class Hold:
     window_s: Optional[int]
     clock_kind: str = CLOCK_IDLE
     ceiling: Optional[datetime] = None
+    source: Optional[str] = None
 
 
 def hold_dir() -> Path:
@@ -112,12 +116,14 @@ def read(handle: str) -> Optional[Hold]:
     ceiling = _parse(ceiling_raw) if isinstance(ceiling_raw, str) else None
     if isinstance(ceiling_raw, str) and ceiling is None:
         return None
+    source_raw = raw.get("source")
     return Hold(
         handle=handle,
         until=until,
         window_s=window if isinstance(window, int) else None,
         clock_kind=clock_kind,
         ceiling=ceiling,
+        source=source_raw if isinstance(source_raw, str) else None,
     )
 
 
@@ -125,14 +131,17 @@ def _write(hold: Hold) -> Hold:
     """Atomic replace, so a reader never catches a half-written clock."""
     directory = hold_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {
-            "until": hold.until.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.until else None,
-            "window_s": hold.window_s,
-            "clock_kind": hold.clock_kind,
-            "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
-        }
-    )
+    fields = {
+        "until": hold.until.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.until else None,
+        "window_s": hold.window_s,
+        "clock_kind": hold.clock_kind,
+        "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
+    }
+    # Only when set, so a clock Python writes keeps its exact legacy bytes;
+    # the Rust conversation arm writes the same key in the same position.
+    if hold.source:
+        fields["source"] = hold.source
+    payload = json.dumps(fields)
     fd, tmp = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle_file:
@@ -311,11 +320,14 @@ def dnd_label(handle) -> Optional[str]:
     ``None`` when mail flows despite the flag, which is the lapsed-timed-hold
     case and the one state where the flag is stale. ``"held"`` when the hold
     has no end to show. A duration whenever there is one, because a hold with
-    no visible end is what the operator asked to avoid.
+    no visible end is what the operator asked to avoid. A machine-armed hold
+    reads with an ``(auto)`` suffix, so nobody reads it as a hold they armed.
     """
     if lapsed(handle):
         return None
-    return remaining_label(handle) or "held"
+    clock = read_any(handle)
+    suffix = " (auto)" if clock is not None and clock.source == CONVERSATION_SOURCE else ""
+    return (remaining_label(handle) or "held") + suffix
 
 
 def remaining_label(handle) -> Optional[str]:
