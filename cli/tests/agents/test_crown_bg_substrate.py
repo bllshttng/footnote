@@ -150,6 +150,27 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     assert "king loop disabled" in result.output
 
 
+def test_promote_is_primary_and_crown_aliases_with_a_notice(bg_home, monkeypatch) -> None:
+    """`--promote` is the taught spelling and lands the same registry fields;
+    `--crown` still answers for one release and prints the replacement."""
+    result = _spawn(
+        "spawn", "--name", "promote-primary", "-H", "claude", "reign",
+        "--substrate", "thread", "--promote", "alpha",
+    )
+    assert result.exit_code == 0, result.output
+    assert "is now" not in result.output
+    assert _row("promote-primary").crown_level == 1
+    assert _row("promote-primary").crown_scope == "alpha"
+
+    aliased = _spawn(
+        "spawn", "--name", "promote-alias", "-H", "claude", "reign",
+        "--substrate", "thread", "--crown", "alpha",
+    )
+    assert aliased.exit_code == 0, aliased.output
+    assert "--crown is now --promote" in aliased.output
+    assert _row("promote-alias").crown_level == 1
+
+
 def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> None:
     """The stamp is opt-in: an ordinary bg spawn is not accidentally crowned."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
@@ -196,7 +217,7 @@ def test_bg_spawn_refuses_a_duplicate_crown_before_launch(bg_home, monkeypatch) 
     assert not [e for e in load_registry() if e.name == "pretender"], (
         "a refused crown must launch nothing"
     )
-    assert "--succeed" in result.output
+    assert "--hand-off" in result.output
 
 
 def test_bg_spawn_refuses_a_crown_over_one_member_of_a_live_set(bg_home, monkeypatch) -> None:
@@ -451,7 +472,7 @@ def test_dispatch_spawn_pane_refuses_a_duplicate_crown_before_launch(
             crown_scope="epic-x",
         )
     assert exc.value.exit_code == 2
-    assert "--succeed" in str(exc.value)
+    assert "--hand-off" in str(exc.value)
 
 
 def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:

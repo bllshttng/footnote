@@ -138,7 +138,7 @@ def test_same_scope_spawn_refuses_without_explicit_succession(court) -> None:
 
     _seat("sitting-king", CALLER_SESSION)
 
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_heir()
 
     king = _row("sitting-king")
@@ -156,7 +156,7 @@ def test_a_shell_spawn_over_a_held_scope_refuses_before_launch(court, monkeypatc
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_heir()
 
     assert _row("other-king").crown_level == 2, "another king's crown must not move"
@@ -438,7 +438,7 @@ def test_a_refused_spawn_journals_no_crown_event(court, monkeypatch) -> None:
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_heir()
 
     assert _row("heir") is None
