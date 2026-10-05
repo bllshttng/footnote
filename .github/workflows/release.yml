@@ -71,11 +71,15 @@ on:
         default: false
 
 # Per channel: an rc or stable run can wait at the approval for days, and a
-# shared group would park every nightly behind it (GitHub keeps one pending
-# run per group and cancels the older pending one).
+# shared group would park every nightly behind it. The nightly-dispatched
+# daily candidate cancels its own group in progress, which is what makes
+# the candidate roll in code instead of by platform courtesy: when today's
+# dispatch enters release-rc, yesterday's still-parked run (waiting or
+# building) is cancelled, so the click always holds the newest sha. A
+# hand-dispatched rc keeps cancel-in-progress false and parks safely.
 concurrency:
   group: release-${{ inputs.channel || 'nightly' }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ inputs.channel == 'rc' && inputs.from_nightly == true }}
 
 permissions:
   contents: write # tags, branches, releases
@@ -663,63 +667,7 @@ jobs:
         with:
           fetch-depth: 0 # tags: candidate age and promotion state
 
-      - name: Open the click reminder once a candidate waits more than a day
-        run: |
-          set -euo pipefail
-          rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
-          if [ -z "$rc_tag" ]; then
-            echo "no candidate exists; nothing to remind about"
-            exit 0
-          fi
-          rc_sha="$(git rev-parse --verify "refs/tags/${rc_tag}^{commit}")"
-          nightly_sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null || true)"
-          if [ -z "$nightly_sha" ]; then
-            echo "no nightly tag; nothing can be waiting"
-            exit 0
-          fi
-          # The last click is the newest candidate tag's creation. Its
-          # version still carries the last stable release too, so a fresh
-          # stable promotion (rarer than the click) counts as a release and
-          # silences the nudge for its own day.
-          click="$(git for-each-ref "refs/tags/${rc_tag}" --format='%(creatordate:unix)')"
-          stable_tag="$(git tag -l 'v[0-9]*' | grep -Ev 'rc|dev' | sort -V | tail -1 || true)"
-          if [ -n "$stable_tag" ]; then
-            stable_cut="$(git for-each-ref "refs/tags/${stable_tag}" --format='%(creatordate:unix)')"
-            if [ "$stable_cut" -gt "$click" ]; then
-              echo "stable ${stable_tag} landed after the last candidate; no click is owed today"
-              exit 0
-            fi
-          fi
-          click_days=$(( ($(date -u +%s) - click) / 86400 ))
-          title="release candidate waiting on the approval click"
-          open="$(gh issue list --state open --search "in:title \"${title}\"" --json number --jq '.[0].number // empty')"
-          if [ "$click_days" -lt 1 ]; then
-            # A click landed inside the day: the nudge did its job.
-            if [ -n "$open" ]; then
-              gh issue close "$open" --comment "candidate ${rc_tag} published; closing the reminder"
-            fi
-            echo "the last click is ${click_days}d old; nothing to remind about"
-            exit 0
-          fi
-          # A candidate is waiting only when the nightly carries content
-          # past the last click. The stamped nightly commit's parent is the
-          # green sha it released, so the parent is the strictness cut.
-          if ! git merge-base --is-ancestor "$rc_sha" "${nightly_sha}^"; then
-            echo "the nightly carries nothing past ${rc_tag}; no candidate is waiting"
-            exit 0
-          fi
-          if [ -n "$open" ]; then
-            echo "reminder issue #${open} is already open"
-            exit 0
-          fi
-          body="$(printf '%s\n%s\n%s\n%s\n' \
-            "The nightly published a candidate ${click_days}d ago and it is still parked on the release approval." \
-            "1. Actions -> release -> the run waiting on the release environment -> review it and approve. One click ships the candidate." \
-            "2. Judge it first: main green, no open p0, your own use of the nightly." \
-            "Autonomy ends at the click; nothing auto-approves. The reminder closes itself once a candidate ships.")"
-          gh issue create --title "$title" --body "$body"
-
-      - name: Open the promotion reminder once the candidate is 3+ days old
+      - name: Remind when a candidate waits (click after a day, stable after 3)
         run: |
           set -euo pipefail
           rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
@@ -729,17 +677,56 @@ jobs:
           fi
           version="${rc_tag#v}"
           version="${version%rc*}"
-          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
-            echo "${rc_tag} is already promoted; nothing to remind about"
-            exit 0
-          fi
+          rc_sha="$(git rev-parse --verify "refs/tags/${rc_tag}^{commit}")"
           cut="$(git for-each-ref "refs/tags/${rc_tag}" --format='%(creatordate:unix)')"
           age_days=$(( ($(date -u +%s) - cut) / 86400 ))
-          if [ "$age_days" -lt 3 ]; then
-            echo "${rc_tag} is ${age_days}d old; the reminder opens at 3 days"
+          cut_day="$(date -u -d "@${cut}" +%Y-%m-%d)"
+
+          # Click reminder. The candidate tag's creation IS the last click,
+          # and a fresh stable promotion (rarer than the click) counts as a
+          # release and silences the nudge for its own day.
+          title="release candidate waiting on the approval click"
+          open="$(gh issue list --state open --search "in:title \"${title}\"" --json number --jq '.[0].number // empty')"
+          stable_tag="$(git tag -l 'v[0-9]*' | grep -Ev 'rc|dev' | sort -V | tail -1 || true)"
+          stable_cut=0
+          if [ -n "$stable_tag" ]; then
+            stable_cut="$(git for-each-ref "refs/tags/${stable_tag}" --format='%(creatordate:unix)')"
+          fi
+          nightly_sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null || true)"
+          if [ "$age_days" -lt 1 ]; then
+            # A click landed inside the day: the nudge did its job.
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "candidate ${rc_tag} published; closing the reminder"
+            fi
+          elif [ -z "$nightly_sha" ] || [ "$stable_cut" -gt "$cut" ]; then
+            echo "no candidate is waiting on the click"
+          elif git merge-base --is-ancestor "$rc_sha" "${nightly_sha}^"; then
+            # The stamped nightly commit's parent is the green sha it
+            # released, so the parent is the strictness cut: a candidate
+            # waits only when the nightly carries content past the click.
+            if [ -n "$open" ]; then
+              echo "reminder issue #${open} is already open"
+            else
+              body="$(printf '%s\n%s\n%s\n%s\n' \
+                "The nightly published a candidate ${age_days}d ago and it is still parked on the release approval." \
+                "1. Actions -> release -> the run waiting on the release environment -> review it and approve. One click ships the candidate." \
+                "2. Judge it first: main green, no open p0, your own use of the nightly." \
+                "Autonomy ends at the click; nothing auto-approves. The reminder closes itself once a candidate ships.")"
+              gh issue create --title "$title" --body "$body"
+            fi
+          else
+            echo "the nightly carries nothing past ${rc_tag}; no candidate is waiting"
+          fi
+
+          # Stable reminder: the candidate is published but unpromoted.
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "${rc_tag} is already promoted; no stable reminder"
             exit 0
           fi
-          cut_day="$(date -u -d "@${cut}" +%Y-%m-%d)"
+          if [ "$age_days" -lt 3 ]; then
+            echo "${rc_tag} is ${age_days}d old; the stable reminder opens at 3 days"
+            exit 0
+          fi
           title="stable promotion waiting: v${version} (${rc_tag} cut ${cut_day})"
           open="$(gh issue list --state open --search "in:title \"stable promotion waiting: v${version}\"" --json number --jq '.[0].number // empty')"
           if [ -n "$open" ]; then
