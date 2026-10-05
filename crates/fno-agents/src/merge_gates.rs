@@ -674,13 +674,13 @@ fn page_names_pr(text: &str, pr: u64) -> bool {
             continue;
         }
         let mut j = i + 1; // first byte after "pr"
-        let sep = bytes.get(j);
-        if matches!(sep, Some(b'#') | Some(b'-') | Some(b'/') | Some(b':')) {
+                           // One separator run, spaces and symbols in any order, so "PR #3036"
+                           // and "pr - 3036" read like "PR 3036".
+        while matches!(
+            bytes.get(j),
+            Some(b'#') | Some(b'-') | Some(b'/') | Some(b':') | Some(b' ')
+        ) {
             j += 1;
-        } else if sep == Some(&b' ') {
-            while j < bytes.len() && bytes[j] == b' ' {
-                j += 1;
-            }
         }
         let rest = &text[j.min(text.len())..];
         if rest.starts_with(&needle)

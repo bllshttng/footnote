@@ -4846,6 +4846,25 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("xc129-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fno")).unwrap();
+        // questions_dir falls back to the space dir, and the hermetic guard
+        // refuses a HOME-derived one under test; point it at a tempdir.
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                    None => std::env::remove_var("FNO_SPACES_DIR"),
+                }
+            }
+        }
+        let spaces = std::env::temp_dir().join(format!("xc129-spaces-{}", std::process::id()));
+        std::fs::create_dir_all(&spaces).unwrap();
+        let _env_lock = crate::pr_status::cache_env_lock();
+        let _env = {
+            let prior = std::env::var_os("FNO_SPACES_DIR");
+            std::env::set_var("FNO_SPACES_DIR", &spaces);
+            RestoreEnv(prior)
+        };
         std::fs::write(
             tmp.join(".fno/config.toml"),
             "merge.visual_paint_paths = [\"crates/fno/src/client/**\"]\n",
