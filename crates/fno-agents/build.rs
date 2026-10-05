@@ -20,7 +20,9 @@ use std::process::Command;
 mod check_supersession_codegen;
 
 fn main() {
-    // Produce the cross-tree copies instead of checking them. Both
+    // Produce the cross-tree copies instead of checking them; the two
+    // events-schema syncs are the exception: they CHECK their tracked copies so
+    // a build never dirties a stale checkout (see check_generated_copy). These
     // run before the env-var work so a build that later fails still leaves the
     // copies fresh.
     sync_harness_capabilities();
@@ -162,6 +164,27 @@ fn write_if_different(path: &Path, bytes: &[u8]) {
             path.display()
         );
     }
+}
+
+/// CHECK a tracked generated copy instead of writing it.
+///
+/// These copies ship in the crates.io packages (the generators' inputs cannot:
+/// package include paths cannot leave the crate dir), so a build that rewrote
+/// them dirtied the tree at any head whose committed copy lagged its source and
+/// blocked the next git pull. A drift fails the build; `FNO_SYNC_EVENTS_SCHEMA=1`
+/// restores produce behavior for the regen-and-commit flow.
+fn check_generated_copy(path: &Path, bytes: &[u8], produce: bool) {
+    if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
+        return;
+    }
+    if !produce {
+        panic!(
+            "tracked copy drifted from its source: {}. Rebuild once with \
+             FNO_SYNC_EVENTS_SCHEMA=1 to regenerate it, then commit.",
+            path.display()
+        );
+    }
+    write_if_different(path, bytes);
 }
 
 /// PRODUCE the downstream copies of the capability table instead of checking
@@ -429,7 +452,7 @@ fn sync_registry_schema() {
     write_if_different(&cli_copy, text.as_bytes());
 }
 
-/// PRODUCE `src/events_limits.toml` from the Python-owned event schema.
+/// CHECK `src/events_limits.toml` against the Python-owned event schema.
 ///
 /// `cli/src/fno/events/schema.yaml` is canonical and Python reads its `limits`
 /// block at runtime. Rust used to MIRROR the two scalars as literals in
@@ -439,8 +462,8 @@ fn sync_registry_schema() {
 /// crates.io build compiles against and the link is a real dependency edge.
 ///
 /// No-op when the schema is absent (tarball case) and on any parse failure: the
-/// committed file is then the value, and the rust-ci generated-copies
-/// dirty-tree step is the tripwire against a hand edit.
+/// committed file is then the value, and the build-time drift check is the
+/// tripwire against a hand edit.
 fn sync_events_limits() {
     let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/events_limits.toml");
     let Some(root) = repo_root() else { return };
@@ -467,21 +490,25 @@ fn sync_events_limits() {
         println!("cargo:warning=fno-agents build: schema.yaml limits block incomplete");
         return;
     };
-    write_if_different(
+    let produce = std::env::var_os("FNO_SYNC_EVENTS_SCHEMA").is_some_and(|v| v == "1");
+    check_generated_copy(
         &generated,
         render_events_limits(max_data_bytes, encoding).as_bytes(),
+        produce,
     );
 }
 
-/// PRODUCE the native judge's rule set from the Python-owned event schema.
+/// CHECK the native judge's rule set against the Python-owned event schema.
 ///
 /// `cli/src/fno/events/schema.yaml` is canonical; `src/event_store/validate.rs`
 /// `include_str!`s its JSON projection (`events_schema.json`) so the judge
 /// needs no YAML parser and cannot drift from the schema Python reads. Every
 /// `data.properties.<field>.enum` projects as `<field>`, and a list item's
 /// enum as `<field>[].<sub>` (the review_attestation dispositions rule). A
-/// sibling copy lands in crates/fno beside its generated `validate.rs`.
-/// No-op when the schema is absent (tarball case) and on parse failure.
+/// sibling copy lives in crates/fno beside its generated `validate.rs`.
+/// No-op when the schema is absent (tarball case); parse failures warn and
+/// skip; a tracked copy that drifted fails the build (see
+/// [`check_generated_copy`]).
 fn sync_events_schema() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let Some(root) = repo_root() else { return };
@@ -557,11 +584,17 @@ fn sync_events_schema() {
         "event_types": event_types,
     });
     let body = serde_json::to_vec(&projection).expect("schema projection serializes");
-    write_if_different(&manifest.join("src/event_store/events_schema.json"), &body);
-    let copy = root.join("crates/fno/src/event_store/events_schema.json");
-    if copy.is_file() {
-        write_if_different(&copy, &body);
-    }
+    let produce = std::env::var_os("FNO_SYNC_EVENTS_SCHEMA").is_some_and(|v| v == "1");
+    check_generated_copy(
+        &manifest.join("src/event_store/events_schema.json"),
+        &body,
+        produce,
+    );
+    check_generated_copy(
+        &root.join("crates/fno/src/event_store/events_schema.json"),
+        &body,
+        produce,
+    );
 }
 
 /// YAML sequence to a JSON array of scalars. The schema blocks the judge
