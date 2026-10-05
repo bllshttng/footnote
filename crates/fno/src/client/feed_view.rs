@@ -411,7 +411,7 @@ pub(crate) fn feed_panel_rows(
         rows[empty_line] = vec![Span::plain(pad_to(
             &match &o.query_text {
                 q if !q.is_empty() => format!("   no activity for {q}"),
-                _ => "   no activity in the last 24h".to_string(),
+                _ => "   no activity yet".to_string(),
             },
             w,
         ))];

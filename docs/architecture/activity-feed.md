@@ -17,9 +17,9 @@ A store qualifies for three reasons. It is durable. It does not rotate. It IS th
 
 The durable db stores meet that test. `events.jsonl` rotates in about twelve hours, but its durable db copy keeps `retention_class = durable` rows long after the file rotates. The feed never reads the jsonl file: a typed read through the store skips the ticks and reaches rows from weeks back.
 
-The feed reads the question, spawn and close kinds typed, so the store's other kinds (119k+ `attention_delivery` rows alone) never reach the parser. Every leg skips its read entirely when the query's flags exclude all of its kinds.
+The feed reads the question, spawn and close kinds typed. The store's other kinds, 119k+ `attention_delivery` rows alone, never reach the parser. If the query's flags exclude every kind a leg can emit, the leg skips its read entirely.
 
-The lifecycle kinds derive from the graph at query time, so the graph stays the one truth. No writer is added. A merged node reads `pr_merged`, not `node_ended`: the merge IS the end.
+The lifecycle kinds derive from the graph at query time, so the graph stays the one truth. No writer is added. A merged node reads `pr_merged`, not `node_ended`. The merge IS the end.
 
 ## The kinds and their areas
 
@@ -43,11 +43,11 @@ Two kinds have no writer yet: `main_ci_changed` (a durable CI source does not ex
 
 The projection orders rows by a total key: parsed time, then kind, node, session, ref and title. Every row carries a `cursor` - that key as one opaque string. The client never parses anything else to page.
 
-`fno agents feed --json --limit 200` reads the newest page. `--before <cursor>` reads the page strictly below a cursor; `--after <cursor>` reads the page strictly above one. Pages concatenate with no row read twice or skipped, even when rows share a timestamp.
+`fno agents feed --json --limit 200` reads the newest page. `--before <cursor>` reads the page strictly below a cursor. `--after <cursor>` reads the page strictly above one. Rows sharing a timestamp still page cleanly. Pages concatenate with no row read twice or skipped.
 
-The panel holds a bounded window of at most 600 rows (three pages). Scrolling back near the oldest loaded row arms an Older page and the window prepends it, dropping the far end when the cap would break. Scrolling forward past a detached head arms a Newer page. Rows arrive live at the top and never jump the view while you are scrolled back: the footer shows `↑ N new`, and a click on that marker (or `g`, or the Home key) returns you to the top. Memory stays flat over a long scroll.
+The panel holds a bounded window of at most 600 rows, three pages. Scrolling back near the oldest loaded row arms an Older page. If the cap must hold, the window drops its far end after prepending. Scrolling forward past a detached head arms a Newer page. Rows arrive live at the top. They never jump the view while you are scrolled back. The footer shows `↑ N new`. A click on that marker, or `g`, or the Home key, returns you to the top. Memory stays flat over a long scroll.
 
-A page costs one projection run. The questions leg reads its kinds typed and the owner rollup indexes the graph once, so the whole projection is under a second where it was over two.
+A page costs one projection run. The questions leg reads its kinds typed. The owner rollup indexes the graph once. The whole projection runs under a second where it ran over two.
 
 ## The verb and the panel
 
@@ -55,15 +55,15 @@ A page costs one projection run. The questions leg reads its kinds typed and the
 
 The filter flags AND together, and the values inside one flag are comma-OR. `--kind` matches by prefix, so an exact kind is its own prefix. An empty flag value is ignored. An unknown area returns an empty answer, not an error. Both epoch bounds reach every event-store leg as real store bounds.
 
-`e` in the mux client toggles the full-height panel on the right edge. Rows render newest first as a table: time, area, harness, kind, node, session tail, lead, summary. A narrow panel drops lead, then harness, then area, then session; time, kind, node and summary never drop. The border drags to a width that persists.
+`e` in the mux client toggles the full-height panel on the right edge. Rows render newest first as a table: time, area, harness, kind, node, session tail, lead, summary. A narrow panel drops lead, then harness, then area, then session. Time, kind, node and summary never drop. The border drags to a width that persists.
 
 The panel holds a bounded window of at most 600 rows (three pages). Rows arrive live at the top and never jump the view while you are scrolled back. The footer shows `↑ N new`, and a click on that marker (or `g`, or the Home key) returns you to the top and clears the marker.
 
-The bottom row carries the hints and the status: the `↑ N new` marker, the active query, then the keys, and the row count (`600 loaded`, `end of history`, the scan note under a client-matched query, or the typed error). The header is a title only.
+The bottom row carries the hints and the status. The hints are the `↑ N new` marker, the active query and the keys. The status is the row count, `end of history`, a scan note, or the typed error. The header is a title only.
 
 ### Keys
 
-Focused with `E`; an unfocused panel takes no keys at all.
+Focus with `E`. An unfocused panel takes no keys at all.
 
 | Key | Does |
 |---|---|
@@ -116,9 +116,9 @@ The query keys the feed answers, as the `?` overlay renders them:
 
 Worked examples: `x-1234` (a bare node id), `h:codex k:node stall`, `sid:00bde302`, `-k:question h:claude`, `h:codex | h:claude k:pr`, `ts:>=2026-10-01`. `s:ready` refuses here: `s:` is node-only.
 
-When the parsed query is plain positive terms on pushable keys, the client sends them as the projection flags above and the store does the filtering. Anything richer - free text, `|`, a negation - matches client-side over each landed page, capped at five pages per scroll gesture, with the footer naming how far back the scan reached.
+If the parsed query is plain positive terms on pushable keys, the client sends them as projection flags. The store does the filtering. Anything richer matches client-side over each landed page. Free text, `|` and a negation all land there. The scan caps at five pages per scroll gesture. The footer names how far back it reached.
 
-Tab completes the token before the cursor: a key prefix completes from the shared table's keys, and a value after `id:`, `sid:`, `a:`, `h:`, `k:` or `l:` completes from the distinct values in the loaded window. Esc in the bar clears the query and refolds unfiltered; the panel stays open.
+Tab completes the token before the cursor. A key prefix completes from the shared table's keys. A value after `id:`, `sid:`, `a:`, `h:`, `k:` or `l:` completes from the distinct values in the loaded window. Esc in the bar clears the query and refolds unfiltered. The panel stays open.
 
 ## Day boundaries
 
@@ -142,7 +142,7 @@ It does NOT borrow the asking row's session. That session asked the question. It
 
 ## The harness and the lead
 
-A row with a session and no harness reads the lane its session ran: a session-to-harness map built from the graph's `sessions[]` rows and the spawn events, joined on the session id. A session in neither source stays absent. No guess.
+A row with a session and no harness reads the lane its session ran. The projection builds one session-to-harness map from the graph's `sessions[]` rows and the spawn events. It joins on the session id. A session in neither source stays absent. No guess.
 
 A row that rolls up to a held team scope carries `lead`: the crown holder's name, beside the `owner` spelling the panel groups on. A row with no node whose parent session IS a held crown holder's session rolls up to that holder.
 
