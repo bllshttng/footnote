@@ -2687,13 +2687,14 @@ def _emit_human(
         # silent scan read as a clean bill of health.
         out("fno doctor: LaunchAgent health: not applicable (no launchctl on this host).")
     for entry in agents.get("dead") or []:
-        if entry["label"] == "sh.fno.pr-watcher":
+        label = entry.get("label")
+        if label == "sh.fno.pr-watcher":
             remedy = "run `fno do pr watch refresh`"
         else:
             remedy = "re-run `fno doctor update` if the entry point moved"
         exit_code = entry.get("exit")
         out(
-            f"fno doctor: LaunchAgent {entry['label']} last exited "
+            f"fno doctor: LaunchAgent {label} last exited "
             f"{exit_code if exit_code is not None else 'exit unknown'} "
             f"(it is installed but failing); check its log under ~/.fno/ and {remedy}."
         )
