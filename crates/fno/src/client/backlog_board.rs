@@ -394,6 +394,14 @@ impl BoardView {
         self.paint_stats.borrow_mut().record(micros);
     }
 
+    /// A board-local popup (the keys sheet, the facet or column picker)
+    /// paints over the board body, so the tap spans on record describe
+    /// cells the popup now covers: while one is open, a press resolves
+    /// nothing.
+    pub(crate) fn popup_open(&self) -> bool {
+        self.keys_overlay || self.facet.is_some() || self.colpick.is_some()
+    }
+
     /// Flush a due paint-stats window to `<mux dir>/client-warnings.log`.
     /// Called each run-loop pass while the board is open.
     pub(crate) fn flush_paint_stats(&self) {

@@ -31,8 +31,8 @@ pub(super) async fn open(view: &mut View, id: String) {
             None => {}
         }
     }
-    // The cascade's middle leg (x-4310 item 4): no vault plan opens the
-    // GitHub-or-Linear link the node stores, through the PR tap's opener.
+    // The cascade's middle leg: no vault plan opens the GitHub-or-Linear
+    // link the node stores, through the PR tap's opener.
     if let Some(link) = view
         .backlog
         .iter()

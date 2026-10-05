@@ -227,8 +227,13 @@ pub(super) async fn mouse_pre_pass(
         // wheel reaches the panes it covers. Keys stay with the board. A
         // left press on a painted node id opens it (plan, else the node's
         // link, else the details pane) - the sideline card tap's cascade.
+        // Under an overlay or a board popup the recorded spans describe
+        // cells something else now paints, so the tap resolves nothing.
         if view.backlog_board.is_some() && view.board_full {
-            if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+            if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
+                && view.active_overlay_layout().is_none()
+                && !view.backlog_board.as_ref().is_none_or(|b| b.popup_open())
+            {
                 if let Some(id) = node_link::span_at(rep.row, rep.col) {
                     node_link::open(view, id).await;
                 }
@@ -655,7 +660,8 @@ pub(super) async fn mouse_pre_pass(
             // The windowed board column is the board's surface: focus it and
             // resolve nothing else there - a stale agents row underneath must
             // never act (no phantom drags, no phantom row actions). A press
-            // on a painted node id opens it, the sideline card tap's cascade.
+            // on a painted node id opens it, the sideline card tap's
+            // cascade; under a board popup the tap resolves nothing.
             if view.backlog_board.is_some()
                 && !view.board_full
                 && view.sideline_view == crate::view_store::SidelineView::Backlog
@@ -663,8 +669,10 @@ pub(super) async fn mouse_pre_pass(
                 && !(rep.row as usize == view.term.0 as usize - 1 && view.bottom_row_is_chrome())
             {
                 view.region_owner = RegionOwner::Board;
-                if let Some(id) = node_link::span_at(rep.row, rep.col) {
-                    node_link::open(view, id).await;
+                if !view.backlog_board.as_ref().is_none_or(|b| b.popup_open()) {
+                    if let Some(id) = node_link::span_at(rep.row, rep.col) {
+                        node_link::open(view, id).await;
+                    }
                 }
                 continue;
             }

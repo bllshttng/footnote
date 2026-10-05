@@ -282,8 +282,8 @@ pub(crate) fn span_at(row: usize, col: usize) -> Option<String> {
 }
 
 /// Whether a Label run reads as a backlog node id: `<prefix>-<hex>` with a
-/// hex tail of at least four (`x-0fd1`, `fno-a3f9`). The shape gate is what
-/// keeps every other Label run (a channel label) out of the taps.
+/// hex tail of at least four (`x-aaaa`, `ab-1234abcd`). The shape gate is
+/// what keeps every other Label run (a channel label) out of the taps.
 fn node_id_shape(s: &str) -> bool {
     let Some((prefix, hex)) = s.split_once('-') else {
         return false;
