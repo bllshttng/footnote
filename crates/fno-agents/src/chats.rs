@@ -1878,11 +1878,13 @@ mod tests {
         assert!(cut.ends_with("twelve thirteen. Rest here."), "{cut}");
         let framed = render_message(&serde_json::json!({
             "type": "message", "from": "folio", "id": "fmail-0badc0de1234",
-            "body": "<fno_mail from=\"quill\" id=\"fmail-1\">\nlegacy body text\n</fno_mail>"
+            "body": "<fno_mail from=\"quill\" id=\"fmail-1\">legacy body text</fno_mail>"
         }));
-        // An unmigrated legacy body shows the raw tag: the visible prompt to
-        // run the one-time "chats migrate --envelopes".
-        assert!(framed.contains("<fno_mail"), "{framed}");
+        // A whole-body legacy envelope reads as its inner text at render
+        // (the operator's 2026-10-05 ask); the bytes at rest only change
+        // when "chats migrate --envelopes" runs.
+        assert!(framed.contains("legacy body text"), "{framed}");
+        assert!(!framed.contains("<fno_mail"), "{framed}");
         // The recipient-key read resolves the registry through AgentsHome;
         // pin a declared test root or the home-fallback fence fires.
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
