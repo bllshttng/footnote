@@ -982,8 +982,8 @@ mod tests {
             .get("participants")
             .and_then(Value::as_array)
             .unwrap();
-        // a+m merge into one pair thread; n, o, p each stand alone; the
-        // system and announce dirs contribute no pair thread.
+        // a+m+e merge into the one candor/vellum pair thread; b, f0, n, o, p
+        // each stand alone; the system and announce dirs contribute none.
         assert_eq!(threads.len(), 7, "pair chats only: {threads:?}");
         // Old mail: an unmigrated legacy row shows the raw tag (the prompt
         // to run the one-time migration), the pasted header-summary repeat
@@ -1098,7 +1098,10 @@ mod tests {
             [
                 "fmail-111111111111",
                 "fmail-222222222223",
-                "fmail-222222222222"
+                "fmail-222222222222",
+                "fmail-b1b1b1b1b1b1",
+                "fmail-b2b2b2b2b2b2",
+                "fmail-b3b3b3b3b3b3"
             ],
             "interleaved by ts: {ids:?}"
         );
