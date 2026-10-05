@@ -23,7 +23,7 @@ A database that misses any bar is named with the failing verb and the measured t
 
 ## The load today
 
-The request log is the counter: set `FNO_STORE_EXEC_LOG=<path>` and every `--store-exec` request appends one JSON line. The line holds the method, the op name, read or write, ok, rows in the reply, reply bytes, and serve time in microseconds. Unset, the lane writes nothing. An end-to-end check against the graph copy logged a two-id read as 2 rows, a whole read as 3,958 rows and 19.5 MB, and an `op` call as a write.
+The request log is the counter: set `FNO_STORE_EXEC_LOG=<path>` and every `--store-exec` request appends one JSON line. The line holds the method, the op name, read or write, ok, rows in the reply, reply bytes, and serve time in microseconds. Unset, the lane writes nothing. An end-to-end check ran against the graph copy. It logged a two-id read as 2 rows and a whole read as 3,958 rows of 19.5 MB. It logged an `op` call as a write.
 
 A working day of counts needs the counter in the deployed binary, so that run follows the merge. Until then the floor comes from the process table. A `ps` sampler ran for 10 minutes on 2026-10-05 and excluded every probe path. It took 3,191 snapshots, one every 0.19 s, and saw 121 distinct request processes. That is a floor of about 12 requests a minute, or 730 an hour. Each process showed in 7.7 snapshots on average, so a typical request lived about 1.4 s. The sampler misses any request shorter than one gap, and it cannot see direct file readers. The fleet incident lane reported the MacBook overloaded during the window, at about 9 jobs waiting per core.
 
@@ -42,7 +42,7 @@ Both Macs reach Tailscale over Wi-Fi today: the MacBook on `en0`, the iMac on `e
 
 ## Measurements
 
-Servers ran in Docker on the iMac, bound to its tailnet address only: `ghcr.io/tursodatabase/libsql-server` (sqld) and the official `postgres:17` image from its public ECR mirror. The client ran on the MacBook. Both stores held the same two tables: `nodes(id, body)` seeded from the 3,958 reply entries of the copy, and `claims(key, holder, expires_ms)`. The claim is one conditional statement: insert, or take over only when the old claim expired.
+Servers ran in Docker on the iMac, bound to its tailnet address only: `ghcr.io/tursodatabase/libsql-server` (sqld) and the official `postgres:17` image from its public ECR mirror. The client ran on the MacBook. Both stores held the same two tables: `nodes(id, body)` seeded from the 3,958 reply entries of the copy, and `claims(key, holder, expires_ms)`. The claim is one conditional statement. It inserts a new claim, or takes over a claim whose expiry has passed.
 
 ```sql
 INSERT INTO claims(key, holder, expires_ms) VALUES (?, ?, ?)
@@ -63,7 +63,7 @@ The first run agrees. libSQL cold claim acquire read p50 16 ms and p95 30 ms. Po
 Four findings carry the ruling.
 
 1. Postgres pays for a connection per request. Cold, every Postgres verb costs about 60 ms at p50, three times libSQL. The startup and password exchange add round trips that an HTTP request does not. Warm, the two databases tie. Postgres meets the bars only behind a resident pooled connection.
-2. No remote whole read meets the bar. libSQL misses it at 1,340 ms, and Postgres misses it at 1,034 ms. Both carry 21.5 MB over the link. sqld also refuses the read in one response by default (`RESPONSE_TOO_LARGE`), so the probe paged it by id in pages of 1,000 rows.
+2. No remote whole read meets the bar. libSQL misses it at 1,340 ms, and Postgres misses it at 1,034 ms. Both carry 21.5 MB over the link. By default sqld refuses the read in one response (`RESPONSE_TOO_LARGE`). The probe paged it by id, 1,000 rows a page.
 3. The embedded replica answers whole reads in 24 ms, against 3,285 ms for today's local lane. A narrow read takes under a millisecond. Postgres has no embedded replica.
 4. libSQL cold claim acquire missed the 100 ms p95 bar by 8 ms in one of two runs. The miss tracks the Wi-Fi tail (ping p95 79 ms). The p50 of 22 ms sits well inside the bar.
 
@@ -85,7 +85,7 @@ A one-shot process that opens and syncs pays 303 ms. So a verb process must neve
 
 ## Hosting the primary: iMac or DS920+
 
-The iMac was measured. The DS920+ was not: it is not on the tailnet today. Its column comes from Synology's published spec (Celeron J4125 with 4 cores, 4 GB RAM that grows to 8 GB, two 1 GbE ports, two M.2 slots) and is a score, not a measurement.
+The iMac was measured. The DS920+ was not: it is not on the tailnet today. Its column is a score from Synology's published spec, not a measurement. The spec lists a 4-core Celeron J4125, 4 GB RAM that grows to 8 GB, two 1 GbE ports, and two M.2 slots.
 
 | Criterion | iMac | DS920+ |
 |---|---|---|
@@ -99,7 +99,7 @@ The iMac was measured. The DS920+ was not: it is not on the tailnet today. Its c
 | Backups | Time Machine | volume snapshots and Hyper Backup |
 | SQLite on a share | never | never: sqld keeps its data on the NAS's own volume, and no machine opens a file on a NAS share |
 
-The DS920+ wins on the axis that matters most for a primary: it stays up when the fleet does not. It loses on disk flush time, and its numbers are unknown. The iMac wins today because it is measured and needs no setup.
+The DS920+ wins on the axis that matters most for a primary. If the fleet goes down, the NAS stays up. It loses on disk flush time, and its numbers are unknown. The iMac wins today because it is measured and needs no setup.
 
 ## Ruling
 
@@ -110,7 +110,7 @@ The DS920+ wins on the axis that matters most for a primary: it stays up when th
 - One resident syncer per machine keeps its replica fresh. A verb process never syncs.
 - The SQL dialect stays SQLite. No second dialect enters the tree.
 
-Against Postgres: it misses every cold bar (claim acquire p95 184 ms, narrow read p95 148 ms, whole read p95 1,034 ms), and it has no embedded replica, so every whole read would cross the network. A pooled resident connection fixes the first two, but nothing fixes the third.
+Against Postgres: it misses every cold bar. Cold claim acquire p95 is 184 ms, narrow read p95 is 148 ms, and whole read p95 is 1,034 ms. It has no embedded replica, so every whole read crosses the network. A pooled resident connection fixes the first two. Nothing fixes the third.
 
 **Primary host: the iMac now, the DS920+ next.** Start the primary on the iMac, because it passed these probes with no new setup. Move it to the DS920+ once the NAS joins the tailnet and passes the same probe at the same bars. The NAS runs sqld in Container Manager with its data on the NAS's own volume. Put the iMac on a cable either way.
 
