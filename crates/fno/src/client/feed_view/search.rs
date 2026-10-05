@@ -211,8 +211,8 @@ pub(crate) mod tests {
 
     pub(crate) fn feed_row_cases_through_the_shared_matcher() {
         let items = vec![
-            row("2026-10-01T08:00:00Z", "node_started", Some("x-1234"), None),
-            row("2026-10-01T09:00:00Z", "node_started", Some("x-abcd"), None),
+            row("2026-10-01T08:00:00Z", "node_started", Some("n-1234"), None),
+            row("2026-10-01T09:00:00Z", "node_started", Some("n-abcd"), None),
             row(
                 "2026-10-01T10:00:00Z",
                 "question_closed",
@@ -222,7 +222,7 @@ pub(crate) mod tests {
             row("2026-10-01T11:00:00Z", "session_spawned", None, None),
             row("2026-10-01T12:00:00Z", "node_started", Some("x-1"), None),
             row("2026-10-01T13:00:00Z", "pr_merged", None, None),
-            row("2026-09-30T23:00:00Z", "node_started", Some("x-old"), None),
+            row("2026-09-30T23:00:00Z", "node_started", Some("n-old"), None),
         ];
         // Per-row tweaks the case table names.
         let mut items = items;
@@ -233,10 +233,10 @@ pub(crate) mod tests {
         items[6].harness = Some("claude".into());
         let fs = fields(&items);
 
-        assert!(keeps("x-1234", &fs[0]), "a bare node id keeps its row");
-        assert!(!keeps("x-1234", &fs[1]), "a bare id is exact, not fuzzy");
-        assert!(keeps("id:x-1234,x-abcd", &fs[1]), "comma OR inside a key");
-        assert!(!keeps("id:x-1234", &fs[1]), "the other id drops");
+        assert!(keeps("n-1234", &fs[0]), "a bare node id keeps its row");
+        assert!(!keeps("n-1234", &fs[1]), "a bare id is exact, not fuzzy");
+        assert!(keeps("id:n-1234,n-abcd", &fs[1]), "comma OR inside a key");
+        assert!(!keeps("id:n-1234", &fs[1]), "the other id drops");
         assert!(keeps("k:question", &fs[2]), "kind matches by prefix");
         assert!(
             keeps("-k:question h:claude", &fs[3]),
@@ -325,7 +325,7 @@ pub(crate) mod tests {
         assert!(f.since.is_some());
         assert_eq!(f.until, None);
         // A bare node id pushes --node.
-        let f = pf("x-1234").expect("an id-shaped bare word pushes");
-        assert_eq!(f.node.as_deref(), Some("x-1234"));
+        let f = pf("n-1234").expect("an id-shaped bare word pushes");
+        assert_eq!(f.node.as_deref(), Some("n-1234"));
     }
 }

@@ -1402,7 +1402,7 @@ pub(crate) async fn feed_keys(
             continue;
         }
         // The `?` overlay sits in front of the panel: Esc unwinds it first
-        // and the panel stays open (x-3584's layering, AC13).
+        // and the panel stays open (the panel-close layering, AC13).
         if view.feed.as_ref().is_some_and(|f| f.keys_open) {
             match tok {
                 ModalKey::Esc => {

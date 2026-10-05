@@ -1182,7 +1182,7 @@ fn scope_holds(scope: &str, node: &str) -> bool {
 /// contiguous with its cursor. Without a cursor `--limit` keeps the newest,
 /// as it always has. Output stays ascending. Pure so the flags are testable
 /// without files.
-pub fn filter_rows(
+pub(crate) fn filter_rows(
     rows: Vec<FeedRow>,
     page: &Page,
     pre: &Prefilter,
@@ -1404,7 +1404,7 @@ pub(crate) fn leg_skipped(pre: &Prefilter, kinds: &[&str]) -> bool {
 /// the rows strictly below the cursor key, newest `limit` of them; `--after`
 /// keeps the rows strictly above, OLDEST `limit`. Both at once is refused.
 #[derive(Debug, Default)]
-struct Page {
+pub(crate) struct Page {
     before: Option<String>,
     after: Option<String>,
     limit: Option<usize>,
@@ -1414,7 +1414,7 @@ struct Page {
 /// values inside one flag are comma-OR. No grammar, no negation, no OR
 /// across flags: the client sends only what one positive group can say.
 #[derive(Debug, Default, Clone)]
-struct Prefilter {
+pub(crate) struct Prefilter {
     /// Exact node ids, comma-OR.
     node: Option<String>,
     /// Kind prefixes, comma-OR.
@@ -1779,12 +1779,12 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
 mod tests {
     use super::*;
 
-    // The x-aaaa shape: a blueprint row with only ended_at, a do row and a
+    // The nd-aaaa shape: a blueprint row with only ended_at, a do row and a
     // ship row each with started_at, on a node carrying pr_number and
     // completed_at.
     fn graph_fixture() -> Vec<Value> {
         vec![serde_json::json!({
-            "id": "x-aaaa",
+            "id": "nd-aaaa",
             "status": "done",
             "title": "feed marker node",
             "pr_number": 1395,
@@ -1813,7 +1813,7 @@ mod tests {
 
     fn questions_fixture() -> String {
         [
-            r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"line one\nline two","session_id":"s-ask","node":"x-aaaa"}}"#,
+            r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"line one\nline two","session_id":"s-ask","node":"nd-aaaa"}}"#,
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"operator","data":{"question_id":"q-1","answer":"ruling: yes\ndo it","closed_by":"s-op"}}"#,
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"operator","data":{"decision_id":"d-1","decision":"strict equality stands","subject":"revert-dispute","decided_by":"s-op"}}"#,
         ]
@@ -1832,7 +1832,7 @@ mod tests {
             ["node_created", "node_started", "node_shipped", "node_ended"]
         );
         let started = &p.rows[1];
-        assert_eq!(started.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(started.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
         let pr = &p.rows[2];
         assert_eq!(pr.session_id.as_deref(), Some("s-ship"));
@@ -1870,7 +1870,7 @@ mod tests {
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
-        assert_eq!(asked.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(asked.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(asked.title, "line one");
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.r#ref.as_deref(), Some("q-1"));
@@ -1878,7 +1878,7 @@ mod tests {
         // offers no attach target. The node comes from the asking row.
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("s-op"));
-        assert_eq!(closed.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(closed.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(closed.title, "ruling: yes");
         let decision = p
             .rows
@@ -1962,13 +1962,13 @@ mod tests {
             p.rows.clone(),
             &Page::default(),
             &Prefilter {
-                node: Some("x-aaaa".into()),
+                node: Some("nd-aaaa".into()),
                 ..Default::default()
             },
             None,
             None,
         );
-        // The fixture question carries node x-aaaa, so a node filter keeps it
+        // The fixture question carries node nd-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
         // closure inherits the association from the row that asked.
         assert_eq!(
@@ -2228,11 +2228,11 @@ mod tests {
         // AC4-HP (projection half): the graph leg skips entries outside the
         // node set before deriving; the other legs filter after projection.
         let entries = vec![
-            serde_json::json!({"id": "x-aaaa", "title": "a", "created_at": "2026-09-02T08:00:00Z"}),
-            serde_json::json!({"id": "x-bbbb", "title": "b", "created_at": "2026-09-02T09:00:00Z"}),
+            serde_json::json!({"id": "nd-aaaa", "title": "a", "created_at": "2026-09-02T08:00:00Z"}),
+            serde_json::json!({"id": "nd-bbbb", "title": "b", "created_at": "2026-09-02T09:00:00Z"}),
         ];
-        let spawns = r#"{"ts":"2026-09-02T10:00:00Z","type":"agent_spawned","source":"python","data":{"node":"x-bbbb","name":"w","substrate":"pane"}}"#;
-        let set = vec!["x-aaaa".to_string()];
+        let spawns = r#"{"ts":"2026-09-02T10:00:00Z","type":"agent_spawned","source":"python","data":{"node":"nd-bbbb","name":"w","substrate":"pane"}}"#;
+        let set = vec!["nd-aaaa".to_string()];
         let p = project(
             &questions_fixture(),
             &entries,
@@ -2246,19 +2246,19 @@ mod tests {
         assert!(
             !p.rows
                 .iter()
-                .any(|r| r.kind == "node_created" && r.node.as_deref() == Some("x-bbbb")),
+                .any(|r| r.kind == "node_created" && r.node.as_deref() == Some("nd-bbbb")),
             "a filtered entry derives no rows"
         );
         let pre = Prefilter {
-            node: Some("x-aaaa".into()),
+            node: Some("nd-aaaa".into()),
             ..Default::default()
         };
         let got = filter_rows(p.rows, &Page::default(), &pre, None, None);
         assert!(
-            got.iter().all(|r| r.node.as_deref() != Some("x-bbbb")),
+            got.iter().all(|r| r.node.as_deref() != Some("nd-bbbb")),
             "legs without a store node filter after projection"
         );
-        assert!(got.iter().any(|r| r.node.as_deref() == Some("x-aaaa")));
+        assert!(got.iter().any(|r| r.node.as_deref() == Some("nd-aaaa")));
 
         // AC5: area is a pure function of kind, and nothing the projection
         // emits lands in `other`.
@@ -2335,7 +2335,7 @@ mod tests {
         // AC6-HP: a question row whose session spawned through a codex
         // agent_spawned reads harness codex, and --harness codex returns it.
         let spawns = r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"w","provider":null,"harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"s-op"}}"#;
-        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","node":"x-aaaa"}}"#;
+        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","node":"nd-aaaa"}}"#;
         let p = project(questions, &[], &[], spawns, "", "", "", None);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.harness.as_deref(), Some("codex"));
@@ -2351,7 +2351,7 @@ mod tests {
 
         // AC6-EDGE: a session in no spawn or graph row stays absent, and the
         // harness filter does not guess it in.
-        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"s-orphan","node":"x-aaaa"}}"#;
+        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"s-orphan","node":"nd-aaaa"}}"#;
         let p = project(questions, &[], &[], "", "", "", "", None);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.harness, None);
@@ -2370,7 +2370,7 @@ mod tests {
         // The lead route: a node-less row whose parent session is a held
         // crown holder's spawn rolls up to that holder; the node route keeps
         // setting lead beside owner.
-        let team = r#"{"ts":"2026-09-02T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-aaaa"}}"#;
+        let team = r#"{"ts":"2026-09-02T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"nd-aaaa"}}"#;
         let spawns = concat!(
             r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"heir","harness":"claude","harness_session_id":"20260904T151442Z-cl54345-58af0c","substrate":"pane","spawned_by_session":"s-op"}}"#,
             "\n",
@@ -2383,7 +2383,7 @@ mod tests {
             .find(|r| r.session_id.as_deref() == Some("00847995-e0db-47c2-ab5b-24468ba1a4f5"))
             .unwrap();
         assert_eq!(child.lead.as_deref(), Some("heir"));
-        assert_eq!(child.owner.as_deref(), Some("Lead of x-aaaa (heir)"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of nd-aaaa (heir)"));
         let holder_row = p
             .rows
             .iter()
@@ -2401,7 +2401,7 @@ mod tests {
             "\n",
             r#"{"ts":"2026-09-30T10:01:00Z","type":"worker_silent","source":"daemon","data":{"handle":"t-w","harness":"claude","age_s":802,"deadline_s":600,"node":null}}"#,
             "\n",
-            r#"{"ts":"2026-09-30T10:02:00Z","type":"blocked","source":"target","data":{"reason":"need a lever","kind":"help"},"node":"x-aaaa","harness":"claude"}"#,
+            r#"{"ts":"2026-09-30T10:02:00Z","type":"blocked","source":"target","data":{"reason":"need a lever","kind":"help"},"node":"nd-aaaa","harness":"claude"}"#,
             "\n",
             r#"{"ts":"2026-09-30T10:03:00Z","type":"fno_update_started","source":"python","data":{"new_rev":"55f04eda70a99c3f4e72a3cfe62e80d219c66d6f"}}"#,
             "\n",
@@ -2427,7 +2427,7 @@ mod tests {
         );
         assert_eq!(find("worker_stalled").title, "t-w silent 802s");
         assert_eq!(find("worker_stalled").area, "agents");
-        assert_eq!(find("help_emitted").node.as_deref(), Some("x-aaaa"));
+        assert_eq!(find("help_emitted").node.as_deref(), Some("nd-aaaa"));
         assert_eq!(find("help_emitted").title, "help: need a lever");
         assert_eq!(
             find("update_started").title,
@@ -2481,10 +2481,10 @@ mod tests {
             short_id: Some("d145".into()),
             harness: Some("claude".into()),
             session_id: Some("00847995-e0db-47c2-ab5b-24468ba1a4f5".into()),
-            node: Some("x-aaaa".into()),
+            node: Some("nd-aaaa".into()),
             removed_by: "gc-sweep".into(),
             verb: None,
-            reason: Some("every named node done: x-aaaa".into()),
+            reason: Some("every named node done: nd-aaaa".into()),
             cause: Some("agent_row_reaped".into()),
             cause_at: Some("2026-09-06T10:00:00Z".into()),
             team: None,
@@ -2510,12 +2510,15 @@ mod tests {
         assert_eq!(row.title, "t-d145 removed", "title was {}", row.title);
         assert_eq!(row.name.as_deref(), Some("t-d145"));
         assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
-        assert_eq!(row.reason.as_deref(), Some("every named node done: x-aaaa"));
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("every named node done: nd-aaaa")
+        );
         assert_eq!(
             row.detail.as_deref(),
             Some("resume: claude --resume 00847995 - cwd /tmp/wt - trigger unattended")
         );
-        assert_eq!(row.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(row.node.as_deref(), Some("nd-aaaa"));
         assert_eq!(
             row.session_id.as_deref(),
             Some("00847995-e0db-47c2-ab5b-24468ba1a4f5")
@@ -2607,7 +2610,7 @@ mod tests {
             .iter()
             .find(|r| r.kind == "node_created")
             .expect("created_at projects with no emitter");
-        assert_eq!(created.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(created.node.as_deref(), Some("nd-aaaa"));
         // The birth stamps: the creating session's registry lane facts,
         // taken at write time.
         assert_eq!(created.model.as_deref(), Some("claude-opus-5"));

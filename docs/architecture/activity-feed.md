@@ -114,7 +114,7 @@ The query keys the feed answers, as the `?` overlay renders them:
 - `title: - text`
 - `details: body: - text`
 
-Worked examples: `x-1234` (a bare node id), `h:codex k:node stall`, `sid:00bde302`, `-k:question h:claude`, `h:codex | h:claude k:pr`, `ts:>=2026-10-01`. `s:ready` refuses here: `s:` is node-only.
+Worked examples: `n-1234` (a bare node id), `h:codex k:node stall`, `sid:00bde302`, `-k:question h:claude`, `h:codex | h:claude k:pr`, `ts:>=2026-10-01`. `s:ready` refuses here: `s:` is node-only.
 
 If the parsed query is plain positive terms on pushable keys, the client sends them as projection flags. The store does the filtering. Anything richer matches client-side over each landed page. Free text, `|` and a negation all land there. The scan caps at five pages per scroll gesture. The footer names how far back it reached.
 
