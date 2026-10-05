@@ -63,7 +63,7 @@ footnote/
 - **Prose style:** a paragraph is ONE physical line. A newline starts the next block. House style, and the gate: [docs/style-rules.md](docs/style-rules.md).
 - **File budget:** a file over 5,000 lines is shrink-only. `cli/src/fno` bars new Python (use `crates/`); an edit is a port, deletion or king-approved blocking-bug fix, no new surface, enforced by `scripts/ci/check-file-budget.sh` at push.
 - **Large files:** a source file over 1,000 lines gets read the exact range, edit, re-read, and a test count proved with `rg -c '#\[test\]'` (or `def test_`) before and after.
-- **Test value:** Run only tests covering changed files. Never wait on cargo/test slots. Push and let CI gate. New tests pass test-audit. The suite is shrink-only: `fno-agents test-delta --max-net 0` gates PR create/push. Added tests replace tests guarding no distinct contract.
+- **Test value:** Run only tests covering changed files. Never wait on cargo/test slots. Push and let CI gate. New tests pass test-audit. The suite is shrink-only: `fno-agents test-delta --max-net 3` gates PR create/push (the cap CI enforces in guards.yml; a first contract test for a new module is the floor the 0 cap cannot express). Added tests replace tests guarding no distinct contract.
 - **Multi-CLI:** skills are portable. Orchestration needs per-CLI hook config. See `docs/HARNESSES.md`, `docs/architecture/multi-cli-hooks.md`, `docs/SKILL-COMPAT-MATRIX.md`.
 
 ## Commands
