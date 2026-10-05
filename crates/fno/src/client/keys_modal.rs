@@ -240,7 +240,6 @@ pub(crate) async fn keys_modal_keys(
         }
         match tok {
             ModalKey::Esc => view.keys_modal = None,
-            ModalKey::BackTab => {}
             ModalKey::Up => {
                 if let Some(m) = view.keys_modal.as_mut() {
                     m.popup.nav(NavDir::Up);

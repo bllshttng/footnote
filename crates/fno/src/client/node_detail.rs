@@ -617,7 +617,6 @@ pub(crate) async fn detail_keys(
             ModalKey::Up | ModalKey::Byte(b'k') => scroll_detail(view, false, 1),
             ModalKey::Down | ModalKey::Byte(b'j') => scroll_detail(view, true, 1),
             ModalKey::Byte(b'\t') => move_sel(view, true),
-            ModalKey::BackTab => move_sel(view, false),
             ModalKey::Enter => activate(view, sock_w).await?,
             ModalKey::PageUp => scroll_detail(view, false, 8),
             ModalKey::PageDown => scroll_detail(view, true, 8),

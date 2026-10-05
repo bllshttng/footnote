@@ -17,10 +17,6 @@ pub(super) enum ModalKey {
     Right,
     PageUp,
     PageDown,
-    /// BackTab (`ESC [ Z`): the detail pane's reverse link walk. Tab keeps
-    /// arriving as [`ModalKey::Byte`](`0x09`), which seven callers already
-    /// bind.
-    BackTab,
 }
 /// The ceiling on a partially-read escape sequence, shared by all four folds.
 /// A real CSI is far shorter, so this only ever fires on a pathological stream,
@@ -109,12 +105,6 @@ pub(super) fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> 
                 }
                 ([0x1b, b'['], b'D') => {
                     out.push(ModalKey::Left);
-                    esc.clear();
-                    continue;
-                }
-                ([0x1b, b'['], b'Z') => {
-                    // Shift-Tab: the detail pane's reverse link walk.
-                    out.push(ModalKey::BackTab);
                     esc.clear();
                     continue;
                 }

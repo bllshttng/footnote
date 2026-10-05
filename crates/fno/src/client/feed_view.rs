@@ -1151,9 +1151,6 @@ pub(crate) async fn feed_keys(
         let len = display_slots(&f.items, f.order).len();
         match tok {
             ModalKey::Esc => {}
-            // Shift-Tab never reached this fold before (a swallowed CSI):
-            // keep it a no-op.
-            ModalKey::BackTab => {}
             ModalKey::Up => {
                 // The marker skips headers: the nearest ITEM slot above.
                 let slots = display_slots(&f.items, f.order);
