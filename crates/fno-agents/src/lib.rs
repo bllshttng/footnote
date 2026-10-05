@@ -152,6 +152,7 @@ pub mod effort_surface;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
+pub mod eval_part4;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_qualification;
