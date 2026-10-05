@@ -643,14 +643,19 @@ fn path_matches_paint(path: &str, patterns: &[String]) -> bool {
 /// names the PR: the pages the lead check-in reads, parsed the same way.
 fn answered_question_names_pr(cwd: &Path, pr: u64) -> bool {
     let dir = crate::escalation::questions_dir(cwd);
-    let Ok(pages) = crate::lead_answers::read_question_pages(&dir) else {
-        return false;
-    };
-    pages.iter().any(|(_stem, text)| {
-        crate::attention_file::parse_page(text)
-            .map(|(front, _)| front.status == "answered")
-            .unwrap_or(false)
-            && page_names_pr(text, pr)
+    // Answered pages are archived into done/ after the fact; an approval
+    // must not lapse because its page moved there.
+    let mut dirs = vec![dir.clone()];
+    dirs.push(dir.join("done"));
+    dirs.iter().any(|d| {
+        crate::lead_answers::read_question_pages(d).is_ok_and(|pages| {
+            pages.iter().any(|(_stem, text)| {
+                crate::attention_file::parse_page(text)
+                    .map(|(front, _)| front.status == "answered")
+                    .unwrap_or(false)
+                    && page_names_pr(text, pr)
+            })
+        })
     })
 }
 

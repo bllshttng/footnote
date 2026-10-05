@@ -4896,6 +4896,11 @@ mod tests {
         )
         .unwrap();
         assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_none());
+        // The page archives into done/; the approval must not lapse.
+        let donedir = qdir.join("done");
+        std::fs::create_dir_all(&donedir).unwrap();
+        std::fs::rename(&page, donedir.join("q-xc129test.md")).unwrap();
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_none());
         // No paint paths in any candidate config: the gate is disarmed and
         // spends no gh read.
         let bare = std::env::temp_dir().join(format!("xc129-bare-{}", std::process::id()));
