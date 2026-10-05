@@ -124,10 +124,25 @@ async fn messages_reply_board_contracts() {
         .map(|l| l.text.clone())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text1.contains("agents"), "{text1}");
+    // The filter row leads (item 5); the All filter lists agents only -
+    // no broadcast row among them, no `#`.
+    assert!(text1.contains("All"), "{text1}");
+    assert!(text1.contains("Broadcasts"), "{text1}");
     assert!(!text1.contains('#'), "{text1}");
-    assert!(!text1.contains("Archive ("), "{text1}");
     assert!(!text1.contains('▸') && !text1.contains('▾'), "{text1}");
+    // The Broadcasts filter lists the groups alone, with the retired
+    // `kings` scope reading as `leads` (item 5).
+    b.filter = ListFilter::Broadcasts;
+    let text_b: String = b
+        .tree_column(100)
+        .iter()
+        .map(|l| l.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text_b.contains("fleet:fno"), "{text_b}");
+    assert!(text_b.contains("fleet:leads"), "{text_b}");
+    assert!(!text_b.contains("candor"), "{text_b}");
+    b.filter = ListFilter::All;
 
     // Column 2 (AC5-HP, AC13-HP): the strip leads with Chats; the Chats
     // tab lists the live thread only, System one entry per arm, Archive
@@ -143,7 +158,7 @@ async fn messages_reply_board_contracts() {
     };
     assert!(unread, "no mark reads unread");
     assert_eq!(partner, "first");
-    let chats_lines = b.chats_column();
+    let chats_lines = b.chats_column(100);
     assert!(
         chats_lines[0].text.starts_with("Chats"),
         "{:?}",
@@ -176,13 +191,18 @@ async fn messages_reply_board_contracts() {
     // the fno/<arm> sender (AC14-HP).
     b.sel_thread = Some("channel:fno".into());
     assert_eq!(b.conversation_rows().len(), 1);
-    b.sel_thread = Some("system:s-c".into());
+    b.sel_thread = Some("system:fno/pr-nudge".into());
     let rows = b.conversation_rows();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].get("from").and_then(Value::as_str),
         Some("fno/pr-nudge")
     );
+    // Item 6: a second arm in the same agent's system listing filters to
+    // its own rows, never the aggregate.
+    b.col2 = ChatTab::System;
+    let sys_arms = b.chat_rows("s-c");
+    assert!(sys_arms.len() >= 1, "{sys_arms:?}");
     // The bubble thread (AC6-HP, AC16-HP, AC17-HP, AC19-HP): the title
     // names the other party with the info affordances, runs share one
     // label, the time lines separate the five-minute gaps, blanks sit
@@ -462,4 +482,82 @@ async fn messages_reply_board_contracts() {
     );
     view.messages_board.as_mut().unwrap().detail = None;
     crate::view_store::clear_test_path();
+}
+
+#[tokio::test]
+async fn messages_keys_contracts() {
+    let mut view = View::new(
+        (24, 100),
+        "main".into(),
+        LayoutView {
+            squads: Vec::new(),
+            active_squad: 0,
+            panes: Vec::new(),
+            focus: 0,
+            area: (0, 0),
+            agents: Vec::new(),
+            focus_node: None,
+        },
+    );
+    check_fixture(&mut view);
+    let b = view.messages_board.as_mut().expect("open");
+    assert_eq!(b.col, Col::Tree);
+    // h/l and the arrows step the columns (item 8).
+    super::keys(&mut view, b"l", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(view.messages_board.as_ref().unwrap().col, Col::Chats);
+    super::keys(&mut view, b"h", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(view.messages_board.as_ref().unwrap().col, Col::Tree);
+    // Esc backs a column and closes from the first (item 8).
+    super::keys(&mut view, b"l", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    super::keys(&mut view, b"\x1b", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(view.messages_board.as_ref().unwrap().col, Col::Tree);
+    super::keys(&mut view, b"\x1b", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    assert!(view.messages_board.is_none(), "esc from column 1 closes");
+    // a/b switch the filter (item 5).
+    check_fixture(&mut view);
+    let b = view.messages_board.as_mut().expect("reopen");
+    b.snapshot.apply(fixture_projection());
+    super::keys(&mut view, b"b", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let b = view.messages_board.as_ref().unwrap();
+    assert_eq!(b.filter, ListFilter::Broadcasts);
+    assert!(b
+        .tree_rows()
+        .iter()
+        .any(|r| matches!(r, TreeRow::Channel(_))));
+    super::keys(&mut view, b"a", &mut tokio::io::sink())
+        .await
+        .unwrap();
+    let b = view.messages_board.as_ref().unwrap();
+    assert_eq!(b.filter, ListFilter::All);
+    assert!(b
+        .tree_rows()
+        .iter()
+        .any(|r| matches!(r, TreeRow::Agent { .. })));
+}
+
+/// The fixture projection, detached from the reply test's own apply.
+fn fixture_projection() -> serde_json::Value {
+    serde_json::json!({
+        "participants": [
+            {"key":"s1","name":"first","system":false,"live":true},
+            {"key":"s-c","name":"candor","system":false,"live":true},
+        ],
+        "threads": [],
+        "system": {},
+        "channels": [{"scope":"fno","rows":[]}],
+        "announcements": [],
+        "unreadable": 0,
+    })
 }

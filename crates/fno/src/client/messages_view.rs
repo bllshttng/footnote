@@ -39,13 +39,21 @@ fn bool_of(v: &Value, key: &str) -> bool {
 }
 
 /// The channel row's display word: the retired `kings` scope reads as
-/// `agents`, everything else as itself, never with a `#`.
+/// `leads` (item 5: no king anymore), everything else as itself, never
+/// with a `#`.
 fn channel_label(scope: &str) -> String {
     if scope == "kings" {
-        "agents".to_string()
+        "leads".to_string()
     } else {
         scope.to_string()
     }
+}
+
+/// The display label for a sender or system arm: the retired `king-settle`
+/// stamp reads `lead-settle` (item 5). A display rename only - the mail
+/// identity, and every stored row, still say `fno/king-settle`.
+fn display_label(name: &str) -> String {
+    name.replace("king-settle", "lead-settle")
 }
 
 pub(crate) type MessagesTx =
@@ -68,6 +76,14 @@ impl Col {
             Col::Thread => Col::Tree,
         }
     }
+    /// Esc's step back (item 8): Thread -> Chats -> Tree -> close.
+    fn prev(self) -> Self {
+        match self {
+            Col::Tree => Col::Thread,
+            Col::Chats => Col::Tree,
+            Col::Thread => Col::Chats,
+        }
+    }
 }
 
 /// Column 2's tab.
@@ -85,6 +101,15 @@ pub(crate) enum ListTab {
     Archive,
 }
 
+/// Column 1's filter row (item 5): the agent list, or the broadcast
+/// groups. The groups read as filters only from here, never as unlabeled
+/// rows among the agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListFilter {
+    All,
+    Broadcasts,
+}
+
 /// Column 1's sort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SortMode {
@@ -100,6 +125,7 @@ pub(crate) struct MessagesBoard {
     pub(crate) sel_thread: Option<String>,
     pub(crate) col2: ChatTab,
     pub(crate) list_tab: ListTab,
+    pub(crate) filter: ListFilter,
     pub(crate) sort_mode: SortMode,
     pending_message_id: Option<String>,
     selected_message_id: Option<String>,
@@ -107,20 +133,27 @@ pub(crate) struct MessagesBoard {
     pub(super) reply: Option<super::messages_reply::ReplyState>,
     pub(crate) gen: u64,
     pub(crate) inflight: bool,
-    last_read: Option<Instant>,
+    /// The store fingerprint at the last kick: a changed fingerprint is the
+    /// only reason to re-read (item 1).
+    pub(crate) last_fingerprint: Option<(usize, u64, u64)>,
+    /// The stat poll's own gate: the fingerprint walk runs at most every 5s.
+    pub(crate) last_poll: Option<Instant>,
     esc: Vec<u8>,
 }
 
 impl MessagesBoard {
     pub(crate) fn new(gen: u64) -> Self {
         Self {
-            snapshot: Default::default(),
+            // The cached last read paints at once; the one baseline read
+            // refreshes behind it (stale-while-revalidate, item 1).
+            snapshot: crate::messages_model::MessagesSnapshot::with_cache(),
             col: Col::Tree,
             cursors: [0; 3],
             sel_agent: None,
             sel_thread: None,
             col2: ChatTab::Chats,
             list_tab: ListTab::Agents,
+            filter: ListFilter::All,
             sort_mode: SortMode::Last,
             pending_message_id: None,
             selected_message_id: None,
@@ -128,7 +161,8 @@ impl MessagesBoard {
             reply: None,
             gen,
             inflight: false,
-            last_read: None,
+            last_fingerprint: None,
+            last_poll: None,
             esc: Vec::new(),
         }
     }
@@ -157,10 +191,8 @@ impl MessagesBoard {
 /// chat list, no tree.
 #[derive(Debug)]
 pub(crate) enum TreeRow {
-    /// A broadcast channel, by its scope.
+    /// A broadcast group row (Broadcasts filter), by its scope.
     Channel(String),
-    /// A spacer line between the sections (item 12).
-    Gap,
     /// One mail participant, live or ended, by name (never a raw session
     /// id: the projection resolves the name from the id).
     Agent {
@@ -240,25 +272,29 @@ impl MessagesBoard {
         agents
     }
 
-    /// Column 1's rows: the channels section, then the agent list per the
-    /// active tab and sort.
+    /// Column 1's rows, per the active filter (item 5): the Broadcasts
+    /// filter lists the broadcast groups alone; the All filter lists the
+    /// agents alone, per the active tab and sort. The groups never sit
+    /// unlabeled among the agents again.
     pub(crate) fn tree_rows(&self) -> Vec<TreeRow> {
         let mut rows: Vec<TreeRow> = Vec::new();
-        if let Some(chans) = self
-            .projection()
-            .and_then(|p| p.get("channels"))
-            .and_then(Value::as_array)
-        {
-            let mut scopes: Vec<&str> = chans
-                .iter()
-                .filter_map(|c| c.get("scope").and_then(Value::as_str))
-                .collect();
-            scopes.sort_unstable();
-            scopes.dedup();
-            for scope in scopes {
-                rows.push(TreeRow::Channel(scope.to_string()));
+        if self.filter == ListFilter::Broadcasts {
+            if let Some(chans) = self
+                .projection()
+                .and_then(|p| p.get("channels"))
+                .and_then(Value::as_array)
+            {
+                let mut scopes: Vec<&str> = chans
+                    .iter()
+                    .filter_map(|c| c.get("scope").and_then(Value::as_str))
+                    .collect();
+                scopes.sort_unstable();
+                scopes.dedup();
+                for scope in scopes {
+                    rows.push(TreeRow::Channel(scope.to_string()));
+                }
             }
-            rows.push(TreeRow::Gap);
+            return rows;
         }
         let mut seen: HashSet<&str> = HashSet::new();
         for p in self.agent_rows() {
@@ -388,14 +424,26 @@ impl MessagesBoard {
                 .map(|rs| rs.iter().collect())
                 .unwrap_or_default();
         }
-        if let Some(agent) = sel.strip_prefix("system:") {
-            return proj
-                .get("system")
-                .and_then(Value::as_object)
-                .and_then(|m| m.get(agent))
-                .and_then(Value::as_array)
-                .map(|rs| rs.iter().collect())
-                .unwrap_or_default();
+        if let Some(arm) = sel.strip_prefix("system:") {
+            // Per-arm filter (item 6): only the selected arm's own rows, to
+            // the selected agent when one is. Every arm listing showed one
+            // aggregate thread before.
+            let mut rows: Vec<&Value> = Vec::new();
+            if let Some(m) = proj.get("system").and_then(Value::as_object) {
+                match self.sel_agent.as_deref() {
+                    Some(agent) => {
+                        if let Some(rs) = m.get(agent).and_then(Value::as_array) {
+                            rows.extend(rs.iter().filter(|r| text_of(r, "from") == arm));
+                        }
+                    }
+                    None => {
+                        for rs in m.values().filter_map(Value::as_array) {
+                            rows.extend(rs.iter().filter(|r| text_of(r, "from") == arm));
+                        }
+                    }
+                }
+            }
+            return rows;
         }
         proj.get("threads")
             .and_then(Value::as_array)
@@ -408,54 +456,98 @@ impl MessagesBoard {
 
     /// The three columns' lines.
     pub(crate) fn columns(&self, w: usize) -> (Vec<BLine>, Vec<BLine>, Vec<BLine>) {
-        let tree = self.tree_column(w);
-        let chats = self.chats_column();
         let (tree_w, part_w) = split(w);
+        let tree = self.tree_column(tree_w);
+        let chats = self.chats_column(part_w);
         let content = self.thread_lines(w.saturating_sub(tree_w + part_w)).0;
         (tree, chats, content)
     }
 
-    /// Column 1: the tab strip, then the flat list. Band rides the cursor
-    /// row; `s` toggles the sort shown in the strip.
-    fn tree_column(&self, _w: usize) -> Vec<BLine> {
-        let rows = self.tree_rows();
-        let (agents_label, archive_label) = match self.sort_mode {
-            SortMode::Last => ("Agents · last", "Archive"),
-            SortMode::Alpha => ("Agents · a-z", "Archive"),
-        };
-        let strip = BLine::of(&[
+    /// Column 1: the filter row (item 5), the All filter's tab strip, then
+    /// the active list. Band rides the cursor row; `a`/`b` switch the
+    /// filter, `s` toggles the sort shown in the strip.
+    fn tree_column(&self, w: usize) -> Vec<BLine> {
+        let wrap_w = w.saturating_sub(2).max(1);
+        let mut lines: Vec<BLine> = Vec::new();
+        let filter_row = BLine::of(&[
+            seg("a ".to_string(), BRole::Meta),
             seg(
-                agents_label.to_string(),
-                if self.list_tab == ListTab::Agents {
+                "All".to_string(),
+                if self.filter == ListFilter::All {
                     BRole::Body
                 } else {
                     BRole::Meta
                 },
             ),
-            seg(" | ".to_string(), BRole::Meta),
+            seg(" \u{b7} b ".to_string(), BRole::Meta),
             seg(
-                archive_label.to_string(),
-                if self.list_tab == ListTab::Archive {
+                "Broadcasts".to_string(),
+                if self.filter == ListFilter::Broadcasts {
                     BRole::Body
                 } else {
                     BRole::Meta
                 },
             ),
         ]);
-        let mut lines = vec![strip, BLine::meta(self.snapshot.error_line(board_now()))];
-        if self.list_tab == ListTab::Archive
-            && !rows.iter().any(|r| matches!(r, TreeRow::Agent { .. }))
-        {
-            lines.push(BLine::meta("(no archived agents)"));
+        lines.push(filter_row);
+        if self.filter == ListFilter::All {
+            let sort_word = match self.sort_mode {
+                SortMode::Last => "last",
+                SortMode::Alpha => "a-z",
+            };
+            let agents_active = self.list_tab == ListTab::Agents;
+            let strip = BLine::of(&[
+                seg(
+                    format!("Agents \u{b7} {sort_word}"),
+                    if agents_active {
+                        BRole::Body
+                    } else {
+                        BRole::Meta
+                    },
+                ),
+                seg(" | ".to_string(), BRole::Meta),
+                seg(
+                    "Archive".to_string(),
+                    if agents_active {
+                        BRole::Meta
+                    } else {
+                        BRole::Body
+                    },
+                ),
+            ]);
+            lines.push(strip);
+        }
+        let error = self.snapshot.error_line(board_now());
+        if !error.is_empty() {
+            lines.extend(BLine::meta(error).wrap(wrap_w));
         }
         if self.snapshot.projection.is_none() {
-            lines.push(BLine::meta("(not read yet - opening gathers once)"));
+            if self.inflight {
+                // Skeleton rows (item 1): the list's shape before the read
+                // lands.
+                for _ in 0..3 {
+                    lines.push(BLine::meta("\u{b7} \u{b7} \u{b7} \u{b7} \u{b7}"));
+                }
+            } else {
+                lines.extend(BLine::meta("(not read yet - opening gathers once)").wrap(wrap_w));
+            }
+        }
+        let rows = self.tree_rows();
+        if self.filter == ListFilter::All
+            && self.list_tab == ListTab::Archive
+            && !rows.iter().any(|r| matches!(r, TreeRow::Agent { .. }))
+        {
+            lines.extend(BLine::meta("(no archived agents)").wrap(wrap_w));
+        }
+        if self.filter == ListFilter::Broadcasts && rows.is_empty() {
+            lines.extend(BLine::meta("(no broadcast groups)").wrap(wrap_w));
         }
         lines.push(BLine::meta(""));
         for (i, row) in rows.iter().enumerate() {
             let mut line = match row {
-                TreeRow::Channel(scope) => BLine::of(&[seg(channel_label(scope), BRole::Label)]),
-                TreeRow::Gap => BLine::meta(""),
+                TreeRow::Channel(scope) => {
+                    BLine::of(&[seg(format!("fleet:{}", channel_label(scope)), BRole::Label)])
+                }
                 TreeRow::Agent { name, live, .. } => BLine::of(&[
                     seg("  ", BRole::Meta),
                     seg(name.clone(), if *live { BRole::Body } else { BRole::Meta }),
@@ -467,8 +559,11 @@ impl MessagesBoard {
         lines
     }
 
-    /// Column 2: the tab strip, then the active tab's rows.
-    fn chats_column(&self) -> Vec<BLine> {
+    /// Column 2: the tab strip, then the active tab's rows. Placeholders
+    /// wrap to the column's width (item 4); a system arm shows its display
+    /// label (item 5).
+    fn chats_column(&self, w: usize) -> Vec<BLine> {
+        let wrap_w = w.saturating_sub(2).max(1);
         let tab = |label: &str, active: bool| {
             seg(
                 label.to_string(),
@@ -484,7 +579,7 @@ impl MessagesBoard {
         ]);
         let mut lines = vec![strip, BLine::meta("")];
         let Some(agent) = self.sel_agent.as_deref() else {
-            lines.push(BLine::meta("(select an agent in column 1)"));
+            lines.extend(BLine::meta("(select an agent in column 1)").wrap(wrap_w));
             return lines;
         };
         let rows = self.chat_rows(agent);
@@ -494,13 +589,13 @@ impl MessagesBoard {
                 ChatTab::System => "(no system mail)",
                 ChatTab::Archive => "(no archived chats)",
             };
-            lines.push(BLine::meta(empty));
+            lines.extend(BLine::meta(empty).wrap(wrap_w));
             return lines;
         }
         for (i, row) in rows.iter().enumerate() {
             let mut line = match row {
                 ChatRow::SystemEntry { arm } => {
-                    BLine::of(&[seg("  ", BRole::Meta), seg(arm.clone(), BRole::Body)])
+                    BLine::of(&[seg("  ", BRole::Meta), seg(display_label(arm), BRole::Body)])
                 }
                 ChatRow::Thread {
                     partner,
@@ -547,7 +642,7 @@ impl MessagesBoard {
         let name = if let Some(scope) = sel.strip_prefix("channel:") {
             channel_label(scope)
         } else if sel.starts_with("system:") {
-            "System".to_string()
+            display_label(&sel["system:".len()..])
         } else {
             let other = self
                 .conversation_rows()
@@ -584,15 +679,18 @@ impl MessagesBoard {
         let title = self.thread_title();
         let mut lines = vec![title];
         let mut owners: Vec<Option<usize>> = vec![None];
+        let wrap_w = w.saturating_sub(2).min(((w * 7) / 10).max(12)).max(1);
         let Some(_sel) = self.sel_thread.as_deref() else {
-            lines.push(BLine::meta("(select a chat in column 2)"));
-            owners.push(None);
+            let wrapped = BLine::meta("(select a chat in column 2)").wrap(wrap_w);
+            owners.extend(std::iter::repeat(None).take(wrapped.len()));
+            lines.extend(wrapped);
             return (lines, owners);
         };
         let rows = self.conversation_rows();
         if rows.is_empty() {
-            lines.push(BLine::meta("(no messages)"));
-            owners.push(None);
+            let wrapped = BLine::meta("(no messages)").wrap(wrap_w);
+            owners.extend(std::iter::repeat(None).take(wrapped.len()));
+            lines.extend(wrapped);
             return (lines, owners);
         }
         let mine = self.sel_agent.as_deref().unwrap_or("");
@@ -619,7 +717,7 @@ impl MessagesBoard {
             let mine_row = key == mine;
             let sys = bool_of(r, "system");
             let sender = if sys {
-                text_of(r, "from").to_string()
+                display_label(&text_of(r, "from"))
             } else {
                 self.participant_name(key)
             };
@@ -727,6 +825,21 @@ pub(crate) fn paint(
         ),
         &view.theme,
     );
+    // The context help line (item 8), on the row the three panels leave
+    // free. Truncated to the width: at a degenerate terminal the keys still
+    // work, only the hint shortens.
+    let help = "h/l columns \u{b7} j/k move \u{b7} enter open \u{b7} esc back \u{b7} a/b filter \u{b7} s sort \u{b7} d details \u{b7} m id \u{b7} y copy \u{b7} q close";
+    let help: String = help.chars().take(width.saturating_sub(1)).collect();
+    for (i, ch) in help.chars().enumerate() {
+        if let Some(cell) = cells.get_mut((height - 1) * cols + i) {
+            *cell = Cell {
+                c: ch,
+                fg: crate::theme::dim_fg(&view.theme),
+                bg: Color::Default,
+                flags: 0,
+            };
+        }
+    }
 }
 
 /// Lifecycle.
@@ -770,6 +883,7 @@ pub(crate) fn apply_gather(
     let mut notice = None;
     match mail {
         Ok(v) => {
+            crate::messages_model::remember(&v);
             b.snapshot.apply(v);
             if let Some(id) = b.pending_message_id.take() {
                 let target = b.projection().and_then(|projection| {
@@ -807,19 +921,35 @@ pub(crate) fn apply_gather(
                         .as_object()?
                         .iter()
                         .find_map(|(agent, rows)| {
-                            rows.as_array()?
-                                .iter()
-                                .any(|row| text_of(row, "id") == id)
-                                .then(|| (format!("system:{agent}"), Some(agent.clone())))
+                            rows.as_array()?.iter().find_map(|row| {
+                                (text_of(row, "id") == id).then(|| {
+                                    // The per-arm thread (item 6), not the
+                                    // agent's aggregate.
+                                    (
+                                        format!("system:{}", text_of(row, "from")),
+                                        Some(agent.clone()),
+                                    )
+                                })
+                            })
                         })
                 });
                 if let Some((thread, agent)) = target.filter(|(thread, _)| !thread.is_empty()) {
                     b.sel_thread = Some(thread.clone());
                     if let Some(agent) = agent {
                         b.sel_agent = Some(agent.clone());
-                        if let Some(i) = b.chat_rows(&agent).iter().position(
-                            |row| matches!(row, ChatRow::Thread { chat_id, .. } if chat_id == &thread),
-                        ) {
+                        let rows = b.chat_rows(&agent);
+                        if let Some(i) = rows
+                            .iter()
+                            .position(|row| {
+                                matches!(row, ChatRow::Thread { chat_id, .. } if chat_id == &thread)
+                            })
+                            .or_else(|| {
+                                rows.iter().position(|row| {
+                                    matches!(row, ChatRow::SystemEntry { arm }
+                                        if format!("system:{arm}") == thread)
+                                })
+                            })
+                        {
                             b.cursors[1] = i;
                         }
                     }
@@ -842,29 +972,46 @@ pub(crate) fn apply_gather(
     }
 }
 
-/// Kick a gather at most every 60s while the board is open.
+/// Kick a gather only when the store changed (item 1): the stat walk runs
+/// every 5s; the expensive read fires on a fingerprint change, or when the
+/// board has never read.
 pub(crate) fn maybe_kick(view: &mut View, tx: &MessagesTx) {
-    let Some(b) = view.messages_board.as_mut() else {
-        return;
-    };
-    if b.inflight
-        || b.last_read
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
-    {
-        return;
+    if let Some(b) = view.messages_board.as_mut() {
+        if b.inflight {
+            return;
+        }
+        let never_read = b.snapshot.projection.is_none();
+        if !never_read
+            && b.last_poll
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        b.last_poll = Some(Instant::now());
+        let fp = crate::messages_model::store_fingerprint();
+        let changed = match (&fp, b.last_fingerprint) {
+            (Some(now), Some(last)) => now != &last,
+            // Never kicked: read once to learn the baseline even when the
+            // cache is painting.
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if !never_read && !changed {
+            return;
+        }
+        b.inflight = true;
+        b.last_fingerprint = fp;
+        let gen = b.gen;
+        let agents = view.layout.agents.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let graph = crate::backlog_view::graph_path();
+            let inputs = crate::org_model::gather(&graph, agents).await;
+            let tree = crate::org_model::derive(&inputs, board_now());
+            let mail = crate::messages_model::gather().await;
+            let _ = tx.send((gen, mail, tree));
+        });
     }
-    b.inflight = true;
-    b.last_read = Some(Instant::now());
-    let gen = b.gen;
-    let agents = view.layout.agents.clone();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let graph = crate::backlog_view::graph_path();
-        let inputs = crate::org_model::gather(&graph, agents).await;
-        let tree = crate::org_model::derive(&inputs, board_now());
-        let mail = crate::messages_model::gather().await;
-        let _ = tx.send((gen, mail, tree));
-    });
 }
 
 /// The column widths the paint and the click map share.
@@ -938,14 +1085,30 @@ pub(crate) async fn keys(
             break;
         };
         match token {
-            ModalKey::Esc | ModalKey::Byte(b'q') => {
+            ModalKey::Byte(b'q') => {
                 view.messages_board = None;
                 super::backlog_board::set_sideline_view(view, SidelineView::Agents);
+            }
+            // Esc backs one column (item 8); from column 1 it closes. It
+            // never wraps: only h from Tree wraps, mirroring l from Thread.
+            ModalKey::Esc => {
+                if b.col == Col::Tree {
+                    view.messages_board = None;
+                    super::backlog_board::set_sideline_view(view, SidelineView::Agents);
+                } else {
+                    b.col = b.col.prev();
+                }
             }
             ModalKey::Byte(b'V') => {
                 super::backlog_board::cycle_sideline_view(view);
             }
-
+            // h/l and the arrows step the columns (item 8).
+            ModalKey::Left | ModalKey::Byte(b'h') => {
+                b.col = b.col.prev();
+            }
+            ModalKey::Right | ModalKey::Byte(b'l') => {
+                b.col = b.col.next();
+            }
             ModalKey::Up | ModalKey::Byte(b'k') => {
                 let len = column_len(b);
                 b.step(false, len);
@@ -953,6 +1116,15 @@ pub(crate) async fn keys(
             ModalKey::Down | ModalKey::Byte(b'j') => {
                 let len = column_len(b);
                 b.step(true, len);
+            }
+            // The filter row's keys (item 5).
+            ModalKey::Byte(b'a') => {
+                b.filter = ListFilter::All;
+                b.cursors[0] = 0;
+            }
+            ModalKey::Byte(b'b') => {
+                b.filter = ListFilter::Broadcasts;
+                b.cursors[0] = 0;
             }
             ModalKey::Enter => act(view, sock).await?,
             ModalKey::Byte(b'd') => open_detail(view),
@@ -1019,10 +1191,8 @@ async fn act(
                     b.cursors[2] = b.conversation_rows().len().saturating_sub(1);
                     b.col = Col::Thread;
                 }
-                TreeRow::Gap => {}
                 TreeRow::Agent { key, .. } => {
                     b.sel_agent = Some(key.clone());
-                    b.cursors[1] = 0;
                     b.sel_thread = None;
                     b.col = Col::Chats;
                 }
@@ -1037,8 +1207,8 @@ async fn act(
                 return Ok(());
             };
             match row {
-                ChatRow::SystemEntry { .. } => {
-                    b.sel_thread = Some(format!("system:{agent}"));
+                ChatRow::SystemEntry { arm } => {
+                    b.sel_thread = Some(format!("system:{arm}"));
                     b.cursors[2] = b.conversation_rows().len().saturating_sub(1);
                     b.col = Col::Thread;
                 }
@@ -1150,7 +1320,7 @@ fn copy_bubble(view: &mut View, whole_body: bool) {
 fn tree_row_agent_key(row: &TreeRow) -> Option<String> {
     match row {
         TreeRow::Agent { key, .. } => Some(key.clone()),
-        TreeRow::Channel(_) | TreeRow::Gap => None,
+        TreeRow::Channel(_) => None,
     }
 }
 
@@ -1214,27 +1384,25 @@ pub(crate) async fn mouse(
     }
     let body_h = (view.term.0 as usize).saturating_sub(3);
     if rep.row == 1 {
-        // A tab strip's own labels switch tabs (items 7 and 8); the
-        // thread column's title affordances were handled above.
+        // A strip's own labels switch tabs (items 5, 7 and 8); the thread
+        // column's title affordances were handled above.
         let hit = |span: std::ops::Range<usize>, rel: usize| span.contains(&rel);
-        let Some(board) = view.messages_board.as_ref() else {
+        if view.messages_board.is_none() {
             return Ok(());
-        };
+        }
         match col {
             Col::Tree => {
-                let label = match board.sort_mode {
-                    SortMode::Last => "Agents · last",
-                    SortMode::Alpha => "Agents · a-z",
-                };
-                let a = label.chars().count();
+                // The filter row: `a All · b Broadcasts` (item 5).
                 let rel = rep.col as usize;
-                if hit(0..a, rel) {
+                if hit(2..5, rel) {
                     if let Some(b) = view.messages_board.as_mut() {
-                        b.list_tab = ListTab::Agents;
+                        b.filter = ListFilter::All;
+                        b.cursors[0] = 0;
                     }
-                } else if hit(a + 3..a + 10, rel) {
+                } else if hit(10..20, rel) {
                     if let Some(b) = view.messages_board.as_mut() {
-                        b.list_tab = ListTab::Archive;
+                        b.filter = ListFilter::Broadcasts;
+                        b.cursors[0] = 0;
                     }
                 }
                 return Ok(());
@@ -1261,16 +1429,41 @@ pub(crate) async fn mouse(
             Col::Thread => {}
         }
     }
+    if rep.row == 2 && col == Col::Tree {
+        // The All filter's tab strip: `Agents · <sort> | Archive` (item 5).
+        let hit = |span: std::ops::Range<usize>, rel: usize| span.contains(&rel);
+        let Some(board) = view.messages_board.as_ref() else {
+            return Ok(());
+        };
+        if board.filter == ListFilter::All {
+            let label = match board.sort_mode {
+                SortMode::Last => "Agents · last",
+                SortMode::Alpha => "Agents · a-z",
+            };
+            let a = label.chars().count();
+            let rel = rep.col as usize;
+            if hit(0..a, rel) {
+                if let Some(b) = view.messages_board.as_mut() {
+                    b.list_tab = ListTab::Agents;
+                }
+            } else if hit(a + 3..a + 10, rel) {
+                if let Some(b) = view.messages_board.as_mut() {
+                    b.list_tab = ListTab::Archive;
+                }
+            }
+            return Ok(());
+        }
+    }
     let index = match col {
         Col::Tree => {
             let Some(board) = view.messages_board.as_ref() else {
                 return Ok(());
             };
-            // Rows start after the column's own prefix lines (strip,
-            // status, optional not-read note, spacer), so the row index
+            // Rows start after the column's own prefix lines (strips,
+            // status, skeleton or not-read note, spacer), so the row index
             // reads off the painted line against that prefix.
             let rows_len = board.tree_rows().len();
-            let lines = board.tree_column(view.term.1 as usize);
+            let lines = board.tree_column(tree_w);
             let start_line = lines.len().saturating_sub(rows_len);
             let (scroll, _) = column_rect(lines.len(), body_h, start_line + board.cursors[0]);
             (rep.row as usize)

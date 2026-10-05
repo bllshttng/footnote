@@ -9134,6 +9134,13 @@ async fn dispatch_event(
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.org.toggle(),
         Event::ToggleBell => bell::toggle(view),
+        Event::OpenMessages => {
+            // Open Messages from anywhere (item 8). The tab paints full
+            // surface, but only while the sideline shows: a hidden sideline
+            // would swallow the open, so the chord reveals it first.
+            view.panel_on = true;
+            messages_view::open(view);
+        }
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
