@@ -892,6 +892,7 @@ def push(ctx: typer.Context) -> None:
 
 @pr_app.command(
     "create",
+    hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
         "The duplicate-guarded create: reads open PRs from the GitHub REST "

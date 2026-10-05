@@ -290,7 +290,10 @@ def test_map_covers_current_surface_once():
     # the same way (592 -> 591): counted from the merged file, 591.
     # The five lane-alias verbs (court/king/reign -> org/lead) joined the
     # registry the same PR that taught the sync lists: 591 -> 596.
-    assert len(mapped) == 596, (
+    # The duplicate-guard create allocates `pr create` plus its `do pr
+    # create` spelling, the thin forwarder beside pr push/rebase/heal
+    # (hidden, per the forwarder convention): 596 -> 598.
+    assert len(mapped) == 598, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
