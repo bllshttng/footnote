@@ -348,6 +348,11 @@ collisions = python_types & rust_kinds
 # is owned by tick_ledger.rs; Rust daemon arms and the Python arms (until they
 # port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
+    # event_payload_too_large: the oversize meta-event both emitters write
+    # when a payload exceeds limits.max_data_bytes; every channel can
+    # overflow, so the kind carries every literal source and both halves
+    # own it by construction.
+    "event_payload_too_large",
     # graph_write_gate: the keeper emits the five-minute window rows (Rust)
     # and the single-row mutation path emits the per-write rows (Rust) with
     # the Python schema declaring both sources.
@@ -415,6 +420,22 @@ dual_owner_kinds = {
     # side carries it in schema.yaml for the validator and `doctor event
     # find`, the way pr_watch_unparked above does.
     "agent_revived",
+    # The unified-judge cutover declared the daemon-lifecycle pair on every
+    # channel that writes it: the Rust daemon journals births and deaths
+    # (source daemon) while the Python daemon-envelope helpers and the
+    # agents emitter write the same kinds from the resume and dispatch
+    # paths (sources python / agents). One wire shape, two runtimes.
+    "agent_spawned",
+    "agent_spawn_accepted",
+    "agent_spawn_failed",
+    "agent_stopped",
+    "agent_stop_error",
+    "agent_stop_refused",
+    "agent_crown_vacated",
+    "agent_ask_done",
+    "agent_inconsistent",
+    "reconcile_done",
+    "startup_reconcile_done",
 }
 collisions -= dual_owner_kinds
 if collisions:

@@ -443,15 +443,28 @@ def _seed_events(records: list[dict]) -> None:
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
     for i, r in enumerate(records):
-        emit_envelope({"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **r}, p)
+        emit_envelope({"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "loop", **r}, p)
 
 
 def _ev_fail(nid: str) -> dict:
-    return {"type": "node_failed", "data": {"unit_id": nid}}
+    return {
+        "type": "node_failed",
+        "data": {"session_id": "s", "unit_id": nid, "iteration": 1, "exit_code": 1},
+    }
 
 
 def _ev_parked(nid: str) -> dict:
-    return {"type": "node_closed", "data": {"unit_id": nid, "close": "parked"}}
+    return {
+        "type": "node_closed",
+        "data": {
+            "session_id": "s",
+            "unit_id": nid,
+            "reason": "auto-failure:",
+            "close": "parked",
+            "detail": "specimen",
+            "iterations_used": 1,
+        },
+    }
 
 
 def _append_events(records: list[dict]) -> None:
@@ -463,7 +476,7 @@ def _append_events(records: list[dict]) -> None:
     for r in records:
         n += 1
         emit_envelope({"ts": f"2026-01-0{min(n // 3600 + 1, 9)}T{n // 60 % 60:02d}:{n % 60:02d}:00Z",
-                       "source": "test", **r}, p)
+                       "source": "loop", **r}, p)
 
 
 @pytest.fixture(autouse=True)

@@ -733,7 +733,7 @@ fn r_team() -> Result<Value, String> {
                     let reading = match registry_read
                         .as_ref()
                         .ok()
-                        .map(|r| crate::lead_state::terminal_name_join(&r.entries, &s.row))
+                        .map(|r| crate::team_split::terminal_join(&r.entries, s))
                     {
                         Some(crate::lead_state::NameJoin::One(e)) => {
                             crate::team_split::dead_call(e, boot)
@@ -4764,6 +4764,7 @@ mod tests {
             }],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-dead".into(),
+                session: None,
                 scope: "shared".into(),
                 stored_status: "orphaned".into(),
             }],
@@ -4801,6 +4802,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-fno-g6".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],
@@ -4825,6 +4827,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-gone".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],

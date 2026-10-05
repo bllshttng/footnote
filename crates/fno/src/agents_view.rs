@@ -4499,7 +4499,7 @@ config_dir = "~/.claude-alt"
         }
         fn write_event(&self, sid: &str, ts: &str) {
             let line = format!(
-                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}"}}}}"#
+                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}","fingerprint":"f","fires":1,"consecutive_unchanged":1,"decision":"allow","intent":"none","pr_state":"none","ci":"none","reviewed":false}}}}"#
             );
             crate::event_store::append_envelope(&self.events(), &line, None).unwrap();
         }

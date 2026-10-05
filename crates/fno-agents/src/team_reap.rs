@@ -609,7 +609,7 @@ mod tests {
     }
 
     fn events_of(dir: &Path) -> crate::events::EventEmitter {
-        crate::events::EventEmitter::new(dir.join("events.jsonl"), "test")
+        crate::events::EventEmitter::new(dir.join("events.jsonl"), "daemon")
     }
 
     fn read_events(dir: &Path) -> Vec<serde_json::Value> {

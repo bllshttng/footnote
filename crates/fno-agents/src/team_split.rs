@@ -23,8 +23,28 @@ pub struct ScopeSplit {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StaleCrown {
     pub row: String,
+    /// The row's session id, so a reading joins on identity; `None` on a
+    /// legacy split read keeps the name join.
+    pub session: Option<String>,
     pub scope: String,
     pub stored_status: String,
+}
+
+/// The stale row's registry read, id-first: a split read after the id
+/// change joins through `StaleCrown::session`; a legacy reading (no
+/// session recorded) falls back to the name join.
+pub(crate) fn terminal_join<'a>(
+    rows: &'a [crate::state::RegistryEntry],
+    stale: &StaleCrown,
+) -> crate::lead_state::NameJoin<'a> {
+    match stale.session.as_deref() {
+        Some(session) => crate::agent_ref::resolve(
+            rows,
+            crate::agent_ref::Key::Id(session),
+            crate::lead_state::is_terminal,
+        ),
+        None => crate::lead_state::terminal_name_join(rows, &stale.row),
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -66,6 +86,7 @@ pub(crate) fn read_team_splits(rows: &[RegistryEntry]) -> TeamSplits {
                 .unwrap_or_default();
             stale.push(StaleCrown {
                 row: row.name.clone(),
+                session: row.harness_session_id.clone(),
                 scope: key,
                 stored_status,
             });

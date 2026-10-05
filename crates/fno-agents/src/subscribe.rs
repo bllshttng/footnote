@@ -458,11 +458,11 @@ mod tests {
         let journal = dir.path().join("events.jsonl");
         let now_ms = chrono::Utc::now().timestamp_millis();
         let pre = json!({"ts": stamp_rfc3339(now_ms - 5_000), "type": "inside_leg_report",
-            "source": "daemon", "data": {"session_id": "s0", "state": "working"}});
+            "source": "daemon", "data": {"session_id": "s0", "seq": 1, "state": "working"}});
         crate::event_store::append_envelope(&journal, &pre.to_string(), None).unwrap();
         let mut cursor = connect_cursor(&journal, now_ms);
         let history = json!({"ts": stamp_rfc3339(now_ms + 5_000), "type": "inside_leg_report",
-            "source": "daemon", "data": {"session_id": "historical", "state": "blocked"}});
+            "source": "daemon", "data": {"session_id": "historical", "seq": 1, "state": "blocked"}});
         let receipt = crate::event_store::append_envelope(
             &journal,
             &history.to_string(),
@@ -481,7 +481,7 @@ mod tests {
         .unwrap();
         drop(db);
         let post = json!({"ts": stamp_rfc3339(now_ms + 5_000), "type": "inside_leg_report",
-            "source": "daemon", "data": {"session_id": "s1", "state": "blocked"}});
+            "source": "daemon", "data": {"session_id": "s1", "seq": 1, "state": "blocked"}});
         crate::event_store::append_envelope(&journal, &post.to_string(), None).unwrap();
         let lines = poll(&journal, &mut cursor);
         assert_eq!(

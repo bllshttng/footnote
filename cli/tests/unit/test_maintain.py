@@ -590,7 +590,10 @@ from fno.graph import failure as f  # noqa: E402
 
 
 def _fail(nid: str) -> dict:
-    return {"type": "node_failed", "data": {"unit_id": nid}}
+    return {
+        "type": "node_failed",
+        "data": {"session_id": "s", "unit_id": nid, "iteration": 1, "exit_code": 1},
+    }
 
 
 def _parked(nid: str) -> dict:
@@ -663,9 +666,9 @@ def test_streak_malformed_event_skipped(tmp_path):
     emit_envelope(
         {
             "ts": "2026-07-24T03:00:00Z",
-            "source": "test",
+            "source": "loop",
             "type": "node_failed",
-            "data": {"unit_id": "ab-x"},
+            "data": {"session_id": "s", "unit_id": "ab-x", "iteration": 1, "exit_code": 1},
         },
         log,
     )
@@ -693,9 +696,9 @@ def test_read_events_spans_rotated_history_before_active(tmp_path):
     emit_envelope(
         {
             "ts": "2026-07-24T03:00:00Z",
-            "source": "test",
+            "source": "loop",
             "type": "node_failed",
-            "data": {"unit_id": "ab-x"},
+            "data": {"session_id": "s", "unit_id": "ab-x", "iteration": 1, "exit_code": 1},
         },
         active,
     )

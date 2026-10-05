@@ -170,6 +170,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PROCESS_ADMISSION` | rs | unclear: crates/fno/src/bootstrap.rs:1721 |
 | `FNO_PROCESS_ADMISSION_MAX` | py+rs | unclear: cli/src/fno/agents/mux_spawn.py:1914 |
 | `FNO_PR_BASE_LINEAGE_OK` | rs | Set to `stale-acknowledged` by an operator who has judged a stale-base lineage refusal: the base-lineage probe records a gate-escape event and clears instead of refusing. |
+| `FNO_TEST_PR_WATCH_LAUNCH_AGENTS_DIR` | rs | Test seam: the LaunchAgents dir the `pr-watch status` verb reads the plist from, standing in for `$HOME/Library/LaunchAgents` so the parity fixtures pin the plist the way the Python leg's `launch_agents_dir` parameter did. |
+| `FNO_TEST_PR_WATCH_LOADED` | rs | Test seam: pins the launchctl load state the `pr-watch status` verb reports (`1` loaded, anything else not loaded) so the parity goldens do not depend on the capture machine's own registration. |
 | `FNO_PR_STATUS_CACHE_DIR` | py+rs | unclear: cli/src/fno/pr/_cache.py:92 |
 | `FNO_PR_STATUS_TTL` | rs | unclear: crates/fno-agents/src/pr_status/cache.rs:32 |
 | `FNO_PY` | rs | Overrides the resolved fno-py console script path (tests and nonstandard installs); empty falls through to the resolver legs. The Rust front door honors it ABOVE the cached sentinel, so a study venv can repoint `fno` at its own env (gap-audit 9); set but unusable refuses naming the var. `fno version` names the resolved target on its `python-cli:` line, and `fno version --json` carries it as `python_script`. |

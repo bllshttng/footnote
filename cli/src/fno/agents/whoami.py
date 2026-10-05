@@ -2,9 +2,9 @@
 
 A mesh-spawned worker has no clean way to learn its OWN registered name —
 the derived-name peers use to address it via ``fno agents mail send <name>``. The
-spawn path injects ``FNO_AGENT_SELF`` / ``FNO_AGENT_HARNESS`` (and, on
-follow-up paths, ``FNO_AGENT_SESSION``) into every spawned agent's env
-(see :mod:`fno.agents.context`), but nothing surfaces that identity back.
+spawn path injects ``FNO_AGENT_SESSION`` / ``FNO_AGENT_HARNESS`` into every
+spawned agent's env (see :mod:`fno.agents.context`), but nothing surfaces
+that identity back. Identity is the session id; the name renders from the row.
 
 This module is the pure-logic half of ``fno agents whoami`` (the plural
 mesh namespace, NOT the retired singular ``fno agent``). The CLI wrapper
@@ -25,7 +25,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Callable, Optional
 
-from fno.agents.registry import AgentEntry, TERMINAL_STATUSES
+from fno.agents.registry import AgentEntry
 from fno.harness_identity import harness_from_env
 
 # Exit code for "ran fine, but you are not a registered mesh agent". Distinct
@@ -64,26 +64,13 @@ class WhoamiResult:
 def _nonempty(value: Optional[str]) -> Optional[str]:
     """Trim and coerce empty-string env values to None.
 
-    A spawn path that exports ``FNO_AGENT_SELF=""`` (or a stray whitespace
-    value) must read as "unset", not as a zero-length name (Boundaries).
+    A spawn path that exports ``FNO_AGENT_SESSION=""`` (or a stray
+    whitespace value) must read as "unset", not as a zero-length id.
     """
     if value is None:
         return None
     trimmed = value.strip()
     return trimmed or None
-
-
-def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]:
-    """Name-or-alias row lookup with the mail_envelope refusal shape: terminal
-    rows never answer, and a name matching more than one live row resolves to
-    ``None`` rather than a first-match guess (tier 1 still answers name-only)."""
-    matches = [
-        entry
-        for entry in registry
-        if entry.status not in TERMINAL_STATUSES
-        and (entry.name == name or name in (getattr(entry, "aliases", None) or []))
-    ]
-    return matches[0] if len(matches) == 1 else None
 
 
 def _row_harness(entry: AgentEntry) -> str:
@@ -205,10 +192,11 @@ def resolve_self(
 
     Tiers (deterministic):
 
-    1. ``env`` — ``FNO_AGENT_SELF`` set -> name is that value. Never depends
-       on the registry, so a corrupt registry still yields the name.
-    2. ``session-fallback`` — ``FNO_AGENT_SELF`` unset but a registry row
-       matches ``session_uuid`` (``CLAUDE_CODE_SESSION_ID``).
+    1. ``env`` — ``FNO_AGENT_SESSION`` set -> the row matching that session
+       id. The fleet name is display only; it renders from the row.
+    2. ``session-fallback`` — no ``FNO_AGENT_SESSION`` (or it matches no row)
+       but a registry row matches ``session_uuid``
+       (``CLAUDE_CODE_SESSION_ID``).
     3. none — neither -> not a registered mesh agent (exit 3).
 
     ``registry_error`` (a stringified ``RegistryVersionError``) means the
@@ -222,7 +210,6 @@ def resolve_self(
         warnings.append(f"registry unreadable, enrichment skipped: {registry_error}")
         registry = []
 
-    self_name = _nonempty(env.get("FNO_AGENT_SELF"))
     env_provider = _nonempty(harness_from_env(env))
     env_session = _nonempty(env.get("FNO_AGENT_SESSION"))
 
@@ -230,15 +217,16 @@ def resolve_self(
     name: Optional[str] = None
     resolved_via: Optional[str] = None
 
-    if self_name:
-        name = self_name
-        resolved_via = "env"
-        row = _find_by_name(registry, self_name)
-    elif session_uuid:
-        row = _find_by_session(registry, session_uuid, harness)
+    # Identity tiers on session ids only: a stale FNO_AGENT_SESSION that
+    # matches no row never blocks the CLAUDE uuid tier.
+    for via, token in (("env", env_session), ("session-fallback", session_uuid)):
+        if not token:
+            continue
+        row = _find_by_session(registry, token, harness)
         if row is not None:
             name = row.name
-            resolved_via = "session-fallback"
+            resolved_via = via
+            break
 
     if name is None:
         return WhoamiResult(

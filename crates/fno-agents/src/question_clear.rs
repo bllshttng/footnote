@@ -34,7 +34,7 @@ mod tests {
         json!({
             "ts": "2026-09-23T00:00:00Z",
             "type": "operator_question",
-            "source": "agent",
+            "source": "test",
             "data": data,
         })
     }
@@ -43,7 +43,7 @@ mod tests {
         json!({
             "ts": "2026-09-23T00:00:00Z",
             "type": "operator_question",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": qid, "question": question, "asker": asker},
         })
     }
@@ -306,7 +306,7 @@ mod tests {
         let close = json!({
             "ts": "2026-09-23T00:02:00Z",
             "type": "operator_question_closed",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": "q-closed", "closed_by": "test-agent"},
         });
         crate::provider_cap::append_questions_row(&req.index_path, &close).unwrap();
@@ -508,7 +508,7 @@ mod tests {
                 &json!({
                     "ts": "2026-10-01T20:00:00Z",
                     "type": "operator_question",
-                    "source": "agent",
+                    "source": "test",
                     "data": {
                         "question_id": qid,
                         "question": "May PR 2911 merge?",

@@ -2831,7 +2831,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = dir.path().join("events.jsonl");
         let ask = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-1", "blocks": ["x-1"], "question": "proceed?"}
         });
         crate::event_store::append_envelope(&journal, &ask.to_string(), None).unwrap();
@@ -2839,7 +2839,7 @@ mod tests {
         assert_eq!(held.len(), 1, "{held:?}");
         assert_eq!(held[0].node, "x-1");
         let close = serde_json::json!({
-            "ts": "2026-09-17T13:00:00Z", "type": "operator_question_closed", "source": "agent",
+            "ts": "2026-09-17T13:00:00Z", "type": "operator_question_closed", "source": "test",
             "data": {"question_id": "q-1"}
         });
         crate::event_store::append_envelope(&journal, &close.to_string(), None).unwrap();
@@ -2856,7 +2856,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = dir.path().join("events.jsonl");
         let ask = serde_json::json!({
-            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
         });
         crate::event_store::append_envelope(&journal, &ask.to_string(), None).unwrap();
@@ -2881,7 +2881,7 @@ mod tests {
         let space = crate::paths::space_dir(&cwd).join("events.jsonl");
         std::fs::create_dir_all(crate::paths::space_dir(&cwd)).unwrap();
         let ask = serde_json::json!({
-            "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "test",
             "data": {
                 "question_id": "q-door", "question": "pick one", "ask": "pick one",
                 "session_id": "s1", "cwd": "/repo/fno", "asker": "w1", "node": "x-1",
@@ -2961,7 +2961,7 @@ mod tests {
         let space = crate::paths::space_dir(&cwd).join("events.jsonl");
         for (id, rev) in [("q-rev-no", "no"), ("q-rev-yes", "yes")] {
             let ask = serde_json::json!({
-                "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "agent",
+                "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "test",
                 "data": {"question_id": id, "question": "pick", "asker": "w1", "node": "x-1",
                          "options": ["a", "b"], "context": {"reversible": rev}}
             });
@@ -2987,7 +2987,7 @@ mod tests {
         let index = crate::provider_cap::questions_path(&home);
         let ask = |id: &str| {
             serde_json::json!({
-                "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "agent",
+                "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "test",
                 "data": {"question_id": id, "question": "pick one", "asker": "w1",
                          "session_id": "s1", "cwd": "/repo/fno", "options": ["a", "b"]}
             })
