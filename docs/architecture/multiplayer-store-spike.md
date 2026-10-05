@@ -38,7 +38,7 @@ The narrow read costs half a whole read because it builds the whole cache to app
 
 ## Network
 
-Both Macs reach Tailscale over Wi-Fi today: the MacBook on `en0`, the iMac on `en1`. The path is direct, not relayed. 100 pings measured p50 6.5 ms, p95 78.7 ms, max 155 ms. The p95 network tail alone takes most of a 100 ms bar, so the remote p95 numbers below mostly measure Wi-Fi. A wired primary removes half of that tail.
+Both Macs reach Tailscale over Wi-Fi today: the MacBook on `en0`, the iMac on `en1`. The path is direct, not relayed. 100 pings measured p50 6.5 ms, p95 78.7 ms, max 155 ms. The p95 network tail alone takes most of a 100 ms bar, so the remote p95 numbers below mostly measure Wi-Fi. A wired primary takes the Wi-Fi hop off one end of the path.
 
 ## Measurements
 
@@ -58,7 +58,7 @@ Each verb ran twice, 30 then 60 samples, with whole reads at a third of that. Th
 | Narrow read p50 / p95 | 18 / 105 ms | 10 / 23 ms | 59 / 148 ms | 9 / 61 ms | 0.0 / 0.1 ms |
 | Whole read p50 / p95 | 1,176 / 1,340 ms | 1,134 / 1,207 ms | 897 / 1,034 ms | 828 / 967 ms | 24 / 41 ms |
 
-The first run agrees. libSQL cold claim acquire read p50 16 ms and p95 30 ms. Postgres cold read p50 68 ms and p95 165 ms.
+The first run agrees on Postgres: cold claim acquire read p50 68 ms and p95 165 ms. The first run's libSQL cold claims took a different path. An aborted earlier run had left those 30 claim keys live, so all 30 statements refused the takeover (p50 16 ms, p95 30 ms). That run proves the conditional statement refuses a live claim. The table's second run measures fresh claims.
 
 Four findings carry the ruling.
 

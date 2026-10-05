@@ -252,9 +252,9 @@ fn fno_home_escape(graph: &Path, fno_home: Option<OsString>) -> Option<String> {
 pub const REQUEST_LOG_ENV: &str = "FNO_STORE_EXEC_LOG";
 
 /// One request log row: the method (with the op name for `op`/`api`), read or
-/// write, outcome, rows in the reply, reply bytes, and serve time. `rows` sums
-/// the top-level arrays of the result, so a whole-graph read counts its
-/// entries and a by-id read counts the ids it answered.
+/// write, outcome, rows in the reply, reply bytes, and serve time. `rows` is
+/// the result's `entries` array when it has one (so a by-id read never counts
+/// its `missing` tokens), else the sum of its top-level arrays.
 fn request_log_row(payload: &[u8], reply: &Value, reply_bytes: usize, wall: Duration) -> Value {
     let req: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -264,7 +264,10 @@ fn request_log_row(payload: &[u8], reply: &Value, reply_bytes: usize, wall: Dura
         .and_then(Value::as_str);
     let rows: usize = match reply.get("result") {
         Some(Value::Array(a)) => a.len(),
-        Some(Value::Object(o)) => o.values().filter_map(Value::as_array).map(Vec::len).sum(),
+        Some(Value::Object(o)) => match o.get("entries").and_then(Value::as_array) {
+            Some(entries) => entries.len(),
+            None => o.values().filter_map(Value::as_array).map(Vec::len).sum(),
+        },
         _ => 0,
     };
     let ts_ms = std::time::SystemTime::now()
