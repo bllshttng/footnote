@@ -948,11 +948,13 @@ pub(crate) struct View {
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
     questions_fold: Option<crate::needs_overlay::QuestionsFold>,
+    /// The question pages index (`questions.md`), read in-process so the
+    /// bell's list lands without waiting on the projection subprocess.
+    questions_index: Option<crate::needs_overlay::QuestionsFold>,
     questions_degraded: bool,
     questions_degraded_reason: Option<String>,
-    /// The full question view's list/detail split.
+    /// The opened question's page view.
     question_detail: Option<questions::Detail>,
-    questions_split: u8,
     question_esc: Vec<u8>,
     /// Latest questions fold and its single-flight refresh while visible.
     questions_kick_at: Option<Instant>,
@@ -1986,11 +1988,11 @@ impl View {
             mine_action: None,
             mine_acting: false,
             questions_fold: None,
+            questions_index: None,
             questions_degraded: false,
             questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
-            questions_split: view_store::load_questions_split(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -2288,13 +2290,45 @@ impl View {
     /// either one failing degrades the whole lane - a bare "half of what
     /// should be here loaded" is not worth rendering as a clean "as of now".
     fn needs_footer(&self) -> NeedsFooter {
-        if self.needs_degraded || self.questions_degraded {
+        if self.needs_degraded || (self.questions_degraded && self.questions_index.is_none()) {
             NeedsFooter::Degraded
-        } else if self.needs_fold.is_none() || self.questions_fold.is_none() {
+        } else if self.needs_fold.is_none() || self.questions_merged().is_none() {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
         }
+    }
+
+    /// The bell's visible question fold: the index seeds the list, the full
+    /// projection enriches it when healthy. A degraded projection yields to
+    /// the index on every id both hold, so a timed-out read never outvotes
+    /// the fresh list; ids only one side holds append.
+    pub(super) fn questions_merged(&self) -> Option<crate::needs_overlay::QuestionsFold> {
+        let index = self.questions_index.as_ref();
+        let fold = self.questions_fold.as_ref();
+        let items = match (index, fold) {
+            (None, None) => return None,
+            (Some(index), None) => index.items.clone(),
+            (None, Some(fold)) => fold.items.clone(),
+            (Some(index), Some(fold)) => {
+                let healthy = !self.questions_degraded;
+                let primary = if healthy { fold } else { index };
+                let secondary = if healthy { index } else { fold };
+                let mut items: Vec<_> = primary.items.clone();
+                let held: std::collections::HashSet<&str> =
+                    primary.items.iter().map(|q| q.id.as_str()).collect();
+                for q in &secondary.items {
+                    if !held.contains(q.id.as_str()) {
+                        items.push(q.clone());
+                    }
+                }
+                items
+            }
+        };
+        Some(crate::needs_overlay::QuestionsFold {
+            items,
+            ..Default::default()
+        })
     }
 
     /// Same as [`Self::needs_footer`] for the MINE leg.
@@ -7622,6 +7656,10 @@ async fn attach_and_run(
     let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
         Result<crate::needs_overlay::QuestionsFold, String>,
     >();
+    // The index leg lands first (an in-process read), so the bell's list
+    // paints before the projection subprocess answers.
+    let (questions_index_tx, mut questions_index_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::needs_overlay::QuestionsFold>();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -7769,7 +7807,7 @@ async fn attach_and_run(
         // `question_acting` is set by the stdin handler at enqueue time,
         // same discipline as the MINE mutation above.
         // Refresh the questions projection while the sidebar is shown.
-        questions::maybe_kick(&mut view, &questions_tx);
+        questions::maybe_kick(&mut view, &questions_tx, &questions_index_tx);
         questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
             view.yard_want = false;
@@ -8403,6 +8441,13 @@ async fn attach_and_run(
                 // A queued question answer finished: success closes the
                 // detail, a refusal keeps it open on the door's line.
                 view.apply_question_action_result(result);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(fold) = questions_index_rx.recv() => {
+                // The index landed: seed the list and repaint.
+                view.apply_questions_index(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
