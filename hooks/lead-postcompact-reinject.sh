@@ -291,7 +291,7 @@ fi
 # after a compact. Reads the same manifest every lead arm resolves; a missing
 # manifest or a foreign session id means the brief above is the
 # whole teaching, so nothing is appended (fail to the narrower rule).
-LEAD_MANIFEST="$(fno agents org manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
+LEAD_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
 if [[ -n "$LEAD_MANIFEST" && -f "$LEAD_MANIFEST" ]]; then
     LEAD_SHAPE="$(sed -n 's/^shape:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')"
     LEAD_SID="$(sed -n 's/^harness_session_id:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')"
