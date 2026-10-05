@@ -7618,7 +7618,6 @@ async fn attach_and_run(
     // other.
     let (question_act_tx, mut question_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
-    // The bell's question legs: the projection and the index that seeds it.
     let (questions_tx, mut questions_rx) = questions::fold_channel();
     let (questions_index_tx, mut questions_index_rx) = questions::index_channel();
 
@@ -7764,8 +7763,7 @@ async fn attach_and_run(
                 let _ = tx.send(result);
             });
         }
-        // task 2.3: kick a queued question answer; refresh the projection
-        // and its index seed while the sidebar is shown.
+        // task 2.3: kick a queued answer; refresh the projection and index.
         questions::maybe_kick(&mut view, &questions_tx, &questions_index_tx);
         questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
@@ -8411,7 +8409,6 @@ async fn attach_and_run(
                 }
             }
             Some(fold) = questions_rx.recv() => {
-                // The questions fold landed: apply and repaint.
                 view.apply_questions_fold(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
