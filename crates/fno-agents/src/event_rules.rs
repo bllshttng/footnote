@@ -919,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn table_loads_with_known_predicates_and_actions() {
+    fn table_loads_and_overrides_disable() {
         let rows = parse_table().expect("the shipped table loads");
         for id in [
             "chat_ask_unfiled",
@@ -936,12 +936,10 @@ mod tests {
         assert!(!worker.default, "the worker row ships disabled");
         let ask_row = rows.iter().find(|r| r.id == "chat_ask_unfiled").unwrap();
         assert!(ask_row.instead.contains("fno inbox outstanding ask"));
+        config_override_leg();
     }
 
-    #[test]
-    fn config_override_disables_a_row() {
-        let lock = crate::claims::test_env_lock();
-        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    fn config_override_leg() {
         let rig = Rig::new(true);
         let ask = "1. merge 2. hold. Your call?";
         let fires = eval_stop_in(&rig.cwd, &rig.journal, &rig.home, &rig.payload(ask));
@@ -1006,6 +1004,7 @@ mod tests {
         );
         assert!(fires.is_empty(), "no ask, no fire");
         r1_uncrowned_and_cap_legs();
+        r2_and_r3_legs();
     }
 
     fn r1_uncrowned_and_cap_legs() {
@@ -1042,10 +1041,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn r2_and_r3_fire_once_per_matched_event() {
-        let lock = crate::claims::test_env_lock();
-        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    fn r2_and_r3_legs() {
         let rig = Rig::new(false);
         rig.seed(json!({
             "ts": crate::events::now_rfc3339(),

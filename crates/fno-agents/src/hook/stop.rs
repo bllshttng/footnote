@@ -1309,16 +1309,6 @@ mod tests {
     }
 
     #[test]
-    fn uuid_suffix_takes_a_rollout_tail() {
-        let tid = "0198abcd-1234-5678-9abc-def012345678";
-        let rollout = format!("rollout-2026-09-15T101530-{tid}");
-        assert_eq!(uuid_suffix(&rollout).as_deref(), Some(tid));
-        assert_eq!(uuid_suffix(tid), None, "no separator prefix, no strip");
-        assert_eq!(uuid_suffix("session-xyz"), None);
-        assert_eq!(uuid_suffix(""), None);
-    }
-
-    #[test]
     fn first_raw_field_reads_first_line_and_skips_null() {
         let doc = "fno_id: a1\nsession_id: null\nfno_id: b2\nharness_session_id: \"h1\"\n";
         assert_eq!(

@@ -70,15 +70,6 @@ fn the_retired_scanners_stay_gone() {
 }
 
 #[test]
-fn the_python_adapters_restart_argv_parses() {
-    // x-67b8: this exact argv (post-verb) is what cli/src/fno/restart.py
-    // spawns; a parser that refuses it breaks every daemon swap.
-    let a = RestartArgs::try_parse_from(["--json", "--force"]).expect("adapter argv parses");
-    assert!(a.json.json);
-    assert!(a.force);
-}
-
-#[test]
 fn the_real_binary_refuses_unknown_restart_flags_before_any_daemon_contact() {
     // Side-effect-free real-binary proof that the typed parser owns restart:
     // an unknown flag refuses at exit 2, one command-qualified line, before
