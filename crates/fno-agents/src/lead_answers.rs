@@ -40,8 +40,9 @@ pub(crate) fn scope_node_ids(
 }
 
 /// Every readable question page in one directory, `(stem, text)`, conflict
-/// markers excluded: the shape both question folds read.
-fn read_question_pages(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+/// markers excluded: the shape both question folds read. `pub(crate)` so the
+/// merge gates read the same pages the lead check-in reads.
+pub(crate) fn read_question_pages(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("questions folder {} unreadable: {e}", dir.display()))?;
     let mut pages: Vec<(String, String)> = Vec::new();
