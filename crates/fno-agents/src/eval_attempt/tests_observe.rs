@@ -138,6 +138,32 @@ fn observe_claude_model_mismatch_is_substituted() {
     assert_eq!(out["substituted"], true);
     assert_eq!(out["lane_status"], "substituted");
     assert_eq!(out["observed_model"], "claude-sonnet-5");
+
+    // The `[1m]` context suffix is how the lane asks, never what the
+    // transcript stores: same family reads ok, a different family does not.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let body = format!(
+        "{}\n{}\n",
+        json!({"type": "user", "cwd": WD, "message": {"role": "user"}}),
+        claude_line(WD, "glm-5.3-flash", 10, 2, 0, 0),
+    );
+    plant_claude(
+        tmp.path(),
+        "-repo-wt",
+        &format!("{uuid}.jsonl"),
+        &body,
+        1_700_000_050,
+    );
+    let root = json!({"projects_root": tmp.path().to_str().unwrap()});
+    let lane =
+        json!({"name": "glm", "harness": "claude", "model": "glm-5.3-flash[1m]", "effort": "high"});
+    let out = observe(&observe_payload(lane, root.clone()));
+    assert_eq!(out["lane_status"], "ok", "out: {out}");
+    assert_eq!(out["observed_model"], "glm-5.3-flash");
+    let lane =
+        json!({"name": "glm", "harness": "claude", "model": "glm-5.3[1m]", "effort": "high"});
+    let out = observe(&observe_payload(lane, root));
+    assert_eq!(out["lane_status"], "substituted", "out: {out}");
 }
 
 fn observe_statuses_before_any_worker() {
@@ -166,25 +192,36 @@ fn observe_opencode_reads_session_and_sums_tokens() {
         [],
     )
     .unwrap();
-    let msg = r#"{"role":"assistant","modelID":"glm-5.2","tokens":{"input":10,"output":4,"cache":{"read":6,"write":1}}}"#;
+    let msg = r#"{"role":"assistant","providerID":"zai","modelID":"glm-5.2","tokens":{"input":10,"output":4,"reasoning":3,"cache":{"read":6,"write":1}}}"#;
     conn.execute(
         "INSERT INTO message VALUES ('m1', 's1', 1700000050000, ?1)",
         [msg],
     )
     .unwrap();
+    let lane =
+        json!({"name": "glm", "harness": "opencode", "model": "zai/glm-5.2", "effort": "high"});
+    let out = observe(&observe_payload(
+        lane,
+        json!({"opencode_dbs": [db.to_str().unwrap()]}),
+    ));
+    // The lane names provider/model and the store splits them: still ok.
+    assert_eq!(out["lane_status"], "ok", "out: {out}");
+    assert_eq!(out["observed_model"], "zai/glm-5.2");
+    assert_eq!(out["observed_session_id"], "s1");
+    assert_eq!(out["usage"]["input"], 10);
+    // Reasoning joins output.
+    assert_eq!(out["usage"]["output"], 7);
+    assert_eq!(out["usage"]["cache_read"], 6);
+    assert_eq!(out["usage"]["cache_write"], 1);
+    assert_eq!(out["usage_source"], "opencode-store");
+
+    // A lane that named the bare model is still the same model.
     let lane = json!({"name": "glm", "harness": "opencode", "model": "glm-5.2", "effort": "high"});
     let out = observe(&observe_payload(
         lane,
         json!({"opencode_dbs": [db.to_str().unwrap()]}),
     ));
     assert_eq!(out["lane_status"], "ok", "out: {out}");
-    assert_eq!(out["observed_model"], "glm-5.2");
-    assert_eq!(out["observed_session_id"], "s1");
-    assert_eq!(out["usage"]["input"], 10);
-    assert_eq!(out["usage"]["output"], 4);
-    assert_eq!(out["usage"]["cache_read"], 6);
-    assert_eq!(out["usage"]["cache_write"], 1);
-    assert_eq!(out["usage_source"], "opencode-store");
 }
 
 #[test]
