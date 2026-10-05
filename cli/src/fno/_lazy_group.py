@@ -50,6 +50,28 @@ if TYPE_CHECKING:
     pass
 
 
+def typer_group_shape(attr: Any, info_overrides: Mapping[str, Any] | None = None) -> click.Group:
+    """The click command for a lazy entry, preserving group structure.
+
+    ``typer.main.get_command`` collapses a one-command Typer app into a bare
+    TyperCommand, which changes the invocation path from
+    ``fno <group> <sub> <args>`` to ``fno <group> <args>``. Walkers that model
+    the live surface (the verb ratchet, the collapse-map tests) must resolve
+    through the same group-preserving shape the runtime uses.
+    """
+    if isinstance(attr, typer.Typer):
+        from typer.models import TyperInfo
+
+        info = TyperInfo(attr, **(info_overrides or {}))
+        return typer.main.get_group_from_info(
+            info,
+            pretty_exceptions_short=True,
+            rich_markup_mode=None,
+            suggest_commands=True,
+        )
+    return attr
+
+
 class _CollapsedForward(click.Command):
     """Unregistered action adapter that preserves the original Click command."""
 
@@ -264,21 +286,7 @@ class _LazyStub(click.Group):
                 f"(lazy entry for {self.name!r})"
             )
         if isinstance(attr, typer.Typer):
-            # Preserve group structure even for single-command apps.  Without
-            # this, ``typer.main.get_command(attr)`` collapses a one-command
-            # Typer app into a bare TyperCommand, which changes the invocation
-            # path from ``fno <group> <sub> <args>`` to ``fno <group> <args>``.
-            # ``get_group_from_info`` keeps the group + subcommand shape that
-            # ``app.add_typer`` produced under the eager-load model.
-            from typer.models import TyperInfo
-
-            info = TyperInfo(attr, **self._info_overrides)
-            self._real = typer.main.get_group_from_info(
-                info,
-                pretty_exceptions_short=True,
-                rich_markup_mode=None,
-                suggest_commands=True,
-            )
+            self._real = typer_group_shape(attr, self._info_overrides)
             if self._collapse_keep is not None:
                 self._real = collapse_click_group(
                     self._real,

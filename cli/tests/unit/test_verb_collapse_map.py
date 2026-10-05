@@ -284,9 +284,11 @@ def test_map_covers_current_surface_once():
     # `backlog reconcile` KEEP row with the verb: 595 -> 594. The emit-shell
     # port retires `paths emit-shell` from the Python surface: 594 -> 593.
     # The shell-stub port retires `paths shell-stub` the same way: 593 -> 592.
-    # The handoff port retires `paths handoff` from the Python surface: 592 -> 591,
-    # then re-registers the leaf as the native forwarder `fno-py` serves: 591 -> 592.
-    assert len(mapped) == 592, (
+    # The handoff port retires `paths handoff` from the Python surface
+    # (592 -> 591), then re-registers the leaf as the native forwarder
+    # `fno-py` serves (591 -> 592). The verify port retires `paths verify`
+    # the same way (592 -> 591): counted from the merged file, 591.
+    assert len(mapped) == 591, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -294,8 +296,8 @@ def test_map_covers_current_surface_once():
 
 def test_map_matches_the_uncollapsed_click_action_inventory():
     import click
-    import typer
 
+    from fno._lazy_group import typer_group_shape
     from fno.cli import COLLAPSE_KEEP, LAZY_SUBCOMMANDS
     from fno.lint_verb_ratchet import _iter_group_leaves, NATIVE_SERVED_LEAVES
 
@@ -304,7 +306,7 @@ def test_map_matches_the_uncollapsed_click_action_inventory():
         import_path = LAZY_SUBCOMMANDS[group][0]
         module_name, _, attr_name = import_path.rpartition(":")
         obj = getattr(importlib.import_module(module_name), attr_name)
-        command = typer.main.get_command(obj)
+        command = typer_group_shape(obj)
         context = click.Context(command, info_name=group)
         live.update(path for path, _sub in _iter_group_leaves(command, context, group))
     live.update(NATIVE_SERVED_LEAVES)
@@ -419,9 +421,8 @@ def test_runtime_keep_registry_matches_the_checked_in_allocation():
 
 def test_each_python_group_dispatcher_reaches_the_original_action_command():
     import click
-    import typer
 
-    from fno._lazy_group import collapse_click_group
+    from fno._lazy_group import collapse_click_group, typer_group_shape
     from fno.cli import COLLAPSE_KEEP, LAZY_SUBCOMMANDS
 
     rows = _rows()
@@ -433,7 +434,7 @@ def test_each_python_group_dispatcher_reaches_the_original_action_command():
         import_path = LAZY_SUBCOMMANDS[group][0]
         module_name, _, attr_name = import_path.rpartition(":")
         obj = getattr(importlib.import_module(module_name), attr_name)
-        original = typer.main.get_command(obj)
+        original = typer_group_shape(obj)
         original_ctx = click.Context(original, info_name=group)
         destination = original.get_command(original_ctx, action_name)
         assert destination is not None, first_t1["current-leaf"]

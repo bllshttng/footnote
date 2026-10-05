@@ -1,19 +1,17 @@
-//! `fno config paths emit-shell`, `shell-stub` and `handoff`: the paths
-//! verbs answered natively.
+//! `fno config paths emit-shell`, `shell-stub`, `verify` and `handoff`: the
+//! paths verbs answered natively.
 //!
-//! One verb per PR (law d-450caaeb): `emit-shell` landed first, `shell-stub`
-//! and `handoff` followed; only `verify` still forwards to the Python paths
-//! group until its child node ports. The route execs the worker's
-//! `--paths-exec` lane (worker_binary resolution like the law door), argv
-//! and exit code
+//! One verb per PR (law d-450caaeb): all four landed across four PRs; the
+//! Python paths group is gone. The route execs the worker's `--paths-exec`
+//! lane (worker_binary resolution like the law door), argv and exit code
+//! pass through unchanged.
 
 use std::ffi::OsString;
 use std::process::Command;
 
-/// The verbs the native lane serves. One per PR (law d-450caaeb):
-/// emit-shell landed first, shell-stub and handoff followed; verify is the
-/// last Python leg.
-pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell", "shell-stub", "handoff"];
+/// All four paths verbs, one per PR (law d-450caaeb): emit-shell,
+/// shell-stub, verify, handoff. The Python group is retired whole.
+pub const NATIVE_PATHS_VERBS: &[&str] = &["emit-shell", "shell-stub", "verify", "handoff"];
 
 /// Classify the paths verb for the front door: `fno config paths <v> ...`
 /// and its deprecated top-level spelling `fno paths <v> ...` both route
@@ -93,13 +91,21 @@ mod tests {
 
     #[test]
     fn classify_leaves_other_verbs_to_python() {
-        for verb in ["verify", "bogus"] {
+        for verb in ["bogus"] {
             assert!(classify(&oss(&["config", "paths", verb])).is_none());
             assert!(classify(&oss(&["paths", verb])).is_none());
         }
         assert!(classify(&oss(&["config", "setup", "auto-wire"])).is_none());
         assert!(classify(&oss(&["paths"])).is_none());
         assert!(classify(&oss(&["config", "paths"])).is_none());
+    }
+
+    #[test]
+    fn classify_claims_verify() {
+        let rest = classify(&oss(&["config", "paths", "verify", "x"])).unwrap();
+        assert_eq!(rest[0], OsString::from("verify"));
+        let top = classify(&oss(&["paths", "verify", "x"])).unwrap();
+        assert_eq!(top[0], OsString::from("verify"));
     }
 
     #[test]

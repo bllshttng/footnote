@@ -78,12 +78,12 @@ BINDIR="$(mktemp -d)"
 # masked registry-json's Rust port entirely, taking four AC31 assertions
 # down with it before this line existed).
 printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
-# The paths verbs emit-shell, shell-stub and handoff answer natively
+# The paths verbs emit-shell, shell-stub, verify and handoff answer natively
 # (crates/fno-agents/src/paths_cli.rs behind crates/fno/src/paths_route.rs):
 # the shim routes exactly those to the built Rust front + worker, the way
-# production resolves them, while verify and every other verb keep the
-# worktree Python front this suite pins. Without the routing, the retired
-# Python legs die and the canon ask names no doc (AC5). Spell
+# production resolves them, while every other verb keeps the worktree Python
+# front this suite pins. Without the routing, the retired Python legs die and
+# the canon ask names no doc (AC5). Spell
 # target/debug/fno contiguously: the smoke runner greps this file for
 # `target/debug/fno-agents` when it selects the harness's cargo build step,
 # and a split spelling selects the harness without its build (the red this
@@ -97,7 +97,7 @@ if [ ! -x "$FRONT_BIN" ] || [ ! -x "$WORKER_BIN" ]; then
   echo "      Fix: (cd crates/fno && cargo build --bin fno) && (cd crates/fno-agents && cargo build --bins)" >&2
   exit 1
 fi
-printf '#!/usr/bin/env bash\nif [ "$1" = config ] && [ "$2" = paths ] && { [ "$3" = emit-shell ] || [ "$3" = shell-stub ] || [ "$3" = handoff ]; }; then\n  export FNO_AGENTS_WORKER="%s"\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$WORKER_BIN" "$FRONT_BIN" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
+printf '#!/usr/bin/env bash\nif [ "$1" = config ] && [ "$2" = paths ] && { [ "$3" = emit-shell ] || [ "$3" = shell-stub ] || [ "$3" = verify ] || [ "$3" = handoff ]; }; then\n  export FNO_AGENTS_WORKER="%s"\n  exec "%s" "$@"\nfi\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$WORKER_BIN" "$FRONT_BIN" "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
 # fno-py is the console script name; provide it too in case anything resolves it.
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
