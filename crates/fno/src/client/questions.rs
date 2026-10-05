@@ -5,6 +5,7 @@
 //! A child module of `client`, so `View`'s private fields stay local.
 
 use super::*;
+use std::sync::atomic::Ordering;
 
 fn age_short(created_at: &str, now: u64) -> String {
     let Ok(t) = chrono::DateTime::parse_from_rfc3339(created_at) else {
@@ -398,7 +399,26 @@ pub(super) fn maybe_kick(
     tx: &tokio::sync::mpsc::UnboundedSender<Result<crate::needs_overlay::QuestionsFold, String>>,
     index_tx: &tokio::sync::mpsc::UnboundedSender<crate::needs_overlay::QuestionsFold>,
 ) {
-    if view.panel_w() == 0 || view.questions_inflight {
+    if view.panel_w() == 0 {
+        return;
+    }
+    // The index flies on its own flight and clock: a projection wedged at
+    // its 30s bound must not starve the ms-fast list refresh.
+    let now_ms = crate::digest_overlay::now_secs() * 1000;
+    if now_ms.saturating_sub(INDEX_KICKED_AT_MS.load(Ordering::Relaxed)) >= 10_000
+        && !INDEX_INFLIGHT.swap(true, Ordering::SeqCst)
+    {
+        INDEX_KICKED_AT_MS.store(now_ms, Ordering::Relaxed);
+        let index_tx = index_tx.clone();
+        tokio::spawn(async move {
+            if let Some(fold) = questions_index_now().await {
+                let _ = index_tx.send(fold);
+            }
+            INDEX_INFLIGHT.store(false, Ordering::SeqCst);
+        });
+    }
+    // The projection keeps the View single-flight: one subprocess at a time.
+    if view.questions_inflight {
         return;
     }
     let due = view
@@ -410,15 +430,16 @@ pub(super) fn maybe_kick(
     view.questions_inflight = true;
     view.questions_kick_at = Some(Instant::now());
     let tx = tx.clone();
-    let index_tx = index_tx.clone();
     tokio::spawn(async move {
-        if let Some(fold) = questions_index_now().await {
-            let _ = index_tx.send(fold);
-        }
         let fold = crate::needs_overlay::questions_now().await;
         let _ = tx.send(fold);
     });
 }
+
+/// The index leg's own single-flight and cadence clock, module-local so the
+/// View carries no second kick state.
+static INDEX_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static INDEX_KICKED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The question pages index, resolved through `state path questions` and
 /// parsed in-process: the fast leg that lets the bell paint the board

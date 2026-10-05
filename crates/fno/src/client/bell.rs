@@ -482,11 +482,11 @@ fn split_announcements(view: &View) -> Option<(usize, usize)> {
 }
 
 /// Each tab's columns on row 0, for the click mapper. The spans derive from
-/// the same labels the draw paints, so the two never drift.
-pub(super) fn tab_spans(view: &View) -> Vec<(Tab, std::ops::Range<usize>)> {
+/// the same labels the draw paints (pass the one `tab_counts` read), so the
+/// two never drift.
+fn tab_spans(view: &View, counts: &[String; 4]) -> Vec<(Tab, std::ops::Range<usize>)> {
     let width = PANEL_W.min(view.term.1 as usize);
     let x0 = view.term.1 as usize - width;
-    let counts = tab_counts(view);
     let mut col = x0 + 4;
     TABS.iter()
         .enumerate()
@@ -511,8 +511,9 @@ pub(super) fn hit(view: &View, row: u16, col: u16) -> Option<ChromeHit> {
     }
     if row == 0 {
         let col = col as usize;
+        let counts = tab_counts(view);
         return Some(ChromeHit::Bell(
-            match tab_spans(view)
+            match tab_spans(view, &counts)
                 .into_iter()
                 .find(|(_, span)| span.contains(&col))
             {
@@ -711,7 +712,7 @@ pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) 
                 true,
             );
             let counts = tab_counts(view);
-            for (tab, span) in tab_spans(view) {
+            for (tab, span) in tab_spans(view, &counts) {
                 let i = TABS.iter().position(|t| t == &tab).unwrap_or(0);
                 let (fg, bold) = if view.bell.tab == tab {
                     (view.theme.brand, true)
@@ -941,16 +942,13 @@ mod tests {
         );
 
         // The strip spans land where the draw paints the labels.
-        let spans = tab_spans(&system);
+        let spans = tab_spans(&system, &tab_counts(&system));
         assert_eq!(spans.len(), 4);
         assert!(spans[0].1.start >= 4, "the glyph keeps its seat");
         assert_eq!(spans[0].0, Tab::All);
         assert_eq!(spans[3].0, Tab::System);
-    }
 
-    #[test]
-    fn tab_keys_switch_panels() {
-        // An empty announcement list: mark_seen has nothing to persist.
+        // Keys switch panels: 1-4 jump, Tab cycles and wraps.
         let mut v = view_with_announcements(vec![]);
         keys(&mut v, b"3");
         assert_eq!(v.bell.tab, Tab::Announcements);
@@ -962,5 +960,42 @@ mod tests {
         assert_eq!(v.bell.tab, Tab::Questions);
         keys(&mut v, b"1");
         assert_eq!(v.bell.tab, Tab::All);
+    }
+
+    #[test]
+    fn stale_banner_yields_to_the_index() {
+        let mut v = view_with_agents(vec![]);
+        v.term = (24, 100);
+        v.questions_index = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![crate::needs_overlay::QuestionItem {
+                id: "q-1".into(),
+                title: "from the index".into(),
+                state: "open".into(),
+                ready: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![crate::needs_overlay::QuestionItem {
+                id: "q-1".into(),
+                title: "from the projection".into(),
+                state: "open".into(),
+                ready: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        v.questions_degraded = true;
+        v.questions_degraded_reason = Some("timed out".into());
+        v.bell.tab = Tab::Questions;
+        let stale = |view: &View| {
+            rows(view)
+                .iter()
+                .any(|r| matches!(r, Row::Info(s) if s.starts_with("stale:")))
+        };
+        assert!(!stale(&v), "the index backs the list; no stale banner");
+        v.questions_index = None;
+        assert!(stale(&v), "no index: the banner says so");
     }
 }
