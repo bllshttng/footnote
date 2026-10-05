@@ -112,21 +112,28 @@ pub(super) fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> 
                     esc.push(b); // PageUp `ESC[5~` / PageDown `ESC[6~` pending
                     continue;
                 }
-                ([0x1b, b'['], b'H') | ([0x1b, b'['], b'1') => {
-                    esc.push(b); // Home pending: `ESC[H` / `ESC[1~`
-                    continue;
-                }
-                ([0x1b, b'['], b'F') | ([0x1b, b'['], b'4') => {
-                    esc.push(b); // End pending: `ESC[F` / `ESC[4~`
-                    continue;
-                }
-                ([0x1b, b'[', b'H'], b'~') | ([0x1b, b'[', b'1'], b'~') => {
-                    // Home folds to the feed's jump-to-top binding.
+                ([0x1b, b'['], b'H') => {
+                    // `ESC[H` is already final; it folds to the feed's
+                    // jump-to-top binding.
                     out.push(ModalKey::Byte(b'g'));
                     esc.clear();
                     continue;
                 }
-                ([0x1b, b'[', b'F'], b'~') | ([0x1b, b'[', b'4'], b'~') => {
+                ([0x1b, b'['], b'F') => {
+                    out.push(ModalKey::Byte(b'G'));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'1') | ([0x1b, b'['], b'4') => {
+                    esc.push(b); // Home `ESC[1~` / End `ESC[4~` pending
+                    continue;
+                }
+                ([0x1b, b'[', b'1'], b'~') => {
+                    out.push(ModalKey::Byte(b'g'));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'4'], b'~') => {
                     out.push(ModalKey::Byte(b'G'));
                     esc.clear();
                     continue;

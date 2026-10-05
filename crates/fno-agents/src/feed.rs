@@ -783,7 +783,7 @@ pub fn project(
             }
             "fno_update_started" | "fno_update_installed" => {
                 let rev = s_field(data, "new_rev").unwrap_or_default();
-                let short = &rev[..rev.len().min(8)];
+                let short: String = rev.chars().take(8).collect();
                 let started = kind == "fno_update_started";
                 rows.push(FeedRow {
                     ts,
@@ -1216,46 +1216,76 @@ pub fn filter_rows(
             c[5].as_str(),
         )
     });
-    // One flag, comma-OR over exact segments.
-    let in_set = |v: &str, set: &str| set.split(',').any(|seg| seg == v);
+    // One flag, comma-OR over exact segments. An empty segment never
+    // matches, so a trailing comma cannot widen the filter to everything.
+    let in_set = |v: &str, set: &str| {
+        set.split(',')
+            .filter(|seg| !seg.is_empty())
+            .any(|seg| seg == v)
+    };
     // One flag, comma-OR over prefix segments. An exact kind is its own
     // prefix, so today's exact `--kind` keeps matching.
-    let prefix_set = |v: &str, set: &str| set.split(',').any(|seg| v.starts_with(seg));
+    let prefix_set = |v: &str, set: &str| {
+        set.split(',')
+            .filter(|seg| !seg.is_empty())
+            .any(|seg| v.starts_with(seg))
+    };
     let mut rows: Vec<FeedRow> = rows
         .into_iter()
         .filter(|r| {
             pre.node
                 .as_deref()
+                .filter(|n| !n.is_empty())
                 .is_none_or(|n| r.node.as_deref().is_some_and(|v| in_set(v, &n)))
         })
-        .filter(|r| pre.kind.as_deref().is_none_or(|k| prefix_set(&r.kind, &k)))
-        .filter(|r| pre.area.as_deref().is_none_or(|a| in_set(&r.area, &a)))
         .filter(|r| {
-            pre.session.as_deref().is_none_or(|s| {
-                r.session_id
-                    .as_deref()
-                    .is_some_and(|v| v.starts_with(&s) || v.ends_with(&s))
-            })
+            pre.kind
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .is_none_or(|k| prefix_set(&r.kind, &k))
+        })
+        .filter(|r| {
+            pre.area
+                .as_deref()
+                .filter(|a| !a.is_empty())
+                .is_none_or(|a| in_set(&r.area, &a))
+        })
+        .filter(|r| {
+            pre.session
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_none_or(|s| {
+                    r.session_id
+                        .as_deref()
+                        .is_some_and(|v| v.starts_with(&s) || v.ends_with(&s))
+                })
         })
         .filter(|r| {
             pre.agent
                 .as_deref()
+                .filter(|a| !a.is_empty())
                 .is_none_or(|a| r.name.as_deref().is_some_and(|v| v.starts_with(&a)))
         })
         .filter(|r| {
-            pre.harness.as_deref().is_none_or(|h| {
-                r.harness
-                    .as_deref()
-                    .is_some_and(|v| h.split(',').any(|seg| v.eq_ignore_ascii_case(seg)))
-            })
+            pre.harness
+                .as_deref()
+                .filter(|h| !h.is_empty())
+                .is_none_or(|h| {
+                    r.harness
+                        .as_deref()
+                        .is_some_and(|v| h.split(',').any(|seg| v.eq_ignore_ascii_case(seg)))
+                })
         })
         .filter(|r| {
-            pre.lead.as_deref().is_none_or(|l| {
-                r.lead
-                    .as_deref()
-                    .or(r.owner.as_deref())
-                    .is_some_and(|v| v.contains(&l))
-            })
+            pre.lead
+                .as_deref()
+                .filter(|l| !l.is_empty())
+                .is_none_or(|l| {
+                    r.lead
+                        .as_deref()
+                        .or(r.owner.as_deref())
+                        .is_some_and(|v| v.contains(&l))
+                })
         })
         .filter(|r| match since_epoch {
             Some(since) => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
@@ -1350,7 +1380,7 @@ pub(crate) fn leg_skipped(pre: &Prefilter, kinds: &[&str]) -> bool {
         return false;
     }
     if let Some(k) = pre.kind.as_deref() {
-        let wanted: Vec<&str> = k.split(',').collect();
+        let wanted: Vec<&str> = k.split(',').filter(|s| !s.is_empty()).collect();
         if !kinds
             .iter()
             .any(|kd| wanted.iter().any(|w| kd.starts_with(w)))
@@ -1359,7 +1389,7 @@ pub(crate) fn leg_skipped(pre: &Prefilter, kinds: &[&str]) -> bool {
         }
     }
     if let Some(a) = pre.area.as_deref() {
-        let wanted: Vec<&str> = a.split(',').collect();
+        let wanted: Vec<&str> = a.split(',').filter(|s| !s.is_empty()).collect();
         if !kinds
             .iter()
             .any(|kd| wanted.iter().any(|w| area_of(kd) == *w))

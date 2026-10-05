@@ -1094,7 +1094,8 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
                 search::apply_query(f);
             }
         }
-        return;
+        // Fall through: the refold the debounce armed fires through the same
+        // single-flight path, so the panel updates while the bar stays open.
     }
     let due = f.want
         || f.last_fold
