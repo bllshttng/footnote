@@ -358,9 +358,7 @@ def _attest_from_record(
 
     # The --verify-fixes round stamp, the shell emitter's rule carried through
     # this emit; the rule lives in the Rust binary, this is the wiring.
-    # Fail-open: an unresolvable round stamps nothing and the pass counts as a
-    # fresh round, as an undeclared pass always has. An explicit --review-round
-    # already sits on the record and wins.
+    # Fail-open, and an explicit --review-round already on the record wins.
     if "review_round" not in data and hold_flags:
         from fno.rust_binary import call_binary_json
 
