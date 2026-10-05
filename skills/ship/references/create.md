@@ -366,7 +366,7 @@ fi
 
 On body-check exit 1, follow the guard's own fix text and rerun the check. If the guard still refuses, end `RESULT: BLOCKED step=body-check reason=<the guard's fix text> draft=.fno/pr-body.md`. Never open the PR: the CI guards read the PR body field, so no commit can fix a body failure. The session-URL guard also scans commit messages, so a commit hit needs a reword, not a body edit.
 
-On `fno do pr create` exit 3, the PR is NOT created: end `RESULT: BLOCKED step=create reason=duplicate of PR #<n> (<branch> by <author>) draft=.fno/pr-body.md`. Rerun with `--not-duplicate <n>` only after reading the twin and judging it not a duplicate; the verb then proceeds past that PR. On exit 127 the deployed binary predates the guard, which is a repair, not a fallback: end `RESULT: BLOCKED step=create reason=binary predates pr create; run fno doctor update --rust draft=.fno/pr-body.md`. On any other nonzero, gh failed before a PR opened; end `RESULT: BLOCKED step=create reason=<verb's message> draft=.fno/pr-body.md`.
+On `fno do pr create` exit 3, the PR is NOT created: end `RESULT: BLOCKED step=create reason=duplicate of PR #<n> (<branch> by <author>) draft=.fno/pr-body.md`. Rerun with `--not-duplicate <n>` only after reading the twin and judging it not a duplicate. The verb then proceeds past that PR. On exit 127 the deployed binary predates the guard, which is a repair, not a fallback: end `RESULT: BLOCKED step=create reason=binary predates pr create, run fno doctor update --rust draft=.fno/pr-body.md`. On any other nonzero, gh failed before a PR opened. End `RESULT: BLOCKED step=create reason=<verb's message> draft=.fno/pr-body.md`.
 
 **Capture PR number** from the verb's output URL (e.g., `/pull/105` → `105`).
 
