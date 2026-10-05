@@ -4653,14 +4653,8 @@ def cmd_hold(
 
     While the hold is on, mail addressed to this session never pastes into the
     prompt line. It queues durable and the sender gets a receipt saying so.
-    ``--minutes`` runs the quiet-minutes idle clock and re-arms on every prompt,
-    with an absolute ceiling at twice the requested window. ``--for`` runs a
-    wall clock and never moves its deadline. Either lift DELIVERS without a new
-    prompt, so a hold whose only drain trigger is the operator cannot stall.
-
-    The hold reuses the ``delivery_policy = "bus-only"`` flag that already
-    exists on the agent row, so every injector lane refuses it before any
-    transport call. This verb owns the clock, not the enforcement.
+    Either clock DELIVERS without a new prompt, so a hold whose only drain
+    trigger is the operator cannot stall.
     """
     import shutil
     import subprocess
