@@ -123,6 +123,12 @@ if [ ! -x "$AGENTS_BIN" ]; then
   exit 1
 fi
 export PATH="$AGENTS_BIN_DIR:$PATH"
+# Pin the optional-hook budget: this suite tests nudge LOGIC, and the runner's
+# load (four shards, one box) is a property of the shard, not of the code. A
+# busy-tier 1s bound fired twice on AC20's probe (2026-10-05, three runs) and
+# read as probe silence, which is indistinguishable here from a real death.
+# The tiers keep ruling in production; FNO_HOOK_BUDGET_SECS is unset there.
+export FNO_HOOK_BUDGET_SECS=30
 
 # --- sandbox: isolated state_dir + config + HOME so nothing leaks ----------
 SBX="$(mktemp -d)"
@@ -447,10 +453,10 @@ fi
 assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
 assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
 if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
-  echo "--- AC20 diagnostics: hook stderr + output of the last fire ---" >&2
-  printf 'OUT: %s\n' "$OUT" >&2
+  echo "--- AC20 diagnostics: rc, hook stderr + output of the last fire ---" >&2
+  printf 'RC: %s\nOUT: %s\n' "$RC" "$OUT" >&2
   cat "$SBX/hook-stderr.log" 2>/dev/null >&2
-  "$WORKER_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
+  "$AGENTS_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
 fi
 run_hook "$(payload "$SBX/small.jsonl")"
 assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
