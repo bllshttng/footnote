@@ -247,7 +247,10 @@ payload_compact() {  # payload_compact <transcript-path>
 }
 
 run_hook() {  # run_hook <payload> ; sets OUT, RC
-  OUT=$(printf '%s' "$1" | bash "$HOOK" 2>/dev/null); RC=$?
+  # stderr lands in a file, not /dev/null: a CI-only branch death (AC20 twice
+  # on 2026-10-05) was undiagnosable from PASS/FAIL lines alone. The file
+  # holds the LAST fire's stderr; the AC20 diagnostic dump reads it.
+  OUT=$(printf '%s' "$1" | bash "$HOOK" 2>"$SBX/hook-stderr.log"); RC=$?
 }
 
 # Same resolution order as scripts/lib/events.sh. The store commit is the
@@ -443,6 +446,12 @@ if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
 fi
 assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
 assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
+if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
+  echo "--- AC20 diagnostics: hook stderr + output of the last fire ---" >&2
+  printf 'OUT: %s\n' "$OUT" >&2
+  cat "$SBX/hook-stderr.log" 2>/dev/null >&2
+  "$WORKER_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
+fi
 run_hook "$(payload "$SBX/small.jsonl")"
 assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
 
