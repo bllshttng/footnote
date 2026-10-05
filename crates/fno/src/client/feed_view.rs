@@ -27,11 +27,10 @@
 //! action. Inspecting never attaches or resumes anything on its own.
 
 use super::*;
-use crate::feed_overlay::{FeedItem, event_fields};
+use crate::feed_overlay::{event_fields, FeedItem};
 
 pub(crate) mod page;
 pub(crate) mod search;
-
 
 /// The panel's open state: the items the last fold landed, the hover marker
 /// (a display index, NEWEST FIRST, the order the rows render in), and the
@@ -126,13 +125,7 @@ impl FeedOrder {
 /// cheap and off-loop.
 pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay {
     let (win, query_text, parsed, pushed, filter) = match prior {
-        Some(f) => (
-            f.win,
-            f.query_text,
-            f.parsed,
-            f.pushed,
-            f.filter,
-        ),
+        Some(f) => (f.win, f.query_text, f.parsed, f.pushed, f.filter),
         None => (
             page::FeedWindow::default(),
             String::new(),
@@ -377,7 +370,12 @@ pub(crate) fn feed_panel_rows(
                     .as_deref()
                     .map(|n| n.chars().take(8).collect::<String>())
                     .unwrap_or_else(|| "-".to_string());
-                cell(&mut row, format!("{:<8} ", node), item.node.is_some(), false);
+                cell(
+                    &mut row,
+                    format!("{:<8} ", node),
+                    item.node.is_some(),
+                    false,
+                );
                 if show_session {
                     let sid = item
                         .session_id
@@ -1113,9 +1111,7 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
     let req = f
         .want_page
         .take()
-        .unwrap_or_else(|| {
-            crate::feed_overlay::PageReq::Live(f.win.head_cursor.clone())
-        });
+        .unwrap_or_else(|| crate::feed_overlay::PageReq::Live(f.win.head_cursor.clone()));
     let filter = f.filter.clone();
     tokio::spawn(async move {
         let result = crate::feed_overlay::fetch_page(req, filter.as_ref()).await;
@@ -1126,11 +1122,7 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
 /// A fold landed: apply only to the still-open, same-generation panel, and
 /// reopen the scroll window on the newest row so a shorter result can never
 /// leave the window parked past the last item (a blank panel).
-pub(crate) fn apply_fold(
-    view: &mut View,
-    gen: u64,
-    outcome: crate::feed_overlay::FoldResult,
-) {
+pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: crate::feed_overlay::FoldResult) {
     let top_slot = view.feed_offset_clamped();
     let visible = (view.term.0 as usize).saturating_sub(2);
     let Some(f) = view.feed.as_mut() else {
@@ -1158,18 +1150,14 @@ pub(crate) fn apply_fold(
                     it.cursor.clone()
                 }
             };
-            let anchor_top = slots
-                .get(top_slot)
-                .and_then(|s| match s {
-                    Slot::Item(i) => f.win.items.get(*i).map(&anchor_of),
-                    Slot::Header(_) => None,
-                });
-            let anchor_sel = slots
-                .get(f.sel)
-                .and_then(|s| match s {
-                    Slot::Item(i) => f.win.items.get(*i).map(&anchor_of),
-                    Slot::Header(_) => None,
-                });
+            let anchor_top = slots.get(top_slot).and_then(|s| match s {
+                Slot::Item(i) => f.win.items.get(*i).map(&anchor_of),
+                Slot::Header(_) => None,
+            });
+            let anchor_sel = slots.get(f.sel).and_then(|s| match s {
+                Slot::Item(i) => f.win.items.get(*i).map(&anchor_of),
+                Slot::Header(_) => None,
+            });
             let (req, raw) = (page.req, page.items);
             let scan_floor = raw.first().map(|i| i.cursor.clone());
             // Under a query the projection flags cannot express, the client
@@ -1193,9 +1181,11 @@ pub(crate) fn apply_fold(
             // as absent and the clamp below keeps both in range.
             let slots = display_slots(&f.win.items, order);
             let slot_of_cursor = |cur: &str| {
-                slots.iter().position(|s| matches!(s, Slot::Item(i) if {
-                    f.win.items.get(*i).is_some_and(|it| &anchor_of(it) == cur)
-                }))
+                slots.iter().position(|s| {
+                    matches!(s, Slot::Item(i) if {
+                        f.win.items.get(*i).is_some_and(|it| &anchor_of(it) == cur)
+                    })
+                })
             };
             if let (Some(cur), false) = (&anchor_top, first) {
                 if let Some(d) = slot_of_cursor(cur) {
@@ -1540,9 +1530,7 @@ pub(crate) async fn feed_keys(
                 let slot_len = display_slots(&f.win.items, f.order).len();
                 let max_off = slot_len.saturating_sub(visible);
                 view.feed_offset = max_off;
-                let sel = display_slots(&f.win.items, f.order)
-                    .len()
-                    .saturating_sub(1);
+                let sel = display_slots(&f.win.items, f.order).len().saturating_sub(1);
                 f.sel = sel;
                 View::arm_feed_page(f, true, false, max_off, 5);
             }

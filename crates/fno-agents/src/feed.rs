@@ -888,7 +888,11 @@ pub fn project(
     let mut harness_by_session: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for entry in graph_entries {
-        for row in entry.get("sessions").and_then(Value::as_array).unwrap_or(&vec![]) {
+        for row in entry
+            .get("sessions")
+            .and_then(Value::as_array)
+            .unwrap_or(&vec![])
+        {
             if let (Some(sid), Some(h)) = (s_field(row, "session_id"), s_field(row, "harness")) {
                 harness_by_session.insert(sid, h);
             }
@@ -935,7 +939,13 @@ pub fn project(
             spawn_names.insert(sid, name);
         }
     }
-    assign_owners(&mut rows, &team_events, graph_entries, &themes, &spawn_names);
+    assign_owners(
+        &mut rows,
+        &team_events,
+        graph_entries,
+        &themes,
+        &spawn_names,
+    );
     for r in &mut rows {
         r.area = area_of(&r.kind).to_string();
         r.cursor = cursor_of(r);
@@ -1055,9 +1065,8 @@ fn assign_owners(
         .iter()
         .filter_map(|e| graph_store::entry_id(e).map(|id| (id, e)))
         .collect();
-    let parent_of = |node: &str| -> Option<String> {
-        by_id.get(node).and_then(|e| s_field(e, "parent"))
-    };
+    let parent_of =
+        |node: &str| -> Option<String> { by_id.get(node).and_then(|e| s_field(e, "parent")) };
     let title_of = |node: &str| -> Option<String> {
         by_id
             .get(node)
@@ -1182,12 +1191,31 @@ pub fn filter_rows(
 ) -> Vec<FeedRow> {
     // The parsed cursors stay in locals; the comparison keys borrow from
     // them, so a page bound costs no per-row allocation.
-    let before_cur = page.before.as_deref().and_then(|raw| parse_cursor(raw).ok());
+    let before_cur = page
+        .before
+        .as_deref()
+        .and_then(|raw| parse_cursor(raw).ok());
     let after_cur = page.after.as_deref().and_then(|raw| parse_cursor(raw).ok());
-    let before =
-        before_cur.as_ref().map(|c| (ts_key(&c[0]), c[1].as_str(), c[2].as_str(), c[3].as_str(), c[4].as_str(), c[5].as_str()));
-    let after =
-        after_cur.as_ref().map(|c| (ts_key(&c[0]), c[1].as_str(), c[2].as_str(), c[3].as_str(), c[4].as_str(), c[5].as_str()));
+    let before = before_cur.as_ref().map(|c| {
+        (
+            ts_key(&c[0]),
+            c[1].as_str(),
+            c[2].as_str(),
+            c[3].as_str(),
+            c[4].as_str(),
+            c[5].as_str(),
+        )
+    });
+    let after = after_cur.as_ref().map(|c| {
+        (
+            ts_key(&c[0]),
+            c[1].as_str(),
+            c[2].as_str(),
+            c[3].as_str(),
+            c[4].as_str(),
+            c[5].as_str(),
+        )
+    });
     // One flag, comma-OR over exact segments.
     let in_set = |v: &str, set: &str| set.split(',').any(|seg| seg == v);
     // One flag, comma-OR over prefix segments. An exact kind is its own
@@ -1196,7 +1224,9 @@ pub fn filter_rows(
     let mut rows: Vec<FeedRow> = rows
         .into_iter()
         .filter(|r| {
-            pre.node.as_deref().is_none_or(|n| r.node.as_deref().is_some_and(|v| in_set(v, &n)))
+            pre.node
+                .as_deref()
+                .is_none_or(|n| r.node.as_deref().is_some_and(|v| in_set(v, &n)))
         })
         .filter(|r| pre.kind.as_deref().is_none_or(|k| prefix_set(&r.kind, &k)))
         .filter(|r| pre.area.as_deref().is_none_or(|a| in_set(&r.area, &a)))
@@ -1264,11 +1294,14 @@ pub(crate) fn area_of(kind: &str) -> &'static str {
         "question_asked" | "question_closed" | "decision_recorded" => "mail",
         "node_created" | "node_started" | "node_ended" => "backlog",
         "node_shipped" | "pr_merged" => "ship",
-        "session_spawned" | "session_spawn_refused" | "session_reaped" | "worker_stalled"
-        | "help_emitted" | "team_granted" | "team_vacated" => "agents",
-        "pane_closed" | "server_stopped" | "composer_shell_ran" | "composer_shell_refused" => {
-            "mux"
-        }
+        "session_spawned"
+        | "session_spawn_refused"
+        | "session_reaped"
+        | "worker_stalled"
+        | "help_emitted"
+        | "team_granted"
+        | "team_vacated" => "agents",
+        "pane_closed" | "server_stopped" | "composer_shell_ran" | "composer_shell_refused" => "mux",
         "day_boundary" | "daemon_restarted" | "update_started" | "update_finished" => "fleet",
         "main_ci_changed" => "ci",
         _ => "other",
@@ -1283,8 +1316,13 @@ pub(crate) const QUESTION_KINDS: &[&str] = &[
     "decision_recorded",
     "day_boundary",
 ];
-pub(crate) const GRAPH_KINDS: &[&str] =
-    &["node_created", "node_started", "node_ended", "node_shipped", "pr_merged"];
+pub(crate) const GRAPH_KINDS: &[&str] = &[
+    "node_created",
+    "node_started",
+    "node_ended",
+    "node_shipped",
+    "pr_merged",
+];
 pub(crate) const REMOVAL_KINDS: &[&str] = &["session_reaped"];
 /// The feed kinds the main store leg derives (its store kinds are
 /// spawn_gate_refused, worker_silent, blocked and the fno_update_* trio).
@@ -1322,7 +1360,10 @@ pub(crate) fn leg_skipped(pre: &Prefilter, kinds: &[&str]) -> bool {
     }
     if let Some(a) = pre.area.as_deref() {
         let wanted: Vec<&str> = a.split(',').collect();
-        if !kinds.iter().any(|kd| wanted.iter().any(|w| area_of(kd) == *w)) {
+        if !kinds
+            .iter()
+            .any(|kd| wanted.iter().any(|w| area_of(kd) == *w))
+        {
             return true;
         }
     }
@@ -1561,17 +1602,15 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     let questions_raw = if leg_skipped(&args.pre, QUESTION_KINDS) {
         String::new()
     } else {
-        match crate::event_store::journal_text_checked(
-            &questions_path, &questions_query,
-        ) {
-        Ok(raw) => raw,
-        Err(e) => {
-            eprintln!(
-                "fno-agents feed: questions store unreadable, skipped: {} ({e})",
-                questions_path.display()
-            );
-            String::new()
-        }
+        match crate::event_store::journal_text_checked(&questions_path, &questions_query) {
+            Ok(raw) => raw,
+            Err(e) => {
+                eprintln!(
+                    "fno-agents feed: questions store unreadable, skipped: {} ({e})",
+                    questions_path.display()
+                );
+                String::new()
+            }
         }
     };
 
@@ -1622,15 +1661,15 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     let closes_raw = if leg_skipped(&args.pre, CLOSE_KINDS) {
         String::new()
     } else {
-    agents_journal(
-        home,
-        &[
-            "pane_closed",
-            "server_stopped",
-            "composer_shell_ran",
-            "composer_shell_refused",
-            "daemon_started",
-        ],
+        agents_journal(
+            home,
+            &[
+                "pane_closed",
+                "server_stopped",
+                "composer_shell_ran",
+                "composer_shell_refused",
+                "daemon_started",
+            ],
             args.since_epoch,
             args.until_epoch,
         )
@@ -1676,13 +1715,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     let mut page = args.page;
     // A page the caller did not size is the head page: the newest 200.
     page.limit = page.limit.or(Some(200));
-    let rows = filter_rows(
-        rows,
-        &page,
-        &args.pre,
-        args.since_epoch,
-        args.until_epoch,
-    );
+    let rows = filter_rows(rows, &page, &args.pre, args.since_epoch, args.until_epoch);
 
     if args.json {
         println!(
@@ -1794,7 +1827,16 @@ mod tests {
         assert_eq!(p.rows[0].title, "day start");
         assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
+        let p = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
@@ -1816,7 +1858,16 @@ mod tests {
         assert_eq!(decision.r#ref.as_deref(), Some("d-1"));
         assert_eq!(decision.title, "revert-dispute: strict equality stands");
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
+        let p = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
         assert_eq!(
             kinds(&p.rows),
             [
@@ -1855,14 +1906,38 @@ mod tests {
         let p = project(&questions, &[], &[], "", "", "", "", None);
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
-        let kept = filter_rows(p.rows, &Page::default(), &Prefilter::default(), Some(1_700_000_000), None);
+        let kept = filter_rows(
+            p.rows,
+            &Page::default(),
+            &Prefilter::default(),
+            Some(1_700_000_000),
+            None,
+        );
         assert_eq!(kept.len(), 1);
     }
 
     #[test]
     fn filter_gate_rows() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
-        let node_rows = filter_rows(p.rows.clone(), &Page::default(), &Prefilter { node: Some("x-aaaa".into()), ..Default::default() }, None, None);
+        let p = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
+        let node_rows = filter_rows(
+            p.rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                node: Some("x-aaaa".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
         // closure inherits the association from the row that asked.
@@ -1877,7 +1952,16 @@ mod tests {
                 "node_ended"
             ]
         );
-        let ship_rows = filter_rows(p.rows.clone(), &Page::default(), &Prefilter { session: Some("s-ship".into()), ..Default::default() }, None, None);
+        let ship_rows = filter_rows(
+            p.rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                session: Some("s-ship".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(kinds(&ship_rows), ["node_shipped", "node_ended"]);
         let shipped = ship_rows.iter().find(|r| r.kind == "node_shipped").unwrap();
         assert_eq!(
@@ -1885,7 +1969,16 @@ mod tests {
             Some("https://github.com/bllshttng/footnote/pull/1395"),
             "the ship row carries the PR URL the provenance action opens"
         );
-        let newest_two = filter_rows(p.rows, &Page { limit: Some(2), ..Page::default() }, &Prefilter::default(), None, None);
+        let newest_two = filter_rows(
+            p.rows,
+            &Page {
+                limit: Some(2),
+                ..Page::default()
+            },
+            &Prefilter::default(),
+            None,
+            None,
+        );
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
 
         // The live shape: `decided_by` is the literal verb on every decision
@@ -1986,7 +2079,10 @@ mod tests {
             None,
         );
         assert_eq!(got.len(), 200);
-        assert_eq!(got[0].kind, rows[11].kind, "after starts just past the cursor");
+        assert_eq!(
+            got[0].kind, rows[11].kind,
+            "after starts just past the cursor"
+        );
 
         // Both cursors at once is refused; an unparseable cursor names its flag.
         let err = parse_args(&[
@@ -2107,7 +2203,16 @@ mod tests {
         ];
         let spawns = r#"{"ts":"2026-09-02T10:00:00Z","type":"agent_spawned","source":"python","data":{"node":"x-bbbb","name":"w","substrate":"pane"}}"#;
         let set = vec!["x-aaaa".to_string()];
-        let p = project(&questions_fixture(), &entries, &[], spawns, "", "", "", Some(&set));
+        let p = project(
+            &questions_fixture(),
+            &entries,
+            &[],
+            spawns,
+            "",
+            "",
+            "",
+            Some(&set),
+        );
         assert!(
             !p.rows
                 .iter()
@@ -2158,7 +2263,16 @@ mod tests {
         assert_eq!(area_of("question_asked"), "mail");
         assert_eq!(area_of("node_shipped"), "ship");
         assert_eq!(area_of("pane_closed"), "mux");
-        let projected = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
+        let projected = project(
+            &questions_fixture(),
+            &graph_fixture(),
+            &[],
+            "",
+            "",
+            "",
+            "",
+            None,
+        );
         assert!(
             projected
                 .rows
@@ -2243,11 +2357,12 @@ mod tests {
         let holder_row = p
             .rows
             .iter()
-            .find(|r| {
-                r.session_id.as_deref() == Some("20260904T151442Z-cl54345-58af0c")
-            })
+            .find(|r| r.session_id.as_deref() == Some("20260904T151442Z-cl54345-58af0c"))
             .unwrap();
-        assert_eq!(holder_row.lead, None, "the holder's own birth rolls to nobody");
+        assert_eq!(
+            holder_row.lead, None,
+            "the holder's own birth rolls to nobody"
+        );
 
         // AC7-HP: one row of each new main-store type projects its kind and
         // area, and a merged node reads pr_merged instead of node_ended.
@@ -2276,12 +2391,18 @@ mod tests {
             find("session_spawn_refused").title,
             "spawn refused (king_share): t-w-glm"
         );
-        assert_eq!(find("session_spawn_refused").reason.as_deref(), Some("king_share"));
+        assert_eq!(
+            find("session_spawn_refused").reason.as_deref(),
+            Some("king_share")
+        );
         assert_eq!(find("worker_stalled").title, "t-w silent 802s");
         assert_eq!(find("worker_stalled").area, "agents");
         assert_eq!(find("help_emitted").node.as_deref(), Some("x-aaaa"));
         assert_eq!(find("help_emitted").title, "help: need a lever");
-        assert_eq!(find("update_started").title, "fno update started (55f04eda)");
+        assert_eq!(
+            find("update_started").title,
+            "fno update started (55f04eda)"
+        );
         assert_eq!(find("update_finished").area, "fleet");
         assert_eq!(
             p.rows
@@ -2299,7 +2420,11 @@ mod tests {
             .unwrap()
             .insert("merge_status".to_string(), serde_json::json!("merged"));
         let p = project("", &[entry], &[], "", "", "", "", None);
-        assert!(kinds(&p.rows).contains(&"pr_merged"), "{:?}", kinds(&p.rows));
+        assert!(
+            kinds(&p.rows).contains(&"pr_merged"),
+            "{:?}",
+            kinds(&p.rows)
+        );
         assert!(!kinds(&p.rows).contains(&"node_ended"));
         let merged = p.rows.iter().find(|r| r.kind == "pr_merged").unwrap();
         assert_eq!(merged.r#ref.as_deref(), Some("1395"));
@@ -2365,7 +2490,16 @@ mod tests {
             row.session_id.as_deref(),
             Some("00847995-e0db-47c2-ab5b-24468ba1a4f5")
         );
-        let only_reaped = filter_rows(p.rows, &Page::default(), &Prefilter { kind: Some("session_reaped".into()), ..Default::default() }, None, None);
+        let only_reaped = filter_rows(
+            p.rows,
+            &Page::default(),
+            &Prefilter {
+                kind: Some("session_reaped".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         assert_eq!(only_reaped.len(), 1);
 
         let mut r = removal_fixture();

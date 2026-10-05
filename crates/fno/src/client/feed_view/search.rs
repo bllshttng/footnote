@@ -45,7 +45,6 @@ pub(crate) fn parse_query(text: &str) -> Result<crate::search_query::Parsed, Str
     )
 }
 
-
 /// The `?` overlay: the panel's keys, then every key the shared table marks
 /// answerable on feed rows - read from `search_query::KEYS`, never a local
 /// copy, so the overlay and the grammar cannot drift.
@@ -144,7 +143,11 @@ pub(crate) fn complete(text: &str, items: &[crate::feed_overlay::FeedItem]) -> O
     if vals.is_empty() {
         return None;
     }
-    let next = vals.iter().position(|v| v == value).map(|i| i + 1).unwrap_or(0);
+    let next = vals
+        .iter()
+        .position(|v| v == value)
+        .map(|i| i + 1)
+        .unwrap_or(0);
     Some(format!("{prefix}{key}:{}", vals[next % vals.len()]))
 }
 

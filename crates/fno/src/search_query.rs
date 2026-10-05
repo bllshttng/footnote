@@ -1130,4 +1130,3 @@ pub fn help_text(surface: Surface) -> String {
     }
     out
 }
-

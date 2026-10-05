@@ -426,7 +426,11 @@ pub fn event_fields(item: &FeedItem, ctx: &EventCtx) -> crate::search_query::Fie
     for a in area {
         push(&mut f, "area", Some(a.to_string()));
     }
-    push(&mut f, "area", (!item.area.is_empty()).then_some(item.area.clone()));
+    push(
+        &mut f,
+        "area",
+        (!item.area.is_empty()).then_some(item.area.clone()),
+    );
     if node_ctx.is_some_and(|(_, _, open)| *open) {
         push(&mut f, "is", Some("open".to_string()));
     }

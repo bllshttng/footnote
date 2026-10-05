@@ -326,7 +326,11 @@ fn click_rows() {
         None,
         "a group header never opens a detail"
     );
-    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), None, "column header next");
+    assert_eq!(
+        feed_row_item(&items, 2, ROWS, 0, g),
+        None,
+        "column header next"
+    );
     assert_eq!(feed_row_item(&items, 3, ROWS, 0, g), Some(2));
     assert_eq!(
         feed_row_item(&items, 6, ROWS, 0, g),
@@ -540,7 +544,12 @@ async fn header_rows() {
     for w in 30..90usize {
         let o = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
         let rows = feed_view::feed_panel_rows(&o, false, w, ROWS, 0);
-        let footer = rows.last().unwrap().iter().map(|s| s.text.clone()).collect::<String>();
+        let footer = rows
+            .last()
+            .unwrap()
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<String>();
         assert!(
             footer.contains("E focus"),
             "the focus key vanished from the footer at width {w}: {footer}"
@@ -599,7 +608,10 @@ async fn header_rows() {
     feed_view::feed_keys(&mut v, &[], &mut writer)
         .await
         .unwrap();
-    assert!(!v.feed.as_ref().unwrap().keys_open, "esc closed the overlay");
+    assert!(
+        !v.feed.as_ref().unwrap().keys_open,
+        "esc closed the overlay"
+    );
     assert!(v.feed.is_some(), "the feed stayed open");
 
     // AC14-HP: `/` opens the bar; typing + Tab completes from the window; a
@@ -1019,9 +1031,7 @@ fn detail_field_rows() {
         rows[3]
     );
     assert!(
-        rows[3]
-            .iter()
-            .any(|s| s.bold && s.text.trim_end() == "x-a"),
+        rows[3].iter().any(|s| s.bold && s.text.trim_end() == "x-a"),
         "the node id is bold: {:?}",
         rows[3]
     );
@@ -1331,10 +1341,7 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
             format!("row {from}"),
             "older rows loaded"
         );
-        assert!(
-            f.win.items.len() <= 600,
-            "the window never exceeds the cap"
-        );
+        assert!(f.win.items.len() <= 600, "the window never exceeds the cap");
         // The anchored row still paints on the first table row.
         let lines = feed_panel_lines(f, false, W, ROWS, v.feed_offset_clamped());
         assert!(

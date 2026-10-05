@@ -175,7 +175,11 @@ pub(crate) mod tests {
         w.land(&PageReq::Older("x".into()), page(200, FEED_PAGE), None);
         assert_eq!(w.items.len(), 2 * FEED_PAGE);
         w.land(&PageReq::Older("y".into()), page(0, FEED_PAGE), None);
-        assert_eq!(w.items.len(), 3 * FEED_PAGE, "three full pages sit at the cap");
+        assert_eq!(
+            w.items.len(),
+            3 * FEED_PAGE,
+            "three full pages sit at the cap"
+        );
         assert!(w.head_attached, "the cap only detaches on overflow");
         // The 601st row: the cap drops the newest, and the head detaches.
         w.land(&PageReq::Older("y2".into()), page(999, 1), None);
