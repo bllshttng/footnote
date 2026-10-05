@@ -1606,18 +1606,17 @@ def cmd_spawn(
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
     # Retired spellings answer for one release and name their replacements.
-    if crown:
-        print(
-            "--crown is now --promote; the old spelling answers for one release.",
-            file=sys.stderr,
-        )
-        promote = list(promote) + list(crown)
-    if succeed:
-        print(
-            "--succeed is now --hand-off; the old spelling answers for one release.",
-            file=sys.stderr,
-        )
-        hand_off = True
+    for retired, current, alias_vals in (
+        ("--crown", "--promote", crown),
+        ("--succeed", "--hand-off", succeed),
+    ):
+        if alias_vals:
+            print(
+                f"{retired} is now {current}; the old spelling answers for one release.",
+                file=sys.stderr,
+            )
+    promote = list(promote) + list(crown)
+    hand_off = hand_off or bool(succeed)
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
     seedless = seedless_thread_refusal(
@@ -1754,26 +1753,14 @@ def cmd_spawn(
         print(refusal, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # --promote <scope>... : the operator names the TERRITORY and the ladder
-    # altitude is derived from it (crown.derive_crown_level). The grantor is
-    # stamped ambiently at spawn from this session, so the child's row records who
-    # actually granted the role, never a value it could forge.
-    #
-    # The substrate axis the role actually cares about is TENURE LENGTH, not pane
-    # geometry. A role is three registry fields; nothing in it needs a PTY. What
-    # it needs is a session that outlives the grant, because a holder that exits
-    # mid-wave orphans its scope. `pane` and `bg` both qualify - a bg worker is a
-    # full persistent conversation in claude's agent view, attachable, replyable,
-    # and resumable, differing from a pane only in who draws it. `headless` is the
-    # one-shot: it answers once and exits, so a role on it names a dead holder
-    # before the grantor's next turn. That one stays refused.
-    #
-    # A bg holder does lose the pane-layer PLACEMENT primitive (`--at current`
-    # resolves the calling pane from FNO_PANE, which a bg session has none of), so
-    # it seats workers in fresh tabs rather than beside itself. That degrades the
-    # org's ergonomics, not its authority: mail, peek, top, and wait are all
-    # substrate-blind. Org-mode briefs that need adjacency should ask for a pane
-    # holder; the role itself does not.
+    # --promote <scope>... : the operator names the TERRITORY, the ladder altitude
+    # derives from it (crown.derive_crown_level), and the grantor is stamped
+    # ambiently from this session - never a value the child could forge. The role
+    # needs a session that outlives the grant, so `headless` (one answer, then
+    # exit) is refused; `pane` and `bg` both qualify. A bg holder loses only the
+    # pane PLACEMENT primitives (`--at current` reads FNO_PANE); mail, peek, top,
+    # and wait are substrate-blind, so adjacency is an ergonomics ask, not an
+    # authority one.
     crown_level: int | None = None
     crown_scope: str | None = None
     if promote:

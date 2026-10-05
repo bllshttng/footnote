@@ -1137,26 +1137,13 @@ def _gate_rm_at_seam(args: Sequence[str]) -> bool:
 def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--promote`` (bestow-at-spawn).
 
-    ``--promote`` (and its retired ``--crown``/``-k`` aliases) is implemented
-    only in the Python spawn path (``cmd_spawn`` derives the rung from the
-    scope and stamps the role onto the spawned row). The Rust client parses
-    none of the spellings, so a promote-bearing spawn that auto-routed to the
-    binary would exit with ``unknown flag`` - the documented grammar reachable
-    only from the path the default route never reaches. Same shape and reason
-    as ``--role`` above. Detected here so the call falls through to the Python
-    runtime that owns the implementation.
-
-    EVERY spelling must be listed. The short form is not cosmetic: it is the
-    one the docs teach for a portfolio (``-k etl -k web``), so a detector that
-    knew only the long form would route exactly the multi-scope case into a
-    binary that cannot parse it. The attached short-option form (``-kVAL``, no
-    space - Click accepts it and parses it as ``-k VAL``) must be listed too,
-    or a spawn spelled that way falls through to the Rust binary that exits
-    ``unknown flag``.
-
-    Load-bearing on ``--substrate bg``, where it is what makes the role land at
-    all: bg spawns otherwise exec the binary. The pane substrate diverts on its
-    own via ``_is_pane_substrate_spawn``.
+    Implemented only in the Python spawn path; the Rust client parses no
+    spelling, so a promote-bearing spawn routed to the binary would exit
+    ``unknown flag``. EVERY spelling must be listed: the docs teach ``-k etl
+    -k web`` for a portfolio, and Click accepts the attached ``-kVAL`` form,
+    so a detector missing either routes exactly that spawn into the binary.
+    Load-bearing on ``--substrate bg``, where bg spawns otherwise exec the
+    binary; the pane substrate diverts on its own.
     """
     if verb != "spawn":
         return False
