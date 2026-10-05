@@ -497,13 +497,9 @@ def refresh(
 def _forward_refresh(
     key, holder, ttl, json_output,
 ) -> None:
-    """Forward to the bundled fno-agents binary, binary-direct.
-
-    The wave-3 port moved the leaf's logic (the ttl parse and refusals, both
-    core shapes, output and exit codes) into
-    `crates/fno-agents/src/claim_cli/refresh.rs`; Python owns transport only,
-    per the dual-implementation protocol.
-    """
+    """Forward to the bundled fno-agents binary, binary-direct. The wave-3
+    port put the leaf's logic in crates/fno-agents/src/claim_cli/refresh.rs
+    (Python owns transport only, per the dual-implementation protocol)."""
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
@@ -517,15 +513,13 @@ def _forward_refresh(
     binary = resolve_binary()
     if binary is None:
         typer.echo(
-            "fno agents claim refresh: the fno-agents binary was not found. "
-            "It ships in the `pip install fno` wheel and with the plugin; "
-            "reinstall fno or run `fno doctor update --rust`, or set "
-            "FNO_AGENTS_BIN to its path.",
+            "fno agents claim refresh: the fno-agents binary was not found "
+            "(reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN).",
             err=True,
         )
         raise typer.Exit(code=127)
-    # Captured and re-emitted through typer: the leaf's output IS the
-    # operator surface, and a CliRunner-hosted caller (the tests) must see it.
+    # Captured and re-emitted through typer (a CliRunner caller must see it).
     result = subprocess.run(
         [str(binary), "claim", "refresh", *argv],
         capture_output=True,
