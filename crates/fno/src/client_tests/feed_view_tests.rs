@@ -155,20 +155,25 @@ fn render_rows() {
     // Slot 0 is the `other` group header (no owners in this fixture); the
     // top ITEM row shows the newest event.
     assert!(
-        lines[1].contains("other"),
-        "group header first: {}",
+        lines[1].contains("time"),
+        "column header second: {}",
         lines[1]
     );
     assert!(
-        lines[2].contains("x-c"),
-        "top row shows the newest: {}",
+        lines[2].contains("other"),
+        "group header first: {}",
         lines[2]
     );
-    assert!(lines[2].starts_with(" ▸"));
-    assert!(lines[3].contains("x-b"));
-    assert!(lines[4].contains("x-a"));
-    assert!(lines[5].trim().is_empty(), "below the last item: blank");
-    assert!(lines.last().unwrap().contains("3 events"));
+    assert!(
+        lines[3].contains("x-c"),
+        "top row shows the newest: {}",
+        lines[3]
+    );
+    assert!(lines[3].starts_with(" ▸"));
+    assert!(lines[4].contains("x-b"));
+    assert!(lines[5].contains("x-a"));
+    assert!(lines[6].trim().is_empty(), "below the last item: blank");
+    assert!(lines.last().unwrap().contains("3 loaded"));
 
     let o = {
         let mut a = feed_item(Some("x-a"), Some("s-1"));
@@ -182,10 +187,10 @@ fn render_rows() {
     // Slot offset 1 skips the group header, so the newest row (x-c) leads
     // the window now.
     let lines = feed_panel_lines(&o, false, W, ROWS, 1);
-    assert!(lines[1].contains("x-c"));
-    assert!(lines[2].contains("x-b"));
-    assert!(lines[3].contains("x-a"));
-    assert!(lines[4].trim().is_empty());
+    assert!(lines[2].contains("x-c"));
+    assert!(lines[3].contains("x-b"));
+    assert!(lines[4].contains("x-a"));
+    assert!(lines[5].trim().is_empty());
 
     // x-d15a: the failure line names the cause, never the old generic
     // "feed unavailable" sentence. Timeout names its budget; a malformed
@@ -265,7 +270,7 @@ fn empty_rows() {
     let o = overlay(vec![]);
     let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(lines.iter().any(|l| l.contains("no activity")));
-    assert!(lines.last().unwrap().contains("0 events"));
+    assert!(lines.last().unwrap().contains("0 loaded"));
 
     // While the fold is in flight the body claims nothing: "no activity" is
     // a statement only a settled fold has earned.
@@ -298,16 +303,17 @@ fn click_rows() {
         None,
         "a group header never opens a detail"
     );
-    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), Some(2));
+    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), None, "column header next");
+    assert_eq!(feed_row_item(&items, 3, ROWS, 0, g), Some(2));
     assert_eq!(
-        feed_row_item(&items, 5, ROWS, 0, g),
+        feed_row_item(&items, 6, ROWS, 0, g),
         None,
         "past the last item: blank"
     );
-    // Offset 2 scrolls the header and the newest row off: painted row 2 is
+    // Offset 2 scrolls the header and the newest row off: painted row 3 is
     // now the OLDEST row (slot 3 = storage 0).
     assert_eq!(
-        feed_row_item(&items, 2, ROWS, 2, g),
+        feed_row_item(&items, 3, ROWS, 2, g),
         Some(0),
         "offset applies"
     );
@@ -332,13 +338,14 @@ fn click_rows() {
     let f = v.feed.as_ref().unwrap();
     let lines = feed_panel_lines(f, false, w as usize - 1, v.term.0 as usize, 0);
     assert!(
-        lines[2].contains("x-c"),
+        lines[3].contains("x-c"),
         "top ITEM row is the newest: {}",
         lines[2]
     );
-    // The header row never deep-links; the item row under it does.
+    // The header rows never deep-link; the item row under them does.
     assert!(v.chrome_hit(1, col).is_none(), "header row is chrome");
-    let hit = v.chrome_hit(2, col).unwrap();
+    assert!(v.chrome_hit(2, col).is_none(), "column header is chrome");
+    let hit = v.chrome_hit(3, col).unwrap();
     assert!(
         matches!(&hit, ChromeHit::OpenFeedDetail(item) if item.session_id.as_deref() == Some("s-3")),
         "the click names the event the top row painted"
@@ -485,34 +492,35 @@ async fn header_rows() {
     let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
     let lines = feed_panel_lines(&unfocused, false, W, ROWS, 0);
     assert!(
-        lines[0].contains("E focus"),
-        "unfocused header: {}",
+        lines[0].contains("activity feed"),
+        "unfocused header is a title: {}",
         lines[0]
     );
     assert!(
-        lines[0].contains("details"),
-        "unfocused header: {}",
-        lines[0]
+        lines.last().unwrap().contains("E focus"),
+        "the focus hint lives on the footer: {}",
+        lines.last().unwrap()
     );
 
     let focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
     let lines = feed_panel_lines(&focused, true, W, ROWS, 0);
     assert!(lines[0].contains("FOCUSED"), "focused header: {}", lines[0]);
-    assert!(lines[0].contains("esc close"));
+    assert!(lines.last().unwrap().contains("esc close"));
+    assert!(
+        !lines[0].contains("esc"),
+        "no hint text sits on the header row: {}",
+        lines[0]
+    );
 
     // The focus key is advertised nowhere else, so it survives every width
     // the border can be dragged to rather than being clipped off the end.
     for w in 30..90usize {
+        let o = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
+        let rows = feed_view::feed_panel_rows(&o, false, w, ROWS, 0);
+        let footer = rows.last().unwrap().iter().map(|s| s.text.clone()).collect::<String>();
         assert!(
-            feed_view::header_line(false, feed_view::FeedOrder::Grouped, w).contains("E focus"),
-            "the focus key vanished at width {w}"
-        );
-        assert!(
-            unicode_width::UnicodeWidthStr::width(
-                feed_view::header_line(false, feed_view::FeedOrder::Grouped, w).as_str(),
-            ) <= w
-                || w < 32,
-            "header overflows at width {w}"
+            footer.contains("E focus"),
+            "the focus key vanished from the footer at width {w}: {footer}"
         );
     }
 
@@ -528,7 +536,7 @@ async fn header_rows() {
     assert!(feed_w > 0, "the panel is painted with a width");
     let x0 = cols - feed_w;
     let sel = v.feed.as_ref().unwrap().sel;
-    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    let band_cell = frame.cells[(2 + sel) * cols + x0 + 2];
     assert_eq!(
         band_cell.bg,
         crate::theme::band_style(&v.theme).1,
@@ -540,7 +548,7 @@ async fn header_rows() {
     let frame = v.compose();
     let cols = frame.cols as usize;
     let x0 = cols - v.feed_panel_w() as usize;
-    let band_cell = frame.cells[(1 + sel) * cols + x0 + 2];
+    let band_cell = frame.cells[(2 + sel) * cols + x0 + 2];
     assert_eq!(
         band_cell.bg,
         Color::Default,
@@ -587,21 +595,18 @@ async fn header_rows() {
     for w in 0..=80usize {
         let unfocused = header_line(false, FeedOrder::Grouped, w);
         assert!(
-            unfocused.starts_with(" E focus")
-                || unicode_width::UnicodeWidthStr::width(unfocused.as_str()) <= w,
+            unicode_width::UnicodeWidthStr::width(unfocused.as_str()) <= w || w < 6,
             "w={w} picked {unfocused:?}"
         );
         let focused = header_line(true, FeedOrder::Grouped, w);
         assert!(
-            focused.starts_with(" esc close")
-                || unicode_width::UnicodeWidthStr::width(focused.as_str()) <= w,
+            unicode_width::UnicodeWidthStr::width(focused.as_str()) <= w || w < 6,
             "w={w} picked {focused:?}"
         );
     }
-    // Below every prose spelling, the fallback leads with the key, so an
-    // 8-column clip still reads "E focus" rather than a truncated label.
-    assert_eq!(header_line(false, FeedOrder::Grouped, 8), " E focus");
-    assert!(header_line(true, FeedOrder::Grouped, 8).starts_with(" esc"));
+    // The header is a title at every width; the keys live on the footer.
+    assert_eq!(header_line(false, FeedOrder::Grouped, 8), " feed");
+    assert_eq!(header_line(true, FeedOrder::Grouped, 8), " FOCUSED");
 }
 
 // Esc and e close the focused panel; a close returns typing to the pane,
@@ -861,9 +866,9 @@ fn detail_field_rows() {
     );
     // A header row never resolves to a detail.
     let g = feed_view::FeedOrder::Grouped;
-    assert_eq!(feed_row_item(&items, 1, ROWS, 0, g), None, "teams header");
+    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), None, "teams header");
     // The first item row IS the team row.
-    assert_eq!(feed_row_item(&items, 2, ROWS, 0, g), Some(3));
+    assert_eq!(feed_row_item(&items, 3, ROWS, 0, g), Some(3));
 
     let mut vacated = feed_item(Some("x-a"), None);
     vacated.kind = "team_vacated".into();
@@ -871,30 +876,32 @@ fn detail_field_rows() {
     vacated.title = "warden left".into();
     let o = overlay(vec![vacated]);
     let rows = feed_view::feed_panel_rows(&o, false, W, ROWS, 0);
-    // Row 1 is the group header: every span bold.
+    // Row 2 is the group header: every span bold.
     assert!(
-        rows[1].iter().all(|s| s.bold),
+        rows[2].iter().all(|s| s.bold),
         "headers render bold: {:?}",
-        rows[1]
-    );
-    // Row 2 is the vacated row: its kind span is bold AND brand.
-    assert!(
         rows[2]
+    );
+    // Row 3 is the vacated row: its kind span is bold AND brand.
+    assert!(
+        rows[3]
             .iter()
             .any(|s| s.bold && s.brand && s.text.contains("team_vacated")),
         "the actionable kind is bold brand: {:?}",
-        rows[2]
+        rows[3]
     );
     assert!(
-        rows[2].iter().any(|s| s.bold && s.text == "x-a"),
+        rows[3]
+            .iter()
+            .any(|s| s.bold && s.text.trim_end() == "x-a"),
         "the node id is bold: {:?}",
-        rows[2]
+        rows[3]
     );
     let lines = feed_panel_lines(&o, false, W, ROWS, 0);
     assert!(
-        lines[2].contains("team_vacated") && lines[2].contains("warden left"),
+        lines[3].contains("team_vacated") && lines[3].contains("warden left"),
         "text is unchanged: {}",
-        lines[2]
+        lines[3]
     );
 
     let mut item = feed_item(Some("x-a"), None);
@@ -952,11 +959,12 @@ fn detail_field_rows() {
     };
     assert_eq!(first, "x-b", "newest first");
     // The resolver answers the same item the painter drew, in Recent too.
-    // Painted row 1 is the first item row (row 0 is the panel header).
+    // Painted row 2 is the first item row (rows 0 and 1 are the header and
+    // the column header).
     assert_eq!(
-        feed_row_item(&items, 1, ROWS, 0, feed_view::FeedOrder::Recent),
+        feed_row_item(&items, 2, ROWS, 0, feed_view::FeedOrder::Recent),
         Some(1),
-        "painted row 1 is storage 1 (the newest)"
+        "painted row 2 is storage 1 (the newest)"
     );
 
     let mut v = view_with_rows(vec![]);
@@ -969,7 +977,7 @@ fn detail_field_rows() {
     v.feed = Some(overlay(vec![q, older]));
     let w = v.feed_panel_w() as u16;
     let col = v.term.1 - w + 2;
-    let hit = v.chrome_hit(2, col).expect("the question row deep-links");
+    let hit = v.chrome_hit(3, col).expect("the question row deep-links");
     assert!(
         matches!(&hit, ChromeHit::OpenQuestionDetail(id) if id == "q-1"),
         "the question row opens the question, not the provenance: {hit:?}"

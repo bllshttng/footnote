@@ -27,7 +27,7 @@
 //! action. Inspecting never attaches or resumes anything on its own.
 
 use super::*;
-use crate::feed_overlay::{FeedError, FeedItem, event_fields};
+use crate::feed_overlay::{FeedItem, event_fields};
 
 pub(crate) mod page;
 pub(crate) mod search;
@@ -288,16 +288,53 @@ pub(crate) fn feed_panel_rows(
     visible_rows: usize,
     offset: usize,
 ) -> Vec<Vec<Span>> {
-    // The header says which input state the panel is in, because the rule is
-    // not guessable: an unfocused panel takes no keys at all. It is also the
-    // ONLY place the focus key is advertised, so it degrades to a shorter
-    // spelling on a narrow panel rather than being clipped away.
+    // Columns, in the operator's order: time, area, harness, kind, node,
+    // session (tail 8), lead, summary. The narrowest panel keeps time, kind,
+    // node and summary; a wider one adds lead, harness, area, session back
+    // in that drop order (AC11).
+    let mut used = 10usize + 17usize + 9usize; // marker+time, kind, node
+    let fits = |needed: usize, used: &mut usize| {
+        if *used + needed <= w {
+            *used += needed;
+            true
+        } else {
+            false
+        }
+    };
+    let show_lead = fits(13, &mut used);
+    let show_harness = fits(8, &mut used);
+    let show_area = fits(8, &mut used);
+    let show_session = fits(9, &mut used);
+
+    let header = |cols: Vec<(&str, bool)>| -> Vec<Span> {
+        let mut row = vec![Span::plain(" ".to_string())];
+        for (title, on) in cols {
+            if on {
+                row.push(Span {
+                    text: format!("{title:<width$} ", title = title, width = title.len() + 2),
+                    bold: true,
+                    brand: false,
+                });
+            }
+        }
+        row
+    };
+
     let mut rows: Vec<Vec<Span>> = Vec::new();
     rows.push(vec![Span::plain(pad_to(
         &header_line(focused, o.order, w),
         w,
     ))]);
-    let visible = visible_rows.saturating_sub(2);
+    rows.push(header(vec![
+        ("time", true),
+        ("area", show_area),
+        ("harness", show_harness),
+        ("kind", true),
+        ("node", true),
+        ("session", show_session),
+        ("lead", show_lead),
+    ]));
+    let visible = visible_rows.saturating_sub(3); // header, column header, footer
     let slots = display_slots(&o.win.items, o.order);
     for d in offset..offset + visible {
         match slots.get(d) {
@@ -310,33 +347,56 @@ pub(crate) fn feed_panel_rows(
             }
             Some(Slot::Item(i)) => {
                 let item = &o.win.items[*i];
-                // The marker lands on the hovered row, or on the selected row
-                // while the panel holds the keyboard - there it reads bold in
-                // the theme accent, so the cursor survives a glance.
                 let selected = focused && d == o.sel;
                 let marker = if d == o.sel { '▸' } else { ' ' };
-                let node = item.node.as_deref().unwrap_or("-");
-                let ts = short_ts(&item.ts);
+                let cell = |row: &mut Vec<Span>, text: String, bold: bool, brand: bool| {
+                    row.push(Span { text, bold, brand });
+                };
+                let mut row = Vec::new();
+                cell(
+                    &mut row,
+                    format!(" {marker} {:<5} ", short_ts(&item.ts)),
+                    selected,
+                    selected,
+                );
+                if show_area {
+                    cell(&mut row, format!("{:<7} ", item.area), false, false);
+                }
+                if show_harness {
+                    let h = item.harness.as_deref().unwrap_or("-");
+                    cell(&mut row, format!("{:<7} ", h), false, false);
+                }
+                cell(
+                    &mut row,
+                    format!("{:<16} ", display_kind(&item.kind)),
+                    bold_kind(item),
+                    bold_kind(item),
+                );
+                let node = item
+                    .node
+                    .as_deref()
+                    .map(|n| n.chars().take(8).collect::<String>())
+                    .unwrap_or_else(|| "-".to_string());
+                cell(&mut row, format!("{:<8} ", node), item.node.is_some(), false);
+                if show_session {
+                    let sid = item
+                        .session_id
+                        .as_deref()
+                        .map(|s| s.chars().rev().take(8).collect::<String>())
+                        .unwrap_or_else(|| "-".to_string());
+                    cell(&mut row, format!("{:<8} ", sid), false, false);
+                }
+                if show_lead {
+                    let lead = item
+                        .lead
+                        .as_deref()
+                        .or(item.owner.as_deref())
+                        .unwrap_or("-");
+                    let lead: String = lead.chars().take(12).collect();
+                    cell(&mut row, format!("{:<12} ", lead), false, false);
+                }
                 let title = pan_by(&item.title, o.hpan);
-                let kind = format!("{:<16}", display_kind(&item.kind));
-                let mut row = vec![
-                    Span {
-                        text: format!(" {marker} {ts} "),
-                        bold: selected,
-                        brand: selected,
-                    },
-                    Span {
-                        text: kind,
-                        bold: bold_kind(item),
-                        brand: bold_kind(item),
-                    },
-                    Span {
-                        text: node.to_string(),
-                        bold: item.node.is_some(),
-                        brand: false,
-                    },
-                    Span::plain(format!(" · {title}")),
-                ];
+                row.push(Span::plain(title));
                 pad_to_spans(&mut row, w);
                 rows.push(row);
             }
@@ -347,21 +407,44 @@ pub(crate) fn feed_panel_rows(
     // The empty notice only when the fold has SETTLED empty: "no activity"
     // beside a still-running fold is a claim the fold has not earned yet.
     if o.win.items.is_empty() && o.error.is_none() && !o.inflight && visible > 0 {
-        rows[1] = vec![Span::plain(pad_to("   no activity in the last 24h", w))];
+        let empty_line = 1 + if visible > 0 { 1 } else { 0 };
+        rows[empty_line] = vec![Span::plain(pad_to(
+            &match &o.query_text {
+                q if !q.is_empty() => format!("   no activity for {q}"),
+                _ => "   no activity in the last 24h".to_string(),
+            },
+            w,
+        ))];
     }
-    let footer = if let Some(e) = &o.error {
-        // The typed reason renders verbatim: a timeout names its
-        // budget, an admission refusal its slot count. The panel clips a
-        // long stderr tail; the cause still leads the line.
-        pad_to(&format!("   {e}"), w)
+    // The footer carries the hints (AC12): the new-row marker, the active
+    // query, then the keys; the status rides the same line.
+    let status = if let Some(e) = &o.error {
+        // The typed reason renders verbatim: a timeout names its budget, an
+        // admission refusal its slot count. The cause leads the line.
+        format!("{e}")
     } else if o.inflight && o.win.items.is_empty() {
-        "   folding...".to_string()
-    } else if o.win.items.len() >= 200 {
-        format!("   200+ events · {}", o.order.key())
+        "folding...".to_string()
+    } else if let Some(note) = &o.scan_note {
+        note.clone()
+    } else if o.win.at_oldest {
+        "end of history".to_string()
     } else {
-        format!("   {} events · {}", o.win.items.len(), o.order.key())
+        format!("{} loaded", o.win.items.len())
     };
-    rows.push(vec![Span::plain(pad_to(&footer, w))]);
+    let mut left = String::new();
+    if o.win.new_count > 0 {
+        left.push_str(&format!("↑ {} new · ", o.win.new_count));
+    }
+    if !o.query_text.is_empty() {
+        left.push_str(&format!("{} · ", o.query_text));
+    }
+    let hints = if focused {
+        format!("/ search · ? keys · o {} · esc close", o.order.key())
+    } else {
+        "E focus · e close".to_string()
+    };
+    let footer = pad_to(&format!(" {left}{hints} · {status}"), w);
+    rows.push(vec![Span::plain(footer)]);
     rows
 }
 
@@ -425,10 +508,12 @@ pub(crate) fn feed_row_item(
     offset: usize,
     order: FeedOrder,
 ) -> Option<usize> {
-    if painted_row == 0 || painted_row + 1 >= visible_rows {
+    // Painted rows 0 and 1 are the header and the column header; the last
+    // painted row is the footer. Chrome never resolves.
+    if painted_row <= 1 || painted_row + 1 >= visible_rows {
         return None;
     }
-    match display_slots(items, order).get(offset + painted_row - 1) {
+    match display_slots(items, order).get(offset + painted_row - 2) {
         Some(Slot::Item(i)) => Some(*i),
         _ => None,
     }
@@ -443,28 +528,23 @@ pub(crate) fn feed_row_item(
 /// narrower than any prose fits, and the caller pads and clips from the end,
 /// so a label-first fallback loses the only place the key is advertised.
 pub(crate) fn header_line(focused: bool, order: FeedOrder, w: usize) -> String {
-    // The order word rides the FOCUSED spellings: `o` is a panel key, and
-    // the header is the only place the key is advertised. Key-led fallbacks
-    // for the widths prose cannot reach.
+    // The header is a TITLE now: the key hints live on the footer line, so
+    // no hint text sits on the header row (AC12).
     let order_word = order.key();
-    let candidates: [String; 4] = if focused {
+    let candidates: [String; 3] = if focused {
         [
-            format!(
-                " FEED FOCUSED · up/down row · enter details · o order: {order_word} · esc close"
-            ),
-            format!(" FOCUSED · arrows move · enter details · o {order_word} · esc close"),
-            format!(" FOCUSED · o {order_word} · esc close"),
-            " esc close".to_string(),
+            format!(" FEED FOCUSED · order: {order_word}"),
+            format!(" FOCUSED · {order_word}"),
+            " FOCUSED".to_string(),
         ]
     } else {
         [
-            " activity feed · click row for details · E focus · e close".to_string(),
-            " activity feed · click: details · E focus · e close".to_string(),
-            " feed · click: details · E focus".to_string(),
-            " E focus".to_string(),
+            " activity feed".to_string(),
+            " feed".to_string(),
+            " feed".to_string(),
         ]
     };
-    let narrowest = if focused { " esc close" } else { " E focus" };
+    let narrowest = " feed";
     candidates
         .into_iter()
         .find(|c| unicode_width::UnicodeWidthStr::width(c.as_str()) <= w)
@@ -711,7 +791,7 @@ impl View {
         // owns the keyboard: the theme's own band pair (selection surface,
         // stamp text), the same vocabulary the backlog board bands with.
         let band_row = if focused {
-            Some(1 + f.sel.saturating_sub(self.feed_offset_clamped()))
+            Some(2 + f.sel.saturating_sub(self.feed_offset_clamped()))
         } else {
             None
         };
