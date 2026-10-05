@@ -45,13 +45,17 @@ fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
     ];
     // The Working spin frames count as glyphs too: each must read apart from
     // every other state's glyph, and the spin turns through all of them.
-    let mut glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
-    glyphs.extend(crate::lattice::SPIN);
-    let step = crate::lattice::SPIN_FRAME_MS;
-    let turned: Vec<char> = (0..4)
-        .map(|i| crate::lattice::spin_frame(i * step))
+    let spin: Vec<char> = crate::lattice::spin_symbols()
+        .iter()
+        .map(|s| s.chars().next().expect("one-char symbol"))
         .collect();
-    assert_eq!(turned, crate::lattice::SPIN);
+    let mut glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
+    glyphs.extend(spin.iter().copied());
+    let step = crate::lattice::SPIN_FRAME_MS;
+    let turned: Vec<char> = (0..spin.len())
+        .map(|i| crate::lattice::spin_frame(i as u64 * step))
+        .collect();
+    assert_eq!(turned, spin);
     assert_eq!(
         status_glyph(Working),
         lattice_glyph(Working).0,
