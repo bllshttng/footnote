@@ -27,7 +27,6 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -342,70 +341,19 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
     })
 }
 
-/// Open (creating if needed) the store with the backlog shadow's pragmas:
-/// WAL so concurrent history readers never block the ingest writer, FULL so
-/// an acknowledged ingest survives a crash. The schema is ensured (v2
-/// created, or v1 migrated) before the connection is handed out.
+/// Open (creating if needed) the store through the store seam, with its
+/// schema ensured (v2 created, or v1 migrated) before the connection is
+/// handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
-    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
-    let mut conn = Connection::open(store).map_err(|e| format!("{}: {e}", store.display()))?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
-    configure_store_connection(&conn, store)?;
+    let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
     observation::ensure_observation_tables(&conn)?;
     Ok(conn)
 }
 
-fn configure_store_connection(conn: &Connection, store: &Path) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let configured = (|| -> rusqlite::Result<()> {
-            let journal_mode: String =
-                conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-            if !journal_mode.eq_ignore_ascii_case("wal") {
-                conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-            }
-            let synchronous: i64 = conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
-            if synchronous != 2 {
-                conn.execute_batch("PRAGMA synchronous=FULL;")?;
-            }
-            Ok(())
-        })();
-        match configured {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if matches!(
-                    error.sqlite_error_code(),
-                    Some(
-                        rusqlite::ffi::ErrorCode::DatabaseBusy
-                            | rusqlite::ffi::ErrorCode::DatabaseLocked
-                    )
-                ) && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(format!("{}: {error}", store.display())),
-        }
-    }
-}
-
 /// Read-only handle for history readers; a failure names the store path.
 pub fn open_read(store: &Path) -> Result<Connection, String> {
-    // A writer that exec-replaced itself or died leaves a hot -wal; a
-    // READ_ONLY open cannot run the WAL recovery reading it needs, and the
-    // durable rows behind it would read as an empty store. Retry
-    // read-write, which recovers the log on open, before reporting the
-    // read-only error.
-    let conn = match Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    {
-        Ok(conn) => conn,
-        Err(ro_error) => {
-            Connection::open(store).map_err(|_| format!("{}: {ro_error}", store.display()))?
-        }
-    };
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+    let conn = crate::store_conn::open_read(store)?;
     refuse_newer_schema(&conn, store)?;
     Ok(conn)
 }

@@ -1,0 +1,135 @@
+//! The one door to the shared fleet stores.
+//!
+//! graph.db (the backlog and the claims table) and the event store open here
+//! and nowhere else. The seam owns the open call, the live-store fence, the
+//! busy wait and the WAL and FULL pragmas. Each caller keeps its own DDL.
+//! Reads take a read-only handle and writes a read-write one, so a backend
+//! that reads a local replica and writes to a remote primary changes these
+//! two functions and no caller.
+
+use rusqlite::{Connection, ErrorCode, OpenFlags};
+use std::path::Path;
+use std::time::Duration;
+
+const BUSY_WAIT: Duration = Duration::from_secs(5);
+
+/// A read-write handle, creating the file and its parent when absent.
+pub fn open_write(path: &Path) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| named(parent, error))?;
+    }
+    refuse_non_database(path)?;
+    let connection = Connection::open(path).map_err(|error| named(path, error))?;
+    connection
+        .busy_timeout(BUSY_WAIT)
+        .map_err(|error| named(path, error))?;
+    ensure_wal(&connection, path)?;
+    connection
+        .execute_batch("PRAGMA synchronous=FULL;")
+        .map_err(|error| named(path, error))?;
+    Ok(connection)
+}
+
+/// A read-only handle. Never creates the file.
+pub fn open_read(path: &Path) -> Result<Connection, String> {
+    // A writer that died leaves a hot -wal, and a READ_ONLY open cannot run
+    // the recovery that reading it needs. Retry read-write, which recovers
+    // the log, before reporting the read-only error.
+    let connection = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(connection) => connection,
+        Err(read_only_error) => Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| named(path, read_only_error))?,
+    };
+    connection
+        .busy_timeout(BUSY_WAIT)
+        .map_err(|error| named(path, error))?;
+    Ok(connection)
+}
+
+fn refuse_non_database(path: &Path) -> Result<(), String> {
+    let size = match path.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(named(path, error)),
+    };
+    if size == 0 {
+        return Ok(());
+    }
+    let mut header = [0; 16];
+    let mut file = std::fs::File::open(path).map_err(|error| named(path, error))?;
+    use std::io::Read;
+    file.read_exact(&mut header)
+        .map_err(|error| named(path, error))?;
+    if &header != b"SQLite format 3\0" {
+        return Err(format!("{}: file is not a database", path.display()));
+    }
+    Ok(())
+}
+
+fn ensure_wal(connection: &Connection, path: &Path) -> Result<(), String> {
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(|error| named(path, error))?;
+    if mode.eq_ignore_ascii_case("wal") {
+        return Ok(());
+    }
+    // First opens of a new file race to switch it to WAL. SQLite answers the
+    // loser busy at once, with no busy handler, since waiting could deadlock.
+    // The loser goes on: the winner switches the file, and a connection that
+    // meets a WAL file reads its header and uses WAL. A retry here waited out
+    // a reader in this same process that could not finish until the open did.
+    match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+        Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::DatabaseBusy => {
+            Ok(())
+        }
+        outcome => outcome.map_err(|error| named(path, error)),
+    }
+}
+
+fn named(path: &Path, error: impl std::fmt::Display) -> String {
+    format!("{}: {error}", path.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_conn_writes_wal_full_reads_read_only_and_refuses_non_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent.db");
+        let error = open_read(&absent).unwrap_err();
+        assert!(error.starts_with(&absent.display().to_string()), "{error}");
+        assert!(!absent.exists(), "a read never creates the store");
+
+        let path = dir.path().join("nested/graph.db");
+        let writer = open_write(&path).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = writer
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((mode.as_str(), synchronous), ("wal", 2));
+        writer
+            .execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('row');")
+            .unwrap();
+        let reader = open_read(&path).unwrap();
+        let value: String = reader.query_row("SELECT v FROM t", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, "row");
+        assert!(reader.execute_batch("INSERT INTO t VALUES ('no')").is_err());
+
+        let junk = dir.path().join("junk.db");
+        std::fs::write(&junk, "not a database, but long enough").unwrap();
+        assert_eq!(
+            open_write(&junk).unwrap_err(),
+            format!("{}: file is not a database", junk.display())
+        );
+    }
+}

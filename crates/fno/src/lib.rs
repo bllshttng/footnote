@@ -87,6 +87,7 @@ pub mod squad_cascade;
 pub mod squad_store;
 pub mod state_layout;
 pub mod store_client;
+pub mod store_conn;
 pub mod templates;
 #[cfg(test)]
 mod test_keeper_cleanup;

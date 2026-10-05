@@ -240,7 +240,6 @@ pub(crate) fn write_connection(graph: &Path) -> Result<Connection, String> {
 
 pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
-    crate::live_store_fence::refuse_worktree_build_on_operator_store(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -262,10 +261,6 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
 /// second flock on a fresh fd blocks behind the caller's own lock and
 /// burns the full timeout on every write to a fresh graph.
 pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
-    let path = database_path(graph);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
     open_connection(graph)
 }
 
@@ -273,28 +268,9 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     // A migration publishing under this root parks the legacy inode we
     // would otherwise open; the bounded fence wait orders us after it.
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
-    let path = database_path(graph);
-    let size = match path.metadata() {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-        Err(error) => return Err(error.to_string()),
-    };
-    if size > 0 {
-        let mut header = [0; 16];
-        let mut file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
-        use std::io::Read;
-        file.read_exact(&mut header)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        if &header != b"SQLite format 3\0" {
-            return Err(format!("{}: file is not a database", path.display()));
-        }
-    }
-    let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
+    let mut connection = crate::store_conn::open_write(&database_path(graph))?;
     connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| error.to_string())?;
-    connection
-        .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+        .execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(|error| error.to_string())?;
     if !schema_needs_ensure(&connection)? {
         // A stamped store can still park legacy blob rows (a seed landing
@@ -314,20 +290,6 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         }
         return Ok(connection);
     }
-    // First opens of a new file race to switch it to WAL. Each upgrades a
-    // read lock, and SQLite answers the loser busy at once, with no busy
-    // handler, since waiting could deadlock. The loser goes on without
-    // waiting: another open switches the file, and a connection that meets
-    // a WAL file reads its header and uses WAL. A retry here waited out a
-    // reader in this same process that could not finish until the open did.
-    match connection.execute_batch("PRAGMA journal_mode=WAL;") {
-        Err(rusqlite::Error::SqliteFailure(error, _))
-            if error.code == rusqlite::ErrorCode::DatabaseBusy => {}
-        outcome => outcome.map_err(|error| error.to_string())?,
-    }
-    connection
-        .execute_batch("PRAGMA synchronous=FULL;")
-        .map_err(|error| error.to_string())?;
     connection
         .execute_batch(&graph_meta_ddl())
         .map_err(|error| error.to_string())?;
@@ -413,12 +375,7 @@ fn read_connection(graph: &Path) -> Result<Connection, String> {
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let path = database_path(graph);
     if path.exists() {
-        let connection =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|error| error.to_string())?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
+        let connection = crate::store_conn::open_read(&path)?;
         if !schema_needs_ensure(&connection)?
             && !store_owes_a_fold(&connection)?
             && !archive_needs_import(&connection, graph)?
@@ -428,12 +385,7 @@ fn read_connection(graph: &Path) -> Result<Connection, String> {
         drop(connection);
     }
     drop(open(graph)?);
-    let connection = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| error.to_string())?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| error.to_string())?;
-    Ok(connection)
+    crate::store_conn::open_read(&path)
 }
 
 fn archive_needs_import(connection: &Connection, graph: &Path) -> Result<bool, String> {
@@ -826,11 +778,7 @@ pub fn api_version(graph: &Path) -> Result<i64, String> {
     if !database_path(graph).exists() {
         return Ok(0);
     }
-    let connection = Connection::open_with_flags(
-        database_path(graph),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|error| error.to_string())?;
+    let connection = crate::store_conn::open_read(&database_path(graph))?;
     match meta(&connection, "api_version") {
         Ok(Some(value)) => value
             .parse::<i64>()
