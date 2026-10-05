@@ -2322,12 +2322,8 @@ mod tests {
     }
 
     #[test]
-    fn mail_send_accepted_nonzero_exit_is_false() {
+    fn mail_send_accepted_false_paths() {
         assert!(!mail_send_accepted(1, "msg-1 delivered (hosted)\n"));
-    }
-
-    #[test]
-    fn mail_send_accepted_empty_stdout_is_false() {
         assert!(!mail_send_accepted(0, "\n"));
         assert_eq!(mail_send_receipt("  \n"), "");
     }
