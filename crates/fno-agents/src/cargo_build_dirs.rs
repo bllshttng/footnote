@@ -81,6 +81,32 @@ pub fn fill_build_dir_env(root: &Path) {
     }
 }
 
+/// The fleet sccache cache: `<fno build base>/sccache`. Same precedence as the
+/// build-dir base, so one reclaim lane owns the whole base.
+pub fn sccache_dir(root: &Path) -> PathBuf {
+    fno_build_base(root).join("sccache")
+}
+
+/// sccache on PATH. A machine without it keeps every current behavior; the
+/// wrapper's own `command -v sccache` probe is the other gate.
+pub fn sccache_bin() -> Option<PathBuf> {
+    let path = std::env::var("PATH").ok()?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("sccache"))
+        .find(|c| c.is_file())
+}
+
+/// Set SCCACHE_DIR when the process has none and sccache is installed. A
+/// preset wins. Env mutation: call only while the process is single-threaded.
+pub fn fill_sccache_env(root: &Path) {
+    if sccache_bin().is_none() {
+        return;
+    }
+    if std::env::var_os("SCCACHE_DIR").is_none() {
+        std::env::set_var("SCCACHE_DIR", sccache_dir(root));
+    }
+}
+
 fn expand_home(path: &Path) -> PathBuf {
     if let Ok(rest) = path.strip_prefix("~") {
         if let Some(home) = home() {
@@ -427,6 +453,16 @@ fn inventory(base: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     };
     for shard in shards.flatten() {
         let shard_path = shard.path();
+        // The build-dir template's shards are 2-hex. Anything else under the
+        // base (the fleet sccache cache) is not this lane's business, however
+        // much its internals may look like tagged cache dirs.
+        let is_shard = shard_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()));
+        if !is_shard {
+            continue;
+        }
         if !std::fs::symlink_metadata(&shard_path)
             .map(|m| m.is_dir())
             .unwrap_or(false)
@@ -1674,6 +1710,42 @@ mod tests {
         }
     }
 
+    // The sccache cache sits directly under the base. Its internals can look
+    // like tagged cache dirs; the 2-hex shard guard keeps them off the lane.
+    #[test]
+    fn inventory_skips_non_shard_base_dirs() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = temp_root("sccache-guard");
+        let inner = base.join("sccache").join("ab").join("cd");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(
+            inner.join(CACHEDIR_TAG),
+            b"Signature: 8a477f597d28d172789f068868ba2775\n",
+        )
+        .unwrap();
+        plant(&base, "00", "aaaa11", seven_h(), false);
+        let (rows, empty) = inventory(&base);
+        assert_eq!(rows, vec![base.join("00").join("aaaa11")]);
+        assert!(empty.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The fleet cache resolves under the same base precedence as build dirs,
+    // so one reclaim lane owns the whole tree.
+    #[test]
+    fn sccache_dir_follows_the_build_base() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = temp_root("sccache-dir");
+        let base = root.join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("FNO_CARGO_TARGETS_BASE", &base);
+        assert_eq!(
+            sccache_dir(Path::new("/any/worktree")),
+            base.join("sccache")
+        );
+        std::env::remove_var("FNO_CARGO_TARGETS_BASE");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     fn seven_h() -> u64 {
         7 * 3600
     }
