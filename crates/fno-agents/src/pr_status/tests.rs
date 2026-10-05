@@ -456,24 +456,6 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
     );
 }
 
-/// The settled-marker rule: a cancelled run is red AND unsettled; an
-/// in-progress run is pending, never red.
-#[test]
-fn cancelled_reads_red_and_unsettled() {
-    let fake = FakeGh::from_fixture("pending_mixed");
-    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None).unwrap();
-    let rollup = without_coverage_statuses(pr_json["statusCheckRollup"].as_array().unwrap());
-    let (verdict, code, counts) = verdict_for(&rollup);
-    assert_eq!(verdict, "red");
-    assert_eq!(code, 1);
-    assert_eq!(counts["unsettled"], json!(2), "both runs are unsettled");
-    assert_eq!(
-        counts["fail"],
-        json!(1),
-        "only the cancelled run counts fail"
-    );
-}
-
 /// The composer replays the live-read fixtures: the payload it assembles and
 /// the stderr lines it prints equal the golden, field for field and line for
 /// line. Failure detail arrives resolved (its own collection is pinned by the

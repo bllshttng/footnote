@@ -74,7 +74,7 @@ fn main_ci_token_from_pages<'a>(
     at_sha: &'a [Value],
     on_main: &'a [Value],
     now: chrono::DateTime<chrono::Utc>,
-) -> Value {
+) -> (Value, Option<&'a Value>) {
     let at_head = |run: &Value| run.get("head_sha").and_then(Value::as_str) == Some(head_sha);
     // The verdict is main's push CI at the head. A schedule-event nightly
     // release failing at the head is a release-engineering concern, never
@@ -133,7 +133,44 @@ fn main_ci_token_from_pages<'a>(
             .expect("token is built as an object")
             .insert("stale".into(), Value::Array(stale));
     }
-    token
+    (token, red)
+}
+
+/// The incident attachment: a red verdict whose run ended `cancel` reads the
+/// run's jobs for the never-got-a-runner shape, then confirms against
+/// githubstatus before the explanation rides the token. Every read is
+/// fail-open - a jobs or status-site failure leaves the token exactly as
+/// the fold built it.
+fn attach_incident(cwd: &Path, token: &mut Value, red: Option<&Value>) {
+    let Some(run) = red else {
+        return;
+    };
+    if run.get("conclusion").and_then(Value::as_str) != Some("cancel") {
+        return;
+    }
+    let Some(id) = run.get("id").and_then(Value::as_u64) else {
+        return;
+    };
+    let Ok(raw) = crate::pr_push::gh_api(
+        "gh",
+        cwd,
+        &format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs?per_page=100"),
+        &[],
+    ) else {
+        return;
+    };
+    let Ok(jobs_page) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    let Some(components) = crate::gh_incident::components_page() else {
+        return;
+    };
+    if let Some(incident) = crate::gh_incident::run_incident(run, &jobs_page, &components) {
+        token
+            .as_object_mut()
+            .expect("token is built as an object")
+            .insert("incident".into(), incident);
+    }
 }
 
 /// The `main ci:` line body: a red verdict names the workflow and sha, a
@@ -143,7 +180,7 @@ pub(crate) fn main_ci_render(v: Option<&Value>) -> String {
     match v {
         Some(Value::Object(o)) => {
             let field = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("unknown");
-            match o.get("workflow") {
+            let base = match o.get("workflow") {
                 Some(_) => format!(
                     "{} ({} at {})",
                     field("verdict"),
@@ -151,6 +188,12 @@ pub(crate) fn main_ci_render(v: Option<&Value>) -> String {
                     field("sha")
                 ),
                 None => field("verdict").to_string(),
+            };
+            match o.get("incident") {
+                Some(incident) => {
+                    format!("{base} {}", crate::gh_incident::incident_line(incident))
+                }
+                None => base,
             }
         }
         other => crate::lead_checkin::dash(other),
@@ -266,12 +309,12 @@ pub(crate) fn main_ci_reading(cwd: &Path) -> Result<Value, String> {
             "repos/{owner}/{repo}/actions/runs?branch=main&per_page=100&page=2",
         )?);
     }
-    Ok(main_ci_token_from_pages(
-        &head_sha,
-        &at_sha,
-        &on_main,
-        chrono::Utc::now(),
-    ))
+    Ok({
+        let (mut token, red) =
+            main_ci_token_from_pages(&head_sha, &at_sha, &on_main, chrono::Utc::now());
+        attach_incident(cwd, &mut token, red);
+        token
+    })
 }
 
 /// The one red run a main-ci token names, as (workflow, head sha). The word
@@ -362,6 +405,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
         )
+        .0
     }
 
     /// An old-commit failure - push or a dispatch-only nightly the head
@@ -641,7 +685,8 @@ mod tests {
     }
 
     /// The rendered line names the workflow and sha; a plain verdict is the
-    /// word alone and legacy string tokens pass through untouched.
+    /// word alone, legacy string tokens pass through untouched, and an
+    /// incident rides the explanation beside the verdict.
     #[test]
     fn main_ci_render_names_the_failed_workflow_and_sha() {
         let red = serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"});
@@ -655,6 +700,17 @@ mod tests {
             "green".to_string()
         );
         assert_eq!(main_ci_render(None), "-".to_string());
+        let incident = red.clone();
+        let mut with_incident = incident.as_object().unwrap().clone();
+        with_incident.insert(
+            "incident".into(),
+            serde_json::json!({"status": "Degraded performance", "since": "2026-10-05T19:11:58Z"}),
+        );
+        assert_eq!(
+            main_ci_render(Some(&Value::Object(with_incident))),
+            "red (cli-ci at a1) GitHub Actions incident: Degraded performance since 2026-10-05T19:11:58Z"
+                .to_string()
+        );
     }
 
     /// Each stale row renders its own line naming the workflow, sha and age;

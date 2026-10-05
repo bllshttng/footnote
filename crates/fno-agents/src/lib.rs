@@ -183,6 +183,7 @@ pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
 pub mod gh_cache;
+pub mod gh_incident;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;

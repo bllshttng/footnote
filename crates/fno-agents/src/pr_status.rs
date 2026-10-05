@@ -813,6 +813,21 @@ pub(crate) fn status_payload<P: GhProbe>(
             .cloned()
             .unwrap_or_default();
 
+    // An Actions incident beside the verdict: a CANCELLED latest row whose
+    // job never got a runner is an infrastructure casualty, not a test
+    // failure, and githubstatus confirms before the note prints.
+    let incident: Value = if !is_terminal && verdict != "green" {
+        incident_for_checks(
+            probe,
+            cwd,
+            slug,
+            &latest_rows,
+            &crate::gh_incident::components_page,
+        )
+    } else {
+        Value::Null
+    };
+
     // A job id is minted per attempt, so a known id is the same completed job.
     let prior_payload = prior.unwrap_or(&Value::Null);
     let mut known: BTreeMap<String, Value> = BTreeMap::new();
@@ -1083,7 +1098,58 @@ pub(crate) fn status_payload<P: GhProbe>(
         failures,
         review_lane: lane,
     };
-    compose::compose_payload(&inputs)
+    let (code, mut payload, mut stderr) = compose::compose_payload(&inputs);
+    if !incident.is_null() {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("incident".into(), incident.clone());
+        }
+        stderr.push(crate::gh_incident::incident_note(&incident));
+    }
+    (code, payload, stderr)
+}
+
+/// The incident probe over a PR's latest check rows: a CANCELLED row whose
+/// linked job never got a runner, confirmed by githubstatus. Capped at
+/// three job reads, and the components fetch rides a closure seam so a
+/// confirmed casualty is the only thing that pays for it. Fail-open: every
+/// read error answers Null and the verdict stands alone.
+fn incident_for_checks<P: GhProbe>(
+    probe: &P,
+    cwd: &Path,
+    slug: &str,
+    latest: &[Value],
+    components: &dyn Fn() -> Option<Value>,
+) -> Value {
+    for check in latest
+        .iter()
+        .filter(|c| alt_conclusion(c) == "CANCELLED")
+        .take(3)
+    {
+        let Some((_owner, _repo, job_id)) = job_ref(check) else {
+            continue;
+        };
+        let args = vec![
+            "api".to_string(),
+            format!("repos/{slug}/actions/jobs/{job_id}"),
+        ];
+        let Ok((ok, stdout, _)) = probe.run_gh(cwd, &args) else {
+            continue;
+        };
+        let job = if ok {
+            serde_json::from_str::<Value>(&stdout).ok()
+        } else {
+            None
+        };
+        let Some(job) = job else { continue };
+        if !crate::gh_incident::cancelled_no_runner(std::slice::from_ref(&job)) {
+            continue;
+        }
+        // One confirmed casualty decides: a second job read buys nothing.
+        return components()
+            .and_then(|page| crate::gh_incident::actions_incident(&page))
+            .unwrap_or(Value::Null);
+    }
+    Value::Null
 }
 
 /// Serializes tests that point the process-global FNO_PR_STATUS_CACHE_DIR
