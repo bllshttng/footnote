@@ -413,6 +413,7 @@ def _attest_from_record(
                 head=head_sha,
                 reviewer=data["reviewer"],
                 pr=None,
+                review_round=record.get("review_round"),
             )
         except Exception:  # noqa: BLE001 - the attestation is the gate evidence
             pass
@@ -590,12 +591,16 @@ def post_dispositions(
         None, "--pr-number", "--pr",
         help="The PR number; resolved from the current branch when omitted.",
     ),
+    review_round: Optional[int] = None,
 ) -> None:
     """Post ONE per-round disposition comment on the PR, over REST.
 
     The comment is the human-visible index of a round's outcomes: one line per
     finding, each naming its disposition or its absence. Idempotent at
     (pr, head) via the marker line; a round with no dispositions posts nothing.
+    ``review_round`` is the emit-side pass-through: the attest flow hands the
+    round its stamp derived, so a --verify-fixes verify's comment names the
+    round it verified instead of reading as a fresh round 1.
     """
     try:
         payload = json.loads(findings_file.read_text(encoding="utf-8"))
@@ -671,7 +676,7 @@ def post_dispositions(
         typer.echo(f"post-dispositions: round comment for {head[:9]} already posted")
         return
 
-    round_no = int(record.get("review_round") or 1)
+    round_no = int(review_round or record.get("review_round") or 1)
     body = _render_round_comment(record, head, round_no, reviewer)
     write = run(
         [
