@@ -749,8 +749,6 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `authorized-merge`: the one merge/arm authorization (see
     // authorized_merge.rs doc). One payload in, one receipt out, one verdict.
-    // `worked-nodes`: the worked-overlay join (seat records, crown
-    // exclusion, provenance). Direct dispatch like kill-check; no daemon RPC.
     if verb == "worked-nodes" {
         return fno_agents::worked_nodes::run_worked_nodes(&args[1..]);
     }
