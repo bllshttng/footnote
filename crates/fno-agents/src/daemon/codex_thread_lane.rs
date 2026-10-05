@@ -51,6 +51,15 @@ pub(super) async fn spawn_codex_thread_lane(
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
     let node = req.params.get("node").and_then(Value::as_str);
+    // The crown rides the request so the row is crowned AT MINT: the seed
+    // turn below enqueues inside this lane, and a crown settled by the
+    // Python caller only after the receipt lets the actor run its first
+    // turn uncrowned. Both halves or neither; the territory and
+    // succession policy stays at the Python seam.
+    let crown = match crown_from_params(&req.params) {
+        Ok(crown) => crown,
+        Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
+    };
     // Hop 2 of the state-root grant. Read the roots from the REQUEST,
     // never from this process's environment. This daemon is long-lived and
     // shared across every thread on the machine, so its own env is not the
@@ -141,7 +150,7 @@ pub(super) async fn spawn_codex_thread_lane(
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(
+    let mut entry = build_codex_thread_entry(
         name,
         &cwd,
         &driver,
@@ -152,6 +161,8 @@ pub(super) async fn spawn_codex_thread_lane(
         &harness_args,
         &req.params,
         provenance,
+        crown.as_ref().map(|(level, _)| *level),
+        crown.as_ref().map(|(_, scope)| scope.as_str()),
     );
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
@@ -168,6 +179,26 @@ pub(super) async fn spawn_codex_thread_lane(
                 && is_non_terminal(existing.status)
         }) {
             return false;
+        }
+        // One-live-crown guard at mint, the same invariant the Python
+        // settle keeps in its write lock: a scope a non-terminal row
+        // already reigns is not ours to crown. Succession - the sitting
+        // king being this spawn's own caller - is the settle's write, so
+        // the mint declines to uncrowned rather than ever landing a
+        // second live crown over the scope.
+        if entry.crown_level.is_some() {
+            if let Some(scope) = entry.crown_scope.as_deref() {
+                let held = registry.entries.iter().any(|existing| {
+                    existing.crown_level.is_some()
+                        && existing.crown_scope.as_deref() == Some(scope)
+                        && is_non_terminal(existing.status)
+                });
+                if held {
+                    entry.crown_level = None;
+                    entry.crown_scope = None;
+                    entry.crown_grantor = None;
+                }
+            }
         }
         registry.entries.push(entry);
         true
@@ -268,6 +299,35 @@ pub(super) async fn spawn_codex_thread_lane(
             "lane": "thread",
         }),
     )
+}
+
+/// The crown a spawn request carries: `Some((level, scope))` or None, both
+/// halves required. This door bounds the TYPE the registry row stores (a
+/// u32 level 0..=2, a nonblank scope); the territory, succession and
+/// canonical-scope policy is the Python seam's pre-launch gate.
+fn crown_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
+    let level = params.get("crown_level");
+    let scope = params
+        .get("crown_scope")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (level, scope) {
+        (None, None) => Ok(None),
+        (Some(level), Some(scope)) => {
+            let level = level
+                .as_u64()
+                .filter(|l| *l <= 2)
+                .ok_or_else(|| "crown_level must be an integer 0..=2".to_string())?;
+            Ok(Some((level as u32, scope.to_string())))
+        }
+        (Some(_), None) => {
+            Err("a crown needs both crown_level and crown_scope; got a level with no scope".into())
+        }
+        (None, Some(_)) => {
+            Err("a crown needs both crown_level and crown_scope; got a scope with no level".into())
+        }
+    }
 }
 
 /// The one cwd a hosted Codex target thread is born with. A node-backed

@@ -135,6 +135,26 @@ check(sizer.get("steps", [{}])[0].get("with", {}).get("fetch-depth") == 0,
       "the sizer fetches full history (its diff must resolve)",
       "the sizer uses a shallow checkout - its estimate would be UNEVALUATED")
 
+# The shard plan has two consumers (the matrix array, the per-leg k/N spec).
+# Two spellings of one number drift independently, and a desync is silent:
+# legs k/1..M against a count N > M never run slice M+1..N, so a fraction of
+# the packet drops out of CI with every check green. Both outputs must read
+# the same $shards source, and the run step must carry both spellings.
+check('echo "shard_count=$shards"' in sizer_run
+      and 'echo "shard_array=$shard_array"' in sizer_run
+      and "range(1, $shards + 1)" in sizer_run,
+      "the shard plan derives one N: array and count share the $shards source",
+      "shard_count and shard_array do not share one source variable - a desync "
+      "drops a slice of the packet from CI with every check green")
+matrix_shard = (changed.get("strategy", {}).get("matrix", {}).get("shard") or "")
+check("fromJSON(needs.changed-packet-size.outputs.shard_array)" in str(matrix_shard),
+      "the changed-smoke matrix is the sizer's shard array",
+      f"the matrix shard is {matrix_shard!r} - legs must come from the sizer")
+check("--shard" in changed_run and "matrix.shard" in changed_run
+      and "shard_count" in changed_run,
+      "each leg runs its k/N slice from the same sizer outputs",
+      "the packet run does not pass --shard k/N from the matrix and sizer count")
+
 # The ceiling must come from the sizer, spelled the same way in both places it
 # is consumed: the job's own timeout and the env the steps read. Two spellings
 # of one number drift independently.

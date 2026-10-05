@@ -891,6 +891,15 @@ def push(ctx: typer.Context) -> None:
 
 
 @pr_app.command(
+    "create", hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help="Duplicate-guarded create; exit 3 refuses a twin (--not-duplicate <pr>).",
+)
+def create(ctx: typer.Context) -> None:
+    _forward_to_binary("pr-create", list(ctx.args))
+
+
+@pr_app.command(
     "ritual",
     hidden=True,
     help=(

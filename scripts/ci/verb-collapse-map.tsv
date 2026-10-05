@@ -476,6 +476,8 @@ pr bind-created	T1	pr bind-created	0
 pr closure-trailer	T1	pr closure-trailer	0
 pr coverage-check	T1	pr coverage-check	1
 pr coverage-waive	T1	pr coverage-waive	8
+pr create	T1	pr create	3
+do pr create	T1	do pr create	3
 pr coverage-publish	T1	pr coverage-publish	0
 pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1

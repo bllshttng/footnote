@@ -4654,41 +4654,6 @@ impl View {
 
     /// A squad's view state by id (test convenience: the production paths all
     /// hold the `&Squad` and key by name directly).
-    #[cfg(test)]
-    fn squad_view(&self, id: u64) -> SectionView {
-        match squad_key(&self.layout, id) {
-            Some(key) => self.section_view(&key),
-            None => SectionView::Collapsed,
-        }
-    }
-
-    /// Cycle a squad's section by id (test convenience for [`Self::cycle_section`]).
-    #[cfg(test)]
-    fn cycle_squad(&mut self, id: u64) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.cycle_section(key);
-        }
-    }
-
-    /// Force a squad's view state by id WITHOUT persisting - tests set up
-    /// state, they do not simulate an operator gesture.
-    #[cfg(test)]
-    fn set_squad_view(&mut self, id: u64, view: SectionView) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.section_view.insert(key, view);
-        }
-    }
-
-    /// Force the pull-section open so a test that exercises orphan
-    /// (`~ elsewhere`) rows renders them past their new
-    /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
-    /// about orphan rows should not silently lose them.
-    #[cfg(test)]
-    fn expand_pull_sections(&mut self) {
-        self.section_view
-            .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    }
-
     /// Agents matched to no live squad - the `~ elsewhere` section's membership.
     /// One predicate so `display_rows` and the dead-row fold never diverge.
     fn orphans(&self) -> Vec<&AgentRow> {
@@ -4974,6 +4939,7 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
+        backlog_style::node_spans_begin();
 
         let agents_full =
             self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
@@ -5202,7 +5168,7 @@ impl View {
             // The board's whole surface - docked column, drill-down,
             // pickers, centered or full-screen overlay - paints from its
             // own module (the file-budget gate keeps client.rs shrinking).
-            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
+            self.draw_board(&mut cells, rows, cols);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -5285,6 +5251,7 @@ impl View {
             }
         }
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
+        backlog_style::node_spans_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,

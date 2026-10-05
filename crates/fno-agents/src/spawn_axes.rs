@@ -813,6 +813,35 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     0
 }
 
+/// One crown flag the client parses into spawn params: typed here
+/// so a crowned codex thread row is crowned AT MINT - the seed turn
+/// enqueues inside the lane and must never submit to an uncrowned row.
+/// The level bound is the type the registry row stores (a u32 0..=2);
+/// territory and succession policy live at the Python seam.
+pub fn insert_crown_flag(
+    flag: &str,
+    args: &mut impl Iterator<Item = String>,
+    params: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    match flag {
+        "--crown" => {
+            let raw = args.next().ok_or("--crown needs a value")?;
+            let level = raw
+                .parse::<u32>()
+                .ok()
+                .filter(|l| *l <= 2)
+                .ok_or("--crown takes an integer level 0-2")?;
+            params.insert("crown_level".into(), Value::from(level));
+        }
+        "--crown-scope" => {
+            let scope = args.next().ok_or("--crown-scope needs a value")?;
+            params.insert("crown_scope".into(), Value::from(scope));
+        }
+        other => return Err(format!("unknown crown flag: {other}")),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

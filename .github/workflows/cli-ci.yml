@@ -144,14 +144,29 @@ jobs:
           # ceiling itself, so the effective bound is: estimates above 75
           # refuse, everything under runs with doubled room.
           timeout_minutes=$(( est * 2 > 75 ? 75 : est * 2 ))
+          # One runner leg died 7 of 8 attempts at a FIXED point ~1/3 into a
+          # 313-file packet (2026-10-05, all tests green to each kill; the
+          # same head's full lane passed the identical suite 13-ways sharded),
+          # so volume on one runner is what kills it, not content. Split the
+          # packet so a leg prices roughly est/15 (five legs at est 72; a
+          # packet at est 15 or under keeps today's single-leg shape). 13
+          # legs is the full lane's ceiling.
+          shards=$(( (est + 14) / 15 ))
+          [ "$shards" -gt 13 ] && shards=13
+          [ "$shards" -lt 1 ] && shards=1
+          shard_array="$(python3 -c "print('[' + ','.join(str(i) for i in range(1, $shards + 1)) + ']')")"
           {
             echo "estimate_minutes=$est"
             echo "timeout_minutes=$timeout_minutes"
+            echo "shard_count=$shards"
+            echo "shard_array=$shard_array"
           } >> "$GITHUB_OUTPUT"
 
     outputs:
       estimate_minutes: ${{ steps.estimate.outputs.estimate_minutes }}
       timeout_minutes: ${{ steps.estimate.outputs.timeout_minutes }}
+      shard_count: ${{ steps.estimate.outputs.shard_count }}
+      shard_array: ${{ steps.estimate.outputs.shard_array }}
 
   # The Rust selector owns lane routing. A PR selects every full lane main
   # runs; only the PR-only bundle freshness job depends on the diff.
@@ -228,6 +243,13 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: [changed-packet-size]
     runs-on: ubuntu-latest
+    # Each leg is a fresh runner carrying 1/N of the packet (see the sizer's
+    # shard sizing). fail-fast false: one leg's kill must not cancel its
+    # siblings - rerunning only the dead leg is the cheap recovery.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changed-packet-size.outputs.shard_array) }}
     # The ceiling is the packet-sized output of changed-packet-size, not a
     # fixed number (needs context is legal in timeout-minutes). GitHub does
     # not expose timeout-minutes to a step, so the same outputs are also this
@@ -274,7 +296,7 @@ jobs:
         run: |
           date +%s > "$RUNNER_TEMP/changed-start"
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh changed-smoke "$(( SECONDS - start ))" "$CAP_MINUTES" || true; touch "$RUNNER_TEMP/smoke-duration-reported"' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh changed-smoke-${{ matrix.shard }} "$(( SECONDS - start ))" "$CAP_MINUTES" || true; touch "$RUNNER_TEMP/smoke-duration-reported"' EXIT
           : "$start"
           # The estimate is raw (unclamped). A packet that cannot fit the
           # ceiling does not run: the cap kill would report an
@@ -291,7 +313,8 @@ jobs:
           fi
           set +e
           uv run --project cli fno-py doctor test smoke --changed \
-            --base "$CHANGED_BASE" --head "$CHANGED_HEAD"
+            --base "$CHANGED_BASE" --head "$CHANGED_HEAD" \
+            --shard "${{ matrix.shard }}/${{ needs.changed-packet-size.outputs.shard_count }}"
           rc=$?
           set -e
           # 20 = the selector mapped nothing. That is evidence about the
@@ -334,7 +357,7 @@ jobs:
             # wrote a start time. Same signature, same receipt at the floor.
             elapsed=$(( CAP_MINUTES * 60 ))
           fi
-          bash scripts/ci/smoke-duration-report.sh changed-smoke "$elapsed" "$CAP_MINUTES" || true
+          bash scripts/ci/smoke-duration-report.sh changed-smoke-${{ matrix.shard }} "$elapsed" "$CAP_MINUTES" || true
 
   # The suite outgrew two runners, so the pytest full-gate lane now runs as
   # eight matrix shards and the rest lane as four. Read this before

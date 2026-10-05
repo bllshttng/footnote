@@ -92,3 +92,32 @@ fn the_org_fold_holds_no_rows_in_the_board_view() {
         "the full column is the list region again"
     );
 }
+
+// The org-board view-state helpers, out of client.rs and then out of the
+// over-budget aggregator: inherent methods on View, test-only, resolved by
+// type from every client test module.
+impl View {
+    pub(crate) fn squad_view(&self, id: u64) -> SectionView {
+        match squad_key(&self.layout, id) {
+            Some(key) => self.section_view(&key),
+            None => SectionView::Collapsed,
+        }
+    }
+
+    pub(crate) fn cycle_squad(&mut self, id: u64) {
+        if let Some(key) = squad_key(&self.layout, id) {
+            self.cycle_section(key);
+        }
+    }
+
+    pub(crate) fn set_squad_view(&mut self, id: u64, view: SectionView) {
+        if let Some(key) = squad_key(&self.layout, id) {
+            self.section_view.insert(key, view);
+        }
+    }
+
+    pub(crate) fn expand_pull_sections(&mut self) {
+        self.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+    }
+}
