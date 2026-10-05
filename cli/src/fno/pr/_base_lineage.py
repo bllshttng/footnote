@@ -141,14 +141,13 @@ def _base_ref_and_head(pr_number, slug: str, cwd: str) -> Tuple[Optional[str], O
         payload = json.loads(res.stdout)
         if isinstance(payload, list):
             payload = payload[0] if payload else None
-        base = payload.get("base") if isinstance(payload, dict) else None
-        head = payload.get("head") if isinstance(payload, dict) else None
-        ref = base.get("ref") if isinstance(base, dict) else None
-        sha = head.get("sha") if isinstance(head, dict) else None
+        base_row: Optional[dict] = payload.get("base") if isinstance(payload, dict) else None
+        head_row: Optional[dict] = payload.get("head") if isinstance(payload, dict) else None
+        ref: Optional[str] = base_row.get("ref") if isinstance(base_row, dict) else None
+        sha: Optional[str] = head_row.get("sha") if isinstance(head_row, dict) else None
     except (json.JSONDecodeError, AttributeError):
         return None, None
-    base_ref = ref if isinstance(ref, str) and ref else None
-    return base_ref, sha if isinstance(sha, str) and sha else None
+    return ref if isinstance(ref, str) and ref else None, sha if isinstance(sha, str) and sha else None
 
 
 def _merged_pr_for_head(base: str, slug: str, cwd: str) -> tuple:

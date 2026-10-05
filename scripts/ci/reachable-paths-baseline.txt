@@ -39,7 +39,6 @@ A	auto_merge.require_checks_pass	py=cli/src/fno/config/optouts.py|cli/src/fno/co
 A	backlog.epic_max_open_children	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/backlog/epic_cap.rs|crates/fno-agents/src/graph_store.rs	# CLASSIFY protocol|msg-twin|data
 A	backlog_done_operator_initiated	py=cli/src/fno/done/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	base directory for this skill:	py=scripts/save-session.py;rs=crates/fno-agents/src/skill_drift.rs	# CLASSIFY protocol|msg-twin|data
-A	base is the default branch ({default})	py=cli/src/fno/pr/_base_lineage.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
 A	cache_creation_input_tokens	py=cli/src/fno/cost/_session_cost.py|scripts/metrics/prompt_prefix_cache_probe.py;rs=crates/fno-agents/src/context_window.rs|crates/fno-agents/src/eval_attempt/tests_observe.rs|crates/fno-agents/src/footnote_harness/mod.rs|crates/fno-agents/src/model_price.rs|crates/fno-agents/src/session_activity.rs|crates/fno/src/context_used.rs	# CLASSIFY protocol|msg-twin|data
 A	cache_write_input_tokens	py=scripts/metrics/prompt_prefix_cache_probe.py;rs=crates/fno-agents/src/session_activity.rs	# CLASSIFY protocol|msg-twin|data
 A	caller-assigned-cwd-scoped	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
