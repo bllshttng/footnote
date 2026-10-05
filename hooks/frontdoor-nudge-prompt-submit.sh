@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # fno hook: UserPromptSubmit - frontdoor nudge prompt submit
 # SessionStart does not fire in the session that installed the plugin, so the
-# first prompt after /plugin install is the first chance to start the CLI
-# installer. The SessionStart hook (frontdoor-nudge-session-start.sh) keeps the
+# first prompt after /plugin install is the first chance to surface the install
+# notice. The SessionStart hook (frontdoor-nudge-session-start.sh) keeps the
 # same job for every later session; this wrapper adds the same-session prompt.
-# Per-prompt cost is bounded by three cheap guards ahead of the full hook: the
-# version stamp (installer already succeeded for this version), the announced
-# marker (this trigger already surfaced its note for this version), and
-# the fno-bin resolver (something named fno resolves, so the mux-probe verdict
-# stays the SessionStart hook's per-session job - a per-prompt probe could pay
-# its 3s wedge cap on every prompt). SILENT unless it actually surfaces a note:
-# UserPromptSubmit exit-0 stdout is added to model context (not user chat), so
-# per-prompt chatter is context cost, and this note relies on the model
-# relaying it - the same plain-text convention as the SessionStart hook.
+# The notice starts nothing: it asks the agent to get the user's yes, then run
+# postinstall.sh in the open. Per-prompt cost is bounded by two cheap
+# guards ahead of the full hook: the announced marker (this trigger already
+# surfaced its notice for this version) and the fno-bin resolver (something
+# named fno resolves, so the mux-probe verdict stays the SessionStart hook's
+# per-session job - a per-prompt probe could pay its 3s wedge cap on every
+# prompt). SILENT unless it relays the notice: UserPromptSubmit exit-0 stdout
+# is added to model context (not user chat), so per-prompt chatter is context
+# cost, and this notice relies on the model relaying it - the same plain-text
+# convention as the SessionStart hook.
 
 set -uo pipefail
 
@@ -27,30 +28,28 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 source "$HOOK_DIR/lib/fno-bin.sh" 2>/dev/null || true
 PLUGIN_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
-# Same dir, stamp and lock as the SessionStart hook: a Codex session carries no
-# CLAUDE_PLUGIN_DATA, so the data dir falls back to the XDG state dir.
+# Same dir and marker as the SessionStart hook's data dir: a Codex session
+# carries no CLAUDE_PLUGIN_DATA, so it falls back to the XDG state dir. The
+# install stamp is gone with the auto-install: the door probe, not a stamp,
+# decides whether an install is still missing.
 DATA="${CLAUDE_PLUGIN_DATA:-${XDG_STATE_HOME:-$HOME/.local/state}/fno/plugin-install}"
-STAMP="$DATA/postinstall.version"
 MARKER="$DATA/postinstall.announced"
 VERSION="$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
 
 if [[ -n "$VERSION" ]]; then
-  [[ "$(cat "$STAMP" 2>/dev/null)" == "$VERSION" ]] && exit 0
   [[ "$(cat "$MARKER" 2>/dev/null)" == "$VERSION" ]] && exit 0
 fi
 [[ -n "$(fno_bin)" ]] && exit 0
 
-# The full hook owns the lock and the detached spawn; its output is the note.
-# It never waits on the installer (every descriptor is redirected), so the
-# capture here cannot be held open by the background job. Only its actionable
-# notes are relayed (both substrings are pinned by the hooks test): when the
-# hook falls to its static reminder - no version, or no installer in the
-# plugin tree - nothing here can mark the note as surfaced, so relaying it
-# would repeat the same lines on every prompt; the using-fno preamble owns
-# that story instead.
+# The full hook prints the consent notice and starts nothing, so the capture
+# here cannot be held open by a background job. Relay it once per version:
+# the marker caps the repeat, whatever note the hook printed. The hook no
+# longer creates the data dir (it starts nothing), so the marker write makes
+# it - best effort, same posture as the guarded write.
 out="$(bash "$HOOK_DIR/frontdoor-nudge-session-start.sh" 2>/dev/null)"
-if [[ "$out" == *postinstall.log* || "$out" == *"install in progress"* ]]; then
+if [[ -n "$out" ]]; then
   printf '%s\n' "$out"
+  mkdir -p "$DATA" 2>/dev/null || true
   [[ -n "$VERSION" ]] && printf '%s' "$VERSION" >"$MARKER" 2>/dev/null
 fi
 exit 0

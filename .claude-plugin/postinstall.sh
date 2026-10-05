@@ -26,6 +26,11 @@
 # daemon-backed verbs will work without a second step.
 set -euo pipefail
 
+# The terminal line every consumer reads (the session-start hook's notice, the
+# skills, the channel-matrix smoke): name the exit code on the way out. The
+# background-era wrapper used to print it; the consented direct run owns it now.
+trap 'rc=$?; printf "installer exit %s\n" "$rc"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(dirname "$SCRIPT_DIR")/cli"
 FNO_RELEASE_REPO="${FNO_RELEASE_REPO:-bllshttng/footnote}"
@@ -308,10 +313,9 @@ install_source_via_uv() {
     log "run 'cargo install --locked --path <repo>/crates/fno' for the daemon-backed verbs, or install a published PyPI wheel for the advertised 'fno' command."
     log "restart your shell (or source your env) to pick up PATH."
     next_steps
-    # Incomplete installs exit 3, not 0: the session-start hook stamps
-    # postinstall.version (and so stops retrying) only on exit 0, and a user
-    # following "the log ends with installer exit 0" must never be handed a
-    # half install as done (gap audit blocker 2).
+    # Incomplete installs exit 3, not 0: the terminal installer-exit line
+    # names the code, and a user following "the output ends with installer
+    # exit 0" must never be handed a half install as done (gap audit blocker 2).
     return 3
   fi
   return 1
@@ -350,7 +354,7 @@ if ! command -v uv >/dev/null 2>&1; then
         ;;
     esac
     if [[ -n "$fno_sh_spec" ]]; then
-      log "uv not found; delegating to scripts/install/fno.sh (it provisions uv)..."
+      log "uv not found; delegating to scripts/install/fno.sh: it runs the uv installer from astral.sh (that installer edits your shell profile), then installs fno from PyPI into the uv tool bin directory..."
       # The guard reads the env at its default location while uv itself is
       # absent: a tool env outliving a removed uv is exactly the one the
       # delegation would otherwise replace unguarded.
@@ -368,6 +372,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if command -v uv >/dev/null 2>&1; then
+
+  # x-0143: name the machine's shape before touching it. uv present means the
+  # astral.sh installer (and its shell-profile edit) never runs here.
+  log "uv found at $(command -v uv); this run touches only the fno tool env (uv tool install) and never edits your shell profile."
 
   # Idempotent: already binary-complete at our version -> nothing to do. Require
   # the front door and ALL THREE agent binaries, not just the client: a
@@ -403,8 +411,8 @@ if command -v uv >/dev/null 2>&1; then
         # The receipt proves the advertised command, not uv's exit code. A wheel
         # that predates the complete payload stays installed (the Python CLI
         # works) but the missing front door is named with its repair (AC2-EDGE).
-        # An incomplete receipt exits 3 with no success stamp (gap audit 2), so
-        # the session-start hook retries instead of declaring the install done.
+        # An incomplete receipt exits 3 (gap audit 2): the terminal
+        # installer-exit line names the failure instead of declaring it done.
         if ! verify_frontdoor; then
           finish_success
           exit 3
@@ -447,7 +455,7 @@ if command -v uv >/dev/null 2>&1; then
 
   # install_source_via_uv returns 3 when it INSTALLED but Python-only
   # (incomplete): still a terminal outcome for this path, but a non-zero one -
-  # no success stamp, the session-start hook retries a complete install.
+  # the terminal installer-exit line names the incomplete install.
   src_rc=0
   install_source_via_uv || src_rc=$?
   if [[ "$src_rc" -eq 3 ]]; then
