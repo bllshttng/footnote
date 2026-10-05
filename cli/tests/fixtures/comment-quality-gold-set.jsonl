@@ -22,7 +22,5 @@
 {"path": "cli/src/fno/pr_watch/_install.py", "line": 594, "label": "CUT", "reason": "label restating the variable and function names below"}
 {"path": "cli/src/fno/target/blast.py", "line": 40, "label": "CUT", "reason": "label restating the glob string below"}
 {"path": "cli/src/fno/agents/rust_runtime.py", "line": 632, "label": "CUT", "reason": "duplicates the function docstring's cutover rule at the seam; adds nothing new"}
-{"path": "cli/src/fno/setup/emit_shell.py", "line": 160, "label": "CUT", "reason": "duplicates the docstring's default-resolution rule and summarizes the branches below"}
-{"path": "cli/src/fno/setup/emit_shell.py", "line": 173, "label": "CUT", "reason": "duplicates the docstring's default-resolution rule and summarizes the branches below"}
 {"path": "crates/fno-agents/tests/loop_runtime.rs", "line": 361, "label": "CUT", "reason": "restates the assert and its own message string"}
 {"path": "scripts/migrations/generate-sweep-inventory.sh", "line": 81, "label": "CUT", "reason": "glob label restating the rglob pattern below"}

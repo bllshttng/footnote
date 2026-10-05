@@ -974,11 +974,17 @@ mod tests {
         let old_home = std::env::var("FNO_HOME").ok();
         let seeded = tempfile::tempdir().unwrap();
         std::env::set_var("FNO_HOME", seeded.path());
+        crate::paths::pin_test_claims_root(seeded.path());
         let graph = vec![
             serde_json::json!({"id": "x-epic1", "project": "fno"}),
             serde_json::json!({"id": "x-epic2", "project": "fno"}),
         ];
-        crate::graph_store::seed_rows(&seeded.path().join("graph.json"), &graph).unwrap();
+        // The graph anchor resolves through the state layout, which places
+        // graph.json under db/ unless a legacy twin exists. Seed at the
+        // placed path so the presiding-team read finds the seeded store.
+        let graph_path = crate::state_layout::place(seeded.path(), "graph.json");
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        crate::graph_store::seed_rows(&graph_path, &graph).unwrap();
         pin_window(&dir, None);
         // Live level-1 team over fno: a busy row holding scope fno at rung 1.
         let l1 = reg_row("team-l1", "busy", Some("fno"), Some(1));
