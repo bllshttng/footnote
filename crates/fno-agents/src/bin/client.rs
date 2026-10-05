@@ -3699,6 +3699,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--deny-tools",
         "--account",
         "--harness-arg",
+        "--crown",
+        "--crown-scope",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3973,6 +3975,24 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 if let Value::Array(list) = items {
                     list.push(v);
                 }
+            }
+            // The crown halves the Python seam carries for a crowned codex
+            // thread spawn (x-c5db). Typed here so the row is crowned AT
+            // MINT - the seed turn enqueues inside the lane and must never
+            // submit to an uncrowned row. The level bound is the type the
+            // registry row stores; territory and succession policy stay at
+            // the spawn seam.
+            "--crown" => {
+                let raw = str_arg(&mut it, "--crown")?;
+                let level = raw
+                    .as_str()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|l| *l <= 2)
+                    .ok_or("--crown takes an integer level 0-2")?;
+                params.insert("crown_level".into(), Value::from(level));
+            }
+            "--crown-scope" => {
+                params.insert("crown_scope".into(), str_arg(&mut it, "--crown-scope")?);
             }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn

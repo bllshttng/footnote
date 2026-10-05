@@ -269,6 +269,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
     assert_eq!(
@@ -315,6 +317,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &[],
         &serde_json::value::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(read_only.sandbox_posture.as_deref(), Some("read-only"));
     assert_eq!(
@@ -350,6 +354,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
     assert!(!crate::codex_posture::entry_posture_is_full_access(
@@ -368,6 +374,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
         &[],
         &serde_json::Value::Null,
+        None,
+        None,
         None,
     );
     assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
@@ -434,6 +442,8 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     // The request says full access...
     assert_eq!(entry.sandbox_posture.as_deref(), Some("danger-full-access"));
@@ -482,6 +492,8 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(entry.node.as_deref(), Some("x-535c"));
 }
@@ -520,6 +532,8 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(pinned.account_record_id.as_deref(), Some("codex-main"));
     let unpinned = build_codex_thread_entry(
@@ -533,6 +547,8 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(unpinned.account_record_id.as_deref(), Some("default"));
     let blank = build_codex_thread_entry(
@@ -545,6 +561,8 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         Some("   "),
         &[],
         &serde_json::Value::Null,
+        None,
+        None,
         None,
     );
     assert_eq!(blank.account_record_id.as_deref(), Some("default"));
@@ -589,6 +607,8 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
             "spawned_by_cwd": "/work"
         }),
         None,
+        None,
+        None,
     );
     assert_eq!(linked.spawned_by_session.as_deref(), Some("parent-1"));
     assert_eq!(linked.lineage_reason, None);
@@ -602,6 +622,8 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
         None,
         &[],
         &serde_json::json!({}),
+        None,
+        None,
         None,
     );
     assert_eq!(orphan.spawned_by_session, None);
@@ -2622,6 +2644,154 @@ async fn codex_target_launch_cwd_refuses_a_worktree_removed_after_ensure() {
                 .any(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t"),
             "no birth event for a refused spawn"
         );
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+// --- x-c5db: the crown rides the lane request ------------------------------
+
+/// A crowned codex thread spawn crowns the row AT MINT: the seed turn
+/// enqueues inside this lane after the registry insert, so it can never
+/// submit to an uncrowned row. The grantor is the parent edge the request
+/// carried, never a caller-supplied value.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_spawn_crowns_the_row_at_mint() {
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-crown-at-mint");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let worktree = home.root().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": worktree.to_string_lossy(),
+                "message": "seed turn",
+                "crown_level": 2,
+                "crown_scope": "x-aaaa",
+                "spawned_by_session": "parent-session-uuid",
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        assert!(resp.result().is_some(), "spawn failed: {resp:?}");
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry");
+        let row = registry.find("t").expect("the spawned row");
+        assert_eq!(row.crown_level, Some(2), "crowned at mint: {row:?}");
+        assert_eq!(row.crown_scope.as_deref(), Some("x-aaaa"));
+        assert_eq!(row.crown_grantor.as_deref(), Some("parent-session-uuid"));
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// The one-live-crown guard at mint: a scope a non-terminal row already
+/// reigns is not ours to crown. Succession is the Python suite's write,
+/// so the mint declines to uncrowned rather than ever landing a second
+/// live crown over the scope.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_spawn_mints_uncrowned_when_the_scope_is_held() {
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-crown-declined");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let worktree = home.root().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut king = thread_entry("sitting-king", AgentStatus::Live, None);
+        king.crown_level = Some(1);
+        king.crown_scope = Some("x-aaaa".into());
+        let inserted = update_registry_offloaded(home.registry_json(), move |registry| {
+            registry.entries.push(king);
+            true
+        })
+        .await;
+        assert!(inserted.is_ok(), "fixture row: {inserted:?}");
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": worktree.to_string_lossy(),
+                "message": "seed turn",
+                "crown_level": 2,
+                "crown_scope": "x-aaaa",
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        assert!(resp.result().is_some(), "spawn failed: {resp:?}");
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry");
+        let row = registry.find("t").expect("the spawned row");
+        assert_eq!(
+            row.crown_level, None,
+            "an occupied scope mints uncrowned: {row:?}"
+        );
+        assert_eq!(row.crown_scope, None);
+        assert_eq!(row.crown_grantor, None);
+        assert_eq!(
+            registry.find("sitting-king").unwrap().crown_level,
+            Some(1),
+            "the sitting king keeps its crown"
+        );
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// A lone crown half refuses the spawn: a scopeless level stamps a crown
+/// that rules nothing, and a levelless scope can never deserialize. The
+/// spawn fails closed - no thread, no row.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_spawn_refuses_a_lone_crown_half() {
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-crown-lone-half");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        for params in [
+            json!({"crown_level": 2}),
+            json!({"crown_level": 7}),
+            json!({"crown_scope": "x-aaaa"}),
+        ] {
+            let mut full = json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": home.root().join("worktree").to_string_lossy(),
+                "message": "seed turn",
+            });
+            for (key, value) in params.as_object().unwrap() {
+                full[key] = value.clone();
+            }
+            let req = Request::new(1, "agent.spawn", full);
+            let resp = handle_spawn(&ctx, &req).await;
+            let refused = match &resp.payload {
+                crate::protocol::ResponsePayload::Err(error) => error.message.clone(),
+                _ => panic!("a lone crown half must refuse: {params} -> {resp:?}"),
+            };
+            assert!(
+                refused.contains("crown"),
+                "the refusal names the crown: {refused}"
+            );
+            assert_eq!(
+                load_registry_offloaded(home.registry_json())
+                    .await
+                    .expect("registry")
+                    .find("t"),
+                None,
+                "no row for a refused spawn"
+            );
+        }
         std::fs::remove_dir_all(home.root()).ok();
     })
     .await;
