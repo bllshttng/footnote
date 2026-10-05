@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_node_on_a_flat_sample_burns_past_the_ceiling() {
+    fn the_age_arm_fires_only_when_node_and_branch_are_both_stale() {
         let prev = BurnState {
             cost_usd: Some(1.0),
             head: Some("a".into()),
@@ -1268,6 +1268,7 @@ mod tests {
             touched_at: Some(1000),
             ..Default::default()
         };
+        // Both aged past the ceiling: wake.
         let (d, _) = decide(
             Some(&prev),
             &sample(Some(1.0), Some("a"), Some(1000)),
@@ -1276,23 +1277,15 @@ mod tests {
             0.01,
         );
         assert!(matches!(d, Decision::Wake(r) if r.contains("node untouched 2h")));
-    }
-
-    #[test]
-    fn a_recent_commit_on_a_flat_branch_is_progress_even_when_the_node_row_is_ancient() {
         // Regression shape: the crown was woken twice over a node whose PR
         // branch took a commit 30 minutes earlier. The node row's touched_at
         // is not the branch: it moves on backlog commands, never on a push.
         // A flat sample whose newest commit is younger than the idle ceiling
         // stands down.
-        let prev = BurnState {
-            cost_usd: Some(1.0),
-            head: Some("a".into()),
-            commits: Some(1),
-            touched_at: Some(1000),
+        let aged_prev = BurnState {
             last_commit_at: Some(1000),
             attempts: 1,
-            ..Default::default()
+            ..prev
         };
         let now = 1000 + 7 * 3600; // the node row reads 7h stale
         let flat = Sample {
@@ -1302,7 +1295,7 @@ mod tests {
             touched_at: Some(1000),
             last_commit_at: Some(now - 1800), // a commit landed 30 minutes ago
         };
-        let (d, next) = decide(Some(&prev), &flat, now, 7200, 0.01);
+        let (d, next) = decide(Some(&aged_prev), &flat, now, 7200, 0.01);
         assert_eq!(d, Decision::StandDown);
         assert_eq!(next.last_commit_at, Some(now - 1800));
     }
