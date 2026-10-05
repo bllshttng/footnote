@@ -369,10 +369,10 @@ fn default_true() -> bool {
 /// for agent spawn; serde remains compatible with old and new placements. Floor stays 58.
 /// v104 adds `AgentRow.compaction_count`; v105 adds addressed pane input receipts; floor stays 58.
 /// v106: `AgentRow.held_conversation` (serde default), the machine-armed hold
-/// mark behind the sideline's `[HELD]` badge, and `BacklogCard.link` (serde
-/// default), the node's stored GitHub-or-Linear URL the node tap opens when no
-/// plan lives in the vault; floor stays 58.
-pub const PROTO_VERSION: u32 = 106;
+/// mark behind the sideline's `[HELD]` badge; floor stays 58.
+/// v107 adds `BacklogCard.link` (serde default), the node's stored GitHub-or-Linear
+/// URL the node tap opens when no plan lives in the vault; floor stays 58.
+pub const PROTO_VERSION: u32 = 107;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1388,7 +1388,7 @@ pub struct BacklogCard {
     /// but an unranked board head is not a promise about the next dispatch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head: bool,
-    /// (v106) The link stored on the node (`pr_url`, a GitHub or Linear URL),
+    /// (v107) The link stored on the node (`pr_url`, a GitHub or Linear URL),
     /// published for the node tap's middle leg: no plan in the vault opens
     /// this instead of dead-ending at the details pane. `None` when the node
     /// stores no link.
@@ -3973,7 +3973,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 106);
+        assert_eq!(PROTO_VERSION, 107);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
