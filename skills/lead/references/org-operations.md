@@ -2,10 +2,12 @@
 # Org operations
 
 The operations manual for [org mode](once.md#org mode-lead-over-the-wave).
+
 The skill carries the *contract* (what an org lead owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
 
 Org needs five worker primitives: **spawn** a teammate, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
 Sweep and wait are separate on purpose: sweeping is a nonblocking look at a teammate you are already awake to check, waiting is the only one of the five that will wake you.
+
 The verbs below are fno's own.
 In an environment whose pane layer is something other than fno mux, the titling brief names that layer's equivalents; the *duties* are identical either way, and every ruling still lands in the graph via `fno backlog` verbs and every node is still claimed through `/fno:target`.
 The pane layer owns placement, lifecycle, and I/O; fno stays the authority for identity, claims, the graph, and dispatch.
@@ -77,6 +79,7 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 `--promote` rides `--substrate thread` for Claude only. Non-Claude thread spawns reject it. For Claude, only `headless` is refused, since a one-shot exits before it can lead. The retired `bg` spelling refuses with a redirect to `thread`.
 
 What a thread sub-lead gives up is placement, not authority.
+
 The placement flags are mux geometry and refuse outside a pane, and `--at current` resolves the anchor from `FNO_PANE`, which a thread session does not have.
 So a thread sub-lead seats its own teammates in fresh tabs and never forms a co-located org.
 Anoint on thread for a sub-lead that will pass; anoint on a pane for one that will hold org.
