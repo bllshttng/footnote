@@ -1,4 +1,4 @@
-"""The fno-py to Rust-front hand-off refuses to recurse (x-b948).
+"""The fno-py to Rust-front hand-off refuses to recurse.
 
 A PATH `fno` that forwards to fno-py re-enters `_run_rust_front`; the
 FNO_PY_HANDOFF marker turns the second entry into a named refusal instead
