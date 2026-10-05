@@ -1100,6 +1100,10 @@ async fn run(args: Vec<String>) -> i32 {
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
     }
+    // `pr-create`: the duplicate-guarded create (see pr_create.rs doc).
+    if matches!(verb, "pr-create") {
+        return fno_agents::pr_create::run_pr_create_verb(&args[1..]);
+    }
     // `pr-closure-parse` / `pr-closure-render`: the one parser/renderer for
     // the PR-body closure line; the Python readers forward here (JSON payload
     // in, JSON answer out, binary-direct like `pr-body-check`).
