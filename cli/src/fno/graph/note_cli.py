@@ -192,6 +192,19 @@ def cmd_note(
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     # An empty body refuses in the native action, which owns the message.
 
+    # A body that looks like a flag is a mistyped flag, not a note: a bare
+    # `note <id> --list` once wrote the literal text "--list" over state.
+    # Refuse BEFORE any write; file bodies are deliberate and exempt.
+    if body_file is None and text.startswith("--"):
+        typer.echo(
+            f"Error: note refused: the body starts with '--' ({text}), so it is "
+            "a mistyped flag, not a note. Nothing was written. Read the feed: "
+            f"`fno backlog notes history {task_id}` or `fno backlog get {task_id}`. "
+            "To write flag-shaped text, pass --body-file.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     # A contradicted citation refuses BEFORE the write; an unmeasured claim
     # only warns (this verb advises, never refuses a body).
     try:
