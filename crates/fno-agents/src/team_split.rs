@@ -214,7 +214,7 @@ mod tests {
         // undecided one (no pid evidence) holds live, so it double-rules
         // beside a live holder - never read stale on the word alone.
         let mut dead = row("lead-dead", Some("shared"), AgentStatus::Orphaned);
-        dead.pid = Some(reaped_pid());
+        dead.pid = Some(crate::row_verdict::reaped_pid());
         let rows = [row("lead-live", Some("shared"), AgentStatus::Live), dead];
         let out = read_team_splits(&rows);
         assert!(out.double_ruled.is_empty());
@@ -231,17 +231,6 @@ mod tests {
         let out = read_team_splits(&rows);
         assert_eq!(out.double_ruled.len(), 1);
         assert!(out.stale.is_empty());
-    }
-
-    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
-    /// so only a reaped pid is provably ESRCH.
-    fn reaped_pid() -> u32 {
-        let mut child = std::process::Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
-        let pid = child.id();
-        child.wait().expect("reap true");
-        pid
     }
 
     #[test]

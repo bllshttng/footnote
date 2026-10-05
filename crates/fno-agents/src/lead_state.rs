@@ -1800,7 +1800,7 @@ mod tests {
         // a live pid stays live-kept and one with a reaped pid stays
         // terminal-kept, so the joins key on proof, not the word.
         let mut orphan_dead = row("lead", "s-3", None, AgentStatus::Orphaned);
-        orphan_dead["pid"] = serde_json::json!(reaped_pid());
+        orphan_dead["pid"] = serde_json::json!(crate::row_verdict::reaped_pid());
         let mut quiet_live = row("quiet", "s-5", None, AgentStatus::Orphaned);
         quiet_live["pid"] = serde_json::json!(std::process::id());
         let dir = tmp("name-join");
@@ -1834,17 +1834,6 @@ mod tests {
             NameJoin::None
         ));
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
-    /// so only a reaped pid is provably ESRCH.
-    fn reaped_pid() -> u32 {
-        let mut child = std::process::Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
-        let pid = child.id();
-        child.wait().expect("reap true");
-        pid
     }
 
     #[test]

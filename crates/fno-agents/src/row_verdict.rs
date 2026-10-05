@@ -176,6 +176,19 @@ fn vendor_verdict(word: &str) -> Option<RowVerdict> {
     }
 }
 
+/// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
+/// so only a reaped pid is provably ESRCH. One shared test helper for
+/// every reader that needs a provably-dead pid.
+#[cfg(test)]
+pub(crate) fn reaped_pid() -> u32 {
+    let mut child = std::process::Command::new("/usr/bin/true")
+        .spawn()
+        .expect("spawn true");
+    let pid = child.id();
+    child.wait().expect("reap true");
+    pid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,7 +253,7 @@ mod tests {
         assert!(matches!(fno_verdict(&e), RowVerdict::Unknown(_)));
 
         let mut gone = entry();
-        gone.pid = Some(spawn_and_reap_pid());
+        gone.pid = Some(reaped_pid());
         assert!(matches!(fno_verdict(&gone), RowVerdict::Finished(_)));
 
         let mut live = entry();
@@ -297,7 +310,7 @@ mod tests {
 
         let mut quiet_dead = entry();
         quiet_dead.status = crate::AgentStatus::Orphaned;
-        quiet_dead.pid = Some(spawn_and_reap_pid());
+        quiet_dead.pid = Some(reaped_pid());
         assert!(finished(&quiet_dead));
 
         let mut undecidable = entry();
@@ -315,16 +328,5 @@ mod tests {
         assert!(!finished_json(&serde_json::json!({
             "name": "lead", "status": "busy",
         })));
-    }
-
-    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
-    /// so only a reaped pid is provably ESRCH.
-    fn spawn_and_reap_pid() -> u32 {
-        let mut child = std::process::Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
-        let pid = child.id();
-        child.wait().expect("reap true");
-        pid
     }
 }
