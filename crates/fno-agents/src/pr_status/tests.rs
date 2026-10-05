@@ -456,8 +456,13 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
     );
 }
 
-/// The settled-marker rule: a cancelled run is red AND unsettled; an
-/// in-progress run is pending, never red.
+/// Cancelled rows, end to end: the verdict reads red AND unsettled, the
+/// take-away shape is the only gate that spends the status-page read, the
+/// parse names a live Actions incident and refuses history and noise, and
+/// the composer carries the fact beside the verdict only when it exists.
+/// Measured 2026-10-05: a critical Actions incident killed hosted runners
+/// fleet-wide for hours while sessions reran jobs the surface could not
+/// explain.
 #[test]
 fn cancelled_reads_red_and_unsettled() {
     let fake = FakeGh::from_fixture("pending_mixed");
@@ -472,6 +477,74 @@ fn cancelled_reads_red_and_unsettled() {
         json!(1),
         "only the cancelled run counts fail"
     );
+
+    // The take-away gate: settled passes ride along, a real failure or an
+    // in-progress row refuses the shape, and a green-only rollup is not it.
+    let cancelled_row =
+        json!({"name": "changed-smoke (5)", "status": "COMPLETED", "conclusion": "CANCELLED"});
+    let passed_row =
+        json!({"name": "smoke-pytest (9)", "status": "COMPLETED", "conclusion": "SUCCESS"});
+    let failed_row = json!({"name": "smoke", "status": "COMPLETED", "conclusion": "FAILURE"});
+    let running_row =
+        json!({"name": "smoke-rest (4)", "status": "IN_PROGRESS", "conclusion": null});
+    assert!(cancelled_only(&[passed_row.clone(), cancelled_row.clone()]));
+    assert!(!cancelled_only(&[
+        passed_row.clone(),
+        cancelled_row.clone(),
+        failed_row.clone()
+    ]));
+    assert!(!cancelled_only(&[passed_row.clone(), running_row]));
+    assert!(!cancelled_only(&[passed_row]));
+
+    // The parse: a live Actions incident qualifies; a resolved one and a
+    // non-Actions one do not; unparseable bodies read null.
+    let body = r#"{"incidents": [
+        {"name": "Incident with Actions", "status": "investigating",
+         "created_at": "2026-10-05T19:11:58.382Z",
+         "incident_updates": [
+            {"created_at": "2026-10-05T21:32:31.460Z", "status": "investigating",
+             "body": "We have applied mitigations to address GitHub Actions failures."}
+         ]},
+        {"name": "Pages degraded performance", "status": "investigating",
+         "created_at": "2026-10-05T21:22:39.017Z", "incident_updates": []},
+        {"name": "Old Actions outage", "status": "resolved",
+         "created_at": "2026-10-01T02:00:00.000Z", "incident_updates": []}
+    ]}"#;
+    let live = crate::pr_status::seams::incidents_from_body(body);
+    let rows = live.as_array().expect("live incidents array");
+    assert_eq!(rows.len(), 1, "only the Actions incident qualifies");
+    assert_eq!(rows[0]["name"], json!("Incident with Actions"));
+    assert_eq!(rows[0]["updated_at"], json!("2026-10-05T21:32:31.460Z"));
+    assert_eq!(
+        crate::pr_status::seams::incidents_from_body("not json"),
+        Value::Null
+    );
+
+    // The insert: the composer carries the fact when present and leaves the
+    // field out when null.
+    let fixture = load_fixture("green_settled");
+    let build = |incident: Value| crate::pr_status::compose::ComposeInputs {
+        pr: "42".to_string(),
+        pr_json: pr_json_from("green_settled"),
+        rerun_recovery: fixture["inputs"]["rerun_recovery"].clone(),
+        branch_history: fixture["inputs"]["branch_history"].clone(),
+        optional_reviews: fixture["inputs"]["optional_reviews"].clone(),
+        coverage_row: fixture["inputs"]["coverage_row"].clone(),
+        hold_reason: fixture["inputs"]["hold_reason"].clone(),
+        review_activity: fixture["inputs"]["review_activity"].clone(),
+        receipt: fixture["inputs"]["receipt"].clone(),
+        github_merge_blockers: fixture["inputs"]["github_merge_blockers"].clone(),
+        merge_authority: fixture["inputs"]["merge_authority"].clone(),
+        merge_execution: fixture["inputs"]["merge_execution"].clone(),
+        failures: Value::Null,
+        review_lane: fixture["inputs"]["review_lane"].as_bool().unwrap_or(false),
+        platform_incident: incident,
+    };
+    let fact = json!([{"name": "Incident with Actions", "status": "investigating"}]);
+    let (_, payload_with, _) = crate::pr_status::compose::compose_payload(&build(fact.clone()));
+    assert_eq!(payload_with["platform_incident"], fact);
+    let (_, payload_without, _) = crate::pr_status::compose::compose_payload(&build(Value::Null));
+    assert!(payload_without.get("platform_incident").is_none());
 }
 
 /// The composer replays the live-read fixtures: the payload it assembles and
@@ -506,6 +579,7 @@ fn composer_replays_the_goldens() {
             merge_execution: fixture["inputs"]["merge_execution"].clone(),
             failures: expected.get("failures").cloned().unwrap_or(Value::Null),
             review_lane: fixture["inputs"]["review_lane"].as_bool().unwrap_or(false),
+            platform_incident: Value::Null,
         };
         let (code, payload, stderr) = crate::pr_status::compose::compose_payload(&inputs);
         assert_eq!(
