@@ -143,6 +143,25 @@ def cmd_note(
         at = extra.index("--kind")
         kind = extra[at + 1] if at + 1 < len(extra) else None
     graph_path = graph_cli._graph_path()
+    # The comment thread owns its word on both entries. The native router
+    # wants `comment` as the first tail word, ahead of --graph, so this
+    # forward keeps that order: the receipts' own suggested command
+    # (`fno backlog note comment <id> --list`) must run here too.
+    if task_id == "comment":
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
+            raise typer.Exit(code=1)
+        argv = [str(binary), "backlog", "note", "comment", "--graph", str(graph_path)]
+        if json_output:
+            argv.append("--json")
+        if text:
+            argv.append(text)
+        argv += extra
+        proc = subprocess.run(argv, check=False)
+        raise typer.Exit(code=proc.returncode)
     if not task_id or "--blocking" in extra or "--resolve" in extra:
         from fno.rust_binary import resolve_binary
 
@@ -159,6 +178,16 @@ def cmd_note(
         argv += extra
         proc = subprocess.run(argv, check=False)
         raise typer.Exit(code=proc.returncode)
+
+    # --replace is retired, not swallowed: a note appends and cannot
+    # clobber, so the flag would silently do nothing on this route.
+    if "--replace" in extra:
+        typer.echo(
+            "--replace is retired: a note appends to the thread and cannot "
+            f"clobber anything. Read the feed: fno backlog note comment {task_id} --list",
+            err=True,
+        )
+        raise typer.Exit(code=3)
 
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     # An empty body refuses in the native action, which owns the message.
