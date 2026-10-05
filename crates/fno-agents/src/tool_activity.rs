@@ -27,6 +27,8 @@ struct ToolFold {
     offset: u64,
     calls: u64,
     errors: u64,
+    /// The last pass that counted this fold: the prune's clock.
+    last_seen: Option<Instant>,
 }
 
 impl ToolFold {
@@ -126,6 +128,8 @@ fn scan_pass(home: &crate::paths::AgentsHome) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    let now = Instant::now();
+    let mut seen: Vec<String> = Vec::new();
     let _ = crate::state::update_registry(&home.registry_json(), |registry| {
         for entry in &mut registry.entries {
             if entry.status == crate::AgentStatus::Exited {
@@ -141,13 +145,26 @@ fn scan_pass(home: &crate::paths::AgentsHome) {
             let Some(path) = transcripts.find(&sid, harness) else {
                 continue;
             };
-            let fold = folds.entry(sid).or_default();
+            let fold = folds.entry(sid.clone()).or_default();
             fold.absorb(&path, harness);
+            fold.last_seen = Some(now);
             entry.tool_calls = Some(fold.calls);
             entry.tool_errors = Some(fold.errors);
+            seen.push(sid);
         }
     });
+    // A fold whose row stopped counting (exited, reaped, transcript gone)
+    // prunes after a day, the same retention the cost folds keep.
+    folds.retain(|sid, fold| {
+        seen.contains(sid)
+            || fold
+                .last_seen
+                .map_or(true, |t| now.duration_since(t) < FOLD_TTL)
+    });
 }
+
+/// One day: the fold retention the cost folds keep.
+const FOLD_TTL: std::time::Duration = std::time::Duration::from_secs(86_400);
 
 /// The daemon tick's tool-scan arm: throttled to [`SCAN_CADENCE`], one
 /// in-flight pass behind `in_flight`, run off the loop. Same shape as
