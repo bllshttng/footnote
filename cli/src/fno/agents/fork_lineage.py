@@ -90,17 +90,19 @@ def respawn_ok(src):
 WAKE_NAME_PREFIX = "wake-"
 
 
-def wake_spawn_name(entry: Any, session_uuid: str) -> str:
-    """The wake fork's spawn name: the row's OWN name when an exited claude row
-    exists for this uuid (Fix 3 revives in place), else the uuid-derived wake-
-    alias. Deterministic, so concurrent wakes still serialize on one flock."""
+def wake_spawn_name(session_uuid: str) -> str:
+    """The wake fork's spawn name, owned by the Rust wake-name resolver beside
+    the reentry plan: the session's LAST recorded registry name for this uuid,
+    whatever the row's status or harness - the name is the worker-to-node join.
+    The uuid-derived wake- alias is only for a uuid that never named a row, and
+    is also the degrade when the owner is unavailable. Both answers are
+    deterministic, so concurrent wakes still serialize on one flock."""
     from fno.harness_identity import canonical_handle
-    named = (entry is not None and getattr(entry, "status", None) == "exited"
-             and getattr(entry, "harness", None) == "claude"
-             and getattr(entry, "harness_session_id", None) == session_uuid
-             and getattr(entry, "name", None))
-    alias = f"{WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
-    return getattr(entry, "name", "") if named else alias
+    try:
+        name = spawn_axes_call({"wake_name": {"session_id": session_uuid}}).get("name")
+    except SpawnAxesUnavailable:
+        name = None
+    return name or f"{WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
 
 
 def predecessor_ids(resume_session_id: Optional[str], revive: bool) -> list[str]:
