@@ -738,7 +738,15 @@ def test_a_file_body_that_looks_like_a_flag_writes(monkeypatch) -> None:
 
 
 def test_comment_forwards_to_the_native_thread(monkeypatch) -> None:
-    """The taught read form rides verbatim to the native comment surface."""
+    """The taught read form rides verbatim to the native comment surface.
+
+    Driven at the callback boundary with a stubbed parse: click versions
+    disagree on where an unknown flag lands (positionals vs ctx.args), and
+    the forward contract owns the tail it is handed, not the parse.
+    """
+    import click
+    import typer
+
     from fno.graph import note_cli as note_bridge
 
     calls: list[list[str]] = []
@@ -747,14 +755,28 @@ def test_comment_forwards_to_the_native_thread(monkeypatch) -> None:
         returncode = 0
 
     def fake_run(argv, check):
-        calls.append(argv)
+        calls.append(list(argv))
         return _Proc()
 
     monkeypatch.setattr(note_bridge.subprocess, "run", fake_run)
     monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: Path("fno-agents"))
-    result, appended = _run(monkeypatch, ["note", "comment", "x-0d08", "--list"])
-    assert result.exit_code == 0
-    assert appended == []
+    monkeypatch.setattr(
+        "fno.graph.cli._graph_path", lambda *a, **k: Path("graph.json")
+    )
+
+    ctx = click.Context(click.Command("note"))
+    ctx.args = ["--list"]
+    with pytest.raises(typer.Exit) as raised:
+        note_bridge.cmd_note(
+            ctx=ctx,
+            task_id="comment",
+            text="x-0d08",
+            body_file=None,
+            quiet=False,
+            json_output=False,
+            read=[],
+        )
+    assert raised.value.exit_code == 0
     assert calls == [["fno-agents", "backlog", "note", "comment", "x-0d08", "--list"]]
 
 
