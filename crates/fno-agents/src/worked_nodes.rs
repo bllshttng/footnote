@@ -319,7 +319,6 @@ pub fn run_worked_nodes(args: &[String]) -> i32 {
     0
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,12 +357,7 @@ mod tests {
 
     fn claims(map: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
         map.iter()
-            .map(|(n, sids)| {
-                (
-                    n.to_string(),
-                    sids.iter().map(|s| s.to_string()).collect(),
-                )
-            })
+            .map(|(n, sids)| (n.to_string(), sids.iter().map(|s| s.to_string()).collect()))
             .collect()
     }
 
@@ -474,5 +468,4 @@ mod tests {
             ]
         );
     }
-
 }
