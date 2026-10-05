@@ -1257,6 +1257,28 @@ final-head code review. {FLOOR_REMEDY}"
     None
 }
 
+/// Resolve `merge.visual_paint_paths`, the render-surface paths whose PRs
+/// hold for the user's visual approval until an answered question page names
+/// the PR. Missing or empty means the gate is disarmed: empty is the default
+/// everywhere, and a project that owns a paint surface names it here.
+pub fn visual_paint_paths(cwd: &Path) -> Vec<String> {
+    resolve(cwd, |t| {
+        t.get("merge")?
+            .as_table()?
+            .get("visual_paint_paths")
+            .cloned()
+    })
+    .map(|value| match value {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        Value::String(s) => vec![s],
+        _ => Vec::new(),
+    })
+    .unwrap_or_default()
+}
+
 /// Resolve `review.optional_apps`, the GitHub App logins whose findings are
 /// honored when present but whose absence never blocks `DonePRGreen`.
 ///

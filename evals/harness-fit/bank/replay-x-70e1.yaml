@@ -1,0 +1,39 @@
+id: replay-x-70e1
+tier: capability
+repo_fixture: bd8c575bbdc9c991e0c053c72dd6986a8dab5cbc
+prompt: |
+  Row retirement executes: role-aware completion, recovered provenance, freshness-stamped sweep writes
+
+  x-2188's shipped-work retire lane classifies correctly and has never once executed. Two independent gaps, either of which alone is sufficient to explain a zero.
+
+  POSITIVE RECEIPT, both directions. In ~/.fno/events.jsonl, 17 records of type watchdog_verdict exist and ZERO records of type watchdog_applied exist, ever.
+  The classifier demonstrably works: 2026-09-02T09:22:43.418943Z, type watchdog_verdict, row bp-7e0b-reap-chain-opus, verdict "retire", basis "node x-7e0b done and its PR merged and has been quiet 100m (grace 15m); stop only, worktree preserved".
+  So a correct retire verdict with a correct basis was produced and nothing acted on it. This is not an absence-only finding: the verdict record is the positive marker for the classifier, and watchdog_applied is the positive marker for execution.
+  NOTE FOR ANYONE RE-MEASURING: the JSON key is `type`, not `event` or `kind`. A reader keyed on `event` returns 0 for both counts and looks like a clean bill of health.
+
+  GAP A, ordering. cli/src/fno/agents/watchdog.py:1571 returns Verdict(..., STALE, reap_basis, "report") when the reap read answers REAP_UNKNOWN. The retire lane sits below it at 1583 and is never reached on that path.
+  The code comment immediately above the retire call says it "runs before reap's LEAVE return so a row reap declines on its own (stricter) preconditions can still be stopped by this (weaker, non-destructive) one." That is true of the LEAVE return and false of the REAP_UNKNOWN return, which sits higher and exits first. The comment documents an intent the control flow does not implement.
+  Measured by the audit: 4 of 4 shipped-basis rows evaluate retire=True and land STALE.
+
+  GAP B, no auto-execute. recovery.watchdog = "off" disarms the tick entirely (cli/src/fno/pr_watch/cli.py:510). When armed it applies lanes = "wake" only (line 613). A bare `fno agents watchdog` never sweeps (cli/src/fno/graph/cli.py:4627).
+  So even with Gap A fixed, a retire verdict would still never execute.
+
+  FOUR SPECIMENS, hand-reaped 2026-09-02 because nothing automatic touched them. Each was node status done AND merge_status merged with a merged PR, which is exactly _shipped_work_basis at watchdog.py:862.
+  t-b2c7-dispatch-truth (x-b2c7, PR 1368) idle 724 minutes.
+  t-32db-build (x-32db, PR 1364) idle 644 minutes.
+  t-377c-doctor-freshness-gpt (x-377c, PR 1369) idle 181 minutes.
+  t-9c9b-vote-pill (x-9c9b, PR 1349) idle 134 minutes.
+  Twelve hours on the oldest. These are the population the lane was built for.
+
+  WHAT IS NOT WRONG. The basis itself is correct and should not be touched. watchdog.py:870 records why both halves are required: "graph 460 nodes read done and 42 of those carry no merge_status, so a done-only basis would stop rows whose work never shipped."
+
+  VERIFY WITH A POSITIVE MARKER. Assert a watchdog_applied event exists carrying a shipped-work basis, for a row that was actually stopped.
+  Do not assert that reapable is non-zero: `reapable` counts KEEPER PROCESSES, not rows, and printed 0 in the same dry run that produced the retire verdict above.
+  Do not assert the absence of stale rows.
+
+  FINDINGS DOC from the audit that established this: /Users/bb16/c3po/internal/fno/plans/20260902-watchdog-shipped-work-retire-lane-does-not-fire-x-2188.md
+grade:
+  - kind: exit
+    command: "git checkout fa00bdc7dcf9d398805f86d55ab1e35bde6b0585 -- cli/tests/unit/test_spawn_phase.py crates/fno-agents/tests/retirement_e2e.rs && (cd cli && uv run pytest tests/unit/test_spawn_phase.py -q) && (cd crates/fno-agents && cargo test --test retirement_e2e)"
+timeout_minutes: 45
+tags: [harness-fit]
