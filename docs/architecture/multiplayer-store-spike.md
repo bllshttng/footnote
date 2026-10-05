@@ -103,6 +103,8 @@ The DS920+ wins on the axis that matters most for a primary. If the fleet goes d
 
 ## Ruling
 
+The decision record holds this ruling under the subject `multiplayer-store`. Run `fno backlog decisions multiplayer-store` to print it.
+
 **Database: libSQL (sqld), with an embedded replica on every machine.**
 
 - Reads, the whole-graph read included, come from the local replica. The replica answers in 24 ms where today's lane takes 3,285 ms.
