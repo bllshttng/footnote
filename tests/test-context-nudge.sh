@@ -463,7 +463,8 @@ if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
   # latch-silent, so OUT above cannot show it). Re-run its exact payload
   # under bash -x with the latch cleared: the trace names the exit line.
   rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null
-  printf '%s' "$(payload "$SBX/small.jsonl")" | bash -x "$HOOK" > "$SBX/diag-out.txt" 2> "$SBX/diag-trace.txt" || true
+  printf '%s' "$(payload "$SBX/small.jsonl")" | bash -x "$HOOK" > "$SBX/diag-out.txt" 2> "$SBX/diag-trace.txt"
+  echo "REFIRE_RC=$? (137=SIGKILL, 143=SIGTERM, 124=timeout)" >&2
   echo "--- AC20 diagnostic refire stdout ---" >&2
   head -c 600 "$SBX/diag-out.txt" >&2
   echo "" >&2
