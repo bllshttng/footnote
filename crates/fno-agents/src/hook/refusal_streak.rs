@@ -205,18 +205,25 @@ fn save(path: &Path, entries: &BTreeMap<String, Value>) {
     }
     let document = json!({"version": 1, "entries": entries});
     let body = document.to_string();
-    let tmp = path.with_extension("json.tmp");
+    // The pid in the tmp name keeps two concurrent recorders from writing
+    // the same staging file; a leaked tmp is inert and the next save
+    // reuses the name.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     if std::fs::write(&tmp, body.as_bytes()).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+        if std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
 /// One outcome against the ledger: a failure with the same digest and a
 /// live entry raises the streak, a changed digest restarts it at one, a
 /// success clears the shape. Saving also prunes expired entries and
-/// evicts the oldest past the cap.
+/// evicts the oldest past the cap; an outcome that changes nothing skips
+/// the write, so a clean session never touches the disk.
 fn record_at(path: &Path, now: u64, key: &str, failed: bool, digest: &str, preview_text: &str) {
     let mut entries = load(path);
+    let mut changed = failed;
     if failed {
         let old = entries.get(key);
         let live = old
@@ -246,13 +253,17 @@ fn record_at(path: &Path, now: u64, key: &str, failed: bool, digest: &str, previ
             }),
         );
     } else {
-        entries.remove(key);
+        changed = entries.remove(key).is_some();
     }
+    let before = entries.len();
     entries.retain(|_, e| {
         e.get("expires_at")
             .and_then(Value::as_u64)
             .is_some_and(|expires| now < expires)
     });
+    if entries.len() != before {
+        changed = true;
+    }
     while entries.len() > MAX_SHAPES {
         let oldest = entries
             .iter()
@@ -261,11 +272,14 @@ fn record_at(path: &Path, now: u64, key: &str, failed: bool, digest: &str, previ
         match oldest {
             Some(k) => {
                 entries.remove(&k);
+                changed = true;
             }
             None => break,
         }
     }
-    save(path, &entries);
+    if changed {
+        save(path, &entries);
+    }
 }
 
 /// The park verdict: a receipt when the shape's live streak sits at the
