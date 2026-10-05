@@ -172,6 +172,19 @@ The user ruled that the rate-limited Run 0 trials run again before the results s
 - Run 1. Nothing changes. Its top-up already refilled every rate-limited attempt.
 - Every other rule stays, including the Amendment 11 load rule, which also applies to the re-runs.
 
+## Amendment 13 (2026-10-05, the 1302 test reads the error, after the second results commit)
+
+A review of the scorer found that it did not apply Amendment 2 as written. The rule names "a 1302 error in its agent log". The scorer counted any timeout whose agent log held the four characters `1302` anywhere. Those characters turn up in ordinary output: Claude Code's thinking-token counter passes 1302 in most long sessions, and uuids, line numbers, file sizes and timestamps carry them too.
+
+- What the bug did. 91 timeouts were flagged as rate limits across the record and the Amendment 12 retries. 17 carried z.ai's actual error. The other 74 were ordinary timeouts.
+- What else it missed. opencode prints the error as `Rate limit reached for requests` with no code. The substring test missed 7 opencode timeouts that did hit the limit, and graded them as failures.
+- The test now. A timeout is a 1302 exclusion when its agent log carries `Rate limit reached for requests`, the message z.ai sends with code 1302 in every harness's log. `run/score_run0.py` applies it. `HARNESS_FIT_LEGACY_1302=1` restores the old test, so earlier tables stay reproducible.
+- The record. Amendment 4 says a started attempt is never run again and is scored as it stands. So an original attempt stands unless it really hit the limit. That covers 44 of the 54 trials Amendment 12 retried: their originals stand as graded timeouts, and their retries are discarded and reported apart. For the other 10, which really hit the limit, the retry stands.
+- The 7 opencode timeouts. Amendment 12 gives every rate-limited trial one retry. These 7 never had one, so each runs once more in the same job, with the same settings and concurrency 4. A second rate limit stays excluded.
+- When it was set. After the second results were written and read, and before the 7 retries started. At commit time, none of those 7 outcomes existed. run-0.md and decision.md keep both earlier sets of tables, labelled.
+- Run 1. Its rate-limit check already reads `Rate limit reached` in the row's reason, so nothing changes there.
+- Every other rule stays.
+
 ## Scope and limits
 
 One machine, one model, 10 replay tasks, 3 repeats: n is small. Bootstrap intervals at this n are wide, and a difference inside the interval is noise. An arm under 20 graded attempts is underpowered and fires no rule alone. Run 0 and Run 1 grade different task distributions (Terminal-Bench 2 is generic, the replay bank is footnote's own), so arms can differ across runs. The Terminus 2 reference tells a harness effect from a model effect. It does not measure footnote's own loop. The collector is the runner's own history rows. The observe door reads the attempt's own transcript for identity and usage. When the transcript is unreadable, `usage` is null, never zero. A row whose identity reads `unverified` still counts toward attempts but never toward a rule.

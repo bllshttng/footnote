@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Run 0 report numbers: per arm, paired by task, and the cost bases decision.md quotes.
 
-  report_run0.py final   the record as it stands: every job directory in the run workspace
-  report_run0.py first   the record before Amendment 12: each re-run trial swapped back
-                         for the original attempt setaside_run0.py moved to aside-amendment-12/
+  report_run0.py final     the record that decides (Amendment 13): each original attempt
+                           stands unless it really hit the rate limit; then its retry stands
+  report_run0.py first     one pass: every Amendment 12 retry swapped back for the original
+                           attempt setaside_run0.py moved to aside-amendment-12/
+  report_run0.py retried   every Amendment 12 retry standing, as the job directories hold them
+
+With HARNESS_FIT_LEGACY_1302=1, `first` and `retried` reproduce the tables published
+before Amendment 13, which read any "1302" substring as a rate limit.
 
 Prints JSON. The per-arm summary is score_run0's. Pairs are bootstrapped over tasks,
 4,000 resamples, seed 272. Run through `uv run --with pyyaml` from this directory.
@@ -27,15 +32,24 @@ def setaside() -> list:
     return [json.loads(line) for line in SETASIDE.read_text().splitlines()] if SETASIDE.is_file() else []
 
 
+def original(rec: dict) -> Path:
+    return ASIDE / f"run0-{rec['arm']}" / rec["trial"]
+
+
+def really_rate_limited(rec: dict) -> bool:
+    return s.trial_row(rec["arm"], original(rec))["excluded"] == "infra-1302"
+
+
 def trial_dirs(arm: str, mode: str) -> list:
-    """One directory per task. `first` swaps each Amendment 12 re-run for its set-aside original."""
+    """One directory per task, chosen by mode (see the module docstring)."""
     dirs = {}
     for res in sorted((RUNS / f"harness-fit-run0-{arm}").glob("*/result.json")):
         dirs[res.parent.name.split("__")[0]] = res.parent
-    if mode == "first":
-        for rec in setaside():
-            if rec["arm"] == arm:
-                dirs[rec["task"]] = ASIDE / f"run0-{arm}" / rec["trial"]
+    for rec in setaside():
+        if rec["arm"] != arm or mode == "retried":
+            continue
+        if mode == "first" or not really_rate_limited(rec):
+            dirs[rec["task"]] = original(rec)
     return sorted(dirs.values())
 
 
@@ -75,18 +89,29 @@ def main(mode: str) -> int:
         }
     if mode == "final":
         recs = setaside()
-        out["set_aside"] = {arm: {"trials": sum(r["arm"] == arm for r in recs),
-                                  "usd": round(sum(r["usd"] or 0 for r in recs if r["arm"] == arm), 4)}
-                            for arm in ARMS}
+        genuine = [r for r in recs if really_rate_limited(r)]
+        genuine_keys = {(r["arm"], r["task"]) for r in genuine}
+        retry_rows = {(arm, r["task"]): r for arm in ARMS
+                      for r in (s.trial_row(arm, res.parent)
+                                for res in (RUNS / f"harness-fit-run0-{arm}").glob("*/result.json"))}
+        # Two kinds of attempt sit outside the record: a really rate-limited original
+        # (its retry stands), and a retry of a mis-flagged original (the original stands).
+        out["outside_record"] = {
+            arm: {"rate_limited_originals": sum(r["arm"] == arm for r in genuine),
+                  "rate_limited_originals_usd": round(sum(r["usd"] or 0 for r in genuine if r["arm"] == arm), 4),
+                  "discarded_retries": sum(r["arm"] == arm and (arm, r["task"]) not in genuine_keys for r in recs),
+                  "discarded_retries_usd": round(sum(retry_rows[(arm, r["task"])]["usd"] or 0 for r in recs
+                                                     if r["arm"] == arm and (arm, r["task"]) not in genuine_keys), 4)}
+            for arm in ARMS}
         for arm in ("opencode", "claude-code"):
-            out["cost"][arm]["all_spend_with_set_aside_per_pass"] = per_pass(rows[arm], out["set_aside"][arm]["usd"])
-        retried = {(r["arm"], r["task"]) for r in recs}
-        out["retries"] = {arm: {"retried": sum(1 for r in rows[arm] if (arm, r["task"]) in retried),
-                                "now_graded": sum(1 for r in rows[arm] if (arm, r["task"]) in retried and not r["excluded"]),
-                                "1302_again": sum(1 for r in rows[arm] if (arm, r["task"]) in retried
-                                                  and r["excluded"] == "infra-1302"),
-                                "max_load1": max((r["load_max"] or 0 for r in rows[arm] if (arm, r["task"]) in retried),
-                                                 default=None)}
+            o = out["outside_record"][arm]
+            out["cost"][arm]["all_spend_with_outside_record_per_pass"] = per_pass(
+                rows[arm], o["rate_limited_originals_usd"] + o["discarded_retries_usd"])
+        out["retries"] = {arm: {"retried": sum(1 for k in genuine_keys if k[0] == arm),
+                                "graded_on_retry": sum(1 for k in genuine_keys
+                                                       if k[0] == arm and not retry_rows[k]["excluded"]),
+                                "1302_again": sum(1 for k in genuine_keys
+                                                  if k[0] == arm and retry_rows[k]["excluded"] == "infra-1302")}
                           for arm in ARMS}
     json.dump(out, sys.stdout, indent=1)
     print()
@@ -94,7 +119,7 @@ def main(mode: str) -> int:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] not in (["final"], ["first"]):
+    if sys.argv[1:] not in (["final"], ["first"], ["retried"]):
         print(__doc__)
         raise SystemExit(2)
     raise SystemExit(main(sys.argv[1]))

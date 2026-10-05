@@ -144,5 +144,16 @@
     "when_set": "after the first results were written and read, before any re-run started; no re-run outcome existed at commit",
     "run_1": "unchanged; its top-up already refilled every rate-limited attempt",
     "load_rule": "the Amendment 11 load rule applies to the re-runs"
+  },
+  "amendment_13": {
+    "declared_at": "2026-10-05T16:34:00Z",
+    "scope": "the scorer applies Amendment 2 as written: a 1302 exclusion needs z.ai's error, not the characters 1302 anywhere in the log; no grade or decision rule changes",
+    "found_by": "external code review of the scorer on the results PR",
+    "test": "a timeout whose agent log carries 'Rate limit reached for requests' (the message z.ai sends with code 1302 in every harness's log); HARNESS_FIT_LEGACY_1302=1 restores the old substring test",
+    "bug_effect": "91 timeouts flagged across the record and the Amendment 12 retries; 17 carried the error; 74 were ordinary timeouts; 7 opencode timeouts with the error but no code were missed and graded",
+    "record": "an original attempt stands unless it really hit the limit (Amendment 4); 44 of the 54 Amendment 12 originals stand and their retries are discarded and reported apart; for the 10 that really hit the limit the retry stands",
+    "new_retries": "the 7 missed opencode trials each run once more in the same job, settings and concurrency 4; a second rate limit stays excluded",
+    "when_set": "after the second results were written and read, before the 7 retries started; none of those outcomes existed at commit",
+    "run_1": "unchanged; its rate-limit check already reads the row's reason"
   }
 }

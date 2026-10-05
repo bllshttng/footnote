@@ -3,13 +3,18 @@
 
   score_run0.py            -> JSON on stdout (per-arm summary + paired counts + trials)
 
-Rules (README, amendments 1-2): a timeout with a 1302 error in the agent log is
-an infrastructure exclusion, also reported scored. An environment exception is
-an infrastructure exclusion. Reasoning tokens join output. A trial with no
-usage reads unmeasured, never zero.
+Rules (README, amendments 1-2 and 13): a timeout with a 1302 error in the agent
+log is an infrastructure exclusion, also reported scored. An environment
+exception is an infrastructure exclusion. Reasoning tokens join output. A trial
+with no usage reads unmeasured, never zero.
+
+HARNESS_FIT_LEGACY_1302=1 restores the substring test the first results used,
+so those tables stay reproducible (Amendment 13).
 """
 import json
 import math
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,16 +25,21 @@ LOAD = loadlog.samples()
 ARMS = ["claude-code", "opencode", "pi", "terminus-2", "zcode"]
 REF = "terminus-2"
 P = {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03}
+# z.ai's 1302 error carries this message in every harness's log format. A bare
+# "1302" also matches token counters, uuids and line numbers (Amendment 13).
+RATE_LIMIT = re.compile(r"Rate limit reached for requests")
+LEGACY_1302 = os.environ.get("HARNESS_FIT_LEGACY_1302") == "1"
 
 
 def has_1302(trial: Path) -> bool:
     for f in (trial / "agent").rglob("*"):
         if f.is_file() and f.stat().st_size < 200_000_000:
             try:
-                if "1302" in f.read_text(errors="ignore"):
-                    return True
+                text = f.read_text(errors="ignore")
             except OSError:
-                pass
+                continue
+            if ("1302" in text) if LEGACY_1302 else bool(RATE_LIMIT.search(text)):
+                return True
     return False
 
 
