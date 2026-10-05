@@ -373,9 +373,9 @@ fi
 
 if command -v uv >/dev/null 2>&1; then
 
-  # x-0143: name the machine's shape before touching it. uv present means the
+  # Name the machine's shape before touching it. uv present means the
   # astral.sh installer (and its shell-profile edit) never runs here.
-  log "uv found at $(command -v uv); this run touches only the fno tool env (uv tool install) and never edits your shell profile."
+  log "uv found at $(command -v uv); this run touches only the fno tool env and never edits your shell profile."
 
   # Idempotent: already binary-complete at our version -> nothing to do. Require
   # the front door and ALL THREE agent binaries, not just the client: a
