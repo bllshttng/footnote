@@ -197,11 +197,9 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             }
             let from_key = participant_key(from_session, from, registry);
             let to_key = recipient_key(to, registry);
-            let reg_from = if from_session.is_empty() && !from.is_empty() {
-                registry_lookup(registry, from)
-            } else {
-                registry_lookup(registry, &from_key)
-            };
+            // The join reads the RESOLVED key, so a prefix-resolved short id
+            // takes its row's display name, not the raw id (item 3).
+            let reg_from = registry_lookup(registry, &from_key);
             let reg_to = registry_lookup(registry, to);
             // A `fleet:` address is a broadcast group, never an agent (the
             // operator's 2026-10-05 screenshots): it names no participant and
@@ -789,8 +787,8 @@ mod tests {
             json!({"name": "quill", "fno_id": "s-quill", "harness_session_id": "s-quill",
                    "harness": "claude", "liveness": "dead", "status": "exited",
                    "exited_at": "2026-10-01T10:00:00Z"}),
-            json!({"name": "prefix-agent", "fno_id": "sess-f2571a54-full",
-                   "harness_session_id": "sess-f2571a54-full",
+            json!({"name": "prefix-agent", "fno_id": "f2571a54-full",
+                   "harness_session_id": "f2571a54-full",
                    "harness": "claude", "liveness": "alive", "status": "live"}),
         ];
         let root = temp_root("projection");
@@ -894,7 +892,9 @@ mod tests {
                 "Short id ping.",
             )],
         );
-        // An unresolvable leaked fixture reads as Archive, not live-list.
+        // An unresolvable leaked fixture reads as Archive, not live-list. It
+        // mails candor, whose registry row holds no crown scope, so no
+        // scope vote ever names it and the unresolved bucket takes it.
         write_chat(
             &chats,
             "chat-oooooooooooooooo",
@@ -902,7 +902,7 @@ mod tests {
                 "fmail-d1d1d1d1d1d1",
                 "2026-10-01T09:21:00Z",
                 "lead-a",
-                "vellum",
+                "candor",
                 "Fixture leak.",
             )],
         );
@@ -1108,7 +1108,7 @@ mod tests {
         // The short id joins its registry row: one participant, named.
         let prefix_p = participants
             .iter()
-            .find(|p| p.get("key").and_then(Value::as_str) == Some("sess-f2571a54-full"))
+            .find(|p| p.get("key").and_then(Value::as_str) == Some("f2571a54-full"))
             .expect("short id resolves to its row");
         assert_eq!(
             prefix_p.get("name").and_then(Value::as_str),
