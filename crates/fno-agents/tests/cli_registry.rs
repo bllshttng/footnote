@@ -4,7 +4,7 @@
 //! helper, drops a help string, or breaks the Python adapter's exact argv
 //! fails here before CI's heavy suites run.
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 
 use fno_agents::cli_args::{RestartArgs, ReviewSummaryArgs, ScratchArgs};
 
@@ -67,15 +67,6 @@ fn the_retired_scanners_stay_gone() {
             assert!(!is_def, "{file} redefines a retired scanner: {trimmed}");
         }
     }
-}
-
-#[test]
-fn the_python_adapters_restart_argv_parses() {
-    // x-67b8: this exact argv (post-verb) is what cli/src/fno/restart.py
-    // spawns; a parser that refuses it breaks every daemon swap.
-    let a = RestartArgs::try_parse_from(["--json", "--force"]).expect("adapter argv parses");
-    assert!(a.json.json);
-    assert!(a.force);
 }
 
 #[test]

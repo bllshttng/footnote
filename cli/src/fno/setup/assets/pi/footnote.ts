@@ -164,6 +164,25 @@ function synthesizeTranscript(entries: unknown[]): string {
   return lines.length ? lines.join("\n") + "\n" : ""
 }
 
+function lastAssistantText(entries: unknown[]): string {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const message = (entries[i] as { message?: { role?: string; content?: unknown } })?.message
+    if (message?.role !== "assistant") continue
+    const content = Array.isArray(message.content) ? message.content : []
+    const text = content
+      .filter(
+        (p): p is { type: "text"; text: string } =>
+          !!p &&
+          typeof p === "object" &&
+          (p as { type?: string }).type === "text" &&
+          typeof (p as { text?: unknown }).text === "string",
+      )
+      .map((p) => p.text)
+      .join("")
+    if (text) return text
+  }
+  return ""
+}
 // The context text a carrier hook printed: the claude JSON shape's
 // additionalContext, else the raw trimmed stdout. A carrier that answered
 // nothing injects nothing.
@@ -416,6 +435,46 @@ export default function (pi: {
       const read = sm?.buildContextEntries ?? sm?.getBranch
       const entries = read ? (read.call(sm) as unknown[]) : []
       writeFileSync(synth, synthesizeTranscript(entries))
+
+      // Event rules: the Stop-boundary rule table runs through the transport
+      // entry, before the gate, with the same Stop payload shape claude's
+      // stop hook evaluates in-process. A block relays to the session in
+      // place of the gate and the settle ends.
+      const lastText = lastAssistantText(entries)
+      const rulesOut = await runBounded(
+        bin,
+        ["hook", "rules", "--event", "stop"],
+        gateTimeoutMs(),
+        JSON.stringify({
+          session_id: sid,
+          last_assistant_message: lastText,
+          transcript_path: synth,
+          cwd: dir,
+        }),
+      )
+      if (rulesOut) {
+        try {
+          const ruled = JSON.parse(rulesOut) as { decision?: string; reason?: string }
+          if (ruled.decision === "block") {
+            try {
+              pi.appendEntry?.("fno-rules", { state: "blocked", reason: ruled.reason || "" })
+            } catch {
+              // best-effort record
+            }
+            try {
+              pi.sendUserMessage(ruled.reason || "an event rule blocked this stop", {
+                deliverAs: "followUp",
+                triggerTurn: true,
+              })
+            } catch (e: unknown) {
+              console.error(`[footnote] rules relay failed: ${e}`)
+            }
+            return
+          }
+        } catch (parseErr: unknown) {
+          console.error(`[footnote] hook rules unparseable: ${parseErr}`)
+        }
+      }
 
       const out = await runBounded(
         bin,

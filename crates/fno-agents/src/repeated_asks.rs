@@ -149,7 +149,7 @@ fn codex_assistant_text(row: &Value) -> Option<String> {
     None
 }
 
-fn asks_in(reply: &str) -> Vec<String> {
+pub(crate) fn asks_in(reply: &str) -> Vec<String> {
     let mut asks = Vec::new();
     for sentence in sentences(reply) {
         if sentence.trim_start().starts_with('|') {

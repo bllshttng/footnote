@@ -84,7 +84,17 @@ STATE
 }
 cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
 
-make_stub() { cat > "$1"; chmod +x "$1"; }
+# Every stub answers the rules transport with an allow: a leg stubs only the
+# leg it tests, and the hook's rules call must not read as that leg's verdict.
+make_stub() {
+    { printf '%s
+' '#!/usr/bin/env bash'
+      printf '%s
+' 'if [[ "${1:-}" == "hook" ]]; then echo {}; exit 0; fi'
+      cat
+    } > "$1"
+    chmod +x "$1"
+}
 safe_path() { echo "/usr/bin:/bin:/usr/sbin:/sbin"; }
 
 # run_hook <cwd> <stdin_json> [env KEY=VALUE ...] -> sets HOOK_STDOUT, HOOK_RC, HOOK_STDERR
