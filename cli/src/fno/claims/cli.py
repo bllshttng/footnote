@@ -31,14 +31,7 @@ from . import io as _claims_io
 from . import roster as _roster
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
-    ClaimContended,
-    ClaimCorrupted,
-    ClaimGoneAway,
-    ClaimValidationError,
-    ClaimVerdictError,
-    ClaimVerdictUnavailable,
     ClaimState,
-    HolderMismatch,
 )
 from fno.tombstones import tombstone_group_cls
 
@@ -498,40 +491,46 @@ def refresh(
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
-    try:
-        result = _claims_core.refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
-    except HolderMismatch as exc:
-        typer.echo(f"holder mismatch: {exc}", err=True)
-        raise typer.Exit(code=4)
-    except ClaimGoneAway as exc:
-        typer.echo(f"claim missing: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
-    except ClaimCorrupted as exc:
-        typer.echo(f"corrupted claim: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
-        typer.echo(f"native verdict unavailable: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except ClaimContended as exc:
-        # refresh_claim's own contention-retry-exhaustion guard; same exit
-        # code as acquire's, both mean "transient, caller should retry".
-        typer.echo(f"contention error: {exc}", err=True)
-        raise typer.Exit(code=1)
+    return _forward_refresh(key, holder, ttl, json_output)
 
-    if result is None:
-        if json_output:
-            typer.echo(json.dumps({"key": key, "refreshed": False, "reason": "pid_liveness"}))
-        else:
-            typer.echo(f"no-op for PID-liveness claim: {key}")
-        return
 
+def _forward_refresh(
+    key, holder, ttl, json_output,
+) -> None:
+    """Forward to the bundled fno-agents binary, binary-direct. The wave-3
+    port put the leaf's logic in crates/fno-agents/src/claim_cli/refresh.rs
+    (Python owns transport only, per the dual-implementation protocol)."""
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    argv = [key, "--holder", holder]
+    if ttl:
+        argv.extend(("--ttl", ttl))
     if json_output:
-        typer.echo(json.dumps(result.to_yaml_dict()))
-    else:
-        typer.echo(f"refreshed: {key} (new expires_at={result.expires_at})")
+        argv.append("--json")
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno agents claim refresh: the fno-agents binary was not found "
+            "(reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN).",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    # Captured and re-emitted through typer (a CliRunner caller must see it).
+    result = subprocess.run(
+        [str(binary), "claim", "refresh", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        typer.echo(result.stdout.rstrip("\n"))
+    if result.stderr:
+        typer.echo(result.stderr.rstrip("\n"), err=True)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 #: States in which nobody holds the key, so a reader is about to conclude the
