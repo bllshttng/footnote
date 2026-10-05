@@ -258,6 +258,20 @@ fn find_ask_span_id(journal: &Path, key: &str) -> Option<String> {
     None
 }
 
+/// The ask span an `answers_ask:` pointer names. A span id passes through
+/// verbatim; any other reference reads as a bus message id whose row's
+/// endpoints re-derive the ask_key the ask span was minted under. An
+/// unresolvable reference returns None: the caller routes unparented rather
+/// than refusing the routing fact.
+pub fn resolve_ask_span(journal: &Path, reference: &str) -> Option<String> {
+    if reference.starts_with("s-") {
+        return Some(reference.to_string());
+    }
+    let (from, to, body) = read_bus_message(reference)?;
+    let key = ask_key(Some(&from), Some(&to), &body);
+    find_ask_span_id(journal, &key)
+}
+
 fn run_mail_record_with(
     journal: &Path,
     lifecycle: &Path,
@@ -316,6 +330,10 @@ fn run_mail_record_with(
             attrs.insert("ask_key".to_string(), json!(key));
             if let Err(e) = emit_span_to(journal, "ask", &trace, &attrs) {
                 eprintln!("mail-record: ask span skipped: {e}");
+            } else {
+                // The receipt is the id's only way out of the leaf: the
+                // caller surfaces it and the escalation cites it.
+                println!("mail-record: ask span {}", trace.span_id);
             }
         }
     }
@@ -481,6 +499,15 @@ mod tests {
             route["data"]["trace"]["parent_span_id"], ask_data["trace"]["span_id"],
             "route parent is the ask span"
         );
+        // The intake resolver: a span id passes through verbatim, the ask's
+        // bus message id re-derives the same span, an unknown row is None.
+        let span_id = ask_data["trace"]["span_id"].as_str().unwrap();
+        assert_eq!(
+            resolve_ask_span(&journal, span_id).as_deref(),
+            Some(span_id)
+        );
+        assert_eq!(resolve_ask_span(&journal, "m-1").as_deref(), Some(span_id));
+        assert_eq!(resolve_ask_span(&journal, "m-missing"), None);
         // A plain body writes the origin row and nothing else (AC4).
         let plain = MailRecordArgs {
             origin: "operator".into(),

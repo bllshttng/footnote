@@ -138,11 +138,12 @@ def test_mail_origin_event_marks_presumed_human_positively(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/fake/fno-agents")
     monkeypatch.setattr("subprocess.run", fake_run)
     _record_mail_origin(origin="peer", lane="reply", sender="w-1",
-                        body="Approval: X", reply_to="m-1")
+                        target_session="lead-1", body="Approval: X", reply_to="m-1")
     assert seen["argv"][1] == "mail-record"
     # The leaf parses flag/value pairs, so each value rides its own token.
     for flag, value in (("--origin", "peer"), ("--lane", "reply"),
-                        ("--sender", "w-1"), ("--reply-to", "m-1")):
+                        ("--sender", "w-1"), ("--target-session", "lead-1"),
+                        ("--reply-to", "m-1")):
         i = seen["argv"].index(flag)
         assert seen["argv"][i + 1] == value
     assert seen["input"] == "Approval: X"

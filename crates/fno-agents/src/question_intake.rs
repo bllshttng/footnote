@@ -487,16 +487,26 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
     let mut route_span_id: Option<String> = None;
     let mut pending_route: Option<(Trace, Map<String, Value>)> = None;
-    if let Some(ask_span) = parsed
+    if let Some(ask_ref) = parsed
         .answers_ask
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        // A span id parents verbatim; any other reference names the ask's
+        // bus message, whose endpoints re-derive the ask span. An
+        // unresolvable pointer still routes: the lead's escalation is the
+        // fact, only parentless.
+        let ask_span = crate::decision_trace::resolve_ask_span(&journal_path, ask_ref);
+        if ask_span.is_none() {
+            eprintln!(
+                "outstanding: answers_ask '{ask_ref}' names no ask span; the route records unparented"
+            );
+        }
         let trace = Trace {
             trace_id: node.unwrap_or("none").to_string(),
             span_id: new_span_id(),
-            parent_span_id: Some(ask_span.to_string()),
+            parent_span_id: ask_span,
             actor_session: req.session_id.clone(),
             actor_kind: actor_kind_in(home, req.session_id.as_deref(), "question"),
             comms: "question",
@@ -511,10 +521,17 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         if let Some(rec) = parsed.recommend {
             attrs.insert("recommendation".to_string(), json!(rec.to_string()));
         }
-        // Minted now, emitted after the question row lands: a failed
-        // question write must not leave an orphan route span.
-        route_span_id = Some(trace.span_id.clone());
         pending_route = Some((trace, attrs));
+    }
+    // The route lands BEFORE the question row: the trace query reads in ts
+    // order, and a parent must not postdate its child. A failed route emit
+    // leaves the question parentless rather than dangling; a failed question
+    // write below leaves the route orphaned, reported on stderr.
+    if let Some((trace, attrs)) = pending_route.take() {
+        match emit_span_to(&journal_path, "route", &trace, &attrs) {
+            Ok(()) => route_span_id = Some(trace.span_id.clone()),
+            Err(e) => eprintln!("outstanding: route span skipped: {e}"),
+        }
     }
 
     let mut data = Map::new();
@@ -642,12 +659,6 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         answer.refusal = Some("write".to_string());
         answer.exit_code = 1;
         return answer;
-    }
-    // The question row is durable: now the route span it parents.
-    if let Some((trace, attrs)) = pending_route {
-        if let Err(e) = emit_span_to(&journal_path, "route", &trace, &attrs) {
-            eprintln!("outstanding: route span skipped: {e}");
-        }
     }
 
     // Machine-wide recall index: best-effort, reported.
@@ -1177,6 +1188,42 @@ stops
             question_row["data"]["trace"]["parent_span_id"],
             route["data"]["trace"]["span_id"]
         );
+        // The parent posts before its child: journal order is ts order, so
+        // the documented ORDER BY ts query folds parents first.
+        let route_at = lines
+            .iter()
+            .position(|l| l["data"]["span_kind"] == "route")
+            .expect("route positioned");
+        let question_at = lines
+            .iter()
+            .position(|l| {
+                l["type"] == "operator_question"
+                    && l["data"]["trace"]["parent_span_id"] == route["data"]["trace"]["span_id"]
+            })
+            .expect("the routed question positioned");
+        assert!(route_at < question_at, "route precedes its question");
+        // An unresolvable pointer still routes, only parentless: the
+        // escalation is the fact.
+        let mut r4 = req(
+            &question.replace(
+                "why_user: a product or taste call",
+                "why_user: a product or taste call\nanswers_ask: m-nope",
+            ),
+            &root,
+        );
+        r4.node = Some("x-bbbb".to_string());
+        let answer4 = run_intake(&r4, &home);
+        assert_eq!(answer4.exit_code, 0, "lines: {:?}", answer4.lines);
+        let orphan = journal_text(&root)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|l| {
+                l["data"]["span_kind"] == "route"
+                    && l["data"]["trace"]["trace_id"] == "x-bbbb"
+                    && l["data"]["trace"]["parent_span_id"].is_null()
+            })
+            .expect("the unparented route landed");
+        assert_eq!(orphan["data"]["route"], "escalate");
         // AC7: `class: cheap` refuses with exit 2, names the six values,
         // and writes no row.
         let mut r3 = req(
@@ -1194,9 +1241,10 @@ stops
         for value in crate::decision_trace::DECISION_CLASSES {
             assert!(message.contains(value), "names {value}: {message}");
         }
-        // Only the three earlier rows sit in the journal; the refusal wrote
-        // none.
-        assert_eq!(journal_text(&root).lines().count(), 3);
+        // Only the five earlier rows sit in the journal: three from before
+        // the AC7 case, plus the r4 route and question the unparented route
+        // wrote. The refusal wrote none.
+        assert_eq!(journal_text(&root).lines().count(), 5);
     }
 
     #[test]

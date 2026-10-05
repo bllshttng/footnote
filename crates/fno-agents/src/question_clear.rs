@@ -128,6 +128,30 @@ mod tests {
             .expect("a decision row landed");
         assert_eq!(decision_row["data"]["trace"]["parent_span_id"], "q-open");
         assert_eq!(decision_row["data"]["trace"]["trace_id"], "x-1");
+        // A user-kind decision keeps actor_session absent: decided_by is an
+        // attested human name, never a session.
+        assert!(decision_row["data"]["trace"]["actor_session"].is_null());
+        assert_eq!(decision_row["data"]["trace"]["actor_kind"], "user");
+        // A lead authority keeps its session: the same rule populates the
+        // field from proven session identity.
+        let mut agent_req = request(&tmp, "q-open2", Some("ship it"));
+        agent_req
+            .provenance
+            .as_object_mut()
+            .expect("provenance is an object")
+            .insert("authority_source".into(), json!("crown"));
+        seed_question(
+            &agent_req,
+            &ask("q-open2", "which lane?", None, Some("x-1")),
+        );
+        let agent_result = run_clear(&agent_req);
+        assert_eq!(agent_result.exit_code, 0, "{:?}", agent_result.lines);
+        let agent_row = rows(&agent_req.journal_path, &["operator_decision"])
+            .into_iter()
+            .find(|r| r["data"]["question_id"] == "q-open2")
+            .expect("the agent decision landed");
+        assert_eq!(agent_row["data"]["trace"]["actor_kind"], "lead");
+        assert_eq!(agent_row["data"]["trace"]["actor_session"], "test-agent");
         assert_eq!(index.len(), 1);
         assert_eq!(index[0]["data"]["question_id"], "q-open");
         let decisions = graph_decisions(&req);
@@ -1301,22 +1325,31 @@ fn make_decision(
     decision.insert("decision_id".into(), json!(&did));
     // The answer span: the decision row IS the span, span_id = decision_id,
     // parented at the question it answers, traced to the question's node.
+    let actor_kind = actor_kind_from_authority(
+        req.provenance
+            .get("authority_source")
+            .and_then(Value::as_str),
+    );
     decision.insert(
         "trace".into(),
         serde_json::to_value(&Trace {
             trace_id: node.unwrap_or("none").to_string(),
             span_id: did,
             parent_span_id: Some(qid.to_string()),
-            actor_session: req
-                .provenance
-                .get("decided_by")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            actor_kind: actor_kind_from_authority(
+            // actor_session carries a canonical harness session only: a
+            // user-kind decision's decided_by is an attested human name, not
+            // a session, so the trace keeps it absent for the attended
+            // terminal (decision-record.md, "Which field a reader can
+            // trust").
+            actor_session: if actor_kind == "user" {
+                None
+            } else {
                 req.provenance
-                    .get("authority_source")
-                    .and_then(Value::as_str),
-            ),
+                    .get("decided_by")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            },
+            actor_kind,
             comms: "question",
             recipient_session: None,
             recipient_kind: Some("user"),

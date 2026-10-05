@@ -1014,7 +1014,8 @@ def cmd_reply(
     body_text = _read_body(body, body_file, body_arg)
     _vet_body(body_text, allow_reason=style_exception)
     classified_origin = classify_origin()
-    _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project,
+    from fno.agents.self_stamp import stamp_from
+    _record_mail_origin(origin=classified_origin, lane="reply", sender=stamp_from(from_project),
                         body=body_text, reply_to=to_msg)
     mail_origin: str | None = (
         None if classified_origin == "unknown" else classified_origin
@@ -3502,11 +3503,11 @@ def cmd_send(
             else "king" if to_king
             else "peer"
         ),
-        sender=from_name,
-        # Under --to-self the positional parks the payload, so `name` is not
-        # a handle at this point; recording it wrote the payload into the
-        # audit row. The self target resolves below.
-        target_session=name if raw and not to_self else None, body=message,
+        # The ask key hashes the bus endpoints; record what the row will
+        # carry. --to-self/--to-project park the body in the positional.
+        sender=stamp_from(from_name),
+        target_session=None if (to_self or to_project) else name,
+        body=message,
     )
     # Unknown is an explicit audit result, not a wire authority. Legacy
     # carriers omit the attribute so a law gate cannot mistake silence for an

@@ -783,16 +783,25 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     let journal = project_events_journal();
     let mut route_span_id: Option<String> = None;
     let mut pending_route: Option<(Trace, Map<String, Value>)> = None;
-    if let Some(ask) = door
+    if let Some(ask_ref) = door
         .answers_ask
         .as_deref()
         .map(str::trim)
         .filter(|a| !a.is_empty())
     {
+        // A span id parents verbatim; any other reference names the ask's
+        // bus message, whose endpoints re-derive the ask span. Unresolvable,
+        // the route still rides, only parentless.
+        let ask = crate::decision_trace::resolve_ask_span(&journal, ask_ref);
+        if ask.is_none() {
+            eprintln!(
+                "decide: answers-ask '{ask_ref}' names no ask span; the route records unparented"
+            );
+        }
         let trace = Trace {
             trace_id: subject.clone(),
             span_id: new_span_id(),
-            parent_span_id: Some(ask.to_string()),
+            parent_span_id: ask,
             actor_session: caller_session.clone(),
             actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
             comms: "mail",
@@ -843,6 +852,16 @@ decision index. Run `fno backlog decide-reindex` before retrying."
         })
         .unwrap_or_default();
     }
+    // The route rides ahead of the row: the trace query reads in ts order and
+    // a parent must not postdate its child. A failed route emit leaves the
+    // row parentless rather than dangling; a failed row write below leaves
+    // the route orphaned, reported on stderr.
+    if let Some((trace, attrs)) = pending_route.take() {
+        match emit_span_to(&journal, "route", &trace, &attrs) {
+            Ok(()) => route_span_id = Some(trace.span_id.clone()),
+            Err(e) => eprintln!("decide: route span skipped: {e}"),
+        }
+    }
     if let Some(rows) = &read_rows {
         data["reads"] = json!(rows);
     }
@@ -853,13 +872,8 @@ decision index. Run `fno backlog decide-reindex` before retrying."
         eprintln!("decide: failed to record: {e}");
         return 1;
     }
-    // The row is durable: now the hops it parents. Emitting here keeps a
-    // failed decision write from leaving orphan spans behind it.
-    if let Some((trace, attrs)) = pending_route {
-        if let Err(e) = emit_span_to(&journal, "route", &trace, &attrs) {
-            eprintln!("decide: route span skipped: {e}");
-        }
-    }
+    // The row is durable: now the correction hop it parents (the route rode
+    // ahead of the row above).
     if let Some(trace) = pending_correction {
         if let Err(e) = emit_span_to(&journal, "correction", &trace, &Map::new()) {
             eprintln!("decide: correction span skipped: {e}");
@@ -1248,6 +1262,11 @@ mod tests {
         let (rows, _) = all_decision_rows().expect("reads");
         let row = rows.last().expect("a row landed");
         assert_eq!(row["trace"]["parent_span_id"], json!(parent));
+        // The route rides ahead of the row: ts order folds the parent first.
+        assert!(
+            route["ts"].as_str().unwrap() <= row["ts"].as_str().unwrap(),
+            "route precedes the row in ts order"
+        );
     }
 
     #[test]
