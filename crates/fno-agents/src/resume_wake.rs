@@ -194,8 +194,8 @@ impl ViewportIo for ShellViewportIo {
 /// but whose thread is loaded in the app-server gets the message over
 /// `turn/start` and attaches a `--remote unix://` viewport. `None` means this
 /// route does not answer and the caller's claim / pane / exec paths run
-/// unchanged - a live pane, a dead pane whose thread is not loaded, and any
-/// unmeasurable verdict all fall through.
+/// unchanged - a live pane, a dead pane whose thread is not loaded and no
+/// daemon can be ensured, and any unmeasurable verdict all fall through.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn codex_resume_route(
     name: &str,
@@ -209,16 +209,21 @@ pub(crate) fn codex_resume_route(
     probe: &dyn Fn(&str, u64) -> PaneProbe,
     loaded: &dyn Fn() -> Result<Vec<String>, &'static str>,
     io: &dyn ViewportIo,
+    ensure_daemon: &dyn Fn() -> bool,
 ) -> Option<i32> {
     if entry.get("harness").and_then(Value::as_str) != Some("codex") {
         return None;
     }
     // A thread row delivers over the daemon, never a terminal exec:
-    // `codex resume <id>` needs a tty and a headless caller has none.
+    // `codex resume <id>` needs a tty and a headless caller has none. After a
+    // reboot the daemon is down too, so a failed delivery gets one ensure +
+    // retry before the caller's failure stands.
     if entry.get("substrate").and_then(Value::as_str) == Some("thread") {
-        return Some(run_codex_thread_delivery(
-            name, session_id, message, cwd, home,
-        ));
+        let mut code = run_codex_thread_delivery(name, session_id, message, cwd, home);
+        if code != 0 && ensure_daemon() {
+            code = run_codex_thread_delivery(name, session_id, message, cwd, home);
+        }
+        return Some(code);
     }
     let mux = entry.get("mux").and_then(|m| {
         Some(state::MuxRef {
@@ -230,7 +235,15 @@ pub(crate) fn codex_resume_route(
     if mux.is_some() {
         let verdict =
             crate::lane_heal::heal_dead_pane_binding(home, session_id, false, probe, loaded);
-        if verdict.verdict == "dead-pane-loaded" {
+        if verdict.verdict == "dead-pane-loaded"
+            || (verdict.verdict == "dead-pane" && ensure_daemon())
+        {
+            // The not-loaded arm is the reboot gap: the daemon boot (or the
+            // wake's own inject) resumes the thread from its rollout, a
+            // crowned row's turn re-asserts the recorded full-access policy,
+            // and the viewport keeps the row on the mux - the terminal-exec
+            // fallback would strand the thread outside the daemon with the
+            // rollout's narrowed sandbox.
             route = Some(wake_loaded_thread(
                 name,
                 session_id,
@@ -394,6 +407,15 @@ pub(crate) fn codex_resume_wake_route(
         let threads = rt.block_on(crate::codex_inject::discover_loaded_threads())?;
         Ok(threads.into_iter().map(|t| t.session_id).collect())
     };
+    // Positive health, then boot: the socket file outlives the daemon, so a
+    // probe alone cannot prove the wake can reach the thread. Only the
+    // not-loaded arms consult this - a loaded thread already answers.
+    let ensure_daemon = || {
+        let sock = crate::codex_inject::codex_app_server_socket_path();
+        crate::codex_inject::probe_codex_app_server(&sock)
+            || (crate::codex_inject::ensure_codex_daemon().is_ok()
+                && crate::codex_inject::probe_codex_app_server(&sock))
+    };
     codex_resume_route(
         name,
         entry,
@@ -406,6 +428,7 @@ pub(crate) fn codex_resume_wake_route(
         &crate::daemon::run_mux_pane_probe,
         &loaded,
         &ShellViewportIo,
+        &ensure_daemon,
     )
 }
 
@@ -2191,8 +2214,14 @@ mod tests {
         AgentsHome::at(dir)
     }
 
+    /// The wake route answers whenever the daemon can reach the thread: the
+    /// loaded arm (the original gate), the not-loaded arm once the daemon is
+    /// ensured (the reboot gap, where the crowned row's turn re-asserts the
+    /// recorded full-access policy), and the launch-failure arm rebinds the
+    /// row to the thread lane. The terminal-exec fallback would strand the
+    /// thread outside the daemon under the rollout's narrowed sandbox.
     #[test]
-    fn a_loaded_thread_wakes_over_the_daemon_and_attaches_a_remote_viewport() {
+    fn a_crowned_resume_wakes_over_the_daemon_whether_loaded_or_not() {
         let _guard = crate::path_test_guard();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -2201,11 +2230,13 @@ mod tests {
         let daemon = rt.block_on(async {
             crate::codex_fake_daemon::FakeDaemon::start(crate::codex_fake_daemon::Behavior::quick())
         });
+        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
+        let entry = codex_pane_entry_json();
+
+        // Arm A: the thread is loaded - the original wake + viewport + rebind.
         let home = tmp_home("wake-hp");
         push_codex_pane_row(&home, "w1", "sess-1");
-        let entry = codex_pane_entry_json();
         let io = ScriptedViewport::new("idle codex tui");
-        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
         let loaded_ok = || Ok(vec!["sess-1".to_string()]);
         let code = codex_resume_route(
             "w1",
@@ -2219,6 +2250,7 @@ mod tests {
             &absent,
             &loaded_ok,
             &io,
+            &|| false,
         )
         .expect("the wake route must answer");
         assert_eq!(code, 0);
@@ -2227,23 +2259,112 @@ mod tests {
             .expect("turn/start must have run");
         assert_eq!(params["threadId"], "sess-1");
         assert_eq!(params["input"][0]["text"], "continue");
-        let launched = io.launched.lock().unwrap();
-        assert_eq!(launched.len(), 1, "one viewport launch");
-        let joined = launched[0].join(" ");
-        assert!(joined.contains("resume"), "attach form resumes: {joined}");
-        assert!(joined.contains("--remote"), "attach is --remote: {joined}");
-        assert!(
-            joined.contains("unix://"),
-            "attach targets the daemon: {joined}"
-        );
-        assert!(
-            !joined.contains("'-c'"),
-            "no client -c grant rides (the fence's sh -c is not one): {joined}"
-        );
+        {
+            let launched = io.launched.lock().unwrap();
+            assert_eq!(launched.len(), 1, "one viewport launch");
+            let joined = launched[0].join(" ");
+            assert!(joined.contains("resume"), "attach form resumes: {joined}");
+            assert!(joined.contains("--remote"), "attach is --remote: {joined}");
+            assert!(
+                joined.contains("unix://"),
+                "attach targets the daemon: {joined}"
+            );
+            assert!(
+                !joined.contains("'-c'"),
+                "no client -c grant rides (the fence's sh -c is not one): {joined}"
+            );
+        }
         let row = read_row(&home, "sess-1").unwrap();
         let mux = row.mux.expect("the row rebinds to the new pane");
         assert_eq!(mux.pane_id, 2301);
         assert!(row.pid.is_none());
+        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
+
+        // Arm B: the reboot gap - the pane is dead and the thread is NOT
+        // loaded, but the ensure arm answers. A crowned row's wake carries
+        // the recorded dangerFullAccess policy, and the row keeps its mux.
+        let home = tmp_home("wake-reboot");
+        push_codex_pane_row(&home, "w1", "sess-1");
+        state::update_registry(&home.registry_json(), |r| {
+            if let Some(row) = r.entries.iter_mut().find(|e| e.name == "w1") {
+                row.sandbox_posture = Some("danger-full-access".to_string());
+            }
+        })
+        .unwrap();
+        let io = ScriptedViewport::new("idle codex tui");
+        let loaded_empty = || Ok(Vec::new());
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", home.registry_json().parent().unwrap());
+        let code = codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            Some("continue"),
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_empty,
+            &io,
+            &|| true,
+        )
+        .expect("the ensured-daemon wake route must answer");
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        assert_eq!(code, 0);
+        let turn = daemon
+            .received()
+            .iter()
+            .find(|frame| frame.get("method").and_then(Value::as_str) == Some("turn/start"))
+            .and_then(|frame| frame.get("params").cloned())
+            .expect("the wake turn ran");
+        assert_eq!(turn["threadId"], "sess-1");
+        assert_eq!(
+            turn["sandboxPolicy"],
+            serde_json::json!({"type": "dangerFullAccess"}),
+            "a crowned row's wake re-asserts the crowned policy"
+        );
+        {
+            let launched = io.launched.lock().unwrap();
+            assert_eq!(launched.len(), 1, "one viewport launch");
+            let joined = launched[0].join(" ");
+            assert!(
+                joined.contains("--remote") && joined.contains("unix://"),
+                "attach targets the daemon: {joined}"
+            );
+        }
+        let row = read_row(&home, "sess-1").unwrap();
+        let mux = row.mux.expect("the row rebinds to the new pane");
+        assert_eq!(mux.pane_id, 2301);
+        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
+
+        // Arm C: the viewport launch fails after delivery - the wake still
+        // counts, and the row rebinds to the thread lane so sends land.
+        let home = tmp_home("wake-launchfail");
+        push_codex_pane_row(&home, "w1", "sess-1");
+        let mut io = ScriptedViewport::new("idle");
+        io.fail_launch = true;
+        let code = codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            Some("go"),
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_ok,
+            &io,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let row = read_row(&home, "sess-1").unwrap();
+        assert!(row.mux.is_none());
         drop(daemon);
         std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
     }
@@ -2271,6 +2392,7 @@ mod tests {
             &present,
             &loaded_ok,
             &io,
+            &|| false,
         )
         .is_none());
         assert!(codex_resume_route(
@@ -2285,6 +2407,7 @@ mod tests {
             &absent,
             &loaded_ok,
             &io,
+            &|| false,
         )
         .is_none());
         assert!(codex_resume_route(
@@ -2299,6 +2422,7 @@ mod tests {
             &absent,
             &loaded_err,
             &io,
+            &|| false,
         )
         .is_none());
         assert!(io.launched.lock().unwrap().is_empty());
@@ -2334,6 +2458,7 @@ mod tests {
             &absent,
             &loaded_ok,
             &io,
+            &|| false,
         )
         .unwrap();
         assert_eq!(code, 0);
@@ -2651,45 +2776,6 @@ mod tests {
         );
         assert_eq!(code, Some(0));
         assert_eq!(injects.borrow().len(), 2);
-    }
-
-    #[test]
-    fn a_failed_viewport_launch_still_delivers_and_rebinds() {
-        let _guard = crate::path_test_guard();
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let daemon = rt.block_on(async {
-            crate::codex_fake_daemon::FakeDaemon::start(crate::codex_fake_daemon::Behavior::quick())
-        });
-        let home = tmp_home("wake-launchfail");
-        push_codex_pane_row(&home, "w1", "sess-1");
-        let entry = codex_pane_entry_json();
-        let mut io = ScriptedViewport::new("idle");
-        io.fail_launch = true;
-        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
-        let loaded_ok = || Ok(vec!["sess-1".to_string()]);
-        let code = codex_resume_route(
-            "w1",
-            &entry,
-            "sess-1",
-            Some("go"),
-            "/tmp/x",
-            "w1",
-            &[],
-            &home,
-            &absent,
-            &loaded_ok,
-            &io,
-        )
-        .unwrap();
-        assert_eq!(code, 0);
-        assert!(daemon.first_params("turn/start").is_some());
-        let row = read_row(&home, "sess-1").unwrap();
-        assert!(row.mux.is_none());
-        drop(daemon);
-        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
     }
 
     fn call_live_claude_route(
