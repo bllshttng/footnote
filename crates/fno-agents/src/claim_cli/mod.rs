@@ -9,6 +9,7 @@
 //! Python leaf (`tests/claim_acquire_parity.rs`) are the contract.
 
 pub mod acquire;
+pub mod refresh;
 pub mod release;
 
 use serde_json::Value;
