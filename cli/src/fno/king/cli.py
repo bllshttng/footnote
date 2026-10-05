@@ -31,9 +31,6 @@ def _refuse(msg: str) -> NoReturn:
     raise typer.Exit(2)
 
 
-EVENTS_PATH = ".fno/events.jsonl"
-
-
 def _emit_cancel_signal(path: Path, scope: str) -> None:
     """Record a king cancel after the sentinel is safely on disk."""
     try:
@@ -812,13 +809,14 @@ def board_cmd(
 
     if last_run:
         from fno.king.state import last_run_is_fresh, parse_window
+        from fno.paths import project_events_json
 
         try:
             window_s = parse_window(since)
         except ValueError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(2) from exc
-        fresh = last_run_is_fresh(Path(EVENTS_PATH), since_s=window_s)
+        fresh = last_run_is_fresh(project_events_json(), since_s=window_s)
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
