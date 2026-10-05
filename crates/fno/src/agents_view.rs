@@ -184,6 +184,10 @@ pub struct RegistryAgent {
     pub context_used_pct: Option<u8>,
     pub context_tokens: Option<(u64, u64)>,
     pub context_measured_at: Option<u64>,
+    /// The registry row's cumulative `(tool_calls, tool_errors)` pair the
+    /// daemon's tail scan writes; `None` before the first scan (or for a
+    /// harness with no readable transcript).
+    pub tool_counts: Option<(u64, u64)>,
     pub started_at: Option<u64>,
     pub mail_unread: Option<u32>,
     pub node: Option<String>,
@@ -2259,6 +2263,10 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 .get("context_measured_at")
                 .and_then(|v| v.as_str())
                 .and_then(rfc3339_like_to_secs),
+            tool_counts: row
+                .get("tool_calls")
+                .and_then(|v| v.as_u64())
+                .zip(row.get("tool_errors").and_then(|v| v.as_u64())),
             started_at: row
                 .get("created_at")
                 .and_then(|v| v.as_str())

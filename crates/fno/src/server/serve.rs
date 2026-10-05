@@ -61,6 +61,7 @@ pub(super) async fn serve(
         ctx_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
         truth_seq: 0,
+        activity_rings: HashMap::new(),
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,

@@ -9,6 +9,72 @@ use crate::proto::{AgentRow, AgentRowReceipt};
 
 use super::*;
 
+/// One row's tool-activity ring: the server samples the registry row's
+/// cumulative `(calls, errors)` pair on a 5s gate as fresh row sets arrive,
+/// pushing each closed interval's delta. The client only draws.
+#[derive(Default)]
+pub(super) struct ActivityRing {
+    /// The last sample's instant; `None` until the first due tick.
+    last: Option<std::time::Instant>,
+    /// The cumulative pair the last pushed cell covered. A not-yet-due tick
+    /// does not touch it, so the next due sample counts the whole gap as
+    /// one interval.
+    pushed: (u64, u64),
+    cells: std::collections::VecDeque<(u8, u8)>,
+}
+
+/// The ring cap and the sample gate: 8 intervals, at most one per 5s.
+pub(super) const ACTIVITY_CELLS: usize = 8;
+const ACTIVITY_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const ACTIVITY_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The row identity a ring rides: the claude transcript uuid where one
+/// exists, else the harness session id, else the label - the same key the
+/// tail pass and the truth probe join on.
+fn activity_key(a: &RegistryAgent) -> String {
+    a.claude_session_uuid
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| a.harness_session_id.clone())
+        .unwrap_or_else(|| a.name.clone())
+}
+
+/// The ring sampler, free so the gate math is testable without a `Core`:
+/// at most one cell per row per [`ACTIVITY_EVERY`]; a row the batch stops
+/// naming keeps its ring, and rings with no sample in ten minutes drop.
+fn sample_rings(
+    rings: &mut HashMap<String, ActivityRing>,
+    rows: &[RegistryAgent],
+    now: std::time::Instant,
+) {
+    rings.retain(|_, ring| {
+        ring.last
+            .is_none_or(|t| now.duration_since(t) < ACTIVITY_IDLE)
+    });
+    for a in rows {
+        let Some((calls, errors)) = a.tool_counts else {
+            continue;
+        };
+        let ring = rings.entry(activity_key(a)).or_default();
+        if ring
+            .last
+            .is_some_and(|t| now.duration_since(t) < ACTIVITY_EVERY)
+        {
+            continue;
+        }
+        ring.last = Some(now);
+        let cell = (
+            calls.saturating_sub(ring.pushed.0).min(u8::MAX as u64) as u8,
+            errors.saturating_sub(ring.pushed.1).min(u8::MAX as u64) as u8,
+        );
+        ring.pushed = (calls, errors);
+        ring.cells.push_back(cell);
+        while ring.cells.len() > ACTIVITY_CELLS {
+            ring.cells.pop_front();
+        }
+    }
+}
+
 /// Whether two cwd paths are checkouts of the SAME project:
 /// equal leaves, equal parents (sibling fno worktrees,
 /// `<base>/<repo>/<name>`), or one path's parent carries the other's leaf
@@ -39,6 +105,22 @@ pub(super) fn same_project(a: &str, b: &str) -> bool {
 }
 
 impl Core {
+    /// Sample every counted row's cumulative pair as a fresh row set lands:
+    /// at most one cell per [`ACTIVITY_EVERY`], so a 1s registry poll over a
+    /// 5s daemon scan reads one interval per scan. Rows the batch stopped
+    /// naming age out after ten idle minutes.
+    pub(crate) fn sample_activity(&mut self, rows: &[RegistryAgent]) {
+        sample_rings(&mut self.activity_rings, rows, std::time::Instant::now());
+    }
+
+    /// The served interval row for one agent: `None` when the row carries no
+    /// counts (no readable transcript), an empty ring reads as waiting.
+    pub(crate) fn activity_of(&self, a: &RegistryAgent) -> Option<Vec<(u8, u8)>> {
+        self.activity_rings
+            .get(&activity_key(a))
+            .map(|r| r.cells.iter().copied().collect())
+    }
+
     pub(crate) fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
@@ -199,6 +281,7 @@ impl Core {
                                 compaction_count: self
                                     .truth_reading(a)
                                     .and_then(|t| t.compaction_count),
+                                activity: self.activity_of(a),
                                 resumable: false,
                                 no_pane_reason: None,
                                 // A registry-hosted pane's badge is its primary
@@ -254,6 +337,7 @@ impl Core {
                                 session_cost_cents: None,
                                 session_tokens: None,
                                 compaction_count: None,
+                                activity: None,
                                 started_at: None,
                                 mail_unread: None,
                                 node: None,
@@ -393,6 +477,7 @@ impl Core {
                         session_cost_cents: self.truth_cost(a).0,
                         session_tokens: self.truth_cost(a).1,
                         compaction_count: self.truth_reading(a).and_then(|t| t.compaction_count),
+                        activity: self.activity_of(a),
                         resumable,
                         no_pane_reason: if detached_live {
                             Some(AgentNoPaneReason::LivePaneless)
@@ -480,6 +565,7 @@ impl Core {
                         session_cost_cents: self.truth_cost(a).0,
                         session_tokens: self.truth_cost(a).1,
                         compaction_count: self.truth_reading(a).and_then(|t| t.compaction_count),
+                        activity: self.activity_of(a),
                         resumable: self.row_resumable_in_session(a),
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
@@ -611,6 +697,7 @@ impl Core {
                 session_cost_cents: None,
                 session_tokens: None,
                 compaction_count: None,
+                activity: None,
                 started_at: None,
                 mail_unread: None,
                 node: None,
@@ -706,5 +793,56 @@ impl Core {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod activity_ring_tests {
+    use super::*;
+
+    fn row(name: &str, sid: &str, counts: Option<(u64, u64)>) -> RegistryAgent {
+        let mut a = RegistryAgent::default();
+        a.name = name.into();
+        a.harness_session_id = Some(sid.into());
+        a.tool_counts = counts;
+        a
+    }
+
+    /// One cell per 5s gate: an immediate re-sample is gated out, a later
+    /// sample over unchanged cumulative counts reads an idle interval, and
+    /// the ring caps at eight with the oldest sliding out.
+    #[test]
+    fn the_ring_samples_one_cell_per_gate_and_caps_at_eight() {
+        let t = std::time::Instant::now();
+        let mut rings = HashMap::new();
+        let rows = vec![row("w", "sess-w", Some((10, 2)))];
+        sample_rings(&mut rings, &rows, t);
+        sample_rings(&mut rings, &rows, t + std::time::Duration::from_secs(1));
+        sample_rings(&mut rings, &rows, t + std::time::Duration::from_secs(6));
+        let ring = rings.get("sess-w").expect("the counted row holds a ring");
+        assert_eq!(ring.cells.len(), 2, "the 1s re-sample was gated out");
+        assert_eq!(ring.cells[0], (10, 2));
+        assert_eq!(ring.cells[1], (0, 0), "unchanged counts read idle");
+        // Samples past the gate, each with a grown cumulative count: the
+        // ninth cell pushes the oldest out, and eight remain.
+        for k in 3..=9 {
+            let rows = vec![row("w", "sess-w", Some((10 + k, 2 + k)))];
+            sample_rings(&mut rings, &rows, t + std::time::Duration::from_secs(k * 6));
+        }
+        let ring = rings.get("sess-w").unwrap();
+        assert_eq!(ring.cells.len(), 8, "the ring caps at eight");
+        assert_ne!(ring.cells[0], (10, 2), "the first cell slid out");
+        assert_eq!(ring.cells[7], (1, 1), "the newest cell carries k=9's delta");
+    }
+
+    /// A row with no counts (no readable transcript) never enters a ring:
+    /// absence on the wire, never a fabricated flat line.
+    #[test]
+    fn a_row_without_counts_never_enters_a_ring() {
+        let t = std::time::Instant::now();
+        let mut rings = HashMap::new();
+        let rows = vec![row("bare", "sess-bare", None)];
+        sample_rings(&mut rings, &rows, t);
+        assert!(rings.is_empty());
     }
 }

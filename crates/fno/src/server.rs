@@ -87,6 +87,7 @@ mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
 mod row_set;
+use self::row_set::ActivityRing;
 mod serve;
 mod session_guard;
 mod shutdown_capture;
@@ -1591,6 +1592,10 @@ pub(crate) struct Core {
     /// a message whose `seq` is not newer is dropped rather than allowed to
     /// overwrite a fresher map with a stale one.
     truth_seq: u64,
+    /// The per-card tool-activity ring: one row of up to 8 `(calls, failed)`
+    /// intervals per row identity, sampled from the registry row's cumulative
+    /// counts on a 5s gate as fresh row sets arrive. The client only draws.
+    activity_rings: HashMap<String, ActivityRing>,
     /// Latest board-ordered work-queue cards, from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
@@ -12364,6 +12369,11 @@ impl Core {
                         self.portal_noticed = true;
                     }
                 }
+                // The activity rings sample here, where fresh registry rows
+                // land: a registry write moves the stamp, so the pass fires
+                // at the daemon's scan cadence, and the 5s gate turns that
+                // into at most one interval per scan.
+                self.sample_activity(&rows);
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;

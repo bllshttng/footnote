@@ -370,7 +370,8 @@ fn default_true() -> bool {
 /// v104 adds `AgentRow.compaction_count`; v105 adds addressed pane input receipts; floor stays 58.
 /// v106: `AgentRow.held_conversation` (serde default), the machine-armed hold
 /// mark behind the sideline's `[HELD]` badge; floor stays 58.
-pub const PROTO_VERSION: u32 = 106;
+/// v107: `AgentRow.activity`, the sideline ramp's served intervals; floor stays 58.
+pub const PROTO_VERSION: u32 = 107;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1082,6 +1083,15 @@ pub struct AgentRow {
     /// fabricated zero. `#[serde(default)]` keeps a v102 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_count: Option<u64>,
+    /// (v105) The last 8 tool-activity intervals for this row, oldest
+    /// first: `(calls, failed)` pairs the server core samples from the
+    /// registry row's cumulative counts on a 5s gate. The client only
+    /// draws: heights scale to the card's own max, and a cell whose failed
+    /// share is high wears the theme's error color. `None` = the row
+    /// carries no readable transcript (never a fabricated flat line);
+    /// empty = no interval has closed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Vec<(u8, u8)>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
