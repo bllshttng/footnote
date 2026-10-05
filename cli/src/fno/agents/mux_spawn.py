@@ -3350,7 +3350,7 @@ def dispatch_spawn_pane(
             crown_scope or "", caller_row, succession,
         )
         if crown_refusal is not None:
-            raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
+            raise DispatchAskError(f"--promote: {crown_refusal}", exit_code=2)
 
     conflict = pane_placement_conflict(
         pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,

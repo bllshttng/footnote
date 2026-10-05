@@ -2467,13 +2467,13 @@ def dispatch_spawn(
     if crown_level is not None:
         if once or headless:
             raise DispatchAskError(
-                "--crown needs a session that outlives the grant; a one-shot "
+                "--promote needs a session that outlives the grant; a one-shot "
                 "exits after one answer. Use the pane or bg substrate.",
                 exit_code=2,
             )
         if harness != "claude":
             raise DispatchAskError(
-                f"--crown on the bg substrate is claude-only; got harness "
+                f"--promote on the bg substrate is claude-only; got harness "
                 f"{harness!r}. Use --substrate pane, which maps every harness.",
                 exit_code=2,
             )
@@ -2643,7 +2643,7 @@ def dispatch_spawn(
                     exclude_name=name if revive else None,
                 )
                 if crown_refusal is not None:
-                    raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
+                    raise DispatchAskError(f"--promote: {crown_refusal}", exit_code=2)
 
             # a revive must come back on the route the row was born with
             # unless this invocation resolved one of its own; raises exit 2 when
