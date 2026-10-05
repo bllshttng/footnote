@@ -275,10 +275,8 @@ def _record_mail_origin(
         flags = [x for pair in pairs if pair[1] for x in pair if x is not None]
         binary = shutil.which("fno-agents")
         if binary is not None:
-            subprocess.run(
-                [binary, "mail-record", *flags],
-                input=body or "", timeout=2, capture_output=True,
-            )
+            subprocess.run([binary, "mail-record", *flags],
+                           input=body or "", timeout=2, capture_output=True)
     except Exception:
         pass
 
@@ -3505,8 +3503,7 @@ def cmd_send(
             else "king" if to_king
             else "peer"
         ),
-        # The ask key hashes the bus endpoints; record what the row will
-        # carry. --to-self/--to-project park the body in the positional.
+        # The ask key hashes the bus endpoints; record what the row will carry.
         sender=stamp_from(from_name),
         target_session=None if (to_self or to_project) else name,
         body=message,
