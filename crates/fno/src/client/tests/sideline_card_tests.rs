@@ -27,7 +27,6 @@ fn lead_and_worker() -> Vec<AgentRow> {
     vec![lead, w1]
 }
 
-
 fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
     let rows = view.painted_rows();
     let agent = rows
