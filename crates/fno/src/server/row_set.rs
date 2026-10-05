@@ -833,12 +833,8 @@ mod activity_ring_tests {
         assert_eq!(ring.cells.len(), 8, "the ring caps at eight");
         assert_ne!(ring.cells[0], (10, 2), "the first cell slid out");
         assert_eq!(ring.cells[7], (1, 1), "the newest cell carries k=9's delta");
-    }
-
-    /// A row with no counts (no readable transcript) never enters a ring:
-    /// absence on the wire, never a fabricated flat line.
-    #[test]
-    fn a_row_without_counts_never_enters_a_ring() {
+        // Absence: a row with no counts (no readable transcript) never
+        // enters a ring - absence on the wire, never a fabricated flat line.
         let t = std::time::Instant::now();
         let mut rings = HashMap::new();
         let rows = vec![row("bare", "sess-bare", None)];

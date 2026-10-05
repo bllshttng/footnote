@@ -696,49 +696,8 @@ mod tests {
         assert_eq!(Theme::default_theme().name, "footnote-superscript");
     }
 
-    /// The activity ramp's color ends must stay legible on the card ground
-    /// in every painted theme: WCAG AA text contrast, 4.5:1, against the
-    /// theme's own base. `terminal` is exempt - it paints no color of its
-    /// own; the emulator's palette owns contrast there.
     #[test]
-    fn activity_ramp_colors_clear_wcag_against_their_ground() {
-        fn lum(c: Color) -> Option<f64> {
-            match c {
-                Color::Rgb(r, g, b) => {
-                    let ch = |v: u8| {
-                        let s = f64::from(v) / 255.0;
-                        if s <= 0.03928 {
-                            s / 12.92
-                        } else {
-                            ((s + 0.055) / 1.055).powf(2.4)
-                        }
-                    };
-                    Some(0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b))
-                }
-                _ => None,
-            }
-        }
-        for n in THEME_NAMES {
-            let (t, _) = Theme::from_name(n);
-            if t.inherit {
-                continue;
-            }
-            let Some(base) = lum(t.base) else {
-                panic!("{n}: the card ground must be a concrete color");
-            };
-            for (role, c) in [("ok", t.ok), ("warn", t.warn), ("error", t.error)] {
-                let Some(fg) = lum(c) else {
-                    panic!("{n}: {role} must be a concrete color");
-                };
-                let (hi, lo) = if fg > base { (fg, base) } else { (base, fg) };
-                let ratio = (hi + 0.05) / (lo + 0.05);
-                assert!(ratio >= 4.5, "{n} {role} {c:?} on {base:?}: {ratio:.2}");
-            }
-        }
-    }
-
-    #[test]
-    fn every_named_theme_pairs_a_distinct_brand_and_needs_you() {
+    fn every_named_theme_keeps_roles_distinct_and_activity_legible() {
         // Attention and selection are different states, so no theme
         // may paint them the same color. `terminal` is the one exemption: it
         // paints no color of its own and both roles ride the emulator's
@@ -752,6 +711,36 @@ mod tests {
                 t.brand, t.needs_you,
                 "{n} must not paint selection and attention alike"
             );
+            // The activity ramp's ok/warn/error cells must stay legible on
+            // the card ground: WCAG AA text contrast, 4.5:1. `terminal` is
+            // exempt - it paints no color of its own.
+            fn lum(c: Color) -> Option<f64> {
+                match c {
+                    Color::Rgb(r, g, b) => {
+                        let ch = |v: u8| {
+                            let s = f64::from(v) / 255.0;
+                            if s <= 0.03928 {
+                                s / 12.92
+                            } else {
+                                ((s + 0.055) / 1.055).powf(2.4)
+                            }
+                        };
+                        Some(0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b))
+                    }
+                    _ => None,
+                }
+            }
+            let Some(base) = lum(t.base) else {
+                panic!("{n}: the card ground must be a concrete color");
+            };
+            for (role, c) in [("ok", t.ok), ("warn", t.warn), ("error", t.error)] {
+                let Some(fg) = lum(c) else {
+                    panic!("{n}: {role} must be a concrete color");
+                };
+                let (hi, lo) = if fg > base { (fg, base) } else { (base, fg) };
+                let ratio = (hi + 0.05) / (lo + 0.05);
+                assert!(ratio >= 4.5, "{n} {role} {c:?} on {base:?}: {ratio:.2}");
+            }
         }
     }
 

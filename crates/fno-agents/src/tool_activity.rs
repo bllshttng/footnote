@@ -256,42 +256,32 @@ mod tests {
         write_file(&path, &(base + &claude_pair("t2", true) + "{\"partial\n"));
         fold.absorb(&path, "claude");
         assert_eq!(fold.offset, held_offset + "{\"partial\n".len() as u64);
-    }
-
-    /// A file that shrank under the fold's offset (rotated, replaced)
-    /// resets the fold and recounts.
-    #[test]
-    fn a_rotated_transcript_resets_and_recounts() {
-        let dir = std::env::temp_dir().join("fno-tool-activity-rotate");
-        std::fs::create_dir_all(&dir).unwrap();
+        // A file that shrank under the fold's offset (rotated, replaced)
+        // resets the fold and recounts.
         let path = dir.join("rotate.jsonl");
         write_file(&path, &claude_pair("t1", false));
-        let mut fold = ToolFold::default();
-        fold.absorb(&path, "claude");
-        assert_eq!(fold.calls, 1);
+        let mut rotated = ToolFold::default();
+        rotated.absorb(&path, "claude");
+        assert_eq!(rotated.calls, 1);
         write_file(&path, "");
-        fold.absorb(&path, "claude");
-        assert_eq!((fold.calls, fold.errors, fold.offset), (0, 0, 0));
-    }
-
-    /// Codex: call rows count; outputs grade by the refusal buckets - the
-    /// same failed-read the lead check-in prices refusal_rate with.
-    #[test]
-    fn codex_counts_calls_and_bucket_failures() {
-        let dir = std::env::temp_dir().join("fno-tool-activity-codex");
-        std::fs::create_dir_all(&dir).unwrap();
+        rotated.absorb(&path, "claude");
+        assert_eq!((rotated.calls, rotated.errors, rotated.offset), (0, 0, 0));
+        // Codex: call rows count; outputs grade by the refusal buckets -
+        // the failed-read the lead check-in prices refusal_rate with.
         let path = dir.join("codex.jsonl");
-        let text = [
-            codex_row("function_call", "c1", ""),
-            codex_row("function_call_output", "c1", "Usage: bad args"),
-            codex_row("function_call", "c2", ""),
-            codex_row("function_call_output", "c2", "all good"),
-        ]
-        .join("");
-        write_file(&path, &text);
-        let mut fold = ToolFold::default();
-        fold.absorb(&path, "codex");
-        assert_eq!(fold.calls, 2);
-        assert_eq!(fold.errors, 1);
+        write_file(
+            &path,
+            &[
+                codex_row("function_call", "c1", ""),
+                codex_row("function_call_output", "c1", "Usage: bad args"),
+                codex_row("function_call", "c2", ""),
+                codex_row("function_call_output", "c2", "all good"),
+            ]
+            .join(""),
+        );
+        let mut codex = ToolFold::default();
+        codex.absorb(&path, "codex");
+        assert_eq!(codex.calls, 2);
+        assert_eq!(codex.errors, 1);
     }
 }

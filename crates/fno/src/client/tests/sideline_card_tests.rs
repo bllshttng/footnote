@@ -221,6 +221,41 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     let over_frame = v.compose();
     let over_window = frame_text(&over_frame);
     assert!(over_window.contains("▁▁▁▁▃▅█▁ · 129%"), "{over_window:?}");
+    // The ramp math: heights scale to the card's own max over the served
+    // intervals, the max reads the full block, and each cell's failed share
+    // grades its color kind (0 ok, 1 warn, 2 error).
+    let cell = card_line::activity_cell(&v.layout.agents[1]).expect("served intervals draw");
+    assert_eq!(
+        cell.text,
+        "\u{2581}\u{2581}\u{2581}\u{2581}\u{2583}\u{2585}\u{2588}\u{2581}"
+    );
+    assert_eq!(cell.kinds, vec![0, 0, 0, 0, 0, 1, 2, 0]);
+    // One interval reads the narrow fill bar; an empty ring waits.
+    v.layout.agents[1].activity = Some(vec![(3, 0)]);
+    let bar = card_line::activity_cell(&v.layout.agents[1]).unwrap();
+    assert_eq!(bar.text, "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}");
+    v.layout.agents[1].activity = Some(vec![(0, 0)]);
+    assert_eq!(
+        card_line::activity_cell(&v.layout.agents[1]).unwrap().text,
+        "     "
+    );
+    v.layout.agents[1].activity = Some(vec![]);
+    assert!(card_line::activity_cell(&v.layout.agents[1]).is_none());
+    // The painter wears each ramp cell in its kind's theme color: the
+    // fixture's majority-failed max cell paints error, the clean pads ok.
+    let theme = v.theme;
+    let mut saw_ok = false;
+    let mut saw_error = false;
+    for c in &frame.cells {
+        if c.c == '\u{2588}' && c.fg == theme.error {
+            saw_error = true;
+        }
+        if c.c == '\u{2581}' && c.fg == theme.ok {
+            saw_ok = true;
+        }
+    }
+    assert!(saw_error, "the majority-failed cell wears the error color");
+    assert!(saw_ok, "the clean cell wears the ok color");
     v.layout.agents[1].context_used_pct = None;
     v.layout.agents[1].activity = None;
     v.layout.agents[1].compaction_count = None;
@@ -291,81 +326,6 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     assert!(matches!(cells[0], card_line::MetricCell::Loading));
     assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "500 tok"));
-}
-
-/// The ramp math: heights scale to the card's own max over the served
-/// intervals (zero reads the flat baseline, the max reads the full block),
-/// fewer than two intervals read the narrow fill bar, and each cell's
-/// failed share grades its color kind (0 ok, 1 warn, 2 error).
-#[test]
-fn activity_ramp_scales_to_the_cards_own_max_and_grades_failures() {
-    let mut a = agent_row("act", 8, Some(AgentBadge::Working), false);
-    a.harness = Some("claude".into());
-    a.activity = Some(vec![(2, 0), (4, 1), (8, 4), (0, 0)]);
-    let cell = card_line::activity_cell(&a).expect("served intervals draw");
-    assert_eq!(
-        cell.text,
-        "\u{2581}\u{2581}\u{2581}\u{2581}\u{2583}\u{2585}\u{2588}\u{2581}"
-    );
-    assert_eq!(cell.kinds, vec![0, 0, 0, 0, 0, 1, 2, 0]);
-    // A full window slides the oldest cell out; eight cells stay eight.
-    a.activity = Some(vec![
-        (1, 0),
-        (1, 0),
-        (2, 0),
-        (3, 0),
-        (5, 0),
-        (8, 2),
-        (13, 5),
-        (0, 0),
-    ]);
-    let cell = card_line::activity_cell(&a).unwrap();
-    assert_eq!(cell.text.chars().count(), 8);
-    assert_eq!(cell.kinds[6], 1, "5 of 13 is under half: warn");
-    // One interval: the narrow fill bar, busy = full, idle = blank.
-    a.activity = Some(vec![(3, 0)]);
-    let cell = card_line::activity_cell(&a).unwrap();
-    assert_eq!(cell.text, "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}");
-    assert_eq!(cell.kinds, vec![0, 0, 0, 0, 0], "no failures: ok");
-    a.activity = Some(vec![(0, 0)]);
-    let cell = card_line::activity_cell(&a).unwrap();
-    assert_eq!(cell.text, "     ");
-    // An empty ring waits; nothing served hides for a bare pane.
-    a.activity = Some(vec![]);
-    assert!(card_line::activity_cell(&a).is_none());
-    a.activity = None;
-    assert!(card_line::activity_cell(&a).is_none());
-}
-
-/// The painter wears each ramp cell in its kind's theme color, error
-/// included, over the metrics row's own cells.
-#[test]
-fn the_activity_painter_colors_cells_by_failed_share() {
-    let mut agents = Vec::new();
-    let mut a = agent_row("act", 5, Some(AgentBadge::Working), false);
-    a.harness = Some("claude".into());
-    a.harness_session_id = Some("sess-act".into());
-    a.activity = Some(vec![(4, 3), (4, 0)]);
-    agents.push(a);
-    let mut v = card_view(agents);
-    v.term = (30, 140);
-    v.sideline_width = 80;
-    let theme = v.theme.clone();
-    let frame = v.compose();
-    let mut saw_ok = false;
-    let mut saw_error = false;
-    for cell in &frame.cells {
-        if cell.c == '\u{2588}' {
-            if cell.fg == theme.error {
-                saw_error = true;
-            }
-            if cell.fg == theme.ok {
-                saw_ok = true;
-            }
-        }
-    }
-    assert!(saw_error, "the majority-failed cell wears the error color");
-    assert!(saw_ok, "the clean cell wears the ok color");
 }
 
 #[test]
