@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterator, Mapping, Optional, Tuple
@@ -1019,6 +1020,8 @@ def check_duplicate_pr(
         )
     except ToolMissing:
         return OK, "duplicate guard: the fno-agents binary could not run; skipping"
+    except subprocess.TimeoutExpired:
+        return OK, "duplicate guard: timed out after 180s; skipping"
     if result.returncode == 3:
         refusal = (result.stderr or "an open PR already touches the same files").strip()
         return 1, refusal
