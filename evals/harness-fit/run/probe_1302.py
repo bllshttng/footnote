@@ -19,11 +19,11 @@ for arm in sys.argv[1:] or s.ARMS:
         for f in (res.parent / "agent").rglob("*"):
             if f.is_file() and f.stat().st_size < 200_000_000:
                 text += f.read_text(errors="ignore")
-        if "1302" in text or "Rate limit reached" in text:
+        if s.RATE_LIMIT.search(text):
             # pi: the run ended on a failed retry of a 1302 (3 tries, then the agent stops, exit 0).
             log = res.parent / "agent" / "pi.txt"
             tail = log.read_text(errors="ignore")[-3000:] if log.is_file() else ""
-            died = '"type":"auto_retry_end","success":false' in tail and "1302" in tail
+            died = '"type":"auto_retry_end","success":false' in tail and bool(s.RATE_LIMIT.search(tail))
             hits.append((row["task"], row["reward"], row["tokens"]["output"], row["exception"], "DIED" if died else ""))
     passed = sum(1 for h in hits if h[1] == 1.0)
     died = [h for h in hits if h[4]]
