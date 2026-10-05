@@ -1526,12 +1526,12 @@ fn derive_change(
             stale_skills.join(", ")
         ));
     }
-    if data
-        .get("refusal_rate_rising")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        attention.push("refusal rate rising two consecutive beats".into());
+    if data.get("refusal_rate_rising").and_then(Value::as_bool) == Some(true) {
+        let name = data.get("harness").and_then(Value::as_str);
+        attention.push(format!(
+            "refusal rate rising two consecutive beats: handoff point ({})",
+            name.unwrap_or("unknown")
+        ));
     }
     if data
         .get("wake_over")
@@ -2673,6 +2673,7 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     };
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
+    data.insert("harness".into(), json!(crate::claims::resolve_identity().1));
     if let Some(holder) = holder.as_deref() {
         data.insert("holder_session".into(), json!(holder));
     }
@@ -2791,13 +2792,15 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
                 })
         })
         .unwrap_or_default();
-    if let Err(e) = crate::team_names::bind_and_refresh(
+    match crate::team_names::bind_and_refresh(
         &crate::paths::AgentsHome::from_env().team_names_json(),
         &crate::paths::AgentsHome::from_env().registry_json(),
         &ctx.scope,
         owned_ids,
     ) {
-        lines.push(format!("team name: {e}"));
+        Err(e) => lines.push(format!("team name: {e}")),
+        Ok(Some(pending)) => crate::succession_txn::verified(&ctx.scope, &ctx.cwd, &pending),
+        Ok(None) => {}
     }
     if model_change.as_deref().map(|t| !t.trim().is_empty()) == Some(true) {
         lines.push(format!("diff: {derived}"));

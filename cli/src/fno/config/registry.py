@@ -687,7 +687,6 @@ FIELD_META: dict[str, Meta] = {
     "auto_heal.enabled": Meta("advanced", "Arm the CI healer: each tick spawns one detached pr-heal --all --apply drive loop over every project root, off the tick's own budget. Default false. Measured 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. Arm with: fno config set auto_heal.enabled true."),
     "king.checkin_interval": Meta("advanced", "The /loop interval a reign self-injects on Claude (default 55m, under the one-hour prompt cache). Fail-safe: a value that is not <digits>[smhd] degrades to 55m at load, never raises."),
     "king.checkin_text": Meta("advanced", "The /loop prompt text a reign self-injects at each check-in (default: run fno agents king checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle)."),
-    "king.compaction_ceiling": Meta("advanced", "The verdict's compaction bound (default 3): post-compact context snapshots tolerated for one crowned session before `fno agents king verdict` reads degraded. Default 3 because one crown on one node produced two compaction-caused retractions in one evening."),
     # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
     "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
     "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),

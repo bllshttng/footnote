@@ -378,6 +378,19 @@ dual_owner_kinds = {
     # them in schema.yaml for the validator and `doctor event find`.
     "scratch_shape_observed",
     "scratch_shape_filed",
+    # Succession transaction: the Rust side is the one writer (team-settle
+    # announce/transfer, the heir beat's verify/release/retro, the reap
+    # rollback, all through succession_txn.rs); the Python side carries them
+    # in schema.yaml for the validator and `doctor event find`, the way the
+    # scratch pair above does.
+    "team_succession_announced",
+    "team_succession_announce_failed",
+    "team_succession_transferred",
+    "team_succession_verified",
+    "team_succession_released",
+    "team_succession_release_unproven",
+    "team_succession_retro_filed",
+    "team_succession_retro_unmeasured",
     # merge_cleanup_skipped: the merge mint (Python) is the only emitter; the
     # Rust known-kind table carries it so the daemon accepts the row, the way
     # the evals pair above does.
