@@ -288,7 +288,9 @@ def test_map_covers_current_surface_once():
     # (592 -> 591), then re-registers the leaf as the native forwarder
     # `fno-py` serves (591 -> 592). The verify port retires `paths verify`
     # the same way (592 -> 591): counted from the merged file, 591.
-    assert len(mapped) == 591, (
+    # The five lane-alias verbs (court/king/reign -> org/lead) joined the
+    # registry the same PR that taught the sync lists: 591 -> 596.
+    assert len(mapped) == 596, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
