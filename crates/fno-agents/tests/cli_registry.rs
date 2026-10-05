@@ -4,7 +4,7 @@
 //! helper, drops a help string, or breaks the Python adapter's exact argv
 //! fails here before CI's heavy suites run.
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 
 use fno_agents::cli_args::{RestartArgs, ReviewSummaryArgs, ScratchArgs};
 
