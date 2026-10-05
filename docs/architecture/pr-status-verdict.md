@@ -44,7 +44,7 @@ The codes keep the status vocabulary readers key on. Those include `review_in_fl
 
 `unknown` coverage blocks and is named as its own blocker (`review_coverage_unknown`). An unreadable optional-review read blocks as `optional_reviews_unknown`. An unreadable merge decision blocks as `merge_decision_unknown`. Fail-closed everywhere: a reader that cannot answer never answers ready.
 
-One gate is opt-in by project. `merge.visual_paint_paths` lists render-surface paths. A PR whose changed files touch a listed path carries `visual_approval` until an answered question page names the PR, so a paint PR never merges without the user's look. An unreadable changed-file list reads `visual_paint_paths_unknown` rather than releasing the hold. The list is empty by default, so the gate is disarmed wherever no paint surface is declared.
+One gate is opt-in by project. `merge.visual_paint_paths` lists render-surface paths. A PR whose changed files touch a listed path carries `visual_approval`. The hold clears only when an answered question page names the PR, so a paint PR never merges without the user's look. An unreadable changed-file list reads `visual_paint_paths_unknown` rather than releasing the hold. The list is empty by default, so the gate is disarmed wherever no paint surface is declared.
 
 The Python ready conjunction is retired (`_ready_blockers`, the waiver overlay, the posture and rerun appends). The waiver overlay runs inside the coverage gate the preview shells (`fno do pr coverage-check`). A waived PR exits 0 at the gate, and no status copy of the overlay can drift from it.
 
