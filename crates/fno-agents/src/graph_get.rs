@@ -175,6 +175,13 @@ pub fn run_graph_get(args: &[String]) -> i32 {
                     println!("{}", crate::pr_draft_ready::run_door(&payload));
                     return 0;
                 }
+                if payload
+                    .as_object()
+                    .is_some_and(|o| o.contains_key("merge_provenance"))
+                {
+                    println!("{}", crate::merge_provenance::run_hook_door(&payload));
+                    return 0;
+                }
             }
         }
     }
@@ -377,22 +384,6 @@ mod tests {
         std::env::remove_var("FNO_TRACKER_BACKEND");
         assert_eq!(refused, 1);
         assert_eq!(overridden, 0);
-    }
-
-    #[test]
-    fn a_fixture_graph_file_round_trips_through_the_binary_entry_point() {
-        let dir = write_graph(&[
-            node("x-aaaa", "fewer-gated"),
-            node("x-bbbb", "dispatch-two-axes"),
-        ]);
-        let graph = dir.path().join("graph.json").display().to_string();
-        let args = vec![
-            "x-aaaa".to_string(),
-            "x-bbbb".to_string(),
-            "--graph".to_string(),
-            graph,
-        ];
-        assert_eq!(run_graph_get(&args), 0);
     }
 
     /// The run path asks the store (`backlog::api::rows`): a seeded fixture

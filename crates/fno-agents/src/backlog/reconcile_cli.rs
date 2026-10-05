@@ -1265,7 +1265,54 @@ fn close_leg(
         ));
         return None;
     }
-    Some(result.into_inner())
+    let result = result.into_inner();
+    for record in &result.actually_closed {
+        emit_outside_merge_label(record);
+    }
+    Some(result)
+}
+
+/// The close's own provenance: `closed_by.path` names the closer lane. The
+/// row mutation rides the graph transaction; the journal emit runs after
+/// the publish (see [`emit_outside_merge_label`]) so a publish retry can
+/// never duplicate an irreversible row.
+fn close_provenance(entry: &mut Value, _record: &MergeDriftRecord) {
+    if let Some(closed_by) = entry.get_mut("closed_by").and_then(Value::as_object_mut) {
+        closed_by.insert("path".into(), json!("reconcile"));
+    }
+}
+
+/// A merge the journal never saw is labelled `merged_outside_fno` so a
+/// later reader can tell an fno-verb merge from a github.com or
+/// foreign-machine one. Called after the graph close published, so a
+/// retried publish finds its own earlier row through `has_record`.
+fn emit_outside_merge_label(record: &MergeDriftRecord) {
+    let Some(repo) =
+        crate::backlog::pr_link::repo_slug_from_url(record.pr_url.as_deref()).or_else(|| {
+            record
+                .cwd
+                .as_deref()
+                .and_then(|c| crate::backlog::pr_link::resolve_current_repo_slug(Some(c)))
+        })
+    else {
+        return;
+    };
+    if record.pr_number <= 0 {
+        return;
+    }
+    let Some(journal) = crate::merge_provenance::journal_for(record.cwd.as_deref()) else {
+        return;
+    };
+    if crate::merge_provenance::has_record(&journal, &repo, record.pr_number as u64) {
+        return;
+    }
+    crate::merge_provenance::record_outside_merge(
+        &journal,
+        record.pr_number as u64,
+        &repo,
+        record.merged_at.as_deref(),
+        record.merge_sha.as_deref(),
+    );
 }
 
 /// The inside-the-lock half of the close: the per-record completion plus
@@ -1312,6 +1359,7 @@ fn close_mutator(
             continue;
         }
         apply_completion_fields(&mut entries[index], true);
+        close_provenance(&mut entries[index], record);
         let mut moved = reparent_live_children(entries, &record.node_id);
         result.borrow_mut().reparented.append(&mut moved);
         let files = if record.changed_files.is_empty() {
@@ -2542,9 +2590,66 @@ fn status_drift(entries: &[Value]) -> Vec<(String, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn tail(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_close_records_its_path_and_labels_an_outside_merge() {
+        let journal = crate::merge_provenance::TestJournal::opt_in();
+        let record = MergeDriftRecord {
+            node_id: "ab-cccccccc".into(),
+            plan_path: None,
+            pr_number: 7,
+            pr_url: Some("https://github.com/o/r/pull/7".into()),
+            pr_state: "MERGED".into(),
+            merged_at: Some("2026-10-04T00:00:00Z".into()),
+            error: None,
+            session_id: None,
+            cwd: Some(journal.root().to_string_lossy().into_owned()),
+            merge_sha: Some("deadbeef".into()),
+            changed_files: vec![],
+            files_truncated: false,
+            error_kind: None,
+            remedy: None,
+        };
+        let mut entry = json!({"id": "ab-cccccccc", "status": "in_review"});
+        apply_completion_fields(&mut entry, true);
+        close_provenance(&mut entry, &record);
+        assert_eq!(entry["closed_by"]["path"], "reconcile");
+        emit_outside_merge_label(&record);
+        let rows = journal.rows();
+        let outside: Vec<_> = rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merged_outside_fno")
+            .collect();
+        assert_eq!(outside.len(), 1, "{rows:?}");
+        assert_eq!(outside[0]["data"]["pr"], 7);
+        assert_eq!(outside[0]["data"]["repo"], "o/r");
+        assert_eq!(outside[0]["data"]["merged_at"], "2026-10-04T00:00:00Z");
+        assert_eq!(outside[0]["data"]["merge_sha"], "deadbeef");
+        // A journal that already carries the merge records nothing more.
+        let seed = json!({
+            "ts": "2026-10-04T00:00:00Z",
+            "type": "decision_span",
+            "source": "target",
+            "data": {"span_kind": "merge_landed", "pr": 9, "repo": "o/r"}
+        });
+        crate::event_store::append_envelope(&journal.journal(), &seed.to_string(), None)
+            .expect("seed row");
+        let mut entry = json!({"id": "ab-cccccccc", "status": "in_review"});
+        apply_completion_fields(&mut entry, true);
+        let mut record = record.clone();
+        record.pr_number = 9;
+        emit_outside_merge_label(&record);
+        let rows = journal.rows();
+        let outside: Vec<_> = rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merged_outside_fno" && r["data"]["pr"] == 9)
+            .collect();
+        assert!(outside.is_empty(), "{rows:?}");
     }
 
     #[test]
