@@ -128,7 +128,7 @@ Three channels ship through `release.yml`. The nightly is automatic. An rc or a 
 ### Nightly (automatic)
 
 - The schedule fires daily. To run it now: `gh workflow run release.yml -f channel=nightly`. The workflow picks the newest default-branch commit whose `rust-ci` push run is green. Its newest ancestor `cli-ci` push run must also be green. The run then replaces the rolling GitHub pre-release named `nightly`. Version: `0.4.0.devYYYYMMDD`. No `v*` tag and no commit on main.
-- Install: `FNO_INSTALL_WHEEL=<wheel asset url> sh fno.sh`. The release notes print the per-platform lines. Tomorrow's nightly replaces it.
+- Install: `FNO_INSTALL_WHEEL=<wheel asset url> sh fno.sh`. The release notes print the per-platform lines. Tomorrow's nightly replaces it. An install run from inside a nightly tree (`scripts/setup.sh` in a clone at the nightly tag) reads the tree's channel and installs the same wheel unprompted; run standalone, `fno.sh` stays stable-channel.
 
 ### Release candidate (one click)
 
