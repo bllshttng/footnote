@@ -108,6 +108,7 @@ pub mod claude_transcript_paths;
 pub mod claude_vault;
 pub mod cli_args;
 pub mod client;
+pub mod client_render;
 pub mod client_verbs;
 pub mod codex_ask;
 pub mod codex_daemon_readiness;

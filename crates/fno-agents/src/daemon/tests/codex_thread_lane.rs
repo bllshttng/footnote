@@ -269,6 +269,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
     assert_eq!(
@@ -315,6 +317,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &[],
         &serde_json::value::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(read_only.sandbox_posture.as_deref(), Some("read-only"));
     assert_eq!(
@@ -350,6 +354,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
     assert!(!crate::codex_posture::entry_posture_is_full_access(
@@ -368,6 +374,8 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
         &[],
         &serde_json::Value::Null,
+        None,
+        None,
         None,
     );
     assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
@@ -434,6 +442,8 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     // The request says full access...
     assert_eq!(entry.sandbox_posture.as_deref(), Some("danger-full-access"));
@@ -482,6 +492,8 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(entry.node.as_deref(), Some("x-535c"));
 }
@@ -520,6 +532,8 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(pinned.account_record_id.as_deref(), Some("codex-main"));
     let unpinned = build_codex_thread_entry(
@@ -533,6 +547,8 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &[],
         &serde_json::Value::Null,
         None,
+        None,
+        None,
     );
     assert_eq!(unpinned.account_record_id.as_deref(), Some("default"));
     let blank = build_codex_thread_entry(
@@ -545,6 +561,8 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         Some("   "),
         &[],
         &serde_json::Value::Null,
+        None,
+        None,
         None,
     );
     assert_eq!(blank.account_record_id.as_deref(), Some("default"));
@@ -589,6 +607,8 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
             "spawned_by_cwd": "/work"
         }),
         None,
+        None,
+        None,
     );
     assert_eq!(linked.spawned_by_session.as_deref(), Some("parent-1"));
     assert_eq!(linked.lineage_reason, None);
@@ -602,6 +622,8 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
         None,
         &[],
         &serde_json::json!({}),
+        None,
+        None,
         None,
     );
     assert_eq!(orphan.spawned_by_session, None);
@@ -1968,7 +1990,12 @@ async fn poll_thread_row(
 /// land in the `thread/start` config map with TOML-typed values, `--add-dir`
 /// rides the state-root grant onto every turn, the spawn-request effort rides
 /// `turn/start`, and the row stores the raw tokens for startup recovery
-/// (AC2-HP, AC3-HP).
+/// (AC2-HP, AC3-HP). The same door carries the crown (x-c5db): the request's
+/// crown half-pair lands on the row AT MINT - grantor read off the request's
+/// parent edge, never caller-supplied - so the seed turn enqueued below can
+/// never submit to an uncrowned row. A scope a non-terminal row already
+/// reigns mints UNCROWNED (succession is the Python settle's write, never a
+/// second live crown), and a lone half refuses with no row written.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
     let behavior = crate::codex_fake_daemon::Behavior::quick();
@@ -1988,6 +2015,9 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
                 "cwd": worktree.to_string_lossy(),
                 "message": "seed turn",
                 "effort": "high",
+                "crown_level": 2,
+                "crown_scope": "x-aaaa",
+                "spawned_by_session": "parent-session-uuid",
                 "harness_args": [
                     "-c", "sandbox_workspace_write.network_access=true",
                     "--add-dir", "/tmp/x",
@@ -2059,8 +2089,99 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
             ),
             "the row stores the fenced tokens verbatim"
         );
+        let crowned = registry.find("t").unwrap();
+        assert_eq!(crowned.crown_level, Some(2), "crowned at mint: {crowned:?}");
+        assert_eq!(crowned.crown_scope.as_deref(), Some("x-aaaa"));
+        assert_eq!(
+            crowned.crown_grantor.as_deref(),
+            Some("parent-session-uuid")
+        );
         ctx.codex_threads.lock().await.remove("t");
         std::fs::remove_dir_all(home.root()).ok();
+
+        // A held scope (fresh home: the fake mints one thread id per
+        // process, and the heir must not collide with the phase-1 row):
+        // the mint declines to uncrowned, and the sitting king keeps its
+        // crown.
+        let held = tmp_home("codex-crown-held");
+        let held_ctx = test_ctx(held.clone(), PathBuf::from("/nonexistent"));
+        let held_wt = held.root().join("worktree");
+        std::fs::create_dir_all(&held_wt).unwrap();
+        let mut king = thread_entry("sitting-king", AgentStatus::Live, None);
+        king.crown_level = Some(1);
+        king.crown_scope = Some("x-aaaa".into());
+        let inserted = update_registry_offloaded(held.registry_json(), move |registry| {
+            registry.entries.push(king);
+            true
+        })
+        .await;
+        assert!(inserted.is_ok(), "fixture row: {inserted:?}");
+        let heir_req = json!({
+            "name": "heir",
+            "provider": "codex",
+            "substrate": "thread",
+            "cwd": held_wt.to_string_lossy(),
+            "message": "seed turn",
+            "crown_level": 2,
+            "crown_scope": "x-aaaa",
+        });
+        let resp = handle_spawn(&held_ctx, &Request::new(1, "agent.spawn", heir_req)).await;
+        assert!(resp.result().is_some(), "spawn failed: {resp:?}");
+        let registry = load_registry_offloaded(held.registry_json())
+            .await
+            .expect("registry");
+        let heir = registry.find("heir").expect("the heir row");
+        assert_eq!(
+            heir.crown_level, None,
+            "an occupied scope mints uncrowned: {heir:?}"
+        );
+        assert_eq!(heir.crown_scope, None);
+        assert_eq!(heir.crown_grantor, None);
+        assert_eq!(
+            registry.find("sitting-king").unwrap().crown_level,
+            Some(1),
+            "the sitting king keeps its crown"
+        );
+        ctx.codex_threads.lock().await.remove("heir");
+        std::fs::remove_dir_all(held.root()).ok();
+
+        // A lone half, or an out-of-ladder level, refuses: no thread, no
+        // row. A scopeless level stamps a crown that rules nothing and a
+        // levelless scope can never deserialize, so the door fails closed.
+        let refusals = tmp_home("codex-crown-lone-half");
+        let ref_ctx = test_ctx(refusals.clone(), PathBuf::from("/nonexistent"));
+        let ref_wt = refusals.root().join("worktree");
+        std::fs::create_dir_all(&ref_wt).unwrap();
+        for half in ["crown_level", "crown_scope"] {
+            let mut params = json!({
+                "name": "t2",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": ref_wt.to_string_lossy(),
+                "message": "seed turn",
+                "crown_level": 2,
+                "crown_scope": "x-bbbb",
+            });
+            params.as_object_mut().unwrap().remove(half);
+            let resp = handle_spawn(&ref_ctx, &Request::new(1, "agent.spawn", params)).await;
+            let refused = match &resp.payload {
+                crate::protocol::ResponsePayload::Err(error) => error.message.clone(),
+                _ => panic!("a lone crown half must refuse: {half} -> {resp:?}"),
+            };
+            assert!(
+                refused.contains("both crown_level and crown_scope"),
+                "the refusal names the missing half {half}: {refused}"
+            );
+        }
+        assert_eq!(
+            load_registry_offloaded(refusals.registry_json())
+                .await
+                .expect("registry")
+                .find("t2"),
+            None,
+            "no row for a refused spawn"
+        );
+        std::fs::remove_dir_all(refusals.root()).ok();
     })
     .await;
 }
