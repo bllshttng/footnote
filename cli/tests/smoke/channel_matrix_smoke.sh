@@ -533,6 +533,62 @@ row_skills_sh() {
   fi
 }
 
+row_fno_sh_nightly() {
+  # x-6f1d: an install run from inside a NIGHTLY tree must land the nightly
+  # wheel, not the stable PyPI package. Stamp a scratch tree with the dev
+  # spelling the nightly tag carries (read off the nightly release's wheel
+  # name), run scripts/install/fno.sh from inside it, and require that exact
+  # dev version back from the installed front door.
+  assert_clean_machine
+  local plat wheel_asset version
+  plat="$(bash -c "source '$REPO_ROOT/scripts/release/plugin-version.sh' && plugin_wheel_platform \"\$(uname -s)\" \"\$(uname -m)\"")"
+  if [ -z "$plat" ]; then
+    miss "platform" "no wheel platform pattern for $(uname -s)/$(uname -m)"
+    return 0
+  fi
+  wheel_asset="$(curl -fsSL "https://api.github.com/repos/bllshttng/footnote/releases/tags/nightly" \
+    | FNO_WHEEL_PLATFORM="$plat" python3 -c '
+import json, os, re, sys
+plat = os.environ["FNO_WHEEL_PLATFORM"]
+for a in json.load(sys.stdin).get("assets", []):
+    n = a.get("name", "")
+    if n.endswith(".whl") and re.search(plat, n):
+        print(n); break
+' 2>/dev/null)"
+  if [ -z "$wheel_asset" ]; then
+    miss "nightly" "no wheel for this platform on the nightly release (API read failed or unsupported platform)"
+    return 0
+  fi
+  version="$(printf '%s' "$wheel_asset" | sed -n -E 's/^fno-(.+)-py3-none-.*/\1/p')"
+  if [ -z "$version" ]; then
+    miss "nightly" "could not read the version off wheel name $wheel_asset"
+    return 0
+  fi
+  local tree="$BASE/nightly-tree"
+  copy_tree_to_scratch "$tree"
+  # PEP 440 -> the semver spelling the nightly stamp commits (release.yml).
+  local semver
+  semver="$(printf '%s' "$version" | sed -E 's/\.dev([0-9]+)$/-dev.\1/; s/rc([0-9]+)$/rc\1/')"
+  for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
+    awk -v v="$semver" '{
+      gsub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" v "\"")
+      print
+    }' "$tree/$manifest" > "$tree/$manifest.new" && mv "$tree/$manifest.new" "$tree/$manifest"
+  done
+  run_capture sh "$tree/scripts/install/fno.sh"
+  if [ "$RC" -ne 0 ]; then
+    miss "install" "fno.sh rc=$RC: $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
+    return 0
+  fi
+  shared_smoke "$HOME/.local/bin"
+  run_capture "$HOME/.local/bin/fno" --version
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "$version"; then
+    pass "nightly-version" "the nightly tree install reports the dev wheel's version ($version)"
+  else
+    miss "nightly-version" "expected $version from the nightly tree install, got rc=$RC: $(printf '%s' "$OUT" | tail -1)"
+  fi
+}
+
 row_clone_setup() {
   assert_clean_machine
   local clone="$BASE/clone"
@@ -562,6 +618,7 @@ run_row() {
     codex-plugin-session)  row_codex_plugin_session ;;
     fno-sh-served)         row_fno_sh_served ;;
     fno-sh-head)           row_fno_sh_head ;;
+    fno-sh-nightly)        row_fno_sh_nightly ;;
     fno-sh-fresh)          row_fno_sh_fresh ;;
     install-sh-alias)      row_install_sh_alias ;;
     pypi-uv)               row_pypi_uv ;;

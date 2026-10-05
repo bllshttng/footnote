@@ -81,6 +81,11 @@ jobs:
             expect: pass
             node: ''
             readme: []
+          - id: fno-sh-nightly
+            runs-on: ubuntu-latest
+            expect: pass
+            node: x-6f1d
+            readme: []
           - id: fno-sh-fresh
             runs-on: ubuntu-latest
             expect: fail
