@@ -891,18 +891,9 @@ def push(ctx: typer.Context) -> None:
 
 
 @pr_app.command(
-    "create",
-    hidden=True,
+    "create", hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help=(
-        "The duplicate-guarded create: reads open PRs from the GitHub REST "
-        "API (no graph read), refuses when an open PR touches the same "
-        "changed files with an overlapping subject (exit 3, names the PR, "
-        "its branch and its author), and otherwise runs `gh pr create "
-        "--title --body-file`. --not-duplicate <pr> (repeatable) passes a "
-        "named twin. Exit 0 created, 3 refused, 2 usage or local read "
-        "error, 4 a GitHub read failure."
-    ),
+    help="Duplicate-guarded create; exit 3 refuses a twin (--not-duplicate <pr>).",
 )
 def create(ctx: typer.Context) -> None:
     _forward_to_binary("pr-create", list(ctx.args))

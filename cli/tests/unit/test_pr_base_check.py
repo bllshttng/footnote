@@ -88,30 +88,19 @@ def test_fail_open_postures_and_the_duplicate_refusal(tmp_path, monkeypatch):  #
     assert "skipped" in (msg or "")
 
     # The duplicate guard shares the posture. A fake FNO_AGENTS_BIN keeps the
-    # run hermetic: exit 2 (old binary, usage) skips with a named reason,
-    # exit 3 is the refusal, and a clean scan is (0, None).
+    # run hermetic: exit 2 (old binary, usage) and exit 0 read as pass (''),
+    # exit 3 is the refusal text.
     fake = tmp_path / "fake-fno-agents"
     fake.write_text("#!/bin/sh\nexit 2\n")
     fake.chmod(0o755)
     monkeypatch.setenv("FNO_AGENTS_BIN", str(fake))
-    code, msg = _preflight.check_duplicate_pr(
-        cwd=str(work), base="origin/main", title="t"
-    )
-    assert code == 0
-    assert "skipping" in (msg or "")
+    assert _preflight.check_duplicate_pr(str(work), "origin/main", "t") == ""
 
     fake.write_text("#!/bin/sh\necho REFUSED 1>&2\nexit 3\n")
-    code, msg = _preflight.check_duplicate_pr(
-        cwd=str(work), base="origin/main", title="t"
-    )
-    assert code == 1
-    assert "REFUSED" in (msg or "")
+    assert "REFUSED" in _preflight.check_duplicate_pr(str(work), "origin/main", "t")
 
     fake.write_text("#!/bin/sh\nexit 0\n")
-    code, msg = _preflight.check_duplicate_pr(
-        cwd=str(work), base="origin/main", title="t"
-    )
-    assert (code, msg) == (0, None)
+    assert _preflight.check_duplicate_pr(str(work), "origin/main", "t") == ""
 
 
 def test_zero_behind_passes_regardless_of_age(tmp_path):  # AC1-EDGE

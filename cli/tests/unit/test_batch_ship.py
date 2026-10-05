@@ -236,7 +236,7 @@ def test_ship_fresh_base_creates_pr_and_duplicate_refusal_abandons(
     B.join_batch(domain="code", node_id="x-1", root=tmp_path)
     monkeypatch.setattr("fno.pr._preflight.check_stale_base", lambda *a, **k: (0, None))
     monkeypatch.setattr(
-        "fno.pr._preflight.check_duplicate_pr", lambda *a, **k: (0, None)
+        "fno.pr._preflight.check_duplicate_pr", lambda *a, **k: ""
     )
 
     gh = FakeGh(create=_cp(0, "https://github.com/o/r/pull/501\n"))
@@ -254,10 +254,7 @@ def test_ship_fresh_base_creates_pr_and_duplicate_refusal_abandons(
     B.join_batch(domain="code", node_id="x-2", root=tmp_path)
     monkeypatch.setattr(
         "fno.pr._preflight.check_duplicate_pr",
-        lambda *a, **k: (
-            1,
-            "pr-create: REFUSED: an open PR already touches the same changed files",
-        ),
+        lambda *a, **k: "pr-create: REFUSED: an open PR already touches the same changed files",
     )
     gh = FakeGh()
     r = B.ship_batch(domain="code", root=tmp_path, run=gh)
@@ -282,7 +279,7 @@ def test_ship_stale_guard_failopen_still_creates_pr(tmp_path, graph, monkeypatch
         lambda *a, **k: (0, "could not refresh origin/main; stale-base check skipped"),
     )
     monkeypatch.setattr(
-        "fno.pr._preflight.check_duplicate_pr", lambda *a, **k: (0, None)
+        "fno.pr._preflight.check_duplicate_pr", lambda *a, **k: ""
     )
 
     gh = FakeGh(create=_cp(0, "https://github.com/o/r/pull/502\n"))

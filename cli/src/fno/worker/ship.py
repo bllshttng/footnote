@@ -231,26 +231,9 @@ def ship(
             body, branch, extra_ids=[manifest_node] if manifest_node else None
         )
         # Create new PR
-        # Duplicate guard before the create: the 2026-10-04 twins ran on this
-        # path. The verb scans open PRs over the GitHub REST API (no graph
-        # read) and refuses when one touches the same changed files with an
-        # overlapping subject; any skip reason prints and proceeds, so a
-        # binary without the verb degrades to today's behavior.
         from fno.pr._preflight import check_duplicate_pr
-
-        dup_code, dup_msg = check_duplicate_pr(
-            cwd=os.getcwd(), base=f"origin/{base_branch}", title=title
-        )
-        if dup_msg and dup_code == 0:
-            import sys
-
-            print(f"worker.ship: {dup_msg}", file=sys.stderr)
-        if dup_code != 0:
-            return {
-                "action": "error",
-                "error": dup_msg or "duplicate PR: refused to open a twin",
-                "branch": branch,
-            }
+        if dup := check_duplicate_pr(os.getcwd(), f"origin/{base_branch}", title):
+            return {"action": "error", "error": dup, "branch": branch}
         create_result = subprocess.run(
             [
                 "gh", "pr", "create",

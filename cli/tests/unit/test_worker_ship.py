@@ -107,7 +107,7 @@ def test_ac2_hp_ship_creates_pr(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from fno.worker.ship import ship
         result = ship(
@@ -145,7 +145,7 @@ def test_ac2_hp_ship_writes_artifact(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from fno.worker.ship import ship
         ship(
@@ -355,7 +355,7 @@ def test_ac1_hp_ship_does_not_arm_automerge(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from importlib import reload
         import fno.worker.ship as ship_mod
@@ -406,7 +406,7 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from fno.worker.ship import ship
         result = ship(
@@ -450,7 +450,7 @@ def test_ac2_err_stamp_failure_reports_incomplete_delivery(tmp_path, monkeypatch
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from fno.worker.ship import ship
         result = ship(
@@ -484,7 +484,7 @@ def test_no_node_id_skips_stamp(tmp_path):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from fno.worker.ship import ship
         ship(
@@ -516,7 +516,7 @@ def test_guard_refusal_blocks_pr_create(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(3, refusal)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from importlib import reload
         import fno.worker.ship as ship_mod
@@ -549,7 +549,7 @@ def test_guard_refusal_blocks_pr_create(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(1, dup_refusal)
+        "fno.pr._preflight.check_duplicate_pr", return_value=dup_refusal
     ):
         from fno.worker.ship import ship
 
@@ -582,7 +582,7 @@ def test_non_full_verification_refuses_pr_create(tmp_path, monkeypatch):
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
     ), patch(
-        "fno.pr._preflight.check_duplicate_pr", return_value=(0, None)
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ):
         from fno.worker.ship import ship
 

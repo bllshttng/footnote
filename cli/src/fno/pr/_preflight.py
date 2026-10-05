@@ -984,47 +984,13 @@ def run_base_check(base: str = BASE_DEFAULT, *, cwd: Optional[str] = None) -> in
     return code
 
 
-def check_duplicate_pr(
-    *, cwd: str, base: str, title: str
-) -> Tuple[int, Optional[str]]:
-    """Return ``(exit_code, message)`` for the pr-create duplicate guard.
-
-    One implementation, two call sites (``worker/ship.py`` and
-    ``backlog/batch.py``), the same contract as :func:`check_stale_base`:
-    ``(0, None)`` clean, ``(0, message)`` a fail-open skip that names the
-    reason, ``(1, refusal)`` when an open PR already touches the same changed
-    files with an overlapping subject. The scan runs in the Rust binary over
-    the GitHub REST API (no graph read), so it works exactly when the graph is
-    down; a binary without the verb (exit 2 usage) also reads as skip, which
-    keeps today's behavior until ``fno doctor update --rust`` lands it.
-    """
+def check_duplicate_pr(cwd: str, base: str, title: str) -> str:
+    """The pr-create guard's refusal text, or '' when the create proceeds."""
     from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        return OK, "duplicate guard: the fno-agents binary was not found; skipping"
     try:
-        result = run(
-            [
-                str(binary),
-                "pr-create",
-                "--check-only",
-                "--title",
-                title,
-                "--base",
-                base,
-                "--cwd",
-                cwd,
-            ],
-            timeout=180,
-        )
-    except ToolMissing:
-        return OK, "duplicate guard: the fno-agents binary could not run; skipping"
-    except subprocess.TimeoutExpired:
-        return OK, "duplicate guard: timed out after 180s; skipping"
-    if result.returncode == 3:
-        refusal = (result.stderr or "an open PR already touches the same files").strip()
-        return 1, refusal
-    if result.returncode == OK:
-        return OK, None
-    return OK, f"duplicate guard: exit {result.returncode}; skipping"
+        cmd = [str(resolve_binary() or "fno-agents"), "pr-create",
+               "--check-only", "--title", title, "--base", base, "--cwd", cwd]
+        result = run(cmd, timeout=180)
+    except (ToolMissing, subprocess.TimeoutExpired):
+        return ""
+    return result.stderr.strip() if result.returncode == 3 else ""
