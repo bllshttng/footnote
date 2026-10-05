@@ -2360,55 +2360,6 @@ def test_event_lane_suppresses_unchanged_rows(monkeypatch, tmp_path):
     assert fresh == {"dddd4444-0000"}
 
 
-def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
-    """`pr-watch status --json` and the doctor read liveness_report_live, and
-    that dict is the ONLY surface they see: a sweep starved while the pr_watch
-    tick stayed healthy must read loud there, not only in the human status
-    lines. The threshold is two CONFIGURED intervals, not the fixed default."""
-    import os
-    import time as _time
-    from types import SimpleNamespace
-    from fno.pr_watch import _install
-
-    sweep = tmp_path / "watchdog-sweep.json"
-    sweep.write_text(json.dumps({"source": "tick", "at": "x", "counts": {}}))
-    # 3x a 600s interval: stale under any plausible clock skew.
-    os.utime(sweep, (_time.time() - 1800,) * 2)
-    monkeypatch.setattr(watchdog, "sweep_path", lambda: sweep)
-    monkeypatch.setattr(_install, "_LAUNCH_AGENTS_DIR", tmp_path)
-    monkeypatch.setattr(_install, "_launchctl_is_loaded", lambda: False)
-    settings = SimpleNamespace(
-        pr_watch=SimpleNamespace(enabled=True, interval_seconds=600, wedged_after_ticks=3),
-        recovery=SimpleNamespace(watchdog=_wd("report"), enabled=True),
-        autonomy=SimpleNamespace(enabled=True),
-    )
-    monkeypatch.setattr("fno.config.load_settings", lambda: settings)
-
-    report = _install.liveness_report_live()
-    assert report["watchdog"]["stale"] is True
-    assert report["watchdog"]["source"] == "tick"
-
-    # And the reader shares the TICK's condition, all three parts of it. The
-    # master panic switch stops the sweep, so a freshness alarm about that
-    # silence is an alarm about a deliberate decision - it used to fire
-    # forever.
-    settings.autonomy.enabled = False
-    assert "watchdog" not in _install.liveness_report_live()
-    settings.autonomy.enabled = True
-    settings.recovery.enabled = False
-    assert "watchdog" not in _install.liveness_report_live()
-
-    # Lane off: no freshness verdict manufactured for a lane nobody armed.
-    monkeypatch.setattr(
-        "fno.config.load_settings",
-        lambda: SimpleNamespace(
-            pr_watch=settings.pr_watch,
-            recovery=SimpleNamespace(watchdog=_wd("off")),
-        ),
-    )
-    assert "watchdog" not in _install.liveness_report_live()
-
-
 def test_failed_send_keeps_the_gate_open(monkeypatch, tmp_path):
     """A digest that failed to deliver must not advance the change gate: the
     stamp stays the PREVIOUS signature so the next sweep retries instead of

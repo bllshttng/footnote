@@ -1762,6 +1762,30 @@ fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
 
 /// The one `Heal:` readout line. `--status` prints it; `_install.py` shells
 /// this verb rather than re-reading the journal in Python.
+/// The one `Heal:` readout for `pr_watch::status`: the arm bit and the
+/// journal are the only inputs `status_line` reads.
+pub(crate) fn status_readout(armed: bool, events_file: &std::path::Path) -> String {
+    let a = Args {
+        pr: None,
+        apply: false,
+        all: false,
+        playbook: false,
+        dry_run: false,
+        detach: false,
+        status: false,
+        armed,
+        gh_bin: "gh".to_string(),
+        git_bin: "git".to_string(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        roots: Vec::new(),
+        deadline: None,
+        bin_dir: String::new(),
+        claims_root: String::new(),
+        events_file: events_file.display().to_string(),
+    };
+    status_line(&a)
+}
+
 fn status_line(a: &Args) -> String {
     if !a.armed {
         return "Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)".to_string();
