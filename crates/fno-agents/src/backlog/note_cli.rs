@@ -1186,6 +1186,9 @@ mod tests {
             "--replace",
         ]));
         assert_eq!(rc, 3, "--replace refuses");
+        // The refusal's own suggested command runs: the feed reads.
+        let rc = run_comment(&argv(&["--graph", &graph_s, "x-t1", "--list"]));
+        assert_eq!(rc, 0, "the retirement's suggested read runs");
     }
 
     // -- import route -----------------------------------------------------
