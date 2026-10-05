@@ -662,7 +662,7 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     let lead = frame.cells[2 * cols]; // outer row 2, col 0
     assert_ne!(
         lead.c, '▎',
-        "the ▎ gutter is retired; the band is the signal"
+        "the list layout keeps no ▎ gutter; the card layout owns the bar"
     );
     assert_eq!(
         lead.bg,
@@ -1762,13 +1762,14 @@ fn link_hover_rows() {
 
     // A modal opened by KEYBOARD emits no pointer event, so the event-side
     // clear never runs; the compose-side suppression is what keeps the
-    // underline from painting beneath or around it. Control: the same
-    // accepted span paints the moment the modal closes.
+    // underline from painting beneath or around it.
     let mut view = two_pane_view();
     view.link_hover.accepted = Some((10, vec![(0, 0)]));
     view.keys_modal = Some(build_keys_modal());
     let ul = cell_flags::UNDERLINE;
-    let lit = |f: &Frame| f.cells.iter().any(|c| c.flags & ul == ul);
+    // Row 0 is the strip, whose active tab wears an underline by design.
+    let cols = view.term.1 as usize;
+    let lit = |f: &Frame| f.cells[cols..].iter().any(|c| c.flags & ul == ul);
     assert!(!lit(&view.compose()), "no underline beneath an open modal");
     view.keys_modal = None;
     assert!(
@@ -1784,10 +1785,9 @@ fn link_hover_rows() {
     view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
     let lit = view.compose();
     let ul = cell_flags::UNDERLINE;
-    // Pane 10's content origin sits at (row 2, col 29): the frame ring
-    // insets the content one cell.
+    // Pane 10's origin sits at (row 2, col 29); row 0 (the strip's tab underline) is excluded.
     let underlined = |f: &Frame| -> Vec<(usize, usize)> {
-        (0..f.rows as usize)
+        (1..f.rows as usize)
             .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
             .filter(|&(r, c)| f.cells[r * f.cols as usize + c].flags & ul == ul)
             .collect()
@@ -1795,7 +1795,7 @@ fn link_hover_rows() {
     assert_eq!(
         underlined(&lit),
         vec![(2, 28 + 4), (3, 28 + 5)],
-        "exactly the two accepted cells, at the pane's screen position"
+        "exactly the two accepted cells"
     );
     assert!(
         underlined(&clean).is_empty(),
@@ -1990,8 +1990,7 @@ fn open_create_is_modal_over_keyboard_overlays() {
 fn chrome_hit_rows() {
     let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
                                 // (x-cd67 US1) The strip is scoped to the content area (origin
-                                // panel_w=28); the pinned Ｆ[no] mark leads it, so
-                                // " footnote "=36..45, " 1 "=46..48, the padded "[ 2 ]"=49..53,
+                                // panel_w=28): " footnote "=36..45, " 1 "=46..48, "[ 2 ]"=49..53,
                                 // " + "=54..56.
     assert_eq!(cmds(view.chrome_hit(0, 47)), vec![Command::SelectTab(0)]);
     assert_eq!(cmds(view.chrome_hit(0, 50)), vec![Command::SelectTab(1)]);
@@ -1999,10 +1998,11 @@ fn chrome_hit_rows() {
     // The squad-name label is inert.
     assert!(view.chrome_hit(0, 41).is_none());
 
-    // Rows (x-cd67 US1; the strip owns terminal row 0 since R15): the strip
-    // word at row 0, then [squad 1 (terminal 1), Blank (2), squad 2 (3)].
+    // Rows (x-cd67 US1): the words right-align now, so the word column reads from the shared span table.
     let view = two_pane_view();
-    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
+    let word_start = view.top_row_spans()[0].0;
+    let word_hit = view.chrome_hit(0, word_start as u16);
+    assert!(matches!(word_hit, Some(ChromeHit::TopRow(_))));
     assert_eq!(cmds(view.chrome_hit(3, 4)), vec![Command::SelectSquad(2)]);
     // The Blank spacer row is inert.
     assert!(view.chrome_hit(2, 4).is_none());
@@ -2120,10 +2120,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     assert_eq!(panel_w, 28);
     let frame = view.compose();
     let cols = frame.cols as usize;
-    // Row 0 in the sideline columns is the strip: the lead pad, then the
-    // Agents word. The squad-1 caret moved to row 1.
-    assert_eq!(frame.cells[0].c, ' ', "row 0 col 0 pads the strip");
-    assert_eq!(frame.cells[2].c, 'A', "row 0 col 2 starts the Agents word");
+    // Row 0 in the sideline columns is the strip: the words right-align now,
+    // so the Agents word reads at its span.
+    let agents_start = view.top_row_spans()[0].0;
+    assert_eq!(
+        frame.cells[agents_start].c, 'A',
+        "row 0 starts the Agents word at its span"
+    );
     assert_eq!(frame.cells[cols].c, '▾', "row 1 col 0 is the squad-1 caret");
     // The divider column runs full height, including row 0.
     assert_eq!(frame.cells[panel_w - 1].c, '│', "divider at row 0");
@@ -2137,16 +2140,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     );
     // A row-0 click on the Agents word switches views; the squad-header
     // click moved to row 1.
-    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
+    let hit = view.chrome_hit(0, agents_start as u16);
+    assert!(matches!(hit, Some(ChromeHit::TopRow(_))));
     assert!(matches!(
         view.chrome_hit(1, 2),
         Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
     ));
 }
-
-// A left click on an inactive sideline squad row switches to it; the
-// already-active squad row toggles its caret locally instead of the old
-// silent SelectSquad no-op (x-2f99, AC3-HP/AC4-HP).
 
 // ---- x-2f99: active-squad visibility ----
 
