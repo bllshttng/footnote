@@ -747,7 +747,61 @@ pub fn project(
     }
 
     rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
-    assign_owners(&mut rows, &team_events, graph_entries, &themes);
+
+    // session -> harness, from the graph's session rows and the spawn events.
+    // A row whose source names no harness reads the lane its session ran, at
+    // event time; a session in neither source stays absent (no guess).
+    let mut harness_by_session: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for entry in graph_entries {
+        for row in entry.get("sessions").and_then(Value::as_array).unwrap_or(&vec![]) {
+            if let (Some(sid), Some(h)) = (s_field(row, "session_id"), s_field(row, "harness")) {
+                harness_by_session.insert(sid, h);
+            }
+        }
+    }
+    for line in spawns_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
+            continue;
+        }
+        let Some(data) = v.get("data") else { continue };
+        if let (Some(sid), Some(h)) = (
+            s_field(data, "harness_session_id").filter(|s| is_session_handle(s)),
+            s_field(data, "harness").or_else(|| s_field(data, "provider")),
+        ) {
+            harness_by_session.entry(sid).or_insert(h);
+        }
+    }
+    for r in &mut rows {
+        if r.harness.is_none() {
+            if let Some(sid) = r.session_id.as_deref() {
+                r.harness = harness_by_session.get(sid).cloned();
+            }
+        }
+    }
+
+    // spawn session -> worker name, for the lead rollup of node-less rows.
+    let mut spawn_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for line in spawns_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
+            continue;
+        }
+        let Some(data) = v.get("data") else { continue };
+        if let (Some(sid), Some(name)) = (
+            s_field(data, "harness_session_id").filter(|s| is_session_handle(s)),
+            s_field(data, "name"),
+        ) {
+            spawn_names.insert(sid, name);
+        }
+    }
+    assign_owners(&mut rows, &team_events, graph_entries, &themes, &spawn_names);
     for r in &mut rows {
         r.area = area_of(&r.kind).to_string();
         r.cursor = cursor_of(r);
@@ -855,6 +909,7 @@ fn assign_owners(
     team_events: &[TeamEvent],
     graph_entries: &[Value],
     themes: &std::collections::BTreeMap<String, String>,
+    spawn_names: &std::collections::HashMap<String, String>,
 ) {
     if rows.is_empty() {
         return;
@@ -943,7 +998,23 @@ fn assign_owners(
                 .get(crate::territory::canonical_scope(&scope).as_str())
                 .cloned();
             let rank = crate::team_names::title(*level as u32, &scope, theme.as_deref());
+            r.lead = Some(holder.clone());
             r.owner = Some(format!("{rank} ({holder})"));
+        } else if r.node.is_none() {
+            // A node-less row whose parent session IS a held crown holder's
+            // session rolls up to that holder: the question a lead's own
+            // session asked belongs to the lead it holds.
+            let named = r.parent.as_deref().and_then(|p| spawn_names.get(p));
+            if let Some(name) = named {
+                if let Some((scope, holder, level)) = held.iter().find(|(_, h, _)| h == name) {
+                    let theme = themes
+                        .get(crate::territory::canonical_scope(scope).as_str())
+                        .cloned();
+                    let rank = crate::team_names::title(*level as u32, scope, theme.as_deref());
+                    r.lead = Some(holder.clone());
+                    r.owner = Some(format!("{rank} ({holder})"));
+                }
+            }
         } else if let Some(p) = parent {
             let title = title_of(&p).unwrap_or_default();
             r.owner = Some(if title.is_empty() {
@@ -1924,6 +1995,67 @@ mod tests {
         assert!(leg_skipped(&pre, SPAWN_KINDS));
         assert!(!leg_skipped(&pre, QUESTION_KINDS));
         assert!(!leg_skipped(&Prefilter::default(), QUESTION_KINDS));
+
+        // AC6-HP: a question row whose session spawned through a codex
+        // agent_spawned reads harness codex, and --harness codex returns it.
+        let spawns = r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"w","provider":null,"harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"s-op"}}"#;
+        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","node":"x-aaaa"}}"#;
+        let p = project(questions, &[], &[], spawns, "", "", None);
+        let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
+        assert_eq!(asked.harness.as_deref(), Some("codex"));
+        let pre = Prefilter {
+            harness: Some("codex".into()),
+            ..Default::default()
+        };
+        let got = filter_rows(p.rows, &Page::default(), &pre, None, None);
+        assert!(
+            got.iter().any(|r| r.kind == "question_asked"),
+            "the question row returns under --harness codex"
+        );
+
+        // AC6-EDGE: a session in no spawn or graph row stays absent, and the
+        // harness filter does not guess it in.
+        let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"s-orphan","node":"x-aaaa"}}"#;
+        let p = project(questions, &[], &[], "", "", "", None);
+        let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
+        assert_eq!(asked.harness, None);
+        let got = filter_rows(
+            p.rows,
+            &Page::default(),
+            &Prefilter {
+                harness: Some("codex".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert!(got.is_empty(), "no harness, no return");
+
+        // The lead route: a node-less row whose parent session is a held
+        // crown holder's spawn rolls up to that holder; the node route keeps
+        // setting lead beside owner.
+        let team = r#"{"ts":"2026-09-02T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-aaaa"}}"#;
+        let spawns = concat!(
+            r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"heir","harness":"claude","harness_session_id":"20260904T151442Z-cl54345-58af0c","substrate":"pane","spawned_by_session":"s-op"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-02T17:30:00Z","type":"agent_spawned","source":"python","data":{"name":"w1","harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"20260904T151442Z-cl54345-58af0c"}}"#,
+        );
+        let p = project("", &[], &[], spawns, team, "", None);
+        let child = p
+            .rows
+            .iter()
+            .find(|r| r.session_id.as_deref() == Some("00847995-e0db-47c2-ab5b-24468ba1a4f5"))
+            .unwrap();
+        assert_eq!(child.lead.as_deref(), Some("heir"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of x-aaaa (heir)"));
+        let holder_row = p
+            .rows
+            .iter()
+            .find(|r| {
+                r.session_id.as_deref() == Some("20260904T151442Z-cl54345-58af0c")
+            })
+            .unwrap();
+        assert_eq!(holder_row.lead, None, "the holder's own birth rolls to nobody");
 
         let a = parse_args(&[
             "--kind".to_string(),
