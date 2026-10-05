@@ -38,13 +38,14 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
+        Some("rules") => crate::event_rules::run_hook(&args[1..]),
         Some("session-state") => session_state::run(&args[1..]),
         Some("test-run-guard") => test_run_guard::run(&args[1..]),
         Some("stop") => stop::run(&args[1..]),
         Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, king-guard, pipe-guard, pretooluse-bash, prompt, session-state, subagent-worktree-guard, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, king-guard, pipe-guard, pretooluse-bash, prompt, rules, session-state, subagent-worktree-guard, test-run-guard or stop"
             );
             2
         }
