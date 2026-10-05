@@ -493,8 +493,9 @@ mod tests {
             .iter()
             .find(|g| g.name == "note")
             .expect("note group");
+        let purpose = note.purpose.to_lowercase();
         assert!(
-            note.purpose.contains("append") && note.purpose.contains("older comments stay"),
+            purpose.contains("append") && purpose.contains("older comments stay"),
             "note purpose must teach append: {}",
             note.purpose
         );
