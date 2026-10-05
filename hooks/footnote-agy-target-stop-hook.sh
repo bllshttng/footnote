@@ -447,6 +447,18 @@ if [[ -z "$BIN" ]]; then
     unavailable_continue_or_allow
 fi
 
+# ── 6b. Event rules: the Stop-boundary rule table, before the gate ────────────
+# The same engine claude's stop hook runs in-process, through the transport
+# entry. A block relays to the session in place of the gate (the same
+# decision protocol step 9 speaks).
+RULES_PAYLOAD=$(jq -nc --arg sid "${CONVERSATION_ID:-}"     --arg msg "$(tail -n 1 "$SYNTH" 2>/dev/null | jq -r '.message.content // empty' 2>/dev/null || true)"     --arg tp "$SYNTH" --arg cwd "$TARGET_CWD"     '{session_id:$sid, last_assistant_message:$msg, transcript_path:$tp, cwd:$cwd}')
+RULES_JSON=$(printf '%s' "$RULES_PAYLOAD" | "$BIN" hook rules --event stop 2>/dev/null || true)
+if printf '%s' "$RULES_JSON" | jq -e 'select(.decision == "block")' >/dev/null 2>&1; then
+    RULES_REASON=$(printf '%s' "$RULES_JSON" | jq -r '.reason // "an event rule blocked"')
+    echo "agy stop-hook: $RULES_REASON" >&2
+    emit "$(jq -nc --arg r "$RULES_REASON" '{decision:"continue",reason:$r}')"
+fi
+
 # ── 7. Invoke loop-check (transcript scan only; agy stdin has no last message) ─
 DECISION_JSON=""
 verb_rc=0

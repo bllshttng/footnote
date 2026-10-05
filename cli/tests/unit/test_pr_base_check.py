@@ -75,7 +75,7 @@ def test_stale_branch_refused_with_fix(tmp_path):  # AC1-ERR
     assert "FNO_PR_BASE_OK=stale-acknowledged" in msg
 
 
-def test_fetch_failure_fails_open(tmp_path):  # AC2-ERR
+def test_fail_open_postures_and_the_duplicate_refusal(tmp_path, monkeypatch):  # AC2-ERR
     # A repo with an origin that points nowhere -> fetch fails -> fail-open.
     work = tmp_path / "work"
     subprocess.run(["git", "init", "-b", "main", str(work)], check=True)
@@ -86,6 +86,21 @@ def test_fetch_failure_fails_open(tmp_path):  # AC2-ERR
     code, msg = _preflight.check_stale_base(cwd=str(work))
     assert code == 0
     assert "skipped" in (msg or "")
+
+    # The duplicate guard shares the posture. A fake FNO_AGENTS_BIN keeps the
+    # run hermetic: exit 2 (old binary, usage) and exit 0 read as pass (''),
+    # exit 3 is the refusal text.
+    fake = tmp_path / "fake-fno-agents"
+    fake.write_text("#!/bin/sh\nexit 2\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(fake))
+    assert _preflight.check_duplicate_pr(str(work), "origin/main", "t") == ""
+
+    fake.write_text("#!/bin/sh\necho REFUSED 1>&2\nexit 3\n")
+    assert "REFUSED" in _preflight.check_duplicate_pr(str(work), "origin/main", "t")
+
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    assert _preflight.check_duplicate_pr(str(work), "origin/main", "t") == ""
 
 
 def test_zero_behind_passes_regardless_of_age(tmp_path):  # AC1-EDGE

@@ -13,6 +13,7 @@ use fno_agents::client::resolve_daemon_bin;
 use fno_agents::client::{
     call, call_if_running, check_daemon_drift, drift_from_status, ClientError,
 };
+use fno_agents::client_render::{render_checked, truncate_cell, LAST_MESSAGE_WIDTH};
 use fno_agents::drift::{drift_warning, DriftState};
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
@@ -1103,6 +1104,10 @@ async fn run(args: Vec<String>) -> i32 {
     // `pr-body-check`: the repo's body guards, run before `gh pr create`.
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
+    }
+    // `pr-create`: the duplicate-guarded create (see pr_create.rs doc).
+    if matches!(verb, "pr-create") {
+        return fno_agents::pr_create::run_pr_create_verb(&args[1..]);
     }
     // `pr-closure-parse` / `pr-closure-render`: the one parser/renderer for
     // the PR-body closure line; the Python readers forward here (JSON payload
@@ -3703,6 +3708,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--deny-tools",
         "--account",
         "--harness-arg",
+        "--crown",
+        "--crown-scope",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3977,6 +3984,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 if let Value::Array(list) = items {
                     list.push(v);
                 }
+            }
+            // The crown halves the Python seam carries for a crowned codex
+            // thread spawn; the typed parse lives in spawn_axes.
+            "--crown" | "--crown-scope" => {
+                fno_agents::spawn_axes::insert_crown_flag(&a, &mut it, &mut params)?;
             }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn
@@ -4705,52 +4717,6 @@ fn retain_discovered_by_progress(rows: &mut Vec<Value>, progress_filter: Option<
 /// the elapsed seconds -- `3s`, `4m`, `18h`, `2d` (plan, AC2-EDGE).
 /// Negative input (a row reconciled in the "future" via clock skew) clamps to
 /// `0s` rather than rendering a misleading negative age.
-fn format_age_secs(secs: i64) -> String {
-    let s = secs.max(0);
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m", s / 60)
-    } else if s < 86400 {
-        format!("{}h", s / 3600)
-    } else {
-        format!("{}d", s / 86400)
-    }
-}
-
-/// Render `last_reconciled_at` (raw RFC3339, or None) as the CHECKED cell:
-/// `never` when never probed, the compact age otherwise, or `?` when the stored
-/// timestamp cannot be parsed (explicit, never blank -- Silent-Failure check).
-fn render_checked(last_reconciled_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
-    match last_reconciled_at {
-        None => "never".to_string(),
-        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
-            Ok(then) => format_age_secs((now - then.with_timezone(&chrono::Utc)).num_seconds()),
-            Err(_) => "?".to_string(),
-        },
-    }
-}
-
-/// Display cap for the LAST MESSAGE cell, kept in step with Python's
-/// `_LAST_MESSAGE_WIDTH` in cli/src/fno/agents/format.py (the two tables are
-/// functional parallels, not byte-exact, but the cap is the one value worth
-/// holding together).
-const LAST_MESSAGE_WIDTH: usize = 40;
-
-/// Right-aligned ellipsis truncation, chars not bytes (mirrors Python's
-/// `_truncate`), so a long transcript line cannot own the table.
-fn truncate_cell(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
-        s.to_string()
-    } else if width <= 1 {
-        s.chars().take(width).collect()
-    } else {
-        let mut t: String = s.chars().take(width - 1).collect();
-        t.push('…');
-        t
-    }
-}
-
 /// Render agents list as a human-readable table: ROW NAME SESSION HARNESS
 /// MODEL EFFORT PR AGE LAST MESSAGE STATUS. MODEL and PR name the basis they
 /// were read from, so an absent value never reads as unset. AGE is the age of

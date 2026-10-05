@@ -231,6 +231,9 @@ def ship(
             body, branch, extra_ids=[manifest_node] if manifest_node else None
         )
         # Create new PR
+        from fno.pr._preflight import check_duplicate_pr
+        if dup := check_duplicate_pr(os.getcwd(), f"origin/{base_branch}", title):
+            return {"action": "error", "error": dup, "branch": branch}
         create_result = subprocess.run(
             [
                 "gh", "pr", "create",

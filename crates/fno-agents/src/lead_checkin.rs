@@ -1513,16 +1513,8 @@ fn derive_change(
         })
         .unwrap_or_default();
     let self_hold = data.get("self_hold");
-    if self_hold
-        .and_then(|hold| hold.get("clock_live"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || self_hold
-            .and_then(|hold| hold.get("delivery_policy"))
-            .and_then(Value::as_str)
-            == Some("bus-only")
-    {
-        attention.push("DND on".into());
+    if let Some(label) = crate::hold_label::hold_attention(self_hold.unwrap_or(&Value::Null)) {
+        attention.push(label);
     }
     let stale_skills: Vec<&str> = data
         .get("skill_drift_stale")
@@ -2174,8 +2166,8 @@ fn render_lines_with(
                 .and_then(Value::as_str)
                 .unwrap_or("none");
             lines.push(format!("self_hold: {clock}; delivery_policy {policy}"));
-            if clock_live || policy == "bus-only" {
-                lines.push("attention: DND on".into());
+            if let Some(label) = crate::hold_label::hold_attention(hold) {
+                lines.push(format!("attention: {label}"));
             }
         }
     }

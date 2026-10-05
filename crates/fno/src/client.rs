@@ -770,7 +770,7 @@ fn is_blocked_row(a: &AgentRow) -> bool {
 
 /// Everything the client renders from. Pure state - `compose` turns it into
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
-struct View {
+pub(crate) struct View {
     term: (u16, u16), // full terminal (rows, cols)
     /// The session name, for the status row. Fixed for the connection's life
     /// (sessions cannot rename), so the row can never go stale.
@@ -1340,7 +1340,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // reuses join_fold_row's join keys for its deep link.
 mod bell;
 mod feed_detail;
-mod feed_view;
+pub(crate) mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;
@@ -4297,8 +4297,8 @@ impl View {
 
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
-        // steals focus - only moving over pane content does.
-        if !self.hover_focus {
+        // steals focus, and a focused feed or board never loses it.
+        if !self.hover_focus || self.input_owner() != region_focus::RegionOwner::Pane {
             self.hover_pending = None;
             return;
         }
@@ -4654,41 +4654,6 @@ impl View {
 
     /// A squad's view state by id (test convenience: the production paths all
     /// hold the `&Squad` and key by name directly).
-    #[cfg(test)]
-    fn squad_view(&self, id: u64) -> SectionView {
-        match squad_key(&self.layout, id) {
-            Some(key) => self.section_view(&key),
-            None => SectionView::Collapsed,
-        }
-    }
-
-    /// Cycle a squad's section by id (test convenience for [`Self::cycle_section`]).
-    #[cfg(test)]
-    fn cycle_squad(&mut self, id: u64) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.cycle_section(key);
-        }
-    }
-
-    /// Force a squad's view state by id WITHOUT persisting - tests set up
-    /// state, they do not simulate an operator gesture.
-    #[cfg(test)]
-    fn set_squad_view(&mut self, id: u64, view: SectionView) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.section_view.insert(key, view);
-        }
-    }
-
-    /// Force the pull-section open so a test that exercises orphan
-    /// (`~ elsewhere`) rows renders them past their new
-    /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
-    /// about orphan rows should not silently lose them.
-    #[cfg(test)]
-    fn expand_pull_sections(&mut self) {
-        self.section_view
-            .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    }
-
     /// Agents matched to no live squad - the `~ elsewhere` section's membership.
     /// One predicate so `display_rows` and the dead-row fold never diverge.
     fn orphans(&self) -> Vec<&AgentRow> {
@@ -4974,6 +4939,7 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
+        backlog_style::node_spans_begin();
 
         let agents_full =
             self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
@@ -5202,7 +5168,7 @@ impl View {
             // The board's whole surface - docked column, drill-down,
             // pickers, centered or full-screen overlay - paints from its
             // own module (the file-budget gate keeps client.rs shrinking).
-            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
+            self.draw_board(&mut cells, rows, cols);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -5252,8 +5218,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
-            && self.backlog_board.is_none()
-            && !(self.org_board.is_some()
+            && !((self.backlog_board.is_some() || self.org_board.is_some())
                 && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
             && self.messages_board.is_none()
         {
@@ -5286,6 +5251,7 @@ impl View {
             }
         }
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
+        backlog_style::node_spans_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,
@@ -8873,7 +8839,7 @@ async fn attach_and_run(
     }
 }
 
-enum StdinFlow {
+pub(crate) enum StdinFlow {
     Continue,
     Detach,
 }

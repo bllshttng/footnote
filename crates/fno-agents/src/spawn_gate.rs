@@ -3322,6 +3322,7 @@ MemAvailable:    8000000 kB\n";
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let td = tempfile::TempDir::new().unwrap();
         let saved = std::env::var_os("FNO_AGENTS_HOME");
         std::env::set_var("FNO_AGENTS_HOME", td.path());

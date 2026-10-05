@@ -3,6 +3,7 @@
 
 use super::*;
 use fno_agents::client::{RestartError, RestartOutcome};
+use fno_agents::client_render::format_age_secs;
 use fno_agents::restart_run::rm_after_drift_repair;
 use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
 use std::path::Path;
@@ -1688,6 +1689,37 @@ fn harness_flag_rows() {
             "{flag} sets model"
         );
     }
+
+    // x-c5db: the crown halves the Python seam passes for a crowned codex
+    // thread spawn parse into params in both spellings, and a level outside
+    // the ladder refuses before any request is built.
+    let (_m, space) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--crown".to_string(),
+            "2".to_string(),
+            "--crown-scope".to_string(),
+            "x-aaaa".to_string(),
+        ],
+    )
+    .expect("--crown must parse");
+    assert_eq!(space["crown_level"], 2);
+    assert_eq!(space["crown_scope"], "x-aaaa");
+    let (_m2, equals) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--crown=1".to_string(),
+            "--crown-scope=x-bbbb".to_string(),
+        ],
+    )
+    .expect("the crown equals forms must parse");
+    assert_eq!(equals["crown_level"], 1);
+    assert_eq!(equals["crown_scope"], "x-bbbb");
+    let err = build_request("spawn", &["wk".to_string(), "--crown=7".to_string()])
+        .expect_err("a level outside the ladder refuses");
+    assert!(err.contains("level 0-2"), "got: {err}");
 }
 
 #[test]

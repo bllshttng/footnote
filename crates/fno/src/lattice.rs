@@ -75,8 +75,13 @@ pub(crate) fn lattice_glyph(s: LatticeState) -> (char, u8) {
 
 /// The frames a Working row's status glyph turns through, so a working row
 /// moves and a done row is still. Only the interactive client turns them
-/// ([`start_spin`]); a snapshot, a test, or reduced motion draws the still `●`.
-pub(crate) const SPIN: [char; 4] = ['◐', '◓', '◑', '◒'];
+/// ([`start_spin`]); a snapshot, a test, or reduced motion draws the still
+/// `●` - the set's own `full`. The set is the throbber crate's
+/// BLACK_CIRCLE: the same quarter-turn family the hand-built table drew,
+/// now a maintained crate's vocabulary.
+pub(crate) fn spin_symbols() -> &'static [&'static str] {
+    throbber_widgets_tui::symbols::throbber::BLACK_CIRCLE.symbols
+}
 pub(crate) const SPIN_FRAME_MS: u64 = 250;
 static SPIN_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
@@ -100,7 +105,11 @@ pub(crate) fn spin_epoch() -> Option<std::time::Instant> {
 }
 
 pub(crate) fn spin_frame(elapsed_ms: u64) -> char {
-    SPIN[(elapsed_ms / SPIN_FRAME_MS) as usize % SPIN.len()]
+    let syms = spin_symbols();
+    syms[(elapsed_ms / SPIN_FRAME_MS) as usize % syms.len()]
+        .chars()
+        .next()
+        .unwrap_or('\u{25cf}')
 }
 
 /// The status-cell glyph: a spin frame for a Working row while the spin

@@ -882,7 +882,14 @@ impl View {
                     format!("{mark} ")
                 };
                 let mut suffix = if a.dnd {
-                    " [DND]".to_string()
+                    // A machine-armed hold reads as its own state; a
+                    // lead seeing [DND] thinks it armed the hold and invents
+                    // a reason.
+                    if a.held_conversation {
+                        " [HELD]".to_string()
+                    } else {
+                        " [DND]".to_string()
+                    }
                 } else {
                     String::new()
                 };

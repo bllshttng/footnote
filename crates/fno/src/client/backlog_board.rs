@@ -14,7 +14,6 @@ use super::*;
 use crate::backlog_model;
 use crate::backlog_model::{unavailable_features, Board, Lane};
 use crate::backlog_view::graph_path;
-use crate::chrome;
 use crate::store_client;
 use serde_json::Value;
 use std::time::Duration;
@@ -75,12 +74,7 @@ pub(crate) struct QueryState {
 impl QueryState {
     /// The model's parsed query for this state.
     pub(crate) fn to_query(&self) -> Result<backlog_model::Query, String> {
-        let lanes = match self.lanes {
-            backlog_model::LanesBy::Project => "project",
-            backlog_model::LanesBy::Epic => "epic",
-            backlog_model::LanesBy::None => "none",
-        };
-        let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes.into())];
+        let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes_name(&self.lanes).into())];
         for (k, vals) in &self.sets {
             for v in vals {
                 p.push((k.to_string(), v.clone()));
@@ -142,6 +136,9 @@ pub(crate) struct BoardView {
     pub(crate) detail_esc: Vec<u8>,
     /// The shown node's cached markdown document read.
     pub(crate) doc: Option<PaneDoc>,
+    /// A card id to focus on the first successful gather, restored from
+    /// the store at open; `None` once consumed.
+    pending_focus: Option<String>,
     /// The write verb queued for the run loop (one at a time).
     pub(crate) write_action: Option<WriteAction>,
     /// Bumped whenever the gathered read (`inputs` + `body`) is replaced.
@@ -163,7 +160,6 @@ pub(crate) struct BoardView {
 struct BodyMemo {
     key: BodyKey,
     lines: Vec<BLine>,
-    body: Vec<chrome::BodyLine>,
     follow: Option<usize>,
 }
 
@@ -184,7 +180,6 @@ pub(crate) struct BodyKey {
 struct DetailMemo {
     key: DetailKey,
     lines: Vec<BLine>,
-    body: Vec<chrome::BodyLine>,
     follow: Option<usize>,
 }
 
@@ -308,6 +303,7 @@ impl BoardView {
             detail: None,
             detail_esc: Vec::new(),
             doc: None,
+            pending_focus: None,
             write_action: None,
             body_gen: 0,
             board_memo: std::cell::RefCell::new(None),
@@ -321,27 +317,17 @@ impl BoardView {
     pub(crate) fn board_body_cached(
         &self,
         key: BodyKey,
-        build: impl FnOnce() -> (Vec<BLine>, Vec<chrome::BodyLine>, Option<usize>),
-    ) -> (std::cell::Ref<'_, [chrome::BodyLine]>, Option<usize>) {
+        build: impl FnOnce() -> (Vec<BLine>, Option<usize>),
+    ) -> Option<usize> {
         {
             let mut slot = self.board_memo.borrow_mut();
             if slot.as_ref().is_none_or(|m| m.key != key) {
-                let (lines, body, follow) = build();
-                *slot = Some(BodyMemo {
-                    key,
-                    lines,
-                    body,
-                    follow,
-                });
+                let (lines, follow) = build();
+                *slot = Some(BodyMemo { key, lines, follow });
             }
         }
         let slot = self.board_memo.borrow();
-        let follow = slot.as_ref().and_then(|m| m.follow);
-        let body = std::cell::Ref::map(slot, |s| match s {
-            Some(m) => m.body.as_slice(),
-            None => &[],
-        });
-        (body, follow)
+        slot.as_ref().and_then(|m| m.follow)
     }
 
     /// The detail pane's lines through the memo. Same contract as
@@ -349,44 +335,55 @@ impl BoardView {
     pub(crate) fn detail_lines_cached(
         &self,
         key: DetailKey,
-        build: impl FnOnce() -> (Vec<BLine>, Vec<chrome::BodyLine>, Option<usize>),
-    ) -> (std::cell::Ref<'_, [chrome::BodyLine]>, Option<usize>) {
+        build: impl FnOnce() -> (Vec<BLine>, Option<usize>),
+    ) -> Option<usize> {
         {
             let mut slot = self.detail_memo.borrow_mut();
             if slot.as_ref().is_none_or(|m| m.key != key) {
-                let (lines, body, follow) = build();
-                *slot = Some(DetailMemo {
-                    key,
-                    lines,
-                    body,
-                    follow,
-                });
+                let (lines, follow) = build();
+                *slot = Some(DetailMemo { key, lines, follow });
             }
         }
         let slot = self.detail_memo.borrow();
-        let follow = slot.as_ref().and_then(|m| m.follow);
-        let body = std::cell::Ref::map(slot, |s| match s {
-            Some(m) => m.body.as_slice(),
-            None => &[],
-        });
-        (body, follow)
+        slot.as_ref().and_then(|m| m.follow)
     }
 
-    /// The raw cached lines, for the unframed painter that reads BLine.
-    pub(crate) fn board_lines_cached(&self) -> Vec<BLine> {
-        self.board_memo
-            .borrow()
-            .as_ref()
-            .map(|m| m.lines.clone())
-            .unwrap_or_default()
+    /// The raw cached lines by shared borrow: the paint pass reads them
+    /// without the per-frame clone an owned getter pays.
+    pub(crate) fn board_lines_ref(&self) -> std::cell::Ref<'_, [BLine]> {
+        std::cell::Ref::map(self.board_memo.borrow(), |s| match s {
+            Some(m) => m.lines.as_slice(),
+            None => &[] as &[BLine],
+        })
     }
 
-    pub(crate) fn detail_lines_raw(&self) -> Vec<BLine> {
-        self.detail_memo
-            .borrow()
-            .as_ref()
-            .map(|m| m.lines.clone())
-            .unwrap_or_default()
+    /// Clear every line's cursor band in the cached board lines: the panel
+    /// paints the band only while the board owns typing.
+    pub(crate) fn strip_board_band(&self) {
+        if let Some(m) = self.board_memo.borrow_mut().as_mut() {
+            for l in &mut m.lines {
+                l.band = false;
+            }
+        }
+    }
+
+    /// The cached detail lines by shared borrow, and the band strip that
+    /// gates them to the owning pane - the paint pass reads without clone.
+    pub(crate) fn detail_lines_ref(&self) -> std::cell::Ref<'_, [BLine]> {
+        std::cell::Ref::map(self.detail_memo.borrow(), |s| match s {
+            Some(m) => m.lines.as_slice(),
+            None => &[] as &[BLine],
+        })
+    }
+
+    /// Clear every line's selection band in the cached detail lines: the
+    /// pane paints them only while it holds focus.
+    pub(crate) fn strip_detail_band(&self) {
+        if let Some(m) = self.detail_memo.borrow_mut().as_mut() {
+            for l in &mut m.lines {
+                l.band = false;
+            }
+        }
     }
 
     /// The cheap reading: one duration in, one log line out per
@@ -394,6 +391,14 @@ impl BoardView {
     /// `<mux dir>/client-warnings.log`.
     pub(crate) fn record_paint(&self, micros: u128) {
         self.paint_stats.borrow_mut().record(micros);
+    }
+
+    /// A board-local popup (the keys sheet, the facet or column picker)
+    /// paints over the board body, so the tap spans on record describe
+    /// cells the popup now covers: while one is open, a press resolves
+    /// nothing.
+    pub(crate) fn popup_open(&self) -> bool {
+        self.keys_overlay || self.facet.is_some() || self.colpick.is_some()
     }
 
     /// Flush a due paint-stats window to `<mux dir>/client-warnings.log`.
@@ -519,13 +524,20 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
             b.force = false;
             b.last_gather = Some(Instant::now());
             b.stamp = inputs.version;
-            let focus = cursor_card_id(b);
             b.inputs = Some(inputs);
             let Ok(q) = b.query.to_query() else {
                 return;
             };
             let board = backlog_model::board(b.inputs.as_ref().expect("set one line above"), &q);
             b.errors = board.errors.clone();
+            // The restored selection waits for a board that actually has
+            // lanes; a failed read keeps it waiting instead of spending it.
+            let focus = if board.lanes.is_empty() {
+                b.pending_focus.clone()
+            } else {
+                b.pending_focus.take()
+            }
+            .or_else(|| cursor_card_id(b));
             // A failed read (errors with no lanes) never repaints a good
             // board empty; a filter matching nothing (empty errors) does.
             if !board.lanes.is_empty() || board.errors.is_empty() || b.body.is_none() {
@@ -606,6 +618,89 @@ fn first_card(b: &mut BoardView) {
             }
         }
     }
+}
+
+/// The query string spelling of the lane grouping, shared by the URL
+/// fold and the store's save/restore.
+fn lanes_name(lanes: &backlog_model::LanesBy) -> &'static str {
+    match lanes {
+        backlog_model::LanesBy::Project => "project",
+        backlog_model::LanesBy::Epic => "epic",
+        backlog_model::LanesBy::None => "none",
+    }
+}
+
+/// The inverse of [`lanes_name`]; an unknown name reads as the default.
+fn lanes_from_name(name: Option<&str>) -> backlog_model::LanesBy {
+    match name {
+        Some("epic") => backlog_model::LanesBy::Epic,
+        Some("none") => backlog_model::LanesBy::None,
+        _ => backlog_model::LanesBy::Project,
+    }
+}
+
+/// The query string spelling of the view mode, shared like [`lanes_name`].
+fn view_name(view: &backlog_model::View) -> &'static str {
+    match view {
+        backlog_model::View::Kanban => "kanban",
+        backlog_model::View::List => "list",
+    }
+}
+
+/// The inverse of [`view_name`]; an unknown name reads as kanban.
+fn view_from_name(name: Option<&str>) -> backlog_model::View {
+    match name {
+        Some("list") => backlog_model::View::List,
+        _ => backlog_model::View::Kanban,
+    }
+}
+
+/// Write the board's query and selection to the view store, so the next
+/// open and the next client restart come back to them. A gesture with a
+/// save in it also cancels the restore-in-waiting: the operator moved
+/// first, so the stored card no longer wins the first gather.
+fn save_board_prefs(b: &mut BoardView) {
+    b.pending_focus = None;
+    let prefs = crate::view_store::BoardQueryPrefs {
+        lanes: Some(lanes_name(&b.query.lanes).to_string()),
+        view: Some(view_name(&b.query.view).to_string()),
+        q: b.query.q.clone(),
+        sets: b
+            .query
+            .sets
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+        sel: cursor_card_id(b),
+    };
+    crate::view_store::save_board_query(&prefs);
+}
+
+/// Restore the remembered query and selection into a fresh board. A stored
+/// state that fails its own parse is ignored, never half-applied.
+fn restore_board_prefs(b: &mut BoardView) {
+    let Some(p) = crate::view_store::load_board_query() else {
+        return;
+    };
+    let sets = p
+        .sets
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let name = FACET_NAMES.iter().find(|n| **n == k.as_str()).copied()?;
+            (!v.is_empty()).then_some((name, v))
+        })
+        .collect();
+    let candidate = QueryState {
+        lanes: lanes_from_name(p.lanes.as_deref()),
+        sets,
+        q: p.q.filter(|q| !q.is_empty()),
+        view: view_from_name(p.view.as_deref()),
+    };
+    if candidate.to_query().is_err() {
+        return;
+    }
+    b.query = candidate;
+    b.pending_focus = p.sel;
 }
 
 /// Render the overlay body: the lines and the cursor row for the painter's
@@ -1072,14 +1167,7 @@ impl View {
     /// full-screen board. Windowed, the backlog paints inside the sideline
     /// column (the sideline's own draw path), so this paints nothing.
     /// The compose branch in `client.rs` is this one call.
-    pub(super) fn draw_board(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        _overlay_origin: (usize, usize),
-        _overlay_dims: (usize, usize),
-    ) {
+    pub(super) fn draw_board(&self, cells: &mut [Cell], rows: usize, cols: usize) {
         let Some(b) = &self.backlog_board else {
             return;
         };
@@ -1172,7 +1260,9 @@ fn backlog_board_open_fresh(view: &mut View) {
         .as_ref()
         .map(|b| b.gen.wrapping_add(1))
         .unwrap_or(0);
-    view.backlog_board = Some(BoardView::new(gen));
+    let mut b = BoardView::new(gen);
+    restore_board_prefs(&mut b);
+    view.backlog_board = Some(b);
     // Opening the board is an explicit keyboard gesture: it takes the input
     // owner, the same way `E` takes it for the feed.
     view.region_owner = super::region_focus::RegionOwner::Board;
@@ -1289,6 +1379,7 @@ pub(crate) async fn board_keys(
             }
             ModalKey::Byte(b'/') => open_find(view),
             ModalKey::Byte(b'f') => open_facet(view),
+            ModalKey::Byte(b'x') => reset_filters(view),
 
             ModalKey::Byte(b'b') => dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => launch_target(view, sock_w).await?,
@@ -1360,6 +1451,7 @@ fn move_row(view: &mut View, down: bool) {
     } else {
         b.row.saturating_sub(1)
     };
+    save_board_prefs(b);
 }
 
 /// The list view's flat cursor walk: one card per (lane, column, row)
@@ -1398,6 +1490,7 @@ fn move_row_list(b: &mut BoardView, down: bool) {
     };
     let (l, c, r) = cells[next];
     (b.lane, b.col, b.row) = (l, c, r);
+    save_board_prefs(b);
 }
 
 /// Move the column cursor (clamped to the six cells); the row clamps at
@@ -1417,6 +1510,7 @@ fn move_col(view: &mut View, right: bool) {
         b.col.saturating_sub(1)
     };
     b.row = 0;
+    save_board_prefs(b);
 }
 
 /// Jump to the previous/next lane and land on its first non-empty cell.
@@ -1448,6 +1542,7 @@ fn move_lane(view: &mut View, next: bool) {
             b.row = 0;
         }
     }
+    save_board_prefs(b);
 }
 
 /// `L`: cycle the lanes query project -> epic -> none -> project, keeping
@@ -1457,6 +1552,19 @@ fn cycle_lanes(view: &mut View) {
         return;
     };
     cycle_lanes_b(b);
+}
+
+/// `x`: every filter back to `any`, and the store's memory of them
+/// cleared with it.
+fn reset_filters(view: &mut View) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    b.query = QueryState::default();
+    b.pending_focus = None;
+    rederive(b);
+    save_board_prefs(b);
+    view.set_notice("filters reset".to_string());
 }
 
 /// Tab: flip the board between the kanban grid and the uncapped list,
@@ -1472,6 +1580,7 @@ fn toggle_view(view: &mut View) {
     };
     rederive(b);
     focus_card(b, focus.as_deref());
+    save_board_prefs(b);
 }
 
 /// The pure half of the lane cycle, so tests exercise it without a View.
@@ -1484,6 +1593,7 @@ fn cycle_lanes_b(b: &mut BoardView) {
     let focus = cursor_card_id(b);
     rederive(b);
     focus_card(b, focus.as_deref());
+    save_board_prefs(b);
 }
 
 /// `/`: open the one-line find input.
@@ -1563,6 +1673,7 @@ fn input_commit(view: &mut View) {
                     let focus = cursor_card_id(b);
                     rederive(b);
                     focus_card(b, focus.as_deref());
+                    save_board_prefs(b);
                 }
                 Err(msg) => view.set_notice(msg),
             }
@@ -1894,6 +2005,12 @@ fn facet_keys(view: &mut View, bytes: &[u8]) {
             ModalKey::Byte(b' ') if b.facet.as_ref().is_some_and(|p| p.value_sel.is_some()) => {
                 facet_toggle(view);
             }
+            // Reset is offered from the filter surface itself: one key
+            // clears every facet and closes the picker.
+            ModalKey::Byte(b'x') if b.facet.as_ref().is_some_and(|p| p.value_sel.is_none()) => {
+                b.facet = None;
+                reset_filters(view);
+            }
             ModalKey::Enter => facet_commit(view),
             _ => {}
         }
@@ -2031,7 +2148,7 @@ pub(crate) fn facet_popup(b: &BoardView) -> Option<Popup> {
         }
         let mut popup = Popup::new(rows, Anchor::Center)
             .title("backlog filters")
-            .footer("enter pick · esc close");
+            .footer("enter pick · x reset · esc close");
         popup.sel = pick.sel;
         Some(popup)
     }
@@ -2144,6 +2261,7 @@ fn toggle_value(b: &mut BoardView, facet: usize, vsel: usize) {
     let focus = cursor_card_id(b);
     rederive(b);
     focus_card(b, focus.as_deref());
+    save_board_prefs(b);
 }
 
 /// Space at the value level: toggle the row under the cursor and stay
@@ -2392,6 +2510,7 @@ fn board_keys_popup() -> Popup {
         PopupRow::Rule,
         pick_row("hjkl move - [ ] lane - L lanes"),
         pick_row("/ find - f filter - r re-read"),
+        pick_row("x reset filters"),
         pick_row("Tab list/kanban - space toggle (in f)"),
         pick_row("enter node detail - F full screen"),
         pick_row("y copy id - Y copy session command (in detail)"),

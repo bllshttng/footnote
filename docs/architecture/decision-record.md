@@ -165,7 +165,7 @@ One query reads the whole decision path for a node (read-only, immutable open, s
 
     sqlite3 "file:<events.db>?mode=ro&immutable=1" "select ts,type,json_extract(data,'$.trace.span_id'),json_extract(data,'$.trace.parent_span_id') from events where json_extract(data,'$.trace.trace_id')='<node>' order by ts"
 
-The route span and the question row come back in parent order. The schema entry (`decision_span`) and the Python `validate` gate the enums. The Stop-boundary rule table acts on these rows.
+The route span and the question row come back in parent order. The schema entry (`decision_span`) and the Python `validate` gate the enums. The Stop-boundary rule table ([event-rules](event-rules.md)) acts on these rows.
 
 ## Backfill
 

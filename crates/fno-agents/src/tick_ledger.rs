@@ -1003,11 +1003,13 @@ pub const LAUNCHD_LABELS: &[&str] = &[
     "com.user.autocorrect-watcher",
 ];
 
-/// One label's facts from the fold.
+/// One label's facts from the fold. Serialized with the `exit` key doctor's
+/// report reads; `None` means launchctl measured no exit.
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchdLabelFacts {
     pub label: String,
     pub loaded: bool,
+    #[serde(rename = "exit")]
     pub last_exit: Option<i64>,
 }
 

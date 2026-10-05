@@ -167,6 +167,9 @@ impl ReaderState {
         // bg /target worker between turns from its claim + loop_check recency.
         if let Some(raw) = &self.reg_raw {
             overlay_truth_badges(&mut reg_rows, &build_truth_badges(raw, now_secs));
+            // Stamp machine-armed holds after the badges; a hold
+            // mark is orthogonal to the badge, like `dnd` itself.
+            overlay_hold_marks(&mut reg_rows, now_secs);
         }
         self.last_good_reg = Some(reg_rows.clone());
 

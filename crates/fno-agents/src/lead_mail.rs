@@ -27,7 +27,7 @@ fn lead_holders(
 ) -> Vec<String> {
     let mut names: Vec<String> = registry
         .iter()
-        .filter(|row| !crate::announce::row_terminal(row))
+        .filter(|row| !crate::row_verdict::finished_json(row))
         .filter(|row| {
             row.get("crown_level")
                 .map(|c| !c.is_null())
@@ -259,5 +259,32 @@ mod tests {
         .unwrap();
         assert_eq!(mailed, ["lead-a"]);
         assert_eq!(read_bus(tmp.path()).len(), 1);
+
+        // The reversible word keys on proof: an Orphaned holder with a
+        // reaped pid never addresses, one with a live pid still answers
+        // its own scope.
+        let mut quiet_dead = team_row("quiet-dead", "x-dddd", 2, "orphaned");
+        quiet_dead["pid"] = json!(crate::row_verdict::reaped_pid());
+        let mut quiet_live = team_row("quiet-live", "x-eeee", 2, "orphaned");
+        quiet_live["pid"] = json!(std::process::id());
+        write_registry(tmp.path(), json!([quiet_dead, quiet_live]));
+        let err = send_at(
+            &registry_path(tmp.path()),
+            &bus_path(tmp.path()),
+            SETTLE_SENDER,
+            "x-dddd",
+            "text",
+        )
+        .unwrap_err();
+        assert!(err.contains("no live team answers"), "{err}");
+        let mailed = send_at(
+            &registry_path(tmp.path()),
+            &bus_path(tmp.path()),
+            SETTLE_SENDER,
+            "x-eeee",
+            "text",
+        )
+        .unwrap();
+        assert_eq!(mailed, ["quiet-live"]);
     }
 }

@@ -30,7 +30,7 @@
 //! destroy the evidence; the operator removes the file by hand to start a
 //! fresh generation.
 //!
-//! Binary verb `fno-agents fleet-incident stop|clear|status|check`, matched
+//! Binary verb `fno-agents fleet-incident stop|clear|status|check|claim`, matched
 //! in `bin/client.rs` next to `test-run` (direct dispatch, no daemon RPC).
 //! The public surface is the thin Python adapter `fno agents incident`,
 //! which relays exit/stdout/stderr and decides nothing.
@@ -522,7 +522,7 @@ fn utc_now() -> String {
 
 /// Caller attribution: an explicit `--by`, else the session env stamps, else
 /// the login name. Nothing here invents an identity it cannot see.
-fn attributed_caller(explicit: Option<&str>) -> String {
+pub(crate) fn attributed_caller(explicit: Option<&str>) -> String {
     if let Some(b) = explicit {
         if !b.trim().is_empty() {
             return b.trim().to_string();
@@ -629,7 +629,7 @@ pub fn targets_dir(home: &crate::paths::AgentsHome) -> PathBuf {
     home.fleet_stop_json().with_file_name("fleet-stop.d")
 }
 
-fn safe_target_value(value: &str) -> bool {
+pub(crate) fn safe_target_value(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
@@ -1010,7 +1010,7 @@ fn print_receipt(record: &IncidentRecord) {
 
 fn print_usage() {
     println!(
-        "usage: fno-agents fleet-incident stop --reason <text> [--hold spawns,tests,merges,loops] [--session <id>|--territory <scope>] [--ttl <dur>] | clear --reason <text> [--session <id>|--territory <scope>] | status [--json] | check [--scope spawns|tests|merges|loops] [--json]"
+        "usage: fno-agents fleet-incident stop --reason <text> [--hold spawns,tests,merges,loops] [--session <id>|--territory <scope>] [--ttl <dur>] | clear --reason <text> [--session <id>|--territory <scope>] | claim <incident> --pr <n> [--by <who>] [--note <text>] | status [--json] | check [--scope spawns|tests|merges|loops] [--json]"
     );
 }
 
@@ -1365,6 +1365,7 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
                 }
             }
         }
+        "claim" => crate::incident_claim::run_claim(rest),
         "check" => {
             // Admission verdict for callers that cannot link this crate (the
             // spawn gate). Asks one scope's question - the spawn gate's own
