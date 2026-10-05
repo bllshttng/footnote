@@ -805,7 +805,14 @@ pub(crate) fn paint(
         part_w,
         body_h,
         &partners,
-        Some(2 + b.cursors[1]),
+        Some(
+            partners.len().saturating_sub(
+                b.sel_agent
+                    .as_deref()
+                    .map(|a| b.chat_rows(a).len())
+                    .unwrap_or(0),
+            ) + b.cursors[1],
+        ),
         &view.theme,
     );
     super::backlog_style::paint_panel_at(
@@ -1489,32 +1496,21 @@ pub(crate) async fn mouse(
                 .and_then(|line| line.checked_sub(start_line))
         }
         Col::Chats => {
-            let agent = view
-                .messages_board
-                .as_ref()
-                .and_then(|b| b.sel_agent.clone());
-            let len = agent
-                .map(|a| {
-                    view.messages_board
-                        .as_ref()
-                        .map(|b| b.chat_rows(&a).len())
-                        .unwrap_or(0)
-                })
+            let Some(board) = view.messages_board.as_ref() else {
+                return Ok(());
+            };
+            let agent = board.sel_agent.clone();
+            let rows_len = agent
+                .as_deref()
+                .map(|a| board.chat_rows(a).len())
                 .unwrap_or(0);
-            // Two prefix lines: the tab strip and the spacer under it.
-            let (start, _) = column_rect(
-                len + 2,
-                body_h,
-                2 + view
-                    .messages_board
-                    .as_ref()
-                    .map(|b| b.cursors[1])
-                    .unwrap_or(0),
-            );
+            let lines = board.chats_column(part_w);
+            let start_line = lines.len().saturating_sub(rows_len);
+            let (scroll, _) = column_rect(lines.len(), body_h, start_line + board.cursors[1]);
             (rep.row as usize)
                 .checked_sub(1)
-                .and_then(|line| line.checked_sub(2))
-                .map(|i| i + start)
+                .map(|i| i + scroll)
+                .and_then(|line| line.checked_sub(start_line))
         }
         Col::Thread => {
             let (tree_w, part_w) = split(view.term.1 as usize);
