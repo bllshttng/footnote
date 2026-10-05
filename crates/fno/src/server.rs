@@ -12482,11 +12482,8 @@ fn subline_with_title(a: &agents_view::RegistryAgent, base: Option<String>) -> O
     }
 }
 
-/// (US3) The cwd basename carried on EVERY agent row (not just orphans),
-/// so the sideline can flag a foreign-cwd join client-side by comparing it to
-/// the squad's project basename. `None` for an empty cwd (no subline is
-/// fabricated - the AC4-EDGE "absent cwd" case); a path with no final component
-/// falls back to the whole cwd, matching the pre-change orphan extraction.
+/// (US3) The cwd basename carried on every agent row: empty cwd -> None
+/// (AC4-EDGE, no fabricated subline); no final component -> the whole cwd.
 fn cwd_basename(cwd: &str) -> Option<String> {
     if cwd.is_empty() {
         return None;

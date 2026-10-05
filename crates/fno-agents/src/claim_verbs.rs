@@ -51,9 +51,14 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "release" {
         // Wave 2 of the leaf port: the operator surface (plain, --lane,
         // --force, and the do-row close/rollback) lives in claim_cli; goldens
-        // are the contract. The engine receipt core.release_claim parses
-        // rides --with-claim.
+        // are the contract.
         return crate::claim_cli::release::run(&args[1..]);
+    }
+    if op == "refresh" {
+        // Wave 3 of the leaf port: the operator surface lives in claim_cli;
+        // goldens are the contract. Both core shapes (legacy for global-id
+        // keys, native pre-read for repo-local) route here.
+        return crate::claim_cli::refresh::run(&args[1..]);
     }
     if op == "lane-acquire" {
         return crate::claim_lanes_cli::run_lane_acquire(&args[1..]);

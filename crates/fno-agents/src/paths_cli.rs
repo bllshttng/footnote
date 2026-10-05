@@ -8,6 +8,7 @@
 //! The live emitter is the config-aware door: every call regenerates from
 //! the settings the caller resolves and prints a sourceable temp path.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -556,6 +557,77 @@ fn run_shell_stub() -> i32 {
     }
 }
 
+/// `verify [PATH]`: compare the schema-derived sha256 with the file's.
+/// Same messages the retired Python verify_cmd printed, byte for byte.
+fn run_verify(args: &[String]) -> i32 {
+    let mut path: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--help" | "-h" => {
+                println!("usage: fno config paths verify [PATH]");
+                return 0;
+            }
+            other => {
+                if other.starts_with('-') {
+                    eprintln!("fno config paths verify: unknown argument {other:?}");
+                    return 2;
+                }
+                if path.is_some() {
+                    eprintln!("fno config paths verify: takes at most one PATH");
+                    return 2;
+                }
+                path = Some(PathBuf::from(other));
+            }
+        }
+    }
+    let target = match path {
+        Some(p) => p,
+        None => match repo_root() {
+            Some(root) => root.join("scripts/lib/paths.sh"),
+            None => {
+                eprintln!("fno config paths verify: no repo root; pass PATH");
+                return 1;
+            }
+        },
+    };
+    if !target.exists() {
+        eprintln!(
+            "error: {} does not exist. Generate it with: fno config paths emit-shell",
+            target.display()
+        );
+        return 1;
+    }
+    let bytes = match std::fs::read(&target) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "fno config paths verify: cannot read {}: {e}",
+                target.display()
+            );
+            return 1;
+        }
+    };
+    let derived = hex(&Sha256::digest(emit_paths_sh_defaults().as_bytes()));
+    let checked = hex(&Sha256::digest(&bytes));
+    if derived == checked {
+        println!(
+            "paths.sh is in sync with schema (hash: {}...)",
+            &derived[..12]
+        );
+        0
+    } else {
+        eprintln!(
+            "--- expected (from schema)\n+++ checked-in\nschema hash:  {derived}\nfile hash:    {checked}\n\nHashes differ. Regenerate with:\n  fno config paths emit-shell"
+        );
+        1
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Worker lane entry for `--paths-exec <verb> [args...]`.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -567,8 +639,11 @@ pub fn run(args: &[String]) -> i32 {
             }
             run_shell_stub()
         }
+        Some("verify") => run_verify(&args[1..]),
         _ => {
-            eprintln!("usage: fno-agents-worker --paths-exec <emit-shell|shell-stub> [args...]");
+            eprintln!(
+                "usage: fno-agents-worker --paths-exec <emit-shell|shell-stub|verify> [args...]"
+            );
             2
         }
     }
@@ -615,6 +690,46 @@ mod tests {
     #[test]
     fn run_refuses_unknown_verb() {
         assert_eq!(run(&["bogus".to_string()]), 2);
+    }
+
+    // -- verify: contracts ported from cli/tests/integration/test_paths_sh_gate.py --
+
+    #[test]
+    fn run_verify_contracts() {
+        let dir = std::env::temp_dir().join(format!("fno-paths-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("paths.sh");
+        std::fs::write(&p, FIXTURE).unwrap();
+        let arg = p.to_string_lossy().into_owned();
+
+        // matching content passes
+        assert_eq!(run(&["verify".to_string(), arg.clone()]), 0);
+
+        // a mtime-only touch still passes: the contract is content hash, not mtime
+        let f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ),
+        )
+        .unwrap();
+        assert_eq!(run(&["verify".to_string(), arg.clone()]), 0);
+
+        // one flipped byte fails
+        let mut bytes = FIXTURE.to_vec();
+        bytes[0] ^= 0x20;
+        std::fs::write(&p, &bytes).unwrap();
+        assert_eq!(run(&["verify".to_string(), arg.clone()]), 1);
+
+        // a missing file fails
+        let missing = dir.join("nope.sh").to_string_lossy().into_owned();
+        assert_eq!(run(&["verify".to_string(), missing]), 1);
+
+        // an unknown flag is a usage error
+        assert_eq!(run(&["verify".to_string(), "--bogus".to_string()]), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- live emitter (shell-stub): contracts ported from the Python

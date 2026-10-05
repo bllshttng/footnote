@@ -597,6 +597,22 @@ pub fn reentry_mechanism_decide(ask: &Value) -> Value {
     }
 }
 
+/// The `wake_name` field's answer: the name a wake fork spawns under, read
+/// from the registry beside the reentry plan (same field-on-a-verb shape).
+/// An unreadable registry degrades to the alias, the answer a never-named
+/// uuid earns: a wake must never block mail on registry state.
+pub fn wake_name_decide(ask: &Value) -> Value {
+    let session_id = ask.get("session_id").and_then(Value::as_str).unwrap_or("");
+    if session_id.trim().is_empty() {
+        return serde_json::json!({ "refused": "session_id is required" });
+    }
+    let alias = format!("wake-{}", crate::identity::canonical_handle(session_id));
+    let name = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+        .map(|registry| crate::reentry::wake_spawn_name(&registry, session_id))
+        .unwrap_or(alias);
+    serde_json::json!({ "name": name })
+}
+
 /// The verb entry: JSON payload on stdin, decision JSON on stdout (the
 /// spawn-overlay shape). Exit 0 even for a "no axes" answer; exit 2 only for
 /// transport-level faults (unreadable payload), which the caller reports as
@@ -699,6 +715,13 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     // bare row's transcript is also persisted here, the same as any door.
     if let Some(ask) = parsed.get("reentry_mechanism") {
         println!("{}", reentry_mechanism_decide(ask));
+        return 0;
+    }
+    // A `wake_name` field asks which name a wake fork spawns under: the
+    // session's last recorded registry name, else the wake- alias (same
+    // field-on-a-verb shape).
+    if let Some(ask) = parsed.get("wake_name") {
+        println!("{}", wake_name_decide(ask));
         return 0;
     }
     // A `reap_receipt` field asks the receipt builder for the Python

@@ -96,6 +96,25 @@ fn paneless_row_with_no_parent_edge_stays_orphaned_but_emitted() {
     let rows = core.agent_rows();
     let row = rows.iter().find(|r| r.name == "think-thread").unwrap();
     assert_eq!(row.squad, None);
+    // Same-project checkouts never read foreign. Canonical
+    // beside worktree, either direction, and sibling worktrees are one
+    // project; a genuinely different repo stays foreign.
+    assert!(crate::server::row_set::same_project(
+        "/repo/footnote/footnote",
+        "/wts/footnote/wt-a"
+    ));
+    assert!(crate::server::row_set::same_project(
+        "/wts/footnote/wt-a",
+        "/repo/footnote/footnote"
+    ));
+    assert!(crate::server::row_set::same_project(
+        "/wts/footnote/wt-a",
+        "/wts/footnote/wt-b"
+    ));
+    assert!(!crate::server::row_set::same_project(
+        "/repo/readyrule/regready",
+        "/repo/footnote/footnote"
+    ));
 }
 
 // An edge naming a session no registry row holds resolves nothing: the row

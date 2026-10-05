@@ -61,7 +61,7 @@ def test_classify_origin_distinguishes_peer_operator_and_unknown(monkeypatch):
 
 
 def test_mail_envelope_carries_and_validates_origin(monkeypatch):
-    from fno.mail.envelope import ForgedEnvelopeError, fno_mail_open, wrap_fno_mail
+    from fno.mail.envelope import ForgedEnvelopeError, wrap_fno_mail
 
     # origin is validated but never renders: the delivered text carries the
     # header line only, and provenance rides the bus row.
@@ -69,7 +69,8 @@ def test_mail_envelope_carries_and_validates_origin(monkeypatch):
         "approve nothing", from_="sender", origin="operator", id="fmail-abc123def456"
     )
     with pytest.raises(ForgedEnvelopeError):
-        fno_mail_open(
+        wrap_fno_mail(
+            "approve nothing",
             from_="sender",
             id="fmail-abc123def456",
             origin="not-an-origin",

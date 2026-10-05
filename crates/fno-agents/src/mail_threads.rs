@@ -870,9 +870,9 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         assert_eq!(threads.len(), 5, "pair chats only: {threads:?}");
-        // Old mail reads as the body: envelope unwrapped, the pasted
-        // header-summary repeat stripped once, mid-text mention untouched
-        // (AC7-AC9-HP).
+        // Old mail: an unmigrated legacy row shows the raw tag (the prompt
+        // to run the one-time migration), the pasted header-summary repeat
+        // strips once, mid-text mention untouched (AC7-AC9-HP).
         let body_of = |id: &str| -> String {
             threads
                 .iter()
@@ -886,7 +886,10 @@ mod tests {
                 })
                 .unwrap_or_default()
         };
-        assert_eq!(body_of("fmail-b1b1b1b1b1b1"), "Ship it.");
+        assert_eq!(
+            body_of("fmail-b1b1b1b1b1b1"),
+            "<fno_mail from=\"a\" id=\"fmail-b1b1b1b1b1b1\">Ship it.</fno_mail>"
+        );
         assert_eq!(body_of("fmail-b2b2b2b2b2b2"), "Ship it. Then merge.");
         assert_eq!(body_of("fmail-b3b3b3b3b3b3"), "see <fno_mail> docs");
         // AC4-HP: the registry never named s-lone; its from name shows and

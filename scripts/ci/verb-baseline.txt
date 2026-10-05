@@ -48,7 +48,7 @@ agents spawn !--bounded-placement !--mux-session !--output-format !--recorded-pr
 annotate
 annotate list
 approvals
-autonomy
+autonomy status
 backlog
 backlog advance !--continuation
 backlog done
@@ -66,7 +66,7 @@ config get
 config set
 context
 cost
-delivery
+delivery evaluate
 do
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
 done
@@ -115,7 +115,7 @@ outstanding clear !--origin
 outstanding mine do
 outstanding reindex
 paths
-phase
+phase kill-check
 plan
 plugins
 pr
@@ -134,7 +134,7 @@ setup
 skill-diff
 state
 status
-status-fanout
+status-fanout tick
 stub-manifest
 target
 target init !--provider

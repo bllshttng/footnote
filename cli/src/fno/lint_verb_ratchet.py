@@ -320,7 +320,9 @@ def iter_python_leaves():
             if import_path in seen_groups:
                 continue
             seen_groups.add(import_path)
-            cmd = typer.main.get_command(obj)
+            from fno._lazy_group import typer_group_shape
+
+            cmd = typer_group_shape(obj)
             collapse_keep = options.get("collapse_keep")
             if collapse_keep is not None:
                 uncollapsed_ctx = click.Context(cmd, info_name=name)

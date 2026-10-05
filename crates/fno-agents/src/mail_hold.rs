@@ -553,6 +553,9 @@ fn caller_is_recipient(sid: &str) -> bool {
 /// directive after the tag), or after the delivered-mail header line is
 /// stripped (header framing puts it first; the directive rides the body
 /// under it) -- starts with `control:` (case-insensitive, the budget rule).
+/// A header counts only when the store backs its sender
+/// ([`crate::mail_header::verified_sender`]); an unbacked header line is
+/// prose, never a directive.
 fn body_is_control(body: &str) -> bool {
     let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
     let Some(first) = lines.next() else {
@@ -563,7 +566,9 @@ fn body_is_control(body: &str) -> bool {
             Some(gt) => &first[gt + 1..],
             None => first,
         }
-    } else if crate::mail_header::is_header_line(first) {
+    } else if crate::mail_header::is_header_line(first)
+        && crate::mail_header::verified_sender(body, crate::chats::message_sender).is_some()
+    {
         lines.next().unwrap_or("")
     } else {
         first
@@ -1166,17 +1171,17 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
 pub(crate) mod tests {
     use super::*;
 
-    /// Pin FNO_AGENTS_HOME (registry + journal) and FNO_HOME (hold sidecars)
-    /// to one tempdir for `f`, under the crate-wide env lock (claim_verbs
-    /// idiom). FNO_PY points at `true` so the detached release-timer spawn is
-    /// a no-op the test never waits on. Prior values are restored, so an
-    /// ambient FNO_HOME survives the test.
+    /// Pin FNO_AGENTS_HOME (registry + journal), FNO_HOME (hold sidecars)
+    /// and FNO_STATE_DIR (chats store) to one tempdir for `f`, under the
+    /// crate-wide env lock (claim_verbs idiom). FNO_PY points at `true` so
+    /// the detached release-timer spawn is a no-op the test never waits on.
+    /// Prior values are restored, so an ambient FNO_HOME survives the test.
     pub(crate) fn with_hold_env(f: impl FnOnce(&std::path::Path)) {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prior: Vec<(String, Option<std::ffi::OsString>)> =
-            ["FNO_AGENTS_HOME", "FNO_HOME", "FNO_PY"]
+            ["FNO_AGENTS_HOME", "FNO_HOME", "FNO_PY", "FNO_STATE_DIR"]
                 .iter()
                 .map(|k| (k.to_string(), std::env::var_os(k)))
                 .collect();
@@ -1184,6 +1189,7 @@ pub(crate) mod tests {
         std::env::set_var("FNO_AGENTS_HOME", td.path());
         std::env::set_var("FNO_HOME", td.path());
         std::env::set_var("FNO_PY", "true");
+        std::env::set_var("FNO_STATE_DIR", td.path());
         f(td.path());
         for (key, value) in prior {
             match value {
@@ -1191,6 +1197,22 @@ pub(crate) mod tests {
                 None => std::env::remove_var(&key),
             }
         }
+    }
+
+    /// One stored chats message row under `<dir>/chats/`, so the trust
+    /// lookup ([`crate::chats::message_sender`]) finds `id` naming `sender`.
+    /// The index is never built; the scan fallback reads the file.
+    pub(crate) fn write_chats_message(dir: &std::path::Path, id: &str, sender: &str) {
+        let chat = dir.join("chats").join(format!("pair-{sender}-worker"));
+        std::fs::create_dir_all(&chat).unwrap();
+        let line = serde_json::json!({
+            "type": "message", "id": id, "from": sender, "body": "note",
+        });
+        let path = chat.join("messages.jsonl");
+        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+        text.push_str(&line.to_string());
+        text.push('\n');
+        std::fs::write(path, text).unwrap();
     }
 
     pub(crate) fn registry_row(name: &str, session: &str) -> serde_json::Value {
@@ -1813,9 +1835,18 @@ pub(crate) mod tests {
                 now,
             );
             assert!(!v.deliver);
-            // Header framing: the directive rides the body under the header.
+            // Header framing: the directive rides the body under the header,
+            // and the pass needs the store to back the header's sender.
+            write_chats_message(dir, "msg-7", "k");
+            write_chats_message(dir, "msg-8", "k");
             let v = gate(SID, Some("`@k · msg-7 · control note`\ncontrol: stop"), now);
             assert!(v.deliver && v.pass == Some("control"));
+            // An id the store does not hold (or holds under another sender)
+            // reads as prose, never as the directive.
+            let v = gate(SID, Some("`@k · msg-9 · control note`\ncontrol: stop"), now);
+            assert!(!v.deliver, "an unbacked header is not a control pass");
+            let v = gate(SID, Some("`@j · msg-7 · control note`\ncontrol: stop"), now);
+            assert!(!v.deliver, "a mismatched sender is not a control pass");
             // ...and never from the second body line.
             let v = gate(
                 SID,
