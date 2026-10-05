@@ -39,13 +39,25 @@ def _events(path):
 def _rc(run_id, top="collision_free"):
     return {"type": "skill_eval_run_complete",
             "data": {"run_id": run_id, "skill_id": "fno:blueprint",
-                     "skill_version": "abc", "failure_ranking": [{"dimension": top, "fail_count": 2}]}}
+                     "skill_version": "abc", "corpus_size": 3, "pass_count": 0,
+                     "degraded_count": 0, "fail_count": 2, "cost_usd": 0.0,
+                     "coverage_pct": 100.0,
+                     "failure_ranking": [{"dimension": top, "fail_count": 2}]}}
 
 
 def _finding(run_id, verdict="fail"):
     return {"type": "skill_eval_finding",
             "data": {"run_id": run_id, "skill_id": "fno:blueprint",
-                     "dimension": "collision_free", "verdict": verdict}}
+                     "skill_version": "abc", "corpus_item_id": f"{run_id}-item",
+                     "dimension": "collision_free", "verdict": verdict,
+                     "evidence": "specimen text", "cost_usd": 0.0}}
+
+
+def _proposed_run(run_id):
+    return {"type": "skill_diff_proposed",
+            "data": {"run_id": run_id, "skill_id": "fno:blueprint",
+                     "pr_number": 1, "branch": f"skill-diff-{run_id}",
+                     "cited_finding_ids": [], "added_lines": 1, "removed_lines": 0}}
 
 
 def test_architectural_followup_filing_declares_difficulty(monkeypatch):
@@ -174,8 +186,7 @@ def test_report_level_is_dry_run(monkeypatch, tmp_path):  # report is the defaul
 
 
 def test_idempotent_after_proposed(monkeypatch, tmp_path):  # AC8-FR
-    events = [_rc("r1"), _finding("r1"),
-              {"type": "skill_diff_proposed", "data": {"run_id": "r1", "skill_id": "fno:blueprint"}}]
+    events = [_rc("r1"), _finding("r1"), _proposed_run("r1")]
     _wire(monkeypatch, tmp_path, events)
     r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
     assert "no-work" in r.output  # r1 already handled
@@ -186,8 +197,7 @@ def test_local_maxima_files_node(monkeypatch, tmp_path):  # AC7-EDGE
     # r1/r2 already handled (proposed) so r3 is the oldest unprocessed run; the
     # window r1..r3 shares one top dimension with proposals in the span -> trip.
     events = [_rc("r1"), _rc("r2"), _rc("r3"), _finding("r3"),
-              {"type": "skill_diff_proposed", "data": {"run_id": "r1", "skill_id": "fno:blueprint"}},
-              {"type": "skill_diff_proposed", "data": {"run_id": "r2", "skill_id": "fno:blueprint"}}]
+              _proposed_run("r1"), _proposed_run("r2")]
     p = _wire(monkeypatch, tmp_path, events, level="assisted")
     r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
     assert "no-diff-helps" in r.output and "local_maxima" in r.output
@@ -225,8 +235,7 @@ def test_no_diff_helps_defers_when_node_filing_fails(monkeypatch, tmp_path):  # 
     # Filing the backlog node fails -> NO terminal event, so the next tick retries.
     monkeypatch.setattr(cli, "_file_no_diff_node", lambda *a, **k: None)
     events = [_rc("r1"), _rc("r2"), _rc("r3"), _finding("r3"),
-              {"type": "skill_diff_proposed", "data": {"run_id": "r1", "skill_id": "fno:blueprint"}},
-              {"type": "skill_diff_proposed", "data": {"run_id": "r2", "skill_id": "fno:blueprint"}}]
+              _proposed_run("r1"), _proposed_run("r2")]
     p = _wire(monkeypatch, tmp_path, events, level="assisted")
     r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
     assert "will retry" in r.output
@@ -316,8 +325,9 @@ def test_registered_in_top_level_cli():
 # --------------------------------------------------------------------------- #
 
 def _find(run_id, corpus_item, verdict="fail", dim="collision_free", tool_fault=False):
-    d = {"run_id": run_id, "skill_id": "fno:blueprint", "corpus_item_id": corpus_item,
-         "dimension": dim, "verdict": verdict}
+    d = {"run_id": run_id, "skill_id": "fno:blueprint", "skill_version": "abc",
+         "corpus_item_id": corpus_item, "dimension": dim, "verdict": verdict,
+         "evidence": "specimen text", "cost_usd": 0.0}
     if tool_fault:
         d["tool_fault"] = True
     return {"type": "skill_eval_finding", "data": d}
@@ -325,7 +335,9 @@ def _find(run_id, corpus_item, verdict="fail", dim="collision_free", tool_fault=
 
 def _proposed(pr, run_id="r1", skill_id="fno:blueprint"):
     return {"type": "skill_diff_proposed",
-            "data": {"run_id": run_id, "skill_id": skill_id, "pr_number": pr}}
+            "data": {"run_id": run_id, "skill_id": skill_id, "pr_number": pr,
+                     "branch": f"skill-diff-{run_id}", "cited_finding_ids": [],
+                     "added_lines": 1, "removed_lines": 0}}
 
 
 def _wire_reeval(monkeypatch, path, merged=True, merge_sha="mergesha12345", replay=None):

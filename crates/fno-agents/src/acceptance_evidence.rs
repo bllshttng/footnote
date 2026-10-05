@@ -2419,7 +2419,7 @@ mod acceptance_evidence_tests {
         let events = tmp.path().join("events.jsonl");
         let line = serde_json::json!({
             "ts": "2026-09-17T12:00:00Z", "type": "loop_check", "source": "hook",
-            "data": {"session_id": "s1", "done_probes": {"p1": {"status": "satisfied"}}}
+            "data": {"session_id": "s1", "fingerprint": "f", "fires": 1, "consecutive_unchanged": 1, "decision": "allow", "intent": "", "pr_state": "none", "ci": "none", "reviewed": false, "done_probes": {"p1": {"status": "satisfied"}}}
         })
         .to_string();
         crate::event_store::append_envelope(&events, &line, None).unwrap();

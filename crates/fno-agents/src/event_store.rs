@@ -71,6 +71,11 @@ pub const GATE_EVENT_TYPES: &[&str] = &["review_attestation", "review_coverage"]
 /// `retention.minimum_ephemeral_ttl_hours`).
 pub const MINIMUM_EPHEMERAL_TTL_HOURS: i64 = 672;
 
+/// Marks a judged refusal inside `append_envelope`'s error string. The
+/// door strips it and answers exit 3, the class Python maps to
+/// `ValidationError`; every other error stays a store fault on exit 1.
+pub const VALIDATE_PREFIX: &str = "event-judged: ";
+
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 
@@ -1031,6 +1036,15 @@ pub fn append_envelope(
     let obj = value
         .as_object()
         .ok_or_else(|| format!("{}: envelope is not a JSON object", store.display()))?;
+    // The judge owns the schema now: one line, the same diagnostic the
+    // Python judge printed. Storage-level checks (ts keying, scope
+    // canonicality) run after it and keep their own wording. The prefix
+    // marks the refusal so the door answers exit 3: a judged refusal is a
+    // different failure class than a store fault, and Python raises
+    // ValidationError only for the former.
+    if let Err(msg) = validate::validate_envelope(obj) {
+        return Err(format!("{VALIDATE_PREFIX}{msg}"));
+    }
     let ty = obj
         .get("type")
         .and_then(|t| t.as_str())
@@ -1820,6 +1834,8 @@ pub fn prune_ephemeral_now(journal: &Path, now_ms: i64) -> Result<u64, String> {
 }
 
 mod observation;
+
+pub mod validate;
 
 #[cfg(test)]
 mod tests;

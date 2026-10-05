@@ -292,7 +292,7 @@ fn map_outcome(
             other => {
                 let _ = journal.append(
                     "active_backlog_skip",
-                    json!({"reason": "no-close", "termination": format!("{other:?}")}),
+                    json!({"reason": "no-close", "mission": cfg.mission, "termination": format!("{other:?}")}),
                 );
                 DrainOutcome::Skipped {
                     reason: format!("{other:?}"),
@@ -407,6 +407,7 @@ fn map_outcome(
                     "active_backlog_skip",
                     json!({
                         "reason": "node-not-closed",
+                        "mission": cfg.mission,
                         "node_id": node,
                         "close": detail,
                         "consecutive_failures": breaker.consecutive_failures(&node),

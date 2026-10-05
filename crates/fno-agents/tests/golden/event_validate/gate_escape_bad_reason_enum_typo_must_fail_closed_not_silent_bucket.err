@@ -1,0 +1,1 @@
+unknown gate_escape data.reason: 'deadbot' (allowed: ['dead-bot', 'zero-coverage', 'flake', 'stale-base', 'wedge', 'spawn-cap', 'other'])

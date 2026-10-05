@@ -4057,7 +4057,7 @@ mod tests {
             ]
         }));
         let ask = json!({
-            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
         });
         std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n")).unwrap();
@@ -4088,11 +4088,11 @@ mod tests {
             ]
         }));
         let ask = json!({
-            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
         });
         let close = json!({
-            "ts": "2026-09-25T13:00:00Z", "type": "operator_question_closed", "source": "agent",
+            "ts": "2026-09-25T13:00:00Z", "type": "operator_question_closed", "source": "test",
             "data": {"question_id": "q-1"}
         });
         std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n{close}\n")).unwrap();

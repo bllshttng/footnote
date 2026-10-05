@@ -155,25 +155,16 @@ def _events_file(repo_root: str, reason: str) -> Optional[str]:
 
 
 def _append_event_lenient(events_file: Optional[str], event: dict, reason: str) -> None:
-    """Validate-with-warning, then commit through the native event store.
+    """Commit through the native event store; the store judges at commit.
 
-    Mirrors the bash: a schema-validation failure logs a warning but the event
-    is committed anyway (missing audit evidence is worse than a relaxed shape).
-    An unresolved journal (None) was already warned about by ``_events_file``.
-    Like the writer it replaces, this stays best-effort: a store failure is one
-    stderr line, never a failed verdict.
+    Mirrors the bash: a schema-judge refusal logs a warning but the caller
+    already decided to commit (missing audit evidence is worse than a
+    relaxed shape). An unresolved journal (None) was already warned about
+    by ``_events_file``. Like the writer it replaces, this stays
+    best-effort: a store failure is one stderr line, never a failed verdict.
     """
     if events_file is None:
         return
-    try:
-        from fno.events import validate
-
-        validate(event)
-    except Exception:
-        sys.stderr.write(
-            f"pr-verify: schema validation failed for transcript_audit_failed "
-            f"(reason={reason}); committing anyway\n"
-        )
     try:
         from fno.events.store_client import emit_envelope
 
