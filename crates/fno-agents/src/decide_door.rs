@@ -817,10 +817,8 @@ decision index. Run `fno backlog decide-reindex` before retrying."
         {
             attrs.insert("class".to_string(), json!(c));
         }
-        let span_id = trace.span_id.clone();
-        // The span rides behind the row (minted here, emitted after the row
-        // lands), so a failed decision write never leaves an orphan route.
-        route_span_id = Some(span_id);
+        // The span rides ahead of the row (emitted below, before the row's
+        // ts mints), so the row's parent is only set when the span landed.
         pending_route = Some((trace, attrs));
     }
     // The correction span: parented at the overturned span; the row's trace
@@ -835,6 +833,16 @@ decision index. Run `fno backlog decide-reindex` before retrying."
         recipient_session: None,
         recipient_kind: None,
     });
+    // The route rides ahead of the row: the trace query reads in ts order and
+    // a parent must not postdate its child. A failed route emit leaves the
+    // row parentless rather than dangling; a failed row write below leaves
+    // the route orphaned, reported on stderr.
+    if let Some((trace, attrs)) = pending_route.take() {
+        match emit_span_to(&journal, "route", &trace, &attrs) {
+            Ok(()) => route_span_id = Some(trace.span_id.clone()),
+            Err(e) => eprintln!("decide: route span skipped: {e}"),
+        }
+    }
     // The decision IS the span when it answers or overturns: the row carries
     // the trace envelope, span_id = decision_id, parented at the hop it
     // answers or overturns.
@@ -850,16 +858,6 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             recipient_kind: None,
         })
         .unwrap_or_default();
-    }
-    // The route rides ahead of the row: the trace query reads in ts order and
-    // a parent must not postdate its child. A failed route emit leaves the
-    // row parentless rather than dangling; a failed row write below leaves
-    // the route orphaned, reported on stderr.
-    if let Some((trace, attrs)) = pending_route.take() {
-        match emit_span_to(&journal, "route", &trace, &attrs) {
-            Ok(()) => route_span_id = Some(trace.span_id.clone()),
-            Err(e) => eprintln!("decide: route span skipped: {e}"),
-        }
     }
     if let Some(rows) = &read_rows {
         data["reads"] = json!(rows);

@@ -527,9 +527,13 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     // order, and a parent must not postdate its child. A failed route emit
     // leaves the question parentless rather than dangling; a failed question
     // write below leaves the route orphaned, reported on stderr.
+    let mut route_recorded = false;
     if let Some((trace, attrs)) = pending_route.take() {
         match emit_span_to(&journal_path, "route", &trace, &attrs) {
-            Ok(()) => route_span_id = Some(trace.span_id.clone()),
+            Ok(()) => {
+                route_span_id = Some(trace.span_id.clone());
+                route_recorded = true;
+            }
             Err(e) => eprintln!("outstanding: route span skipped: {e}"),
         }
     }
@@ -653,7 +657,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         }
     };
     if let Err(e) = crate::event_store::append_envelope(&journal_path, &line, None) {
-        if route_span_id.is_some() {
+        if route_recorded {
             eprintln!("outstanding: the route span landed alone; the question row did not");
         }
         answer.lines.push(format!(
