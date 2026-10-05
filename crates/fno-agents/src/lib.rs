@@ -428,6 +428,7 @@ pub mod stuck_work;
 pub mod subagent_hold;
 pub mod subprocess_ask;
 pub mod subscribe;
+pub mod succession_txn;
 pub mod supervisor;
 pub mod surface_check;
 pub mod sync_canonical;
@@ -1693,6 +1694,18 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // session after an heir died unbound past the window (team_reap.rs;
     // the daemon retire arm and `fno agents reap`).
     "team_succession_reverted",
+    // The succession transaction (succession_txn.rs): announce (plus its
+    // failed row), transfer, verify, release (plus the unproven row), and
+    // the retro receipt (plus its unmeasured row). All share one
+    // succession_id.
+    "team_succession_announced",
+    "team_succession_announce_failed",
+    "team_succession_transferred",
+    "team_succession_verified",
+    "team_succession_released",
+    "team_succession_release_unproven",
+    "team_succession_retro_filed",
+    "team_succession_retro_unmeasured",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
