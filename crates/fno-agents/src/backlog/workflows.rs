@@ -375,6 +375,14 @@ pub(crate) fn apply_completion_fields(node: &mut Value, merge_status: bool) {
     if merge_status {
         obj.insert("merge_status".into(), Value::String("merged".into()));
     }
+    let session = crate::identity::ambient_agent_handle();
+    obj.insert(
+        "closed_by".into(),
+        json!({
+            "session": session,
+            "actor_kind": crate::decision_trace::actor_kind(session.as_deref(), "verb"),
+        }),
+    );
 }
 
 /// Undo a close (the _clear_completion_fields twin). `status` is the
@@ -389,6 +397,7 @@ fn clear_completion_fields(node: &mut Value, reason: &str, status: &str) {
     );
     obj.insert("reopened_reason".into(), Value::String(reason.into()));
     obj.remove("reopen_warning");
+    obj.insert("closed_by".into(), Value::Null);
     obj.insert("status".into(), Value::String(status.into()));
 }
 
@@ -2700,6 +2709,11 @@ mod tests {
             .position(|e| text_at(e, "id") == Some("ab-bbbbbbbb"))
             .unwrap();
         apply_completion_fields(&mut rows[idx], false);
+        // The closer stamp: the row names who closed it, whatever the
+        // ambient identity resolved to (null session reads user).
+        let closer = &rows[idx]["closed_by"];
+        assert!(closer["session"].is_null() || closer["session"].is_string());
+        assert!(closer["actor_kind"].is_string());
         let closed = cascade_close_parents(&mut rows, "ab-bbbbbbbb");
         assert!(closed.contains(&"ab-ffffffff".to_string()), "{closed:?}");
         let epic = rows

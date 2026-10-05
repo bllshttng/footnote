@@ -264,6 +264,7 @@ pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;
 pub mod merge_posture;
+pub mod merge_provenance;
 pub mod merge_reap;
 #[cfg(test)]
 #[path = "mint_guard_tests.rs"]

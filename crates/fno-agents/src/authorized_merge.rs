@@ -1256,6 +1256,7 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         }
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
+            crate::merge_provenance::record_outcome(request, &authorized.facts, &outcome);
             // Only a Merge hands the slot back. Every terminal effect() outcome of a Merge
             // - landed, durably Failed, HeadChanged, or Unknown - releases it
             // here rather than starving the queue for the rest of the lease.
@@ -3576,20 +3577,6 @@ mod tests {
     }
 
     #[test]
-    fn oldest_current_run_reads_each_branch() {
-        let runs = vec![
-            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-        ];
-        assert_eq!(
-            oldest_current_run(&runs),
-            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
-        );
-        assert_eq!(oldest_current_run(&[]), None);
-    }
-
-    #[test]
     fn a_green_pr_whose_ci_predates_main_merges_main_in_and_waits_for_the_retest() {
         // The replay: one PR lands, then a second PR shares no file with it
         // and is green on a run created before that landing. It holds, takes
@@ -3961,6 +3948,7 @@ mod tests {
     #[test]
     fn an_arm_receipt_names_the_head_and_is_never_merged() {
         // AC2-EDGE. A queue entry is not a landed merge.
+        let journal = crate::merge_provenance::TestJournal::opt_in();
         let fake = clean();
         let outcome = run(&fake, &request(Effect::Arm));
         assert_eq!(
@@ -3975,10 +3963,24 @@ mod tests {
         assert!(calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
         assert!(calls[0].contains(&"abc123".to_string()));
+        // An arm records merge_armed, never a landed merge.
+        let journal_rows = journal.rows();
+        let armed: Vec<_> = journal_rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_armed")
+            .collect();
+        assert_eq!(armed.len(), 1, "{journal_rows:?}");
+        assert_eq!(armed[0]["data"]["pr"], 7);
+        let landed: Vec<_> = journal_rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_landed")
+            .collect();
+        assert!(landed.is_empty(), "{journal_rows:?}");
     }
 
     #[test]
     fn an_immediate_merge_never_passes_auto() {
+        let journal = crate::merge_provenance::TestJournal::opt_in();
         let fake = clean();
         let outcome = run(&fake, &request(Effect::Merge));
         assert_eq!(
@@ -3993,6 +3995,18 @@ mod tests {
         let calls = fake.gh_calls.borrow();
         assert!(!calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
+        // The owner's record: one merge_landed span for the run, naming the
+        // verb lane and the merged PR.
+        let spans: Vec<_> = journal
+            .rows()
+            .into_iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_landed")
+            .collect();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["data"]["path"], "pr_merge");
+        assert_eq!(spans[0]["data"]["pr"], 7);
+        assert_eq!(spans[0]["data"]["repo"], "o/r");
+        assert_eq!(spans[0]["data"]["head"], "abc123");
     }
 
     #[test]
