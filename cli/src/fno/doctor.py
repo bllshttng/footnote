@@ -1135,24 +1135,39 @@ def _orphan_report() -> list[str]:
 def _pr_watch_liveness() -> dict[str, Any]:
     """Ground-truth liveness verdict for the global PR-watch agent.
 
-    Advisory: never changes doctor's status/exit. Degrades to ``unknown``
-    (silent) rather than crying wolf when the check itself can't run.
+    Advisory: never changes doctor's status/exit. The verdict is the Rust
+    verb's (`fno-agents pr-watch status --json`); a check that can't run
+    degrades to ``unknown`` (silent) rather than crying wolf.
     """
-    try:
-        from fno.pr_watch import _install as m
+    import subprocess
 
-        return m.liveness_report_live()
+    try:
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is not None:
+            proc = subprocess.run(
+                [str(binary), "pr-watch", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            report = json.loads(proc.stdout)
+            if isinstance(report, dict) and "verdict" in report:
+                return report
     except Exception:
-        # Same dict shape as liveness_report so a future non-.get() reader
-        # cannot KeyError on the exception path.
-        return {
-            "enabled": False,
-            "verdict": "unknown",
-            "detail": "",
-            "fix": None,
-            "loaded": False,
-            "last_tick": None,
-        }
+        pass
+    # Same dict shape as the report so a future non-.get() reader
+    # cannot KeyError on the exception path.
+    return {
+        "enabled": False,
+        "verdict": "unknown",
+        "detail": "",
+        "fix": None,
+        "loaded": False,
+        "last_tick": None,
+    }
 
 
 _FD_SOFT_FLOOR = 1024

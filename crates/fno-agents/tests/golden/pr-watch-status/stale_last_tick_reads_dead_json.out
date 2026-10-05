@@ -1,0 +1,1 @@
+{"enabled": true, "verdict": "dead", "detail": "last tick <AGE>s ago (> 2x interval 1200s)", "fix": "fno do pr watch install", "loaded": true, "last_tick": "<TS>", "interval_seconds": 600, "bounce_pending": false}

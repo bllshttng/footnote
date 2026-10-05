@@ -1,0 +1,1 @@
+{"enabled": true, "verdict": "dead", "detail": "enabled but no LaunchAgent plist installed", "fix": "fno do pr watch install", "loaded": true, "last_tick": "<TS>", "interval_seconds": 600, "bounce_pending": false, "merge_scan": {"completed": true, "completed_at": "<TS>", "scanned": 3}}

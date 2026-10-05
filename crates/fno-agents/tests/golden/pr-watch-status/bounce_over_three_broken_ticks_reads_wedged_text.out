@@ -1,0 +1,13 @@
+Agent loaded: yes
+Plist path:   <CASE>/LaunchAgents/sh.fno.pr-watcher.plist (exists)
+Verdict:      wedged (bounced <AGE>s ago over 3 consecutive broken ticks; last completed tick <AGE>s ago; no tick has ended since the bounce, so it is not yet a cure)
+Fix:          fno agents status
+Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)
+Last tick:    <TS>
+Last attempt: <TS>
+Last tick outcome: timeout (12.3s, phase: sweep)
+Completed tick: <TS> swept=1
+Merge scan:   (no scan receipt from a merge_scan-capable tick)
+Open PRs:     1
+Parked PRs (0 open, 0 finished, 2 foreign):
+  foreign: 2 (other repos, left alone)

@@ -1158,7 +1158,9 @@ def test_a_refused_observation_is_visible_and_the_hook_stays_fail_soft(
     refused = [e for e in _events(tmp_path) if e["kind"] == "session_id_record_refused"]
     assert refused, "the refusal is a named event"
     assert refused[0]["recorded_ids"] == f"{BIRTH},{FORK}"
-    assert refused[0]["source"] == "resume"
+    # The envelope's top-level source is the channel identity ('agents');
+    # the caller's domain source (--source resume) rides in data.
+    assert refused[0]["data"]["source"] == "resume"
     err = capsys.readouterr().err
     assert BIRTH in err and FORK in err, "both recorded ids are in the visible line"
     assert (

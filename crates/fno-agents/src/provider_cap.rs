@@ -1897,7 +1897,7 @@ fn open_question(home: &AgentsHome, lane: &CapLane, now_epoch: i64) {
         &json!({
             "ts": epoch_to_rfc3339(now_epoch),
             "type": "operator_question",
-            "source": "provider-cap",
+            "source": "daemon",
             "data": {
                 "question_id": question_id,
                 "question": format!(

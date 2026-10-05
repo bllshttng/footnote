@@ -93,10 +93,12 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
         {
             **record,
             "type": kind,
-            # A caller-supplied ``source`` kwarg is a legacy top-level field
-            # (e.g. register_session's --source resume); it outranks the
-            # channel identity so kind-keyed readers keep their semantics.
-            "source": data.get("source") or "agents",
+            # The envelope source is the channel identity ('agents'): a
+            # caller-supplied ``source`` kwarg is a legacy top-level field
+            # (e.g. register_session's --source resume), not a declared
+            # envelope source, and stamping it there refuses every such row
+            # at the judge. The legacy value still rides in ``data``.
+            "source": "agents",
             "data": dict(data),
         }
     ]

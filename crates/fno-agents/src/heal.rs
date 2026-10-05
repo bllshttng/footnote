@@ -1594,18 +1594,22 @@ fn journal_path(a: &Args) -> std::path::PathBuf {
 /// skip_reason/detail vocabulary the tick's own `_emit_tick_row` writes, so
 /// the journal agrees with the status line on why nothing ran.
 fn emit_arm_row(a: &Args, acted: u8, skip_reason: Option<&str>, detail: &str) {
-    let mut fields = serde_json::Map::new();
-    fields.insert("arm".to_string(), serde_json::json!("heal"));
-    fields.insert("acted".to_string(), serde_json::json!(acted));
-    if let Some(s) = skip_reason {
-        fields.insert("skip_reason".to_string(), serde_json::json!(s));
-    }
-    if !detail.is_empty() {
-        fields.insert("detail".to_string(), serde_json::json!(detail));
-    }
-    if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal")
-        .emit_fields("control_plane_tick", fields)
-    {
+    let fields = crate::tick_ledger::tick_data(
+        "heal",
+        crate::tick_ledger::SCHED_LAUNCHD,
+        acted as u64,
+        skip_reason,
+        if detail.is_empty() {
+            None
+        } else {
+            Some(detail)
+        },
+        600,
+    );
+    if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal").emit_fields(
+        "control_plane_tick",
+        fields.as_object().cloned().unwrap_or_default(),
+    ) {
         eprintln!("pr-heal: the control_plane_tick arm row did not land: {e}");
     }
 }
@@ -1758,6 +1762,30 @@ fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
 
 /// The one `Heal:` readout line. `--status` prints it; `_install.py` shells
 /// this verb rather than re-reading the journal in Python.
+/// The one `Heal:` readout for `pr_watch::status`: the arm bit and the
+/// journal are the only inputs `status_line` reads.
+pub(crate) fn status_readout(armed: bool, events_file: &std::path::Path) -> String {
+    let a = Args {
+        pr: None,
+        apply: false,
+        all: false,
+        playbook: false,
+        dry_run: false,
+        detach: false,
+        status: false,
+        armed,
+        gh_bin: "gh".to_string(),
+        git_bin: "git".to_string(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        roots: Vec::new(),
+        deadline: None,
+        bin_dir: String::new(),
+        claims_root: String::new(),
+        events_file: events_file.display().to_string(),
+    };
+    status_line(&a)
+}
+
 fn status_line(a: &Args) -> String {
     if !a.armed {
         return "Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)".to_string();
@@ -2133,7 +2161,13 @@ fn emit_tick_event(
     fields.insert("unknown".to_string(), serde_json::json!(unknown));
     fields.insert("dry_run".to_string(), serde_json::json!(dry_run));
     // Explicit defaults: the newest tick row must carry the keys the done
-    // probe asserts on even when a run acted on nothing.
+    // probe asserts on even when a run acted on nothing. The single-PR
+    // apply path calls with an empty counts map, so the required trio is
+    // defaulted here rather than trusted from the caller.
+    fields.insert(
+        "seen".to_string(),
+        serde_json::json!(counts.get("seen").copied().unwrap_or(0)),
+    );
     fields.insert(
         "rebased".to_string(),
         serde_json::json!(counts.get("rebased").copied().unwrap_or(0)),
@@ -4129,7 +4163,7 @@ echo '[]'
             .map(|n| format!(",\"node_id\":\"{n}\""))
             .unwrap_or_default();
         let row = format!(
-            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"source\":\"heal\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"{run}\",\"check\":\"ci\"{node_json}}}}}"
+            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"source\":\"pr-heal\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"{run}\",\"check\":\"ci\"{node_json}}}}}"
         );
         let path = dir.join("events.jsonl");
         crate::event_store::append_envelope(&path, row.trim_end(), None).unwrap();

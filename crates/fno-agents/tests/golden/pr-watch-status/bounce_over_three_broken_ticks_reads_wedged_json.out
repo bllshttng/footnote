@@ -1,0 +1,1 @@
+{"enabled": true, "verdict": "wedged", "detail": "bounced <AGE>s ago over 3 consecutive broken ticks; last completed tick <AGE>s ago; no tick has ended since the bounce, so it is not yet a cure", "fix": "fno agents status", "loaded": true, "last_tick": "<TS>", "interval_seconds": 600, "bounce_pending": true}

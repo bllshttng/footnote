@@ -593,7 +593,7 @@ mod tests {
         )
         .unwrap();
         let events = dir.path().join("events.jsonl");
-        let emitter = crate::events::EventEmitter::new(&events, "test");
+        let emitter = crate::events::EventEmitter::new(&events, "daemon");
 
         stage_removal_accounting(&home, &entry, "test-remover", &emitter);
 
