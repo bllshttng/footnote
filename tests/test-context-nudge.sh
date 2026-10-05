@@ -457,6 +457,16 @@ if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
   printf 'RC: %s\nOUT: %s\n' "$RC" "$OUT" >&2
   cat "$SBX/hook-stderr.log" 2>/dev/null >&2
   "$AGENTS_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
+  # Fire #1 died between the latch touch and the emit (fire #2 is
+  # latch-silent, so OUT above cannot show it). Re-run its exact payload
+  # under bash -x with the latch cleared: the trace names the exit line.
+  rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null
+  printf '%s' "$(payload "$SBX/small.jsonl")" | bash -x "$HOOK" > "$SBX/diag-out.txt" 2> "$SBX/diag-trace.txt" || true
+  echo "--- AC20 diagnostic refire stdout ---" >&2
+  head -c 600 "$SBX/diag-out.txt" 2>/dev/null >&2
+  echo "" >&2
+  echo "--- AC20 diagnostic refire trace tail ---" >&2
+  tail -30 "$SBX/diag-trace.txt" 2>/dev/null >&2
 fi
 run_hook "$(payload "$SBX/small.jsonl")"
 assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
