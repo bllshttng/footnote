@@ -400,6 +400,7 @@ fn run(args: &[OsString]) -> BootResult<()> {
     let source = install_source(
         env::var("FNO_BOOTSTRAP_WHEEL").ok().as_deref(),
         read_dev_source_pin().as_deref(),
+        receipt_wheel_url().as_deref(),
     )?;
 
     // A provision that installs cleanly but yields no usable fno leaves nothing
@@ -1059,16 +1060,26 @@ fn install_failure_message(source: &str) -> String {
     )
 }
 
-/// Choose the `uv tool install` source across three rungs of precedence, pure
+/// Choose the `uv tool install` source across four rungs of precedence, pure
 /// for testing:
 ///   1. `FNO_BOOTSTRAP_WHEEL` (`override_val`) when set and non-empty.
 ///   2. a maintainer's `config.dev.source` pin (`pin`) when set: validated and
 ///      expanded to its `<checkout>/cli` build dir.
-///   3. `"fno"` (PyPI by name; the end-user default, byte-identical to before).
+///   3. the installed venv's remote-wheel receipt (`receipt`): a nightly
+///      install repairs from ITS wheel, never the stable PyPI by-name package
+///      (the pairing the sh twin, scripts/install/fno.sh, fixes for in-tree
+///      runs). The reader filters to https .whl URLs; uv records the field for
+///      URL installs only, so a registry install carries no receipt and this
+///      rung is empty for it.
+///   4. `"fno"` (PyPI by name; the end-user default, byte-identical to before).
 /// A set-but-invalid pin is an error, never a silent PyPI downgrade: a
 /// maintainer who pinned source WANTS to know it is broken, not be handed a
 /// months-stale wheel (US3/AC3).
-fn install_source(override_val: Option<&str>, pin: Option<&str>) -> BootResult<String> {
+fn install_source(
+    override_val: Option<&str>,
+    pin: Option<&str>,
+    receipt: Option<&str>,
+) -> BootResult<String> {
     if let Some(v) = override_val {
         let v = v.trim();
         if !v.is_empty() {
@@ -1081,7 +1092,75 @@ fn install_source(override_val: Option<&str>, pin: Option<&str>) -> BootResult<S
             return resolve_pin(p);
         }
     }
+    if let Some(url) = receipt {
+        let url = url.trim();
+        if !url.is_empty() {
+            return Ok(url.to_string());
+        }
+    }
     Ok("fno".to_string())
+}
+
+/// The installed venv's remote-wheel receipt, when one exists: the
+/// `direct_url.json` URL under `<tool dir>/fno/lib`, read the same way
+/// postinstall.sh's `tool_receipt_source` reads it. Needs uv to resolve the
+/// tool dir (the bootstrap resolves the same way), so an env outliving a
+/// removed uv repairs by-name exactly as before. None when uv is absent, the
+/// venv is gone (a `--force` removes it whole), or the receipt is not a
+/// remote wheel URL - best-effort, never a boot failure.
+fn receipt_wheel_url() -> Option<String> {
+    let uv = find_uv()?;
+    let tool_dir = uv_tool_dir(&uv)?;
+    read_install_receipt_url(&tool_dir)
+}
+
+/// Pure-IO core of `receipt_wheel_url` below a resolved tool dir. First
+/// `*.dist-info/direct_url.json` under `<tool_dir>/fno/lib` wins (uv lays out
+/// one pythonX.Y tree per venv). Absent, unreadable, malformed, non-https, or
+/// non-.whl all resolve to None. file:// receipts belong to a local checkout,
+/// where `config.dev.source` is the rung that speaks; they are filtered here,
+/// not downstream.
+fn read_install_receipt_url(tool_dir: &Path) -> Option<String> {
+    let lib = tool_dir.join(TOOL_NAME).join("lib");
+    let receipt = find_first_direct_url(&lib, 4)?;
+    let body = fs::read_to_string(receipt).ok()?;
+    let url = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()?
+        .get("url")?
+        .as_str()?
+        .to_string();
+    if url.starts_with("https://") && url.ends_with(".whl") {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+/// Depth-bounded search for the first `*.dist-info/direct_url.json` under
+/// `dir`. The venv layout is shallow (lib/pythonX.Y/site-packages/*.dist-info)
+/// so the cap is a runaway guard, not a layout requirement. Sorted per dir so
+/// the winner is stable across filesystems.
+fn find_first_direct_url(dir: &Path, depth: u8) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    let mut entries: Vec<std::fs::DirEntry> = fs::read_dir(dir).ok()?.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.extension().is_some_and(|e| e == "dist-info") {
+            let receipt = path.join("direct_url.json");
+            if receipt.is_file() {
+                return Some(receipt);
+            }
+        } else if let Some(hit) = find_first_direct_url(&path, depth - 1) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 /// Validate a pinned checkout and return its `uv tool install` source
@@ -2057,39 +2136,39 @@ mod tests {
     #[test]
     fn install_source_rows() {
         // US4/AC (end-user path): no env, no pin -> "fno", byte-identical.
-        assert_eq!(install_source(None, None).unwrap(), "fno");
-        assert_eq!(install_source(Some(""), None).unwrap(), "fno");
-        assert_eq!(install_source(Some("   "), Some("  ")).unwrap(), "fno");
+        assert_eq!(install_source(None, None, None).unwrap(), "fno");
+        assert_eq!(install_source(Some(""), None, None).unwrap(), "fno");
+        assert_eq!(
+            install_source(Some("   "), Some("  "), None).unwrap(),
+            "fno"
+        );
 
         assert_eq!(
-            install_source(Some("/tmp/fno-0.1.0-py3-none-any.whl"), None).unwrap(),
+            install_source(Some("/tmp/fno-0.1.0-py3-none-any.whl"), None, None).unwrap(),
             "/tmp/fno-0.1.0-py3-none-any.whl"
         );
         assert_eq!(
-            install_source(Some("  fno==0.1.0  "), None).unwrap(),
+            install_source(Some("  fno==0.1.0  "), None, None).unwrap(),
             "fno==0.1.0"
         );
 
         // AC4-EDGE: rung-1 env override beats a set rung-2 pin.
         let root = valid_checkout();
         assert_eq!(
-            install_source(Some("/env/wheel.whl"), Some(root.to_str().unwrap())).unwrap(),
+            install_source(Some("/env/wheel.whl"), Some(root.to_str().unwrap()), None).unwrap(),
             "/env/wheel.whl"
         );
 
         // US1/AC1-HP: a valid pin -> `<checkout>/cli` (the wheel-build path).
         let root = valid_checkout();
         assert_eq!(
-            install_source(None, Some(root.to_str().unwrap())).unwrap(),
+            install_source(None, Some(root.to_str().unwrap()), None).unwrap(),
             root.join("cli").to_string_lossy()
         );
-    }
 
-    #[test]
-    fn install_source_failure_rows() {
         // US3/AC3-FR: a set-but-invalid pin errors naming config.dev.source and
         // the bad path; it does NOT fall through to "fno".
-        let e = install_source(None, Some("/no/such/checkout"))
+        let e = install_source(None, Some("/no/such/checkout"), None)
             .unwrap_err()
             .msg;
         assert!(e.contains("config.dev.source"), "{e}");
@@ -2099,7 +2178,66 @@ mod tests {
         // (strict check catches "pinned the repo root, not cli/").
         let root = env::temp_dir().join(format!("fno-boot-bare-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
-        assert!(install_source(None, Some(root.to_str().unwrap())).is_err());
+        assert!(install_source(None, Some(root.to_str().unwrap()), None).is_err());
+
+        // The receipt rung: a nightly install repairs from ITS wheel, never
+        // the stable by-name package. The explicit rungs still outrank it, and
+        // a receipt that is not an https wheel URL is no receipt at all.
+        let nightly = "https://github.com/bllshttng/footnote/releases/download/nightly/fno-0.4.1.dev20261003-py3-none-macosx_11_0_arm64.whl";
+        assert_eq!(install_source(None, None, Some(nightly)).unwrap(), nightly);
+        assert_eq!(
+            install_source(Some("/tmp/w.whl"), None, Some(nightly)).unwrap(),
+            "/tmp/w.whl"
+        );
+        let root = valid_checkout();
+        assert_eq!(
+            install_source(None, Some(root.to_str().unwrap()), Some(nightly)).unwrap(),
+            root.join("cli").to_string_lossy()
+        );
+    }
+
+    /// A fake uv tool venv with one dist-info carrying `body`; returns the
+    /// tool dir. The layout mirrors uv's (lib/pythonX.Y/site-packages).
+    fn fake_tool_dir(body: Option<&str>) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let root = env::temp_dir().join(format!(
+            "fno-boot-receipt-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dist = root
+            .join("fno")
+            .join("lib")
+            .join("python3.13")
+            .join("site-packages")
+            .join("fno-0.4.1.dev20261003.dist-info");
+        fs::create_dir_all(&dist).unwrap();
+        if let Some(body) = body {
+            fs::write(dist.join("direct_url.json"), body).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn a_nightly_receipt_is_the_repair_source() {
+        let nightly = "https://github.com/bllshttng/footnote/releases/download/nightly/fno-0.4.1.dev20261003-py3-none-macosx_11_0_arm64.whl";
+        let body = format!(r#"{{"url": "{nightly}"}}"#);
+
+        // The nightly wheel URL is read back verbatim.
+        let td = fake_tool_dir(Some(&body));
+        assert_eq!(read_install_receipt_url(&td).as_deref(), Some(nightly));
+
+        // A file:// receipt belongs to a local checkout; that is the
+        // config.dev.source rung's business, never a repair source here.
+        let td = fake_tool_dir(Some(r#"{"url": "file:///repo/cli"}"#));
+        assert_eq!(read_install_receipt_url(&td), None);
+
+        // No receipt (a registry install), or a malformed one, is no receipt.
+        let td = fake_tool_dir(None);
+        assert_eq!(read_install_receipt_url(&td), None);
+        let td = fake_tool_dir(Some("not json"));
+        assert_eq!(read_install_receipt_url(&td), None);
     }
 
     #[test]
