@@ -74,16 +74,19 @@ def classify(r: dict) -> dict:
     if lane == "claude" and model and lane_status == "substituted":
         # Amendment 10: the transcript stores the bare model, the lane asks with `[1m]`.
         lane_status = "ok" if family(model) == family(r.get("requested_model") or "") else "substituted"
-    if stalled:
-        kind = "stall"
-    elif "Rate limit reached" in (r.get("reason") or ""):
+    # Exclusions and identity come before the stall rule: a contaminated,
+    # substituted or explicitly excluded row is never scored, timed out or not.
+    # A stall is the runner's own `unavailable` filing of a timeout (Amendment 4).
+    if "Rate limit reached" in (r.get("reason") or ""):
         kind = "excluded:rate-limit"
     elif r.get("excluded_reason"):
         kind = f"excluded:{r['excluded_reason']}"
-    elif r.get("status") != "graded":
-        kind = f"excluded:{r.get('status')}"
     elif lane_status == "substituted":
         kind = "excluded:substituted"
+    elif stalled:
+        kind = "stall"
+    elif r.get("status") != "graded":
+        kind = f"excluded:{r.get('status')}"
     else:
         kind = "graded"
     end = loadlog.ts(r["ts"])

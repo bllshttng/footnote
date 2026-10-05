@@ -95,11 +95,10 @@ echo "== run workspace $WS"
 run mkdir -p "$WS/logs" "$WS/runs" "$WS/pi-agent"
 if [ "$CHECK" = 0 ]; then
   chmod 700 "$WS"
-  # Run 1 config: the machine's own fno config plus the study lanes, read as FNO_CONFIG.
-  base="$HOME/.fno/config.toml"
-  { [ -f "$base" ] && cat "$base"; cat "$HERE/run/run1-lanes.toml"
-    grep -qs 'id = "zai"' "$base" || printf '\n[[accounts.records]]\nid = "zai"\nname = "zai"\nharness = "claude"\nauth = "api_key"\npriority = 100\nroute = "zai/glm-5.3-flash[1m]"\naccount_id = "zai"\n'
-  } > "$WS/run1-config.toml"
+  # Run 1 config: the machine's own fno config merged with the study lanes, read as FNO_CONFIG.
+  # A structural merge, not a concatenation: an inline key in the base would clash with a table.
+  uv run --quiet --with tomli-w python "$HERE/run/merge_config.py" \
+    "$HOME/.fno/config.toml" "$HERE/run/run1-lanes.toml" "$WS/run1-config.toml"
   chmod 600 "$WS/run1-config.toml"
   # pi reads its z.ai provider from PI_CODING_AGENT_DIR; the key stays an env reference.
   cat > "$WS/pi-agent/models.json" <<'JSON'
