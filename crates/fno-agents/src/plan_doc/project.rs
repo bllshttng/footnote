@@ -182,7 +182,10 @@ pub fn project_node(
         } else if let Some(projected) =
             project_plan_status(current_status.as_deref(), &graph_status)
         {
-            if current_status.as_deref() != Some(projected.as_str()) {
+            // Count waves, not PRs: a done projection onto a plan with
+            // unshipped waves waits, like the graduate gate beside it.
+            let held = projected == "done" && super::stamp::unshipped_waves(&fields, plan_path);
+            if !held && current_status.as_deref() != Some(projected.as_str()) {
                 fields.insert("status", Fv::Scalar(projected.clone()));
                 changed = true;
                 if projected == "done" && !fields.contains_key("done_at") {
@@ -1151,6 +1154,29 @@ mod tests {
             assert!(!direct(&plan, one("status", gated)));
         }
         assert_eq!(s(&fields_of(&plan), "status"), "ready");
+        let dir = tmp_dir("waveshold");
+        let plan = write_plan(
+            &dir,
+            "plan.md",
+            &PLAN.replace(
+                "---\n\n# child plan\n",
+                &format!(
+                    "---\n\n# child plan\n\n## Execution Strategy\n\n```yaml\nexecution_mode: sequential\nwaves:\n  - wave: 1\n    tasks: ['1.1']\n  - wave: 2\n    tasks: ['2.1']\n  - wave: 3\n    tasks: ['3.1']\ntasks:\n  - id: '1.1'\n    surface: ['a.rs']\n    verify: 'true'\n  - id: '2.1'\n    surface: ['b.rs']\n    verify: 'true'\n  - id: '3.1'\n    surface: ['c.rs']\n    verify: 'true'\n```\n"
+                ),
+            ),
+        );
+        // One merged wave is not a done plan: the projection holds.
+        assert!(!direct(&plan, one("status", "done")));
+        assert_eq!(s(&fields_of(&plan), "status"), "ready");
+        // Every wave shipped: the projection lands done with a done_at.
+        let (target, mut fields, rest) = codec::read_plan_file(&plan).unwrap();
+        let urls = vec!["u1".to_string(), "u2".to_string(), "u3".to_string()];
+        fields.insert("urls", codec::Value::List(urls));
+        codec::write_plan_file(&target, &fields, &rest).unwrap();
+        assert!(direct(&plan, one("status", "done")));
+        let f = fields_of(&plan);
+        assert_eq!(s(&f, "status"), "done");
+        assert!(f.get("done_at").is_some());
     }
 
     #[test]
