@@ -1,6 +1,6 @@
 {
   "name": "buddy",
-  "version": "0.4.1",
+  "version": "0.0.1",
   "description": "Bring back buddy: a terminal companion beside your status line that watches your work and talks back.",
   "author": {
     "name": "Jason Noah Choi",

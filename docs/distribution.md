@@ -156,3 +156,5 @@ Dispatch `release.yml` on your fork with `dry_run=true` for any channel. The reh
 Version lockstep is no longer hand-maintained: `scripts/release/sync-version.sh` is the
 single propagation point, and `--check` is the drift guard that fails when any surface
 lags the wheel.
+
+The one exception is `buddy`: it versions on its own (0.0.1 today). Its marketplace entry tracks `main`, not the `stable` ref. A buddy release is a PR that bumps `plugins/buddy/.claude-plugin/plugin.json`, never an fno stable promotion.
