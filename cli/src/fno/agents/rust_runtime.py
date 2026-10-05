@@ -100,6 +100,14 @@ RUST_CLIENT_VERBS = frozenset(
         "stop",
         "rm",
         "reconcile",
+        # The worked-overlay join (seat records, crown exclusion, provenance):
+        # dispatched directly in client.rs; one JSON payload on stdin.
+        "worked-nodes",
+        "court-fold",
+        "court-orphans",
+        "king-checkin",
+        "king-history",
+        "reign-ledger",
         # Daemon binary-version drift restart: a Rust-only verb
         # dispatched directly in client.rs before build_request (no daemon RPC).
         # SIGTERMs a stale daemon and lazy-starts a fresh one from the current

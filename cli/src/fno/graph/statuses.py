@@ -391,10 +391,10 @@ def _live_rows(reading: RosterReading) -> list[dict[str, object]]:
             collect(row, None)
         for node, names in (reading.unmeasurable_by_node or {}).items():
             rows.extend({
-                "name": str(name),
-                "label": f"{name} {UNMEASURABLE_LABEL_MARK} no harness session id)",
+                "name": str(extra_name),
+                "label": f"{extra_name} {UNMEASURABLE_LABEL_MARK} no harness session id)",
                 "session": "", "node": node,
-            } for name in names)
+            } for extra_name in names)
     return rows
 
 

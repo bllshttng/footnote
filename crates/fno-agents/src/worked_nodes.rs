@@ -95,6 +95,7 @@ fn parse_rows(payload: &Value) -> Result<Vec<GateRow>, String> {
 /// phase/harness/session_id/started_at non-empty strings, `ended_at` absent
 /// or null counts open. Ship rows never reach here (the caller skips them).
 fn open_row(row: &Value) -> Option<String> {
+    let ended_open = row.get("ended_at").map(|v| v.is_null()).unwrap_or(true);
     let (phase, harness, sid, started) = (
         row.get("phase").and_then(|v| v.as_str()),
         row.get("harness").and_then(|v| v.as_str()),
@@ -103,7 +104,7 @@ fn open_row(row: &Value) -> Option<String> {
     );
     match (phase, harness, sid, started) {
         (Some(p), Some(h), Some(s), Some(t))
-            if !p.is_empty() && !h.is_empty() && !s.is_empty() && !t.is_empty() =>
+            if !p.is_empty() && !h.is_empty() && !s.is_empty() && !t.is_empty() && ended_open =>
         {
             Some(s.to_string())
         }
@@ -381,7 +382,7 @@ mod tests {
         let rows = vec![
             row("finch", "crown-s", Some("x-1")),
             row("finch", "", Some("x-1")),
-            row("finch-no-sid", "", Some("x-1")),
+            row("finch", "", Some("x-1")),
             row("t-w", "s-2", Some("x-1")),
         ];
         let worked = join_worked(&rows, &graph, &crowns(&["finch"]), &HashMap::new());
