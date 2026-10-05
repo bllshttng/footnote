@@ -295,6 +295,12 @@ pub fn sweep(plans_dir: &Path, apply: bool, status_map: &HashMap<String, String>
             res.skipped += 1;
             continue;
         };
+        // Absent full-delivery evidence never manufactures a terminal write:
+        // a plan that declares more ships than it recorded holds its drift.
+        if new == "done" && super::stamp::unshipped_waves(&parsed.fields, &path) {
+            res.skipped += 1;
+            continue;
+        }
 
         let Some(rewritten) = rewrite_status(&text, &new) else {
             res.skipped += 1;
@@ -632,6 +638,21 @@ mod tests {
         let text = read_doc(&p);
         assert!(text.contains("status: \"done\""));
         assert_eq!(text.matches("done_at:").count(), 1);
+
+        // A plan that declares more ships than it recorded holds: the
+        // node-closed signal never promotes it past in_review.
+        let multi = write_doc(
+            &dir,
+            "multi.md",
+            &linked_plan("in_review", "x-1").replace(
+                "---\n# T\n",
+                "---\n# T\n\n## Execution Strategy\n\n```yaml\nexecution_mode: sequential\nwaves:\n  - wave: 1\n    tasks: ['1.1']\n  - wave: 2\n    tasks: ['2.1']\ntasks:\n  - id: '1.1'\n    surface: ['a.rs']\n    verify: 'true'\n  - id: '2.1'\n    surface: ['b.rs']\n    verify: 'true'\n```\n",
+            ),
+        );
+        let res = sweep(&dir, true, &map(&[("x-1", "done")]));
+        assert_eq!(res.normalized, 0);
+        assert_eq!(res.skipped, 2);
+        assert!(read_doc(&multi).contains("status: in_review"));
     }
 
     #[test]

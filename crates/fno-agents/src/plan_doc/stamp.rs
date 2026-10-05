@@ -75,6 +75,18 @@ fn plan_expected_url_count(fields: &Fields) -> Option<i64> {
     }
 }
 
+/// True when a plan that DECLARES more than one ship has not yet recorded
+/// every ship's URL: expected_url_count when well-formed, else the Execution
+/// Strategy's wave count, else one. Single-ship plans never hold. The done
+/// gate shared by graduate, the projection, and the reconcile sweep - count
+/// waves, not PRs, so a multi-wave join-manual plan never reads done while a
+/// wave is unshipped.
+pub(crate) fn unshipped_waves(fields: &Fields, plan_path: &Path) -> bool {
+    let expected = plan_expected_url_count(fields)
+        .unwrap_or_else(|| crate::wave::declared_wave_count(plan_path).unwrap_or(1) as i64);
+    expected > 1 && (plan_urls(fields).len() as i64) < expected
+}
+
 /// The latest session id from session_ids (scalar or last list item).
 fn latest_plan_session(fields: &Fields) -> Option<String> {
     match fields.get("session_ids") {
@@ -345,7 +357,13 @@ fn do_graduate(plan_path: &Path, dry_run: bool, events_path: Option<&Path>) -> O
 
     let expected_raw = match fields.get("expected_url_count") {
         Some(Fv::Scalar(s)) => s.clone(),
-        _ => "1".to_string(),
+        // Count waves, not PRs: a multi-wave join-manual plan declares its
+        // ships in the Execution Strategy, so graduate waits for every
+        // wave's URL instead of defaulting to one.
+        _ => match crate::wave::declared_wave_count(plan_path) {
+            Some(count) => count.to_string(),
+            None => "1".to_string(),
+        },
     };
     let expected: i64 = match expected_raw.trim().parse::<i64>() {
         Ok(v) => v,
@@ -488,6 +506,45 @@ mod tests {
         let text = std::fs::read_to_string(&doc).unwrap();
         assert!(text.contains("status: done"));
         assert!(text.contains("iteration_ceiling"));
+
+        // Count waves, not PRs: a multi-wave plan holds in_review until the
+        // last wave's URL lands, then graduates.
+        let multi = dir.join("multi-wave.md");
+        std::fs::write(
+            &multi,
+            "---\nstatus: draft\n---\n# Multi-wave\n\n## Execution Strategy\n\n```yaml\nexecution_mode: sequential\nwaves:\n  - wave: 1\n    mode: sequential\n    tasks: ['1.1']\n  - wave: 2\n    mode: sequential\n    tasks: ['2.1']\n  - wave: 3\n    mode: sequential\n    tasks: ['3.1']\ntasks:\n  - id: '1.1'\n    surface: ['a.rs']\n    verify: 'true'\n  - id: '2.1'\n    surface: ['b.rs']\n    verify: 'true'\n  - id: '3.1'\n    surface: ['c.rs']\n    verify: 'true'\n```\n",
+        )
+        .unwrap();
+        let r = cmd_stamp(
+            &multi,
+            "w1",
+            &["https://x/pr/1".to_string()],
+            None,
+            false,
+            None,
+        );
+        assert_eq!(r.exit, 0, "{}", r.message);
+        let r = cmd_graduate(&multi, false, None);
+        assert_eq!(r.exit, 0, "{}", r.message);
+        let text = std::fs::read_to_string(&multi).unwrap();
+        assert!(text.contains("status: in_review"), "{text}");
+        assert!(!text.contains("status: done"), "{text}");
+        for n in 2..=3 {
+            let r = cmd_stamp(
+                &multi,
+                "wn",
+                &[format!("https://x/pr/{n}")],
+                None,
+                false,
+                None,
+            );
+            assert_eq!(r.exit, 0, "{}", r.message);
+        }
+        let r = cmd_graduate(&multi, false, None);
+        assert_eq!(r.exit, 0, "{}", r.message);
+        assert!(std::fs::read_to_string(&multi)
+            .unwrap()
+            .contains("status: done"));
     }
 
     #[test]
