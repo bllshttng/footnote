@@ -31,6 +31,25 @@ const ACTIVITY_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
 /// The row identity a ring rides: the claude transcript uuid where one
 /// exists, else the harness session id, else the label - the same key the
 /// tail pass and the truth probe join on.
+/// The ring store, a static beside the fold idiom (`model_price::FOLDS`):
+/// keyed by row identity, sampled through interior mutability so the read
+/// path can sample without a `&mut Core`. Rows the batches stop naming
+/// prune after ten idle minutes.
+static RINGS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ActivityRing>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn rings() -> std::sync::MutexGuard<'static, HashMap<String, ActivityRing>> {
+    RINGS.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Sample the served row set against the static: one cell per row per
+/// [`ACTIVITY_EVERY`].
+pub(crate) fn sample_activity(rows: &[RegistryAgent]) {
+    sample_rings(&mut rings(), rows, std::time::Instant::now());
+}
+
 fn activity_key(a: &RegistryAgent) -> String {
     a.claude_session_uuid
         .clone()
@@ -42,7 +61,7 @@ fn activity_key(a: &RegistryAgent) -> String {
 /// The ring sampler, free so the gate math is testable without a `Core`:
 /// at most one cell per row per [`ACTIVITY_EVERY`]; a row the batch stops
 /// naming keeps its ring, and rings with no sample in ten minutes drop.
-pub(super) fn sample_rings(
+pub(crate) fn sample_rings(
     rings: &mut HashMap<String, ActivityRing>,
     rows: &[RegistryAgent],
     now: std::time::Instant,
@@ -105,23 +124,16 @@ pub(super) fn same_project(a: &str, b: &str) -> bool {
 }
 
 impl Core {
-    /// Sample every counted row's cumulative pair as a fresh row set lands:
-    /// at most one cell per [`ACTIVITY_EVERY`], so a 1s registry poll over a
-    /// 5s daemon scan reads one interval per scan. Rows the batch stopped
-    /// naming age out after ten idle minutes.
-    pub(crate) fn sample_activity(&mut self, rows: &[RegistryAgent]) {
-        sample_rings(&mut self.activity_rings, rows, std::time::Instant::now());
-    }
-
     /// The served interval row for one agent: `None` when the row carries no
     /// counts (no readable transcript), an empty ring reads as waiting.
     pub(crate) fn activity_of(&self, a: &RegistryAgent) -> Option<Vec<(u8, u8)>> {
-        self.activity_rings
+        rings()
             .get(&activity_key(a))
             .map(|r| r.cells.iter().copied().collect())
     }
 
     pub(crate) fn agent_rows(&self) -> Vec<AgentRow> {
+        sample_activity(&self.agents);
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
         // double-render as watch-only). Indexed like `self.agents`.

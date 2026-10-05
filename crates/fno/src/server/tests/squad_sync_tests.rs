@@ -275,9 +275,9 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
     let uncounted = RegistryAgent::default();
     let t = std::time::Instant::now();
     let rows = vec![counted.clone(), uncounted.clone()];
-    crate::server::row_set::sample_rings(&mut core.activity_rings, &rows, t);
+    crate::server::row_set::sample_rings(&mut *crate::server::row_set::rings(), &rows, t);
     crate::server::row_set::sample_rings(
-        &mut core.activity_rings,
+        &mut *crate::server::row_set::rings(),
         &rows,
         t + std::time::Duration::from_secs(1),
     );
@@ -287,7 +287,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         "the first sample lands and the 1s re-sample is gated out"
     );
     crate::server::row_set::sample_rings(
-        &mut core.activity_rings,
+        &mut *crate::server::row_set::rings(),
         &rows,
         t + std::time::Duration::from_secs(6),
     );
@@ -303,7 +303,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         grown.tool_counts = Some((10 + k, 2 + k));
         let rows = vec![grown, RegistryAgent::default()];
         crate::server::row_set::sample_rings(
-            &mut core.activity_rings,
+            &mut *crate::server::row_set::rings(),
             &rows,
             t + std::time::Duration::from_secs(k * 6),
         );
