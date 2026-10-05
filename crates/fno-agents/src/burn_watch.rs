@@ -1280,11 +1280,11 @@ mod tests {
 
     #[test]
     fn a_recent_commit_on_a_flat_branch_is_progress_even_when_the_node_row_is_ancient() {
-        // x-09e3: the crown was woken twice over a node whose PR branch took
-        // a commit 30 minutes earlier. The node row's touched_at is not the
-        // branch: it moves on backlog commands, never on a push. A flat
-        // sample whose newest commit is younger than the idle ceiling stands
-        // down.
+        // Regression shape: the crown was woken twice over a node whose PR
+        // branch took a commit 30 minutes earlier. The node row's touched_at
+        // is not the branch: it moves on backlog commands, never on a push.
+        // A flat sample whose newest commit is younger than the idle ceiling
+        // stands down.
         let prev = BurnState {
             cost_usd: Some(1.0),
             head: Some("a".into()),
