@@ -199,10 +199,12 @@ async fn messages_reply_board_contracts() {
         Some("fno/pr-nudge")
     );
     // Item 6: a second arm in the same agent's system listing filters to
-    // its own rows, never the aggregate.
+    // its own rows, never the aggregate. col2 returns to Chats, the tab
+    // the audit block below Enters on.
     b.col2 = ChatTab::System;
     let sys_arms = b.chat_rows("s-c");
     assert!(sys_arms.len() >= 1, "{sys_arms:?}");
+    b.col2 = ChatTab::Chats;
     // The bubble thread (AC6-HP, AC16-HP, AC17-HP, AC19-HP): the title
     // names the other party with the info affordances, runs share one
     // label, the time lines separate the five-minute gaps, blanks sit
