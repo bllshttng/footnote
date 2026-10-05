@@ -290,7 +290,9 @@ def test_map_covers_current_surface_once():
     # the same way (592 -> 591): counted from the merged file, 591.
     # The five lane-alias verbs (court/king/reign -> org/lead) joined the
     # registry the same PR that taught the sync lists: 591 -> 596.
-    assert len(mapped) == 596, (
+    # The worked-nodes verb joined the registry the PR that ported the
+    # worked overlay to Rust: 596 -> 597.
+    assert len(mapped) == 597, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
