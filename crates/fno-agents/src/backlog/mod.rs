@@ -302,6 +302,12 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         // rows, so a healthy store pays one COUNT here and a parked store
         // folds. The DDL, migrations and one-shot imports below stay
         // setup-only.
+        //
+        // A store stamped before the identity columns landed carries no
+        // stamp gap, so the ensure path below never runs for it and only
+        // this migration moves it to the current shape; without it the first
+        // reader of agent_sessions.fno_id dies on the missing column.
+        entities::migrate_identity(&connection)?;
         import_if_needed(&mut connection)?;
         if archive_needs_import(&connection, graph)? {
             archive_import_if_needed(&mut connection, graph)?;
@@ -1509,6 +1515,44 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = dir.path().join(name);
         (dir, graph)
+    }
+
+    /// A store stamped before the identity columns opens: the stamped fast
+    /// path runs the identity migration, so the first reader of
+    /// agent_sessions.fno_id meets the column instead of dying on it (the
+    /// merge-refusal shape the fleet hit on stores minted before the
+    /// identity columns landed).
+    #[test]
+    fn a_stamped_store_without_identity_columns_opens_and_gains_them() {
+        let (_dir, graph) = fixture("identity-stamped.json");
+        open(&graph).unwrap();
+        let db = database_path(&graph);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS agent_sessions_fno_id;
+                 ALTER TABLE agent_sessions DROP COLUMN fno_id;
+                 ALTER TABLE agent_sessions DROP COLUMN display_name;
+                 ALTER TABLE agent_sessions DROP COLUMN links;",
+            )
+            .unwrap();
+        }
+        open(&graph).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('agent_sessions')")
+            .unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for column in ["fno_id", "display_name", "links"] {
+            assert!(
+                columns.iter().any(|name| name == column),
+                "the stamped store opened without {column}"
+            );
+        }
     }
 
     /// A first write that lands between an opener's unlocked row count and
