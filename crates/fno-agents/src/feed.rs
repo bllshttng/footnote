@@ -89,6 +89,14 @@ pub struct FeedRow {
     /// The PR URL, on a ship row. The mux's provenance action opens it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Which slice of the fleet the row belongs to: mail, backlog, ship,
+    /// agents, mux, fleet or ci. A pure function of the kind, so no migration
+    /// ever backfills it.
+    pub area: String,
+    /// The crown holder the row rolls up to, when the row's scope is held.
+    /// The search answers `l:` through it, else through `owner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     /// The row's position in the total order, as a six-string JSON array
     /// (`[ts, kind, node, session_id, ref, title]`, absent fields as "").
     /// The `--before` / `--after` flags take one back. Always serialized:
@@ -955,10 +963,9 @@ fn scope_holds(scope: &str, node: &str) -> bool {
 pub fn filter_rows(
     rows: Vec<FeedRow>,
     page: &Page,
-    node: Option<&str>,
-    session: Option<&str>,
-    kind: Option<&str>,
+    pre: &Prefilter,
     since_epoch: Option<u64>,
+    until_epoch: Option<u64>,
 ) -> Vec<FeedRow> {
     // The parsed cursors stay in locals; the comparison keys borrow from
     // them, so a page bound costs no per-row allocation.
@@ -968,14 +975,55 @@ pub fn filter_rows(
         before_cur.as_ref().map(|c| (ts_key(&c[0]), c[1].as_str(), c[2].as_str(), c[3].as_str(), c[4].as_str(), c[5].as_str()));
     let after =
         after_cur.as_ref().map(|c| (ts_key(&c[0]), c[1].as_str(), c[2].as_str(), c[3].as_str(), c[4].as_str(), c[5].as_str()));
+    // One flag, comma-OR over exact segments.
+    let in_set = |v: &str, set: &str| set.split(',').any(|seg| seg == v);
+    // One flag, comma-OR over prefix segments. An exact kind is its own
+    // prefix, so today's exact `--kind` keeps matching.
+    let prefix_set = |v: &str, set: &str| set.split(',').any(|seg| v.starts_with(seg));
     let mut rows: Vec<FeedRow> = rows
         .into_iter()
-        .filter(|r| node.is_none_or(|n| r.node.as_deref() == Some(n)))
-        .filter(|r| session.is_none_or(|s| r.session_id.as_deref() == Some(s)))
-        .filter(|r| kind.is_none_or(|k| r.kind == k))
+        .filter(|r| {
+            pre.node.as_deref().is_none_or(|n| r.node.as_deref().is_some_and(|v| in_set(v, &n)))
+        })
+        .filter(|r| pre.kind.as_deref().is_none_or(|k| prefix_set(&r.kind, &k)))
+        .filter(|r| pre.area.as_deref().is_none_or(|a| in_set(&r.area, &a)))
+        .filter(|r| {
+            pre.session.as_deref().is_none_or(|s| {
+                r.session_id
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with(&s) || v.ends_with(&s))
+            })
+        })
+        .filter(|r| {
+            pre.agent
+                .as_deref()
+                .is_none_or(|a| r.name.as_deref().is_some_and(|v| v.starts_with(&a)))
+        })
+        .filter(|r| {
+            pre.harness.as_deref().is_none_or(|h| {
+                r.harness
+                    .as_deref()
+                    .is_some_and(|v| h.split(',').any(|seg| v.eq_ignore_ascii_case(seg)))
+            })
+        })
+        .filter(|r| {
+            pre.lead.as_deref().is_none_or(|l| {
+                r.lead
+                    .as_deref()
+                    .or(r.owner.as_deref())
+                    .is_some_and(|v| v.contains(&l))
+            })
+        })
         .filter(|r| match since_epoch {
             Some(since) => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
                 Ok(t) => t.timestamp() >= since as i64,
+                Err(_) => true,
+            },
+            None => true,
+        })
+        .filter(|r| match until_epoch {
+            Some(until) => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
+                Ok(t) => t.timestamp() <= until as i64,
                 Err(_) => true,
             },
             None => true,
@@ -1005,24 +1053,43 @@ struct Page {
     limit: Option<usize>,
 }
 
+/// The flat WHERE clause the client may send: every flag ANDs, and the
+/// values inside one flag are comma-OR. No grammar, no negation, no OR
+/// across flags: the client sends only what one positive group can say.
+#[derive(Debug, Default, Clone)]
+struct Prefilter {
+    /// Exact node ids, comma-OR.
+    node: Option<String>,
+    /// Kind prefixes, comma-OR.
+    kind: Option<String>,
+    /// Area names, exact, comma-OR.
+    area: Option<String>,
+    /// Session id prefix or tail.
+    session: Option<String>,
+    /// Worker name prefix.
+    agent: Option<String>,
+    /// Harness names, case-insensitive, comma-OR.
+    harness: Option<String>,
+    /// Substring of the lead, else the owner.
+    lead: Option<String>,
+}
+
 #[derive(Debug)]
 struct FeedArgs {
     json: bool,
     since_epoch: Option<u64>,
+    until_epoch: Option<u64>,
     page: Page,
-    node: Option<String>,
-    session: Option<String>,
-    kind: Option<String>,
+    pre: Prefilter,
 }
 
 fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
     let mut args = FeedArgs {
         json: false,
         since_epoch: None,
+        until_epoch: None,
         page: Page::default(),
-        node: None,
-        session: None,
-        kind: None,
+        pre: Prefilter::default(),
     };
     let mut it = crate::client_verbs::expand_eq(rest).into_iter();
     while let Some(a) = it.next() {
@@ -1052,15 +1119,34 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
                 parse_cursor(&raw).map_err(|e| format!("--after: {e}"))?;
                 args.page.after = Some(raw);
             }
-            "--node" => args.node = Some(it.next().ok_or("--node needs an id")?),
-            "--session" => args.session = Some(it.next().ok_or("--session needs an id")?),
-            "--kind" => args.kind = Some(it.next().ok_or("--kind needs a kind name")?),
+            "--until-epoch" => {
+                args.until_epoch = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or("--until-epoch needs a non-negative integer")?,
+                )
+            }
+            "--node" => args.pre.node = Some(it.next().ok_or("--node needs an id")?),
+            "--session" => args.pre.session = Some(it.next().ok_or("--session needs an id")?),
+            "--kind" => args.pre.kind = Some(it.next().ok_or("--kind needs a kind name")?),
+            "--area" => args.pre.area = Some(it.next().ok_or("--area needs a name")?),
+            "--agent" => args.pre.agent = Some(it.next().ok_or("--agent needs a name")?),
+            "--harness" => args.pre.harness = Some(it.next().ok_or("--harness needs a name")?),
+            "--lead" => args.pre.lead = Some(it.next().ok_or("--lead needs a name")?),
             other => return Err(format!("unknown feed flag: {other}")),
         }
     }
     if args.page.before.is_some() && args.page.after.is_some() {
         return Err("--before and --after cannot combine: page from one edge".into());
     }
+    let live = |v: Option<String>| v.filter(|s| !s.is_empty());
+    args.pre.node = live(args.pre.node);
+    args.pre.kind = live(args.pre.kind);
+    args.pre.area = live(args.pre.area);
+    args.pre.session = live(args.pre.session);
+    args.pre.agent = live(args.pre.agent);
+    args.pre.harness = live(args.pre.harness);
+    args.pre.lead = live(args.pre.lead);
     Ok(args)
 }
 
@@ -1083,9 +1169,15 @@ pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
 /// `since_epoch` (seconds), or empty when the store is unreadable (the
 /// removal leg's notes name the store when THAT store fails; the spawn leg
 /// degrades to no rows, in step with the questions leg's posture).
-fn agents_journal(home: &AgentsHome, types: &[&str], since_epoch: Option<u64>) -> String {
+fn agents_journal(
+    home: &AgentsHome,
+    types: &[&str],
+    since_epoch: Option<u64>,
+    until_epoch: Option<u64>,
+) -> String {
     let query = crate::event_store::EventQuery {
         since_ms: since_epoch.map(|s| s as i64 * 1000),
+        until_ms: until_epoch.map(|u| u as i64 * 1000),
         ..crate::event_store::EventQuery::of_types(types)
     };
     crate::event_store::journal_text_checked(&home.events_jsonl(), &query).unwrap_or_default()
@@ -1097,7 +1189,7 @@ fn agents_journal(home: &AgentsHome, types: &[&str], since_epoch: Option<u64>) -
 /// events it owns.
 fn team_journals(home: &AgentsHome) -> String {
     let types = ["agent_teamed", "agent_team_vacated"];
-    let mut raw = agents_journal(home, &types, None);
+    let mut raw = agents_journal(home, &types, None, None);
     if let Some(parent) = home.root().parent() {
         let path = parent.join("events.jsonl");
         if let Ok(text) = crate::event_store::journal_text_checked(
@@ -1132,14 +1224,18 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     // Typed read: the four question kinds plus the empty type (corrupt rows
     // still count). The store's other kinds, 119k+ attention_delivery rows
     // alone, never reach the parser, so they stop reading as malformed.
-    let questions_raw = match crate::event_store::journal_text_checked(
-        &questions_path,
-        &crate::event_store::EventQuery::of_types(&[
+    let questions_query = crate::event_store::EventQuery {
+        since_ms: args.since_epoch.map(|s| s as i64 * 1000),
+        until_ms: args.until_epoch.map(|u| u as i64 * 1000),
+        ..crate::event_store::EventQuery::of_types(&[
             "operator_question",
             "operator_question_closed",
             "operator_decision",
             "day_boundary",
-        ]),
+        ])
+    };
+    let questions_raw = match crate::event_store::journal_text_checked(
+        &questions_path, &questions_query,
     ) {
         Ok(raw) => raw,
         Err(e) => {
@@ -1179,6 +1275,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         home,
         &["agent_spawned", "agent_spawn_refused"],
         args.since_epoch,
+        args.until_epoch,
     );
     let team_raw = team_journals(home);
     let closes_raw = agents_journal(
@@ -1190,6 +1287,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
             "composer_shell_refused",
         ],
         args.since_epoch,
+        args.until_epoch,
     );
 
     let Projection {
@@ -1217,10 +1315,9 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
     let rows = filter_rows(
         rows,
         &page,
-        args.node.as_deref(),
-        args.session.as_deref(),
-        args.kind.as_deref(),
+        &args.pre,
         args.since_epoch,
+        args.until_epoch,
     );
 
     if args.json {
@@ -1394,14 +1491,14 @@ mod tests {
         let p = project(&questions, &[], &[], "", "", "");
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
-        let kept = filter_rows(p.rows, &Page::default(), None, None, None, Some(1_700_000_000));
+        let kept = filter_rows(p.rows, &Page::default(), &Prefilter::default(), Some(1_700_000_000), None);
         assert_eq!(kept.len(), 1);
     }
 
     #[test]
     fn filter_gate_rows() {
         let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
-        let node_rows = filter_rows(p.rows.clone(), &Page::default(), Some("x-aaaa"), None, None, None);
+        let node_rows = filter_rows(p.rows.clone(), &Page::default(), &Prefilter { node: Some("x-aaaa".into()), ..Default::default() }, None, None);
         // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
         // closure inherits the association from the row that asked.
@@ -1416,7 +1513,7 @@ mod tests {
                 "node_ended"
             ]
         );
-        let ship_rows = filter_rows(p.rows.clone(), &Page::default(), None, Some("s-ship"), None, None);
+        let ship_rows = filter_rows(p.rows.clone(), &Page::default(), &Prefilter { session: Some("s-ship".into()), ..Default::default() }, None, None);
         assert_eq!(kinds(&ship_rows), ["node_shipped", "node_ended"]);
         let shipped = ship_rows.iter().find(|r| r.kind == "node_shipped").unwrap();
         assert_eq!(
@@ -1424,7 +1521,7 @@ mod tests {
             Some("https://github.com/bllshttng/footnote/pull/1395"),
             "the ship row carries the PR URL the provenance action opens"
         );
-        let newest_two = filter_rows(p.rows, &Page { limit: Some(2), ..Page::default() }, None, None, None, None);
+        let newest_two = filter_rows(p.rows, &Page { limit: Some(2), ..Page::default() }, &Prefilter::default(), None, None);
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
 
         // The live shape: `decided_by` is the literal verb on every decision
@@ -1490,8 +1587,7 @@ mod tests {
                     limit: Some(200),
                     ..Page::default()
                 },
-                None,
-                None,
+                &Prefilter::default(),
                 None,
                 None,
             );
@@ -1521,8 +1617,7 @@ mod tests {
                 limit: Some(200),
                 ..Page::default()
             },
-            None,
-            None,
+            &Prefilter::default(),
             None,
             None,
         );
@@ -1542,6 +1637,116 @@ mod tests {
         assert!(err.starts_with("--before"), "{err}");
         let err = parse_args(&["--after".into(), "[1,2]".into()]).unwrap_err();
         assert!(err.starts_with("--after"), "{err}");
+
+        // AC3-HP: the flat flags AND together; kinds match by prefix, and a
+        // page bound still applies under a filter.
+        let mk = |ts: &str, kind: &str, harness: Option<&str>| FeedRow {
+            ts: ts.to_string(),
+            kind: kind.to_string(),
+            harness: harness.map(str::to_string),
+            title: format!("{kind} title"),
+            ..FeedRow::default()
+        };
+        let mut rows = vec![
+            mk("2026-09-02T17:00:00Z", "question_asked", Some("claude")),
+            mk("2026-09-02T18:00:00Z", "question_closed", Some("codex")),
+            mk("2026-09-02T19:00:00Z", "node_started", Some("codex")),
+            mk("2026-09-02T20:00:00Z", "session_spawned", None),
+        ];
+        rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+        for r in &mut rows {
+            r.cursor = cursor_of(r);
+        }
+        let pre = Prefilter {
+            harness: Some("codex".into()),
+            kind: Some("question".into()),
+            ..Default::default()
+        };
+        let got = filter_rows(rows.clone(), &Page::default(), &pre, None, None);
+        assert_eq!(kinds(&got), ["question_closed"]);
+        let got = filter_rows(
+            rows.clone(),
+            &Page {
+                before: Some(rows[3].cursor.clone()),
+                ..Default::default()
+            },
+            &pre,
+            None,
+            None,
+        );
+        assert_eq!(kinds(&got), ["question_closed"], "filter still pages");
+        let got = filter_rows(
+            rows.clone(),
+            &Page {
+                before: Some(rows[1].cursor.clone()),
+                ..Default::default()
+            },
+            &pre,
+            None,
+            None,
+        );
+        assert!(got.is_empty(), "the bound cuts under the filter too");
+
+        // AC3-EDGE: an empty value is ignored, an unknown area answers empty
+        // (an empty answer, not an error), and a harness set is
+        // case-insensitive.
+        let got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                kind: Some(String::new()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(got.len(), 4, "empty --kind filters nothing");
+        let got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                area: Some("nosuch".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(got.len(), 0, "unknown area matches no row");
+        let got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter {
+                harness: Some("CODEX,pi".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(kinds(&got), ["question_closed", "node_started"]);
+        let until_got = filter_rows(
+            rows.clone(),
+            &Page::default(),
+            &Prefilter::default(),
+            None,
+            Some(1_788_372_000), /* 2026-09-02T18:00:00Z */
+        );
+        assert_eq!(
+            kinds(&until_got),
+            ["question_asked", "question_closed"],
+            "--until-epoch bounds the newer end"
+        );
+        let a = parse_args(&[
+            "--kind".to_string(),
+            String::new(),
+            "--harness".into(),
+            "codex".into(),
+            "--until-epoch".into(),
+            "123".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.pre.kind, None, "an empty flag value is dropped");
+        assert_eq!(a.pre.harness.as_deref(), Some("codex"));
+        assert_eq!(a.until_epoch, Some(123));
     }
 
     fn removal_fixture() -> crate::removals::Removal {
@@ -1590,7 +1795,7 @@ mod tests {
             row.session_id.as_deref(),
             Some("00847995-e0db-47c2-ab5b-24468ba1a4f5")
         );
-        let only_reaped = filter_rows(p.rows, &Page::default(), None, None, Some("session_reaped"), None);
+        let only_reaped = filter_rows(p.rows, &Page::default(), &Prefilter { kind: Some("session_reaped".into()), ..Default::default() }, None, None);
         assert_eq!(only_reaped.len(), 1);
 
         let mut r = removal_fixture();
