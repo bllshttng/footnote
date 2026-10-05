@@ -213,9 +213,13 @@ def test_respawn_failure_falls_through_to_fork(monkeypatch):
     )
     ok, detail = wake_and_deliver("uuid-full", "wake")
     assert ok is True and detail == "FORK"
-    # The fork revives under the row's OWN name (dispatch_spawn Fix 3 reads
-    # same-name + same-uuid as an in-place revival), never a wake- alias.
-    assert spawned[0]["name"] == "wk-abc12345"
+    # The fork's name comes from the Rust wake-name resolver reading the real
+    # registry; the stubbed row never hit disk, so this uuid resolves to the
+    # deterministic wake- alias. Name-keeping across statuses is the Rust
+    # contract (reentry::tests::revive_rows).
+    from fno.harness_identity import canonical_handle
+
+    assert spawned[0]["name"] == f"wake-{canonical_handle('uuid-full')}"
 
 
 def test_respawn_ok_inject_miss_does_not_create_second_worker(monkeypatch):
@@ -642,8 +646,9 @@ def test_rung2_claim_held_falls_through_to_fork(monkeypatch):
     assert ok is True and detail == "FORK"
     assert respawned == []  # never respawned: the guard was held
     assert spawned and spawned[0]["resume_session_id"] == "uuid-full"
-    # No claude harness on the row -> no name to revive; the uuid-derived
-    # wake- alias is the fallback (deterministic, so wakes still serialize).
+    # No registry name is recorded for this uuid (the stubbed row never hit
+    # disk), so the uuid-derived wake- alias is the fallback (deterministic,
+    # so wakes still serialize).
     from fno.harness_identity import canonical_handle
 
     assert spawned[0]["name"] == f"wake-{canonical_handle('uuid-full')}"
@@ -910,10 +915,12 @@ def test_recorded_route_wake_asks_spawn_axes_nothing(monkeypatch):
     )
     import fno.agents.fork_lineage as fork_lineage
 
-    def _must_not_ask(payload):
-        raise AssertionError("a recorded route needs no spawn-axes ask")
+    def _no_route_ask(payload):
+        if "resume_pin" in payload:
+            raise AssertionError("a recorded route needs no resume-pin ask")
+        return {}  # the wake-name ask rides the real owner; no name stubbed
 
-    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _must_not_ask)
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _no_route_ask)
     captured = []
     monkeypatch.setattr(
         dispatch,
