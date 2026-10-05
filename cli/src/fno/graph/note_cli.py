@@ -192,23 +192,6 @@ def cmd_note(
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     # An empty body refuses in the native action, which owns the message.
 
-    # `note comment <id> ...` is the native comment thread (the reader the
-    # receipt teaches). Forward verbatim in the public shape; it sits above
-    # the flag refusal so a forgotten id reaches the native answer.
-    if task_id == "comment":
-        from fno.rust_binary import resolve_binary
-
-        binary = resolve_binary()
-        if binary is None:
-            typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
-            raise typer.Exit(code=1)
-        argv = [str(binary), "backlog", "note", "comment"]
-        if text:
-            argv.append(text)
-        argv += extra
-        proc = subprocess.run(argv, check=False)
-        raise typer.Exit(code=proc.returncode)
-
     # A body that looks like a flag is a mistyped flag, not a note: a bare
     # `note <id> --list` once wrote the literal text "--list" over state.
     # Refuse BEFORE any write; file bodies are deliberate and exempt.
