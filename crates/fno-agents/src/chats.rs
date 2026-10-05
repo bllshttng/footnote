@@ -120,10 +120,25 @@ fn config_chats_override() -> Option<String> {
         .find_map(|p| crate::finalize::read_path_setting(p, "chats"))
 }
 
-/// The recipient participant key: the registry row's `session_id` for the
-/// addressee (exact match on session_id, harness_session_id or name - the
-/// d-e952ed19 join, a name is a label), else the raw `to` string (AC1-ERR).
+/// The participant key a registry row answers to: the fno_id when one
+/// stands, else the session id (the d-e952ed19 join, a name is a label).
+fn registry_row_key(row: &Value) -> Option<String> {
+    row.get("fno_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| row.get("harness_session_id").and_then(Value::as_str))
+        .or_else(|| row.get("session_id").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// The addressee participant key: the registry row's key for the addressee
+/// (exact match on fno_id, session_id, harness_session_id or name), else the
+/// raw `to` string (AC1-ERR). Keying the STORE by the fno_id keeps both
+/// halves of an exchange in one chat dir (the operator's item 2).
 fn recipient_key(to: &str) -> String {
+    if to.is_empty() {
+        return to.to_string();
+    }
     let home = crate::paths::AgentsHome::from_env();
     let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
         return to.to_string();
@@ -137,16 +152,49 @@ fn recipient_key(to: &str) -> String {
         .into_iter()
         .flatten()
     {
-        let matches = ["session_id", "harness_session_id", "name"]
+        let matches = ["fno_id", "session_id", "harness_session_id", "name"]
             .iter()
             .any(|k| row.get(*k).and_then(Value::as_str) == Some(to));
         if matches {
-            if let Some(sid) = row.get("session_id").and_then(Value::as_str) {
-                return sid.to_string();
+            if let Some(key) = registry_row_key(row) {
+                return key;
             }
         }
     }
     to.to_string()
+}
+
+/// The sender participant key: the `from_session` id resolved to its
+/// registry row's key (fno_id first), else the raw id, else the raw `from`
+/// name - the same join the read model applies, so a stored row and its
+/// projection agree on which pair a message belongs to.
+fn sender_key(from: &str, from_session: &str) -> String {
+    if from_session.is_empty() {
+        return from.to_string();
+    }
+    let home = crate::paths::AgentsHome::from_env();
+    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
+        return from_session.to_string();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+        return from_session.to_string();
+    };
+    for row in parsed
+        .get("agents")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let matches = ["fno_id", "harness_session_id", "session_id"]
+            .iter()
+            .any(|k| row.get(*k).and_then(Value::as_str) == Some(from_session));
+        if matches {
+            if let Some(key) = registry_row_key(row) {
+                return key;
+            }
+        }
+    }
+    from_session.to_string()
 }
 
 fn scope_of(line: &Value) -> String {
@@ -246,16 +294,12 @@ fn message_line(line: &Value) -> Option<(String, Value)> {
         return None;
     }
     let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
-    let from_key = line
+    let from = line.get("from").and_then(Value::as_str).unwrap_or("unknown");
+    let from_session = line
         .get("from_session")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            line.get("from")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        })
-        .to_string();
+        .unwrap_or("");
+    let from_key = sender_key(from, from_session);
     let to_key = if kind == "announce" {
         String::new()
     } else {
