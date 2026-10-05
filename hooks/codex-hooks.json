@@ -162,6 +162,17 @@
         ]
       },
       {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/refusal-streak-record.sh",
+            "statusMessage": "recording the refusal streak",
+            "timeout": 4
+          }
+        ]
+      },
+      {
         "matcher": "",
         "hooks": [
           {
