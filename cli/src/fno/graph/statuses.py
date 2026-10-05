@@ -331,10 +331,9 @@ def live_worked_node_ids(
 ) -> dict[str, list[str]]:
     """Return open-phase nodes whose roster workers are live.
 
-    The fleet read and the transcript liveness stay here; the join itself is
-    the Rust `fno-agents worked-nodes` verb: one owner, no Python twin.
-    ``reading`` hands in an already-paid fleet read; a caller that read the
-    roster itself must pass it here rather than pay a second probe.
+    The fleet read and transcript liveness stay here; the join is the Rust
+    `fno-agents worked-nodes` verb. ``reading`` hands in an already-paid
+    fleet read; callers that read the roster must pass it here.
     """
     try:
         from fno.claims.roster import read_roster
@@ -403,23 +402,15 @@ def _live_rows(reading: RosterReading) -> list[dict[str, object]]:
 
 
 def _worked_nodes_reply(rows: list[dict[str, object]]) -> dict[str, list[str]]:
-    """One fno-agents worked-nodes call; a non-zero exit fails the overlay."""
+    """One fno-agents worked-nodes call; any failure fails the overlay."""
     import json
-    import subprocess
 
-    from fno.rust_binary import resolve_binary
+    from fno.rust_binary import call_binary_json
 
-    binary = resolve_binary()
-    if binary is None:
-        raise RuntimeError("worked-nodes unavailable: set FNO_AGENTS_BIN or reinstall fno")
-    result = subprocess.run(
-        [str(binary), "worked-nodes", "--rows-file", "-"],
-        input=json.dumps({"rows": rows}), capture_output=True, text=True, timeout=60,
+    error, reply = call_binary_json(
+        "worked-nodes", ("--rows-file", "-"), input_text=json.dumps({"rows": rows}),
     )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"worked-nodes exited {result.returncode}: {result.stderr.strip()[:200]}")
-    worked = json.loads(result.stdout).get("worked")
+    worked = reply.get("worked") if error is None and isinstance(reply, dict) else None
     if not isinstance(worked, dict):
-        raise RuntimeError("worked-nodes returned no worked map")
+        raise RuntimeError(f"worked-nodes: {error or 'no worked map'}")
     return worked
