@@ -98,6 +98,7 @@ pub(crate) fn finished_json(row: &Value) -> bool {
     // projected caller row carries no created_at to satisfy the struct.
     let entry = serde_json::from_value::<RegistryEntry>(serde_json::json!({
         "name": row.get("name").and_then(Value::as_str).unwrap_or_default(),
+        "cwd": row.get("cwd").and_then(Value::as_str).unwrap_or_default(),
         "status": word,
         "created_at": row.get("created_at").and_then(Value::as_str).unwrap_or_default(),
         "pid": row.get("pid").cloned().unwrap_or(Value::Null),
