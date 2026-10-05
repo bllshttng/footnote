@@ -20,10 +20,10 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _no_node_claims(monkeypatch):
-    """Hermetic overlay: no claims root read unless a test provides one."""
+def _no_worked_reply(monkeypatch):
+    """Hermetic overlay: the verb never runs unless a test provides a reply."""
     monkeypatch.setattr(
-        "fno.graph.statuses._node_claim_sessions", lambda: {}
+        "fno.graph.statuses._worked_nodes_reply", lambda rows: {}
     )
 
 
@@ -126,6 +126,10 @@ def test_ac6_edge_claim_status_names_live_worker(monkeypatch):
     monkeypatch.setattr("fno.claims.cli.read_roster", lambda **_kw: reading)
     _graph_entry(monkeypatch)
     monkeypatch.setattr(
+        "fno.graph.statuses._worked_nodes_reply",
+        lambda rows: {"ac1-node": ["bp-worker"]},
+    )
+    monkeypatch.setattr(
         "fno.claims.cli._claims_core.claim_status",
         lambda **_kw: {"key": "node:ac1-node", "state": "free"},
     )
@@ -144,10 +148,10 @@ def test_ac6_edge_claim_status_names_live_worker(monkeypatch):
 def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     """The reproduced case as a fixture: a row with no node field whose
     row_id matches an open-phase session row on this node. 68 unresolved of
-    133 scanned is the measured wedge shape. Under the crowned-lead gate a
-    bare seat record is a witness, never ownership: this row proves itself
-    the way a real worker does when its registry row is missing - it holds
-    the node claim."""
+    133 scanned is the measured wedge shape. The join lives in the Rust
+    worked-nodes verb now; this pin covers the Python display leg - a
+    worked map renders as worked_by and flips an unheld node's verdict to
+    unknown."""
     s1 = {
         "name": "king-a792-control",
         "state": "working",
@@ -164,8 +168,8 @@ def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     monkeypatch.setattr("fno.claims.cli.read_roster", lambda **_kw: reading)
     _graph_entry(monkeypatch, session_id="s-1")
     monkeypatch.setattr(
-        "fno.graph.statuses._node_claim_sessions",
-        lambda: {"ac1-node": {"s-1"}},
+        "fno.graph.statuses._worked_nodes_reply",
+        lambda rows: {"ac1-node": ["king-a792-control"]},
     )
     monkeypatch.setattr(
         "fno.claims.cli._claims_core.claim_status",
@@ -192,12 +196,15 @@ def test_ac5_err_registry_only_probe_still_answers_the_join(monkeypatch):
     row = SimpleNamespace(
         name="reg-worker", state="working", cwd="/worktrees/ac1-node",
         row_id="s-1", pid=None, pid_start_time=None, mux=None, node="ac1-node",
-        crowned=False,
     )
     monkeypatch.setattr(
         "fno.agents.watchdog.fleet_rows", lambda **_kw: ([row], [fallback])
     )
     _graph_entry(monkeypatch, session_id="s-1")
+    monkeypatch.setattr(
+        "fno.graph.statuses._worked_nodes_reply",
+        lambda rows: {"ac1-node": ["reg-worker"]},
+    )
     monkeypatch.setattr(
         "fno.claims.cli._claims_core.claim_status",
         lambda **_kw: {"key": "node:ac1-node", "state": "free"},
