@@ -208,6 +208,29 @@ fn render_rows() {
     // At the panel's 40 columns the panel clips the tail; the CAUSE still
     // leads the line (the x-d15a contract).
     assert!(lines.iter().any(|l| l.contains("feed exited non-zero")));
+
+    // AC15-HP: a landed page under a query names the query in the footer,
+    // and every row's node cell reads the filtered node.
+    let mut o = overlay(vec![feed_item(Some("x-1234"), None)]);
+    o.query_text = "x-1234".into();
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
+    assert!(
+        lines.iter().filter(|l| l.contains("x-1234")).count() >= 1,
+        "the filtered rows paint: {lines:?}"
+    );
+    assert!(
+        lines.last().unwrap().contains("x-1234"),
+        "the footer shows the query: {}",
+        lines.last().unwrap()
+    );
+    // AC15-EDGE: a query with zero hits reads as the filtered empty notice.
+    let mut o = overlay(vec![]);
+    o.query_text = "k:pane".into();
+    let lines = feed_panel_lines(&o, false, W, ROWS, 0);
+    assert!(
+        lines.iter().any(|l| l.contains("no activity for k:pane")),
+        "{lines:?}"
+    );
 }
 
 #[test]
@@ -554,10 +577,115 @@ async fn header_rows() {
         Color::Default,
         "the band is gone once typing returns to the pane"
     );
+    // AC13-HP: `?` opens the keys overlay; the frame carries the title and
+    // the shared keys; Esc unwinds the overlay and the feed stays open.
+    let mut v = view_with_rows(vec![]);
+    v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
+    v.region_owner = crate::client::region_focus::RegionOwner::Feed;
+    let (mut writer, _reader) = tokio::io::duplex(4096);
+    feed_view::feed_keys(&mut v, b"?", &mut writer)
+        .await
+        .unwrap();
+    assert!(v.feed.as_ref().unwrap().keys_open, "? opened the overlay");
+    let text = crate::vt::frame_text(&v.compose());
+    assert!(text.contains("feed keys"), "{text}");
+    assert!(text.contains("id:"), "{text}");
+    assert!(text.contains("sid:"), "{text}");
+    assert!(text.contains("k:"), "{text}");
+    assert!(text.contains("h:"), "{text}");
+    feed_view::feed_keys(&mut v, &[0x1b], &mut writer)
+        .await
+        .unwrap();
+    feed_view::feed_keys(&mut v, &[], &mut writer)
+        .await
+        .unwrap();
+    assert!(!v.feed.as_ref().unwrap().keys_open, "esc closed the overlay");
+    assert!(v.feed.is_some(), "the feed stayed open");
+
+    // AC14-HP: `/` opens the bar; typing + Tab completes from the window; a
+    // settled query carries the pushed flags.
+    let mut codex = feed_item(None, Some("s-codex"));
+    codex.harness = Some("codex".into());
+    codex.ts = "2026-09-28T16:00:00Z".into();
+    let mut claude = feed_item(None, Some("s-claude"));
+    claude.harness = Some("claude".into());
+    claude.ts = "2026-09-28T17:00:00Z".into();
+    v.feed = Some(overlay(vec![codex, claude.clone()]));
+    feed_view::feed_keys(&mut v, b"/", &mut writer)
+        .await
+        .unwrap();
+    assert!(v.feed.as_ref().unwrap().bar_open, "/ opened the bar");
+    feed_view::feed_keys(&mut v, b"h:co", &mut writer)
+        .await
+        .unwrap();
+    feed_view::feed_keys(&mut v, &[0x09], &mut writer)
+        .await
+        .unwrap();
+    assert_eq!(
+        v.feed.as_ref().unwrap().query_text,
+        "h:codex",
+        "Tab completed the value"
+    );
+    crate::client::feed_view::search::apply_query(v.feed.as_mut().unwrap());
+    let f = v.feed.as_ref().unwrap();
+    assert!(f.pushed, "h:codex pushes wholly");
+    assert_eq!(
+        f.filter.as_ref().and_then(|x| x.harness.as_deref()),
+        Some("codex"),
+        "the head request carries --harness codex"
+    );
+    // AC14-EDGE: Esc in the bar clears the query, refolds unfiltered, and
+    // the panel stays open.
+    feed_view::feed_keys(&mut v, b"/", &mut writer)
+        .await
+        .unwrap();
+    feed_view::feed_keys(&mut v, &[0x1b], &mut writer)
+        .await
+        .unwrap();
+    feed_view::feed_keys(&mut v, &[], &mut writer)
+        .await
+        .unwrap();
+    let f = v.feed.as_ref().unwrap();
+    assert!(!f.bar_open, "esc closed the bar");
+    assert!(f.query_text.is_empty(), "esc cleared the query");
+    assert!(f.filter.is_none(), "the refold is unfiltered");
+    assert!(v.feed.is_some(), "the panel stayed open");
+
+    // AC10-EDGE (keys half): g on a detached window arms a Head; on landing
+    // the newest row is on top and the marker is gone.
+    {
+        let f = v.feed.as_mut().unwrap();
+        f.win.head_attached = false;
+        f.win.new_count = 2;
+        f.win.head_cursor = "[old]".into();
+    }
+    feed_view::feed_keys(&mut v, b"g", &mut writer)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            v.feed.as_ref().unwrap().want_page,
+            Some(crate::feed_overlay::PageReq::Head)
+        ),
+        "a detached g arms a Head"
+    );
+    let gen_now = v.feed.as_ref().unwrap().gen;
+    feed_view::apply_fold(
+        &mut v,
+        gen_now,
+        Ok(crate::feed_overlay::FeedPage {
+            req: crate::feed_overlay::PageReq::Head,
+            items: vec![claude],
+        }),
+    );
+    let f = v.feed.as_ref().unwrap();
+    assert!(f.win.head_attached, "the head reattached");
+    assert_eq!(f.win.new_count, 0, "the marker is gone");
+    assert_eq!(v.feed_offset, 0, "the newest row is on top");
+
     // Esc and e close the focused panel outright; there is no key-less open
     // state left behind.
     v.region_owner = crate::client::region_focus::RegionOwner::Feed;
-    let (mut writer, _reader) = tokio::io::duplex(4096);
     feed_view::feed_keys(&mut v, b"e", &mut writer)
         .await
         .unwrap();
@@ -1149,6 +1277,72 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
     // The bounded window's own contract (pages land, the cap trims the far
     // end, live rows count while detached).
     feed_view::page::tests::head_replaces_and_bounds_at_history_end();
+
+    // AC10-HP: four synthetic Older pages of 200 land while the view sits
+    // back; the top visible row is the SAME row before and after every land.
+    let mut v = view_with_rows(vec![]);
+    v.feed = Some(overlay(vec![]));
+    let page_rows = |from: usize| -> Vec<crate::feed_overlay::FeedItem> {
+        (from..from + 200)
+            .map(|i| {
+                let mut it = feed_item(Some("x-p"), Some("s-1"));
+                it.ts = format!("2026-08-01T00:{:02}:{:02}Z", (i / 60) % 60, i % 60);
+                it.cursor = format!("c{i}");
+                it.title = format!("row {i}");
+                it
+            })
+            .collect()
+    };
+    feed_view::apply_fold(
+        &mut v,
+        0,
+        Ok(crate::feed_overlay::FeedPage {
+            req: crate::feed_overlay::PageReq::Head,
+            items: page_rows(800),
+        }),
+    );
+    for from in [600usize, 400, 200, 0] {
+        let top_before = {
+            let f = v.feed.as_ref().unwrap();
+            let off = v.feed_offset_clamped();
+            let slots = feed_view::display_slots(&f.win.items, f.order);
+            match slots.get(off) {
+                Some(feed_view::Slot::Item(i)) => f.win.items[*i].title.clone(),
+                _ => String::new(),
+            }
+        };
+        let cur = {
+            let f = v.feed.as_mut().unwrap();
+            let c = f.win.scan_cursor.clone();
+            f.want_page = Some(crate::feed_overlay::PageReq::Older(c.clone()));
+            c
+        };
+        feed_view::apply_fold(
+            &mut v,
+            0,
+            Ok(crate::feed_overlay::FeedPage {
+                req: crate::feed_overlay::PageReq::Older(cur),
+                items: page_rows(from),
+            }),
+        );
+        let f = v.feed.as_ref().unwrap();
+        assert_eq!(
+            f.win.items.first().unwrap().title,
+            format!("row {from}"),
+            "older rows loaded"
+        );
+        assert!(
+            f.win.items.len() <= 600,
+            "the window never exceeds the cap"
+        );
+        // The anchored row still paints on the first table row.
+        let lines = feed_panel_lines(f, false, W, ROWS, v.feed_offset_clamped());
+        assert!(
+            lines[2].contains(&top_before),
+            "page from {from}: {top_before} stayed on top: {}",
+            lines[2]
+        );
+    }
 }
 
 // (x-182e) The order toggle: `Recent` is one flat newest-first list with no

@@ -418,10 +418,13 @@ pub(crate) fn feed_panel_rows(
     }
     // The footer carries the hints (AC12): the new-row marker, the active
     // query, then the keys; the status rides the same line.
-    let status = if let Some(e) = &o.error {
+    let mut status = if let Some(e) = &o.error {
         // The typed reason renders verbatim: a timeout names its budget, an
         // admission refusal its slot count. The cause leads the line.
         format!("{e}")
+    } else if let Some(Err(refusal)) = &o.parsed {
+        // The shared grammar's refusal, verbatim; no fetch armed.
+        refusal.clone()
     } else if o.inflight && o.win.items.is_empty() {
         "folding...".to_string()
     } else if let Some(note) = &o.scan_note {
@@ -431,11 +434,14 @@ pub(crate) fn feed_panel_rows(
     } else {
         format!("{} loaded", o.win.items.len())
     };
+    if o.bar_open {
+        status = format!("/{}▏ {status}", o.query_text);
+    }
     let mut left = String::new();
     if o.win.new_count > 0 {
         left.push_str(&format!("↑ {} new · ", o.win.new_count));
     }
-    if !o.query_text.is_empty() {
+    if !o.bar_open && !o.query_text.is_empty() {
         left.push_str(&format!("{} · ", o.query_text));
     }
     let hints = if focused {
@@ -759,6 +765,48 @@ impl View {
 
     /// The scroll offset clamped to what the CURRENT items and viewport can
     /// show, the single value every read path (paint, click, hover) shares.
+    /// True when a click lands on the footer's `↑ N new` marker: the one
+    /// footer span that acts, home through the same path the g key takes.
+    pub(super) fn feed_new_marker_hit(&self, row: u16, col: u16) -> bool {
+        let Some(f) = &self.feed else {
+            return false;
+        };
+        if f.win.new_count == 0 {
+            return false;
+        }
+        let feed_w = self.feed_panel_w() as usize;
+        if feed_w == 0 {
+            return false;
+        }
+        let footer_row = (self.term.0 as usize).saturating_sub(1);
+        if row as usize != footer_row || self.bottom_row_is_chrome() {
+            return false;
+        }
+        let x0 = self.term.1 as usize - feed_w;
+        let marker = format!("↑ {} new · ", f.win.new_count);
+        let start = x0 + 1;
+        let end = start + marker.chars().count() + 1;
+        let c = col as usize;
+        c >= start && c < end
+    }
+
+    /// The marker's (and Home's) action: attached, the view jumps to the top
+    /// and the count clears; detached, a Head request is armed and landing
+    /// puts the newest row on top (AC10-EDGE).
+    pub(super) fn feed_home(&mut self) {
+        let Some(f) = self.feed.as_mut() else {
+            return;
+        };
+        if f.win.home_is_local() {
+            self.feed_offset = 0;
+            f.win.new_count = 0;
+            f.sel = first_item_slot(&f.win.items, f.order);
+        } else {
+            f.want_page = Some(crate::feed_overlay::PageReq::Head);
+            f.want = true;
+        }
+    }
+
     pub(super) fn feed_offset_clamped(&self) -> usize {
         let Some(f) = &self.feed else {
             return 0;
@@ -861,6 +909,12 @@ impl View {
                 bg: Color::Default,
                 flags: border_flags,
             };
+        }
+        // The `?` overlay floats over the panel (AC13), the board's own
+        // popup layering.
+        if f.keys_open {
+            let popup = search::feed_keys_popup();
+            draw_popup_overlay(cells, rows, cols, &popup, self.term, &self.theme);
         }
         // The panel's esc chip, at the header row's right edge. A tap on it
         // presses Esc through the shared chip path: a focused panel reads the
@@ -1033,6 +1087,17 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
     // Time-based re-arm, the backlog board's pattern: a settled fold goes
     // stale after FEED_REFRESH_EVERY and the next run-loop tick refolds, so
     // the panel is fresh without the operator touching anything.
+    // The search bar's 250ms debounce: an expired one re-parses and refolds
+    // under the new filter before any other fold arms.
+    if f.bar_open {
+        if let Some(at) = f.bar_debounce {
+            if at.elapsed() >= std::time::Duration::from_millis(250) {
+                f.bar_debounce = None;
+                search::apply_query(f);
+            }
+        }
+        return;
+    }
     let due = f.want
         || f.last_fold
             .is_none_or(|t| t.elapsed() >= FEED_REFRESH_EVERY);
@@ -1345,6 +1410,68 @@ pub(crate) async fn feed_keys(
             }
             continue;
         }
+        // The `?` overlay sits in front of the panel: Esc unwinds it first
+        // and the panel stays open (x-3584's layering, AC13).
+        if view.feed.as_ref().is_some_and(|f| f.keys_open) {
+            match tok {
+                ModalKey::Esc => {
+                    if let Some(f) = view.feed.as_mut() {
+                        f.keys_open = false;
+                    }
+                }
+                ModalKey::Byte(b'?') => {
+                    if let Some(f) = view.feed.as_mut() {
+                        f.keys_open = false;
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        // The search bar takes the typing keys while it is open; Esc clears
+        // the query and refolds unfiltered, and never closes the panel.
+        if view.feed.as_ref().is_some_and(|f| f.bar_open) {
+            match tok {
+                ModalKey::Esc => {
+                    let f = view.feed.as_mut().unwrap();
+                    f.bar_open = false;
+                    f.bar_debounce = None;
+                    f.query_text.clear();
+                    search::apply_query(f);
+                }
+                ModalKey::Enter => {
+                    let f = view.feed.as_mut().unwrap();
+                    f.bar_open = false;
+                    f.bar_debounce = None;
+                    search::apply_query(f);
+                }
+                ModalKey::Byte(0x09) => {
+                    let f = view.feed.as_mut().unwrap();
+                    let items = f.win.items.clone();
+                    if let Some(next) = search::complete(&f.query_text, &items) {
+                        f.query_text = next;
+                    }
+                    f.bar_debounce = Some(Instant::now());
+                }
+                ModalKey::Byte(b'?') => {
+                    if let Some(f) = view.feed.as_mut() {
+                        f.keys_open = true;
+                    }
+                }
+                ModalKey::Byte(b) if b == 0x7f || b == 0x08 => {
+                    let f = view.feed.as_mut().unwrap();
+                    f.query_text.pop();
+                    f.bar_debounce = Some(Instant::now());
+                }
+                ModalKey::Byte(b) if b >= 0x20 => {
+                    let f = view.feed.as_mut().unwrap();
+                    f.query_text.push(b as char);
+                    f.bar_debounce = Some(Instant::now());
+                }
+                _ => {}
+            }
+            continue;
+        }
         if matches!(tok, ModalKey::Esc | ModalKey::Byte(b'e')) {
             // Close once; a second close token in the same chunk is
             // swallowed, never a reopen.
@@ -1418,6 +1545,13 @@ pub(crate) async fn feed_keys(
                     .saturating_sub(1);
                 f.sel = sel;
                 View::arm_feed_page(f, true, false, max_off, 5);
+            }
+            ModalKey::Byte(b'?') => {
+                f.keys_open = !f.keys_open;
+            }
+            ModalKey::Byte(b'/') => {
+                f.bar_open = true;
+                f.bar_debounce = None;
             }
             // The order toggle: the panel's ONE local preference, persisted
             // per client like the dragged width.

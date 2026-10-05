@@ -45,6 +45,139 @@ pub(crate) fn parse_query(text: &str) -> Result<crate::search_query::Parsed, Str
     )
 }
 
+
+/// The `?` overlay: the panel's keys, then every key the shared table marks
+/// answerable on feed rows - read from `search_query::KEYS`, never a local
+/// copy, so the overlay and the grammar cannot drift.
+pub(crate) fn feed_keys_popup() -> crate::popup::Popup {
+    use crate::popup::{Popup, PopupRow};
+    let pick = |label: &str| PopupRow::Entry {
+        glyph: " ".into(),
+        label: label.into(),
+        hint: String::new(),
+        enabled: true,
+    };
+    let kind_word = |k: crate::search_query::Kind| match k {
+        crate::search_query::Kind::Value => "value prefix",
+        crate::search_query::Kind::Text => "text",
+        crate::search_query::Kind::Date => "date",
+        crate::search_query::Kind::Number => "number",
+        crate::search_query::Kind::Age => "age",
+        crate::search_query::Kind::Flag => "exact word",
+        crate::search_query::Kind::Sort => "sort",
+    };
+    let mut rows: Vec<PopupRow> = vec![
+        PopupRow::Header("keys".into()),
+        PopupRow::Rule,
+        pick("up/down row - enter details - o order"),
+        pick("g home (newest) - G oldest - arrows pan"),
+        pick("/ search - ? keys - esc close"),
+        PopupRow::Header("query keys".into()),
+        PopupRow::Rule,
+    ];
+    for def in crate::search_query::KEYS.iter().filter(|d| d.event) {
+        let names: Vec<String> = def.names.iter().map(|n| format!("{n}:")).collect();
+        rows.push(pick(&format!(
+            "{} - {}",
+            names.join(" "),
+            kind_word(def.kind)
+        )));
+    }
+    Popup::new(rows, crate::popup::Anchor::Center)
+        .title("feed keys")
+        .footer("esc close")
+}
+
+/// One Tab press on the bar text: complete the token before the cursor.
+/// A key prefix completes to the full key names the event surface takes; a
+/// value after a value key completes from the distinct values in the loaded
+/// window. Repeated Tab cycles. `None` leaves the text.
+pub(crate) fn complete(text: &str, items: &[crate::feed_overlay::FeedItem]) -> Option<String> {
+    let (prefix, token) = match text.rsplit_once(' ') {
+        Some((p, t)) => (format!("{p} "), t),
+        None => (String::new(), text),
+    };
+    if !token.contains(':') {
+        let mut cands: Vec<&str> = Vec::new();
+        for def in crate::search_query::KEYS.iter().filter(|d| d.event) {
+            for name in def.names {
+                if name.starts_with(token) && !cands.contains(name) {
+                    cands.push(name);
+                }
+            }
+        }
+        cands.sort();
+        if cands.is_empty() {
+            return None;
+        }
+        let next = cands
+            .iter()
+            .position(|c| c.to_string() == token)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        return Some(format!("{prefix}{}", cands[next % cands.len()]));
+    }
+    let (key, value) = token.split_once(':')?;
+    let field = match key {
+        "id" | "n" => "id",
+        "sid" | "session" => "session",
+        "a" | "agent" => "agent",
+        "h" | "harness" => "harness",
+        "k" | "kind" => "kind",
+        "l" | "lead" => "lead",
+        _ => return None,
+    };
+    let ctx = crate::feed_overlay::EventCtx::from_rows(&[], &[]);
+    let mut vals: Vec<String> = Vec::new();
+    for it in items {
+        for v in crate::feed_overlay::event_fields(it, &ctx)
+            .get(field)
+            .into_iter()
+            .flatten()
+        {
+            if v.starts_with(value) && !vals.contains(v) {
+                vals.push(v.clone());
+            }
+        }
+    }
+    vals.sort();
+    if vals.is_empty() {
+        return None;
+    }
+    let next = vals.iter().position(|v| v == value).map(|i| i + 1).unwrap_or(0);
+    Some(format!("{prefix}{key}:{}", vals[next % vals.len()]))
+}
+
+/// The bar's text settled: parse the query, recompute the pushable flags,
+/// and re-arm the head page under the new filter. A refusal shows in the
+/// footer verbatim and fetches nothing.
+pub(crate) fn apply_query(o: &mut super::FeedOverlay) {
+    o.scan_pages = 0;
+    o.scan_note = None;
+    if o.query_text.is_empty() {
+        o.parsed = None;
+        o.pushed = false;
+        o.filter = None;
+        o.want_page = Some(crate::feed_overlay::PageReq::Head);
+        o.want = true;
+        return;
+    }
+    match parse_query(&o.query_text) {
+        Ok(parsed) => {
+            let pre = prefilter(&parsed);
+            o.pushed = pre.is_some();
+            o.filter = pre;
+            o.parsed = Some(Ok(parsed));
+            o.win = super::page::FeedWindow::default();
+            o.want_page = Some(crate::feed_overlay::PageReq::Head);
+            o.want = true;
+        }
+        Err(e) => {
+            o.parsed = Some(Err(e));
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
