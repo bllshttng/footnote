@@ -41,7 +41,12 @@ const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 /// The loop job is NOT one of them: `loop_participation` and
 /// `loop_extension` already declare it, and the wire-gate below derives the
 /// loop's state from that pair instead of a second field.
-pub const HOOK_JOBS: [&str; 3] = ["lead_guard", "lead_reinject", "session_state"];
+pub const HOOK_JOBS: [&str; 4] = [
+    "lead_guard",
+    "lead_reinject",
+    "session_state",
+    "event_rules",
+];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
 
@@ -1424,7 +1429,7 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
                 harness,
                 "hooks",
                 &format!(
-                    "unknown hook job {job:?}; declared jobs are lead_guard, lead_reinject and session_state"
+                    "unknown hook job {job:?}; declared jobs are lead_guard, lead_reinject, session_state and event_rules"
                 ),
             ));
         }

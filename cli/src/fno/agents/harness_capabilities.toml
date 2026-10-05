@@ -1953,3 +1953,49 @@ reason = "no session-state push for grok (no fno hook registration; the per-harn
 [harness.zcode.hooks.session_state]
 state = "missing"
 reason = "no session-state push for zcode (no fno hook registration; the per-harness report adapters land with the session-state push work)"
+
+# ── event_rules ────────────────────────────────────────────────────────────────
+# The Stop-boundary rule table (docs/architecture/event-rules.md). claude and
+# codex run it in-process inside fno-agents hook stop; the adapters whose Stop
+# cannot carry it call fno-agents hook rules --event stop beside their
+# loop-check call. A missing on a wired row fails the load.
+
+[harness.claude.hooks.event_rules]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/target-stop-hook.sh", "crates/fno-agents/src/hook/stop.rs"]
+
+[harness.codex.hooks.event_rules]
+state = "supported"
+via = ["hooks/codex-hooks.json", "hooks/target-stop-hook.sh", "crates/fno-agents/src/hook/stop.rs"]
+
+[harness.agy.hooks.event_rules]
+state = "supported"
+via = ["hooks/footnote-agy-target-stop-hook.sh", "crates/fno-agents/src/event_rules.rs"]
+
+[harness.opencode.hooks.event_rules]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "crates/fno-agents/src/event_rules.rs"]
+
+[harness.pi.hooks.event_rules]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/event_rules.rs"]
+
+[harness.footnote.hooks.event_rules]
+state = "supported"
+via = ["crates/fno-agents/src/footnote_harness/hooks.rs", "crates/fno-agents/src/hook/stop.rs"]
+
+[harness.gemini.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"
+
+[harness.cursor-agent.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for cursor-agent (no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"
+
+[harness.grok.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for grok (no plugin hook file and no capability install lane; the grok install lane would flip this), so its Stop never reaches the rule engine"
+
+[harness.zcode.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"

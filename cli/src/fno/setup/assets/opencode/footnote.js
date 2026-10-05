@@ -239,6 +239,46 @@ function makeHandler(io, dir) {
           return
         }
 
+        // 2.5. Event rules: the Stop-boundary rule table runs through the
+        // transport entry, before the gate, with the same Stop payload shape
+        // claude's stop hook evaluates in-process. A block relays to the
+        // session in place of the gate and the idle ends.
+        const lastText = items.filter(Boolean).at(-1) || ""
+        let ruled = null
+        try {
+          const rulesBin = process.env.FNO_AGENTS_BIN || "fno-agents"
+          const proc = Bun.spawn(
+            [rulesBin, "hook", "rules", "--event", "stop"],
+            { cwd: dir, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+          )
+          proc.stdin.write(
+            JSON.stringify({
+              session_id: sid,
+              last_assistant_message: lastText,
+              transcript_path: synth,
+              cwd: dir,
+            }),
+          )
+          proc.stdin.end()
+          const timer = setTimeout(() => proc.kill(), SUBPROC_TIMEOUT_MS)
+          const rulesOut = await new Response(proc.stdout).text()
+          await proc.exited
+          clearTimeout(timer)
+          ruled = JSON.parse(rulesOut)
+        } catch (e) {
+          console.error(`[footnote] hook rules unavailable/failed: ${e}`)
+        }
+        if (ruled && ruled.decision === "block") {
+          try {
+            io.sendPrompt(sid, ruled.reason).catch((e) =>
+              console.error(`[footnote] rules prompt(${sid}) failed: ${e}`),
+            )
+          } catch (e) {
+            console.error(`[footnote] rules prompt(${sid}) threw: ${e}`)
+          }
+          return
+        }
+
         // 3. Run the full claude completion gate, bound to THIS session.
         //    The gate refuses a session the registry does not bind to this
         //    target (exit 0, decision "refuse"); the bridge then runs the
