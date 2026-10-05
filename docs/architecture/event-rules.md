@@ -110,7 +110,7 @@ The source prose carried 55 if-then rules across skills/lead, using-fno, target 
 | 36 | "Don't interrupt" means `/fno:dnd` (lead:169) | stays prose (judgment) |
 | 37 | Run intel windows at abdicate (lead:173) | guard: daemon writes parts 1 and 2 |
 | 38 | Ask the king by mail with `<help>` for out-of-scope calls (minion-clause:15) | stays prose (help rows carry no node or session yet) |
-| 39 | Escalate one level at a time (minion-clause:18, once:456) | stays prose: conflicts with x-e1d2, unsettled |
+| 39 | Escalate one level at a time (minion-clause:18, once:456) | stays prose: conflicts with the user-question routing rule, unsettled |
 | 40 | Rule a worker ask: approve, revise or escalate the four classes (once:506) | row: why_user_escape |
 | 41 | Pass: an unknown goes to the triage pile, not a guessed edge (once:531) | stays prose |
 | 42 | Mail 80 words, `--raw` only for `/` or `$` (using-fno:21) | guard: style_refusal + raw-payload check |

@@ -241,7 +241,9 @@ pub fn eval_stop_in(
         .or(cursor_ts)
         .unwrap_or(now_ms);
 
-    let ledger = ledger_rows(journal);
+    // The dedupe ledger loads on the first candidate fire: a Stop with no
+    // ask and no journal event never scans the span table.
+    let mut ledger: Option<Vec<(String, String, String)>> = None;
     let mut fires = Vec::new();
     for row in table() {
         if !enabled(cwd, row) {
@@ -250,7 +252,11 @@ pub fn eval_stop_in(
         match row.event.as_str() {
             "stop" => {
                 if row.when.iter().all(|p| predicate(&ctx, p, None)) {
-                    if let Some(fire) = stop_block(&ctx, row, &ledger, journal) {
+                    let ledger = match &mut ledger {
+                        Some(l) => l,
+                        None => ledger.insert(ledger_rows(journal)),
+                    };
+                    if let Some(fire) = stop_block(&ctx, row, ledger, journal) {
                         fires.push(fire);
                     }
                 }
@@ -272,7 +278,11 @@ pub fn eval_stop_in(
                         continue;
                     }
                     if row.when.iter().all(|p| predicate(&ctx, p, Some(&v))) {
-                        if let Some(fire) = event_action(&ctx, row, &v, &ledger, journal) {
+                        let ledger = match &mut ledger {
+                            Some(l) => l,
+                            None => ledger.insert(ledger_rows(journal)),
+                        };
+                        if let Some(fire) = event_action(&ctx, row, &v, ledger, journal) {
                             fires.push(fire);
                         }
                     }
@@ -282,7 +292,9 @@ pub fn eval_stop_in(
             _ => {}
         }
     }
-    write_cursor(journal, &ctx.session, max_seq, max_ts);
+    if max_seq > cursor_seq || cursor_ts.is_none() {
+        write_cursor(journal, &ctx.session, max_seq, max_ts);
+    }
     fires
 }
 
@@ -291,7 +303,7 @@ pub fn eval_stop_in(
 fn stop_block(
     ctx: &Ctx,
     row: &Row,
-    ledger: &[(String, String, String)],
+    ledger: &mut Vec<(String, String, String)>,
     journal: &Path,
 ) -> Option<Fire> {
     let prior = ledger
@@ -330,7 +342,7 @@ fn event_action(
     ctx: &Ctx,
     row: &Row,
     event_row: &Value,
-    ledger: &[(String, String, String)],
+    ledger: &mut Vec<(String, String, String)>,
     journal: &Path,
 ) -> Option<Fire> {
     let data = event_row.get("data")?;
