@@ -15182,8 +15182,3 @@ mod lineage_paint_tests;
 
 #[path = "client_tests/composer_fullscreen_tests.rs"]
 mod composer_fullscreen_tests;
-
-// The org-board view-state test helpers live in their own module (the file
-// budget keeps this aggregator shrinking too).
-#[path = "client_tests/view_state_test_helpers.rs"]
-mod view_state_test_helpers;
