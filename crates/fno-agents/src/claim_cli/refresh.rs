@@ -83,11 +83,11 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn usage_error(detail: &str) -> i32 {
-    eprintln!("Usage: fno agents claim refresh [OPTIONS] KEY");
-    eprintln!("Try 'fno agents claim refresh --help' for help.");
-    eprintln!();
-    eprintln!("{detail}");
-    2
+    super::usage_refusal(
+        "fno agents claim refresh [OPTIONS] KEY",
+        "fno agents claim refresh --help",
+        detail,
+    )
 }
 
 fn bad_parameter(msg: &str) -> i32 {
@@ -99,10 +99,11 @@ fn bad_parameter(msg: &str) -> i32 {
 /// engine extend.
 fn run_global(a: &LeafArgs, key: &str, holder: &str) -> i32 {
     let root = node_aware_root(key);
+    // The legacy body range-checked BEFORE touching the file, with its own
+    // message (the engine only refuses non-positive); the range check also
+    // narrows the i128 to the engine's i64.
     let ttl = match a.ttl_ms {
         Some(t) => {
-            // The legacy body range-checked BEFORE touching the file, with
-            // its own message (the engine only refuses non-positive).
             if t < i128::from(MIN_TTL_MS) || t > i128::from(claims::MAX_TTL_MS) {
                 eprintln!(
                     "validation error: ttl_ms={t} out of range [{}, {}]",
@@ -111,16 +112,9 @@ fn run_global(a: &LeafArgs, key: &str, holder: &str) -> i32 {
                 );
                 return 2;
             }
-            t
+            t as i64
         }
-        None => i128::from(MIN_TTL_MS),
-    };
-    let ttl = match ttl_ms_checked(ttl) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("validation error: {e}");
-            return 2;
-        }
+        None => MIN_TTL_MS,
     };
     let path = match claims::claim_path(key, root.as_deref()) {
         Ok(p) => p,

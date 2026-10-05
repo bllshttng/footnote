@@ -15,6 +15,16 @@ pub mod release;
 use serde_json::Value;
 use std::path::PathBuf;
 
+/// typer 0.27's UsageError layout, shared by the leaves whose goldens pin
+/// the exact lines.
+pub(crate) fn usage_refusal(usage: &str, help_hint: &str, detail: &str) -> i32 {
+    eprintln!("Usage: {usage}");
+    eprintln!("Try '{help_hint}' for help.");
+    eprintln!();
+    eprintln!("{detail}");
+    2
+}
+
 /// `--ttl` expression ("30m" / "1h" / "3600s" / "5000") into milliseconds.
 /// `Ok(None)` for the empty string (the caller decides the default); plain
 /// digits are seconds. The error text is the frozen Python `typer
