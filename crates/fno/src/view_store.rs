@@ -187,6 +187,12 @@ struct StoreFile {
     /// `experimental_backlog_view`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     board_layout: Option<serde_json::Value>,
+    /// The backlog board's remembered view state: the query (lane
+    /// grouping, facet sets, search, list/kanban) plus the selected card.
+    /// Default absent = the fresh defaults. Same contract as
+    /// `board_layout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    board_query: Option<serde_json::Value>,
     /// The sideline's active view. Default absent = agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sideline_view: Option<serde_json::Value>,
@@ -1396,4 +1402,46 @@ fn backlog_default_columns() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+/// The backlog board's remembered view state: the query (lane grouping,
+/// facet sets, search text, list/kanban) plus the selected card id. JSON
+/// round-trip so a schema addition never breaks a read.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct BoardQueryPrefs {
+    /// `"project" | "epic" | "none"`; absent reads as the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<String>,
+    /// `"list" | "kanban"`; absent reads as kanban.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// The find text. Absent or empty reads as no filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// The facet multi-select sets, any-of, by facet name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sets: std::collections::BTreeMap<String, Vec<String>>,
+    /// The card the cursor sat on, when it sat on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sel: Option<String>,
+}
+
+/// Read the backlog board's remembered view state. Absent or corrupt reads
+/// as `None`: the board opens fresh.
+pub fn load_board_query() -> Option<BoardQueryPrefs> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .board_query
+        .and_then(|v| serde_json::from_value::<BoardQueryPrefs>(v).ok())
+}
+
+/// Persist the backlog board's remembered view state. Best-effort like
+/// every other write here.
+pub fn save_board_query(prefs: &BoardQueryPrefs) {
+    mutate(|file| {
+        file.board_query = serde_json::to_value(prefs).ok();
+    });
 }
