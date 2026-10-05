@@ -8,34 +8,117 @@ Several stores hold one timeline and nothing joined them. The feed is one projec
 
 | Store | Holds | Contributes |
 |---|---|---|
-| `~/.fno/questions.jsonl` | `operator_question`, `operator_question_closed`, `operator_decision`, `day_boundary` rows | `question_asked`, `question_closed`, `decision_recorded`, `day_boundary` |
-| `~/.fno/graph.db` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `completed_at` | `node_created`, `node_started`, `pr_created`, `node_ended` |
+| `~/.fno/db/events.db` | question and team lifecycle, spawn-gate refusals, stalls, distress, daemon starts, update runs - read typed through the `events_type_ts` index | `question_asked`, `question_closed`, `decision_recorded`, `day_boundary`, `team_granted`, `team_vacated`, `session_spawned`, `session_spawn_refused`, `worker_stalled`, `help_emitted`, `update_started`, `update_finished` |
+| `~/.fno/graph.db` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `merge_status`, `completed_at` | `node_created`, `node_started`, `node_shipped`, `pr_merged`, `node_ended` |
+| `~/.fno/agents/events.db` | the agents journal: mux close rows, spawn events, daemon starts | `session_spawned`, `session_spawn_refused`, `pane_closed`, `server_stopped`, `composer_shell_ran`, `composer_shell_refused`, `daemon_restarted` |
 | `~/.fno/agents/reap-receipts/` | one durable receipt per removed registry row, each carrying the verbatim resume line | `session_reaped` |
-| `~/.fno/events.jsonl` | telemetry (72% ticks) | nothing - deliberately not read |
 
 A store qualifies for three reasons. It is durable. It does not rotate. It IS the record, not a restatement of one.
 
-The reap-receipts store meets that test. It holds one file per removal, written before the row drops, and the file carries the recovery path itself.
+The durable db stores meet that test. `events.jsonl` rotates in about twelve hours, but its durable db copy keeps `retention_class = durable` rows long after the file rotates. The feed never reads the jsonl file: a typed read through the store skips the ticks and reaches rows from weeks back.
 
-`events.jsonl` fails it. It rotates in about twelve hours. It carries a hundred noisy rows for every operator-facing one. A feed that mines it re-derives the filter in every consumer.
+The feed reads the question, spawn and close kinds typed, so the store's other kinds (119k+ `attention_delivery` rows alone) never reach the parser. Every leg skips its read entirely when the query's flags exclude all of its kinds.
 
-The lifecycle kinds derive from the graph at query time, so the graph stays the one truth. No writer is added. No second statement of "a PR was opened" exists to drift.
+The lifecycle kinds derive from the graph at query time, so the graph stays the one truth. No writer is added. A merged node reads `pr_merged`, not `node_ended`: the merge IS the end.
 
-## The kinds
+## The kinds and their areas
 
-| Kind | Derived from |
+Every row carries an `area`: a pure function of the kind. The column renders in the panel and `--area` filters on it.
+
+| Area | Kinds |
 |---|---|
-| `question_asked` | an `operator_question` row (ref: question id) |
-| `question_closed` | an `operator_question_closed` row (ref: question id) |
-| `decision_recorded` | an `operator_decision` row (ref: decision id) |
-| `node_created` | a node's `created_at`, which every entry carries |
-| `node_started` | a do-phase `sessions[]` row with `started_at` |
-| `pr_created` | a ship-phase row with `started_at` on a node carrying `pr_number` (ref: PR number) |
-| `node_ended` | a node's `completed_at`, session id from its newest do/ship row |
-| `session_reaped` | a reap receipt, `detail` carrying its verbatim resume line |
-| `day_boundary` | a persisted morning or end-of-day readback (ref: boundary id) |
+| `mail` | `question_asked`, `question_closed`, `decision_recorded` |
+| `backlog` | `node_created`, `node_started`, `node_ended` |
+| `ship` | `node_shipped`, `pr_merged` |
+| `agents` | `session_spawned`, `session_spawn_refused`, `session_reaped`, `worker_stalled`, `help_emitted`, `team_granted`, `team_vacated` |
+| `mux` | `pane_closed`, `server_stopped`, `composer_shell_ran`, `composer_shell_refused` |
+| `fleet` | `day_boundary`, `daemon_restarted`, `update_started`, `update_finished` |
+| `ci` | `main_ci_changed` (reserved; no writer yet) |
 
-Crown rows (`crown_granted`, `crown_vacated`) also carry `holder`: the crowned worker's name, which the feed search answers `l:` through.
+Two kinds have no writer yet: `main_ci_changed` (a durable CI source does not exist) and `mail_to_user` (no durable sink row exists). They are filed, not built here.
+
+`worker_stalled` derives from a `worker_silent` event (the handle and its silent age). `help_emitted` derives from a `blocked` event (the distress kind and its reason). A spawn-gate refusal keeps the `session_spawn_refused` kind and carries the gate axis as its `reason`. The update trio folds into `update_started` and `update_finished`.
+
+## Paging, and the window
+
+The projection orders rows by a total key: parsed time, then kind, node, session, ref and title. Every row carries a `cursor` - that key as one opaque string. The client never parses anything else to page.
+
+`fno agents feed --json --limit 200` reads the newest page. `--before <cursor>` reads the page strictly below a cursor; `--after <cursor>` reads the page strictly above one. Pages concatenate with no row read twice or skipped, even when rows share a timestamp.
+
+The panel holds a bounded window of at most 600 rows (three pages). Scrolling back near the oldest loaded row arms an Older page and the window prepends it, dropping the far end when the cap would break. Scrolling forward past a detached head arms a Newer page. Rows arrive live at the top and never jump the view while you are scrolled back: the footer shows `↑ N new`, and a click on that marker (or `g`, or the Home key) returns you to the top. Memory stays flat over a long scroll.
+
+A page costs one projection run. The questions leg reads its kinds typed and the owner rollup indexes the graph once, so the whole projection is under a second where it was over two.
+
+## The verb and the panel
+
+`fno agents feed [--since-epoch <secs>] [--until-epoch <secs>] [--limit <n>] [--before <cursor>] [--after <cursor>] [--node <ids>] [--session <id>] [--kind <prefix>] [--area <names>] [--agent <name>] [--harness <names>] [--lead <name>] [--json]` is the projection. A missing or unreadable store is not fatal. The rows the other stores yielded still emit, with one stderr line naming the store skipped.
+
+The filter flags AND together, and the values inside one flag are comma-OR. `--kind` matches by prefix, so an exact kind is its own prefix. An empty flag value is ignored. An unknown area returns an empty answer, not an error. Both epoch bounds reach every event-store leg as real store bounds.
+
+`e` in the mux client toggles the full-height panel on the right edge. Rows render newest first as a table: time, area, harness, kind, node, session tail, lead, summary. A narrow panel drops lead, then harness, then area, then session; time, kind, node and summary never drop. The border drags to a width that persists.
+
+The panel holds a bounded window of at most 600 rows (three pages). Rows arrive live at the top and never jump the view while you are scrolled back. The footer shows `↑ N new`, and a click on that marker (or `g`, or the Home key) returns you to the top and clears the marker.
+
+The bottom row carries the hints and the status: the `↑ N new` marker, the active query, then the keys, and the row count (`600 loaded`, `end of history`, the scan note under a client-matched query, or the typed error). The header is a title only.
+
+### Keys
+
+Focused with `E`; an unfocused panel takes no keys at all.
+
+| Key | Does |
+|---|---|
+| Up, Down | select a row |
+| Left, Right | pan the summary in display columns |
+| PageUp, PageDown | select a viewport at a time |
+| `g` or Home | jump to the top; on a detached head it arms a fresh Head |
+| `G` or End | jump to the oldest visible row |
+| `o` | toggle grouped/recent order |
+| `?` | toggle the keys overlay |
+| `/` | open the search bar |
+| Enter | open the row's provenance |
+| Esc | release the keyboard; the overlay unwinds first if it is open |
+
+`?` toggles the `feed keys` overlay. The panel's keys, as it renders them:
+
+- `up/down row - enter details - o order`
+- `g home (newest) - G oldest - arrows pan`
+- `/ search - ? keys - esc close`
+
+### Search
+
+`/` opens a query bar on the footer line. The bar speaks the shared search grammar - the one parser the feed, the mux backlog search and the web board share. Space ANDs, comma ORs inside a key, `|` ORs across terms, and a leading `-` negates. A term the grammar cannot read shows the refusal in the footer verbatim and fetches nothing.
+
+The query keys the feed answers, as the `?` overlay renders them:
+
+- `id: n: - value prefix`
+- `session: sid: - value prefix`
+- `spawner: by: - value prefix`
+- `agent: a: - value prefix`
+- `actor: - value prefix`
+- `pr: - value prefix`
+- `project: proj: - value prefix`
+- `epic: e: - value prefix`
+- `in: - value prefix`
+- `lead: l: - value prefix`
+- `area: ar: - value prefix`
+- `harness: h: - value prefix`
+- `model: m: - value prefix`
+- `effort: ef: - value prefix`
+- `phase: ph: - value prefix`
+- `kind: k: - value prefix`
+- `reason: - text`
+- `ts: at: - date`
+- `is: - exact word`
+- `has: - exact word`
+- `age: - age`
+- `title: - text`
+- `details: body: - text`
+
+Worked examples: `x-1234` (a bare node id), `h:codex k:node stall`, `sid:00bde302`, `-k:question h:claude`, `h:codex | h:claude k:pr`, `ts:>=2026-10-01`. `s:ready` refuses here: `s:` is node-only.
+
+When the parsed query is plain positive terms on pushable keys, the client sends them as the projection flags above and the store does the filtering. Anything richer - free text, `|`, a negation - matches client-side over each landed page, capped at five pages per scroll gesture, with the footer naming how far back the scan reached.
+
+Tab completes the token before the cursor: a key prefix completes from the shared table's keys, and a value after `id:`, `sid:`, `a:`, `h:`, `k:` or `l:` completes from the distinct values in the loaded window. Esc in the bar clears the query and refolds unfiltered; the panel stays open.
 
 ## Day boundaries
 
@@ -57,35 +140,13 @@ A closure and a decision carry only their `question_id`. The asking row is the o
 
 It does NOT borrow the asking row's session. That session asked the question. It did not close it. A borrowed session in `session_id` is a guess wearing the clothes of provenance.
 
-## The verb and the panel
+## The harness and the lead
 
-`fno agents feed [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--kind <k>] [--json]` is the projection. A missing or unreadable store is not fatal. The rows the other stores yielded still emit, with one stderr line naming the store skipped.
+A row with a session and no harness reads the lane its session ran: a session-to-harness map built from the graph's `sessions[]` rows and the spawn events, joined on the session id. A session in neither source stays absent. No guess.
 
-## Open questions in the sideline
+A row that rolls up to a held team scope carries `lead`: the crown holder's name, beside the `owner` spelling the panel groups on. A row with no node whose parent session IS a held crown holder's session rolls up to that holder.
 
-Open questions also show as a block in the sideline, pinned above the court block. The block reads `fno-agents needs --items`, not the feed: the feed shows a question's history, and the block shows only what is open. An answer picked in the block's overlay records `sink: mux`, and the row shows the delivery rung for 15 minutes. See [attention-items](attention-items.md) for the delivery ladder.
-
-`e` in the mux client toggles the full-height panel on the right edge. Rows render newest first. The border drags to a width that persists.
-
-### Two input states, and the header says which
-
-The panel is chrome by default. It consumes no keys at all, so typing reaches the focused pane. That is deliberate, not a missing binding.
-
-`E` focuses it explicitly. While focused, the panel takes these keys:
-
-| Key | Does |
-|---|---|
-| Up, Down | select a row |
-| Left, Right | pan the title in display columns, with the stamp, kind and node anchored |
-| PageUp, PageDown | select a viewport at a time |
-| Enter | open the row's provenance |
-| Esc | release the keyboard, leaving the panel open |
-
-Closing the panel releases the keyboard too, so a reopen never starts holding it.
-
-The header names the state it is in. On a narrow panel it degrades to a shorter spelling rather than clipping the focus key away. The header is the only place that key is advertised.
-
-### A click opens provenance, not a deep link
+## A click opens provenance, not a deep link
 
 A click on a row opens that row's PROVENANCE view. It shows the nine facts the operator asked for, in their order, each saying how it is known.
 
@@ -107,8 +168,12 @@ Enter resolves from the same evidence the footer named. For a row seated in a pa
 
 For a `node_created` row with a node id, the footer offers `b: blueprint`. Pressing `b` opens the node-bound launch composer with `/fno:blueprint <id>`. When the row has a recorded cwd, the composer selects that project. If it is absent, choose the project in the composer. The harness, model and placement choices remain available, and the composer shows the normal launch receipt. Other row kinds and id-less creation rows do not offer this action.
 
+## Open questions in the sideline
+
+Open questions also show as a block in the sideline, pinned above the court block. The block reads `fno-agents needs --items`, not the feed: the feed shows a question's history, and the block shows only what is open. An answer picked in the block's overlay records `sink: mux`, and the row shows the delivery rung for 15 minutes. See [attention-items](attention-items.md) for the delivery ladder.
+
 ## Deploy rule
 
-The feed reads the graph for lifecycle. No writer is added.
+The feed reads the durable stores and the graph for lifecycle. No writer is added.
 
-When you want to surface a new operator-facing event, add it to a store that passes the test above. A questions.jsonl row qualifies. So does a stamped graph field beside the row that produced it, and so does a durable receipt store. Never emit it into events.jsonl expecting the feed to mine it.
+When you want to surface a new operator-facing event, add it to a store that passes the test above. A typed row in db/events.db or the agents journal qualifies - give the type a required data shape and the projection a derived kind. So does a stamped graph field beside the row that produced it, and so does a durable receipt store. Never emit it into events.jsonl expecting the feed to mine the rotating file.

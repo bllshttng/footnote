@@ -265,6 +265,32 @@ pub(crate) mod tests {
         );
         _refusal_case();
         _prefilter_case();
+
+        // AC16-EDGE: the wording test. The doc carries every line the `?`
+        // overlay renders, so the overlay and the doc cannot drift.
+        let doc = include_str!("../../../../../docs/architecture/activity-feed.md");
+        for line in [
+            "up/down row - enter details - o order",
+            "g home (newest) - G oldest - arrows pan",
+            "/ search - ? keys - esc close",
+        ] {
+            assert!(doc.contains(line), "the doc lost the overlay line: {line}");
+        }
+        let kind_word = |k: crate::search_query::Kind| match k {
+            crate::search_query::Kind::Value => "value prefix",
+            crate::search_query::Kind::Text => "text",
+            crate::search_query::Kind::Date => "date",
+            crate::search_query::Kind::Number => "number",
+            crate::search_query::Kind::Age => "age",
+            crate::search_query::Kind::Flag => "exact word",
+            crate::search_query::Kind::Sort => "sort",
+        };
+        for def in crate::search_query::KEYS.iter().filter(|d| d.event) {
+            let names: Vec<String> = def.names.iter().map(|n| format!("{n}:")).collect();
+            let line = format!("{} - {}", names.join(" "), kind_word(def.kind));
+            assert!(doc.contains(&line), "the doc lost the key line: {line}");
+        }
+        assert!(doc.contains("feed keys"), "the doc lost the overlay title");
     }
 
     fn _refusal_case() {
