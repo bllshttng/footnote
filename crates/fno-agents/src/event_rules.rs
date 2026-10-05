@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn r1_blocks_an_unfiled_chat_ask_and_allows_when_filed() {
+    fn r1_blocks_unfiled_chat_asks_allows_filed_and_caps() {
         let lock = crate::claims::test_env_lock();
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         let rig = Rig::new(true);
@@ -1005,12 +1005,10 @@ mod tests {
             &rig.payload("wave 1 merged clean"),
         );
         assert!(fires.is_empty(), "no ask, no fire");
+        r1_uncrowned_and_cap_legs();
     }
 
-    #[test]
-    fn r1_allows_an_uncrowned_session_and_caps_repeat_blocks() {
-        let lock = crate::claims::test_env_lock();
-        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    fn r1_uncrowned_and_cap_legs() {
         // AC5: uncrowned, no manifest, default config - the same ask allows.
         let rig = Rig::new(false);
         let ask = "1. merge 2. hold. Your call?";
@@ -1045,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_notifies_once_on_a_self_decided_route() {
+    fn r2_and_r3_fire_once_per_matched_event() {
         let lock = crate::claims::test_env_lock();
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         let rig = Rig::new(false);
@@ -1088,12 +1086,10 @@ mod tests {
             .collect();
         assert_eq!(notifies.len(), 1, "one notify span is the ledger");
         assert_eq!(notifies[0]["data"]["matched_event"], "s-rig0099");
+        r3_legs();
     }
 
-    #[test]
-    fn r3_blocks_the_why_user_escape_but_not_a_user_only_class() {
-        let lock = crate::claims::test_env_lock();
-        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    fn r3_legs() {
         // AC7: reversible, recommended, why_user set, class none - one block.
         let rig = Rig::new(false);
         rig.question("q-rig02", None);
