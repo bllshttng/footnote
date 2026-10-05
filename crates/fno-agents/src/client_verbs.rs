@@ -3820,6 +3820,60 @@ mod tests {
             )
         );
 
+        // x-747b: a rebooted thread row has no pane and records no pid, so its
+        // transcript reads stale-live or inconclusive forever and no falsifier
+        // fires. With the job state on disk and the socket down, the re-seat
+        // arm returns the dead-relaunch plan the caller resolves to
+        // `claude respawn` (same session id, no terminal) - never the false
+        // attach, never the inconclusive refusal.
+        let home3 = cv_tmpdir();
+        let jobs = home3.path().join(".claude").join("jobs").join("7c5dcf5d");
+        fs::create_dir_all(&jobs).unwrap();
+        fs::write(jobs.join("state.json"), "{\"state\":\"idle\"}").unwrap();
+        let ch3 = ClaudeHome::at(home3.path());
+        let thread_row = serde_json::json!({
+            "name": "lead", "provider": "claude", "substrate": "thread",
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        // The pre-reboot transcript still says your-move: no false attach.
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch3, &thread_row, "lead", |_| {
+                Some("your-move".into())
+            })
+            .unwrap(),
+            (
+                vec!["claude".to_string(), "--resume".into(), uuid.into()],
+                Some(uuid.to_string()),
+            )
+        );
+        // An inconclusive truth re-seats too.
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch3, &thread_row, "lead", |_| None).unwrap(),
+            (
+                vec!["claude".to_string(), "--resume".into(), uuid.into()],
+                Some(uuid.to_string()),
+            )
+        );
+        // No job state on disk: respawn has no target, so the honest
+        // inconclusive refusal stays.
+        let ch4 = ClaudeHome::at(cv_tmpdir().path());
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch4, &thread_row, "lead", |_| None),
+            Err(13)
+        );
+        // A thread row whose socket ANSWERS is live: attach stays the arm.
+        let thread_live = serde_json::json!({
+            "name": "w", "provider": "claude", "substrate": "thread",
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+        });
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch2, &thread_live, "w", |_| None).unwrap(),
+            (
+                vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()],
+                None,
+            )
+        );
+
         // The live-attach arm ((["claude","attach",short_id], None)) is the one
         // this binary used to exec bare, with no pty/route/verification. It is
         // the only combination that should delegate to `fno-py agents resume`.
