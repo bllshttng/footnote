@@ -232,6 +232,7 @@ pub fn project(
     spawns_raw: &str,
     team_raw: &str,
     closes_raw: &str,
+    node_set: Option<&[String]>,
 ) -> Projection {
     let mut rows = Vec::new();
     let mut skipped_lines = 0usize;
@@ -373,6 +374,12 @@ pub fn project(
             skipped_entries += 1;
             continue;
         };
+        // A node filter cuts the graph leg before any row derives: the entry
+        // set is the operator's whole backlog, and only the asked-for nodes
+        // pay the derivation.
+        if node_set.is_some_and(|set| !set.iter().any(|n| n == node_id)) {
+            continue;
+        }
         let node_title = graph_store::s_str(entry, "title")
             .unwrap_or(node_id)
             .to_string();
@@ -1290,6 +1297,14 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         args.until_epoch,
     );
 
+    // The projection sees the node set so the graph leg can skip whole
+    // entries; the other legs filter after projection (node_id is sparse in
+    // the stores).
+    let node_set: Option<Vec<String>> = args
+        .pre
+        .node
+        .as_deref()
+        .map(|s| s.split(',').map(str::to_string).collect());
     let Projection {
         rows,
         skipped_lines,
@@ -1301,6 +1316,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         &spawns_raw,
         &team_raw,
         &closes_raw,
+        node_set.as_deref(),
     );
     if skipped_lines > 0 {
         eprintln!("fno-agents feed: skipped {skipped_lines} malformed question line(s)");
@@ -1399,7 +1415,7 @@ mod tests {
 
     #[test]
     fn life_rows() {
-        let p = project("", &graph_fixture(), &[], "", "", "");
+        let p = project("", &graph_fixture(), &[], "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_shipped", "node_ended"]
@@ -1417,20 +1433,20 @@ mod tests {
         // The marker: a projection fed only an events-style stream yields none
         // of the three lifecycle rows - they derive from the graph and nowhere
         // else.
-        let p = project(&questions_fixture(), &[], &[], "", "", "");
+        let p = project(&questions_fixture(), &[], &[], "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["question_asked", "question_closed", "decision_recorded"]
         );
 
         let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
-        let p = project(questions, &[], &[], "", "", "");
+        let p = project(questions, &[], &[], "", "", "", None);
         assert_eq!(p.skipped_lines, 0);
         assert_eq!(kinds(&p.rows), ["day_boundary"]);
         assert_eq!(p.rows[0].title, "day start");
         assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
@@ -1452,7 +1468,7 @@ mod tests {
         assert_eq!(decision.r#ref.as_deref(), Some("d-1"));
         assert_eq!(decision.title, "revert-dispute: strict equality stands");
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             [
@@ -1472,7 +1488,7 @@ mod tests {
                 + &questions_fixture();
         let mut entries = vec![serde_json::json!("a bare string")];
         entries.extend(graph_fixture());
-        let p = project(&questions, &entries, &[], "", "", "");
+        let p = project(&questions, &entries, &[], "", "", "", None);
         assert_eq!(p.skipped_lines, 2);
         assert_eq!(p.skipped_entries, 1);
         assert!(p.rows.iter().all(|r| matches!(
@@ -1488,7 +1504,7 @@ mod tests {
         )));
 
         let questions = r#"{"ts":"yesterday-ish","type":"operator_question","source":"t","data":{"question_id":"q-0","question":"odd stamp","session_id":"s-x"}}"#.to_string();
-        let p = project(&questions, &[], &[], "", "", "");
+        let p = project(&questions, &[], &[], "", "", "", None);
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
         let kept = filter_rows(p.rows, &Page::default(), &Prefilter::default(), Some(1_700_000_000), None);
@@ -1497,7 +1513,7 @@ mod tests {
 
     #[test]
     fn filter_gate_rows() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
         let node_rows = filter_rows(p.rows.clone(), &Page::default(), &Prefilter { node: Some("x-aaaa".into()), ..Default::default() }, None, None);
         // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
@@ -1532,7 +1548,7 @@ mod tests {
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"d","data":{"decision_id":"d-1","decision":"stands","subject":"s","question_id":"q-1","decided_by":"fno agents stale-escalate"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[], "", "", "");
+        let p = project(&questions, &[], &[], "", "", "", None);
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("stale-escalate"));
@@ -1551,7 +1567,7 @@ mod tests {
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"d","data":{"question_id":"q-1","answer":"yes","closed_by":"20260904T151442Z-cl54345-58af0c"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[], "", "", "");
+        let p = project(&questions, &[], &[], "", "", "", None);
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(
             closed.session_id.as_deref(),
@@ -1735,6 +1751,32 @@ mod tests {
             ["question_asked", "question_closed"],
             "--until-epoch bounds the newer end"
         );
+        // AC4-HP (projection half): the graph leg skips entries outside the
+        // node set before deriving; the other legs filter after projection.
+        let entries = vec![
+            serde_json::json!({"id": "x-aaaa", "title": "a", "created_at": "2026-09-02T08:00:00Z"}),
+            serde_json::json!({"id": "x-bbbb", "title": "b", "created_at": "2026-09-02T09:00:00Z"}),
+        ];
+        let spawns = r#"{"ts":"2026-09-02T10:00:00Z","type":"agent_spawned","source":"python","data":{"node":"x-bbbb","name":"w","substrate":"pane"}}"#;
+        let set = vec!["x-aaaa".to_string()];
+        let p = project(&questions_fixture(), &entries, &[], spawns, "", "", Some(&set));
+        assert!(
+            !p.rows
+                .iter()
+                .any(|r| r.kind == "node_created" && r.node.as_deref() == Some("x-bbbb")),
+            "a filtered entry derives no rows"
+        );
+        let pre = Prefilter {
+            node: Some("x-aaaa".into()),
+            ..Default::default()
+        };
+        let got = filter_rows(p.rows, &Page::default(), &pre, None, None);
+        assert!(
+            got.iter().all(|r| r.node.as_deref() != Some("x-bbbb")),
+            "legs without a store node filter after projection"
+        );
+        assert!(got.iter().any(|r| r.node.as_deref() == Some("x-aaaa")));
+
         let a = parse_args(&[
             "--kind".to_string(),
             String::new(),
@@ -1774,7 +1816,7 @@ mod tests {
     #[test]
     fn reap_rows() {
         let r = removal_fixture();
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1801,7 +1843,7 @@ mod tests {
         let mut r = removal_fixture();
         r.removed_by.clear();
         r.trigger = None;
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1819,7 +1861,7 @@ mod tests {
 
         let mut r = removal_fixture();
         r.model = Some("glm-5.3-flash[1m]".into());
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -1834,6 +1876,7 @@ mod tests {
             "",
             "",
             "",
+            None,
         );
         let bare = p
             .rows
@@ -1865,7 +1908,7 @@ mod tests {
 
     #[test]
     fn proj_rows() {
-        let p = project("", &graph_fixture(), &[], "", "", "");
+        let p = project("", &graph_fixture(), &[], "", "", "", None);
         let created = p
             .rows
             .iter()
@@ -1885,7 +1928,7 @@ mod tests {
         );
         let mut cwdless_entry = graph_fixture().remove(0);
         cwdless_entry.as_object_mut().unwrap().remove("cwd");
-        let cwdless = project("", &[cwdless_entry], &[], "", "", "");
+        let cwdless = project("", &[cwdless_entry], &[], "", "", "", None);
         let cwdless_created = cwdless
             .rows
             .iter()
@@ -1907,7 +1950,7 @@ mod tests {
             .unwrap()
             .remove("pr_number")
             .expect("fixture carries pr_number");
-        let p = project("", &[entry], &[], "", "", "");
+        let p = project("", &[entry], &[], "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
@@ -1961,7 +2004,7 @@ mod tests {
             "attention rows never reach the questions parser"
         );
         let text = format!("{raw}\nnot json\n");
-        let p = project(&text, &[], &[], "", "", "");
+        let p = project(&text, &[], &[], "", "", "", None);
         assert_eq!(
             p.skipped_lines, 1,
             "the corrupt line is the only malformed count"
@@ -1983,7 +2026,7 @@ mod tests {
         r.resume = None;
         r.cwd = None;
         r.trigger = None;
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "");
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2004,7 +2047,7 @@ mod tests {
         // AC4: agent_spawned carries provider (not harness), so the fallback
         // is load-bearing.
         let spawns = r#"{"ts":"2026-09-28T16:48:35Z","type":"agent_spawned","source":"python","data":{"cwd":"/repo","model":"gpt-6-sol","name":"jolly-finch","provider":"codex","spawned_by_session":"49a80492-388e-44a3-bd91-017be26bcaa0","substrate":"pane"}}"#;
-        let p = project("", &[], &[], spawns, "", "");
+        let p = project("", &[], &[], spawns, "", "", None);
         let row = p
             .rows
             .iter()
@@ -2020,7 +2063,7 @@ mod tests {
         // A pre-birth refusal used to write nothing, so the feed showed
         // nothing for a launch the operator watched refuse.
         let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"daemon","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
-        let p = project("", &[], &[], refused, "", "");
+        let p = project("", &[], &[], refused, "", "", None);
         let row = p
             .rows
             .iter()
@@ -2038,7 +2081,7 @@ mod tests {
         ]
         .join("\n");
         let both = format!("{team}\n{team}");
-        let p = project("", &[], &[], "", &both, "");
+        let p = project("", &[], &[], "", &both, "", None);
         let granted: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_granted").collect();
         let vacated: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_vacated").collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
@@ -2065,7 +2108,7 @@ mod tests {
             }),
         ];
         let team = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-epic"}}"#;
-        let p = project("", &entries, &[], "", team, "");
+        let p = project("", &entries, &[], "", team, "", None);
         let child = p
             .rows
             .iter()
@@ -2086,7 +2129,7 @@ mod tests {
             .unwrap();
         assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // Without a team the child rolls up to its epic by the graph parent.
-        let p = project("", &entries, &[], "", "", "");
+        let p = project("", &entries, &[], "", "", "", None);
         let child = p
             .rows
             .iter()
@@ -2116,7 +2159,7 @@ mod tests {
             "\n",
             "{not json",
         );
-        let p = project("", &[], &[], "", "", closes);
+        let p = project("", &[], &[], "", "", closes, None);
         assert_eq!(
             p.skipped_lines, 0,
             "unrelated malformed lines do not count here"
