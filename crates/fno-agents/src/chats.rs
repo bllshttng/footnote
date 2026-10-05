@@ -434,13 +434,41 @@ pub(crate) fn message_sender_at(chats_dir: &Path, db: &Path, id: &str) -> Option
         {
             continue;
         }
-        let sender = v
+        let handle = v.get("from").and_then(Value::as_str).unwrap_or("");
+        let session = v
+            .get("from_session")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let from_name = v
             .get("from_name")
             .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .or_else(|| v.get("from").and_then(Value::as_str))
-            .unwrap_or("");
-        return (!sender.is_empty()).then(|| sender.to_string());
+            .filter(|s| !s.is_empty());
+        // The delivered header names the registry row's fleet name for the
+        // row's session, so trust resolves through the same lookup
+        // (mail_envelope::header_sender's order: row name, from_name, from).
+        let named = (|| {
+            let path = crate::paths::AgentsHome::shared_registry_json();
+            let registry = crate::state::try_load_registry(&path).ok()??;
+            let identity = session.map(str::to_string).filter(|s| !s.is_empty());
+            let address = identity.as_deref().unwrap_or(handle);
+            let keep = |entry: &crate::state::RegistryEntry| {
+                !matches!(
+                    entry.status,
+                    crate::AgentStatus::Exited
+                        | crate::AgentStatus::Orphaned
+                        | crate::AgentStatus::Failed
+                        | crate::AgentStatus::PermanentDead
+                )
+            };
+            match crate::agent_ref::resolve_address(&registry.entries, address, keep) {
+                crate::agent_ref::Join::One(row) => Some(row.name.clone()),
+                crate::agent_ref::Join::Ambiguous | crate::agent_ref::Join::None => None,
+            }
+        })();
+        let sender = named
+            .or_else(|| from_name.map(str::to_string))
+            .or_else(|| (!handle.is_empty()).then(|| handle.to_string()))?;
+        return Some(sender);
     }
     None
 }
@@ -1061,9 +1089,17 @@ fn migrate_envelopes_at(chats_dir: &Path, db: &Path) -> Result<String, String> {
             touched.push(src);
         }
     }
+    // Any copy failure aborts before the first rewrite; the rewrite pass
+    // re-copies under the appender's per-chat lock, so the backup is exactly
+    // the pre-rewrite bytes and a concurrent append cannot be discarded.
     let mut rewritten = 0usize;
     let mut skipped = 0usize;
     for src in &touched {
+        let dst = backup.join(src.parent().and_then(|p| p.file_name()).unwrap_or_default());
+        std::fs::create_dir_all(&dst).map_err(|e| format!("backup dir: {e}"))?;
+        let _chat_lock = ChatLock::acquire(src)?;
+        std::fs::copy(src, dst.join("messages.jsonl"))
+            .map_err(|e| format!("backup copy {}: {e}", src.display()))?;
         let Ok(text) = std::fs::read_to_string(src) else {
             continue;
         };
@@ -1108,6 +1144,9 @@ fn migrate_envelopes_at(chats_dir: &Path, db: &Path) -> Result<String, String> {
                     .or_else(|| v.get("from").and_then(Value::as_str))
                     .unwrap_or("unknown")
                     .to_string();
+                // The whole inner rides under the header: display and
+                // render_message regenerate their own view of the body, so a
+                // delivered-body sentence drop here would lose the sentence.
                 Some((
                     crate::mail_header::render_header(
                         crate::mail_header::HeaderForm::Mention,
@@ -1115,7 +1154,7 @@ fn migrate_envelopes_at(chats_dir: &Path, db: &Path) -> Result<String, String> {
                         &id,
                         &crate::mail_header::header_subject(None, &inner),
                     ),
-                    crate::mail_header::delivered_body(None, &inner),
+                    inner,
                 ))
             })();
             let Some((header, delivered)) = rewrite else {
@@ -2201,7 +2240,7 @@ mod tests {
         let rec: Value = serde_json::from_str(migrated.trim()).unwrap();
         assert_eq!(
             rec["body"].as_str().unwrap(),
-            "`@candor \u{b7} msg-1 \u{b7} Build green.`\nDetails."
+            "`@candor \u{b7} msg-1 \u{b7} Build green.`\nBuild green. Details."
         );
         // The backup holds the original bytes.
         let backup_dir = receipt
