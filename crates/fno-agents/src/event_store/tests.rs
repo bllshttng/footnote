@@ -46,7 +46,7 @@ fn a_cause_stores_reads_back_and_migrates_in_place() {
     let envelope = json!({
         "ts": "2026-10-04T00:00:00Z",
         "type": "agent_spawned",
-        "source": "agents",
+        "source": "daemon",
         "data": {"caused_by": "evt:parent", "session_id": "s-1"},
     })
     .to_string();
