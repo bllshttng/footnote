@@ -1677,9 +1677,16 @@ pub(crate) fn project_events_journal() -> std::path::PathBuf {
             .join("events.jsonl");
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    project_events_journal_in(&cwd)
+}
+
+/// The same canonical-root walk, run from a caller-named directory instead
+/// of the process cwd. The env-free form exists because a process-wide
+/// `FNO_REPO_ROOT` pin would race the daemon's concurrent emitters.
+pub(crate) fn project_events_journal_in(cwd: &std::path::Path) -> std::path::PathBuf {
     let main_root = std::process::Command::new("git")
         .args(["worktree", "list", "--porcelain"])
-        .current_dir(&cwd)
+        .current_dir(cwd)
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -1689,7 +1696,7 @@ pub(crate) fn project_events_journal() -> std::path::PathBuf {
                 .find_map(|l| l.strip_prefix("worktree ").map(str::to_string))
         })
         .map(std::path::PathBuf::from)
-        .unwrap_or(cwd);
+        .unwrap_or_else(|| cwd.to_path_buf());
     main_root.join(".fno").join("events.jsonl")
 }
 
