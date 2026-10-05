@@ -1520,7 +1520,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let questions = dir.path().join("questions.jsonl");
         let row = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-feed-1", "question": "proceed?", "blocks": []}
         });
         crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();

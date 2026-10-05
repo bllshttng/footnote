@@ -248,6 +248,7 @@ fn refusal_text(subject: &str) -> String {
 /// nothing.
 fn check(args: &[String], cwd: Option<&str>) -> Value {
     let command = command_args(args);
+    crate::merge_provenance::record_request(&command, cwd, "gh_proxy");
     let Some(intent) = draft_intent(&command) else {
         return json!({ "admitted": true });
     };

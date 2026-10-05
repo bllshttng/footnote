@@ -51,6 +51,7 @@ pub mod additional_prs;
 pub(crate) mod adopt_carry;
 pub(crate) mod adopt_identity;
 mod agent_lock;
+pub mod agent_ref;
 pub mod agents_config;
 pub(crate) mod agents_event;
 pub mod agy_ask;
@@ -263,6 +264,7 @@ pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;
 pub mod merge_posture;
+pub mod merge_provenance;
 pub mod merge_reap;
 #[cfg(test)]
 #[path = "mint_guard_tests.rs"]
@@ -316,6 +318,7 @@ pub mod pr_push;
 pub mod pr_rebase;
 pub mod pr_status;
 pub mod pr_status_facts;
+pub mod pr_watch;
 pub mod pr_worktree;
 pub mod process_owner;
 pub mod protocol;
@@ -1845,8 +1848,8 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "rust", "skill_diff", "subagent", "target", "test"] },
-                        { "pattern": "^(worker|stream-worker):.+$" }
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "legacy", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "rust", "skill_diff", "subagent", "target", "test"] },
+                        { "pattern": "^(worker|stream-worker|footnote):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"
                 },

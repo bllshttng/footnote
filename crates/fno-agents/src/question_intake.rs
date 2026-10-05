@@ -1169,7 +1169,7 @@ stops
         let ask = json!({
             "ts": "2026-09-25T00:00:00Z",
             "type": "operator_question",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": "q-old1", "question": "ship?", "subject": "subject-r", "node": "x-aaaa"}
         });
         {
@@ -1184,7 +1184,7 @@ stops
         let close = json!({
             "ts": "2026-09-26T00:00:00Z",
             "type": "operator_question_closed",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": "q-old1"}
         });
         crate::provider_cap::append_questions_row(&index, &close).unwrap();
@@ -1277,12 +1277,12 @@ stops
         ));
         std::fs::create_dir_all(&p).unwrap();
         let index = p.join("questions.jsonl");
-        let ask = r#"{"ts":"2026-09-23T01:00:00Z","type":"operator_question","source":"agent","data":{"question_id":"q-t1","question":"ship?","blocks":[]}}"#;
+        let ask = r#"{"ts":"2026-09-23T01:00:00Z","type":"operator_question","source":"test","data":{"question_id":"q-t1","question":"ship?","blocks":[]}}"#;
         std::fs::write(&index, format!("{ask}\n")).unwrap();
         let close = json!({
             "ts": "2026-09-23T01:05:00Z",
             "type": "operator_question_closed",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": "q-t1"}
         });
         crate::event_store::append_envelope(&index, &close.to_string(), None).unwrap();

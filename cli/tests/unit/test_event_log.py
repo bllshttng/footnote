@@ -37,7 +37,7 @@ def test_ac1_hp_emit_writes_one_line(tmp_path: Path) -> None:
 
     nonce = emit_event(
         event_type="phase_transition",
-        payload={"phase": "ship"},
+        payload={"phase": "ship", "gate_bearing": False},
         state_path=tmp_path / ".fno" / "target-state.md",
         events_path=events_file,
     )
@@ -70,7 +70,7 @@ def test_ac1_hp_emit_appends_not_overwrites(tmp_path: Path) -> None:
     emit_event("phase_init", {"phase": "build"},
                state_path=tmp_path / ".fno" / "target-state.md",
                events_path=events_file)
-    emit_event("phase_transition", {"phase": "ship"},
+    emit_event("phase_transition", {"phase": "ship", "gate_bearing": False},
                state_path=tmp_path / ".fno" / "target-state.md",
                events_path=events_file)
 
@@ -88,7 +88,7 @@ def _worker_emit(args: tuple) -> None:
     from fno.events.log import emit_event
     emit_event(
         event_type="phase_init",
-        payload={"worker": idx},
+        payload={"phase": "build", "worker": idx},
         state_path=state_path_str,
         events_path=events_path_str,
     )
@@ -286,7 +286,7 @@ def test_edge_events_file_auto_created(tmp_path: Path) -> None:
     events_file = _events_file(tmp_path)
     assert not store_db_path(events_file).exists()
 
-    emit_event("phase_init", {}, state_path=state_file, events_path=events_file)
+    emit_event("phase_init", {"phase": "build"}, state_path=state_file, events_path=events_file)
     assert store_db_path(events_file).exists()
     assert len(read_events(events_file)) == 1
 
@@ -322,7 +322,7 @@ def test_edge_nonce_is_32_hex_chars(tmp_path: Path) -> None:
     state_file = _make_state_file(tmp_path, "ses-nonce")
     events_file = _events_file(tmp_path)
 
-    nonce = emit_event("phase_init", {}, state_path=state_file, events_path=events_file)
+    nonce = emit_event("phase_init", {"phase": "build"}, state_path=state_file, events_path=events_file)
     assert len(nonce) == 32
     assert all(c in "0123456789abcdef" for c in nonce)
 
@@ -339,7 +339,7 @@ def test_legacy_event_roundtrip(tmp_path: Path) -> None:
     events_file = tmp_path / "events.jsonl"
 
     emit_event(
-        "test_event",
+        "gate_written",
         {"phase": "init", "count": 3, "nested": {"k": "v"}},
         state_path=state_file,
         events_path=events_file,
@@ -366,7 +366,7 @@ def test_legacy_event_roundtrip(tmp_path: Path) -> None:
     assert isinstance(data["nonce"], str)
 
     # Values correct
-    assert event["type"] == "test_event"
+    assert event["type"] == "gate_written"
     assert data["session_id"] == "test-session-001"
 
     # Payload round-trips intact including nested dict

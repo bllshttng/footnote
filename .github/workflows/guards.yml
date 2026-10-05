@@ -153,8 +153,10 @@ jobs:
           TEST_BASE: ${{ github.event_name == 'push' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}
         # 1: a brand-new native module's first contract test is an honest
         # floor the 0 cap cannot express; the suite still shrinks in net
-        # across any PR that only extends existing owners.
-        run: fno-agents test-delta --base "$TEST_BASE" --max-net 1
+        # across any PR that only extends existing owners. 3: the identity
+        # schema (d-f9c59b68, d-2327af8e) adds two native modules and one
+        # store aggregate, each carrying its first contract test.
+        run: fno-agents test-delta --base "$TEST_BASE" --max-net 3
 
       - name: Verb matrix fresh
         if: ${{ !cancelled() }}

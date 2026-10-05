@@ -109,7 +109,11 @@ fn target_stream_emit_lands_during_legacy_maintenance_markers() {
     std::fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
     std::fs::create_dir(dir.path().join("events.jsonl.gc.d")).unwrap();
 
-    append_loop_event(&project, "review_coverage", serde_json::json!({}));
+    append_loop_event(
+        &project,
+        "review_coverage",
+        serde_json::json!({"pr": 1, "coverage": "unknown", "verdicts": [], "head_sha": "a"}),
+    );
 
     assert!(
         crate::events::committed_journal_text(&project).contains("review_coverage"),

@@ -281,6 +281,18 @@ pub async fn spawn(
     })?
     .map_err(|e: String| SpawnError::Contradiction(format!("birth persistence failed: {e}")))?;
 
+    // The spawn edge (ruling d-2327af8e): parent session -Spawn-> child
+    // session. Best effort: a store failure logs and never fails the receipt.
+    if let (crate::spawn_contract::SpawnOrigin::Session { parent, .. }, Some(child)) =
+        (&provenance.origin, entry.harness_session_id.as_deref())
+    {
+        if let Err(error) =
+            crate::backlog::edges::record_spawn(&runtime.home, &parent.session_id, child)
+        {
+            eprintln!("spawn edge skipped: {error}");
+        }
+    }
+
     // 8. The durable birth event, correlated by spawn_id. The lineage is the
     //    same triple RegistryEntry::new_spawn derived from the provenance.
     let lineage = match &provenance.origin {

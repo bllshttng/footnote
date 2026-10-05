@@ -265,7 +265,9 @@ pub(crate) fn list_for(tree: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn tracked_files(tree: &Path, dir: &Path) -> bool {
-    let Ok(relative) = dir.strip_prefix(tree) else {
+    // dir arrives canonicalized; macOS reports temp dirs as /var/... while
+    // canonicalize yields /private/var/..., so strip against the same form.
+    let Ok(relative) = dir.strip_prefix(phys(tree)) else {
         return true;
     };
     let Ok(output) = Command::new("git")

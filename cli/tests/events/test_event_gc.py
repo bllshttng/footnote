@@ -51,6 +51,8 @@ def _event(event_type: str, ts: str) -> str:
         }
     elif event_type == "human_touch":
         data = {"graph_node_id": "test", "source": "answer", "resolution": "ok"}
+    elif event_type == "operator_decision":
+        data = {"decision_id": "test", "decision": "approve"}
     return json.dumps({"ts": ts, "type": event_type, "source": source, "data": data})
 
 
