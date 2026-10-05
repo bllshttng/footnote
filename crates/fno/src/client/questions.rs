@@ -1305,7 +1305,7 @@ mod tests {
 
     #[test]
     fn questions_index_and_merge_rows() {
-        let text = "---\nfno_generated: questions-index\n---\n\n## Open (2)\n\n- [[20261005-q-aaaaaaaa-pin-kind-q-aaaa|pin title]] \u{b7} pin \u{b7} quill\n- [[20261005-q-bbbbbbbb-the-other-one-x-97db|other title]] \u{b7} question \u{b7} blocks x-97db \u{b7}\n\n## Done\n\n- [[q-cccccccc|closed title]] \u{b7} closed 2026-10-05 \u{b7} node-closed\n- [[ask-deadbeef|an ask]] \u{b7} answered 2026-10-04 \u{b7} PR\n";
+        let text = "---\nfno_generated: questions-index\n---\n\n## Open (2)\n\n- [[20261005-q-aaaaaaaa-pin-kind-q-aaaa|pin title]] \u{b7} pin \u{b7} quill\n- [[20261005-q-bbbbbbbb-the-other-one-x-aaaa|other title]] \u{b7} question \u{b7} blocks x-aaaa \u{b7}\n\n## Done\n\n- [[q-cccccccc|closed title]] \u{b7} closed 2026-10-05 \u{b7} node-closed\n- [[ask-deadbeef|an ask]] \u{b7} answered 2026-10-04 \u{b7} PR\n";
         let fold = parse_questions_index(text).unwrap();
         assert_eq!(fold.items.len(), 3, "ask- pages stay out of the fold");
         let pin = &fold.items[0];
