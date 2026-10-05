@@ -4297,8 +4297,10 @@ impl View {
 
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
-        // steals focus - only moving over pane content does.
-        if !self.hover_focus {
+        // steals focus, and a feed or backlog that owns typing never loses
+        // it (the q-7eadc5fe ruling: hover never pulls focus off a focused
+        // region) - only pane content under a Pane owner settles focus.
+        if !self.hover_focus || self.input_owner() != region_focus::RegionOwner::Pane {
             self.hover_pending = None;
             return;
         }
@@ -5252,8 +5254,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
-            && self.backlog_board.is_none()
-            && !(self.org_board.is_some()
+            && !((self.backlog_board.is_some() || self.org_board.is_some())
                 && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
             && self.messages_board.is_none()
         {
@@ -9620,6 +9621,7 @@ async fn row_menu_keys(
         }
         match tok {
             ModalKey::Esc => view.row_menu = None,
+            ModalKey::BackTab => {}
             ModalKey::Up => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.nav(NavDir::Up);
@@ -9919,6 +9921,9 @@ async fn aux_keys(
                     view.aux = None;
                 }
             }
+            // Shift-Tab never reached this fold before (a swallowed CSI):
+            // keep it a no-op.
+            ModalKey::BackTab => {}
             ModalKey::Up => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.nav(NavDir::Up);

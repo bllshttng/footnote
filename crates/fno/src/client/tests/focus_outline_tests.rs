@@ -288,4 +288,50 @@ fn clicks_select_one_input_owner_and_route_bytes() {
         wire.is_empty(),
         "a modal owns the press; no forward escapes"
     );
+
+    // Hover never steals from a focused region (q-7eadc5fe): with the feed
+    // owning typing, a pointer resting on pane 11 past the settle delay
+    // leaves no pending focus, and closing the feed hands typing to the
+    // pane focused before it opened. The board owns the same way.
+    let mut view = narrow_three(10);
+    view.feed = Some(super::feed_view::open_overlay(None, 0));
+    view.region_owner = RegionOwner::Feed;
+    view.on_hover(5, 53, std::time::Instant::now());
+    assert!(
+        view.hover_pending.is_none(),
+        "hover under a focused feed never arms a focus settle"
+    );
+    view.feed = None;
+    assert_eq!(view.input_owner(), RegionOwner::Pane);
+    assert_eq!(view.layout.focus, 10, "server focus never moved");
+
+    let mut view = narrow_three(10);
+    view.backlog_board = Some(super::backlog_board::BoardView::new(0));
+    view.sideline_view = crate::view_store::SidelineView::Backlog;
+    view.region_owner = RegionOwner::Board;
+    view.on_hover(5, 53, std::time::Instant::now());
+    assert!(
+        view.hover_pending.is_none(),
+        "hover under a focused board never arms a focus settle"
+    );
+    view.backlog_board = None;
+    assert_eq!(view.input_owner(), RegionOwner::Pane);
+
+    // The composer cursor follows the owner: backlog open but a pane
+    // clicked (Pane owns), the frame shows the focused pane's cursor;
+    // the board owning typing hides it (AC4-UI).
+    let mut view = narrow_three(10);
+    view.backlog_board = Some(super::backlog_board::BoardView::new(0));
+    view.sideline_view = crate::view_store::SidelineView::Backlog;
+    let frame = view.compose();
+    assert!(
+        frame.cursor_visible,
+        "a pane owns typing under an open backlog: its cursor shows"
+    );
+    view.region_owner = RegionOwner::Board;
+    let frame = view.compose();
+    assert!(
+        !frame.cursor_visible,
+        "the board owning typing hides the pane cursor"
+    );
 }
