@@ -104,3 +104,13 @@ When the queue lands a merge later, no fno process is in the loop. The remote re
 The PR watcher tick already detects the confirmed merge. It pays the step there, through the merge verb's own `_post_merge_remote_delete`. One cleanup implementation. No second watcher, no second store. Only the MERGED arm reaches it, so a pending or unreadable state never deletes anything. It is warn-only: cleanup never fails the merge it follows.
 
 Local branches and worktrees keep their own lifecycle. See [worktree-mechanics](worktree-mechanics.md).
+
+## Merge provenance
+
+Every merge hop writes one `decision_span` row to the project journal beside the repo. The row carries `trace.actor_session` and `trace.actor_kind`, so "who merged PR N" has a durable answer that survives the session.
+
+The merge owner (`authorized_merge::run`, via `crates/fno-agents/src/merge_provenance.rs`) writes `merge_landed` or `merge_armed`. The `path` attr names the lane: `pr_merge`, `pr_watch`, or `finalize`. The gh proxy's draft door writes `merge_requested` with `path: gh_proxy` for every delegated gh merge argv. A PostToolUse Bash hook (`hooks/merge-capture.sh`, through the `graph-get` stdin door) writes `merge_requested` with `path: hook`. It is the backstop for gh that skipped the proxy.
+
+When reconcile closes a node whose PR merged with no fno record anywhere, it writes `merged_outside_fno` with `merged_at` and `merge_sha`. No record means the user in the GitHub UI or another machine. The Rust close also stamps `closed_by: {session, actor_kind}` on the node row, and the daemon close adds `path: reconcile`.
+
+GitHub alone cannot tell a fleet merge from a user merge while both share one token. The query that answers the node's own record is `jq 'select(.type=="decision_span" and .data.pr==N)' <repo>/.fno/events.jsonl`. A GitHub App identity for fleet merges is the standing question that will make GitHub itself show the difference.
