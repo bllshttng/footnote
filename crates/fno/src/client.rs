@@ -5195,11 +5195,7 @@ impl View {
         } else if self.org_board.is_some() && self.board_full {
             org_board::paint(self, &mut cells, rows, cols, cols, rows);
         } else if self.messages_board.is_some() {
-            // Messages is a full-surface view: the strip row is the
-            // sideline's, so the board paints from row 1.
-            self.paint_top_row(&mut cells, cols, cols);
-            messages_view::paint(self, &mut cells, rows, cols, cols, rows);
-            messages_reply::paint(self, &mut cells, rows, cols);
+            messages_view::paint_full(self, &mut cells, rows, cols);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -9134,13 +9130,7 @@ async fn dispatch_event(
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.org.toggle(),
         Event::ToggleBell => bell::toggle(view),
-        Event::OpenMessages => {
-            // Open Messages from anywhere (item 8). The tab paints full
-            // surface, but only while the sideline shows: a hidden sideline
-            // would swallow the open, so the chord reveals it first.
-            view.panel_on = true;
-            messages_view::open(view);
-        }
+        Event::OpenMessages => messages_view::open_from_chord(view),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would

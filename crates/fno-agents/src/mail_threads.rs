@@ -301,7 +301,10 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             k.dedup();
             k
         };
-        pair_rows.entry(keys.join("\u{1}")).or_default().extend(rows);
+        pair_rows
+            .entry(keys.join("\u{1}"))
+            .or_default()
+            .extend(rows);
     }
     // R3: an ended participant archives under the scope its registry row
     // still holds, else the scope it mailed most, latest on a tie.
@@ -1092,7 +1095,11 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            ["fmail-111111111111", "fmail-222222222223", "fmail-222222222222"],
+            [
+                "fmail-111111111111",
+                "fmail-222222222223",
+                "fmail-222222222222"
+            ],
             "interleaved by ts: {ids:?}"
         );
         // The short id joins its registry row: one participant, named.

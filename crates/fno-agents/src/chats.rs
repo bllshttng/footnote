@@ -294,7 +294,10 @@ fn message_line(line: &Value) -> Option<(String, Value)> {
         return None;
     }
     let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
-    let from = line.get("from").and_then(Value::as_str).unwrap_or("unknown");
+    let from = line
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let from_session = line
         .get("from_session")
         .and_then(Value::as_str)

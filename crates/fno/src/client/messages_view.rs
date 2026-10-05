@@ -842,6 +842,23 @@ pub(crate) fn paint(
     }
 }
 
+/// The full-surface paint the client's paint chain calls: Messages is a
+/// full-surface view, so the strip row is the sideline's and the board
+/// paints from row 1.
+pub(crate) fn paint_full(view: &View, cells: &mut [Cell], rows: usize, cols: usize) {
+    view.paint_top_row(cells, cols, cols);
+    paint(view, cells, rows, cols, cols, rows);
+    super::messages_reply::paint(view, cells, rows, cols);
+}
+
+/// The chord door (prefix+M, item 8): open Messages from anywhere. The tab
+/// paints full surface, but only while the sideline shows: a hidden
+/// sideline would swallow the open, so the chord reveals it first.
+pub(crate) fn open_from_chord(view: &mut View) {
+    view.panel_on = true;
+    open(view);
+}
+
 /// Lifecycle.
 pub(crate) fn open(view: &mut View) {
     let gen = NEXT_MESSAGES_GEN.fetch_add(1, Ordering::Relaxed);
