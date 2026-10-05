@@ -81,6 +81,12 @@ pub struct RegistryAgent {
     /// Active do-not-disturb delivery policy. Presence only: it never changes
     /// the row's liveness badge or whether the worker is alive.
     pub dnd: bool,
+    /// The hold is machine-armed: a live conversation clock in the
+    /// mail-hold sidecar backs this row's bus-only stamp, so the sideline
+    /// labels it `[HELD]`, never `[DND]`. Stamped only by the render-path
+    /// overlay, never by `derive_rows` (the registry doc carries no such
+    /// fact); absent on every hand-built row.
+    pub held_conversation: bool,
     /// In-TTL inside-leg badge; `None` = liveness-only. Never a scraped guess.
     pub badge: Option<AgentBadge>,
     pub reason: Option<String>,
@@ -2221,6 +2227,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 .map(str::to_string),
             exited,
             dnd,
+            held_conversation: false,
             badge,
             reason,
             mux,
@@ -2482,6 +2489,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             cwd: w.cwd.clone(),
             exited: false,
             dnd: false,
+            held_conversation: false,
             badge: None,
             reason: None,
             mux: None,
@@ -2554,6 +2562,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             related_session_id: None,
             exited: false,
             dnd: false,
+            held_conversation: false,
             badge: None,
             reason: None,
             mux: None,
@@ -2738,6 +2747,14 @@ pub fn reconcile_external(
 mod reader_state;
 
 pub use reader_state::{IsolatedRead, ReaderState};
+
+// The machine-armed hold mark lives in its own module; this file is
+// shrink-only under the file-budget gate.
+mod hold_marks;
+
+pub(crate) use hold_marks::overlay_hold_marks;
+#[cfg(test)]
+pub(crate) use hold_marks::overlay_hold_marks_at;
 
 #[cfg(test)]
 mod tests {
@@ -4336,6 +4353,7 @@ config_dir = "~/.claude-alt"
             cwd: "/w".into(),
             exited,
             dnd: false,
+            held_conversation: false,
             badge,
             reason: None,
             mux: None,
@@ -4499,7 +4517,7 @@ config_dir = "~/.claude-alt"
         }
         fn write_event(&self, sid: &str, ts: &str) {
             let line = format!(
-                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}"}}}}"#
+                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}","fingerprint":"f","fires":1,"consecutive_unchanged":1,"decision":"allow","intent":"none","pr_state":"none","ci":"none","reviewed":false}}}}"#
             );
             crate::event_store::append_envelope(&self.events(), &line, None).unwrap();
         }

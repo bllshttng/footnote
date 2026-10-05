@@ -1154,7 +1154,7 @@ mod tests {
         let cutoff = parse_since("1h").unwrap();
         let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let line = json!({
-            "ts": ts, "type": "termination", "source": "hook", "data": {"reason": "NoProgress"}
+            "ts": ts, "type": "termination", "source": "hook", "data": {"session_id": "sess-evals", "reason": "NoProgress", "message": "no progress"}
         })
         .to_string();
         crate::event_store::append_envelope(&journal, &line, None).unwrap();

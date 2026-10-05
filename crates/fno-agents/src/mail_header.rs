@@ -5,9 +5,11 @@
 //! The header replaces the tag at the source (the envelope renderer writes
 //! it; no display-time rewrite). One line carries the three facts every
 //! machine reader keyed off the tag for: the shape (this is mail, never an
-//! operator turn), the msg id (reply resolution and drain dedup join on it),
-//! and a short summary. The full body follows on the next lines, wholly
-//! visible - nothing in a turn is hidden.
+//! operator turn), the msg id (reply resolution and drain dedup join on
+//! it), and the subject - the sender's `--subject` when one was given, else
+//! the body's first sentence. The body follows, minus that first sentence
+//! when the sentence is the header's own third field, so the text never
+//! shows twice.
 //!
 //! A body can never forge one: any line shaped like a header inside a sent
 //! body refuses the send, the same rule as the tag-in-body refusal it
@@ -145,10 +147,6 @@ fn local_sent_time(value: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(value).ok()
-}
-
 fn unwrap_held_body(body: &str) -> String {
     let trimmed = body.trim();
     let Some(block) = paired_envelope_block(trimmed) else {
@@ -156,11 +154,32 @@ fn unwrap_held_body(body: &str) -> String {
     };
     if block != trimmed {
         return body.to_string();
-    }
+    };
     let Some(open_end) = block.find('>') else {
         return body.to_string();
     };
     block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
+}
+
+/// The held-release re-frame unwraps the released turn's legacy paired
+/// envelope the same way display once did; display itself no longer does.
+fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+/// The body a reader sees: a leading delivered-header line is removed, a
+/// fence that wraps the whole body under the header (the pane lane's
+/// framing) is stripped, and a header whose summary was also pasted as the
+/// body's own first line loses that repeat. A body still carrying the
+/// legacy paired envelope shows the raw tag - the visible prompt to run
+/// the one-time `chats migrate --envelopes`; display never rewrites bytes.
+pub fn display_body(body: &str) -> String {
+    let (rest, header) = strip_leading_header(body);
+    let rest = strip_body_fence(&rest).to_string();
+    match header.as_deref().and_then(header_summary) {
+        Some(summary) => strip_display_repeat(&rest, &summary),
+        None => rest,
+    }
 }
 
 fn strip_leading_header(body: &str) -> (String, Option<String>) {
@@ -173,12 +192,67 @@ fn strip_leading_header(body: &str) -> (String, Option<String>) {
     (rest.to_string(), Some(header.to_string()))
 }
 
+/// A pane-delivered body rides inside a backtick fence one run longer than
+/// any run it holds, and the pane lane marks its OPEN fence `fno-pane`.
+/// Only that marked shape strips: a body's own fenced code block (no
+/// marker) keeps its fences. The close is a bare run at least as long as
+/// the open.
+fn strip_body_fence(body: &str) -> &str {
+    let Some((first, rest)) = body.split_once('\n') else {
+        return body;
+    };
+    let Some(open) = first.strip_suffix("fno-pane") else {
+        return body;
+    };
+    if open.is_empty() || !open.bytes().all(|b| b == b'`') {
+        return body;
+    }
+    let Some((inner, last)) = rest.rsplit_once('\n') else {
+        return body;
+    };
+    if !last.is_empty() && last.len() >= open.len() && last.bytes().all(|b| b == b'`') {
+        inner
+    } else {
+        body
+    }
+}
+
 fn header_summary(header: &str) -> Option<String> {
     let (inner, _) = split_header_span(header.trim())?;
     let (_, _, summary) = header_fields(inner)?;
     Some(cut_words(summary, SUMMARY_MAX_WORDS).replace('`', "'"))
 }
 
+/// The display-time repeat strip: the header's summary repeats only as the
+/// body's own whole first line (`summary\nrest`) - the projection shows
+/// the body without the header, so a sentence that merely prefixes a
+/// longer first line is body text and stays, and a body that is nothing
+/// but the summary stays too. The held-release re-frame strips inline as
+/// well (strip_summary_prefix), where header and body show together.
+fn strip_display_repeat(body: &str, summary: &str) -> String {
+    if summary.is_empty() {
+        return body.to_string();
+    }
+    let leading_len = body.len() - body.trim_start().len();
+    let (leading, content) = body.split_at(leading_len);
+    let Some(rest) = content.strip_prefix(summary) else {
+        return body.to_string();
+    };
+    let Some(rest) = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+    else {
+        return body.to_string();
+    };
+    if rest.is_empty() {
+        return body.to_string();
+    }
+    format!("{leading}{rest}")
+}
+
+/// Remove the header's summary prefix, then one separator - the
+/// held-release re-frame's rule, where the header and the body show
+/// together and the sentence must not print twice.
 fn strip_summary_prefix(body: &str, summary: &str) -> String {
     let leading_len = body.len() - body.trim_start().len();
     let (leading, content) = body.split_at(leading_len);
@@ -230,13 +304,68 @@ fn cut_words(text: &str, max: usize) -> String {
     words[..max].join(" ")
 }
 
-/// The rendered header line, backticks included, no trailing newline.
-pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str, summary: &str) -> String {
+/// The rendered header line, backticks included, no trailing newline. The
+/// third field is the subject: the sender's own when one was given, else
+/// the body's first sentence ([`header_subject`]).
+pub fn render_header(form: HeaderForm, sender: &str, msg_id: &str, subject: &str) -> String {
     let who = match form {
         HeaderForm::Mention => format!("@{sender}"),
         HeaderForm::Plain => sender.to_string(),
     };
-    format!("`{who} · {msg_id} · {summary}`")
+    format!("`{who} · {msg_id} · {subject}`")
+}
+
+/// The header's third field: the sender's subject when one was given, else
+/// the body's first sentence. A whitespace-only subject reads as none.
+pub fn header_subject(subject: Option<&str>, body: &str) -> String {
+    match subject.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => summary_of(body),
+    }
+}
+
+/// The body with its first sentence removed - the envelope delivers the
+/// header's third field in place of it when the two are the same text, so
+/// the sentence never shows twice. A body that is nothing but the sentence
+/// is kept whole.
+pub fn without_first_sentence(body: &str) -> String {
+    let sentence = first_sentence_of(body);
+    if sentence.is_empty() {
+        return body.to_string();
+    }
+    let trimmed = body.trim_start();
+    let Some(rest) = trimmed.strip_prefix(sentence.as_str()) else {
+        return body.to_string();
+    };
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .or_else(|| rest.strip_prefix(' '))
+        .unwrap_or(rest);
+    if rest.is_empty() {
+        body.to_string()
+    } else {
+        rest.to_string()
+    }
+}
+
+/// The body a reader sees under the delivered header. The header's third
+/// field is the sender's subject or the body's first sentence; when it
+/// echoes the WHOLE first sentence, the delivered copy drops that sentence:
+/// it reads as already shown. A first sentence the summary CUT stays whole:
+/// the header shows only its first [`SUMMARY_MAX_WORDS`], and dropping the
+/// sentence would silently lose the words past the cut.
+pub fn delivered_body(subject: Option<&str>, body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return body.to_string();
+    }
+    let sentence = first_sentence_of(trimmed).replace('`', "'");
+    if header_subject(subject, body) == sentence {
+        without_first_sentence(body)
+    } else {
+        body.to_string()
+    }
 }
 
 /// The header's inner span and what follows it: the opening backtick through
@@ -258,7 +387,7 @@ fn split_header_span(trimmed: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// The span's three fields: sender, id, summary. The summary may itself
+/// The span's three fields: sender, id, subject. The subject may itself
 /// carry a backtick or a " · " separator, so it is everything after the
 /// second separator, not the third split field.
 fn header_fields(inner: &str) -> Option<(&str, &str, &str)> {
@@ -267,18 +396,18 @@ fn header_fields(inner: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// True when the whole line reads as a delivered-mail header: one backticked
-/// span of exactly `sender · id · summary`, the sender `@name` or `name` with
+/// span of exactly `sender · id · subject`, the sender `@name` or `name` with
 /// no spaces, the middle id `fmail-` plus 12 hex (the message-id form the
 /// mux-messages group rules on) or a legacy `msg-…` token that still
 /// resolves. The span closes at the line's end or before the " ⏎ " body
-/// separator; the summary may carry a backtick or " · ". Both header forms
+/// separator; the subject may carry a backtick or " · ". Both header forms
 /// match; this is the reader's shape test and the forged-body detector.
 pub fn is_header_line(line: &str) -> bool {
     let trimmed = line.trim();
     let Some((inner, _tail)) = split_header_span(trimmed) else {
         return false;
     };
-    let Some((sender, id, summary)) = header_fields(inner) else {
+    let Some((sender, id, subject)) = header_fields(inner) else {
         return false;
     };
     let bare = sender.strip_prefix('@').unwrap_or(sender);
@@ -289,7 +418,7 @@ pub fn is_header_line(line: &str) -> bool {
         Some(hex) => hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
         None => id.strip_prefix("msg-").is_some_and(|rest| !rest.is_empty()),
     };
-    id_ok && !summary.trim().is_empty()
+    id_ok && !subject.trim().is_empty()
 }
 
 /// True when any line of `body` is shaped like a delivered header. A send
@@ -423,6 +552,20 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     let (inner, _) = split_header_span(line.trim())?;
     let (_, id, _) = header_fields(inner)?;
     Some(id.to_string())
+}
+
+/// The header's sender when the store backs it: the first line must parse as
+/// a delivered header and the caller's lookup (the chats store) must hold the
+/// header's id under the sender the header names. A leading `@` does not
+/// distinguish the two spellings. `None` when the shape, the id or the
+/// sender does not match - the store is what makes a header trusted.
+pub fn verified_sender(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let line = text.trim_start().lines().next()?;
+    let (inner, _) = split_header_span(line.trim())?;
+    let (sender, id, _) = header_fields(inner)?;
+    let bare = sender.strip_prefix('@').unwrap_or(sender);
+    let stored = lookup(id)?;
+    (stored.strip_prefix('@').unwrap_or(&stored) == bare).then(|| bare.to_string())
 }
 
 /// ASCII-only case fold that preserves byte offsets, so a match position in
@@ -810,5 +953,46 @@ mod tests {
             delivered_msg_id("`@a · msg-1 · fix x · y`"),
             Some("msg-1".to_string())
         );
+
+        // The third field: the sender's subject when one was given, else
+        // the body's first sentence.
+        assert_eq!(
+            header_subject(Some("gate fix"), "Fix the gate."),
+            "gate fix"
+        );
+        assert_eq!(header_subject(Some("  "), "Fix the gate."), "Fix the gate.");
+        assert_eq!(
+            header_subject(None, "Fix the gate. Then ship."),
+            "Fix the gate."
+        );
+        assert_eq!(header_subject(None, ""), "(empty)");
+        // The delivered body drops its first sentence only when that
+        // sentence IS the header's third field; a body that is nothing
+        // but the sentence stays whole.
+        assert_eq!(
+            without_first_sentence("Fix the gate. Details follow."),
+            "Details follow."
+        );
+        assert_eq!(
+            without_first_sentence("Fix the gate.\nDetails follow."),
+            "Details follow."
+        );
+        assert_eq!(without_first_sentence("Ship it."), "Ship it.");
+
+        // An unmigrated legacy body shows the raw tag unchanged (no panic, no
+        // partial strip): the prompt to run the one-time store migration.
+        assert_eq!(
+            display_body("<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"),
+            "<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"
+        );
+        assert_eq!(
+            display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it. Then merge."),
+            "Ship it. Then merge."
+        );
+        assert_eq!(
+            display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it.\nThen merge."),
+            "Then merge."
+        );
+        assert_eq!(display_body("see <fno_mail> docs"), "see <fno_mail> docs");
     }
 }

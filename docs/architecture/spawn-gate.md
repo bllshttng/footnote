@@ -41,7 +41,7 @@ One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py
 
 ## Reading a refusal
 
-The last `spawn-gate: refused on <axis> (<reason>, exit <code>): <figures>` line on stderr is the verdict. It names the axis that refused and its breach. The figures are the receipt's scalar fields. Every other gate line starts `spawn-gate note:` and passed. The Python transport's pass lines carry that prefix too. If the gate verb itself is unreachable, the transport prints the same verdict shape for exit 87 before refusing. The Python reader `cli/src/fno/backlog/advance.py` (`_gate_refusal_detail`) keys on the `spawn-gate: ` prefix and reads the last such line, so it gets the verdict, never a passing reading.
+The last `spawn-gate: refused on <axis> (<reason>, exit <code>): <figures>` line on stderr is the verdict. It is the WHOLE refusal: one line naming the reason and what to do, the exit code carrying the class. When the receipt carries a `remedy`, the verdict ends `; remedy: <what to do>`. The figures are the receipt's scalar fields. With `--json` the caller also gets the receipt as one JSON object. Every other gate line starts `spawn-gate note:` and passed. The Python transport's pass lines carry that prefix too. If the gate verb itself is unreachable, the transport prints the same verdict shape for exit 87 before refusing. The Python reader `cli/src/fno/backlog/advance.py` (`_gate_refusal_detail`) keys on the `spawn-gate: ` prefix and reads the last such line, so it gets the verdict, never a passing reading.
 
 A stderr with no `spawn-gate:` line means the gate admitted and something after it failed. The real error is the first non-note line there, never a `spawn-gate note:` line.
 

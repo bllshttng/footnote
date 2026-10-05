@@ -42,6 +42,7 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
+CONVERSATION_SOURCE = "conversation"  # the Rust conversation arm's mark
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class Hold:
     window_s: Optional[int]
     clock_kind: str = CLOCK_IDLE
     ceiling: Optional[datetime] = None
+    source: Optional[str] = None
 
 
 def hold_dir() -> Path:
@@ -118,6 +120,7 @@ def read(handle: str) -> Optional[Hold]:
         window_s=window if isinstance(window, int) else None,
         clock_kind=clock_kind,
         ceiling=ceiling,
+        source=raw.get("source") if isinstance(raw.get("source"), str) else None,
     )
 
 
@@ -125,14 +128,16 @@ def _write(hold: Hold) -> Hold:
     """Atomic replace, so a reader never catches a half-written clock."""
     directory = hold_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {
-            "until": hold.until.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.until else None,
-            "window_s": hold.window_s,
-            "clock_kind": hold.clock_kind,
-            "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
-        }
-    )
+    fields = {
+        "until": hold.until.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.until else None,
+        "window_s": hold.window_s,
+        "clock_kind": hold.clock_kind,
+        "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
+    }
+    # Only when set: Python-written clocks keep their legacy bytes.
+    if hold.source:
+        fields["source"] = hold.source
+    payload = json.dumps(fields)
     fd, tmp = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle_file:
@@ -315,7 +320,9 @@ def dnd_label(handle) -> Optional[str]:
     """
     if lapsed(handle):
         return None
-    return remaining_label(handle) or "held"
+    clock = read_any(handle)
+    auto = clock is not None and clock.source == CONVERSATION_SOURCE
+    return (remaining_label(handle) or "held") + (" (auto)" if auto else "")
 
 
 def remaining_label(handle) -> Optional[str]:

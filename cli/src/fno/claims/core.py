@@ -2136,7 +2136,13 @@ def release_claim(
         prior = Claim.model_validate(prior_payload)
         if prior.holder != holder and strict:
             raise HolderMismatch(holder, prior.holder, key)
-    receipt = _native_claim("release", key, ["--holder", holder, *_native_root_flags(native_root)])
+    # --with-claim: the wave-2 leaf port moved the release surface into
+    # claim_cli; the operator --json receipt is the frozen two-field shape,
+    # and the engine leg asks for the removed record so this parse is
+    # unchanged.
+    receipt = _native_claim(
+        "release", key, ["--holder", holder, "--with-claim", *_native_root_flags(native_root)]
+    )
     return _native_claim_model(receipt) if receipt.get("released") is True else None
 
 

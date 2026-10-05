@@ -1,0 +1,1 @@
+{"enabled": true, "verdict": "healthy", "detail": "last tick <AGE>s ago", "fix": null, "loaded": true, "last_tick": "<TS>", "interval_seconds": 600, "bounce_pending": false, "merge_scan": {"completed": true, "completed_at": "<TS>", "scanned": 3}}

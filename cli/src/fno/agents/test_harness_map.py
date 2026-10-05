@@ -428,14 +428,17 @@ def unseated(monkeypatch):
 
 
 def test_explicit_bg_resolves_where_the_spawn_claim_is_native(unseated):
-    """thread (and its bg alias) is seated by the spawn claim: opencode's
-    row reads native (measured 2026-09-03 on the live daemon-owned session),
-    so bg resolves onto the thread lane. A harness whose claim is only
-    `capable` still refuses - real on the harness, no fno arm."""
-    out = _resolve(harness="opencode", substrate="bg")
+    """thread is seated by the spawn claim: opencode's row reads native
+    (measured 2026-09-03 on the live daemon-owned session), so thread
+    resolves onto the thread lane. A harness whose claim is only `capable`
+    still refuses - real on the harness, no fno arm. The bg spelling refuses
+    with the redirect like every other door."""
+    out = _resolve(harness="opencode", substrate="thread")
     assert out["substrate"] == "thread"
     with pytest.raises(DispatchResolveError, match="headless"):
-        _resolve(harness=unseated, substrate="bg")
+        _resolve(harness=unseated, substrate="thread")
+    with pytest.raises(DispatchResolveError, match="retired"):
+        _resolve(harness="opencode", substrate="bg")
 
 
 def test_thread_lane_is_derived_from_the_attach_declaration():
@@ -502,10 +505,9 @@ def test_explicit_thread_on_codex_is_allowed():
     assert out["thread"] is True
 
 
-def test_bg_is_a_deprecated_alias_for_thread():
-    out = _resolve(harness="claude", substrate="bg")
-    assert out["substrate"] == "thread"
-    assert out["thread"] is True
+def test_bg_refuses_with_the_redirect():
+    with pytest.raises(DispatchResolveError, match="retired"):
+        _resolve(harness="claude", substrate="bg")
 
 
 def test_thread_is_the_canonical_persistent_substrate():

@@ -147,9 +147,9 @@ pub(crate) struct NodeDetailOverlay {
     pub(crate) scroll: usize,
 }
 
-/// The selectable rows in render order: the five link groups, then the
+/// The selectable rows in render order: the link groups, then the
 /// session rows. `sel` indexes THIS list.
-fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
+pub(crate) fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
     let mut v: Vec<Sel> = Vec::new();
     for l in view.parent.iter() {
         v.push(Sel::Link(l.id.clone()));
@@ -564,12 +564,13 @@ fn note_age(ts: &Option<String>) -> String {
     }
 }
 
-/// The detail pane's keys. j/k (and arrows) move the selection, Enter
-/// runs the selected row (a link drills in, a session launches through
-/// the hit cascade, a dim row answers with its reason), PgUp/PgDn scroll
-/// the document, `b` plans, `t` launches the node as a target through the
-/// prefilled launcher, and `A` asks the lead (the board's own sends).
-/// `c` posts a user comment on the node's thread.
+/// The detail pane's keys. j/k (and arrows) SCROLL the document one line
+/// (PgUp/PgDn keep their eight-line page), Tab/BackTab move the selection
+/// across the link and session rows, Enter runs the selected row (a link
+/// drills in, a session launches through the hit cascade, a dim row
+/// answers with its reason), `b` plans, `t` launches the node as a target
+/// through the prefilled launcher, and `A` asks the lead (the board's own
+/// sends). `c` posts a user comment on the node's thread.
 pub(crate) async fn detail_keys(
     view: &mut View,
     bytes: &[u8],
@@ -613,11 +614,12 @@ pub(crate) async fn detail_keys(
         }
         match tok {
             ModalKey::Esc | ModalKey::Byte(b'q') => pop_or_close(view),
-            ModalKey::Up | ModalKey::Byte(b'k') => move_sel(view, false),
-            ModalKey::Down | ModalKey::Byte(b'j') => move_sel(view, true),
+            ModalKey::Up | ModalKey::Byte(b'k') => scroll_detail(view, false, 1),
+            ModalKey::Down | ModalKey::Byte(b'j') => scroll_detail(view, true, 1),
+            ModalKey::Byte(b'\t') => move_sel(view, true),
             ModalKey::Enter => activate(view, sock_w).await?,
-            ModalKey::PageUp => scroll_detail(view, false),
-            ModalKey::PageDown => scroll_detail(view, true),
+            ModalKey::PageUp => scroll_detail(view, false, 8),
+            ModalKey::PageDown => scroll_detail(view, true, 8),
             ModalKey::Byte(b'b') => backlog_board::dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => backlog_board::launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => backlog_board::ask_the_lead(view, sock_w).await?,
@@ -674,8 +676,9 @@ fn move_sel(view: &mut View, down: bool) {
     };
 }
 
-/// PgUp/PgDn: scroll the pane's document, in steps of eight lines.
-fn scroll_detail(view: &mut View, down: bool) {
+/// Scroll the pane's document. j/k and the arrows take one line; PgUp/PgDn
+/// keep their eight-line page.
+fn scroll_detail(view: &mut View, down: bool, step: usize) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
     };
@@ -683,9 +686,9 @@ fn scroll_detail(view: &mut View, down: bool) {
         return;
     };
     o.scroll = if down {
-        o.scroll.saturating_add(8)
+        o.scroll.saturating_add(step)
     } else {
-        o.scroll.saturating_sub(8)
+        o.scroll.saturating_sub(step)
     };
 }
 

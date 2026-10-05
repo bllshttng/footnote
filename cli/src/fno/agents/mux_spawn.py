@@ -1985,7 +1985,7 @@ def _reconcile_unanswered_run(
     if not candidates:
         raise DispatchAskError(
             f"no pane was created; the mux never answered and no pane in "
-            f"{session!r} matches this spawn. Retry, or use --substrate bg.",
+            f"{session!r} matches this spawn. Retry, or use --substrate thread.",
             exit_code=1,
         )
     if len(candidates) > 1:
@@ -4713,7 +4713,7 @@ def dispatch_spawn_pane(
                 f"The registry row is `failed` (not live) and {where}. "
                 "Read that output for the cause, then retry - the row is kept as "
                 "evidence but it is terminal, so a respawn under the same name "
-                "reclaims it rather than colliding. Or spawn with --substrate bg.",
+                "reclaims it rather than colliding. Or spawn with --substrate thread.",
                 exit_code=13,
             )
 

@@ -126,6 +126,9 @@ toml = "0.8"
 # so the compile is cached; a hand-rolled indented-block reader would be a
 # third spelling of the datum.
 serde_yaml_ng = "0.10"
+# The same projection emits the judge's rule set (src/event_store/
+# events_schema.json) as JSON the validator include_str!s.
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -37,7 +37,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
 
     // The board docks into the sideline column.
     h.type_bytes(&[PREFIX, b'O']);
-    h.wait_screen(15, |s| s.contains("filters"));
+    h.wait_screen(15, |s| s.contains("Search:"));
 
     // leg 1: `^B V` (cycle sideline view) still resolves while the
     // board holds the keyboard. Org is the next view from the board.
@@ -72,12 +72,12 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     // The cycle now runs through Messages (the new view after Agents) ...
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE roundtrip messages-after-third-V");
-    h.wait_screen(15, |s| s.contains("Partners"));
+    h.wait_screen(15, |s| s.contains("select a chat in column 2"));
 
     // ... and the chord round-trips the view back to the board.
     h.type_bytes(&[PREFIX, b'V']);
     eprintln!("STAGE roundtrip board-again");
-    h.wait_screen(15, |s| s.contains("filters"));
+    h.wait_screen(15, |s| s.contains("Search:"));
 
     // leg 2: `^B ?` opens the GLOBAL keybinds menu, not the board's
     // own keys overlay (its `?` verb, reachable with the bare key).

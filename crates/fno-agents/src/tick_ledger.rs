@@ -1003,11 +1003,13 @@ pub const LAUNCHD_LABELS: &[&str] = &[
     "com.user.autocorrect-watcher",
 ];
 
-/// One label's facts from the fold.
+/// One label's facts from the fold. Serialized with the `exit` key doctor's
+/// report reads; `None` means launchctl measured no exit.
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchdLabelFacts {
     pub label: String,
     pub loaded: bool,
+    #[serde(rename = "exit")]
     pub last_exit: Option<i64>,
 }
 
@@ -2114,8 +2116,8 @@ mod tests {
         let row = json!({
             "ts": "2026-09-22T08:27:07Z",
             "type": "pr_watch_tick_end",
-            "source": "pr-watch",
-            "data": {"phase": "merge", "outcome": "ok", "cut": ["merge"]},
+            "source": "daemon",
+            "data": {"phase": "merge", "outcome": "ok", "duration_s": 4, "cut": ["merge"]},
         });
         commit_row(&journal, &row);
         let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();

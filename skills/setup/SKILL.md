@@ -34,7 +34,7 @@ defaulted and never surfaced.
 
 ## Step -1: the CLI itself
 
-Run `command -v fno`. A failure means the footnote CLI never finished installing, and every step below fails with it. Start the installer with `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"`. It takes the install lock, prints the log path and returns immediately. Poll that log until it ends with `installer exit 0`, and cap the wait at 5 minutes. A non-zero exit line or a missing log is a failed install: report the log tail to the user and stop. Never run `.claude-plugin/postinstall.sh` directly. The install lock lives in the hook, so a bare run can race a detached installer that is already running.
+Run `command -v fno`. A failure means the footnote CLI is not installed, and every step below fails with it. Tell the user what the installer does, then ask. It installs uv from astral.sh, which edits the shell profile. Then it installs the `fno` package from PyPI into the tool bin directory. On a yes run `bash "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/postinstall.sh"` and let it finish. Output ending `installer exit 0` means done. Cap the wait at 5 minutes. A non-zero exit line is a failed install: report the output tail to the user and stop. Never run any install without the user's yes. The session-start hook never installs anything itself.
 
 ## Step 0: Check existing settings
 

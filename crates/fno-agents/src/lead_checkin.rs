@@ -186,8 +186,11 @@ pub(crate) fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
 /// placeholder beat. Takes the directory and scope rather than `Ctx` so the
 /// stop gate's stale-doc resolver calls the same one.
 pub(crate) fn team_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathBuf, String> {
-    let key = format!("team-{}", sanitize_scope_key(scope));
-    if key == "team-" {
+    // The FILENAME key keeps the crown- spelling: the docs on disk and both
+    // writers (the retired Python verb, the native handoff verb) mint
+    // crown-, so a reader keying team- would find nothing, ever.
+    let key = format!("crown-{}", sanitize_scope_key(scope));
+    if key == "crown-" {
         return Err("empty scope names no canon doc".into());
     }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -216,11 +219,17 @@ pub(crate) fn team_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathB
 
 pub(crate) fn sanitize_scope_key(scope: &str) -> String {
     let mut out = String::new();
+    let mut in_run = false;
     for ch in scope.trim().chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
             out.push(ch);
-        } else {
+            in_run = false;
+        } else if !in_run {
+            // One dash per unsafe RUN, the Python writer's
+            // re.sub(r"[^A-Za-z0-9._-]+", "-") shape, so reader keys match
+            // the docs the verb wrote.
             out.push('-');
+            in_run = true;
         }
     }
     out.trim_matches('-').to_string()
@@ -733,7 +742,7 @@ fn r_team() -> Result<Value, String> {
                     let reading = match registry_read
                         .as_ref()
                         .ok()
-                        .map(|r| crate::lead_state::terminal_name_join(&r.entries, &s.row))
+                        .map(|r| crate::team_split::terminal_join(&r.entries, s))
                     {
                         Some(crate::lead_state::NameJoin::One(e)) => {
                             crate::team_split::dead_call(e, boot)
@@ -1504,16 +1513,8 @@ fn derive_change(
         })
         .unwrap_or_default();
     let self_hold = data.get("self_hold");
-    if self_hold
-        .and_then(|hold| hold.get("clock_live"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || self_hold
-            .and_then(|hold| hold.get("delivery_policy"))
-            .and_then(Value::as_str)
-            == Some("bus-only")
-    {
-        attention.push("DND on".into());
+    if let Some(label) = crate::hold_label::hold_attention(self_hold.unwrap_or(&Value::Null)) {
+        attention.push(label);
     }
     let stale_skills: Vec<&str> = data
         .get("skill_drift_stale")
@@ -1526,12 +1527,12 @@ fn derive_change(
             stale_skills.join(", ")
         ));
     }
-    if data
-        .get("refusal_rate_rising")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        attention.push("refusal rate rising two consecutive beats".into());
+    if data.get("refusal_rate_rising").and_then(Value::as_bool) == Some(true) {
+        let name = data.get("harness").and_then(Value::as_str);
+        attention.push(format!(
+            "refusal rate rising two consecutive beats: handoff point ({})",
+            name.unwrap_or("unknown")
+        ));
     }
     if data
         .get("wake_over")
@@ -2165,8 +2166,8 @@ fn render_lines_with(
                 .and_then(Value::as_str)
                 .unwrap_or("none");
             lines.push(format!("self_hold: {clock}; delivery_policy {policy}"));
-            if clock_live || policy == "bus-only" {
-                lines.push("attention: DND on".into());
+            if let Some(label) = crate::hold_label::hold_attention(hold) {
+                lines.push(format!("attention: {label}"));
             }
         }
     }
@@ -2673,6 +2674,7 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     };
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
+    data.insert("harness".into(), json!(crate::claims::resolve_identity().1));
     if let Some(holder) = holder.as_deref() {
         data.insert("holder_session".into(), json!(holder));
     }
@@ -2791,13 +2793,15 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
                 })
         })
         .unwrap_or_default();
-    if let Err(e) = crate::team_names::bind_and_refresh(
+    match crate::team_names::bind_and_refresh(
         &crate::paths::AgentsHome::from_env().team_names_json(),
         &crate::paths::AgentsHome::from_env().registry_json(),
         &ctx.scope,
         owned_ids,
     ) {
-        lines.push(format!("team name: {e}"));
+        Err(e) => lines.push(format!("team name: {e}")),
+        Ok(Some(pending)) => crate::succession_txn::verified(&ctx.scope, &ctx.cwd, &pending),
+        Ok(None) => {}
     }
     if model_change.as_deref().map(|t| !t.trim().is_empty()) == Some(true) {
         lines.push(format!("diff: {derived}"));
@@ -3021,6 +3025,22 @@ mod tests {
         assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
+        assert_eq!(sanitize_scope_key("a, b"), "a-b");
+    }
+
+    #[test]
+    fn team_handoff_doc_reads_the_crown_keyed_writer() {
+        // The persisted FILENAME key is crown- (both writers mint it); the
+        // crown->team rename must never split the reader from the docs.
+        let base = std::env::temp_dir().join(format!("fno-checkin-dockey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("handoffs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("20261001-crown-fno-x-aaaa.md");
+        std::fs::write(&doc, "x").unwrap();
+        let got = team_handoff_doc(&dir, "fno-x-aaaa").unwrap();
+        assert_eq!(got, doc);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A repo fixture whose escalations dir resolves deterministically through
@@ -4764,6 +4784,7 @@ mod tests {
             }],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-dead".into(),
+                session: None,
                 scope: "shared".into(),
                 stored_status: "orphaned".into(),
             }],
@@ -4801,6 +4822,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-fno-g6".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],
@@ -4825,6 +4847,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-gone".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],

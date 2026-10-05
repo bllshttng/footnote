@@ -9,10 +9,11 @@
 //! could check). An agent caller may only succeed itself: every live holder
 //! of the scope must already be that agent.
 //!
-//! Rows arrive as plain JSON here, not a typed registry row, so a row's
-//! status is matched by string against `announce::TERMINAL_STATUSES`
-//! (itself `registry.py::TERMINAL_STATUSES`), the same string-match
-//! reasoning `announce.rs` documents for its own terminal check.
+//! Rows arrive as plain JSON here, not a typed registry row. A row's
+//! terminal read answers through `row_verdict::finished_json`, the
+//! crown-vacancy door: the reversible word (Orphaned) re-answers on
+//! process evidence, and every other status keeps the legacy
+//! `announce::TERMINAL_STATUSES` word list.
 //!
 //! Occupancy is the exact-scope holders plus ladder-aware rivals: through
 //! `loop_lead::team_rivals`, a live team over overlapping territory
@@ -24,7 +25,6 @@
 //! name and harness session id together because registry names are reclaimable.
 //! Rows that both lack a session id still compare by name alone.
 
-use crate::announce::TERMINAL_STATUSES;
 use crate::loop_lead::{same_territory, scopes_overlap, team_rivals_pub};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -100,7 +100,14 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
     let effect = match outcome {
         Some("succeeded") => {
             let pending = succession_pending(payload);
-            crate::team_names::carry_succession(store, scope, pending)
+            let result = crate::team_names::carry_succession(store, scope, pending.clone());
+            if result.is_ok() {
+                if let Some(p) = pending.as_ref() {
+                    crate::succession_txn::announce(scope, p);
+                    crate::succession_txn::transferred(scope, p);
+                }
+            }
+            result
         }
         Some("granted") => crate::team_names::forget(store, scope),
         _ => Ok(()),
@@ -127,10 +134,24 @@ fn succession_pending(payload: &Value) -> Option<crate::team_names::PendingSucce
         .next()?;
     Some(crate::team_names::PendingSuccession {
         heir_name: heir.to_string(),
+        heir_session: heir_session(heir),
         predecessor_name: name,
         predecessor_session: session,
         ts: crate::daemon::now_rfc3339_like(),
     })
+}
+
+/// The heir row's session id at settle time, so the succession revert's
+/// join keys on identity. A row not yet in the registry (a settle racing
+/// the spawn row's write, or a test with no declared home) carries no
+/// session; the revert then falls back to the name join as before.
+fn heir_session(heir: &str) -> Option<String> {
+    let home = crate::paths::AgentsHome::from_env_opt()?;
+    let registry = crate::state::try_load_registry(&home.registry_json()).ok()??;
+    match crate::lead_state::live_name_join(&registry.entries, heir) {
+        crate::lead_state::NameJoin::One(row) => row.harness_session_id.clone(),
+        _ => None,
+    }
 }
 
 fn resolve_with_projects(
@@ -157,13 +178,12 @@ fn occupancy(
     let mut rivals = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("");
         let row_scope = row.get("crown_scope").and_then(Value::as_str);
-        if row_scope == Some(scope) && TERMINAL_STATUSES.contains(&status) {
+        if row_scope == Some(scope) && crate::row_verdict::finished_json(row) {
             clear_terminal.push((index, name.to_string()));
             continue;
         }
-        if TERMINAL_STATUSES.contains(&status) || Some(name) == exclude_name {
+        if crate::row_verdict::finished_json(row) || Some(name) == exclude_name {
             continue;
         }
         if row_scope == Some(scope) {
@@ -472,8 +492,7 @@ fn apply_with_projects(
         rows.iter()
             .enumerate()
             .filter(|(_, row)| {
-                let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-                if TERMINAL_STATUSES.contains(&status) {
+                if crate::row_verdict::finished_json(row) {
                     return false;
                 }
                 if Some(row.get("name").and_then(Value::as_str).unwrap_or("")) == exclude_name {
@@ -610,6 +629,23 @@ mod tests {
         .unwrap();
         assert_eq!(out["clear_terminal"], json!(["dead-lead"]));
         assert_eq!(out["outcome"], "granted");
+
+        // The reversible word never hands a crown away: an Orphaned row
+        // with a live pid stays a holder, and the spawn declines naming it.
+        let quiet = json!({
+            "name": "quiet-lead", "crown_scope": "fno", "status": "orphaned",
+            "pid": std::process::id(),
+            "created_at": "2026-10-01T00:00:00Z",
+        });
+        let out = resolve(&json!({
+            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "caller": {"kind": "human"},
+            "rows": [quiet],
+        }))
+        .unwrap();
+        assert_eq!(out["outcome"], "declined");
+        assert_eq!(out["holders"], json!(["quiet-lead"]));
+        assert!(out["refusal"].as_str().unwrap().contains("quiet-lead"));
 
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
@@ -937,6 +973,28 @@ mod tests {
 
     #[test]
     fn record_rows() {
+        // The transaction receipts land under a pinned nested home for the
+        // heir settle; the lock keeps the env mutation off parallel tests.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bus_home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(bus_home.path().join("home")).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", bus_home.path().join("home"));
+        // The fleet announce needs one live recipient in the home registry.
+        std::fs::write(
+            bus_home.path().join("home/registry.json"),
+            serde_json::to_string(&json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "agents": [{
+                    "name": "lead-heir", "status": "live", "cwd": "/repo", "log_path": "/repo/lead-heir.log",
+                    "harness": "claude", "harness_session_id": "sess-new",
+                    "created_at": "2026-10-04T00:00:00Z",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let _reg = team_registry(tmp.path(), agents_with_succession_rows());
         named_record_fixture(tmp.path());
@@ -988,6 +1046,36 @@ mod tests {
         assert_eq!(pending["predecessor_name"], json!("lead-old"));
         assert_eq!(pending["predecessor_session"], json!("sess-old"));
         assert!(pending["ts"].is_string());
+        // AC2-HP: exactly one announce row and one transfer receipt for the
+        // succeeded settle. The store commit is the write boundary: query
+        // the store; the raw journal bytes are only a fallback.
+        let journal = crate::paths::AgentsHome::from_env().events_jsonl();
+        let raw = match crate::event_store::query_events(&journal, &Default::default()) {
+            Ok(rows) => rows
+                .iter()
+                .map(|r| r.line.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(_) => std::fs::read_to_string(&journal).unwrap_or_default(),
+        };
+        assert_eq!(
+            raw.matches("team_succession_transferred").count(),
+            1,
+            "one transfer receipt: {raw}"
+        );
+        assert_eq!(
+            raw.matches("team_succession_announced").count(),
+            1,
+            "one announce receipt: {raw}"
+        );
+        let bus =
+            std::fs::read_to_string(bus_home.path().join("bus/messages.jsonl")).unwrap_or_default();
+        assert_eq!(
+            bus.matches("succession: x-aaaa").count(),
+            1,
+            "one fleet announcement: {bus}"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
         // Without the heir key (an old caller) today's shape holds: no
         // pending record is written.
         named_record_fixture(tmp.path());

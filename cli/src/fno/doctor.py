@@ -1135,24 +1135,39 @@ def _orphan_report() -> list[str]:
 def _pr_watch_liveness() -> dict[str, Any]:
     """Ground-truth liveness verdict for the global PR-watch agent.
 
-    Advisory: never changes doctor's status/exit. Degrades to ``unknown``
-    (silent) rather than crying wolf when the check itself can't run.
+    Advisory: never changes doctor's status/exit. The verdict is the Rust
+    verb's (`fno-agents pr-watch status --json`); a check that can't run
+    degrades to ``unknown`` (silent) rather than crying wolf.
     """
-    try:
-        from fno.pr_watch import _install as m
+    import subprocess
 
-        return m.liveness_report_live()
+    try:
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is not None:
+            proc = subprocess.run(
+                [str(binary), "pr-watch", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            report = json.loads(proc.stdout)
+            if isinstance(report, dict) and "verdict" in report:
+                return report
     except Exception:
-        # Same dict shape as liveness_report so a future non-.get() reader
-        # cannot KeyError on the exception path.
-        return {
-            "enabled": False,
-            "verdict": "unknown",
-            "detail": "",
-            "fix": None,
-            "loaded": False,
-            "last_tick": None,
-        }
+        pass
+    # Same dict shape as the report so a future non-.get() reader
+    # cannot KeyError on the exception path.
+    return {
+        "enabled": False,
+        "verdict": "unknown",
+        "detail": "",
+        "fix": None,
+        "loaded": False,
+        "last_tick": None,
+    }
 
 
 _FD_SOFT_FLOOR = 1024
@@ -2026,8 +2041,10 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         )
 
     for agent in (result.get("launch_agents") or {}).get("dead") or []:
+        exit_code = agent.get("exit")
         blockers.append(
-            f"LaunchAgent {agent.get('label')} last exited {agent.get('exit')}."
+            f"LaunchAgent {agent.get('label')} last exited "
+            f"{exit_code if exit_code is not None else 'exit unknown'}."
         )
 
     fd_limit = result.get("fd_limit") or {}
@@ -2670,12 +2687,15 @@ def _emit_human(
         # silent scan read as a clean bill of health.
         out("fno doctor: LaunchAgent health: not applicable (no launchctl on this host).")
     for entry in agents.get("dead") or []:
-        if entry["label"] == "sh.fno.pr-watcher":
+        label = entry.get("label")
+        if label == "sh.fno.pr-watcher":
             remedy = "run `fno do pr watch refresh`"
         else:
             remedy = "re-run `fno doctor update` if the entry point moved"
+        exit_code = entry.get("exit")
         out(
-            f"fno doctor: LaunchAgent {entry['label']} last exited {entry['exit']} "
+            f"fno doctor: LaunchAgent {label} last exited "
+            f"{exit_code if exit_code is not None else 'exit unknown'} "
             f"(it is installed but failing); check its log under ~/.fno/ and {remedy}."
         )
 

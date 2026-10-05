@@ -113,5 +113,6 @@
       "do the work"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

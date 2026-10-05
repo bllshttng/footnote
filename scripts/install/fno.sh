@@ -39,6 +39,12 @@
 #   FNO_NO_WIRE        set to any non-empty value to skip the plugin wiring step
 #                      (every agent CLI on PATH gets the fno plugin otherwise;
 #                      `fno config setup wizard` still chooses by hand)
+#
+# The channel is read from the TREE this script sits in: the nightly
+# tag stamps a dev version into .claude-plugin/plugin.json, so an install run
+# from inside a nightly tree pairs the nightly wheel with the nightly skills
+# and hooks instead of the stable PyPI package. Served standalone at fno.sh
+# there is no tree and the stable channel applies exactly as before.
 set -eu
 
 # --- output helpers --------------------------------------------------------
@@ -70,6 +76,47 @@ fetch_pipe_cmd() {
 	else
 		die "neither curl nor wget is available to fetch the uv installer; install one (or install uv from https://docs.astral.sh/uv/) and re-run."
 	fi
+}
+
+# --- plugin channel detection -----------------------------------------------
+# plugin_channel and friends come from scripts/release/plugin-version.sh, the
+# same helper .claude-plugin/postinstall.sh sources. Sourced only when it sits
+# beside this script (an in-tree run); the served fno.sh copy needs nothing.
+# $0 under `curl | sh` is the shell name, so the paths below never resolve and
+# the stable channel stands - the served script keeps its old behavior.
+FNO_RELEASE_REPO="${FNO_RELEASE_REPO:-bllshttng/footnote}"
+FNO_DECLARED_VERSION=
+FNO_CHANNEL=stable
+detect_channel() {
+	_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || return 0
+	[ -f "$_dir/../release/plugin-version.sh" ] || return 0
+	# shellcheck disable=SC1090,SC1091
+	. "$_dir/../release/plugin-version.sh"
+	[ -f "$_dir/../../.claude-plugin/plugin.json" ] || return 0
+	FNO_DECLARED_VERSION=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$_dir/../../.claude-plugin/plugin.json" | head -n 1)
+	[ -n "$FNO_DECLARED_VERSION" ] || { FNO_DECLARED_VERSION=; return 0; }
+	FNO_CHANNEL=$(plugin_channel "$FNO_DECLARED_VERSION")
+}
+
+# The nightly release's wheel asset for this platform, when one exists; sets
+# FNO_WHEEL_URL. The postinstall twin (nightly_wheel_url in
+# .claude-plugin/postinstall.sh) parses the same release JSON with python3;
+# this script's only prerequisite is curl or wget, so the extraction is
+# sed+grep on the pretty-printed browser_download_url lines.
+FNO_WHEEL_URL=
+nightly_wheel_url() {
+	_plat=$(plugin_wheel_platform "$(uname -s)" "$(uname -m)")
+	[ -n "$_plat" ] || return 1
+	fetch_pipe_cmd
+	# shellcheck disable=SC2086
+	_json=$($FNO_FETCH_TO_STDOUT "https://api.github.com/repos/${FNO_RELEASE_REPO}/releases/tags/nightly" 2>/dev/null) || return 1
+	# shellcheck disable=SC2086
+	_url=$(printf '%s\n' "$_json" \
+		| sed -n -E 's/.*"(https[^"]*\.whl)".*/\1/p' \
+		| grep -E -- "$_plat" \
+		| head -n 1)
+	[ -n "$_url" ] || return 1
+	FNO_WHEEL_URL=$_url
 }
 
 # --- uv discovery + install ------------------------------------------------
@@ -226,6 +273,23 @@ resolve_source() {
 			*)
 				die "FNO_VERSION='$FNO_VERSION' must start with a digit (e.g. 1.2.3)." ;;
 		esac
+	fi
+	# The tree's channel decides: a nightly tree installs this
+	# platform's wheel from the nightly GitHub release (no registry holds a
+	# nightly), an rc tree pins the candidate (a plain by-name install skips
+	# pre-releases), stable keeps the by-name package. The explicit knobs above
+	# still win. A nightly with no readable wheel dies - never a silent
+	# downgrade to the stable PyPI package.
+	if [ "$FNO_CHANNEL" = nightly ]; then
+		if nightly_wheel_url; then
+			FNO_SOURCE=$FNO_WHEEL_URL
+			return 0
+		fi
+		die "this tree is the nightly channel (${FNO_DECLARED_VERSION:-version unreadable}) but the nightly GitHub release has no installable wheel for this platform (unsupported platform, rate limit, or offline). Install per the nightly release notes: FNO_INSTALL_WHEEL=<wheel url> sh fno.sh"
+	fi
+	if [ "$FNO_CHANNEL" = rc ]; then
+		FNO_SOURCE="fno==$(plugin_pep_normalize "$FNO_DECLARED_VERSION")"
+		return 0
 	fi
 	FNO_SOURCE=fno
 }
@@ -502,7 +566,14 @@ main() {
 			;;
 	esac
 
+	detect_channel
 	resolve_source
+	# Name the channel before the slow provision: a nightly or rc run must say
+	# why it is not touching the stable PyPI package (AC7-UI's installer twin).
+	case "$FNO_CHANNEL" in
+		nightly) say "channel nightly (${FNO_DECLARED_VERSION}): installing this platform's wheel from the nightly GitHub release." ;;
+		rc) say "channel rc: pinning the candidate $FNO_SOURCE from PyPI." ;;
+	esac
 
 	# Honor FNO_INSTALL_DIR by handing it to uv as the tool-bin location.
 	if [ -n "${FNO_INSTALL_DIR:-}" ]; then
@@ -530,18 +601,27 @@ main() {
 			fi
 			if [ -z "$_skip_adopt" ]; then
 				if verify_ours_within; then
-					say "fno is already installed and verified - nothing to do."
-					report_success
-					return 0
-				fi
-				# Only a VERIFIABLE stranger is refused (the Rust adopt arm's
-				# invariant: a complete foreign answer is never
-				# --force-installed over). An instrument failure - torn
-				# metadata, a missing venv python - falls through on purpose:
-				# the force install below is this script's repair path for a
-				# broken-but-ours install, and refusing here would leave a
-				# half-removed install with no automated repair.
-				if [ -n "$FNO_VERIFY_STABLE" ]; then
+					# A tree channel only adopts an install of its own version:
+					# stable 0.4.0 on disk under a 0.4.1-dev tree is
+					# the exact mismatch this run exists to repair. Stable keeps
+					# the plain no-op.
+					if [ "$FNO_CHANNEL" = stable ] || plugin_version_matches "$FNO_VERIFIED_VERSION" "$FNO_DECLARED_VERSION"; then
+						say "fno is already installed and verified - nothing to do."
+						report_success
+						return 0
+					fi
+					say "installed fno ${FNO_VERIFIED_VERSION:-<unreadable>} is not this tree's ${FNO_CHANNEL} ${FNO_DECLARED_VERSION}; replacing it."
+				elif [ -n "$FNO_VERIFY_STABLE" ]; then
+					# Only a VERIFIABLE stranger is refused (the Rust adopt arm's
+					# invariant: a complete foreign answer is never
+					# --force-installed over). An instrument failure - torn
+					# metadata, a missing venv python - falls through on purpose:
+					# the force install below is this script's repair path for a
+					# broken-but-ours install, and refusing here would leave a
+					# half-removed install with no automated repair. The check
+					# guards a FAILED verify only: a successful verify leaves
+					# FNO_VERIFY_STABLE=1, and the version-mismatch repair above
+					# must reach the install, not this refusal.
 					die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to install over a foreign fno."
 				fi
 			fi

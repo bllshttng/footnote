@@ -34,14 +34,18 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-/// The four terminal row statuses, Python's `TERMINAL_STATUSES` exactly.
+/// Terminal for the vacancy and join reads. Orphaned is the reversible
+/// resumable word (a quiet live lead settles Orphaned), so the word alone
+/// never vacates what the row holds: the row_verdict door decides, and
+/// only proof the process is gone reads terminal. The other three words
+/// stay Python's `TERMINAL_STATUSES` read.
 pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
+    if matches!(row.status, crate::AgentStatus::Orphaned) {
+        return crate::row_verdict::finished(row);
+    }
     matches!(
         row.status,
-        crate::AgentStatus::Exited
-            | crate::AgentStatus::Orphaned
-            | crate::AgentStatus::Failed
-            | crate::AgentStatus::PermanentDead
+        crate::AgentStatus::Exited | crate::AgentStatus::Failed | crate::AgentStatus::PermanentDead
     )
 }
 
@@ -50,24 +54,13 @@ pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
 /// name), match name or alias, and refuse when the name still matches more
 /// than one row - the first match of a duplicate name is a guess, and the
 /// callers below act on the row.
-pub(crate) enum NameJoin<'a> {
-    One(&'a RegistryEntry),
-    Ambiguous,
-    None,
-}
+pub(crate) type NameJoin<'a> = crate::agent_ref::Join<'a>;
 
 fn join_rows<'a, F>(rows: &'a [RegistryEntry], name: &str, keep: F) -> NameJoin<'a>
 where
     F: Fn(&RegistryEntry) -> bool,
 {
-    let mut matches = rows.iter().filter(|row| {
-        keep(row) && (row.name == name || row.aliases.iter().any(|alias| alias == name))
-    });
-    match (matches.next(), matches.next()) {
-        (Some(row), None) => NameJoin::One(row),
-        (None, _) => NameJoin::None,
-        (Some(_), Some(_)) => NameJoin::Ambiguous,
-    }
+    crate::agent_ref::resolve(rows, crate::agent_ref::Key::Name(name), keep)
 }
 
 /// The join over live rows: every terminal row is invisible to it.
@@ -1803,12 +1796,20 @@ mod tests {
         // The mail_envelope join contract, on both liveness sides: a
         // dead twin never answers a live name, a live twin never answers
         // a terminal name, and a side that still matches two rows refuses.
+        // The reversible word keeps its reader truth: an Orphaned twin with
+        // a live pid stays live-kept and one with a reaped pid stays
+        // terminal-kept, so the joins key on proof, not the word.
+        let mut orphan_dead = row("lead", "s-3", None, AgentStatus::Orphaned);
+        orphan_dead["pid"] = serde_json::json!(crate::row_verdict::reaped_pid());
+        let mut quiet_live = row("quiet", "s-5", None, AgentStatus::Orphaned);
+        quiet_live["pid"] = serde_json::json!(std::process::id());
         let dir = tmp("name-join");
         let rows = [
             row("heir", "s-1", None, AgentStatus::Live),
             row("heir", "s-2", None, AgentStatus::Exited),
-            row("lead", "s-3", None, AgentStatus::Orphaned),
+            orphan_dead,
             row("lead", "s-4", None, AgentStatus::Exited),
+            quiet_live,
         ];
         registry_file(&dir, &rows);
         let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
@@ -1827,6 +1828,10 @@ mod tests {
         assert!(matches!(
             terminal_name_join(&reg.entries, "lead"),
             NameJoin::Ambiguous
+        ));
+        assert!(matches!(
+            terminal_name_join(&reg.entries, "quiet"),
+            NameJoin::None
         ));
         let _ = fs::remove_dir_all(&dir);
     }

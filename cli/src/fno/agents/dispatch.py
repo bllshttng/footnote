@@ -2923,7 +2923,7 @@ def dispatch_spawn(
                         raise DispatchAskError(
                             "opencode one-shot spawns run through the Rust "
                             "runtime's headless lane; the Python path carries "
-                            "--substrate bg only",
+                            "--substrate thread only",
                             exit_code=2,
                         )
                     if resume_session_id:
@@ -6508,7 +6508,7 @@ def wake_and_deliver(
     except (RegistryVersionError, ValueError):
         return False, "registry-incomplete"
 
-    spawn_name = fork_lineage.wake_spawn_name(entry, session_uuid)
+    spawn_name = fork_lineage.wake_spawn_name(session_uuid)
     route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
     from fno.agents.launch_provenance import launch_account_for_session

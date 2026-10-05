@@ -263,23 +263,20 @@ def _record_mail_origin(
     lane: str,
     sender: str | None = None,
     target_session: str | None = None,
+    body: str | None = None,
+    reply_to: str | None = None,
 ) -> None:
-    """Best-effort positive measurement of the classified send origin."""
+    """Best-effort origin row and ask/route spans, via the Rust mail-record leaf."""
     try:
-        from fno.agents import events
-        from fno.events import append_event, mail_origin_classified
+        import shutil
 
-        append_event(
-            mail_origin_classified(
-                origin=origin,
-                lane=lane,
-                presumed_human=origin == "operator",
-                sender=sender,
-                target_session=target_session,
-            ),
-            events.daemon_lifecycle_log(),
-            lock_timeout_seconds=2,
-        )
+        pairs = (("--origin", origin), ("--lane", lane), ("--sender", sender),
+                 ("--target-session", target_session), ("--reply-to", reply_to))
+        flags = [x for pair in pairs if pair[1] for x in pair if x is not None]
+        binary = shutil.which("fno-agents")
+        if binary is not None:
+            subprocess.run([binary, "mail-record", *flags],
+                           input=body or "", timeout=2, capture_output=True)
     except Exception:
         pass
 
@@ -1017,7 +1014,9 @@ def cmd_reply(
     body_text = _read_body(body, body_file, body_arg)
     _vet_body(body_text, allow_reason=style_exception)
     classified_origin = classify_origin()
-    _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project)
+    from fno.agents.self_stamp import stamp_from
+    _record_mail_origin(origin=classified_origin, lane="reply", sender=stamp_from(from_project),
+                        body=body_text, reply_to=to_msg)
     mail_origin: str | None = (
         None if classified_origin == "unknown" else classified_origin
     )
@@ -3504,11 +3503,10 @@ def cmd_send(
             else "king" if to_king
             else "peer"
         ),
-        sender=from_name,
-        # Under --to-self the positional parks the payload, so `name` is not
-        # a handle at this point; recording it wrote the payload into the
-        # audit row. The self target resolves below.
-        target_session=name if raw and not to_self else None,
+        # The ask key hashes the bus endpoints; record what the row will carry.
+        sender=stamp_from(from_name),
+        target_session=None if (to_self or to_project) else name,
+        body=message,
     )
     # Unknown is an explicit audit result, not a wire authority. Legacy
     # carriers omit the attribute so a law gate cannot mistake silence for an
@@ -4655,14 +4653,8 @@ def cmd_hold(
 
     While the hold is on, mail addressed to this session never pastes into the
     prompt line. It queues durable and the sender gets a receipt saying so.
-    ``--minutes`` runs the quiet-minutes idle clock and re-arms on every prompt,
-    with an absolute ceiling at twice the requested window. ``--for`` runs a
-    wall clock and never moves its deadline. Either lift DELIVERS without a new
-    prompt, so a hold whose only drain trigger is the operator cannot stall.
-
-    The hold reuses the ``delivery_policy = "bus-only"`` flag that already
-    exists on the agent row, so every injector lane refuses it before any
-    transport call. This verb owns the clock, not the enforcement.
+    Either clock DELIVERS without a new prompt, so a hold whose only drain
+    trigger is the operator cannot stall.
     """
     import shutil
     import subprocess
@@ -4679,12 +4671,19 @@ def cmd_hold(
         raise typer.Exit(code=2)
 
     if status:
-        # Ask the delivery gate, not the clock: a hand-stamped bus-only row
-        # has no clock, and the clock alone reported deliverable for held mail.
-        from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
+        # The record, not the gate: the gate's own-pass never refuses your own hold.
+        from fno.agents.dispatch import BUS_ONLY_POLICY
 
-        if _delivery_policy_refusal(handle) != BUS_ONLY_POLICY:
+        entry = hold_mod.resolve_entry(handle)
+        if getattr(entry, "delivery_policy", None) != BUS_ONLY_POLICY:
             print(f"{handle}: no hold - mail delivers normally")
+            return
+        clock = hold_mod.read_any(handle)
+        if clock is not None and clock.source == hold_mod.CONVERSATION_SOURCE:
+            print(
+                f"{handle}: holding mail, machine-armed while you talk "
+                f"({hold_mod.clock_description(clock)}), lifts about 2 min after your answer"
+            )
             return
         label = hold_mod.dnd_label(handle)
         if label == "held":
@@ -4697,7 +4696,6 @@ def cmd_hold(
                 "delivery gate - run `fno agents mail hold --off` to clear it"
             )
         else:
-            clock = hold_mod.read_any(handle)
             print(
                 f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
                 f"lifts in {label.lstrip('~')}"

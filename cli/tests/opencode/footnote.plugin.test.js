@@ -54,6 +54,7 @@ function stubBin(script) {
 }
 
 const GATE_STUB = `echo "ARGS: $*" >> "$FNO_STUB_LOG"
+if [ "$1" = "hook" ]; then printf '{}'; exit 0; fi
 if [ "$1" = "loop-check" ]; then cat "$5" >> "$FNO_STUB_LOG" 2>/dev/null; fi
 printf '{"decision":"block","termination_reason":null,"continuation":"/target --resume"}'`
 

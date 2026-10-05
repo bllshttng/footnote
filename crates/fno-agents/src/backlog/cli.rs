@@ -151,11 +151,10 @@ pub fn run(args: &[String]) -> i32 {
         // shape still carries Python-owned legs (evidence, identity,
         // reader walk, delivery) and rides the forward until its port.
         "note" if leads_with_engine_door(resolved.tail) => super::note_cli::run_note(resolved.tail),
-        // The comment thread: `note comment <id> ...` routes here before the
-        // generic note arm, so the thread owns its word.
-        "note" if resolved.tail.first().map(String::as_str) == Some("comment") => {
-            super::note_cli::run_comment(&resolved.tail[1..])
-        }
+        // The comment thread: the catalog folds `note comment` to the
+        // legacy word `comment` (commands.rs), so this arm, not a `note`
+        // tail probe, is what the receipts' own suggested command rides.
+        "comment" => super::note_cli::run_comment(resolved.tail),
         // The folded patch door: the same leading-`--graph` contract the
         // lifecycle door speaks. The full public flag surface stays
         // Python-owned until its port.
@@ -339,6 +338,17 @@ mod tests {
         assert_eq!(routed(&["get", "node", "x-abc"]), Ok("get"));
         assert_eq!(routed(&["note", "state", "x"]), Ok("note"));
         assert_eq!(routed(&["update", "rank", "x"]), Ok("rank"));
+    }
+
+    #[test]
+    fn note_comment_resolves_to_the_comment_arm() {
+        // The catalog consumes `comment` as the group action, so the legacy
+        // word the router sees is `comment` - the receipts' own suggested
+        // command (`fno backlog note comment <id> --list`) rides this arm.
+        assert_eq!(
+            routed(&["note", "comment", "x-abc", "--list"]),
+            Ok("comment")
+        );
     }
 
     #[test]

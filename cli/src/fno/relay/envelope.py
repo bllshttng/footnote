@@ -11,31 +11,27 @@ bus fields:
 - ``from``/``to`` -> bus ``from_``/``to`` (addresses; ``from_session`` is the id).
 - ``hop_count`` + ``ttl`` -> bus ``meta`` (cycle termination; relay-private).
 - ``provenance``  -> derived from ``from_session`` / ``from_harness`` /
-  ``from_model`` and serialized to the ``<fno_mail ...>`` wire tag below.
+  ``from_model`` and rendered into the delivered-header wire line below.
 
-Provenance wire format (node : the relay is the SINGLE-LINE transport
-variant of the unified ``<fno_mail>`` a2a envelope, :mod:`fno.mail.envelope`)::
+Provenance wire format: the relay rides the ONE delivered shape, the
+delivered-mail header (:func:`fno.mail.envelope.wrap_fno_mail`) collapsed to a
+single physical line with the transcript newline glyph::
 
-    <fno_mail from="<short-sid>"> <message>
+    `@<sender> · <fmail-id> · <subject>` ⏎ <message>
 
-A single-line attribute tag prefixing the (single-lined) body, NO closing tag:
-the PTY Enter submits on newline so the turn boundary is the delimiter, so this
-hop cannot carry the paired multiline ``<fno_mail>...</fno_mail>`` form the
-control.sock inject uses. The wire shape is FROZEN (the Rust door reads it as
-the cross-session framing), so :func:`frame` builds the line itself; the
-delivered-mail header does not ride the wire. The sender self-stamps -- the
-framed line is self-describing with no registry dependency.
+The PTY Enter submits on newline so the turn boundary is the delimiter; the
+glyph keeps the header framing on one line, and the Rust door reads it as the
+header framing. The renderer refuses a body carrying its own tag or a
+header-shaped line, and the sender self-stamps (an unknown session renders as
+its own address, no registry dependency).
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from fno.bus.log import Envelope
-from fno.mail.envelope import (
-    ForgedEnvelopeError,
-    contains_fno_mail_tag,
-    harness_for_provider,
-)
+from fno.inbox.store import generate_msg_id
+from fno.mail.envelope import ForgedEnvelopeError, harness_for_provider, wrap_fno_mail
 
 # Relay-private meta keys on the bus envelope.
 META_HOP = "hop_count"
@@ -47,20 +43,18 @@ DEFAULT_TTL = 8
 
 RELAY_KIND = "relay"
 
+# The transcript one-line body separator (the Rust door's NEWLINE_GLYPH).
+NEWLINE_GLYPH = " ⏎ "
+
 
 def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
-    """Serialize one peer message to the single-line ``<fno_mail ...>`` wire
-    line. The body is collapsed to one line (Enter submits the TUI turn, so an
-    embedded newline would submit early). Raises ForgedEnvelopeError on a body
-    holding a tag, or a from_session that could forge the attr section. This is
-    the single producer every delivery vehicle's framed line derives from: the
-    daemon RPC and the mail-inject binary each take an already-framed string,
-    so no downstream check alone covers a peer-controlled body or attribute."""
-    if contains_fno_mail_tag(body):
-        raise ForgedEnvelopeError(
-            "relay body contains an <fno_mail> tag. The single-line envelope "
-            "frames peer mail; a body cannot contain one."
-        )
+    """Serialize one peer message to the single-line delivered-header wire
+    line (header, glyph, body). The body is collapsed to one line (Enter
+    submits the TUI turn, so an embedded newline would submit early). Raises
+    ForgedEnvelopeError on a body holding a tag or a header-shaped line (the
+    Rust renderer refuses both), or a from_session that could forge the sender
+    field. The daemon RPC and the mail-inject binary each take an
+    already-framed string from this single producer."""
     for name, value in (("from_session", from_session), ("harness", harness)):
         if value is None:
             continue
@@ -69,14 +63,19 @@ def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
                 f"relay {name} cannot hold a quote, angle bracket or backtick"
             )
     one_line = " ".join(body.split())
-    # The wire line is FROZEN (the Rust door's cross-session framing).
-    harness_attr = "" if harness is None else f' harness="{harness_for_provider(harness)}"'
-    return f'<fno_mail from="{from_session}"{harness_attr}> {one_line}'
+    rendered = wrap_fno_mail(
+        one_line,
+        from_=from_session,
+        harness=None if harness is None else harness_for_provider(harness),
+        id=generate_msg_id(),
+    )
+    return rendered.replace("\n", NEWLINE_GLYPH)
 
 
 def parse(line: str) -> Optional[dict]:
-    """Parse a wire line into ``{from_session, body}``; ``None`` when unframed
-    (the caller refuses an unframed cross-provider injection, AC5-FR)."""
+    """Parse a legacy ``<fno_mail ...>`` wire line into ``{from_session,
+    body}``; ``None`` when unframed or when the line rides the header form
+    (the Rust door classifies that one directly)."""
     from fno.mail.envelope import mail_shape
 
     parsed = mail_shape([line])[0]["relay_parse"]

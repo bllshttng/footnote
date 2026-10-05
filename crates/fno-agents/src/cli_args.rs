@@ -108,6 +108,14 @@ pub struct ReviewSummaryArgs {
     /// Read observer items as JSON on stdin and print their review evidence as JSON
     #[arg(long)]
     pub evidence: bool,
+    /// The invocation flags as one JSON array of strings; --declared-round reads them
+    #[arg(long, value_name = "JSON", requires = "declared_round")]
+    pub flags: Option<String>,
+    /// Machine read: with --flags, print {"declared_round": N} when the
+    /// invocation carried --verify-fixes, naming the round the verify
+    /// verifies; print nothing for any other flag set
+    #[arg(long, requires = "flags")]
+    pub declared_round: bool,
 }
 
 /// The spawn head's axis flags, parsed once and consumed by both the client's
@@ -142,7 +150,7 @@ pub struct SpawnAxes {
     /// Per-spawn account selection
     #[arg(long)]
     pub account: Option<String>,
-    /// Session substrate (pane | thread | headless; bg is a deprecated alias)
+    /// Session substrate (pane | thread | headless)
     #[arg(long)]
     pub substrate: Option<String>,
 }
@@ -389,6 +397,30 @@ mod tests {
                 "a partial triplet is a parse failure (the caller stays silent)"
             );
         }
+        // The declared-round mode is paired: either half alone is a parse
+        // failure, so a mode with no input flags can never stamp silently.
+        let paired = ReviewSummaryArgs::try_parse_from([
+            "--declared-round",
+            "--flags",
+            r#"["--verify-fixes"]"#,
+            "--branch",
+            "b",
+            "--head",
+            "abc1234",
+        ])
+        .expect("the paired mode parses");
+        assert!(paired.declared_round);
+        assert_eq!(paired.flags.as_deref(), Some(r#"["--verify-fixes"]"#));
+        assert!(ReviewSummaryArgs::try_parse_from(["--declared-round"]).is_err());
+        assert!(ReviewSummaryArgs::try_parse_from([
+            "--flags",
+            r#"["--verify-fixes"]"#,
+            "--branch",
+            "b",
+            "--head",
+            "abc1234"
+        ])
+        .is_err());
     }
 
     #[test]

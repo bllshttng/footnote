@@ -20,6 +20,7 @@ pub mod decisions_cli;
 pub mod done_evidence;
 pub(crate) mod drift_emit;
 pub(crate) mod drift_scan;
+pub mod edges;
 pub mod encounters;
 pub mod entities;
 pub mod epic_cap;
@@ -73,8 +74,8 @@ use std::time::Duration;
 /// Schema 4 (see schema_v4.rs) is the shape every table is born in.
 pub const SCHEMA_VERSION: &str = "4";
 const SCHEMA_VERSION_NUMBER: u32 = 4;
-const OPEN_SETUP_VERSION: &str = "1";
-const OPEN_SETUP_VERSION_NUMBER: u32 = 1;
+const OPEN_SETUP_VERSION: &str = "2";
+const OPEN_SETUP_VERSION_NUMBER: u32 = 2;
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -100,6 +101,7 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("harnesses", "backlog/entities.rs"),
     ("models", "backlog/entities.rs"),
     ("agent_sessions", "backlog/entities.rs"),
+    ("edges", "backlog/edges.rs"),
 ];
 
 /// The store's key-value table, with the schema-4 stamps every table has.
@@ -300,6 +302,12 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         // rows, so a healthy store pays one COUNT here and a parked store
         // folds. The DDL, migrations and one-shot imports below stay
         // setup-only.
+        //
+        // A store stamped before the identity columns landed carries no
+        // stamp gap, so the ensure path below never runs for it and only
+        // this migration moves it to the current shape; without it the first
+        // reader of agent_sessions.fno_id dies on the missing column.
+        entities::migrate_identity(&connection)?;
         import_if_needed(&mut connection)?;
         if archive_needs_import(&connection, graph)? {
             archive_import_if_needed(&mut connection, graph)?;
@@ -325,6 +333,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         .map_err(|error| error.to_string())?;
     schema_v4::migrate_if_needed(&mut connection, graph)?;
     entities::ensure_table(&connection)?;
+    entities::migrate_identity(&connection)?;
     nodes::ensure_table(&connection)?;
     sessions::ensure_table(&connection)?;
     comments::ensure_table(&connection)?;
@@ -334,6 +343,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     relations::ensure_table(&connection)?;
     costs::ensure_table(&connection)?;
     decisions::ensure_table(&connection)?;
+    edges::ensure_table(&connection)?;
     ensure_triggers(&connection)?;
     search::ensure_table(&connection)?;
     import_if_needed(&mut connection)?;
@@ -1507,6 +1517,44 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = dir.path().join(name);
         (dir, graph)
+    }
+
+    /// A store stamped before the identity columns opens: the stamped fast
+    /// path runs the identity migration, so the first reader of
+    /// agent_sessions.fno_id meets the column instead of dying on it (the
+    /// merge-refusal shape the fleet hit on stores minted before the
+    /// identity columns landed).
+    #[test]
+    fn a_stamped_store_without_identity_columns_opens_and_gains_them() {
+        let (_dir, graph) = fixture("identity-stamped.json");
+        open(&graph).unwrap();
+        let db = database_path(&graph);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS agent_sessions_fno_id;
+                 ALTER TABLE agent_sessions DROP COLUMN fno_id;
+                 ALTER TABLE agent_sessions DROP COLUMN display_name;
+                 ALTER TABLE agent_sessions DROP COLUMN links;",
+            )
+            .unwrap();
+        }
+        open(&graph).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('agent_sessions')")
+            .unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for column in ["fno_id", "display_name", "links"] {
+            assert!(
+                columns.iter().any(|name| name == column),
+                "the stamped store opened without {column}"
+            );
+        }
     }
 
     /// A first write that lands between an opener's unlocked row count and

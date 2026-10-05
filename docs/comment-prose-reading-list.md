@@ -97,7 +97,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.5x | 10 | 4 | `cli/src/fno/relay/roundtrip.py:90` | `_frame` |
 | 2.5x | 15 | 6 | `cli/src/fno/review/cache.py:43` | `cache_key` |
 | 2.5x | 20 | 8 | `cli/src/fno/review/orchestrator.py:112` | `_strip_frontmatter` |
-| 2.5x | 10 | 4 | `cli/src/fno/setup/emit_shell.py:31` | `_home_relative` |
 | 2.5x | 10 | 4 | `cli/src/fno/setup/recommended_rules.py:27` | `default_rules_source` |
 | 2.45x | 27 | 11 | `cli/src/fno/agents/harness_map.py:179` | `normalize_command` |
 | 2.44x | 44 | 18 | `cli/src/fno/graph/cli.py:6491` | `_cascade_close_contained` |

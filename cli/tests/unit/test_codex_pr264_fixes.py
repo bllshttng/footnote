@@ -1,13 +1,12 @@
-"""Tests for Codex PR #264 round 3 fixes (findings A, B, C, D).
+"""Tests for Codex PR #264 round 3 fixes (findings B, D).
 
-Finding A: paths.sh self-sets REPO_ROOT so sourcing under set -u doesn't crash.
+Finding A's paths.sh tests moved to Rust with the emitter
+(crates/fno-agents/src/paths_cli.rs, verify port).
 Finding B: dead-line regression in health_monitor.py and collision.py; fail-open.
-Finding C: shell-stub regenerates from current settings, not static snapshot.
 Finding D: plain-relative predicate in paths.py rejects env vars anywhere.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Generator
 
@@ -23,89 +22,7 @@ import pytest
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    from fno import config as config_mod
-    import fno.paths as paths_mod
     yield
-def _set_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str) -> None:
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text(content, encoding="utf-8")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-    # The declaration key is unchanged by a content rewrite; drop the entry.
-    from fno.config import _load_settings_at
-
-    _load_settings_at.cache_clear()
-
-
-# ===========================================================================
-# Finding A: paths.sh self-sets REPO_ROOT under set -u
-# ===========================================================================
-
-
-def test_paths_sh_sourceable_without_repo_root_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-HP: paths.sh can be sourced under 'set -u' without REPO_ROOT pre-set.
-
-    The generated stub must define REPO_ROOT itself (via git or pwd fallback)
-    before using it in PLANS_DIR / INBOX_DIR export lines.
-    """
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    paths_file = tmp_path / "paths.sh"
-    paths_file.write_text(stub, encoding="utf-8")
-
-    # Source under set -u WITHOUT pre-setting REPO_ROOT - must not crash.
-    result = subprocess.run(
-        ["bash", "-c", f'set -u; source {paths_file} && echo "OK STATE_DIR=$STATE_DIR PLANS_DIR=$PLANS_DIR"'],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin:/usr/local/bin"},
-    )
-    assert result.returncode == 0, (
-        f"paths.sh crashed under set -u without REPO_ROOT:\n"
-        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-    )
-    assert "OK" in result.stdout, f"Expected OK in output, got: {result.stdout!r}"
-    assert "STATE_DIR=" in result.stdout, f"STATE_DIR not in output: {result.stdout!r}"
-    assert "PLANS_DIR=" in result.stdout, f"PLANS_DIR not in output: {result.stdout!r}"
-
-
-def test_paths_sh_repo_root_self_set_line_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-HP: Generated stub contains REPO_ROOT self-set line before any $REPO_ROOT usage."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.setup.emit_shell import emit_paths_sh
-
-    stub = emit_paths_sh()
-    lines = stub.splitlines()
-
-    # Find the first line that uses $REPO_ROOT
-    first_use_idx = next(
-        (i for i, line in enumerate(lines) if "$REPO_ROOT" in line and "REPO_ROOT=" not in line),
-        None,
-    )
-    # Find the line that defines REPO_ROOT
-    repo_root_def_idx = next(
-        (i for i, line in enumerate(lines) if "REPO_ROOT=" in line and "REPO_ROOT:-" in line),
-        None,
-    )
-
-    assert repo_root_def_idx is not None, (
-        "Generated paths.sh must contain a REPO_ROOT self-set line "
-        "(e.g. REPO_ROOT=\"${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\")"
-        f"\nStub:\n{stub}"
-    )
-    if first_use_idx is not None:
-        assert repo_root_def_idx < first_use_idx, (
-            f"REPO_ROOT self-set (line {repo_root_def_idx}) must appear BEFORE "
-            f"first $REPO_ROOT usage (line {first_use_idx})"
-        )
 
 
 # ===========================================================================
@@ -124,8 +41,6 @@ def test_health_load_config_failsopen_on_invalid_settings(
     load_config must catch that and fall back to defaults.
     """
     from fno.health_monitor import load_config, DEFAULT_CONFIG
-    from fno import config as config_mod
-    import fno.paths as paths_mod
 
     # Write an invalid settings.yaml - glob char in state_dir fails Pydantic validation
     bad_settings = tmp_path / "bad-settings.yaml"
@@ -179,8 +94,6 @@ def test_collision_load_thresholds_failsopen_on_invalid_settings(
     it raises ValidationError. _load_thresholds must catch that and return defaults.
     """
     from fno.graph.collision import _load_thresholds, _default_thresholds_loaded
-    from fno import config as config_mod
-    import fno.paths as paths_mod
 
     # Write an invalid settings.yaml - glob char in state_dir fails Pydantic validation
     bad_settings = tmp_path / "bad-collision-settings.yaml"
@@ -213,74 +126,3 @@ def test_collision_load_thresholds_no_dead_assignment(tmp_path: Path) -> None:
     assert 'Path("~/.fno/settings.yaml").expanduser()' not in src, (
         "Dead assignment in _load_thresholds must be removed"
     )
-
-
-# ===========================================================================
-# Finding C: shell-stub regenerates from current settings
-# ===========================================================================
-
-
-def test_shell_stub_regenerates_per_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC3-HP (Finding C): shell_stub() generates a fresh stub and returns its path.
-
-    Two calls with DIFFERENT settings must produce files with different content
-    (the settings change is reflected in the generated stub).
-    """
-    # First call: default settings
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.paths_cli import shell_stub as _  # noqa: just ensure importable
-    from typer.testing import CliRunner
-    from fno.cli import app
-
-    runner = CliRunner()
-
-    result1 = runner.invoke(
-        app,
-        ["config", "paths", "shell-stub"],
-        env={"FNO_REPO_ROOT": str(tmp_path), "COLUMNS": "240", "NO_COLOR": "1"},
-        catch_exceptions=False,
-    )
-    assert result1.exit_code == 0, f"shell-stub failed: {result1.output}"
-    path1 = result1.output.strip()
-    assert path1, "shell-stub must print a path"
-
-    # Change settings - custom plans_dir - then call again
-    from fno import config as config_mod
-    import fno.paths as paths_mod
-
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/my-custom-plans'\n",
-    )
-
-    result2 = runner.invoke(
-        app,
-        ["config", "paths", "shell-stub"],
-        env={"FNO_REPO_ROOT": str(tmp_path), "COLUMNS": "240", "NO_COLOR": "1"},
-        catch_exceptions=False,
-    )
-    assert result2.exit_code == 0, f"shell-stub failed second call: {result2.output}"
-    path2 = result2.output.strip()
-    assert path2, "shell-stub must print a path on second call"
-
-    # The path returned must be a readable file
-    assert Path(path1).exists(), f"shell-stub path1 must be a readable file: {path1}"
-    assert Path(path2).exists(), f"shell-stub path2 must be a readable file: {path2}"
-
-    # Content must differ because settings changed
-    content1 = Path(path1).read_text(encoding="utf-8")
-    content2 = Path(path2).read_text(encoding="utf-8")
-    assert content1 != content2, (
-        "shell-stub must regenerate from current settings. "
-        "Two calls with different settings must produce different files.\n"
-        f"path1 content:\n{content1}\npath2 content:\n{content2}"
-    )
-    assert "my-custom-plans" in content2, (
-        f"Second stub must reflect custom plans_dir, got:\n{content2}"
-    )
-
-

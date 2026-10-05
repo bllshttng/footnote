@@ -40,6 +40,63 @@ fn count_type(store: &Path, event_type: &str) -> i64 {
 }
 
 #[test]
+fn a_cause_stores_reads_back_and_migrates_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    let envelope = json!({
+        "ts": "2026-10-04T00:00:00Z",
+        "type": "agent_spawned",
+        "source": "daemon",
+        "data": {"caused_by": "evt:parent", "session_id": "s-1"},
+    })
+    .to_string();
+    let receipt = append_envelope(&journal, &envelope, None).unwrap();
+    assert!(receipt.inserted);
+    let caused: Option<String> = open_read(&store_path(&journal))
+        .unwrap()
+        .query_row(
+            "SELECT caused_by FROM events WHERE event_id = ?1",
+            params![receipt.event_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(caused.as_deref(), Some("evt:parent"));
+    // An envelope without a cause stores NULL, never an empty string.
+    let plain = append_envelope(
+        &journal,
+        &checkin("2026-10-04T00:00:01Z", "x", "c").to_string(),
+        None,
+    )
+    .unwrap();
+    let caused: Option<String> = open_read(&store_path(&journal))
+        .unwrap()
+        .query_row(
+            "SELECT caused_by FROM events WHERE event_id = ?1",
+            params![plain.event_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(caused.is_none());
+    // A store created before the column existed gains it in place.
+    let store = store_path(&journal);
+    {
+        let conn = open_store(&store).unwrap();
+        conn.execute_batch("ALTER TABLE events DROP COLUMN caused_by")
+            .unwrap();
+    }
+    let mut conn = rusqlite::Connection::open(&store).unwrap();
+    ensure_schema(&mut conn, &store).unwrap();
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'caused_by'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has, 1);
+}
+
+#[test]
 fn store_path_strips_generation_suffix() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
@@ -507,7 +564,7 @@ fn append_envelope_commits_and_reads_back() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
     let envelope = json!({"ts": "2026-09-17T12:00:00Z", "type": "review_attestation",
-        "source": "reviewer", "data": {"session_id": "s1", "node": "x-1",
+        "source": "hook", "data": {"session_id": "s1", "reviewer": "r1", "node": "x-1",
         "pr": 2170, "head_sha": "abc", "repo": "o/r", "verdict": "pass"}})
     .to_string();
     let receipt = append_envelope(&live, &envelope, None).unwrap();
@@ -654,15 +711,27 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
 fn append_requires_type_source_data_object() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    for bad in [
-        r#"{"ts": "2026-09-17T12:00:00Z", "source": "s", "data": {}}"#,
-        r#"{"ts": "2026-09-17T12:00:00Z", "type": "", "source": "s", "data": {}}"#,
-        r#"{"ts": "2026-09-17T12:00:00Z", "type": "t", "data": {}}"#,
-        r#"{"ts": "2026-09-17T12:00:00Z", "type": "t", "source": "s", "data": [1]}"#,
-        "[1,2]",
+    for (bad, needle) in [
+        (
+            r#"{"ts": "2026-09-17T12:00:00Z", "source": "s", "data": {}}"#,
+            "missing required field: type",
+        ),
+        (
+            r#"{"ts": "2026-09-17T12:00:00Z", "type": "", "source": "hook", "data": {}}"#,
+            "unknown event type:",
+        ),
+        (
+            r#"{"ts": "2026-09-17T12:00:00Z", "type": "t", "data": {}}"#,
+            "missing required field: source",
+        ),
+        (
+            r#"{"ts": "2026-09-17T12:00:00Z", "type": "claim_released", "source": "hook", "data": [1]}"#,
+            "event data must be an object",
+        ),
+        ("[1,2]", "envelope is not a JSON object"),
     ] {
         let err = append_envelope(&live, bad, None).unwrap_err();
-        assert!(err.contains("envelope"), "{bad}: {err}");
+        assert!(err.contains(needle), "{bad}: {err}");
     }
     assert!(
         !store_path(&live).exists(),
@@ -676,8 +745,8 @@ fn query_filters_narrow_and_identity_columns_match() {
     let live = dir.path().join("events.jsonl");
     let mk = |node: &str, verdict: &str| {
         json!({"ts": "2026-09-17T12:00:00Z", "type": "review_attestation",
-            "source": "reviewer", "data": {"node": node, "head_sha": "h1",
-            "verdict": verdict}})
+            "source": "hook", "data": {"reviewer": "r1", "session_id": "s1",
+            "node": node, "head_sha": "h1", "verdict": verdict}})
         .to_string()
     };
     append_envelope(&live, &mk("x-1", "pass"), None).unwrap();

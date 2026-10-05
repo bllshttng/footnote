@@ -1297,6 +1297,7 @@ fn assert_bash_pretooluse_dispatch_order() {
         "git-protection",
         "pipe-guard",
         "recursive-grep-guard",
+        "refusal-streak",
         "test-run-guard",
     ]
     .into_iter()

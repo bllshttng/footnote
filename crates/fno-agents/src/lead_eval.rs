@@ -817,7 +817,7 @@ pub fn run(args: &[String]) -> i32 {
             eprintln!("fno-agents intel --windows: transcript has no first cwd row");
             return 3;
         };
-        let ceiling = match crate::lead_verdict_inputs::compaction_ceiling(&cwd) {
+        let ceiling = match crate::lead_verdict_inputs::compaction_ceiling_for(&cwd, harness) {
             Ok(ceiling) => ceiling,
             Err(error) => {
                 eprintln!("fno-agents intel --windows: {error}");

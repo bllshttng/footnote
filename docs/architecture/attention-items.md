@@ -35,6 +35,8 @@ The fields ride a question file handed to `--question-file`:
 ```markdown
 ---
 recommend: 1
+answers_ask: s-1a2b3c4d
+class: irreversible
 ---
 Is a net-zero Python repair legal with no grant?
 
@@ -75,13 +77,17 @@ The first line after the frontmatter is the question. Each numbered option carri
 fno inbox outstanding ask --question-file q.md --node <node-id> --subject <subject> --blocks <blocked-node-id>
 ```
 
-When options are present, `--node` is required: an ask is one line plus a node pointer. The port refuses a question with no what, why, two options, or recommendation with its reason:
+When options are present, `--node` is required: an ask is one line plus a node pointer. The port refuses an incomplete question and names each missing section. The template above carries every section the gate reads. A half-checked question used to record with exit 0 and then never render: the mux lists only ready items.
 
 ```
-outstanding: refused: a question needs why, two options, a recommendation. Write a question file (docs/architecture/attention-items.md, "Asking with context") and pass --question-file. One action with no choice is a pin: pass --ask "<the action>".
+outstanding: refused: a question needs <the missing sections>. Write a question file (docs/architecture/attention-items.md, "Asking with context") and pass --question-file. One action with no choice is a pin: pass --ask "<the action>".
 ```
+
+Flag options (`--options a --options b`) carry no per-option next, so the door refuses them for questions and points at the question file. The fno-agents binary can be missing on a broken install. The fallback then still records the question. It prints a NOT VISIBLE line: without the readiness gate the row can land not-ready, and the mux will not show it.
 
 A reversible question that carries a recommendation is one the asker must decide itself. The port refuses it too, naming the door: record the ruling as the asking session or its king with `fno backlog decide <node> "<ruling>"`, then continue. It reaches the user only with a user-only reason in a `why_user:` frontmatter key. The four reasons are: irreversible, spends money or a credential, reaches outside the machine, or a product or taste call. The user sees a decide-it-yourself ruling only as a one-line FYI in the check-in, never as a question.
+
+The two trace keys name the hop the question answers. `answers_ask:` is the ask span id. Any other id reads as the ask mail's message id. The intake reads that row off the bus and re-derives the ask span. An unresolvable id still routes, only parentless. `class:` is one of public-surface, irreversible, money-security, law-change, gate-override, none. The intake turns `answers_ask:` into the escalate route span and stamps the question row's trace (docs/architecture/decision-record.md, "Traced decisions"). The ask span id also prints on every Approval: send as `mail-record: ask span <id>`.
 
 ## Question pages
 

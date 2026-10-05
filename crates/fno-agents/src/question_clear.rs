@@ -34,7 +34,7 @@ mod tests {
         json!({
             "ts": "2026-09-23T00:00:00Z",
             "type": "operator_question",
-            "source": "agent",
+            "source": "test",
             "data": data,
         })
     }
@@ -43,7 +43,7 @@ mod tests {
         json!({
             "ts": "2026-09-23T00:00:00Z",
             "type": "operator_question",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": qid, "question": question, "asker": asker},
         })
     }
@@ -87,7 +87,7 @@ mod tests {
     fn answered_clear_records_one_decision_and_receipts_before_delivery() {
         let tmp = tempfile::tempdir().unwrap();
         let req = request(&tmp, "q-open", Some("ship it"));
-        seed_question(&req, &ask("q-open", "which lane?", None, None));
+        seed_question(&req, &ask("q-open", "which lane?", None, Some("x-1")));
 
         let result = run_clear(&req);
 
@@ -120,6 +120,38 @@ mod tests {
                 .count(),
             1
         );
+        // AC10: the answer row IS the span: parented at the question,
+        // traced to the question's node.
+        let decision_row = project
+            .iter()
+            .find(|r| r["type"] == "operator_decision")
+            .expect("a decision row landed");
+        assert_eq!(decision_row["data"]["trace"]["parent_span_id"], "q-open");
+        assert_eq!(decision_row["data"]["trace"]["trace_id"], "x-1");
+        // A user-kind decision keeps actor_session absent: decided_by is an
+        // attested human name, never a session.
+        assert!(decision_row["data"]["trace"]["actor_session"].is_null());
+        assert_eq!(decision_row["data"]["trace"]["actor_kind"], "user");
+        // A lead authority keeps its session: the same rule populates the
+        // field from proven session identity.
+        let mut agent_req = request(&tmp, "q-open2", Some("ship it"));
+        agent_req
+            .provenance
+            .as_object_mut()
+            .expect("provenance is an object")
+            .insert("authority_source".into(), json!("crown"));
+        seed_question(
+            &agent_req,
+            &ask("q-open2", "which lane?", None, Some("x-1")),
+        );
+        let agent_result = run_clear(&agent_req);
+        assert_eq!(agent_result.exit_code, 0, "{:?}", agent_result.lines);
+        let agent_row = rows(&agent_req.journal_path, &["operator_decision"])
+            .into_iter()
+            .find(|r| r["data"]["question_id"] == "q-open2")
+            .expect("the agent decision landed");
+        assert_eq!(agent_row["data"]["trace"]["actor_kind"], "lead");
+        assert_eq!(agent_row["data"]["trace"]["actor_session"], "test-agent");
         assert_eq!(index.len(), 1);
         assert_eq!(index[0]["data"]["question_id"], "q-open");
         let decisions = graph_decisions(&req);
@@ -306,7 +338,7 @@ mod tests {
         let close = json!({
             "ts": "2026-09-23T00:02:00Z",
             "type": "operator_question_closed",
-            "source": "agent",
+            "source": "test",
             "data": {"question_id": "q-closed", "closed_by": "test-agent"},
         });
         crate::provider_cap::append_questions_row(&req.index_path, &close).unwrap();
@@ -508,7 +540,7 @@ mod tests {
                 &json!({
                     "ts": "2026-10-01T20:00:00Z",
                     "type": "operator_question",
-                    "source": "agent",
+                    "source": "test",
                     "data": {
                         "question_id": qid,
                         "question": "May PR 2911 merge?",
@@ -704,6 +736,7 @@ mod tests {
     }
 }
 use crate::backlog::api::{self, Store};
+use crate::decision_trace::{actor_kind_from_authority, Trace};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -1288,7 +1321,41 @@ fn make_decision(
     let mut decision = Map::new();
     let mut id_bytes = [0u8; 4];
     getrandom::fill(&mut id_bytes).expect("OS CSPRNG unavailable");
-    decision.insert("decision_id".into(), json!(format!("d-{}", hex(&id_bytes))));
+    let did = format!("d-{}", hex(&id_bytes));
+    decision.insert("decision_id".into(), json!(&did));
+    // The answer span: the decision row IS the span, span_id = decision_id,
+    // parented at the question it answers, traced to the question's node.
+    let actor_kind = actor_kind_from_authority(
+        req.provenance
+            .get("authority_source")
+            .and_then(Value::as_str),
+    );
+    decision.insert(
+        "trace".into(),
+        serde_json::to_value(&Trace {
+            trace_id: node.unwrap_or("none").to_string(),
+            span_id: did,
+            parent_span_id: Some(qid.to_string()),
+            // actor_session carries a canonical harness session only: a
+            // user-kind decision's decided_by is an attested human name, not
+            // a session, so the trace keeps it absent for the attended
+            // terminal (decision-record.md, "Which field a reader can
+            // trust").
+            actor_session: if actor_kind == "user" {
+                None
+            } else {
+                req.provenance
+                    .get("decided_by")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            },
+            actor_kind,
+            comms: "question",
+            recipient_session: None,
+            recipient_kind: Some("user"),
+        })
+        .unwrap_or_default(),
+    );
     decision.insert("decision".into(), json!(decision_text));
     decision.insert("subject".into(), json!(subject));
     decision.insert("question_id".into(), json!(qid));

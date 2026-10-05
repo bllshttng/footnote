@@ -211,6 +211,15 @@ pub(super) async fn mouse_pre_pass(
             continue;
         }
         if view.sideline_full && view.sideline_view == crate::view_store::SidelineView::Agents {
+            // The bell lives on the tab bar now (terminal row 0, far right),
+            // above the sideline's own rows: answer its seat before the
+            // full-surface delegation, which rejects row 0 outright.
+            if bell::button_at(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                continue;
+            }
             sideline::route_mouse(view, rep, sock_w).await?;
             continue;
         }
@@ -586,9 +595,7 @@ pub(super) async fn mouse_pre_pass(
             if rep.row == 0 {
                 // The strip row: only its words act (R15); the rest of the
                 // row is dead.
-                if bell::button_range(view, view.panel_w().saturating_sub(1) as usize)
-                    .contains(&(rep.col as usize))
-                {
+                if bell::button_range(view).contains(&(rep.col as usize)) {
                     apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
                 }
                 for (start, w, v) in view.top_row_spans() {
@@ -625,6 +632,13 @@ pub(super) async fn mouse_pre_pass(
                     && !over_chrome_row
                 {
                     view.region_owner = RegionOwner::Feed;
+                    // The footer's `↑ N new` marker acts before row
+                    // resolution: a click there jumps home, it never opens a
+                    // row underneath (no new ChromeHit variant).
+                    if view.feed_new_marker_hit(rep.row, rep.col) {
+                        view.feed_home();
+                        continue;
+                    }
                     if let Some(hit) = view.chrome_hit_feed(rep.row, rep.col) {
                         apply_hit(view, hit, sock_w).await?;
                     }

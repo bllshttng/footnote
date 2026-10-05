@@ -1218,7 +1218,6 @@ PERMISSION_MODE_HELP = (
 
 
 _VALID_SUBSTRATES = ("thread", "headless", "pane")
-_LEGACY_SUBSTRATE_ALIASES = {"bg": "thread"}
 # US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
 _DEFAULT_ALLOWED_VERBS = ("/target", "/think", "/blueprint")
 # The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
@@ -1341,9 +1340,8 @@ def resolve_dispatch(
         chosen_substrate = substrate_default(chosen_harness)
         decision.append(f"substrate=default({chosen_substrate})")
 
-    if chosen_substrate in _LEGACY_SUBSTRATE_ALIASES:
-        decision.append("substrate=deprecated-alias(bg->thread)")
-        chosen_substrate = _LEGACY_SUBSTRATE_ALIASES[chosen_substrate]
+    if chosen_substrate == "bg":
+        raise DispatchResolveError("substrate 'bg' was retired; set substrate = \"thread\"")
     if chosen_substrate not in _VALID_SUBSTRATES:
         raise DispatchResolveError(
             f"unknown substrate {chosen_substrate!r}; "
@@ -1353,8 +1351,8 @@ def resolve_dispatch(
         raise DispatchResolveError(
             f"substrate 'thread' is unsupported on harness {chosen_harness!r}: "
             f"its features.spawn state reads {spawn_state(chosen_harness)!r}, "
-            f"so fno has not built the {thread_lane(chosen_harness)} lane yet "
-            f"(bg is a deprecated alias); use 'headless'"
+            f"so fno has not built the {thread_lane(chosen_harness)} lane yet; "
+            f"use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay

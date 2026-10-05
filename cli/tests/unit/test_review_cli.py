@@ -43,7 +43,9 @@ class TestBuildEmitRecord:
         record = build_emit_record({"findings": [_finding(1)]})
         assert record["findings_blocking"] == 1
 
-    def test_object_payload_passes_dispositions_and_round_through(self) -> None:
+    def test_payload_shape_decides_what_rides_through(self) -> None:
+        """One contract, two arms: an object payload passes dispositions and
+        review_round through, a bare array carries neither."""
         record = build_emit_record(
             {
                 "findings": [_finding(1)],
@@ -57,11 +59,9 @@ class TestBuildEmitRecord:
             {"finding_key": "f1.py:1:correctness", "disposition": "fixed", "reason": "commit abc"}
         ]
         assert record["review_round"] == 2
-
-    def test_bare_array_carries_no_dispositions_or_round(self) -> None:
-        record = build_emit_record([_finding(1)])
-        assert "dispositions" not in record
-        assert "review_round" not in record
+        bare = build_emit_record([_finding(1)])
+        assert "dispositions" not in bare
+        assert "review_round" not in bare
 
     def test_malformed_disposition_refuses(self) -> None:
         with pytest.raises(RecordBuildError):
@@ -172,12 +172,11 @@ class TestClassifyReviewRoundOption:
             ["classify", "--findings-file", str(findings), "--emit-record", *extra],
         )
 
-    def test_round_stamps_the_record(self, tmp_path) -> None:
+    def test_the_flag_decides_the_round_stamp(self, tmp_path) -> None:
+        """One contract, two arms: the flag stamps, its absence does not."""
         r = self._invoke(tmp_path, [_finding(1)], "--review-round", "1")
         assert r.exit_code == 0, r.output
         assert json.loads(r.output)["review_round"] == 1
-
-    def test_flag_absent_stamps_nothing(self, tmp_path) -> None:
         r = self._invoke(tmp_path, [_finding(1)])
         assert r.exit_code == 0, r.output
         assert "review_round" not in json.loads(r.output)
@@ -325,3 +324,77 @@ class TestClassifyBranchEnv:
         assert r.exit_code == 0, r.output
         assert captured["branch"] == "feature/x-pr"
         assert calls == ["append", "release:review/pr-1"]
+
+
+class TestAttestRoundStamp:
+    """The --verify-fixes round stamp rides the lane's own emit.
+
+    The shell emitter (emit-attestation.sh) stamps review_round when the hold
+    flags carry --verify-fixes; the classify emit must carry the same stamp,
+    or a verify round reads as a fresh one and rounds_used overruns the cap.
+    The derivation lives in the Rust binary; these tests wire the plumbing.
+    """
+
+    def _invoke(self, tmp_path, monkeypatch, hold_flags, declared, **kw):
+        from typer.testing import CliRunner
+
+        from fno.review import cli as review_cli
+        from fno.review.cli import review_app
+
+        captured, calls = _mock_attest_world(monkeypatch, tmp_path)
+        seen = {}
+
+        def fake_claim_status(key):
+            return {"metadata": {"invocation_id": "ri-1", "flags": hold_flags}}
+
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status", fake_claim_status, raising=True
+        )
+
+        def fake_call(verb, args, **kw2):
+            seen.update({"verb": verb, "args": args})
+            if declared is None:
+                return "fno-agents binary not found", None
+            # The Rust rule: a round only when the flags carry --verify-fixes.
+            flags_json = args[args.index("--flags") + 1]
+            if "--verify-fixes" not in json.loads(flags_json):
+                return None, None
+            return None, {"declared_round": declared}
+
+        monkeypatch.setattr("fno.rust_binary.call_binary_json", fake_call)
+        findings = tmp_path / "findings.json"
+        findings.write_text(json.dumps([_finding(1)]), encoding="utf-8")
+        argv = ["classify", "--findings-file", str(findings), "--attest", "code-review"]
+        if kw.get("explicit_round") is not None:
+            argv += ["--review-round", str(kw["explicit_round"])]
+        r = CliRunner().invoke(review_app, argv, catch_exceptions=False)
+        return r, captured, seen
+
+    def test_hold_flags_decide_the_stamp(self, tmp_path, monkeypatch) -> None:
+        for hold_flags, declared, expect in (
+            (["--verify-fixes", "--comment"], 2, 2),
+            (["--comment"], 2, None),
+        ):
+            r, captured, _seen = self._invoke(
+                tmp_path, monkeypatch, hold_flags, declared=declared
+            )
+            assert r.exit_code == 0, r.output
+            if expect is None:
+                assert "review_round" not in captured
+            else:
+                assert captured["review_round"] == expect
+
+    def test_the_stamp_arbitrates(self, tmp_path, monkeypatch) -> None:
+        """Explicit --review-round wins; an unresolvable round stamps nothing
+        and the emit still lands (fail-open, the emitter's posture)."""
+        r, captured, _seen = self._invoke(
+            tmp_path, monkeypatch, ["--verify-fixes"], declared=2, explicit_round=5
+        )
+        assert r.exit_code == 0, r.output
+        assert captured["review_round"] == 5
+        r, captured, _seen = self._invoke(
+            tmp_path, monkeypatch, ["--verify-fixes"], declared=None
+        )
+        assert r.exit_code == 0, r.output
+        assert "review_round" not in captured
+        assert captured["verdict"] == "fail"

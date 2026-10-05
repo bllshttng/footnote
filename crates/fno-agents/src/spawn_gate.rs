@@ -31,9 +31,7 @@ use crate::spawn_gate_lanes;
 use crate::spawn_gate_lanes::{
     check_account_login, check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
 };
-use crate::spawn_gate_reservations::{
-    release_redeemed_reservation, reserved_note, reserved_receipt, RESERVATION_RULE,
-};
+use crate::spawn_gate_reservations::{release_redeemed_reservation, reserved_receipt};
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
 use std::collections::HashSet;
@@ -148,7 +146,10 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
     let mut figures: Vec<String> = Vec::new();
     let collect = |map: &serde_json::Map<String, serde_json::Value>, figures: &mut Vec<String>| {
         for (k, v) in map {
-            if matches!(k.as_str(), "status" | "reason" | "axis" | "held_on") {
+            if matches!(
+                k.as_str(),
+                "status" | "reason" | "axis" | "held_on" | "remedy"
+            ) {
                 continue;
             }
             match v {
@@ -169,14 +170,20 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
         // no breach at all.
         collect(&r.event, &mut figures);
     }
+    let remedy = rc_str("remedy").or_else(|| ev_str("remedy")).unwrap_or("");
+    let remedy = if remedy.is_empty() {
+        String::new()
+    } else {
+        format!("; remedy: {remedy}")
+    };
     if figures.is_empty() {
         format!(
-            "spawn-gate: refused on {axis} ({reason}, exit {})",
+            "spawn-gate: refused on {axis} ({reason}, exit {}){remedy}",
             r.exit_code
         )
     } else {
         format!(
-            "spawn-gate: refused on {axis} ({reason}, exit {}): {}",
+            "spawn-gate: refused on {axis} ({reason}, exit {}): {}{remedy}",
             r.exit_code,
             figures.join(", ")
         )
@@ -1629,28 +1636,10 @@ fn decide_gate(
                 ) {
                     Ok(reading) => {
                         let live = reading.count;
-                        for w in &lane_warnings {
-                            eprintln!("{w}");
-                        }
                         if live >= cap_value {
                             guard.release_gate_mutex();
                             let parked_names: Vec<String> =
                                 reading.parked.iter().map(|(n, _)| n.clone()).collect();
-                            let wait_note = if reading.parked.is_empty() {
-                                String::new()
-                            } else {
-                                format!(
-                                    "; {} waiting on the operator, not counted",
-                                    parked_names.len()
-                                )
-                            };
-                            let reserved_note = reserved_note(&reading.reserved);
-                            eprintln!(
-                                "spawn-gate: provider {}, cap {cap_value}, current count \
-                                 {live}{wait_note}{reserved_note}; refusing; no worker launched. \
-                                 {RESERVATION_RULE}",
-                                route_provider.unwrap_or("unknown")
-                            );
                             return Err(Refusal::with_receipt(
                                 EXIT_PROVIDER_CAP,
                                 serde_json::json!({
@@ -1662,15 +1651,13 @@ fn decide_gate(
                                     "current_count": live,
                                     "parked": parked_names,
                                     "reserved": reserved_receipt(&reading.reserved),
+                                    "remedy": "read fno agents gate-status",
                                 }),
                             ));
                         }
                     }
                     Err(fault) => {
                         guard.release_gate_mutex();
-                        for w in &lane_warnings {
-                            eprintln!("{w}");
-                        }
                         return Err(gate_fault_refusal(
                             route_provider,
                             "gate_mutex_unavailable",
@@ -3292,10 +3279,14 @@ MemAvailable:    8000000 kB\n";
             .err()
             .expect("armed brake refuses");
         assert_eq!(refusal.exit_code, EXIT_FLEET_STOP);
-        assert!(
-            verdict_line(&refusal).contains("machine-runaway"),
-            "{refusal:?}"
-        );
+        // One line, and the hold's numbers (seconds left) ride the verdict
+        // detail; the prose line is gone.
+        let verdict = verdict_line(&refusal);
+        assert!(!verdict.contains('\n'), "{verdict}");
+        assert!(verdict.contains("machine-runaway"), "{verdict}");
+        // The fixture arms the brake for 600s; two clock reads can straddle a
+        // second boundary, so assert the shape, not the exact count.
+        assert!(verdict.contains("s left"), "{verdict}");
         // No worker identity, no hold: the default door admits.
         std::env::remove_var("FNO_AGENT_SELF");
         assert!(
@@ -3331,6 +3322,7 @@ MemAvailable:    8000000 kB\n";
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let td = tempfile::TempDir::new().unwrap();
         let saved = std::env::var_os("FNO_AGENTS_HOME");
         std::env::set_var("FNO_AGENTS_HOME", td.path());

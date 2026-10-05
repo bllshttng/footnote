@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 import subprocess
 from typing import Optional
 
@@ -93,29 +94,6 @@ def _render_in_rust(payload: dict) -> str:
     return rendered
 
 
-# A quote closes the attribute early; an angle bracket forges a tag boundary
-# once the value is rendered inline. A handle, model id, node id, or msg id
-# never legitimately needs either, so a sender who supplies one (e.g. an
-# attacker-controlled `--from-name`) is refused rather than escaped: escaping
-# would silently change the string a reader later matches against.
-def fno_mail_open(
-    *,
-    from_: str,
-    harness: Optional[str] = None,
-    from_rank: Optional[str] = None,
-    to: Optional[str] = None,
-    to_rank: Optional[str] = None,
-    id: Optional[str] = None,
-    reply_to: Optional[str] = None,
-    node: Optional[str] = None,
-    origin: Optional[str] = None,
-) -> str:
-    """Render one open envelope tag through the Rust owner."""
-    payload = locals().copy()
-    payload["mode"], payload["from"] = "tag", payload.pop("from_")
-    return _render_in_rust(payload)
-
-
 # The boundary rule lives in the Rust classifier; case-insensitive (codex P1).
 def contains_fno_mail_tag(text: str) -> bool:
     """True if ``text`` holds an ``<fno_mail`` open or ``</fno_mail>`` close
@@ -155,4 +133,11 @@ def wrap_fno_mail(
     payload = locals().copy()
     mode = "held-release" if payload.pop("held_release") else "wrap"
     payload["mode"], payload["from"] = mode, payload.pop("from_")
+    if mode == "wrap":
+        # The front's peeled --subject rides the render too, so the
+        # delivered header's third field is the sender's subject, not the
+        # body's first sentence. The peel already validated the shape.
+        subject = (os.environ.get("FNO_MAIL_SUBJECT") or "").strip()
+        if subject:
+            payload["subject"] = subject
     return _render_in_rust(payload)

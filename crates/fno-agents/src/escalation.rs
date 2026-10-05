@@ -71,6 +71,9 @@ pub struct Escalation {
     /// reaches the user (irreversible, money or credential, outside the
     /// machine, product or taste). Empty reads as absent.
     pub why_user: String,
+    /// The ask span this question routes (`answers_ask:` frontmatter), the
+    /// pointer that links the escalate route span to the ask it answers.
+    pub answers_ask: Option<String>,
 }
 
 /// The project's escalations directory: `<vault>/internal/<project>/escalations`
@@ -135,6 +138,7 @@ pub fn parse(text: &str) -> Escalation {
                 "recommend" => esc.recommend = value.parse::<usize>().ok(),
                 "on_silence" => esc.on_silence = value.to_string(),
                 "why_user" | "why-user" => esc.why_user = value.to_string(),
+                "answers_ask" => esc.answers_ask = (!value.is_empty()).then(|| value.to_string()),
                 _ => {}
             }
         }

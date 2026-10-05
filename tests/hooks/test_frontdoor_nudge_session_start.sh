@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 # tests/hooks/test_frontdoor_nudge_session_start.sh
 #
-# Verifies hooks/frontdoor-nudge-session-start.sh (x-40c4): the SessionStart
-# reminder to install the Rust `fno` front door. It must go SILENT when `fno` on
-# PATH answers a mux-only verb (the Rust front door is active), and print the
-# one-line reminder when `fno` is absent or is the Python `fno-py` (no `mux`
-# subcommand).
+# Verifies hooks/frontdoor-nudge-session-start.sh (x-40c4, consent rewritten by
+# x-0143): the SessionStart notice about the missing `fno` front door. It must
+# go SILENT when `fno` on PATH answers a mux-only verb (the Rust front door is
+# active), print the one-line PATH hint for a proven door off PATH, and for a
+# genuinely missing door print the consent notice - what the install does, and
+# the one command that runs it - while starting NOTHING: no installer child,
+# no data dir, no file under the tool bin (x-0143, user ruling 2026-10-01: we
+# always tell people before we install anything on their machine).
 #
-# Cases 5-9 cover the installer launch: with CLAUDE_PLUGIN_DATA set, the hook
-# starts .claude-plugin/postinstall.sh detached, once per plugin version.
-#
-# Cases 3b/3c cover the known-install-dir resolution (gap audit blocker 1,
-# 2026-10-02): a fresh background session's PATH lacks ~/.cargo/bin, so `fno`
-# installed there must be FOUND (probe by absolute path: door proven -> a
-# named hint, never the installer) rather than read as missing.
+# Cases 1-4 cover the front-door probe (silent / hint). Cases 5-9 cover the
+# consent notice per machine shape: no uv, uv present, fno-py present, no
+# installer in the tree, and the XDG fallback with no CLAUDE_PLUGIN_DATA.
 #
 # Isolation: a FAKE `fno` is placed first on PATH per case, so no real mux is
 # probed. HOME points at an empty temp dir for every case, so the hook's
 # known-install-dir probe never resolves the caller's real `~/.cargo/bin/fno`.
-# The installer cases run a copy of the hook under a fake plugin root
-# whose postinstall.sh is a stub, so the real installer never runs.
+# The notice cases run a copy of the hook under a fake plugin root whose
+# postinstall.sh is a stub that touches a marker; the hook must never run it,
+# so any marker at all is a failure.
 # Run: bash tests/hooks/test_frontdoor_nudge_session_start.sh
 
 set -uo pipefail
-# An inherited value would make cases 1-4 start the REAL installer.
+# An inherited value would point the fallback case at the real plugin data dir.
 unset CLAUDE_PLUGIN_DATA
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,16 +61,7 @@ out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
 [[ -z "$out" ]] || fail "active front door must be silent, got: $out"
 pass "active front door -> silent"
 
-# The reminder cases run the REAL hook in place, so the XDG fallback dir must be
-# pre-stamped to this tree's plugin version: the hook then takes the already-ran
-# path and prints the reminder without ever starting the real installer into the
-# caller's HOME.
-REAL_VERSION="$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$REPO_ROOT_REAL/.claude-plugin/plugin.json" | head -1)"
-REMIND_XDG="$WORK/xdg-remind"
-mkdir -p "$REMIND_XDG/fno/plugin-install"
-printf '%s' "$REAL_VERSION" > "$REMIND_XDG/fno/plugin-install/postinstall.version"
-
-# --- Case 2: fno-py only (fno exists but has no `mux` verb) -> REMIND ----------
+# --- Case 2: fno-py only (fno exists but has no `mux` verb) -> CONSENT NOTICE --
 cat > "$FAKEBIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 # Mimics the Python `fno-py`: any mux verb is "No such command".
@@ -78,16 +69,16 @@ echo "No such command 'mux'." >&2
 exit 2
 FAKE
 chmod +x "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
-grep -q "Install the .fno. front door" <<<"$out" || fail "fno-py-only must remind, got: $out"
-grep -q "cargo install fno" <<<"$out" || fail "reminder must name the fix, got: $out"
-pass "fno-py only -> reminder with fix"
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
+grep -q "Ask the user first" <<<"$out" || fail "fno-py-only must ask before installing, got: $out"
+grep -q "fno-py" <<<"$out" || fail "notice must name the Python CLI that already works, got: $out"
+pass "fno-py only -> consent notice naming the Python CLI"
 
-# --- Case 3: no `fno` on PATH at all -> REMIND --------------------------------
+# --- Case 3: no `fno` on PATH at all -> CONSENT NOTICE ------------------------
 rm -f "$FAKEBIN/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
-grep -q "Install the .fno. front door" <<<"$out" || fail "missing fno must remind, got: $out"
-pass "no fno on PATH -> reminder"
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
+grep -q "Ask the user first" <<<"$out" || fail "missing fno must ask before installing, got: $out"
+pass "no fno on PATH -> consent notice"
 
 # --- Case 3b: fno only in ~/.local/bin, proving the door -> HINT, no installer -
 # The gap-audit blocker: a fresh background session's PATH lacks the install
@@ -100,12 +91,12 @@ cat > "$EMPTY_HOME/.local/bin/fno" <<'FAKE'
 exit 0
 FAKE
 chmod +x "$EMPTY_HOME/.local/bin/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
 grep -q "installed, just not on this session's PATH" <<<"$out" || fail "known-dir door must print the PATH hint, got: $out"
 grep -qF "$EMPTY_HOME/.local/bin/fno" <<<"$out" || fail "hint must name the resolved path, got: $out"
 pass "fno in ~/.local/bin proving the door -> hint naming the path"
 
-# --- Case 3c: fno in ~/.cargo/bin but NOT the door -> falls through to REMIND --
+# --- Case 3c: fno in ~/.cargo/bin but NOT the door -> falls through to NOTICE --
 rm -rf "$EMPTY_HOME/.local"
 mkdir -p "$EMPTY_HOME/.cargo/bin"
 cat > "$EMPTY_HOME/.cargo/bin/fno" <<'FAKE'
@@ -114,16 +105,16 @@ echo "No such command 'mux'." >&2
 exit 2
 FAKE
 chmod +x "$EMPTY_HOME/.cargo/bin/fno"
-out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$REMIND_XDG" bash "$HOOK" 2>/dev/null)
-grep -q "Install the .fno. front door" <<<"$out" || fail "known-dir non-door fno must fall through to the reminder, got: $out"
-pass "fno in ~/.cargo/bin without a mux verb -> reminder"
+out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" bash "$HOOK" 2>/dev/null)
+grep -q "Ask the user first" <<<"$out" || fail "known-dir non-door fno must fall through to the notice, got: $out"
+pass "fno in ~/.cargo/bin without a mux verb -> consent notice"
 rm -rf "$EMPTY_HOME/.cargo"
 
 # --- Case 4: wedged mux socket -> BOUNDED and SILENT --------------------------
 # This hook probes a socket at SessionStart, so an unbounded probe stalls every
 # session start. On a host with no coreutils timeout(1) it had no bound at all.
 # A wedged socket also PROVES the Rust front door is present (fno-py has no
-# `mux` verb and fails fast), so the correct behavior is silence, not a reminder
+# `mux` verb and fails fast), so the correct behavior is silence, not a notice
 # telling the user to install what they already have.
 cat > "$FAKEBIN/fno" <<'FAKE'
 #!/usr/bin/env bash
@@ -142,20 +133,22 @@ ELAPSED=$((END - START))
 [[ -z "$out" ]] || fail "a wedged mux socket proves the front door exists, so the hook must stay silent, got: $out"
 pass "wedged mux socket -> bounded at the cap (${ELAPSED}s) and silent"
 
-# --- Installer cases: a fake plugin root with a stub installer ----------------
+# --- Notice cases: a fake plugin root with a stub installer -------------------
 PLUG="$WORK/plug"
 mkdir -p "$PLUG/hooks" "$PLUG/hooks/lib" "$PLUG/scripts/lib" "$PLUG/.claude-plugin"
 cp "$HOOK" "$PLUG/hooks/"
 cp "$REPO_ROOT_REAL/hooks/lib/fno-bin.sh" "$PLUG/hooks/lib/"
 cp "$REPO_ROOT_REAL/scripts/lib/with-timeout.sh" "$PLUG/scripts/lib/"
-cp "$REPO_ROOT_REAL/scripts/lib/hook-budget.sh" "$PLUG/scripts/lib/"
 printf '{\n  "name": "fno",\n  "version": "9.9.9"\n}\n' >"$PLUG/.claude-plugin/plugin.json"
 MARK="$WORK/installer-ran"
+# The stub leaves a marker the instant it runs. The hook must never start it,
+# so the marker is a failure signal in every notice case; the stub also sleeps
+# so a detached spawn (the pre-x-0143 behavior) would still land the marker
+# before the assertions below read it.
 cat >"$PLUG/.claude-plugin/postinstall.sh" <<STUB
 #!/usr/bin/env bash
-sleep 2
 touch "$MARK"
-exit "\${STUB_RC:-0}"
+sleep 30
 STUB
 PHOOK="$PLUG/hooks/frontdoor-nudge-session-start.sh"
 DATA="$WORK/data"
@@ -163,106 +156,68 @@ rm -f "$FAKEBIN/fno"
 
 run_hook() { PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" CLAUDE_PLUGIN_DATA="$DATA" bash "$PHOOK" 2>/dev/null; }
 
-# Wait up to 10s for the detached installer to release its lock. $1 = the data
-# dir to poll (default $DATA).
-wait_unlocked() {
-  local dir="${1:-$DATA}" _
-  for _ in $(seq 1 50); do
-    [[ -d "$dir/postinstall.lock" ]] || return 0
-    sleep 0.2
-  done
-  return 1
-}
+# The x-0143 verify contract: the hook creates no data dir and no file under
+# the tool bin, on this HOME or any fallback.
+TOOLBIN="$EMPTY_HOME/.local/bin"
+mkdir -p "$TOOLBIN"
 
-# --- Case 5: no stamp -> starts the installer detached, stamps on exit 0 ------
-START=$(date +%s)
+# --- Case 5: no uv, no fno, fresh HOME -> full notice, NOTHING started --------
 out=$(run_hook)
-ELAPSED=$(( $(date +%s) - START ))
-(( ELAPSED < 2 )) || fail "hook waited on the installer: ${ELAPSED}s"
-grep -q "Installing the fno CLI" <<<"$out" || fail "no stamp must start the installer, got: $out"
-grep -qF "$DATA/postinstall.log" <<<"$out" || fail "installing message must name the log, got: $out"
-[[ ! -e "$MARK" ]] || fail "installer finished before the hook returned: it was not detached"
-wait_unlocked || fail "installer lock still held after 10s"
-[[ -e "$MARK" ]] || fail "detached installer never ran"
-[[ "$(cat "$DATA/postinstall.version" 2>/dev/null)" == "9.9.9" ]] || fail "stamp does not hold the plugin version"
-grep -q "installer exit 0" "$DATA/postinstall.log" || fail "log lacks the exit line"
-pass "no stamp -> installer runs detached (${ELAPSED}s), stamps 9.9.9, drops the lock"
+grep -q "Ask the user first" <<<"$out" || fail "notice must ask for consent, got: $out"
+grep -q "astral.sh/uv/install.sh" <<<"$out" || fail "notice must name the uv installer, got: $out"
+grep -q "shell profile" <<<"$out" || fail "notice must name the profile edit, got: $out"
+grep -q "PyPI" <<<"$out" || fail "notice must name PyPI, got: $out"
+grep -qF "bash $PLUG/.claude-plugin/postinstall.sh" <<<"$out" || fail "notice must name the one command, got: $out"
+[[ ! -e "$MARK" ]] || fail "the hook started the installer (no child may run unasked)"
+[[ ! -e "$DATA" ]] || fail "the hook created the plugin data dir; the lock/log era is gone"
+[[ -z "$(ls -A "$TOOLBIN" 2>/dev/null)" ]] || fail "the tool bin grew files"
+pass "no uv, no fno -> full consent notice, nothing started, tool bin untouched"
 
-# --- Case 6: stamp holds the version -> no installer, reminder + log ----------
-rm -f "$MARK"
+# --- Case 6: uv already present -> notice scopes the touch to the fno tool ----
+cat > "$FAKEBIN/uv" <<'FAKE'
+#!/usr/bin/env bash
+exit 0
+FAKE
+chmod +x "$FAKEBIN/uv"
 out=$(run_hook)
-sleep 3
-[[ ! -e "$MARK" ]] || fail "stamped version must not start the installer"
-grep -q "Install the .fno. front door" <<<"$out" || fail "stamped case must remind, got: $out"
-grep -qF "$DATA/postinstall.log" <<<"$out" || fail "stamped reminder must name the log, got: $out"
-pass "stamped version -> no installer, reminder names the log"
+grep -q "uv is already installed" <<<"$out" || fail "uv present must be named, got: $out"
+grep -q "nothing but the fno tool" <<<"$out" || fail "uv-present notice must scope the touch, got: $out"
+if grep -q "astral.sh" <<<"$out"; then
+  fail "uv-present notice must skip the astral.sh step"
+fi
+[[ ! -e "$MARK" ]] || fail "the hook started the installer stub"
+rm -f "$FAKEBIN/uv"
+pass "uv present -> notice scopes to the fno tool, no astral.sh step"
 
-# --- Case 7: installer fails -> no stamp, no lock, retry names the exit code --
-rm -rf "$DATA" "$MARK"
-export STUB_RC=1
+# --- Case 7: fno-py present (probe rc 2) -> notice says the Python CLI works --
+cat > "$FAKEBIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+echo "No such command 'mux'." >&2
+exit 2
+FAKE
+chmod +x "$FAKEBIN/fno"
 out=$(run_hook)
-wait_unlocked || fail "failed installer left its lock"
-[[ -e "$MARK" ]] || fail "failing installer never ran"
-[[ ! -e "$DATA/postinstall.version" ]] || fail "a failed install must not stamp"
-rm -f "$MARK"
-out=$(run_hook)
-grep -q "Installing the fno CLI" <<<"$out" || fail "failed install must retry next session, got: $out"
-grep -q "installer exit 1" <<<"$out" || fail "retry message must name the failed exit code, got: $out"
-wait_unlocked || fail "retry installer left its lock"
-unset STUB_RC
-pass "failed install -> no stamp, lock dropped, retry names exit 1"
+grep -q "fno-py" <<<"$out" || fail "fno-py presence must be named, got: $out"
+grep -q "Ask the user first" <<<"$out" || fail "fno-py-only still needs consent for the full install, got: $out"
+[[ ! -e "$MARK" ]] || fail "the hook started the installer stub"
+rm -f "$FAKEBIN/fno"
+pass "fno-py only -> notice names it and still asks"
 
-# --- Case 8: live lock holder -> no second installer, in-progress -------------
-rm -rf "$DATA" "$MARK"
-mkdir -p "$DATA/postinstall.lock"
-sleep 30 &
-HOLDER=$!
-echo "$HOLDER" >"$DATA/postinstall.lock/pid"
+# --- Case 8: installer missing from the tree -> short note, nothing started ---
+mv "$PLUG/.claude-plugin/postinstall.sh" "$WORK/postinstall.sh.bak"
 out=$(run_hook)
-sleep 3
-kill "$HOLDER" 2>/dev/null
-wait "$HOLDER" 2>/dev/null
-[[ ! -e "$MARK" ]] || fail "a live lock must block a second installer"
-grep -q "install in progress" <<<"$out" || fail "live lock must report in progress, got: $out"
-pass "live lock holder -> no second installer, in-progress message"
+grep -q "carries no installer" <<<"$out" || fail "missing installer must say so, got: $out"
+[[ ! -e "$MARK" ]] || fail "nothing may run without the installer"
+mv "$WORK/postinstall.sh.bak" "$PLUG/.claude-plugin/postinstall.sh"
+pass "installer missing -> short note, nothing started"
 
-# --- Case 8b: a live pid on a lock older than 60 minutes is a reused pid ------
-rm -rf "$DATA" "$MARK"
-mkdir -p "$DATA/postinstall.lock"
-sleep 30 &
-HOLDER=$!
-echo "$HOLDER" >"$DATA/postinstall.lock/pid"
-touch -t 200001010000 "$DATA/postinstall.lock"
-out=$(run_hook)
-kill "$HOLDER" 2>/dev/null
-wait "$HOLDER" 2>/dev/null
-grep -q "Installing the fno CLI" <<<"$out" || fail "a lock older than 60 minutes must be reclaimed, got: $out"
-wait_unlocked || fail "reclaimed installer left its lock"
-[[ -e "$MARK" ]] || fail "reclaimed lock never ran the installer"
-[[ ! -d "$DATA/postinstall.lock.reclaim" ]] || fail "reclaim mutex left behind"
-pass "lock older than 60 minutes with a live (reused) pid -> reclaimed, installer runs"
-
-# --- Case 9: CLAUDE_PLUGIN_DATA unset -> the XDG fallback dir gets the install -
-# A Codex session carries no CLAUDE_PLUGIN_DATA; the hook must fall back to the
-# XDG state dir and run the installer there, same log, stamp and lock.
-rm -rf "$DATA" "$MARK"
-XDG_DIR="$WORK/xdg-state/fno/plugin-install"
+# --- Case 9: CLAUDE_PLUGIN_DATA unset -> same notice, nothing created ---------
+# A Codex session carries no CLAUDE_PLUGIN_DATA; the notice prints the same
+# way, and the hook still creates nothing in any fallback data dir.
 out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$WORK/xdg-state" bash "$PHOOK" 2>/dev/null)
-grep -q "Installing the fno CLI" <<<"$out" || fail "no plugin data dir must start the installer in the XDG fallback, got: $out"
-grep -qF "$XDG_DIR/postinstall.log" <<<"$out" || fail "fallback message must name the XDG log, got: $out"
-wait_unlocked "$XDG_DIR" || fail "fallback installer left its lock"
-[[ -e "$MARK" ]] || fail "fallback installer never ran"
-[[ "$(cat "$XDG_DIR/postinstall.version" 2>/dev/null)" == "9.9.9" ]] || fail "fallback stamp does not hold the plugin version"
-grep -q "installer exit 0" "$XDG_DIR/postinstall.log" || fail "fallback log lacks the exit line"
-pass "CLAUDE_PLUGIN_DATA unset -> XDG fallback dir gets the installer"
-
-# --- Case 9b: no CLAUDE_PLUGIN_DATA and no XDG dir writable -> plain reminder --
-rm -rf "$WORK/xdg-state" "$MARK"
-touch "$WORK/not-a-dir"
-out=$(PATH="$FAKEBIN:$BASE_PATH" HOME="$EMPTY_HOME" XDG_STATE_HOME="$WORK/not-a-dir" bash "$PHOOK" 2>/dev/null)
-sleep 3
-[[ ! -e "$MARK" ]] || fail "an unwritable XDG fallback must not start the installer"
-grep -q "Install the .fno. front door" <<<"$out" || fail "unwritable fallback must remind, got: $out"
-pass "unwritable XDG fallback -> plain reminder, no installer"
+grep -q "Ask the user first" <<<"$out" || fail "XDG fallback must print the notice, got: $out"
+[[ ! -e "$WORK/xdg-state" ]] || fail "the hook created the XDG data dir"
+[[ ! -e "$MARK" ]] || fail "the hook started the installer stub"
+pass "CLAUDE_PLUGIN_DATA unset -> same notice, nothing created"
 
 log "all cases passed"

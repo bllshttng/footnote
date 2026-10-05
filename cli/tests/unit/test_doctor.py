@@ -2222,20 +2222,30 @@ def _fresh(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "dead_row, expect_exit_text",
+    [
+        ({"label": "sh.fno.pr-watcher", "exit": 78}, "78"),
+        ({"label": "sh.fno.pr-watcher"}, "exit unknown"),
+    ],
+)
 def test_dead_launch_agent_is_named_with_its_exit_and_reddens_doctor(
     monkeypatch: pytest.MonkeyPatch,
+    dead_row: dict,
+    expect_exit_text: str,
 ) -> None:
-    """AC1-ERR: an installed-but-failing agent must not be a quiet line."""
+    """AC1-ERR: an installed-but-failing agent must not be a quiet line, and
+    a row launchctl gave no exit for reads exit unknown, never a crash."""
     _fresh(monkeypatch)
     monkeypatch.setattr(
         doctor,
         "_launch_agent_failures",
-        lambda: {"applicable": True, "dead": [{"label": "sh.fno.pr-watcher", "exit": 78}]},
+        lambda: {"applicable": True, "dead": [dead_row]},
     )
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 1, "a dead agent must fail the exit code, not just print"
     assert "sh.fno.pr-watcher" in result.stdout
-    assert "78" in result.stdout
+    assert expect_exit_text in result.stdout
 
 
 def test_missing_launchctl_degrades_without_crying_wolf(

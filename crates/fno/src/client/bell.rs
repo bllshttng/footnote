@@ -82,8 +82,15 @@ pub(crate) fn toggle(view: &mut View) {
     }
 }
 
+/// The bell's glyph: a single-column Nerd Font bell (the operator's
+/// 2026-10-04 ask). A TUI cannot detect font coverage, so a terminal without
+/// the font shows tofu - the fallback (`\u{2407}`, the ASCII bell control
+/// picture) is a one-line const swap, and the live screenshot step is what
+/// catches it.
+const BELL_GLYPH: char = '\u{f0f3}';
+
 pub(crate) fn button_label(view: &View) -> String {
-    let mut label = String::from("🔔");
+    let mut label = String::from(BELL_GLYPH);
     let count = ready_count(view);
     if count > 0 {
         let digits = count.to_string();
@@ -109,34 +116,21 @@ pub(crate) fn button_label(view: &View) -> String {
     label
 }
 
-pub(crate) fn button_range(view: &View, text_w: usize) -> std::ops::Range<usize> {
+/// The bell's seat: the far right of the mux top bar (terminal row 0), so it
+/// shows whether or not the sideline is open. Full-terminal columns; a
+/// transient notice paints under it, never over.
+pub(crate) fn button_range(view: &View) -> std::ops::Range<usize> {
     let width = unicode_width::UnicodeWidthStr::width(button_label(view).as_str());
-    let words_end = top_row_words_end(view);
-    let start = text_w.saturating_sub(width);
-    if start < words_end {
-        text_w..text_w
-    } else {
-        start..text_w
-    }
-}
-
-pub(super) fn top_row_words_end(view: &View) -> usize {
-    view.top_row_spans()
-        .iter()
-        .map(|(start, span, _)| *start + *span)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(2)
+    let cols = view.term.1 as usize;
+    cols.saturating_sub(width)..cols
 }
 
 pub(super) fn button_at(view: &View, row: u16, col: u16) -> bool {
-    let top = view.sideline_top();
-    let text_w = view.sideline_paint_w().saturating_sub(1);
-    row as usize + 1 == top && button_range(view, text_w).contains(&(col as usize))
+    row == 0 && button_range(view).contains(&(col as usize))
 }
 
-pub(crate) fn paint_button(view: &View, cells: &mut [Cell], text_w: usize, cols: usize) {
-    let range = button_range(view, text_w);
+pub(crate) fn paint_button(view: &View, cells: &mut [Cell], cols: usize) {
+    let range = button_range(view);
     paint(
         cells,
         cols,
@@ -471,7 +465,7 @@ pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) 
                 r,
                 x0 + 2,
                 width.saturating_sub(2),
-                "🔔 Questions and Announcements",
+                &format!("{BELL_GLYPH} Questions and Announcements"),
                 view.theme.brand,
                 true,
             );
@@ -496,7 +490,7 @@ pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) 
                 ),
                 Row::Clear(n) => (format!("Clear all {n} answered"), view.theme.brand, true),
                 Row::Announcement(s) => (format!("• {s}"), Color::Default, false),
-                Row::Info(s) => (s.clone(), Color::Indexed(8), false),
+                Row::Info(s) => (s.clone(), crate::theme::dim_fg(&view.theme), false),
             };
             paint(
                 cells,

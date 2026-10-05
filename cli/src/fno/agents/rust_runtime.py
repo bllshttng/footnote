@@ -100,6 +100,13 @@ RUST_CLIENT_VERBS = frozenset(
         "stop",
         "rm",
         "reconcile",
+        # The court/king/reign spellings are aliases the dispatch lane rewrites
+        # to the org/lead verbs; client.rs routes them directly.
+        "court-fold",
+        "court-orphans",
+        "king-checkin",
+        "king-history",
+        "reign-ledger",
         # Daemon binary-version drift restart: a Rust-only verb
         # dispatched directly in client.rs before build_request (no daemon RPC).
         # SIGTERMs a stale daemon and lazy-starts a fresh one from the current
@@ -494,6 +501,13 @@ AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS
 #: future Rust-only verb cannot land without a help entry and re-introduce the
 #: gap.
 RUST_ONLY_VERB_HELP: dict[str, str] = {
+    # The court/king/reign spellings are aliases the dispatch lane rewrites to
+    # the org/lead verbs; the help names the alias target so a reader finds it.
+    "court-fold": "Alias of org-fold: --graph PATH [--cwd PATH] [--claims-dir PATH] --teams-json JSON [--format json].",
+    "court-orphans": "Alias of org-vacancies: --root PATH [--held SCOPE]... reads the unfilled org seats.",
+    "king-checkin": "Alias of lead-checkin: --scope SCOPE --events-path PATH [...] --graph PATH [--handoffs-dir PATH] [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] [--json].",
+    "king-history": "Alias of lead-history: [--scope SCOPE] --events-path PATH [...] [--json].",
+    "reign-ledger": "Alias of lead-rundown: --org-json PATH|- --graph PATH --generated TS --out PATH.",
     # "spawn" is now Python-registered (Task 1.2): a Python cmd_spawn command
     # provides the --once / ephemeral lifecycle path and the claude plain-spawn
     # path. The daemon PTY worker path (codex/gemini without --once) still
@@ -529,7 +543,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
-    "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
+    "judge": "Blueprint judge: grade a plan against the five product questions, --budget <secs> to bound the whole pass (default 600s), or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
     "org-vacancies": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "org-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json; invoked directly by `fno agents court`, not `fno agents` routing.",
     "lead-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; --verdict selects the reign tenure verdict read (assembles its own inputs natively: crown, manifest, config, graph scope, window, delivery split); invoked directly by `fno agents king history` and `fno agents king verdict`, which pass every journal paths.event_journals resolves.",
@@ -1804,6 +1818,9 @@ def make_agents_group_cls() -> type:
                         route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
+            if args and args[0] == "spawn":  # the python route never runs the client that owns --json/--verbose
+                fence = next((i for i, a in enumerate(args) if a in ("--", "--argv")), len(args))
+                args = args[:1] + [a for a in args[1:fence] if a not in ("--json", "--verbose")] + args[fence:]
             context = super().make_context(info_name, args, parent=parent, **extra)
             if args and args[0] == "spawn":
                 context.meta["fno_spawn_existing_pane"] = existing_pane

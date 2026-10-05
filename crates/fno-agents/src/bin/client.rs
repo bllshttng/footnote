@@ -268,13 +268,30 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-attempt") {
         std::process::exit(fno_agents::eval_attempt::run_evals_attempt(&args[1..]));
     }
-    // `pr-park`: the park-record owner behind `fno do pr watch`; dispatches
-    // here like evals-arm because the shrink law bars a new `run` arm.
+    // `pr-park` and `pr-watch`: the two verb families behind `fno do pr
+    // watch`; both dispatch here like evals-arm because the shrink law bars
+    // a new `run` arm. Their module docs carry the per-verb contract.
     if args.first().map(String::as_str) == Some("pr-park") {
         std::process::exit(fno_agents::pr_park::run(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("pr-watch") {
+        std::process::exit(fno_agents::pr_watch::run(&args[1..]));
+    }
     let code = rt.block_on(run(args));
     std::process::exit(code);
+}
+
+/// Per-column widths in chars, not bytes: the `{:<width$}` pad counts chars,
+/// so a byte width on non-ASCII text (a CJK cwd, an emoji message) pads past
+/// the intended column and shoves the rest of the row wide.
+fn display_widths<const N: usize>(headers: [&str; N], display: &[[String; N]]) -> [usize; N] {
+    let mut widths = headers.map(str::len);
+    for row in display {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    widths
 }
 
 async fn run(args: Vec<String>) -> i32 {
@@ -303,17 +320,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `mail-inject` is the one-shot LIVE-DELIVERY verb `fno agents mail send` calls to
-    // inject a turn into a live `claude --bg` session over the daemon control.sock
-    // (node). Binary-direct (Python `_deliver_live` subprocess), NOT a
-    // routable `fno agents` verb -- matched with `matches!` (like `version`) so the
-    // parity guard (test_rust_client_verbs_match_client_rs) does not see it and it
-    // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. Connects to an existing
-    // daemon; never lazy-starts one.
+    // inject a turn into a live `claude --bg` session over the daemon control.sock.
+    // Binary-direct (Python `_deliver_live` subprocess), NOT a routable `fno agents`
+    // verb -- matched with `matches!` (like `version`) so the parity guard does not
+    // see it. Connects to an existing daemon; never lazy-starts one.
     if matches!(verb, "mail-inject") {
-        // The control drain rides this action as a mode flag (law d-fe66560a
-        // allows no new client action): the PreToolUse hook calls it
-        // binary-direct at every tool boundary, and a frozen worker's freeze
-        // mail must land even when the daemon is the thing wedged.
+        // The control drain rides this action as a mode flag: the PreToolUse
+        // hook calls it binary-direct at every tool boundary, so a frozen
+        // worker's freeze mail lands even when the daemon is the thing wedged.
         if args.iter().skip(1).any(|a| a == "--control-drain") {
             let rest: Vec<String> = args[1..]
                 .iter()
@@ -323,6 +337,12 @@ async fn run(args: Vec<String>) -> i32 {
             return fno_agents::mail_control_drain::run(&rest);
         }
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
+    }
+
+    // `mail-record` is binary-direct like `mail-inject`: the origin-record
+    // leaf `fno agents mail send/reply` calls; unregistered (shrink-only list).
+    if matches!(verb, "mail-record") {
+        return fno_agents::decision_trace::run_mail_record(&args[1..]);
     }
 
     if matches!(verb, "mail-envelope") {
@@ -2386,7 +2406,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             "use --substrate pane"
         };
         eprintln!(
-            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
+            "--permission-mode is not supported for harness {} on --substrate thread/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
             py_repr(provider),
         );
         return Some(2);
@@ -2545,8 +2565,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ) {
             Ok(g) => Some(g),
             Err(refusal) => {
-                if let Some(receipt) = &refusal.receipt {
-                    println!("{receipt}");
+                // One line by default; the receipt rides --json.
+                if params.get("json_out").and_then(Value::as_bool) == Some(true) {
+                    if let Some(receipt) = &refusal.receipt {
+                        println!("{receipt}");
+                    }
                 }
                 return Some(refusal.exit_code);
             }
@@ -3839,11 +3862,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("progress".into(), str_arg(&mut it, "--progress")?);
             }
             "--json" | "-J" => {
-                // Task 3.1: --json is a client-side rendering flag. We recognize it
-                // here so it is not rejected as "unknown flag". It is NOT forwarded
-                // to the daemon as a param. The caller captures it separately.
-                // -J is the global-register short for --json.
+                // Client-side rendering flag; never forwarded to the daemon.
+                // On spawn the gate refusal's receipt prints only with it.
+                if verb == "spawn" {
+                    params.insert("json_out".into(), Value::Bool(true));
+                }
             }
+            "--verbose" => {}
             "--all" | "-A" => {
                 params.insert("all".into(), Value::Bool(true));
             }
@@ -3992,14 +4017,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                         params.insert("substrate".into(), v);
                     }
                     Some("bg") => {
-                        eprintln!(
-                            "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                        return Err(
+                            "substrate 'bg' was retired; use --substrate thread".to_string()
                         );
-                        params.insert("substrate".into(), Value::String("thread".into()));
                     }
                     other => {
                         return Err(format!(
-                            "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {})",
+                            "--substrate must be one of: pane, thread, headless (got {})",
                             other.unwrap_or("")
                         ));
                     }
@@ -4137,13 +4161,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if sx == "pane" || sx == "thread" || sx == "headless" {
                 params.insert("substrate".into(), Value::String(sx.clone()));
             } else if sx == "bg" {
-                eprintln!(
-                    "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
-                );
-                params.insert("substrate".into(), Value::String("thread".into()));
+                return Err("substrate 'bg' was retired; use --substrate thread".to_string());
             } else {
                 return Err(format!(
-                    "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {sx})"
+                    "--substrate must be one of: pane, thread, headless (got {sx})"
                 ));
             }
         }
@@ -4802,15 +4823,7 @@ fn render_list_table(
         })
         .collect();
 
-    let mut widths = headers.map(str::len);
-    for row in &display {
-        for (i, cell) in row.iter().enumerate() {
-            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
-            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
-            // past the intended column and shoves the rest of the row wide.
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
+    let widths = display_widths(headers, &display);
 
     let mut lines = Vec::new();
     // The instrument's receipt, in the artifact itself: a total
@@ -4869,21 +4882,7 @@ fn render_discovered_section(discovered: &[Value]) -> String {
         })
         .collect();
 
-    let mut widths = [
-        headers[0].len(),
-        headers[1].len(),
-        headers[2].len(),
-        headers[3].len(),
-        headers[4].len(),
-    ];
-    for row in &display {
-        for (i, cell) in row.iter().enumerate() {
-            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
-            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
-            // past the intended column and shoves the rest of the row wide.
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
+    let widths = display_widths(headers, &display);
 
     let mut lines = Vec::new();
     lines.push(String::new()); // blank separator line

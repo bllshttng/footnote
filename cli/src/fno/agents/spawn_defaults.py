@@ -452,7 +452,7 @@ def normalize_spawn_args(
        ``--substrate <token>`` (unless an explicit substrate is present -> exit 2).
     2. ``-r`` is the short flag for ``--resume``; its value may be a full uuid or
        an 8-hex short-id (resolved to the uuid; unresolvable/malformed -> exit 2).
-       ``--resume`` with no substrate defaults the substrate to ``bg``.
+       ``--resume`` with no substrate defaults the substrate to ``thread``.
     3. The single positional is the MESSAGE; the name rides ``--name`` and is
        minted (``adjective-noun``) when omitted. A second positional -> exit 2.
 
@@ -552,15 +552,10 @@ def normalize_spawn_args(
         elif not (flag == "--resume" and raw_value == resolved):
             toks[i] = "--resume"
             toks[value_at] = resolved
-        # `--resume` is bg-only: default the substrate when none was pinned.
-        # Print the implied choice so the routing decision is never silent
-        # (blueprint Silent-Failure-Hunter / Locked Decision 4). The flag pair
-        # splices BEFORE any bare `--` fence: appended past it, click
-        # reads it as passthrough positionals and the implied lane is lost.
+        # `--resume` implies thread; the splice lands BEFORE any `--` fence, never past it.
         if _has_explicit_substrate(toks) is None:
             cut = _fence if _fence is not None else len(toks)
-            toks = toks[:cut] + ["--substrate", "bg"] + toks[cut:]
-            print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
+            toks = toks[:cut] + ["--substrate", "thread"] + toks[cut:]
 
     # A thread lane carries only what its contract row maps: a spawn pinning
     # thread/bg with an unmapped fenced token demotes to the pane here, on
@@ -927,6 +922,7 @@ def compose_spawn_argv(
         "permission_builtin": SPAWN_PERMISSION_BUILTIN if apply_permission_builtin else None,
         "scan": scan,
         "facts": facts,
+        "verbose": "--verbose" in out[1 : next((i for i, t in enumerate(out) if t in ("--", "--argv")), len(out))],
     }
     try:
         from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
@@ -1039,16 +1035,13 @@ def resolve_spawn_gates(substrate, monitor, *, once, harness):
     """
     if substrate not in ("pane", "thread", "bg", "headless"):
         print(
-            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
+            f"--substrate must be one of: pane, thread, headless (got {substrate})",
             file=sys.stderr,
         )
         raise SystemExit(2)
     if substrate == "bg":
-        print(
-            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
-            "the alias will be removed after one release",
-            file=sys.stderr,
-        )
+        print("substrate 'bg' was retired; use --substrate thread", file=sys.stderr)
+        raise SystemExit(2)
     if substrate == "thread":
         substrate = "bg"
     if monitor is not None and monitor != "happy":

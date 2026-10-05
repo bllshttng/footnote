@@ -44,15 +44,6 @@ def test_ac1_hp_nameless_spawn_mints_slug():
     assert "-" in out[2]  # adjective-noun slug
 
 
-def test_ac2_edge_lone_bg_positional_is_substrate_and_name_autogens():
-    out = _norm(["spawn", "bg"])
-    assert out[:2] == ["spawn", "--name"]
-    assert out[-2:] == ["--substrate", "bg"]
-    # a NAME slug was minted, not the substrate word
-    assert out[2] not in ("bg", "--substrate")
-    assert "-" in out[2]
-
-
 def test_workspace_value_flag_not_misread_as_name_or_substrate():
     # Codex P2 (x-8317 US2): --workspace is a value flag, so its value is never
     # the agent name (a nameless spawn still mints a slug), and a substrate-shaped
@@ -95,19 +86,21 @@ def test_autogen_exhaustion_exits_2():
 # --- AC2-HP / AC3-HP / AC3-EDGE: -r widening ---------------------------------
 
 def test_ac2_hp_short_form_revival_normalizes_fully():
-    out = _norm(["spawn", "--name", "foo", "-r", SHORT, "bg"])
-    assert out == ["spawn", "--name", "foo", "--resume", UUID, "--substrate", "bg"]
+    out = _norm(["spawn", "--name", "foo", "-r", SHORT, "thread"])
+    assert out == ["spawn", "--name", "foo", "--resume", UUID, "--substrate", "thread"]
 
 
-def test_ac3_hp_resume_implies_bg():
+def test_ac3_hp_resume_implies_thread():
     out = _norm(["spawn", "--name", "foo", "-r", UUID])
-    assert out == ["spawn", "--name", "foo", "--resume", UUID, "--substrate", "bg"]
+    assert out == ["spawn", "--name", "foo", "--resume", UUID, "--substrate", "thread"]
 
 
-def test_implied_bg_is_announced_on_stderr():
+def test_implied_lane_is_silent():
+    # A spawn prints what the user acts on: the implied substrate rides the
+    # spawn receipt, not a stderr announcement.
     err = io.StringIO()
     _norm(["spawn", "--name", "foo", "-r", UUID], stderr=err)
-    assert "implied by --resume" in err.getvalue()
+    assert err.getvalue() == ""
 
 
 def test_resume_does_not_override_explicit_substrate():
@@ -120,7 +113,7 @@ def test_resume_does_not_override_explicit_substrate():
 def test_ac3_edge_uppercase_uuid_tolerated():
     upper = UUID.upper()
     out = _norm(["spawn", "--name", "foo", "--resume", upper])
-    assert out == ["spawn", "--name", "foo", "--resume", UUID, "--substrate", "bg"]
+    assert out == ["spawn", "--name", "foo", "--resume", UUID, "--substrate", "thread"]
 
 
 # --- AC1-ERR / AC2-ERR / refusals --------------------------------------------
@@ -422,13 +415,13 @@ def test_fenced_provider_resume_is_not_fnos_resume():
     assert out[-2:] == ["--resume", UUID]
 
 
-def test_implied_bg_substrate_splices_before_the_fence():
-    # --resume plus a fenced seed: the implied `--substrate bg` lands in the
-    # fno head, never past the fence where click would read it as passthrough
-    # positionals and lose the lane.
+def test_implied_thread_substrate_splices_before_the_fence():
+    # --resume plus a fenced seed: the implied `--substrate thread` lands in
+    # the fno head, never past the fence where click would read it as
+    # passthrough positionals and lose the lane.
     out = _norm(["spawn", "-r", UUID, "--", "--flag seed"])
     assert out.index("--substrate") < out.index("--")
-    assert out[out.index("--substrate") + 1] == "bg"
+    assert out[out.index("--substrate") + 1] == "thread"
 
 
 # --- x-b80d: a node-driven spawn mints t-<node>-<slug>-<model> ----------------
