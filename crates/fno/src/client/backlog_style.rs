@@ -6,7 +6,7 @@
 
 use super::super::chrome;
 use super::super::theme::{band_style, cell_style, Role, Theme};
-use crate::proto::Cell;
+use crate::proto::{cell_flags, Cell};
 
 /// What a piece of backlog text is. The mapping through [`role_of`] is the
 /// whole style policy: the surfaces pick segments; the policy picks styles.
@@ -266,7 +266,22 @@ pub(crate) fn paint_panel(
     theme: &Theme,
 ) {
     let area_h = area_h.min(rows.saturating_sub(top));
-    if area_h == 0 || text_w == 0 || lines.is_empty() {
+    if area_h == 0 || text_w == 0 {
+        return;
+    }
+    // The panel owns its full rect: default cells past the last line, so a
+    // short body never lets stale pane content bleed through.
+    for r in top..top + area_h {
+        for c in 0..text_w.min(cols) {
+            cells[r * cols + c] = Cell {
+                c: ' ',
+                fg: crate::proto::Color::Default,
+                bg: crate::proto::Color::Default,
+                flags: 0,
+            };
+        }
+    }
+    if lines.is_empty() {
         return;
     }
     // Window the same way the framed overlay windows: top-pinned, scrolled
@@ -319,7 +334,21 @@ pub(crate) fn paint_panel_at(
     theme: &Theme,
 ) {
     let area_h = area_h.min(rows.saturating_sub(top));
-    if area_h == 0 || text_w == 0 || lines.is_empty() {
+    if area_h == 0 || text_w == 0 {
+        return;
+    }
+    // Same full-rect ownership as [`paint_panel`], at the column offset.
+    for r in top..top + area_h {
+        for c in x0..(x0 + text_w).min(cols) {
+            cells[r * cols + c] = Cell {
+                c: ' ',
+                fg: crate::proto::Color::Default,
+                bg: crate::proto::Color::Default,
+                flags: 0,
+            };
+        }
+    }
+    if lines.is_empty() {
         return;
     }
     let start = match follow {
@@ -423,5 +452,66 @@ pub(crate) fn paint_framed_band(
         cell.fg = fg;
         cell.bg = bg;
         cell.flags = flags;
+    }
+}
+
+/// One region's title row, the focus mark the frames used to carry: the
+/// owning region's title takes the accent fill across the full row, every
+/// other title reads dim. Exactly one visible mark names the keyboard
+/// owner; no region draws a border for it.
+pub(crate) fn paint_title_row(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    row: usize,
+    left: usize,
+    w: usize,
+    text: &str,
+    focused: bool,
+    theme: &Theme,
+) {
+    if row >= rows || w == 0 {
+        return;
+    }
+    let width = w.min(cols.saturating_sub(left));
+    if width == 0 {
+        return;
+    }
+    if focused {
+        let (fg, _, _) = band_style(theme);
+        for c in left..left + width {
+            cells[row * cols + c] = Cell {
+                c: ' ',
+                fg,
+                bg: theme.brand,
+                flags: cell_flags::BOLD,
+            };
+        }
+        let mut sc = left;
+        for ch in text.chars() {
+            if sc >= left + width {
+                break;
+            }
+            cells[row * cols + sc] = Cell {
+                c: ch,
+                fg,
+                bg: theme.brand,
+                flags: cell_flags::BOLD,
+            };
+            sc += char_w(ch);
+        }
+    } else {
+        let line = BLine::meta(text);
+        paint_bline(
+            cells,
+            rows,
+            cols,
+            row,
+            left,
+            width,
+            &line,
+            &[Role::PanelMeta],
+            theme,
+        );
     }
 }

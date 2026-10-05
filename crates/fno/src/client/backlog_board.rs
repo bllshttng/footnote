@@ -14,7 +14,6 @@ use super::*;
 use crate::backlog_model;
 use crate::backlog_model::{unavailable_features, Board, Lane};
 use crate::backlog_view::graph_path;
-use crate::chrome;
 use crate::store_client;
 use serde_json::Value;
 use std::time::Duration;
@@ -163,7 +162,6 @@ pub(crate) struct BoardView {
 struct BodyMemo {
     key: BodyKey,
     lines: Vec<BLine>,
-    body: Vec<chrome::BodyLine>,
     follow: Option<usize>,
 }
 
@@ -184,7 +182,6 @@ pub(crate) struct BodyKey {
 struct DetailMemo {
     key: DetailKey,
     lines: Vec<BLine>,
-    body: Vec<chrome::BodyLine>,
     follow: Option<usize>,
 }
 
@@ -321,27 +318,17 @@ impl BoardView {
     pub(crate) fn board_body_cached(
         &self,
         key: BodyKey,
-        build: impl FnOnce() -> (Vec<BLine>, Vec<chrome::BodyLine>, Option<usize>),
-    ) -> (std::cell::Ref<'_, [chrome::BodyLine]>, Option<usize>) {
+        build: impl FnOnce() -> (Vec<BLine>, Option<usize>),
+    ) -> Option<usize> {
         {
             let mut slot = self.board_memo.borrow_mut();
             if slot.as_ref().is_none_or(|m| m.key != key) {
-                let (lines, body, follow) = build();
-                *slot = Some(BodyMemo {
-                    key,
-                    lines,
-                    body,
-                    follow,
-                });
+                let (lines, follow) = build();
+                *slot = Some(BodyMemo { key, lines, follow });
             }
         }
         let slot = self.board_memo.borrow();
-        let follow = slot.as_ref().and_then(|m| m.follow);
-        let body = std::cell::Ref::map(slot, |s| match s {
-            Some(m) => m.body.as_slice(),
-            None => &[],
-        });
-        (body, follow)
+        slot.as_ref().and_then(|m| m.follow)
     }
 
     /// The detail pane's lines through the memo. Same contract as
@@ -349,30 +336,20 @@ impl BoardView {
     pub(crate) fn detail_lines_cached(
         &self,
         key: DetailKey,
-        build: impl FnOnce() -> (Vec<BLine>, Vec<chrome::BodyLine>, Option<usize>),
-    ) -> (std::cell::Ref<'_, [chrome::BodyLine]>, Option<usize>) {
+        build: impl FnOnce() -> (Vec<BLine>, Option<usize>),
+    ) -> Option<usize> {
         {
             let mut slot = self.detail_memo.borrow_mut();
             if slot.as_ref().is_none_or(|m| m.key != key) {
-                let (lines, body, follow) = build();
-                *slot = Some(DetailMemo {
-                    key,
-                    lines,
-                    body,
-                    follow,
-                });
+                let (lines, follow) = build();
+                *slot = Some(DetailMemo { key, lines, follow });
             }
         }
         let slot = self.detail_memo.borrow();
-        let follow = slot.as_ref().and_then(|m| m.follow);
-        let body = std::cell::Ref::map(slot, |s| match s {
-            Some(m) => m.body.as_slice(),
-            None => &[],
-        });
-        (body, follow)
+        slot.as_ref().and_then(|m| m.follow)
     }
 
-    /// The raw cached lines, for the unframed painter that reads BLine.
+    /// The raw cached lines, for the painter that reads BLine.
     pub(crate) fn board_lines_cached(&self) -> Vec<BLine> {
         self.board_memo
             .borrow()

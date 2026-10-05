@@ -772,14 +772,14 @@ fn chord_rows() {
 
 // The composed frame paints the backlog inside the sideline column: the
 // filter bar, the board pane and the detail pane are the column's
-// content, region-framed, with the card rows visible.
+// content, title rows carrying the focus mark instead of frames.
 #[tokio::test]
 async fn compose_rows() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
     v.sideline_view = crate::view_store::SidelineView::Backlog;
     let text = crate::vt::frame_text(&v.compose());
-    assert!(text.contains("filters"), "filter bar frame: {text}");
+    assert!(text.contains("Search:"), "filter bar: {text}");
     assert!(text.contains("In Progress"), "column header: {text}");
     assert!(text.contains("mux card"), "card row: {text}");
 
@@ -789,32 +789,74 @@ async fn compose_rows() {
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ filters")),
+        text.lines().any(|l| l.starts_with("Search:")),
         "filter bar at column 0: {text}"
     );
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ backlog")),
-        "board pane at column 0: {text}"
+        text.lines().any(|l| l.starts_with("backlog \u{b7} kanban")),
+        "board title at column 0: {text}"
     );
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ details")),
-        "detail pane paints: {text}"
+        text.lines().any(|l| l.contains("details \u{b7} x-")),
+        "detail title paints: {text}"
     );
     assert!(
-        !text.contains("e/p/s/S edit") && text.contains("c comment (detail)"),
-        "hint carries the comment key and no edit keys: {text}"
+        !text.contains('\u{256d}'),
+        "no box-drawing frame glyph anywhere: {text}"
+    );
+    assert!(
+        !text.contains("e/p/s/S edit") && text.contains("c cols"),
+        "hint carries the column key and no edit keys: {text}"
     );
     // One esc chip on the full board (the filter bar's, top right); a tap
     // returns it to the docked column, and a tap on the column's chip,
-    // keyboard elsewhere, closes the column.
-    assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
+    // keyboard elsewhere, closes the column. The chip rides no frame now,
+    // so the tap goes through the real press path at the recorded span.
+    let chip = tap_recorded_chip(&mut v).await;
+    assert_eq!(chip, 1, "one chip on the full board");
     assert!(
         !v.board_full && v.backlog_board.is_some(),
         "full returns to docked"
     );
     v.region_owner = crate::client::region_focus::RegionOwner::Pane;
-    assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
+    let chip = tap_recorded_chip(&mut v).await;
+    assert_eq!(chip, 1, "one chip on the docked column");
     assert!(v.backlog_board.is_none(), "the docked column closes");
+}
+
+/// Press the topmost recorded esc chip through the real mouse path: the
+/// press lands on the recorded span, `chip_at` routes it as Esc.
+async fn tap_recorded_chip(v: &mut View) -> usize {
+    v.compose();
+    let chips: Vec<crate::chrome::CloseSpan> = v
+        .close_chips
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|s| s.len == 3)
+        .collect();
+    let Some(s) = chips.last() else {
+        return 0;
+    };
+    let (row, col) = (s.row as u16, s.col as u16 + 1);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let mut scanner = crate::keys::Scanner::default();
+    for kind in [
+        crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        crate::proto::MouseKind::Release(crate::proto::MouseButton::Left),
+    ] {
+        let rep = crate::mouse::MouseReport {
+            kind,
+            row,
+            col,
+            shift: false,
+        };
+        crate::client::region_focus::mouse_pre_pass(v, &mut scanner, vec![rep], &mut sock)
+            .await
+            .unwrap();
+    }
+    chips.len()
 }
 
 // Full screen paints the filter bar, the board pane and the two-row hint;
@@ -955,9 +997,8 @@ fn board_cells_rows() {
     let frame = view.compose();
     let text = crate::vt::frame_text(&frame);
     assert!(
-        text.lines()
-            .any(|l| l.starts_with("\u{256d}\u{2500} backlog")),
-        "board box at column 0: {text}"
+        text.lines().any(|l| l.starts_with("backlog \u{b7} kanban")),
+        "board title at column 0: {text}"
     );
     assert!(text.contains("In Progress"), "{text}");
 }
@@ -1304,7 +1345,7 @@ fn memo_rebuilds_only_when_the_key_moves() {
         };
     let build = |builds: &std::cell::Cell<usize>| {
         builds.set(builds.get() + 1);
-        (Vec::new(), Vec::new(), None)
+        (Vec::new(), None)
     };
     let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
     let _ = b.board_body_cached(body_key(0, 0), || build(&builds));

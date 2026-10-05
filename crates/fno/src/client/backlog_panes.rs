@@ -1,40 +1,35 @@
-//! The backlog board's framed panes: one paint for both hosts (the
-//! full-screen `draw_board` and the windowed sideline column). Regions,
-//! top to bottom: the filter bar, the board pane and the detail pane side
-//! by side (or stacked when narrow), and the two-row hint.
+//! The backlog board's panes: one paint for both hosts (the full-screen
+//! `draw_board` and the windowed sideline column). Regions, top to bottom:
+//! the filter bar, the board pane and the detail pane side by side (or
+//! stacked when narrow), and the wrapped hint. Focus reads on the region
+//! title rows (`backlog_style::paint_title_row`); no region draws a frame.
 
 use super::backlog_board::{cursor_card_id, filter_bar_lines, render, BoardView, PaneDoc};
 use super::backlog_style::{self, BLine, BRole, BSeg};
-use super::node_detail;
+use super::node_detail::{self, Sel};
 use crate::chrome;
-use crate::proto::Cell;
+use crate::proto::{cell_flags, Cell, Color};
 use crate::theme::Theme;
 
-/// The three region rectangles one host rect lays out as, plus whether the
-/// panes carry frames. One home for the geometry so painting and any hit
-/// testing read the same layout (`paint` is the only painter today).
+/// The three region rectangles one host rect lays out as. One home for the
+/// geometry so painting and any hit testing read the same layout (`paint`
+/// is the only painter today).
 pub(crate) struct PaneRegions {
     pub(crate) bar: (usize, usize, usize, usize),
     pub(crate) board: (usize, usize, usize, usize),
     pub(crate) detail: (usize, usize, usize, usize),
-    pub(crate) framed: bool,
 }
 
 /// The layout `paint` computes for a host rect: the filter bar, the board
-/// and detail panes side by side at w >= 100 (stacked below it), under the
-/// same region heights paint has always used.
-pub(crate) fn regions(rect: (usize, usize, usize, usize)) -> PaneRegions {
+/// and detail panes side by side at w >= 100 (stacked below it). `hint_h`
+/// is the caller's wrapped hint height (see [`hint_lines`]).
+pub(crate) fn regions(rect: (usize, usize, usize, usize), hint_h: usize) -> PaneRegions {
     let (top, left, h, w) = rect;
-    // Region heights: hint 2 rows, the filter bar framed around its 2-row
-    // body, the rest split between the panes.
-    let hint_h = if h >= 6 { 2 } else { 0 };
-    let bar_h = 4.min(h.saturating_sub(hint_h));
+    // Region heights: the hint rows the text needs (capped by the caller),
+    // the filter bar's two-row body, the rest split between the panes.
+    let bar_h = 2.min(h.saturating_sub(hint_h));
     let panes_h = h.saturating_sub(bar_h + hint_h);
-    // Side by side at w >= 100 when the panes keep their frames; under 16
-    // rows they drop their frames so each keeps at least 3 body rows; the
-    // unframed painter has no left offset, so a short-wide rect stacks too.
-    let framed = panes_h >= 10;
-    let side_by_side = w >= 100 && framed;
+    let side_by_side = w >= 100;
     let board_w = if side_by_side { w * 55 / 100 } else { w };
     let detail_w = w.saturating_sub(board_w);
     let (board, detail) = if side_by_side {
@@ -53,7 +48,6 @@ pub(crate) fn regions(rect: (usize, usize, usize, usize)) -> PaneRegions {
         bar: (top, left, bar_h, w),
         board,
         detail,
-        framed,
     }
 }
 
@@ -71,55 +65,33 @@ pub(crate) fn paint(
     if h == 0 || w == 0 {
         return;
     }
-    let hint_h = if h >= 6 { 2 } else { 0 };
-    let laid_out = regions(rect);
-    let bar_h = laid_out.bar.2;
-    let panes_h = h.saturating_sub(bar_h + hint_h);
-    if panes_h == 0 {
-        return;
-    }
     // The board region holds the keyboard when the owner is the board; its
     // detail pane takes the focus presentation while a drill-down is open.
     let focus_pane = owner && b.detail.is_some();
-    // The filter bar: framed around the capped two-row cell wrap.
-    let bar_body: Vec<chrome::BodyLine> = b
+    // The hint sheet is sized first: its wrapped height is the layout's
+    // floor, and the cap keeps the panes their rows (change 4: nothing
+    // drops off the bottom unseen).
+    let hint = hint_lines(b, focus_pane, w);
+    let hint_h = if h >= 6 { hint.len().min(4) } else { 0 };
+    let laid_out = regions(rect, hint_h);
+    let bar_h = laid_out.bar.2;
+    // The filter bar: the capped two-row cell wrap, unframed, carrying the
+    // board's one esc chip on its top-right (it owned the framed title row
+    // before the frames left).
+    let bar_body: Vec<BLine> = b
         .body
         .as_ref()
-        .map(|board| filter_bar_lines(b, board, w.saturating_sub(2)))
-        .unwrap_or_default()
-        .iter()
-        .map(|l| {
-            let mut line = l.clone();
-            line = line.pad_to(w.saturating_sub(2));
-            backlog_style::to_body_line(&line)
-        })
-        .collect();
-    // The filter bar spans the top row, so it holds the board's one esc
-    // chip; the board and details panes below it carry none.
-    let bar_chrome = chrome::Chrome::new("filters", crate::popup::Anchor::Center).flat();
-    framed_region(
-        cells,
-        rows,
-        cols,
-        laid_out.bar,
-        &bar_chrome,
-        &bar_body,
-        None,
-        None,
-        theme,
-    );
-    let framed = laid_out.framed;
+        .map(|board| filter_bar_lines(b, board, w))
+        .unwrap_or_default();
+    backlog_style::paint_panel(cells, rows, cols, top, w, bar_h, &bar_body, None, theme);
+    paint_esc_chip(cells, rows, cols, top, _left, w, theme);
     let board_rect = laid_out.board;
     let detail_rect = laid_out.detail;
     // The board pane: the kanban render or the uncapped list, banded only
-    // while the pane holds focus. Both shapes go through the paint memo
-    // (the frame-cost measurement): a frame recompose re-blits the cached
-    // lines instead of re-rendering every card.
-    let board_inner_w = if framed {
-        board_rect.3.saturating_sub(chrome::Chrome::FRAME_COLS)
-    } else {
-        board_rect.3
-    };
+    // while the board owns typing. The memo (the frame-cost measurement)
+    // still serves a recompose: it re-blits the cached lines instead of
+    // re-rendering every card.
+    let board_inner_w = board_rect.3;
     let bkey = crate::client::backlog_board::BodyKey {
         gen: b.body_gen,
         lane: b.lane,
@@ -131,62 +103,53 @@ pub(crate) fn paint(
         errors: b.errors.len(),
         columns: b.layout.columns.clone(),
     };
-    let (board_body_ref, f2) = b.board_body_cached(bkey, || {
-        let (lines, follow) = if b.query.view == crate::backlog_model::View::List {
+    let follow = b.board_body_cached(bkey, || {
+        if b.query.view == crate::backlog_model::View::List {
             list_lines(b, board_inner_w)
         } else {
             render(b, board_inner_w)
-        };
-        let body = lines
-            .iter()
-            .map(|l| backlog_style::to_body_line(&l.clone().pad_to(board_inner_w)))
-            .collect();
-        (lines, body, follow)
+        }
     });
-    let follow = f2;
     // The board pane wears the cursor band while the board owns the
     // keyboard and no drill-down took it; an inactive board keeps its plain
-    // selection glyph, never the band.
-    let band = if owner && !focus_pane { follow } else { None };
-    let board_chrome = chrome::Chrome::new("backlog", crate::popup::Anchor::Center)
-        .tabs(vec![
-            (
-                "kanban".to_string(),
-                b.query.view == crate::backlog_model::View::Kanban,
-            ),
-            (
-                "list".to_string(),
-                b.query.view == crate::backlog_model::View::List,
-            ),
-        ])
-        .flat()
-        .without_close();
-    if framed {
-        framed_region(
-            cells,
-            rows,
-            cols,
-            board_rect,
-            &board_chrome,
-            &board_body_ref,
-            follow,
-            band,
-            theme,
-        );
-    } else {
-        let board_lines = b.board_lines_cached();
-        backlog_style::paint_panel(
-            cells,
-            rows,
-            cols,
-            board_rect.0,
-            board_rect.3,
-            board_rect.2,
-            &board_lines,
-            follow,
-            theme,
-        );
+    // selection glyph, never the band. The band rides the cached BLine
+    // (line.band), so an unowned board strips it before the panel paint.
+    let band_on = owner && !focus_pane;
+    backlog_style::paint_title_row(
+        cells,
+        rows,
+        cols,
+        board_rect.0,
+        board_rect.1,
+        board_rect.3,
+        &format!(
+            "backlog \u{b7} {}",
+            if b.query.view == crate::backlog_model::View::List {
+                "list"
+            } else {
+                "kanban"
+            }
+        ),
+        band_on,
+        theme,
+    );
+    let mut board_lines = b.board_lines_cached();
+    if !band_on {
+        for l in &mut board_lines {
+            l.band = false;
+        }
     }
+    backlog_style::paint_panel(
+        cells,
+        rows,
+        cols,
+        board_rect.0 + 1,
+        board_rect.3,
+        board_rect.2.saturating_sub(1),
+        &board_lines,
+        follow,
+        theme,
+    );
     // The detail pane: the focused node, else the cursor card's node,
     // scrolled by the pane's scroll offset.
     let node = b
@@ -195,11 +158,7 @@ pub(crate) fn paint(
         .map(|d| d.node_id.clone())
         .or_else(|| cursor_card_id(b))
         .unwrap_or_default();
-    let detail_inner_w = if framed {
-        detail_rect.3.saturating_sub(chrome::Chrome::FRAME_COLS)
-    } else {
-        detail_rect.3
-    };
+    let detail_inner_w = detail_rect.3;
     let dkey = crate::client::backlog_board::DetailKey {
         gen: b.body_gen,
         node: node.clone(),
@@ -211,87 +170,52 @@ pub(crate) fn paint(
             .map(|d| (d.node_id.clone(), d.path.clone(), d.mtime, d.error.clone())),
     };
     let is_empty_node = node.is_empty();
-    let (detail_body_ref, dfollow_pre) = b.detail_lines_cached(dkey, || {
+    let dfollow_pre = b.detail_lines_cached(dkey, || {
         if is_empty_node {
-            return (
-                vec![BLine::meta("no card under the cursor")],
-                Vec::new(),
-                None,
-            );
+            return (vec![BLine::meta("no card under the cursor")], None);
         }
         let sel = b.detail.as_ref().map(|d| d.sel);
-        // The frame spends two body columns on side pad: wrap the text to
-        // the columns it paints, so no line loses its tail.
-        let text_w = if framed {
-            detail_inner_w.saturating_sub(2)
-        } else {
-            detail_inner_w
-        };
-        let (ls, f) = node_detail::pane_lines(b, &node, sel, text_w);
-        let body = ls
-            .iter()
-            .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_inner_w)))
-            .collect();
-        (ls, body, f)
+        node_detail::pane_lines(b, &node, sel, detail_inner_w)
     });
     // The scroll rides after the memo read (a skip over the cached lines).
     let scroll = b.detail.as_ref().map(|d| d.scroll).unwrap_or(0);
     let dfollow_pre = dfollow_pre.map(|i| i.saturating_sub(scroll));
     // The detail pane wears its follow line only while it holds focus.
     let dfollow = if focus_pane { dfollow_pre } else { None };
-    let detail_chrome = chrome::Chrome::new(
-        format!("details \u{b7} {node}"),
-        crate::popup::Anchor::Center,
-    )
-    .flat()
-    .without_close();
-    if framed {
-        framed_region(
-            cells,
-            rows,
-            cols,
-            detail_rect,
-            &detail_chrome,
-            &detail_body_ref[scroll.min(detail_body_ref.len())..],
-            dfollow,
-            dfollow,
-            theme,
-        );
-    } else {
-        let dlines = b.detail_lines_raw();
-        let dlines = &dlines[scroll.min(dlines.len())..];
-        backlog_style::paint_panel(
-            cells,
-            rows,
-            cols,
-            detail_rect.0,
-            detail_rect.3,
-            detail_rect.2,
-            dlines,
-            dfollow,
-            theme,
-        );
-    }
-    // The hint bar: two unframed rows of the wrapped hint text.
-    let hint_top = top + h - hint_h;
-    let hint = if focus_pane {
-        "j/k link · enter open · y copy id · Y copy cmd · PgUp/PgDn scroll · esc board · e/p/s/S edit · D append · N note · E editor · b blueprint · t target · A lead · T/K/J rank · c cols · F full · ? keys"
-    } else {
-        "hjkl move · [ ] lane · L lanes · Tab list/kanban · / search · f filter · enter details · c comment (detail) · b blueprint · t target · A lead · T/K/J rank · c cols · F full · ? keys"
-    };
-    let [a, b2] = hint_rows(hint, w);
-    let hint_lines = [BLine::meta(a), BLine::meta(b2)];
-    backlog_style::paint_panel(
+    backlog_style::paint_title_row(
         cells,
         rows,
         cols,
-        hint_top,
-        w,
-        hint_h,
-        &hint_lines,
-        None,
+        detail_rect.0,
+        detail_rect.1,
+        detail_rect.3,
+        &format!("details \u{b7} {node}"),
+        focus_pane,
         theme,
     );
+    let mut dlines = b.detail_lines_raw();
+    if !focus_pane {
+        for l in &mut dlines {
+            l.band = false;
+        }
+    }
+    let dlines = &dlines[scroll.min(dlines.len())..];
+    backlog_style::paint_panel_at(
+        cells,
+        rows,
+        cols,
+        detail_rect.1,
+        detail_rect.0 + 1,
+        detail_rect.3,
+        detail_rect.2.saturating_sub(1),
+        dlines,
+        dfollow,
+        theme,
+    );
+    // The hint: the wrapped sheet, painted once more in the new key-role
+    // style the hint_lines builder produced.
+    let hint_top = top + h - hint_h;
+    backlog_style::paint_panel(cells, rows, cols, hint_top, w, hint_h, &hint, None, theme);
     let micros = started.elapsed().as_micros();
     b.record_paint(micros);
 }
@@ -341,6 +265,40 @@ pub(crate) fn framed_region(
 
 use super::overlay_paint;
 
+/// The board's one esc chip, top-right of the filter bar row. Painted text
+/// plus the recorded hit span the tap gestures read; the framed chrome used
+/// to own this, and the chip outlives the frames.
+pub(crate) fn paint_esc_chip(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    row: usize,
+    left: usize,
+    w: usize,
+    theme: &Theme,
+) {
+    let chip = " esc ";
+    if row >= rows || w <= chip.len() {
+        return;
+    }
+    let c0 = left + w - chip.len();
+    for (i, ch) in chip.chars().enumerate() {
+        if c0 + i < cols {
+            cells[row * cols + c0 + i] = Cell {
+                c: ch,
+                fg: theme.brand,
+                bg: Color::Default,
+                flags: cell_flags::BOLD,
+            };
+        }
+    }
+    crate::chrome::record_close_spans(
+        (rows, cols),
+        (row, left),
+        w,
+        &[(crate::chrome::ESC_CLOSE_HIT, w - 4, 3)],
+    );
+}
 /// The shown node's cached markdown document read: refreshed only when
 /// the shown node, the path or the mtime changed.
 pub(crate) fn sync_doc(b: &mut BoardView) {
@@ -473,26 +431,25 @@ fn trunc_line(s: &str, w: usize) -> String {
 mod tests {
     use super::*;
 
-    // AC13-HP: a hint wider than the width fills two rows.
+    // AC7: a hint wider than the width wraps, every word placed.
     #[test]
-    fn hint_wraps_to_two_rows() {
-        let [a, b] = hint_rows("alpha beta gamma delta", 12);
-        assert!(!a.is_empty() && !b.is_empty(), "{a:?} {b:?}");
-        assert_eq!(hint_rows("tiny", 40), ["tiny".to_string(), String::new()]);
+    fn hint_wraps_every_word() {
+        let rows = hint_rows("alpha beta gamma delta", 12);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows.join(" "), "alpha beta gamma delta");
     }
 
-    // AC13-HP: two rows cannot hold the hint, so the tail drops with no
-    // marker (the ROW rule, d-36438ea4). Every painted word is whole.
+    // AC7: no word is ever cut - wrap() breaks only at spaces - and no
+    // row outgrows the width.
     #[test]
-    fn hint_drops_the_tail_when_two_rows_cannot_hold_it() {
+    fn hint_keeps_whole_words() {
         let long = "word ".repeat(60);
-        let [a, b] = hint_rows(long.trim(), 20);
-        assert!(!b.contains('\u{2026}'), "{b:?}");
+        let rows = hint_rows(long.trim(), 20);
         assert!(
-            b.split(' ').all(|w| w == "word"),
-            "no partial word survives the cut: {b:?}"
+            rows.iter().all(|r| r.split(' ').all(|w| w == "word")),
+            "no partial word survives: {rows:?}"
         );
-        assert!(a.chars().count() <= 20);
+        assert!(rows.iter().all(|r| r.chars().count() <= 20));
     }
 
     // AC6-HP list half: the flat body lists every card under its column
@@ -517,29 +474,87 @@ mod tests {
 
 /// The two-row hint: words wrap onto two rows; a word that fits in neither
 /// drops whole, no marker.
-pub(crate) fn hint_rows(text: &str, w: usize) -> [String; 2] {
-    if w == 0 {
-        return [String::new(), String::new()];
-    }
-    let mut rows = [String::new(), String::new()];
-    let mut row = 0usize;
-    let mut used = 0usize;
-    for word in text.split(' ') {
-        let cw = word.chars().count();
-        if used + cw > w {
-            if row == 0 {
-                row = 1;
-                used = 0;
-            } else {
-                break;
+pub(crate) fn hint_rows(text: &str, w: usize) -> Vec<String> {
+    BLine::meta(text)
+        .wrap(w.max(1))
+        .iter()
+        .map(|l| l.text.trim_end().to_string())
+        .collect()
+}
+
+/// The detail hint's `enter <word>`: the selected row's action, named the
+/// way the footer says it. A link opens; a session names its action; a
+/// dead session names its reason (AC6: the footer says why it does
+/// nothing).
+fn enter_word(b: &BoardView) -> String {
+    let Some(d) = b.detail.as_ref() else {
+        return "details".into();
+    };
+    let Some(inputs) = b.inputs.as_ref() else {
+        return "details".into();
+    };
+    let Some(nv) = crate::backlog_model::node(inputs, &d.node_id) else {
+        return "details".into();
+    };
+    let sels = node_detail::sel_list(&nv);
+    match sels.get(d.sel.min(sels.len().saturating_sub(1))) {
+        Some(Sel::Link(_)) => "open".into(),
+        Some(Sel::Session(i)) => {
+            let Some(s) = nv.sessions.get(*i) else {
+                return "none".into();
+            };
+            match s.action.as_str() {
+                "attach" => "attach".into(),
+                "resume" => "resume".into(),
+                _ => s.reason.clone().unwrap_or_else(|| "none".into()),
             }
         }
-        if used > 0 {
-            rows[row].push(' ');
-            used += 1;
+        None => "details".into(),
+    }
+}
+
+/// The hint sheet: the key list for the board or the focused details.
+/// Every word lands (nothing drops off the bottom unseen); a sheet longer
+/// than 4 rows ends its last row in `? keys`, the full keys overlay one
+/// press away. Key words read bold, the text plain - nothing dims.
+pub(crate) fn hint_lines(b: &BoardView, detail_focus: bool, w: usize) -> Vec<BLine> {
+    let text = if detail_focus {
+        format!(
+            "j/k scroll \u{b7} tab link \u{b7} enter {} \u{b7} y copy id \u{b7} Y copy cmd \u{b7} PgUp/PgDn scroll \u{b7} esc board \u{b7} b blueprint \u{b7} t target \u{b7} A lead \u{b7} c comment \u{b7} ? keys",
+            enter_word(b)
+        )
+    } else {
+        "hjkl move \u{b7} [ ] lane \u{b7} L lanes \u{b7} Tab list/kanban \u{b7} / search \u{b7} f filter \u{b7} enter details \u{b7} c cols \u{b7} b blueprint \u{b7} t target \u{b7} A lead \u{b7} T/K/J rank \u{b7} F full \u{b7} esc close \u{b7} ? keys"
+        .to_string()
+    };
+    let mut sheet = BLine {
+        text: String::new(),
+        roles: Vec::new(),
+        default_role: BRole::Body,
+        band: false,
+    };
+    for (i, part) in text.split(" \u{b7} ").enumerate() {
+        if i > 0 {
+            sheet.push_line(BLine::plain(" \u{b7} "));
         }
-        rows[row].push_str(word);
-        used += cw;
+        match part.split_once(' ') {
+            Some((k, rest)) => {
+                sheet.push_line(BLine::head(k));
+                sheet.push_line(BLine::plain(format!(" {rest}")));
+            }
+            None => sheet.push_line(BLine::head(part)),
+        }
+    }
+    let mut rows: Vec<BLine> = sheet.wrap(w.max(1));
+    const HINT_MAX_ROWS: usize = 4;
+    if rows.len() > HINT_MAX_ROWS {
+        let keep = w.saturating_sub(7);
+        let last = &mut rows[HINT_MAX_ROWS - 1];
+        *last = BLine::plain(format!(
+            "{} ? keys",
+            last.text.chars().take(keep).collect::<String>()
+        ));
+        rows.truncate(HINT_MAX_ROWS);
     }
     rows
 }
