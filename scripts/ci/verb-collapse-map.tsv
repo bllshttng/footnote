@@ -287,7 +287,7 @@ config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
-delivery	KEEP	delivery	7	single-leaf group
+delivery evaluate	KEEP	delivery evaluate	7	single-leaf group
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1
 do loops pause-all	T1	do loops pause-all	1
@@ -451,7 +451,7 @@ observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4
 observer judge	T1	observer judge	0	
 paths handoff	T1	paths handoff	9
-phase	KEEP	phase	16	single-leaf group
+phase kill-check	KEEP	phase kill-check	16	single-leaf group
 plan brief	T1	plan brief	4
 plan fidelity	T1	plan fidelity	5
 plan folder-audit	T1	plan folder-audit	0
@@ -542,7 +542,7 @@ state init	T1	state init	3
 state set	T1	state set	20
 state show	T1	state show	7
 status	KEEP	status	22	single-leaf group
-status-fanout	KEEP	status-fanout	4	single-leaf group
+status-fanout tick	KEEP	status-fanout tick	4	single-leaf group
 stub-manifest reconcile-finalize	T1	stub-manifest reconcile-finalize	1
 stub-manifest reconcile-validate	T1	stub-manifest reconcile-validate	2
 stub-manifest write	T1	stub-manifest write	2
