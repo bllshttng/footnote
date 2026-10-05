@@ -533,6 +533,9 @@ mod tests {
         let p = crate::search_query::parse("l:heir", crate::search_query::Surface::Event, now)
             .expect("l:heir parses");
         assert!(p.keeps(&fc), "the crown row keeps under l:heir");
+        // The feed-row case table and the prefilter cases, from the feed's
+        // own search surface.
+        crate::client::feed_view::search::tests::feed_row_cases_through_the_shared_matcher();
     }
 
     #[test]

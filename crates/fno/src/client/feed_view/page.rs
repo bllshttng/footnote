@@ -126,7 +126,7 @@ impl FeedWindow {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn item(i: usize) -> FeedItem {
@@ -147,8 +147,7 @@ mod tests {
         (from..from + count).map(item).collect()
     }
 
-    #[test]
-    fn head_replaces_and_bounds_at_history_end() {
+    pub(crate) fn head_replaces_and_bounds_at_history_end() {
         let mut w = FeedWindow::default();
         w.land(&PageReq::Head, page(400, FEED_PAGE), None);
         assert_eq!(w.items.len(), FEED_PAGE);

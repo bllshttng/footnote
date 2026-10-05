@@ -46,7 +46,7 @@ pub(crate) fn parse_query(text: &str) -> Result<crate::search_query::Parsed, Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::feed_overlay::{event_fields, EventCtx, FeedItem};
 
@@ -73,8 +73,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn feed_row_cases_through_the_shared_matcher() {
+    pub(crate) fn feed_row_cases_through_the_shared_matcher() {
         let items = vec![
             row("2026-10-01T08:00:00Z", "node_started", Some("x-1234"), None),
             row("2026-10-01T09:00:00Z", "node_started", Some("x-abcd"), None),

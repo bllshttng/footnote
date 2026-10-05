@@ -1340,7 +1340,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // reuses join_fold_row's join keys for its deep link.
 mod bell;
 mod feed_detail;
-mod feed_view;
+pub(crate) mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;

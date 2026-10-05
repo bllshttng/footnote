@@ -1138,6 +1138,9 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
     assert_eq!(f.sel, 2, "the selected row survived the fold");
     assert!(f.last_fold.is_some(), "the fold stamped its time");
     let _ = rx;
+    // The bounded window's own contract (pages land, the cap trims the far
+    // end, live rows count while detached).
+    feed_view::page::tests::head_replaces_and_bounds_at_history_end();
 }
 
 // (x-182e) The order toggle: `Recent` is one flat newest-first list with no
