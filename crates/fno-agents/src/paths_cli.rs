@@ -892,7 +892,7 @@ mod tests {
         )
     }
 
-    use crate::claims::{test_env_lock, EnvVarGuard};
+    use crate::claims::EnvVarGuard;
 
     #[test]
     fn handoff_key_derivation_first_eight_then_slug() {
