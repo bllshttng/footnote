@@ -150,7 +150,7 @@ fn empty_team_finding(
         line: format!(
             "no lead on scope {scope}: {manifest}, holder {holder}, 0 live rows; \
              empty {}m against a {}m grace; {} ready over {threshold_min}m with no \
-             worker ({}); respawn: fno agents spawn --team {scope} --succeed; \
+             worker ({}); respawn: fno agents spawn --promote {scope} --hand-off; \
              this notifies only, it gates no dispatch and takes no team",
             age_s / 60,
             TEAM_EMPTY_GRACE_S / 60,
@@ -289,7 +289,7 @@ mod tests {
         assert!(line.contains("ready over 60m with no worker"), "{line}");
         assert!(line.contains("x-1"), "{line}");
         assert!(
-            line.contains("respawn: fno agents spawn --team alpha --succeed"),
+            line.contains("respawn: fno agents spawn --promote alpha --hand-off"),
             "{line}"
         );
         assert!(line.contains("gates no dispatch"), "{line}");

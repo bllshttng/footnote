@@ -305,7 +305,7 @@ fn plan_with_projects(
         let refusal = format!(
             "scope {scope:?} overlaps territory held by live row(s) {listed}. Two live \
              teams would rule the same members, so this spawn refuses before launch. \
-             --succeed hands down only an identical team, never part of a wider or \
+             --hand-off hands down only an identical team, never part of a wider or \
              overlapping one. Re-scope the holder (fno agents org promote {first} --scope \
              <other territory>), run fno agents reconcile if it looks dead, or fno \
              agents stop {first}, then retry."
@@ -356,14 +356,14 @@ fn plan_with_projects(
     let refusal = match &caller {
         Caller::Human => format!(
             "scope {scope:?} is held by live row(s) {holders:?}. This spawn would launch \
-             an heir with no team, so it refuses. Re-run with --succeed to transfer the \
+             an heir with no team, so it refuses. Re-run with --hand-off to transfer the \
              team to the new session, or choose a scope nobody holds."
         ),
         Caller::Agent(_) => format!(
             "scope {scope:?} is held by live row(s) {holders:?}, not by this session, so \
-             this session cannot hand it down. Only the holder (spawn --crown --succeed \
-             from its own session) or an attended shell (spawn --crown --succeed) can \
-             transfer it."
+             this session cannot hand it down. Only the holder (spawn --promote \
+             --hand-off from its own session) or an attended shell (spawn --promote \
+             --hand-off) can transfer it."
         ),
     };
 
@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(out["outcome"], "declined");
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("lead-a"));
-        assert!(refusal.contains("--succeed"));
+        assert!(refusal.contains("--hand-off"));
 
         // holders = ["lead-a", "lead-b"]; the caller matches one but not all,
         // so succession must fall through to the ordinary decline rather
@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(out["vacate"], json!([]));
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("lead-a"));
-        assert!(refusal.contains("--succeed"));
+        assert!(refusal.contains("--hand-off"));
     }
 
     #[test]
@@ -745,7 +745,7 @@ mod tests {
         assert!(out["refusal"]
             .as_str()
             .unwrap()
-            .contains("--succeed hands down only an identical team"));
+            .contains("--hand-off hands down only an identical team"));
 
         let out = settle(
             json!({
