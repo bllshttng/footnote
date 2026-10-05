@@ -29,6 +29,9 @@
 use super::*;
 use crate::feed_overlay::{FeedError, FeedItem};
 
+pub(crate) mod search;
+
+
 /// The panel's open state: the items the last fold landed, the hover marker
 /// (a display index, NEWEST FIRST, the order the rows render in), and the
 /// same generation/single-flight discipline the needs fold runs. `want` arms
@@ -871,11 +874,9 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
     f.inflight = true;
     let tx = tx.clone();
     let gen = f.gen;
-    let since = crate::digest_overlay::now_secs()
-        .saturating_sub(NEEDS_WINDOW_SECS)
-        .to_string();
     tokio::spawn(async move {
-        let result = crate::feed_overlay::feed_now(&since).await;
+        let result =
+            crate::feed_overlay::fetch_page(crate::feed_overlay::PageReq::Head, None).await;
         let _ = tx.send((gen, result));
     });
 }
@@ -883,7 +884,11 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
 /// A fold landed: apply only to the still-open, same-generation panel, and
 /// reopen the scroll window on the newest row so a shorter result can never
 /// leave the window parked past the last item (a blank panel).
-pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem>, FeedError>) {
+pub(crate) fn apply_fold(
+    view: &mut View,
+    gen: u64,
+    outcome: crate::feed_overlay::FoldResult,
+) {
     let Some(f) = view.feed.as_mut() else {
         return;
     };
@@ -894,7 +899,8 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
     let first = f.last_fold.is_none();
     f.last_fold = Some(Instant::now());
     match outcome {
-        Ok(items) => {
+        Ok(page) => {
+            let items = page.items;
             // Capture the selected row's identity BEFORE the list is replaced;
             // a refresh keeps it, a fold on open resets to the newest row.
             let kept = if first {

@@ -37,6 +37,9 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         owner: None,
         parent: None,
         url: None,
+        lead: None,
+        area: String::new(),
+        cursor: String::new(),
     }
 }
 
@@ -62,6 +65,9 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         owner: None,
         parent: None,
         url: None,
+        lead: None,
+        area: String::new(),
+        cursor: String::new(),
     }
 }
 
@@ -1124,7 +1130,14 @@ async fn a_stale_fold_refolds_and_keeps_the_selection() {
     // refresh, and the same (ts, kind, title) stays selected.
     v.feed.as_mut().unwrap().sel = 2;
     let gen = v.feed.as_ref().unwrap().gen;
-    feed_view::apply_fold(&mut v, gen, Ok(vec![other, it]));
+    feed_view::apply_fold(
+        &mut v,
+        gen,
+        Ok(crate::feed_overlay::FeedPage {
+            req: crate::feed_overlay::PageReq::Head,
+            items: vec![other, it],
+        }),
+    );
     let f = v.feed.as_ref().unwrap();
     assert_eq!(f.sel, 2, "the selected row survived the fold");
     assert!(f.last_fold.is_some(), "the fold stamped its time");

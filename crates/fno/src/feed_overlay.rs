@@ -82,6 +82,18 @@ pub struct FeedItem {
     /// The PR URL, on a ship row. The provenance view's PR action opens it.
     #[serde(default)]
     pub url: Option<String>,
+    /// The crown holder the row rolls up to; `l:` answers through it before
+    /// the owner spelling.
+    #[serde(default)]
+    pub lead: Option<String>,
+    /// Which slice of the fleet the row is (mail, backlog, ship, agents,
+    /// mux, fleet, ci), stamped by the projection.
+    #[serde(default)]
+    pub area: String,
+    /// The row's position in the projection's total order. The page requests
+    /// hand it back verbatim; the client parses nothing else to page.
+    #[serde(default)]
+    pub cursor: String,
 }
 
 /// Why a feed fold failed. Each variant is a different user action - retune a
@@ -138,22 +150,134 @@ fn stderr_note(stderr: &[u8], status: &std::process::ExitStatus) -> String {
 }
 
 /// One fold result, as it travels the client's single-flight channel.
-pub type FoldResult = Result<Vec<FeedItem>, FeedError>;
+pub type FoldResult = Result<FeedPage, FeedError>;
 
-/// Run the feed projection, `Err` carrying the typed reason on any failure.
-/// An empty feed is `Ok(vec![])` - a real answer, not a failure.
-pub async fn feed_now(since_epoch: &str) -> FoldResult {
+/// The page size: the head page and every paged page. The projection's own
+/// default when the client sends no `--limit`, spelled here so the argv
+/// never drifts from the window's arithmetic.
+pub const FEED_PAGE: usize = 200;
+
+/// The flat prefilter flags a one-group positive query pushes: every field
+/// ANDs, and the values inside one field are comma-OR. The projection owns
+/// the match semantics; this only spells the argv.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FeedFilter {
+    pub node: Option<String>,
+    pub kind: Option<String>,
+    pub area: Option<String>,
+    pub session: Option<String>,
+    pub agent: Option<String>,
+    pub harness: Option<String>,
+    pub lead: Option<String>,
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+}
+
+impl FeedFilter {
+    /// True when nothing is set, so the argv carries no filter at all.
+    pub fn is_empty(&self) -> bool {
+        self.node.is_none()
+            && self.kind.is_none()
+            && self.area.is_none()
+            && self.session.is_none()
+            && self.agent.is_none()
+            && self.harness.is_none()
+            && self.lead.is_none()
+            && self.since.is_none()
+            && self.until.is_none()
+    }
+
+    /// The argv spelling: flag then value, in a stable order the tests pin.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let pair = |out: &mut Vec<String>, flag: &str, v: &Option<String>| {
+            if let Some(v) = v {
+                out.push(flag.to_string());
+                out.push(v.clone());
+            }
+        };
+        pair(&mut out, "--node", &self.node);
+        pair(&mut out, "--kind", &self.kind);
+        pair(&mut out, "--area", &self.area);
+        pair(&mut out, "--session", &self.session);
+        pair(&mut out, "--agent", &self.agent);
+        pair(&mut out, "--harness", &self.harness);
+        pair(&mut out, "--lead", &self.lead);
+        if let Some(s) = self.since {
+            out.push("--since-epoch".into());
+            out.push(s.to_string());
+        }
+        if let Some(u) = self.until {
+            out.push("--until-epoch".into());
+            out.push(u.to_string());
+        }
+        out
+    }
+}
+
+/// Which page of the keyset to read. `Head` is the newest page; `Older` and
+/// `Newer` page from a cursor; `Live` is the refresh tick's incremental read
+/// of the rows above the newest one already held.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageReq {
+    Head,
+    /// Rows strictly below the cursor, newest [`FEED_PAGE`] of them.
+    Older(String),
+    /// Rows strictly above the cursor, oldest [`FEED_PAGE`] of them.
+    Newer(String),
+    /// The refresh read: rows above the held cursor, like `Newer`.
+    Live(String),
+}
+
+impl PageReq {
+    /// The tag the fold bookkeeping reads, so a stale page can be told from
+    /// a fresh one without comparing cursors.
+    pub fn is_live(&self) -> bool {
+        matches!(self, PageReq::Live(_))
+    }
+}
+
+/// One landed page: the request it answers and the rows, ascending.
+#[derive(Debug)]
+pub struct FeedPage {
+    pub req: PageReq,
+    pub items: Vec<FeedItem>,
+}
+
+/// The argv one page request spells, `Err` carrying the bad cursor's own
+/// line when the request carries one the projection would refuse.
+pub fn page_argv(req: &PageReq, filter: Option<&FeedFilter>) -> Vec<String> {
+    let mut argv = vec![
+        "agents".to_string(),
+        "feed".to_string(),
+        "--json".to_string(),
+        "--limit".to_string(),
+        FEED_PAGE.to_string(),
+    ];
+    match req {
+        PageReq::Head => {}
+        PageReq::Older(c) | PageReq::Newer(c) | PageReq::Live(c) => {
+            let flag = if matches!(req, PageReq::Older(_)) {
+                "--before"
+            } else {
+                "--after"
+            };
+            argv.push(flag.to_string());
+            argv.push(c.clone());
+        }
+    }
+    if let Some(f) = filter {
+        argv.extend(f.to_args());
+    }
+    argv
+}
+
+/// Run one page of the feed projection, `Err` carrying the typed reason on
+/// any failure. An empty page is `Ok` with no rows - a real answer.
+pub async fn fetch_page(req: PageReq, filter: Option<&FeedFilter>) -> FoldResult {
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
     command
-        .args([
-            "agents",
-            "feed",
-            "--json",
-            "--since-epoch",
-            since_epoch,
-            "--limit",
-            "200",
-        ])
+        .args(page_argv(&req, filter))
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
@@ -164,7 +288,8 @@ pub async fn feed_now(since_epoch: &str) -> FoldResult {
     if !output.status.success() {
         return Err(FeedError::Exit(stderr_note(&output.stderr, &output.status)));
     }
-    parse_feed(&output.stdout, &output.stderr)
+    let items = parse_feed(&output.stdout, &output.stderr)?;
+    Ok(FeedPage { req, items })
 }
 
 fn parse_feed(stdout: &[u8], stderr: &[u8]) -> Result<Vec<FeedItem>, FeedError> {
@@ -294,13 +419,14 @@ pub fn event_fields(item: &FeedItem, ctx: &EventCtx) -> crate::search_query::Fie
                 .and_then(|(_, r)| r.strip_suffix(')').map(str::to_string))
         }
     });
-    push(&mut f, "lead", holder.clone());
+    push(&mut f, "lead", item.lead.clone().or_else(|| holder.clone()));
     push(&mut f, "agent", holder.clone());
     push(&mut f, "ts", Some(item.ts.clone()));
     let area = crate::search_query::areas_for_kind(&item.kind);
     for a in area {
         push(&mut f, "area", Some(a.to_string()));
     }
+    push(&mut f, "area", (!item.area.is_empty()).then_some(item.area.clone()));
     if node_ctx.is_some_and(|(_, _, open)| *open) {
         push(&mut f, "is", Some("open".to_string()));
     }

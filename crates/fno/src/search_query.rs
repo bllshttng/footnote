@@ -898,6 +898,76 @@ pub(crate) fn stamp_epoch(s: &str) -> Option<i64> {
     None
 }
 
+/// The keys a feed query can push into the projection's flat flags; every
+/// other key is matched client-side only.
+pub const PUSHABLE_KEYS: &[&str] = &[
+    "id", "session", "kind", "area", "harness", "agent", "lead", "ts",
+];
+
+/// What one pushable query hands the feed projection: one (key, OR-values)
+/// pair per term, plus the ts bounds when a term gave them. A query this
+/// shape travels as flags; anything richer is matched client-side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pushdown {
+    pub vals: Vec<(&'static str, Vec<String>)>,
+    /// Inclusive epoch-second bounds from `ts:` terms (lo = since, hi = until).
+    pub ts: Option<(Option<i64>, Option<i64>)>,
+}
+
+impl Parsed {
+    /// The flat flags a one-group positive query pushes, `None` when any
+    /// term falls outside [`PUSHABLE_KEYS`]. The projection then receives
+    /// nothing, and the client matches every landed page itself - the one
+    /// rule that keeps a half-pushed query from lying about its scope.
+    pub fn pushdown(&self) -> Option<Pushdown> {
+        // AND here is N one-term groups; a shared group (the `|` spelling)
+        // is OR, which flat flags cannot spell.
+        if self.groups.iter().any(|g| g.len() != 1 || g[0].neg) {
+            return None;
+        }
+        let mut vals: Vec<(&'static str, Vec<String>)> = Vec::new();
+        let mut ts: Option<(Option<i64>, Option<i64>)> = None;
+        for t in self.groups.iter().map(|g| &g[0]) {
+            let mut term_vals: Option<(&'static str, Vec<String>)> = None;
+            let mut term_ts: Option<(Option<i64>, Option<i64>)> = None;
+            for p in &t.alts {
+                match p {
+                    Pred::Val { key, val, .. } if PUSHABLE_KEYS.contains(key) => {
+                        match &mut term_vals {
+                            Some((k, v)) if k == key => v.push(val.clone()),
+                            Some(_) => return None,
+                            None => term_vals = Some((key, vec![val.clone()])),
+                        }
+                    }
+                    Pred::IdExact { val } => match &mut term_vals {
+                        Some((k, v)) if *k == "id" => v.push(val.clone()),
+                        Some(_) => return None,
+                        None => term_vals = Some(("id", vec![val.clone()])),
+                    },
+                    Pred::Date { key: "ts", lo, hi } => {
+                        if term_ts.is_some() || ts.is_some() {
+                            return None;
+                        }
+                        term_ts = Some((*lo, *hi));
+                    }
+                    _ => return None,
+                }
+            }
+            let pushed = term_vals.is_some() || term_ts.is_some();
+            if let Some(v) = term_vals.take() {
+                vals.push(v);
+            }
+            if let Some(d) = term_ts {
+                ts = Some(d);
+            }
+            if !pushed {
+                return None;
+            }
+        }
+        Some(Pushdown { vals, ts })
+    }
+}
+
 /// The wall clock, epoch seconds, one `now` per read.
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -1060,3 +1130,4 @@ pub fn help_text(surface: Surface) -> String {
     }
     out
 }
+
