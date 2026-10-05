@@ -15,6 +15,7 @@
 //! once the request parsed, the question-intake shape); refusal MESSAGES stay
 //! in the shim, which owns the user's name.
 
+use crate::decision_trace::{actor_kind_in, emit_span_to, new_span_id, Trace};
 use crate::paths::AgentsHome;
 use crate::provider_cap::questions_path;
 use serde::{Deserialize, Serialize};
@@ -349,6 +350,19 @@ question and ask again: only the user may record that retraction.";
     }
 
     let parsed = crate::escalation::parse(&req.question);
+    // A mistyped class would land as an unroutable hop, so it refuses the
+    // way the reversible field does: exit 2, the six values named, nothing
+    // written.
+    let asked_class = parsed.class.trim();
+    if !asked_class.is_empty() && !crate::decision_trace::DECISION_CLASSES.contains(&asked_class) {
+        answer.lines.push(format!(
+            "outstanding: refused: unknown class '{asked_class}'. Allowed: {}.",
+            crate::decision_trace::DECISION_CLASSES.join(", ")
+        ));
+        answer.refusal = Some("class".to_string());
+        answer.exit_code = 2;
+        return answer;
+    }
     let from_file = is_question_file(&req.question);
     // File options carry a per-option next; flag options stay bare strings.
     let file_options = !parsed.options.is_empty();
@@ -490,9 +504,69 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         req.question.clone()
     };
 
+    // The escalate route: an `answers_ask:` pointer turns the intake into the
+    // lead's route span, so the question links the hop it answers. Same
+    // journal as the question row.
+    let journal_path = req
+        .journal_path
+        .clone()
+        .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
+    let mut route_span_id: Option<String> = None;
+    let mut pending_route: Option<(Trace, Map<String, Value>)> = None;
+    if let Some(ask_ref) = parsed
+        .answers_ask
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // A span id parents verbatim; any other reference names the ask's
+        // bus message, whose endpoints re-derive the ask span. An
+        // unresolvable pointer still routes: the lead's escalation is the
+        // fact, only parentless.
+        let ask_span = crate::decision_trace::resolve_ask_span(&journal_path, ask_ref);
+        if ask_span.is_none() {
+            eprintln!(
+                "outstanding: answers_ask '{ask_ref}' names no ask span; the route records unparented"
+            );
+        }
+        let trace = Trace {
+            trace_id: node.unwrap_or("none").to_string(),
+            span_id: new_span_id(),
+            parent_span_id: ask_span,
+            actor_session: req.session_id.clone(),
+            actor_kind: actor_kind_in(home, req.session_id.as_deref(), "question"),
+            comms: "question",
+            recipient_session: None,
+            recipient_kind: None,
+        };
+        let mut attrs = Map::new();
+        attrs.insert("route".to_string(), json!("escalate"));
+        if !asked_class.is_empty() {
+            attrs.insert("class".to_string(), json!(asked_class));
+        }
+        if let Some(rec) = parsed.recommend {
+            attrs.insert("recommendation".to_string(), json!(rec.to_string()));
+        }
+        pending_route = Some((trace, attrs));
+    }
+    // The route lands BEFORE the question row: the trace query reads in ts
+    // order, and a parent must not postdate its child. A failed route emit
+    // leaves the question parentless rather than dangling; a failed question
+    // write below leaves the route orphaned, reported on stderr.
+    let mut route_recorded = false;
+    if let Some((trace, attrs)) = pending_route.take() {
+        match emit_span_to(&journal_path, "route", &trace, &attrs) {
+            Ok(()) => {
+                route_span_id = Some(trace.span_id.clone());
+                route_recorded = true;
+            }
+            Err(e) => eprintln!("outstanding: route span skipped: {e}"),
+        }
+    }
+
     let mut data = Map::new();
     let qid = mint_id();
-    data.insert("question_id".into(), json!(qid));
+    data.insert("question_id".into(), json!(&qid));
     data.insert("question".into(), json!(stored_question));
     for (key, value) in [
         ("session_id", &req.session_id),
@@ -575,10 +649,22 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     // durable half and its failure is fatal. The journal path travels in
     // the request (the Python sandbox stays the single path authority, as
     // with index_path); the legacy .fno path is the fallback.
-    let journal_path = req
-        .journal_path
-        .clone()
-        .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
+    // The question span: the question row IS the span (span_id = question_id),
+    // parented at the route span an answers_ask pointer produced.
+    data.insert(
+        "trace".into(),
+        serde_json::to_value(&Trace {
+            trace_id: node.unwrap_or("none").to_string(),
+            span_id: qid.clone(),
+            parent_span_id: route_span_id,
+            actor_session: req.session_id.clone(),
+            actor_kind: actor_kind_in(home, req.session_id.as_deref(), "question"),
+            comms: "question",
+            recipient_session: None,
+            recipient_kind: Some("user"),
+        })
+        .unwrap_or(Value::Null),
+    );
     let event = json!({
         "ts": crate::events::now_rfc3339(),
         "type": "operator_question",
@@ -597,6 +683,9 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         }
     };
     if let Err(e) = crate::event_store::append_envelope(&journal_path, &line, None) {
+        if route_recorded {
+            eprintln!("outstanding: the route span landed alone; the question row did not");
+        }
         answer.lines.push(format!(
             "outstanding: failed to record question: failed to append question to project journal: {e}"
         ));
@@ -1156,6 +1245,95 @@ stops
             row.pointer("/data/why_user").and_then(Value::as_str),
             Some("a product or taste call")
         );
+        // AC6: with answers_ask + class in the frontmatter, the journal holds
+        // the escalate route span and the question parents at it.
+        let mut r2 = req(
+            &question.replace(
+                "why_user: a product or taste call",
+                "why_user: a product or taste call\nanswers_ask: s-1a2b3c4d\nclass: irreversible",
+            ),
+            &root,
+        );
+        r2.node = Some("x-aaaa".to_string());
+        let answer2 = run_intake(&r2, &home);
+        assert_eq!(answer2.exit_code, 0, "lines: {:?}", answer2.lines);
+        let lines: Vec<Value> = journal_text(&root)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let route = lines
+            .iter()
+            .find(|l| l["data"]["span_kind"] == "route")
+            .expect("a route span landed");
+        assert_eq!(route["data"]["route"], "escalate");
+        assert_eq!(route["data"]["class"], "irreversible");
+        assert_eq!(route["data"]["trace"]["parent_span_id"], "s-1a2b3c4d");
+        let question_row = lines
+            .iter()
+            .filter(|l| l["type"] == "operator_question")
+            .last()
+            .expect("the question landed");
+        assert_eq!(
+            question_row["data"]["trace"]["parent_span_id"],
+            route["data"]["trace"]["span_id"]
+        );
+        // The parent posts before its child: journal order is ts order, so
+        // the documented ORDER BY ts query folds parents first.
+        let route_at = lines
+            .iter()
+            .position(|l| l["data"]["span_kind"] == "route")
+            .expect("route positioned");
+        let question_at = lines
+            .iter()
+            .position(|l| {
+                l["type"] == "operator_question"
+                    && l["data"]["trace"]["parent_span_id"] == route["data"]["trace"]["span_id"]
+            })
+            .expect("the routed question positioned");
+        assert!(route_at < question_at, "route precedes its question");
+        // An unresolvable pointer still routes, only parentless: the
+        // escalation is the fact.
+        let mut r4 = req(
+            &question.replace(
+                "why_user: a product or taste call",
+                "why_user: a product or taste call\nanswers_ask: m-nope",
+            ),
+            &root,
+        );
+        r4.node = Some("x-bbbb".to_string());
+        let answer4 = run_intake(&r4, &home);
+        assert_eq!(answer4.exit_code, 0, "lines: {:?}", answer4.lines);
+        let orphan = journal_text(&root)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|l| {
+                l["data"]["span_kind"] == "route"
+                    && l["data"]["trace"]["trace_id"] == "x-bbbb"
+                    && l["data"]["trace"]["parent_span_id"].is_null()
+            })
+            .expect("the unparented route landed");
+        assert_eq!(orphan["data"]["route"], "escalate");
+        // AC7: `class: cheap` refuses with exit 2, names the six values,
+        // and writes no row.
+        let mut r3 = req(
+            &question.replace(
+                "why_user: a product or taste call",
+                "why_user: a product or taste call\nclass: cheap",
+            ),
+            &root,
+        );
+        r3.node = Some("x-aaaa".to_string());
+        let answer3 = run_intake(&r3, &home);
+        assert_eq!(answer3.exit_code, 2);
+        assert_eq!(answer3.refusal.as_deref(), Some("class"));
+        let message = answer3.lines.join("\n");
+        for value in crate::decision_trace::DECISION_CLASSES {
+            assert!(message.contains(value), "names {value}: {message}");
+        }
+        // Only the five earlier rows sit in the journal: three from before
+        // the AC7 case, plus the r4 route and question the unparented route
+        // wrote. The refusal wrote none.
+        assert_eq!(journal_text(&root).lines().count(), 5);
     }
 
     #[test]

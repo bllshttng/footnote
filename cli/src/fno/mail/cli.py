@@ -263,23 +263,20 @@ def _record_mail_origin(
     lane: str,
     sender: str | None = None,
     target_session: str | None = None,
+    body: str | None = None,
+    reply_to: str | None = None,
 ) -> None:
-    """Best-effort positive measurement of the classified send origin."""
+    """Best-effort origin row and ask/route spans, via the Rust mail-record leaf."""
     try:
-        from fno.agents import events
-        from fno.events import append_event, mail_origin_classified
+        import shutil
 
-        append_event(
-            mail_origin_classified(
-                origin=origin,
-                lane=lane,
-                presumed_human=origin == "operator",
-                sender=sender,
-                target_session=target_session,
-            ),
-            events.daemon_lifecycle_log(),
-            lock_timeout_seconds=2,
-        )
+        pairs = (("--origin", origin), ("--lane", lane), ("--sender", sender),
+                 ("--target-session", target_session), ("--reply-to", reply_to))
+        flags = [x for pair in pairs if pair[1] for x in pair if x is not None]
+        binary = shutil.which("fno-agents")
+        if binary is not None:
+            subprocess.run([binary, "mail-record", *flags],
+                           input=body or "", timeout=2, capture_output=True)
     except Exception:
         pass
 
@@ -1017,7 +1014,9 @@ def cmd_reply(
     body_text = _read_body(body, body_file, body_arg)
     _vet_body(body_text, allow_reason=style_exception)
     classified_origin = classify_origin()
-    _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project)
+    from fno.agents.self_stamp import stamp_from
+    _record_mail_origin(origin=classified_origin, lane="reply", sender=stamp_from(from_project),
+                        body=body_text, reply_to=to_msg)
     mail_origin: str | None = (
         None if classified_origin == "unknown" else classified_origin
     )
@@ -3504,11 +3503,10 @@ def cmd_send(
             else "king" if to_king
             else "peer"
         ),
-        sender=from_name,
-        # Under --to-self the positional parks the payload, so `name` is not
-        # a handle at this point; recording it wrote the payload into the
-        # audit row. The self target resolves below.
-        target_session=name if raw and not to_self else None,
+        # The ask key hashes the bus endpoints; record what the row will carry.
+        sender=stamp_from(from_name),
+        target_session=None if (to_self or to_project) else name,
+        body=message,
     )
     # Unknown is an explicit audit result, not a wire authority. Legacy
     # carriers omit the attribute so a law gate cannot mistake silence for an
