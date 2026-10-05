@@ -372,6 +372,24 @@ fn draw_notes_box(
     }
 }
 
+pub(super) type FoldMsg = Result<crate::needs_overlay::QuestionsFold, String>;
+
+/// The projection leg's channel: the newest fold wins.
+pub(super) fn fold_channel() -> (
+    tokio::sync::mpsc::UnboundedSender<FoldMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<FoldMsg>,
+) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
+/// The index leg's channel: lands first, seeds the bell's list.
+pub(super) fn index_channel() -> (
+    tokio::sync::mpsc::UnboundedSender<crate::needs_overlay::QuestionsFold>,
+    tokio::sync::mpsc::UnboundedReceiver<crate::needs_overlay::QuestionsFold>,
+) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
 /// Refresh the shared questions projection while the sidebar is visible.
 /// The read runs off the UI loop; the index fold rides `index_tx` back the
 /// moment it lands, the projection rides `tx` when the subprocess answers.
@@ -807,6 +825,37 @@ impl View {
         bell::clamp_selection(self);
     }
 
+    /// The bell's visible question fold: the index seeds the list, the full
+    /// projection enriches it when healthy. A degraded projection yields to
+    /// the index on every id both hold, so a timed-out read never outvotes
+    /// the fresh list; ids only one side holds append.
+    pub(super) fn questions_merged(&self) -> Option<crate::needs_overlay::QuestionsFold> {
+        let index = self.questions_index.as_ref();
+        let fold = self.questions_fold.as_ref();
+        let items = match (index, fold) {
+            (None, None) => return None,
+            (Some(index), None) => index.items.clone(),
+            (None, Some(fold)) => fold.items.clone(),
+            (Some(index), Some(fold)) => {
+                let healthy = !self.questions_degraded;
+                let primary = if healthy { fold } else { index };
+                let secondary = if healthy { index } else { fold };
+                let mut items: Vec<_> = primary.items.clone();
+                let held: std::collections::HashSet<&str> =
+                    primary.items.iter().map(|q| q.id.as_str()).collect();
+                for q in &secondary.items {
+                    if !held.contains(q.id.as_str()) {
+                        items.push(q.clone());
+                    }
+                }
+                items
+            }
+        };
+        Some(crate::needs_overlay::QuestionsFold {
+            items,
+            ..Default::default()
+        })
+    }
     /// Apply the index fold: the fast seed the bell renders before the
     /// projection answers.
     pub(super) fn apply_questions_index(&mut self, fold: crate::needs_overlay::QuestionsFold) {

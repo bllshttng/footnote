@@ -948,8 +948,7 @@ pub(crate) struct View {
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
     questions_fold: Option<crate::needs_overlay::QuestionsFold>,
-    /// The question pages index (`questions.md`), read in-process so the
-    /// bell's list lands without waiting on the projection subprocess.
+    /// The question pages index, read in-process: the bell's fast seed.
     questions_index: Option<crate::needs_overlay::QuestionsFold>,
     questions_degraded: bool,
     questions_degraded_reason: Option<String>,
@@ -2297,38 +2296,6 @@ impl View {
         } else {
             NeedsFooter::AsOf
         }
-    }
-
-    /// The bell's visible question fold: the index seeds the list, the full
-    /// projection enriches it when healthy. A degraded projection yields to
-    /// the index on every id both hold, so a timed-out read never outvotes
-    /// the fresh list; ids only one side holds append.
-    pub(super) fn questions_merged(&self) -> Option<crate::needs_overlay::QuestionsFold> {
-        let index = self.questions_index.as_ref();
-        let fold = self.questions_fold.as_ref();
-        let items = match (index, fold) {
-            (None, None) => return None,
-            (Some(index), None) => index.items.clone(),
-            (None, Some(fold)) => fold.items.clone(),
-            (Some(index), Some(fold)) => {
-                let healthy = !self.questions_degraded;
-                let primary = if healthy { fold } else { index };
-                let secondary = if healthy { index } else { fold };
-                let mut items: Vec<_> = primary.items.clone();
-                let held: std::collections::HashSet<&str> =
-                    primary.items.iter().map(|q| q.id.as_str()).collect();
-                for q in &secondary.items {
-                    if !held.contains(q.id.as_str()) {
-                        items.push(q.clone());
-                    }
-                }
-                items
-            }
-        };
-        Some(crate::needs_overlay::QuestionsFold {
-            items,
-            ..Default::default()
-        })
     }
 
     /// Same as [`Self::needs_footer`] for the MINE leg.
@@ -7651,15 +7618,9 @@ async fn attach_and_run(
     // other.
     let (question_act_tx, mut question_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
-    // The bell's question list uses the same questions projection as the
-    // detail view; reads stay off the UI loop and apply the latest fold.
-    let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
-        Result<crate::needs_overlay::QuestionsFold, String>,
-    >();
-    // The index leg lands first (an in-process read), so the bell's list
-    // paints before the projection subprocess answers.
-    let (questions_index_tx, mut questions_index_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::needs_overlay::QuestionsFold>();
+    // The bell's question legs: the projection and the index that seeds it.
+    let (questions_tx, mut questions_rx) = questions::fold_channel();
+    let (questions_index_tx, mut questions_index_rx) = questions::index_channel();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -7803,10 +7764,8 @@ async fn attach_and_run(
                 let _ = tx.send(result);
             });
         }
-        // task 2.3: kick a queued question answer off the UI loop.
-        // `question_acting` is set by the stdin handler at enqueue time,
-        // same discipline as the MINE mutation above.
-        // Refresh the questions projection while the sidebar is shown.
+        // task 2.3: kick a queued question answer; refresh the projection
+        // and its index seed while the sidebar is shown.
         questions::maybe_kick(&mut view, &questions_tx, &questions_index_tx);
         questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
@@ -8446,7 +8405,6 @@ async fn attach_and_run(
                 }
             }
             Some(fold) = questions_index_rx.recv() => {
-                // The index landed: seed the list and repaint.
                 view.apply_questions_index(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
