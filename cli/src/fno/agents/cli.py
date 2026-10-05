@@ -1327,8 +1327,8 @@ def cmd_spawn(
         "--promote",
         help=(
             "Promote the spawned worker to a titled role over a territory: "
-            "epic id(s), one project, or several. Refused on headless. "
-            "Contract: docs/guides/agents-spawn-flags.md."
+            "epic id(s), one project, or several. Contract: "
+            "docs/guides/agents-spawn-flags.md."
         ),
     ),
     crown: list[str] = typer.Option(
@@ -1342,9 +1342,8 @@ def cmd_spawn(
         False,
         "--hand-off",
         help=(
-            "Hand the caller-held role to the spawned worker. Without this "
-            "flag, a same-scope promote is refused and the caller keeps its "
-            "role."
+            "Hand the caller-held role to the spawned worker. Without it, a "
+            "same-scope promote is refused and the caller keeps its role."
         ),
     ),
     succeed: bool = typer.Option(
@@ -1607,8 +1606,7 @@ def cmd_spawn(
 
     # Retired spellings answer for one release and name their replacements.
     for retired, current, alias_vals in (
-        ("--crown", "--promote", crown),
-        ("--succeed", "--hand-off", succeed),
+        ("--crown", "--promote", crown), ("--succeed", "--hand-off", succeed),
     ):
         if alias_vals:
             print(
@@ -1758,9 +1756,7 @@ def cmd_spawn(
     # ambiently from this session - never a value the child could forge. The role
     # needs a session that outlives the grant, so `headless` (one answer, then
     # exit) is refused; `pane` and `bg` both qualify. A bg holder loses only the
-    # pane PLACEMENT primitives (`--at current` reads FNO_PANE); mail, peek, top,
-    # and wait are substrate-blind, so adjacency is an ergonomics ask, not an
-    # authority one.
+    # pane PLACEMENT primitives; mail, peek, top, and wait are substrate-blind.
     crown_level: int | None = None
     crown_scope: str | None = None
     if promote:
