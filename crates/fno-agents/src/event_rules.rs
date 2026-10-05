@@ -814,7 +814,7 @@ mod tests {
     /// One engine test's world: a temp agents home (its registry crowns the
     /// test session when asked), a temp journal, and the canonical handle.
     struct Rig {
-        dir: tempfile::TempDir,
+        _dir: tempfile::TempDir,
         home: crate::paths::AgentsHome,
         journal: PathBuf,
         cwd: PathBuf,
@@ -852,7 +852,7 @@ mod tests {
                 .unwrap();
             }
             Rig {
-                dir,
+                _dir: dir,
                 home: crate::paths::AgentsHome::from_env(),
                 journal: journal_dir.join("events.jsonl"),
                 cwd,
