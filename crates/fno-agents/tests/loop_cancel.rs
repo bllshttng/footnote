@@ -138,7 +138,7 @@ fn lead_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     fs::create_dir_all(&bin_dir).unwrap();
     write_executable(
         &dir.path().join("fake-fno"),
-        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"drain\" ]; then\n\
+        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"org\" ] && [ \"$3\" = \"drain\" ]; then\n\
          \x20 printf '%s\\n' '{\"scope\":\"k\",\"undelivered\":1}'\n\
          \x20 exit 0\n\
          fi\n\
