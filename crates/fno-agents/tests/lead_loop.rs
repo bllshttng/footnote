@@ -223,12 +223,12 @@ fn lead_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
             home,
             "escalate-mock",
             &format!(
-                "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"drain\" ]; \
+                "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"org\" ] && [ \"$3\" = \"drain\" ]; \
                  then\n\
                  \x20 {}\n\
                  \x20 exit 0\n\
                  fi\n\
-                 if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+                 if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"org\" ] && [ \"$3\" = \"escalate\" ]; then\n\
                  \x20 echo q-mock\n\
                  \x20 exit 0\n\
                  fi\n\
@@ -396,11 +396,11 @@ fn lead_quiet_drain_bin(dir: &Path, counts: &[Option<i64>], log: &Path) -> PathB
         dir,
         "escalate-mock",
         &format!(
-            "if [ \"$1\" = agents ] && [ \"$2\" = lead ] && [ \"$3\" = drain ]; then\n\
+            "if [ \"$1\" = agents ] && [ \"$2\" = org ] && [ \"$3\" = drain ]; then\n\
              n=$(cat {counter} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {counter}\n\
              case $n in\n{arms}esac\n\
              exit 0\nfi\n\
-             if [ \"$1\" = agents ] && [ \"$2\" = lead ] && [ \"$3\" = escalate ]; then\n\
+             if [ \"$1\" = agents ] && [ \"$2\" = org ] && [ \"$3\" = escalate ]; then\n\
              echo \"$*\" >> {log}\n\
              echo q-mock\n\
              exit 0\nfi\n\
@@ -1160,11 +1160,11 @@ fn lead_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
         dir,
         "escalate-mock",
         &format!(
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"drain\" ]; then\n\
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"org\" ] && [ \"$3\" = \"drain\" ]; then\n\
              \x20 {}\n\
              \x20 exit 0\n\
              fi\n\
-             if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"lead\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+             if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"org\" ] && [ \"$3\" = \"escalate\" ]; then\n\
              \x20 echo \"$*\" >> {log}\n\
              \x20 echo q-mock\n\
              \x20 exit 0\n\
