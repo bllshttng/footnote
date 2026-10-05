@@ -132,12 +132,10 @@ pub(crate) fn paint(
         band_on,
         theme,
     );
-    let mut board_lines = b.board_lines_cached();
     if !band_on {
-        for l in &mut board_lines {
-            l.band = false;
-        }
+        b.strip_board_band();
     }
+    let board_lines = b.board_lines_ref();
     backlog_style::paint_panel(
         cells,
         rows,
@@ -192,13 +190,11 @@ pub(crate) fn paint(
         focus_pane,
         theme,
     );
-    let mut dlines = b.detail_lines_raw();
     if !focus_pane {
-        for l in &mut dlines {
-            l.band = false;
-        }
+        b.strip_detail_band();
     }
-    let dlines = &dlines[scroll.min(dlines.len())..];
+    let dlines_all = b.detail_lines_ref();
+    let dlines = &dlines_all[scroll.min(dlines_all.len())..];
     backlog_style::paint_panel_at(
         cells,
         rows,
