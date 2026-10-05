@@ -368,7 +368,9 @@ fn default_true() -> bool {
 /// v103 removes `PanePlacement.human`: default admission leaves an opt-in machine gate
 /// for agent spawn; serde remains compatible with old and new placements. Floor stays 58.
 /// v104 adds `AgentRow.compaction_count`; v105 adds addressed pane input receipts; floor stays 58.
-pub const PROTO_VERSION: u32 = 105;
+/// v106: `AgentRow.held_conversation` (serde default), the machine-armed hold
+/// mark behind the sideline's `[HELD]` badge; floor stays 58.
+pub const PROTO_VERSION: u32 = 106;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1031,6 +1033,13 @@ pub struct AgentRow {
     /// Missing on an older wire defaults false and false stays off the wire.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dnd: bool,
+    /// (v106) The hold is machine-armed: a live conversation clock
+    /// in the mail-hold sidecar backs this row's bus-only stamp, so the
+    /// sideline renders `[HELD]`, never the `[DND]` a lead reads as its own
+    /// deliberate hold. Additive like `dnd`: an older wire defaults false,
+    /// which degrades to the old label, never a wrong one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_conversation: bool,
     /// (v47) True only when `exited` is a terminal registry status
     /// with NO positive corroboration (no confirmed-dead pid, no confirmed-
     /// gone pane) -- `agents_view::Liveness::Unmeasured`. `exited` keeps its
@@ -3672,6 +3681,7 @@ mod tests {
                         reason: Some("permission prompt".into()),
                         exited: false,
                         dnd: false,
+                        held_conversation: false,
                         unmeasured: false,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
@@ -3730,6 +3740,7 @@ mod tests {
                         reason: None,
                         exited: true,
                         dnd: false,
+                        held_conversation: false,
                         unmeasured: false,
                         answerable: None,
                         attach_id: None,
@@ -3986,6 +3997,23 @@ mod tests {
         assert!(
             !serde_json::to_string(&row).unwrap().contains("dnd"),
             "legacy false DND stays absent from the wire"
+        );
+        // The machine-armed mark rides the wire the same way -
+        // additive, true survives, false stays absent.
+        let held_wire = r#"{"squad":null,"name":"held","pane_id":null,
+                          "badge":"working","reason":null,"exited":false,
+                          "dnd":true,"held_conversation":true}"#;
+        let held_row: AgentRow = serde_json::from_str(held_wire).unwrap();
+        let encoded = serde_json::to_string(&held_row).unwrap();
+        assert!(
+            encoded.contains(r#""held_conversation":true"#),
+            "the machine-armed mark survives the wire: {encoded}"
+        );
+        assert!(
+            !serde_json::to_string(&dnd_row)
+                .unwrap()
+                .contains("held_conversation"),
+            "false stays absent from the wire"
         );
         // A teamed row round-trips losslessly.
         let mut teamed = row.clone();

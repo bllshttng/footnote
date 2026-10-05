@@ -530,3 +530,152 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
         "focus and selector share the one surface band"
     );
 }
+
+// The identity-suffix family: lane color, deviation tokens, and the hold
+// badges ([DND] for a hold you set, [HELD] for one the machine armed).
+
+#[test]
+fn sideline_lane_color_and_deviation_token_render_on_the_row() {
+    // x-1b35 AC3: the lane renders as zero-width color on the agent row
+    // (here through the built-in codex table entry), the model-deviation
+    // token appends ` glm` on a claude row OFF its default lane, and the
+    // retired `@<account>` text prefix is gone from the composition.
+    let mut view = two_pane_view();
+    let mut codex_row = focus_agent(21);
+    codex_row.harness = Some("codex".into());
+    let mut glm_row = focus_agent(22);
+    glm_row.harness = Some("claude".into());
+    glm_row.model = Some("glm-5.3-flash[1m]".into());
+    glm_row.account = Some("makers".into());
+    view.layout.agents.push(codex_row);
+    view.layout.agents.push(glm_row);
+    // The deviation token rides the name cell; give the columns room for it.
+    view.sideline_width = 100;
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let panel_w = view.panel_w() as usize;
+    let name_x = view.worker_column_rects((panel_w - 1) as u16)[1].x as usize;
+    let line = |row: usize| -> (String, Color) {
+        let start = row * cols;
+        let end = start + panel_w.min(cols);
+        let text: String = frame.cells[start..end].iter().map(|c| c.c).collect();
+        // A name cell, not the row lead: the focused row's band and the
+        // selector own the first columns.
+        let fg = frame.cells[start + name_x].fg;
+        (text, fg)
+    };
+    // Row 2 (1 + the strip row): the codex row - the lane color now rides
+    // the status cell only (the operator's color ruling), so the NAME cell
+    // reads default. No account prefix.
+    let (text, fg) = line(2);
+    assert_eq!(
+        fg,
+        Color::Default,
+        "the name cell carries no lane color anymore"
+    );
+    assert!(
+        !text.contains('@'),
+        "the @account prefix is retired: `{text}`"
+    );
+    // Row 3 (2 + the strip row): the claude/glm row - the deviation token
+    // is the textual channel; claude itself carries no builtin color, so fg
+    // stays default and the token does the naming.
+    let (text, fg) = line(3);
+    assert!(
+        text.contains(" glm"),
+        "the deviation token renders: `{text}`"
+    );
+    assert!(!text.contains("@makers"), "no @account prefix: `{text}`");
+    assert_eq!(fg, Color::Default, "claude carries no builtin lane color");
+}
+
+#[test]
+fn sideline_marks_active_squad_and_focused_agent_row() {
+    // x-4374 / AC2-HP: the active squad header accents its caret, and the
+    // agent row whose pane holds focus wears the full-width INVERSE band
+    // (replacing the near-invisible one-cell gutter x-5a52 painted). Both
+    // stand regardless of the selector (parked elsewhere) or hover.
+    let mut view = two_pane_view(); // active_squad = 1, focus = pane 11
+    view.layout.agents.push(focus_agent(11));
+    view.selector = Some(3); // squad 2's header, not row 0 or 1
+    view.hover_row = None;
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let panel_w = view.panel_w() as usize;
+
+    // Display row 0 -> outer row 1 (the strip owns outer row 0): the active
+    // squad header caret is amber.
+    let caret = frame.cells[cols];
+    assert_eq!(caret.c, '▾', "active expanded squad shows the caret");
+    assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
+
+    // Display row 1 -> outer row 2: the focused agent row is a full-width
+    // surface band (accent text on the deep index, never a full accent
+    // fill), and the `▎` gutter glyph is gone.
+    let lead = frame.cells[2 * cols]; // outer row 2, col 0
+    assert_ne!(
+        lead.c, '▎',
+        "the list layout keeps no ▎ gutter; the card layout owns the bar"
+    );
+    assert_eq!(
+        lead.bg,
+        Color::Indexed(0),
+        "the focused row carries the standing surface band"
+    );
+    // The band fills the panel width (a right-edge text cell is still banded).
+    assert_eq!(
+        frame.cells[2 * cols + panel_w - 2].bg,
+        Color::Indexed(0),
+        "the focus band fills the panel width"
+    );
+}
+
+#[test]
+fn client_agent_row_renders_dnd_as_presence_not_liveness() {
+    let held: AgentRow = serde_json::from_str(
+        r#"{"squad":1,"name":"dnd","pane_id":10,
+                "badge":"working","reason":null,"exited":false,"dnd":true}"#,
+    )
+    .unwrap();
+    let mut view = two_pane_view();
+    view.sideline_width = 60;
+    view.layout.agents = vec![held];
+    let text = frame_text(&view.compose());
+    let row = text.lines().find(|line| line.contains("dnd")).unwrap();
+    assert!(
+        row.contains("[DND]") && row.contains("Work"),
+        "DND rides the identity without replacing liveness: {row:?}"
+    );
+}
+
+#[test]
+fn sideline_marks_a_machine_armed_hold_held_never_dnd() {
+    // A hold the conversation rules armed is its own state: the row reads
+    // [HELD], and a manual hold keeps [DND].
+    let held: AgentRow = serde_json::from_str(
+        r#"{"squad":1,"name":"held","pane_id":10,
+                "badge":"working","reason":null,"exited":false,
+                "dnd":true,"held_conversation":true}"#,
+    )
+    .unwrap();
+    let manual: AgentRow = serde_json::from_str(
+        r#"{"squad":1,"name":"manual","pane_id":11,
+                "badge":"working","reason":null,"exited":false,
+                "dnd":true,"held_conversation":false}"#,
+    )
+    .unwrap();
+    let mut view = two_pane_view();
+    view.sideline_width = 60;
+    view.layout.agents = vec![held, manual];
+    let text = frame_text(&view.compose());
+    let held_row = text.lines().find(|line| line.contains("held")).unwrap();
+    assert!(
+        held_row.contains("[HELD]") && !held_row.contains("[DND]"),
+        "machine-armed hold reads HELD: {held_row:?}"
+    );
+    let manual_row = text.lines().find(|line| line.contains("manual")).unwrap();
+    assert!(
+        manual_row.contains("[DND]") && !manual_row.contains("[HELD]"),
+        "a manual hold keeps DND: {manual_row:?}"
+    );
+}
