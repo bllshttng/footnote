@@ -148,9 +148,9 @@ jobs:
           # 313-file packet (2026-10-05, all tests green to each kill; the
           # same head's full lane passed the identical suite 13-ways sharded),
           # so volume on one runner is what kills it, not content. Split the
-          # packet so a leg prices ~15 minutes: five legs at est 72, and
-          # packets at est <= 15 keep today's single-leg shape. 13 legs is
-          # the full lane's ceiling.
+          # packet so a leg prices roughly est/15 (five legs at est 72; a
+          # packet at est 15 or under keeps today's single-leg shape). 13
+          # legs is the full lane's ceiling.
           shards=$(( (est + 14) / 15 ))
           [ "$shards" -gt 13 ] && shards=13
           [ "$shards" -lt 1 ] && shards=1
