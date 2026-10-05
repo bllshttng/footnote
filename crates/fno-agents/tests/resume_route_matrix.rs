@@ -81,18 +81,17 @@ impl Fixture {
     }
 
     fn events(&self) -> String {
-        // The children pin FNO_AGENTS_HOME=<home>, so the store beside their
-        // journal routes to the state-layout place under home's parent. The
-        // route keys the table by the journal stem ("events"), not the db
-        // name, and this process carries no pin, so store_path beside the
-        // journal would name a different file and read as an empty store.
+        // The children pin FNO_AGENTS_HOME=<home>, so their journal's store
+        // routes to the layout place of events.db under home's parent. This
+        // process carries no pin, so it names the same place and hands
+        // query_events a journal beside it, whose store_path is that file.
         let root = self.home.parent().unwrap();
         let store = fno_agents::state_layout::place(
             &std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
-            "events",
+            "events.db",
         );
         fno_agents::event_store::query_events(
-            &store,
+            &store.with_extension("jsonl"),
             &fno_agents::event_store::EventQuery::default(),
         )
         .unwrap_or_default()
