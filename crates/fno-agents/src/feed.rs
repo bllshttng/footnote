@@ -732,7 +732,7 @@ pub fn project(
     }
 
     rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
-    assign_owners(&mut rows, &team_events, graph_entries);
+    assign_owners(&mut rows, &team_events, graph_entries, &themes);
     for r in &mut rows {
         r.cursor = cursor_of(r);
     }
@@ -834,22 +834,28 @@ fn parse_team_events(team_raw: &str) -> Vec<TeamEvent> {
 /// clears its scope at its own ts. A row whose node, or that node's graph
 /// parent, sits in a held scope gets `lead {holder} L{level}`; otherwise a
 /// row whose node has a graph parent gets `epic {parent} {parent title}`.
-fn assign_owners(rows: &mut [FeedRow], team_events: &[TeamEvent], graph_entries: &[Value]) {
+fn assign_owners(
+    rows: &mut [FeedRow],
+    team_events: &[TeamEvent],
+    graph_entries: &[Value],
+    themes: &std::collections::BTreeMap<String, String>,
+) {
     if rows.is_empty() {
         return;
     }
-    // node -> parent / title lookups, one linear scan each (the entry set is
-    // the operator's backlog, not a hot path).
+    // One id -> entry map replaces a linear scan per row; the projection
+    // runs on every page read, so the walk is O(entries) once, not O(rows x
+    // entries).
+    let by_id: std::collections::HashMap<&str, &Value> = graph_entries
+        .iter()
+        .filter_map(|e| graph_store::entry_id(e).map(|id| (id, e)))
+        .collect();
     let parent_of = |node: &str| -> Option<String> {
-        graph_entries
-            .iter()
-            .find(|e| graph_store::entry_id(e) == Some(node))
-            .and_then(|e| s_field(e, "parent"))
+        by_id.get(node).and_then(|e| s_field(e, "parent"))
     };
     let title_of = |node: &str| -> Option<String> {
-        graph_entries
-            .iter()
-            .find(|e| graph_store::entry_id(e) == Some(node))
+        by_id
+            .get(node)
             .and_then(|e| graph_store::s_str(e, "title"))
             .map(str::to_string)
     };
@@ -917,8 +923,9 @@ fn assign_owners(rows: &mut [FeedRow], team_events: &[TeamEvent], graph_entries:
                 })
                 .map(|(s, _, _)| s.clone())
                 .unwrap_or_default();
-            let theme = crate::paths::AgentsHome::from_env_opt()
-                .and_then(|home| crate::team_names::theme_for(&home.team_names_json(), &scope));
+            let theme = themes
+                .get(crate::territory::canonical_scope(&scope).as_str())
+                .cloned();
             let rank = crate::team_names::title(*level as u32, &scope, theme.as_deref());
             r.owner = Some(format!("{rank} ({holder})"));
         } else if let Some(p) = parent {
@@ -1122,9 +1129,17 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let questions_path = fno_dir.join("questions.jsonl");
+    // Typed read: the four question kinds plus the empty type (corrupt rows
+    // still count). The store's other kinds, 119k+ attention_delivery rows
+    // alone, never reach the parser, so they stop reading as malformed.
     let questions_raw = match crate::event_store::journal_text_checked(
         &questions_path,
-        &crate::event_store::EventQuery::of_types(&[]),
+        &crate::event_store::EventQuery::of_types(&[
+            "operator_question",
+            "operator_question_closed",
+            "operator_decision",
+            "day_boundary",
+        ]),
     ) {
         Ok(raw) => raw,
         Err(e) => {
@@ -1707,6 +1722,45 @@ mod tests {
         )
         .unwrap();
         assert!(raw.contains("q-feed-1"), "{raw}");
+
+        // AC2-EDGE: the typed questions read keeps the parser to the four
+        // question kinds. Attention rows never reach it, so they stop reading
+        // as malformed; an empty-type corrupt line still counts, once.
+        let dir = tempfile::tempdir().unwrap();
+        let questions = dir.path().join("questions.jsonl");
+        for i in 0..3 {
+            let row = serde_json::json!({
+                "ts": "2026-09-17T11:00:00Z", "type": "attention_delivery", "source": "test",
+                "data": {"attention_id": format!("a-{i}"), "item_id": format!("it-{i}"), "rung": "inbox", "outcome": "delivered"}
+            });
+            crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();
+        }
+        let q = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "test",
+            "data": {"question_id": "q-typed", "question": "still read?", "blocks": []}
+        });
+        crate::event_store::append_envelope(&questions, &q.to_string(), None).unwrap();
+        let raw = crate::event_store::journal_text_checked(
+            &questions,
+            &crate::event_store::EventQuery::of_types(&[
+                "operator_question",
+                "operator_question_closed",
+                "operator_decision",
+                "day_boundary",
+            ]),
+        )
+        .unwrap();
+        assert!(raw.contains("q-typed"));
+        assert!(
+            !raw.contains("a-1"),
+            "attention rows never reach the questions parser"
+        );
+        let text = format!("{raw}\nnot json\n");
+        let p = project(&text, &[], &[], "", "", "");
+        assert_eq!(
+            p.skipped_lines, 1,
+            "the corrupt line is the only malformed count"
+        );
 
         // AC1: the jolly-finch shape, projected. The removal is recovered from
         // its registry_row_removed event; the feed row carries the deeper
