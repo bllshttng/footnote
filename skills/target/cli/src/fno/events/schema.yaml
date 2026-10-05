@@ -2952,6 +2952,112 @@ event_types:
           type: string
 
   - {name: team_succession_reverted, alias_of: crown_succession_reverted, sources: [daemon]}
+  - name: team_succession_announced
+    description: "The succession transaction's announce step: one fleet announcement from the heir's name naming the handoff, from the succeeded team-settle or the rollback. The registry commit stays the authority; a failed announce never undoes the transfer."
+    sources: [agents]
+    data:
+      required: [scope, heir_name, predecessor_name]
+      properties:
+        scope:
+          type: string
+        heir_name:
+          type: string
+        predecessor_name:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_announce_failed
+    description: "The succession transaction's announce step could not write its fleet announcement: one stderr line carries the error and the transfer stands."
+    sources: [agents]
+    data:
+      required: [scope, heir_name, predecessor_name]
+      properties:
+        scope:
+          type: string
+        heir_name:
+          type: string
+        predecessor_name:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_transferred
+    description: "The succession transaction's transfer receipt: carry_succession committed the regnal bump and the pending record on a succeeded settle."
+    sources: [agents]
+    data:
+      required: [scope, heir_name, predecessor_name]
+      properties:
+        scope:
+          type: string
+        heir_name:
+          type: string
+        predecessor_name:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_verified
+    description: "The heir's first beat bound the carried name: the verify step of the succession transaction, keyed by succession_id."
+    sources: [agents]
+    data:
+      required: [scope, heir_name]
+      properties:
+        scope:
+          type: string
+        heir_name:
+          type: string
+        predecessor_name:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_released
+    description: "The release readback passed at verify: no live registry row still holds the predecessor's crown over the scope."
+    sources: [agents]
+    data:
+      required: [scope, heir_name]
+      properties:
+        scope:
+          type: string
+        heir_name:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_release_unproven
+    description: "The release readback could not prove the predecessor's crown vacated over the scope: a live row still holds it, or the registry read failed. reason names the row or the error."
+    sources: [agents]
+    data:
+      required: [scope]
+      properties:
+        scope:
+          type: string
+        reason:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_retro_filed
+    description: "The retro step launched the intel writer detached for the predecessor's session and named the eval dir it writes."
+    sources: [agents]
+    data:
+      required: [scope, session, dir]
+      properties:
+        scope:
+          type: string
+        session:
+          type: string
+        dir:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_retro_unmeasured
+    description: "The retro step could not run: no predecessor session id, or no resolvable plans dir. reason names which."
+    sources: [agents]
+    data:
+      required: [scope]
+      properties:
+        scope:
+          type: string
+        reason:
+          type: string
+        succession_id:
+          type: string
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
