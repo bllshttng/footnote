@@ -455,7 +455,9 @@ assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
 if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
   echo "--- AC20 diagnostics: rc, hook stderr + output of the last fire ---" >&2
   printf 'RC: %s\nOUT: %s\n' "$RC" "$OUT" >&2
-  cat "$SBX/hook-stderr.log" 2>/dev/null >&2
+  # >&2 LAST: `2>/dev/null >&2` would send stdout to wherever stderr now
+  # points, and the first dump round's evidence landed in /dev/null.
+  cat "$SBX/hook-stderr.log" >&2
   "$AGENTS_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
   # Fire #1 died between the latch touch and the emit (fire #2 is
   # latch-silent, so OUT above cannot show it). Re-run its exact payload
@@ -463,10 +465,10 @@ if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
   rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null
   printf '%s' "$(payload "$SBX/small.jsonl")" | bash -x "$HOOK" > "$SBX/diag-out.txt" 2> "$SBX/diag-trace.txt" || true
   echo "--- AC20 diagnostic refire stdout ---" >&2
-  head -c 600 "$SBX/diag-out.txt" 2>/dev/null >&2
+  head -c 600 "$SBX/diag-out.txt" >&2
   echo "" >&2
   echo "--- AC20 diagnostic refire trace tail ---" >&2
-  tail -30 "$SBX/diag-trace.txt" 2>/dev/null >&2
+  tail -30 "$SBX/diag-trace.txt" >&2
 fi
 run_hook "$(payload "$SBX/small.jsonl")"
 assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
