@@ -211,6 +211,7 @@ pub mod kill_criteria;
 pub mod lane_heal;
 pub mod lanes;
 pub mod launch_workdir;
+pub mod worked_nodes;
 pub mod law_match;
 pub mod lead_answers;
 pub mod lead_checkin;

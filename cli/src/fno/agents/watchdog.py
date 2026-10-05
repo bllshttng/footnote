@@ -47,10 +47,8 @@ Verdict = namedtuple(
 #: ``pid``/``pid_start_time``/``mux`` ride for the reachability falsifiers.
 Row = namedtuple(
     "Row",
-    "row_id name state node cwd agent pid pid_start_time mux stopped_at crowned",
-    # crowned: the registry entry carries a crown level. A crowned lead row
-    # is never a node worker, whatever its attribution reads.
-    defaults=(None, "", "claude", None, None, None, None, False),
+    "row_id name state node cwd agent pid pid_start_time mux stopped_at",
+    defaults=(None, "", "claude", None, None, None, None),
 )
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -1363,20 +1361,12 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     out: list[Row] = []
     unmapped_states: set[str] = set()
     skipped_no_sid = 0
-    # A crowned lead is never a node worker, so its name never seeds the
-    # unmeasurable fold either - that fold is the one place a row with no
-    # session id could still read as the occupant.
-    crowned_lead_names = {
-        str(getattr(e, "name", "") or "")
-        for e in registry_rows
-        if getattr(e, "crown_level", None) is not None
-    }
     for r in raw:
         sid = str(r.get("sessionId") or r.get("session_id") or "")
         if not sid:
             cwd = str(r.get("cwd") or "")
             node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
-            if node and str(r.get("name") or "") not in crowned_lead_names:
+            if node:
                 warnings.append(
                     f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
                     f"harness=claude node={node} name={r.get('name') or 'unknown'}"
@@ -1405,7 +1395,6 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             cwd=cwd,
             agent="claude",
             stopped_at=(getattr(match, "stop", None) or {}).get("at"),
-            crowned=getattr(match, "crown_level", None) is not None,
         ))
     for sid, entry in by_sid.items():  # fno-first: vendor-omitted rows list (d-e096c669)
         state, state_warning = _row_state({"status": str(getattr(entry, "status", "") or "")})
@@ -1441,7 +1430,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             name = str(getattr(entry, "name", None) or "") or "unknown"
             if not node:
                 skipped_nonclaude_no_id += 1
-            elif getattr(entry, "crown_level", None) is None:
+            else:
                 warnings.append(
                     f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
                     f"harness={getattr(entry, 'harness', None) or 'unknown'} "
@@ -1471,7 +1460,6 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
                 pid=getattr(entry, "pid", None),
                 pid_start_time=getattr(entry, "pid_start_time", None),
                 mux=getattr(entry, "mux", None),
-                crowned=getattr(entry, "crown_level", None) is not None,
             )
         )
         seen_row_ids.add(row_id)
