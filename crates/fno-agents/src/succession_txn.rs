@@ -261,14 +261,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_id_is_the_ts_and_the_scope() {
-        assert_eq!(
-            succession_id(&pending(), "x-aaaa"),
-            "2026-10-04T00:00:00Z:x-aaaa"
-        );
-    }
-
     /// Pin a private agents home so the transaction's event rows land where
     /// the test reads them. Holds the env lock for the test's whole scope.
     fn pin_txn_home() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {

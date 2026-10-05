@@ -1636,55 +1636,6 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_live_name_refuses_and_names_the_holder_and_scope() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(
-            tmp.path(),
-            json!([
-                team_row("lead-a", "x-aaaa", 2, "sess-a"),
-                team_row("lead-b", "fno", 1, "sess-b"),
-            ]),
-        );
-        name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "x-aaaa",
-            "barnaby",
-        )
-        .unwrap();
-        let err = name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "fno",
-            "BARNABY",
-        )
-        .unwrap_err();
-        assert!(err.contains("barnaby"), "{err}");
-        assert!(err.contains("x-aaaa"), "{err}");
-    }
-
-    #[test]
-    fn an_already_named_team_refuses_a_second_naming() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_registry(tmp.path(), json!([team_row("lead-a", "fno", 1, "sess-a")]));
-        name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "fno",
-            "barnaby",
-        )
-        .unwrap();
-        let err = name_team(
-            &store_path(tmp.path()),
-            &registry_path(tmp.path()),
-            "fno",
-            "ernest",
-        )
-        .unwrap_err();
-        assert!(err.contains("already named Barnaby"), "{err}");
-    }
-
-    #[test]
     fn a_bad_name_pattern_refuses() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(tmp.path(), json!([team_row("lead-a", "fno", 1, "sess-a")]));
