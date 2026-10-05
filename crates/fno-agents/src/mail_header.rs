@@ -147,10 +147,6 @@ fn local_sent_time(value: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(value).ok()
-}
-
 fn unwrap_held_body(body: &str) -> String {
     let trimmed = body.trim();
     let Some(block) = paired_envelope_block(trimmed) else {
@@ -158,21 +154,28 @@ fn unwrap_held_body(body: &str) -> String {
     };
     if block != trimmed {
         return body.to_string();
-    }
+    };
     let Some(open_end) = block.find('>') else {
         return body.to_string();
     };
     block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
 }
 
-/// The body a reader sees: a whole-body paired `<fno_mail ...>...</fno_mail>`
-/// block yields its inner text, a leading delivered-header line is removed,
-/// and a header whose summary was also pasted as the body's own first line
-/// loses that repeat. Old mail that stored the envelope reads as its body;
-/// the stored bytes are never rewritten.
+/// The held-release re-frame unwraps the released turn's legacy paired
+/// envelope the same way display once did; display itself no longer does.
+fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+/// The body a reader sees: a leading delivered-header line is removed, a
+/// fence that wraps the whole body under the header (the pane lane's
+/// framing) is stripped, and a header whose summary was also pasted as the
+/// body's own first line loses that repeat. A body still carrying the
+/// legacy paired envelope shows the raw tag - the visible prompt to run
+/// the one-time `chats migrate --envelopes`; display never rewrites bytes.
 pub fn display_body(body: &str) -> String {
-    let body = unwrap_held_body(body);
-    let (rest, header) = strip_leading_header(&body);
+    let (rest, header) = strip_leading_header(body);
+    let rest = strip_body_fence(&rest).to_string();
     match header.as_deref().and_then(header_summary) {
         Some(summary) => strip_display_repeat(&rest, &summary),
         None => rest,
@@ -187,6 +190,31 @@ fn strip_leading_header(body: &str) -> (String, Option<String>) {
         return (body.to_string(), None);
     }
     (rest.to_string(), Some(header.to_string()))
+}
+
+/// A pane-delivered body rides inside a backtick fence one run longer than
+/// any run it holds, and the pane lane marks its OPEN fence `fno-pane`.
+/// Only that marked shape strips: a body's own fenced code block (no
+/// marker) keeps its fences. The close is a bare run at least as long as
+/// the open.
+fn strip_body_fence(body: &str) -> &str {
+    let Some((first, rest)) = body.split_once('\n') else {
+        return body;
+    };
+    let Some(open) = first.strip_suffix("fno-pane") else {
+        return body;
+    };
+    if open.is_empty() || !open.bytes().all(|b| b == b'`') {
+        return body;
+    }
+    let Some((inner, last)) = rest.rsplit_once('\n') else {
+        return body;
+    };
+    if !last.is_empty() && last.len() >= open.len() && last.bytes().all(|b| b == b'`') {
+        inner
+    } else {
+        body
+    }
 }
 
 fn header_summary(header: &str) -> Option<String> {
@@ -524,6 +552,20 @@ pub fn delivered_msg_id(text: &str) -> Option<String> {
     let (inner, _) = split_header_span(line.trim())?;
     let (_, id, _) = header_fields(inner)?;
     Some(id.to_string())
+}
+
+/// The header's sender when the store backs it: the first line must parse as
+/// a delivered header and the caller's lookup (the chats store) must hold the
+/// header's id under the sender the header names. A leading `@` does not
+/// distinguish the two spellings. `None` when the shape, the id or the
+/// sender does not match - the store is what makes a header trusted.
+pub fn verified_sender(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let line = text.trim_start().lines().next()?;
+    let (inner, _) = split_header_span(line.trim())?;
+    let (sender, id, _) = header_fields(inner)?;
+    let bare = sender.strip_prefix('@').unwrap_or(sender);
+    let stored = lookup(id)?;
+    (stored.strip_prefix('@').unwrap_or(&stored) == bare).then(|| bare.to_string())
 }
 
 /// ASCII-only case fold that preserves byte offsets, so a match position in
@@ -937,11 +979,11 @@ mod tests {
         );
         assert_eq!(without_first_sentence("Ship it."), "Ship it.");
 
-        // Old envelope mail reads as its body at display time; the stored
-        // bytes never change (AC7-AC9-HP shape).
+        // An unmigrated legacy body shows the raw tag unchanged (no panic, no
+        // partial strip): the prompt to run the one-time store migration.
         assert_eq!(
             display_body("<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"),
-            "Ship it."
+            "<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"
         );
         assert_eq!(
             display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it. Then merge."),

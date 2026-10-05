@@ -314,6 +314,31 @@ pub fn band_style(t: &Theme) -> (Color, Color, u8) {
     }
 }
 
+/// The chosen sideline card's fill: the theme accent across all 3 lines with
+/// the base tone as text - the same leg-swap the `[no]` stamp uses - so the
+/// selection reads as one unmistakable accent block on a dark and a light
+/// terminal. The operator's 2026-10-04 sideline ruling supersedes the
+/// surface-band selection for the card layout; the list layout keeps
+/// [`band_style`].
+pub fn chosen_card_style(t: &Theme) -> (Color, Color, u8) {
+    if t.inherit {
+        (Color::Indexed(0), Color::Indexed(3), 0)
+    } else {
+        (t.base, t.brand, 0)
+    }
+}
+
+/// The muted text tone for plain rows: the theme's tested dim under a named
+/// theme, the palette's own gray under the inherit theme (byte-identity with
+/// the pre-theme render).
+pub fn dim_fg(t: &Theme) -> Color {
+    if t.inherit {
+        Color::Indexed(8)
+    } else {
+        t.dim
+    }
+}
+
 fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",

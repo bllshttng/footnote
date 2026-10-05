@@ -1,0 +1,4 @@
+Usage: fno agents claim refresh [OPTIONS] KEY
+Try 'fno agents claim refresh --help' for help.
+
+Error: Missing option '--holder'.
