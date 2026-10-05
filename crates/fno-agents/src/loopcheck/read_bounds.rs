@@ -116,7 +116,7 @@ pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
 }
 
 /// The drain's own floor: the smallest bound a drain read can still meet.
-/// `fno agents lead drain` answers in 1.5s to 1.7s warm on this machine
+/// `fno agents org drain` answers in 1.5s to 1.7s warm on this machine
 /// (the bare CLI cold start alone costs 1.36s), so the generic 250ms floor
 /// was five to seven times under the cost of STARTING the drain - a
 /// deterministic kill no cache warmth or quiet fire could pass. 5s is about

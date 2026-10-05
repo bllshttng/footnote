@@ -1,5 +1,5 @@
 //! `lead-history`: the team-scope `lead_checkin` readback behind
-//! `fno agents lead history`.
+//! `fno agents org history`.
 //!
 //! Python resolves the caller's team scope (harness identity and registry
 //! rows are Python-owned), passes every journal `paths.event_journals`

@@ -13,6 +13,12 @@ king:
   - fno.king.cli:agents_king_app
   - The king session manifest and escalation controls.
   - hidden: true
+# The canonical spelling the Rust front and every hint teach (x-cf9e): the
+# same app under both names until the king mount takes its one-release exit.
+org:
+  - fno.king.cli:agents_king_app
+  - The org chart of roles and their lifecycle.
+  - hidden: true
 mail:
   - fno.mail.cli:mail_app
   - "Durable polled mailbox: send/unread/ack/reply/drain/status (canonical spelling; root `fno mail` is the shim)."

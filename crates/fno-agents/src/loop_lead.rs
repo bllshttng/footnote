@@ -14,7 +14,7 @@
 //! hardcoded to `/target --resume` and `Unit.extra_env` was read by nothing,
 //! so the spawned session was a target resume that did not know it was a lead.
 //! The lifecycle those defects sat on is now real: manifests are per-scope at
-//! `<space>/leads/<scope>.md`, coronation arms them, `fno agents lead done`
+//! `<space>/leads/<scope>.md`, coronation arms them, `fno agents org done`
 //! expires them, and a leftover file is inert without a live registry team.
 //!
 //! The rebuild fixes the identity split at the source: the walk keys its unit
@@ -336,7 +336,7 @@ fn scope_undelivered_count_with_timeout(
 ) -> Result<i64, ScopeDrainError> {
     let out = crate::loopcheck::bounded_read(
         std::ffi::OsStr::new(fno_bin),
-        &["agents", "lead", "drain", scope],
+        &["agents", "org", "drain", scope],
         cwd,
         "lead drain",
         timeout,
@@ -706,7 +706,7 @@ pub(crate) fn escalate_stalled(
         Command::new(fno_bin)
             .args([
                 "agents",
-                "lead",
+                "org",
                 "escalate",
                 "--stalled",
                 &ids.join(","),
