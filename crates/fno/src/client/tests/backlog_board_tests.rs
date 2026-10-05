@@ -822,6 +822,90 @@ async fn compose_rows() {
     let chip = tap_recorded_chip(&mut v).await;
     assert_eq!(chip, 1, "one chip on the docked column");
     assert!(v.backlog_board.is_none(), "the docked column closes");
+
+    // A press on a painted node id opens the node the sideline card tap's
+    // way: full-screen and docked, the span the paint recorded drills into
+    // the details pane (the fixture cards carry no plan and no link). The
+    // shape gate needs a real-shaped id, so the mux card renames to one.
+    let mut inp = board_inputs();
+    inp.order[1] = "x-24c8".into();
+    if let Some(r) = inp.rows.get_mut(1) {
+        r["id"] = json!("x-24c8");
+    }
+    let mut v = key_view(board_with(inp));
+    v.experimental_backlog = true;
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
+    v.board_full = true;
+    v.compose();
+    let s = painted_id("x-24c8");
+    let (off_row, off_col) = (s.row, s.col - 1);
+    press_span(&mut v, s.row, s.col).await;
+    let d = v
+        .backlog_board
+        .as_ref()
+        .expect("board stays open")
+        .detail
+        .as_ref()
+        .expect("the tap drills in");
+    assert_eq!(d.node_id, "x-24c8");
+    assert!(
+        !backlog_style::painted_spans()
+            .iter()
+            .any(|sp| { sp.row == off_row && off_col >= sp.col && off_col < sp.col + sp.len }),
+        "the glyph column records no span"
+    );
+
+    v.board_full = false;
+    v.backlog_board.as_mut().expect("board open").detail = None;
+    v.compose();
+    let s = painted_id("x-24c8");
+    press_span(&mut v, s.row, s.col).await;
+    let d = v
+        .backlog_board
+        .as_ref()
+        .expect("board stays open")
+        .detail
+        .as_ref()
+        .expect("the docked tap drills in");
+    assert_eq!(d.node_id, "x-24c8");
+
+    // The cascade's middle leg: no plan in the vault opens the link the
+    // node stores, through the PR tap's opener. The fixture link names no
+    // openable scheme, so the attempt lands as the refusal notice - and
+    // the details pane never opens over it.
+    v.backlog_board.as_mut().expect("board open").detail = None;
+    v.backlog = vec![crate::proto::BacklogCard {
+        id: "x-24c8".into(),
+        slug: "mux-card".into(),
+        priority: "p2".into(),
+        state: crate::proto::CardState::Ready,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+        link: Some("linear:x-24c8".into()),
+    }];
+    crate::client::node_link::open(&mut v, "x-24c8".into()).await;
+    let notice = v
+        .notice
+        .as_ref()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    assert!(
+        notice.contains("refused to open linear:x-24c8"),
+        "the link leg runs the PR opener: {notice}"
+    );
+    assert!(
+        v.backlog_board
+            .as_ref()
+            .expect("board open")
+            .detail
+            .is_none(),
+        "the link outranks the details pane"
+    );
 }
 
 /// Press the topmost recorded esc chip through the real mouse path: the
@@ -857,6 +941,35 @@ async fn tap_recorded_chip(v: &mut View) -> usize {
             .unwrap();
     }
     chips.len()
+}
+
+/// The recorded span of one painted node id.
+fn painted_id(id: &str) -> backlog_style::NodeSpan {
+    backlog_style::painted_spans()
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .expect("card id painted")
+}
+
+/// One left press through the real mouse path at painted screen coords.
+async fn press_span(v: &mut View, row: usize, col: usize) {
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let mut scanner = crate::keys::Scanner::default();
+    crate::client::region_focus::mouse_pre_pass(
+        v,
+        &mut scanner,
+        vec![crate::mouse::MouseReport {
+            kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+            row: row as u16,
+            col: col as u16,
+            shift: false,
+        }],
+        &mut sock,
+    )
+    .await
+    .unwrap();
 }
 
 // Full screen paints the filter bar, the board pane and the two-row hint;

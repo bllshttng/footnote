@@ -228,6 +228,113 @@ pub(crate) fn role_of(role: BRole) -> Role {
         BRole::Pill => Role::PanelPill,
     }
 }
+
+/// One painted node-id span in screen cells, recorded at paint time so a
+/// press routes to what the last frame actually drew (the esc-chip
+/// precedent): the board's card rows and the detail's id and link rows
+/// paint node ids as Label segments, and the collector keeps their
+/// screen rectangles for the tap.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeSpan {
+    pub(crate) row: usize,
+    pub(crate) col: usize,
+    pub(crate) len: usize,
+    pub(crate) id: String,
+}
+
+thread_local! {
+    /// The node spans one compose painted, collected between
+    /// [`node_spans_begin`] and [`node_spans_end`]; `None` outside them.
+    static NODE_SPANS: std::cell::RefCell<Option<Vec<NodeSpan>>> =
+        const { std::cell::RefCell::new(None) };
+    /// The last compose's recorded spans: the one store a board tap reads.
+    /// The client holds one view, so last-compose-wins is the same
+    /// freshness the esc-chip store has.
+    static PAINTED: std::cell::RefCell<Vec<NodeSpan>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Start collecting the node-id spans the backlog painters put on screen.
+pub(crate) fn node_spans_begin() {
+    NODE_SPANS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop collecting and park what the frame painted for the taps.
+pub(crate) fn node_spans_end() {
+    let recorded = NODE_SPANS.with(|c| c.borrow_mut().take().unwrap_or_default());
+    PAINTED.with(|p| *p.borrow_mut() = recorded);
+}
+
+/// The spans the last compose painted (tests read them to find a target).
+#[cfg(test)]
+pub(crate) fn painted_spans() -> Vec<NodeSpan> {
+    PAINTED.with(|p| p.borrow().clone())
+}
+
+/// The node id painted at `(row, col)` by the last compose, if any.
+pub(crate) fn span_at(row: usize, col: usize) -> Option<String> {
+    PAINTED.with(|p| {
+        p.borrow()
+            .iter()
+            .find(|s| s.row == row && col >= s.col && col < s.col + s.len)
+            .map(|s| s.id.clone())
+    })
+}
+
+/// Whether a Label run reads as a backlog node id: `<prefix>-<hex>` with a
+/// hex tail of at least four (`x-aaaa`, `ab-1234abcd`). The shape gate is
+/// what keeps every other Label run (a channel label) out of the taps.
+fn node_id_shape(s: &str) -> bool {
+    let Some((prefix, hex)) = s.split_once('-') else {
+        return false;
+    };
+    let prefix_ok = !prefix.is_empty()
+        && prefix.len() <= 8
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    prefix_ok && (4..=16).contains(&hex.len()) && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Record the node-id runs of one painted line: the screen rectangle of
+/// each maximal Label-role run whose text is node-id shaped and fully
+/// painted (a run the width cut in half is no tap target, and its id
+/// would not be the id the text shows).
+fn record_node_spans(r: usize, c0: usize, w: usize, line: &BLine, roles: &[Role]) {
+    NODE_SPANS.with(|c| {
+        let mut slot = c.borrow_mut();
+        let Some(spans) = slot.as_mut() else {
+            return;
+        };
+        let label = role_of(BRole::Label);
+        let mut col = c0;
+        let mut runs: Vec<(usize, String)> = Vec::new();
+        let mut open = false;
+        for (j, ch) in line.text.chars().enumerate() {
+            if roles.get(j).copied() == Some(label) {
+                if open {
+                    runs.last_mut().expect("an open run exists").1.push(ch);
+                } else {
+                    runs.push((col, ch.to_string()));
+                    open = true;
+                }
+            } else {
+                open = false;
+            }
+            col += char_w(ch);
+        }
+        for (start, text) in runs {
+            if node_id_shape(&text) && start + text.chars().count() <= c0 + w {
+                spans.push(NodeSpan {
+                    row: r,
+                    col: start,
+                    len: text.chars().count(),
+                    id: text,
+                });
+            }
+        }
+    });
+}
 /// Compress the per-char walk into `(start, len, theme Role)` spans for the
 /// chrome's per-char role resolution; unroled chars stay Body.
 pub(crate) fn to_body_line(line: &BLine) -> chrome::BodyLine {
@@ -388,6 +495,7 @@ fn paint_bline(
     if r >= rows {
         return;
     }
+    record_node_spans(r, c0, w, line, roles);
     let mut sc = c0;
     for (j, ch) in line.text.chars().enumerate() {
         if sc - c0 >= w || sc >= cols {

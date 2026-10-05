@@ -393,6 +393,14 @@ impl BoardView {
         self.paint_stats.borrow_mut().record(micros);
     }
 
+    /// A board-local popup (the keys sheet, the facet or column picker)
+    /// paints over the board body, so the tap spans on record describe
+    /// cells the popup now covers: while one is open, a press resolves
+    /// nothing.
+    pub(crate) fn popup_open(&self) -> bool {
+        self.keys_overlay || self.facet.is_some() || self.colpick.is_some()
+    }
+
     /// Flush a due paint-stats window to `<mux dir>/client-warnings.log`.
     /// Called each run-loop pass while the board is open.
     pub(crate) fn flush_paint_stats(&self) {
@@ -1159,14 +1167,7 @@ impl View {
     /// full-screen board. Windowed, the backlog paints inside the sideline
     /// column (the sideline's own draw path), so this paints nothing.
     /// The compose branch in `client.rs` is this one call.
-    pub(super) fn draw_board(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        _overlay_origin: (usize, usize),
-        _overlay_dims: (usize, usize),
-    ) {
+    pub(super) fn draw_board(&self, cells: &mut [Cell], rows: usize, cols: usize) {
         let Some(b) = &self.backlog_board else {
             return;
         };

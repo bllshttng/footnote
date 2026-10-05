@@ -309,6 +309,7 @@ fn card_slug_drops_node_and_model_and_the_node_taps_open() {
         lane: None,
         plan_path: None,
         head: false,
+        link: None,
     };
     assert_eq!(
         card_line::slug(&a, &[card("x-5316", "gc-sweep")]),

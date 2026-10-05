@@ -731,6 +731,9 @@ pub fn derive_queue(
                     .get("plan_path")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                // The node tap's middle leg: no vault plan opens the stored
+                // GitHub-or-Linear link (the PR tap's URL, verbatim).
+                link: e.get("pr_url").and_then(|v| v.as_str()).map(str::to_string),
                 // Set below, once the board order is known.
                 head: false,
             },
