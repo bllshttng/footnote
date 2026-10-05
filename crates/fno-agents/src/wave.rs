@@ -137,6 +137,16 @@ fn parse_strategy(path: &Path) -> Result<Strategy, String> {
     Ok(Strategy { waves, tasks })
 }
 
+/// The number of waves the plan's Execution Strategy declares, or None when
+/// no readable strategy declares any (no block, invalid YAML, empty waves).
+/// A `#fragment` suffix is stripped first, matching the plan-doc readers.
+pub fn declared_wave_count(plan: &Path) -> Option<usize> {
+    let text = plan.to_str()?;
+    let bare = text.split('#').next().unwrap_or(text);
+    let count = parse_strategy(Path::new(bare)).ok()?.waves.len();
+    (count > 0).then_some(count)
+}
+
 fn git(cwd: &Path, args: &[&OsStr]) -> Result<Output, String> {
     Command::new("git")
         .arg("-C")
