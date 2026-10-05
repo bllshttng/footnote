@@ -1,12 +1,11 @@
 //! `fno do pr create` (binary verb `pr-create`) -- the duplicate-guarded
-//! create. On 2026-10-04 three PRs (#3049, #3050, #3051) fixed one bug on the
-//! same file within an hour: the graph was down, so no claim or fold check
-//! could see the others. This verb reads open PRs from the GitHub REST API
-//! (no graph read: the outage is exactly when the guard must work) and
-//! refuses when an open PR touches the same changed files with an overlapping
-//! subject. The refusal names the PR, its branch and its author; an explicit
-//! `--not-duplicate <n>` passes it. On pass it execs `gh pr create --title
-//! --body-file`.
+//! create. On 2026-10-04 three PRs fixed one bug on the same file within an
+//! hour: the graph was down, so no claim or fold check could see the others.
+//! This verb reads open PRs from the GitHub REST API (no graph read: the
+//! outage is exactly when the guard must work) and refuses when an open PR
+//! touches the same changed files with an overlapping subject. The refusal
+//! names the PR, its branch and its author; an explicit `--not-duplicate <n>`
+//! passes it. On pass it execs `gh pr create --title --body-file`.
 //!
 //! Exit codes:
 //! * `0` the PR was created (gh's output passes through)
@@ -378,7 +377,7 @@ mod tests {
         let dup = find_duplicate(
             "fix(backlog): repair the graph door",
             &["crates/fno-agents/src/backlog/entities.rs".to_string()],
-            "x-3679-guard",
+            "feature/duplicate-guard",
             &[],
             &gh,
             "o/r",
