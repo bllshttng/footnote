@@ -817,6 +817,38 @@ def test_cli_for_arms_wall_clock_and_names_it_in_the_receipt(monkeypatch, capsys
     assert "wall clock" in output
     assert "fixed deadline 20:08:00 UTC" in output
 
+    # The status leg reads the record, not the gate: the gate's own-pass
+    # answers deliverable for the session's own hold, which once made
+    # --status report "no hold" while the check-in read bus-only.
+    auto = hold_mod.Hold(
+        handle=HANDLE,
+        until=armed.until,
+        window_s=480,
+        clock_kind="wall",
+        source=hold_mod.CONVERSATION_SOURCE,
+    )
+    monkeypatch.setattr(
+        hold_mod, "resolve_entry", lambda _h: SimpleNamespace(delivery_policy="bus-only")
+    )
+    monkeypatch.setattr(hold_mod, "read_any", lambda _h: auto)
+    mail_cli.cmd_hold(minutes=None, for_minutes=None, off=False, status=True)
+    output = capsys.readouterr().out
+    assert "machine-armed while you talk" in output
+    assert "lifts about 2 min after your answer" in output
+
+    # A manual stamp keeps the old shape.
+    live_manual = hold_mod.Hold(
+        handle=HANDLE,
+        until=datetime.now(timezone.utc) + timedelta(minutes=8),
+        window_s=480,
+        clock_kind="wall",
+    )
+    monkeypatch.setattr(hold_mod, "read_any", lambda _h: live_manual)
+    mail_cli.cmd_hold(minutes=None, for_minutes=None, off=False, status=True)
+    output = capsys.readouterr().out
+    assert "lifts in" in output
+    assert "machine-armed" not in output
+
 
 def test_bounce_reason_is_silent_for_a_permanent_policy_and_for_no_hold():
     assert hold_mod.bounce_reason(HANDLE) is None

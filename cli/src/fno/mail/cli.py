@@ -4677,12 +4677,24 @@ def cmd_hold(
         raise typer.Exit(code=2)
 
     if status:
-        # Ask the delivery gate, not the clock: a hand-stamped bus-only row
-        # has no clock, and the clock alone reported deliverable for held mail.
-        from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
+        # Read the RECORD, not the gate: the gate's own-pass answers
+        # deliverable for the session's own hold, so a session asking about
+        # itself read "no hold" while the check-in read bus-only off the same
+        # row. A hand-stamped bus-only row has no clock, and the clock alone
+        # reported deliverable for held mail - the record answers both.
+        from fno.agents.dispatch import BUS_ONLY_POLICY
 
-        if _delivery_policy_refusal(handle) != BUS_ONLY_POLICY:
+        entry = hold_mod.resolve_entry(handle)
+        if getattr(entry, "delivery_policy", None) != BUS_ONLY_POLICY:
             print(f"{handle}: no hold - mail delivers normally")
+            return
+        clock = hold_mod.read_any(handle)
+        if clock is not None and clock.source == hold_mod.CONVERSATION_SOURCE:
+            print(
+                f"{handle}: holding mail, machine-armed while you talk "
+                f"({hold_mod.clock_description(clock)}), lifts about 2 min "
+                "after your answer"
+            )
             return
         label = hold_mod.dnd_label(handle)
         if label == "held":
@@ -4695,7 +4707,6 @@ def cmd_hold(
                 "delivery gate - run `fno agents mail hold --off` to clear it"
             )
         else:
-            clock = hold_mod.read_any(handle)
             print(
                 f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
                 f"lifts in {label.lstrip('~')}"
