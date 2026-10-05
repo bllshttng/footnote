@@ -308,6 +308,7 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
         "",
         "",
         "",
+        "",
         None,
     );
     // node_ended rows carry no PR reference; the graph entry does. Join the

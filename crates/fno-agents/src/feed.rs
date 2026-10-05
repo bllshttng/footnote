@@ -232,6 +232,7 @@ pub fn project(
     spawns_raw: &str,
     team_raw: &str,
     closes_raw: &str,
+    main_raw: &str,
     node_set: Option<&[String]>,
 ) -> Projection {
     let mut rows = Vec::new();
@@ -480,8 +481,9 @@ pub fn project(
             }
         }
 
-        // node_ended: completed_at is the statement; the newest do/ship row
-        // supplies the session the deep link lands in.
+        // Completion: a merged node reads pr_merged (the merge IS the end);
+        // everything else reads node_ended. completed_at is the statement;
+        // the newest do/ship row supplies the session the deep link lands in.
         if let Some(completed) = s_field(entry, "completed_at") {
             let status = graph_store::s_str(entry, "status")
                 .unwrap_or("done")
@@ -489,15 +491,32 @@ pub fn project(
             let (sid, harness) = latest_session
                 .map(|(_, sid, harness)| (sid, harness))
                 .unwrap_or((None, None));
-            rows.push(FeedRow {
-                ts: completed,
-                kind: "node_ended".into(),
-                node: Some(node_id.to_string()),
-                session_id: sid,
-                harness,
-                title: status,
-                ..FeedRow::default()
-            });
+            let merged = graph_store::s_str(entry, "merge_status").as_deref() == Some("merged");
+            let pr = entry.get("pr_number").and_then(Value::as_i64);
+            if let (true, Some(pr)) = (merged, pr) {
+                let url = graph_store::s_str(entry, "pr_url").unwrap_or(node_id);
+                rows.push(FeedRow {
+                    ts: completed,
+                    kind: "pr_merged".into(),
+                    node: Some(node_id.to_string()),
+                    session_id: sid,
+                    harness,
+                    title: format!("PR {pr} merged - {url}"),
+                    r#ref: Some(pr.to_string()),
+                    url: Some(url.to_string()),
+                    ..FeedRow::default()
+                });
+            } else {
+                rows.push(FeedRow {
+                    ts: completed,
+                    kind: "node_ended".into(),
+                    node: Some(node_id.to_string()),
+                    session_id: sid,
+                    harness,
+                    title: status,
+                    ..FeedRow::default()
+                });
+            }
         }
     }
 
@@ -563,7 +582,8 @@ pub fn project(
                 k @ ("pane_closed"
                 | "server_stopped"
                 | "composer_shell_ran"
-                | "composer_shell_refused"),
+                | "composer_shell_refused"
+                | "daemon_started"),
             ) => k,
             _ => continue,
         };
@@ -571,6 +591,17 @@ pub fn project(
         let Some(ts) = s_field(&v, "ts") else {
             continue;
         };
+        if kind == "daemon_started" {
+            let version = s_field(data, "version").unwrap_or_default();
+            let pid = data.get("pid").and_then(Value::as_u64).unwrap_or(0);
+            rows.push(FeedRow {
+                ts: ts.to_string(),
+                kind: "daemon_restarted".into(),
+                title: format!("daemon {version} pid {pid}"),
+                ..FeedRow::default()
+            });
+            continue;
+        }
         if kind == "server_stopped" {
             let cause = s_field(data, "cause").unwrap_or_else(|| "unknown".into());
             rows.push(FeedRow {
@@ -676,6 +707,109 @@ pub fn project(
             ),
             ..FeedRow::default()
         });
+    }
+
+    // Coverage kinds from the durable main store. spawn_gate_refused keeps
+    // the session_spawn_refused kind and carries the gate axis as its reason;
+    // the update trio folds into update_started / update_finished.
+    for line in main_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let kind = match v
+            .get("type")
+            .and_then(Value::as_str)
+            .map(crate::event_store::event_type_alias)
+        {
+            Some(
+                k @ ("spawn_gate_refused"
+                | "worker_silent"
+                | "blocked"
+                | "fno_update_started"
+                | "fno_update_installed"
+                | "fno_update_failed"),
+            ) => k,
+            _ => continue,
+        };
+        let Some(data) = v.get("data") else { continue };
+        let Some(ts) = s_field(&v, "ts") else {
+            continue;
+        };
+        match kind {
+            "spawn_gate_refused" => {
+                let reason = s_field(data, "reason").unwrap_or_else(|| "unknown".into());
+                let name = s_field(data, "name").unwrap_or_default();
+                rows.push(FeedRow {
+                    ts,
+                    kind: "session_spawn_refused".into(),
+                    title: format!("spawn refused ({reason}): {name}"),
+                    reason: Some(reason),
+                    ..FeedRow::default()
+                });
+            }
+            "worker_silent" => {
+                let handle = s_field(data, "handle").unwrap_or_default();
+                let age = data.get("age_s").map(|v| v.to_string()).unwrap_or_default();
+                rows.push(FeedRow {
+                    ts,
+                    kind: "worker_stalled".into(),
+                    node: s_field(data, "node"),
+                    harness: s_field(data, "harness"),
+                    title: format!("{handle} silent {age}s"),
+                    ..FeedRow::default()
+                });
+            }
+            "blocked" => {
+                let bkind = s_field(data, "kind").unwrap_or_default();
+                let reason = s_field(data, "reason").unwrap_or_default();
+                let title = if reason.is_empty() {
+                    bkind
+                } else {
+                    format!("{bkind}: {}", one_line(&reason))
+                };
+                rows.push(FeedRow {
+                    ts,
+                    kind: "help_emitted".into(),
+                    node: s_field(&v, "node"),
+                    harness: s_field(&v, "harness"),
+                    reason: if reason.is_empty() {
+                        None
+                    } else {
+                        Some(one_line(&reason))
+                    },
+                    title,
+                    ..FeedRow::default()
+                });
+            }
+            "fno_update_started" | "fno_update_installed" => {
+                let rev = s_field(data, "new_rev").unwrap_or_default();
+                let short = &rev[..rev.len().min(8)];
+                let started = kind == "fno_update_started";
+                rows.push(FeedRow {
+                    ts,
+                    kind: if started {
+                        "update_started".into()
+                    } else {
+                        "update_finished".into()
+                    },
+                    title: format!(
+                        "fno update {} ({short})",
+                        if started { "started" } else { "installed" }
+                    ),
+                    ..FeedRow::default()
+                });
+            }
+            _ => {
+                let reason = s_field(data, "reason").unwrap_or_else(|| "failed".into());
+                rows.push(FeedRow {
+                    ts,
+                    kind: "update_finished".into(),
+                    title: format!("fno update failed ({})", one_line(&reason)),
+                    reason: Some(one_line(&reason)),
+                    ..FeedRow::default()
+                });
+            }
+        }
     }
 
     // Team rows from the team events, which land in BOTH journals, so rows
@@ -1150,14 +1284,24 @@ pub(crate) const QUESTION_KINDS: &[&str] = &[
     "day_boundary",
 ];
 pub(crate) const GRAPH_KINDS: &[&str] =
-    &["node_created", "node_started", "node_ended", "node_shipped"];
+    &["node_created", "node_started", "node_ended", "node_shipped", "pr_merged"];
 pub(crate) const REMOVAL_KINDS: &[&str] = &["session_reaped"];
+/// The feed kinds the main store leg derives (its store kinds are
+/// spawn_gate_refused, worker_silent, blocked and the fno_update_* trio).
+pub(crate) const MAIN_KINDS: &[&str] = &[
+    "session_spawn_refused",
+    "worker_stalled",
+    "help_emitted",
+    "update_started",
+    "update_finished",
+];
 pub(crate) const SPAWN_KINDS: &[&str] = &["session_spawned", "session_spawn_refused"];
 pub(crate) const CLOSE_KINDS: &[&str] = &[
     "pane_closed",
     "server_stopped",
     "composer_shell_ran",
     "composer_shell_refused",
+    "daemon_restarted",
 ];
 pub(crate) const TEAM_KINDS: &[&str] = &["team_granted", "team_vacated"];
 
@@ -1345,6 +1489,44 @@ fn team_journals(home: &AgentsHome) -> String {
     raw
 }
 
+/// The main store's typed read for the coverage kinds. `events.jsonl` routes
+/// to db/events.db, the durable store; a store neither present nor readable
+/// notes its skip once and yields no rows (AC7-EDGE).
+fn main_store_journal(
+    home: &AgentsHome,
+    since_epoch: Option<u64>,
+    until_epoch: Option<u64>,
+) -> (String, Option<String>) {
+    let Some(parent) = home.root().parent() else {
+        return (String::new(), None);
+    };
+    let path = parent.join("events.jsonl");
+    if !path.is_file() && !crate::event_store::store_path(&path).is_file() {
+        return (
+            String::new(),
+            Some(format!("main store skipped (absent): {}", path.display())),
+        );
+    }
+    match crate::event_store::journal_text_checked(
+        &path,
+        &crate::event_store::EventQuery {
+            since_ms: since_epoch.map(|s| s as i64 * 1000),
+            until_ms: until_epoch.map(|u| u as i64 * 1000),
+            ..crate::event_store::EventQuery::of_types(&[
+                "spawn_gate_refused",
+                "worker_silent",
+                "blocked",
+                "fno_update_started",
+                "fno_update_installed",
+                "fno_update_failed",
+            ])
+        },
+    ) {
+        Ok(text) => (text, None),
+        Err(e) => (String::new(), Some(format!("main store skipped ({e})"))),
+    }
+}
+
 /// The `fno-agents feed` verb. A missing or unreadable store is not fatal: the
 /// rows the other store yielded still emit, with one stderr line naming the
 /// store skipped. Non-JSON output is one line per row, `ts kind node session title`.
@@ -1447,11 +1629,20 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
             "server_stopped",
             "composer_shell_ran",
             "composer_shell_refused",
+            "daemon_started",
         ],
             args.since_epoch,
             args.until_epoch,
         )
     };
+    let (main_raw, main_note) = if leg_skipped(&args.pre, MAIN_KINDS) {
+        (String::new(), None)
+    } else {
+        main_store_journal(home, args.since_epoch, args.until_epoch)
+    };
+    if let Some(note) = main_note {
+        eprintln!("fno-agents feed: {note}");
+    }
 
     // The projection sees the node set so the graph leg can skip whole
     // entries; the other legs filter after projection (node_id is sparse in
@@ -1472,6 +1663,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         &spawns_raw,
         &team_raw,
         &closes_raw,
+        &main_raw,
         node_set.as_deref(),
     );
     if skipped_lines > 0 {
@@ -1571,7 +1763,7 @@ mod tests {
 
     #[test]
     fn life_rows() {
-        let p = project("", &graph_fixture(), &[], "", "", "", None);
+        let p = project("", &graph_fixture(), &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_shipped", "node_ended"]
@@ -1589,20 +1781,20 @@ mod tests {
         // The marker: a projection fed only an events-style stream yields none
         // of the three lifecycle rows - they derive from the graph and nowhere
         // else.
-        let p = project(&questions_fixture(), &[], &[], "", "", "", None);
+        let p = project(&questions_fixture(), &[], &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["question_asked", "question_closed", "decision_recorded"]
         );
 
         let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
-        let p = project(questions, &[], &[], "", "", "", None);
+        let p = project(questions, &[], &[], "", "", "", "", None);
         assert_eq!(p.skipped_lines, 0);
         assert_eq!(kinds(&p.rows), ["day_boundary"]);
         assert_eq!(p.rows[0].title, "day start");
         assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
@@ -1624,7 +1816,7 @@ mod tests {
         assert_eq!(decision.r#ref.as_deref(), Some("d-1"));
         assert_eq!(decision.title, "revert-dispute: strict equality stands");
 
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             [
@@ -1644,7 +1836,7 @@ mod tests {
                 + &questions_fixture();
         let mut entries = vec![serde_json::json!("a bare string")];
         entries.extend(graph_fixture());
-        let p = project(&questions, &entries, &[], "", "", "", None);
+        let p = project(&questions, &entries, &[], "", "", "", "", None);
         assert_eq!(p.skipped_lines, 2);
         assert_eq!(p.skipped_entries, 1);
         assert!(p.rows.iter().all(|r| matches!(
@@ -1660,7 +1852,7 @@ mod tests {
         )));
 
         let questions = r#"{"ts":"yesterday-ish","type":"operator_question","source":"t","data":{"question_id":"q-0","question":"odd stamp","session_id":"s-x"}}"#.to_string();
-        let p = project(&questions, &[], &[], "", "", "", None);
+        let p = project(&questions, &[], &[], "", "", "", "", None);
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
         let kept = filter_rows(p.rows, &Page::default(), &Prefilter::default(), Some(1_700_000_000), None);
@@ -1669,7 +1861,7 @@ mod tests {
 
     #[test]
     fn filter_gate_rows() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
         let node_rows = filter_rows(p.rows.clone(), &Page::default(), &Prefilter { node: Some("x-aaaa".into()), ..Default::default() }, None, None);
         // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
@@ -1704,7 +1896,7 @@ mod tests {
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"d","data":{"decision_id":"d-1","decision":"stands","subject":"s","question_id":"q-1","decided_by":"fno agents stale-escalate"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[], "", "", "", None);
+        let p = project(&questions, &[], &[], "", "", "", "", None);
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("stale-escalate"));
@@ -1723,7 +1915,7 @@ mod tests {
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"d","data":{"question_id":"q-1","answer":"yes","closed_by":"20260904T151442Z-cl54345-58af0c"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[], "", "", "", None);
+        let p = project(&questions, &[], &[], "", "", "", "", None);
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(
             closed.session_id.as_deref(),
@@ -1915,7 +2107,7 @@ mod tests {
         ];
         let spawns = r#"{"ts":"2026-09-02T10:00:00Z","type":"agent_spawned","source":"python","data":{"node":"x-bbbb","name":"w","substrate":"pane"}}"#;
         let set = vec!["x-aaaa".to_string()];
-        let p = project(&questions_fixture(), &entries, &[], spawns, "", "", Some(&set));
+        let p = project(&questions_fixture(), &entries, &[], spawns, "", "", "", Some(&set));
         assert!(
             !p.rows
                 .iter()
@@ -1966,7 +2158,7 @@ mod tests {
         assert_eq!(area_of("question_asked"), "mail");
         assert_eq!(area_of("node_shipped"), "ship");
         assert_eq!(area_of("pane_closed"), "mux");
-        let projected = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", None);
+        let projected = project(&questions_fixture(), &graph_fixture(), &[], "", "", "", "", None);
         assert!(
             projected
                 .rows
@@ -2000,7 +2192,7 @@ mod tests {
         // agent_spawned reads harness codex, and --harness codex returns it.
         let spawns = r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"w","provider":null,"harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"s-op"}}"#;
         let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","node":"x-aaaa"}}"#;
-        let p = project(questions, &[], &[], spawns, "", "", None);
+        let p = project(questions, &[], &[], spawns, "", "", "", None);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.harness.as_deref(), Some("codex"));
         let pre = Prefilter {
@@ -2016,7 +2208,7 @@ mod tests {
         // AC6-EDGE: a session in no spawn or graph row stays absent, and the
         // harness filter does not guess it in.
         let questions = r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-h","question":"ask","session_id":"s-orphan","node":"x-aaaa"}}"#;
-        let p = project(questions, &[], &[], "", "", "", None);
+        let p = project(questions, &[], &[], "", "", "", "", None);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.harness, None);
         let got = filter_rows(
@@ -2040,7 +2232,7 @@ mod tests {
             "\n",
             r#"{"ts":"2026-09-02T17:30:00Z","type":"agent_spawned","source":"python","data":{"name":"w1","harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"20260904T151442Z-cl54345-58af0c"}}"#,
         );
-        let p = project("", &[], &[], spawns, team, "", None);
+        let p = project("", &[], &[], spawns, team, "", "", None);
         let child = p
             .rows
             .iter()
@@ -2056,6 +2248,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(holder_row.lead, None, "the holder's own birth rolls to nobody");
+
+        // AC7-HP: one row of each new main-store type projects its kind and
+        // area, and a merged node reads pr_merged instead of node_ended.
+        let main = concat!(
+            r#"{"ts":"2026-09-30T10:00:00Z","type":"spawn_gate_refused","source":"agents","data":{"reason":"king_share","name":"t-w-glm","substrate":"bg","gate":"python"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:01:00Z","type":"worker_silent","source":"daemon","data":{"handle":"t-w","harness":"claude","age_s":802,"deadline_s":600,"node":null}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:02:00Z","type":"blocked","source":"target","data":{"reason":"need a lever","kind":"help"},"node":"x-aaaa","harness":"claude"}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:03:00Z","type":"fno_update_started","source":"python","data":{"new_rev":"55f04eda70a99c3f4e72a3cfe62e80d219c66d6f"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:04:00Z","type":"fno_update_installed","source":"python","data":{"new_rev":"55f04eda70a99c3f4e72a3cfe62e80d219c66d6f"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-30T10:05:00Z","type":"fno_update_failed","source":"python","data":{"rc":"1","stage":"install","reason":"install exited 1"}}"#,
+        );
+        let daemon = r#"{"ts":"2026-09-30T10:06:00Z","type":"daemon_started","source":"daemon","data":{"pid":15714,"version":"0.4.1","recovery_mode":"preserve"}}"#;
+        let p = project("", &[], &[], "", "", daemon, main, None);
+        let find = |k: &str| {
+            p.rows
+                .iter()
+                .find(|r| r.kind == k)
+                .unwrap_or_else(|| panic!("no {k} row"))
+        };
+        assert_eq!(
+            find("session_spawn_refused").title,
+            "spawn refused (king_share): t-w-glm"
+        );
+        assert_eq!(find("session_spawn_refused").reason.as_deref(), Some("king_share"));
+        assert_eq!(find("worker_stalled").title, "t-w silent 802s");
+        assert_eq!(find("worker_stalled").area, "agents");
+        assert_eq!(find("help_emitted").node.as_deref(), Some("x-aaaa"));
+        assert_eq!(find("help_emitted").title, "help: need a lever");
+        assert_eq!(find("update_started").title, "fno update started (55f04eda)");
+        assert_eq!(find("update_finished").area, "fleet");
+        assert_eq!(
+            p.rows
+                .iter()
+                .filter(|r| r.kind == "update_finished")
+                .count(),
+            2,
+            "installed and failed both fold into update_finished"
+        );
+        assert_eq!(find("daemon_restarted").title, "daemon 0.4.1 pid 15714");
+
+        let mut entry = graph_fixture().remove(0);
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("merge_status".to_string(), serde_json::json!("merged"));
+        let p = project("", &[entry], &[], "", "", "", "", None);
+        assert!(kinds(&p.rows).contains(&"pr_merged"), "{:?}", kinds(&p.rows));
+        assert!(!kinds(&p.rows).contains(&"node_ended"));
+        let merged = p.rows.iter().find(|r| r.kind == "pr_merged").unwrap();
+        assert_eq!(merged.r#ref.as_deref(), Some("1395"));
+        assert_eq!(merged.area, "ship");
 
         let a = parse_args(&[
             "--kind".to_string(),
@@ -2096,7 +2344,7 @@ mod tests {
     #[test]
     fn reap_rows() {
         let r = removal_fixture();
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2123,7 +2371,7 @@ mod tests {
         let mut r = removal_fixture();
         r.removed_by.clear();
         r.trigger = None;
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2141,7 +2389,7 @@ mod tests {
 
         let mut r = removal_fixture();
         r.model = Some("glm-5.3-flash[1m]".into());
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2153,6 +2401,7 @@ mod tests {
             "",
             &[],
             std::slice::from_ref(&removal_fixture()),
+            "",
             "",
             "",
             "",
@@ -2188,7 +2437,7 @@ mod tests {
 
     #[test]
     fn proj_rows() {
-        let p = project("", &graph_fixture(), &[], "", "", "", None);
+        let p = project("", &graph_fixture(), &[], "", "", "", "", None);
         let created = p
             .rows
             .iter()
@@ -2208,7 +2457,7 @@ mod tests {
         );
         let mut cwdless_entry = graph_fixture().remove(0);
         cwdless_entry.as_object_mut().unwrap().remove("cwd");
-        let cwdless = project("", &[cwdless_entry], &[], "", "", "", None);
+        let cwdless = project("", &[cwdless_entry], &[], "", "", "", "", None);
         let cwdless_created = cwdless
             .rows
             .iter()
@@ -2230,7 +2479,7 @@ mod tests {
             .unwrap()
             .remove("pr_number")
             .expect("fixture carries pr_number");
-        let p = project("", &[entry], &[], "", "", "", None);
+        let p = project("", &[entry], &[], "", "", "", "", None);
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
@@ -2284,7 +2533,7 @@ mod tests {
             "attention rows never reach the questions parser"
         );
         let text = format!("{raw}\nnot json\n");
-        let p = project(&text, &[], &[], "", "", "", None);
+        let p = project(&text, &[], &[], "", "", "", "", None);
         assert_eq!(
             p.skipped_lines, 1,
             "the corrupt line is the only malformed count"
@@ -2306,7 +2555,7 @@ mod tests {
         r.resume = None;
         r.cwd = None;
         r.trigger = None;
-        let p = project("", &[], std::slice::from_ref(&r), "", "", "", None);
+        let p = project("", &[], std::slice::from_ref(&r), "", "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2327,7 +2576,7 @@ mod tests {
         // AC4: agent_spawned carries provider (not harness), so the fallback
         // is load-bearing.
         let spawns = r#"{"ts":"2026-09-28T16:48:35Z","type":"agent_spawned","source":"python","data":{"cwd":"/repo","model":"gpt-6-sol","name":"jolly-finch","provider":"codex","spawned_by_session":"49a80492-388e-44a3-bd91-017be26bcaa0","substrate":"pane"}}"#;
-        let p = project("", &[], &[], spawns, "", "", None);
+        let p = project("", &[], &[], spawns, "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2343,7 +2592,7 @@ mod tests {
         // A pre-birth refusal used to write nothing, so the feed showed
         // nothing for a launch the operator watched refuse.
         let refused = r#"{"ts":"2026-09-29T20:03:39Z","type":"agent_spawn_refused","source":"daemon","data":{"argv":["agents","spawn","--harness","claude"],"exit_code":2,"reason":"--mux-session is pane-only; substrate 'bg' has no mux session to spawn into"}}"#;
-        let p = project("", &[], &[], refused, "", "", None);
+        let p = project("", &[], &[], refused, "", "", "", None);
         let row = p
             .rows
             .iter()
@@ -2361,7 +2610,7 @@ mod tests {
         ]
         .join("\n");
         let both = format!("{team}\n{team}");
-        let p = project("", &[], &[], "", &both, "", None);
+        let p = project("", &[], &[], "", &both, "", "", None);
         let granted: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_granted").collect();
         let vacated: Vec<_> = p.rows.iter().filter(|r| r.kind == "team_vacated").collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
@@ -2388,7 +2637,7 @@ mod tests {
             }),
         ];
         let team = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-epic"}}"#;
-        let p = project("", &entries, &[], "", team, "", None);
+        let p = project("", &entries, &[], "", team, "", "", None);
         let child = p
             .rows
             .iter()
@@ -2409,7 +2658,7 @@ mod tests {
             .unwrap();
         assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
         // Without a team the child rolls up to its epic by the graph parent.
-        let p = project("", &entries, &[], "", "", "", None);
+        let p = project("", &entries, &[], "", "", "", "", None);
         let child = p
             .rows
             .iter()
@@ -2439,7 +2688,7 @@ mod tests {
             "\n",
             "{not json",
         );
-        let p = project("", &[], &[], "", "", closes, None);
+        let p = project("", &[], &[], "", "", closes, "", None);
         assert_eq!(
             p.skipped_lines, 0,
             "unrelated malformed lines do not count here"
