@@ -262,6 +262,7 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
   <button type="button" id="f-dadd" title="add the date filter">add</button>
   <span id="f-dchips"></span>
   <label><input id="f-all" type="checkbox"> all projects</label>
+  <button type="button" id="f-reset" title="every filter back to any">reset filters</button>
   <button type="button" id="sheetbtn" title="keyboard shortcuts (?)">?</button>
 </div>
 <div id="note"></div>
@@ -906,6 +907,25 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   const searchClear = document.getElementById("f-q-clear");
   const sheetEl = document.getElementById("sheet");
   const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king", "kind"];
+  // The remembered board: a bare URL (the usual open) comes back to the
+  // last used filters, search, view, lanes and selection. A URL that
+  // carries filters (shared, bookmarked) wins as-is. Storage can refuse
+  // (private mode): a failed read just leaves the defaults.
+  const PREFS_KEY = "fno-backlog-prefs";
+  const hadUrlFilters = ["lanes", "view", "q", "all"].some((k) => initial.has(k)) ||
+    FILTER_KEYS.some((k) => initial.has(k === "kind" ? "type" : k));
+  if (!hadUrlFilters) {
+    let saved = null;
+    try { saved = JSON.parse(lsGet(PREFS_KEY) || "null"); } catch (e) { saved = null; }
+    if (saved && typeof saved === "object") {
+      for (const k of FILTER_KEYS) if (Array.isArray(saved[k])) state[k] = saved[k];
+      if (typeof saved.lanes === "string") state.lanes = saved.lanes;
+      if (typeof saved.view === "string") state.view = saved.view;
+      if (typeof saved.q === "string") state.q = saved.q;
+      if (typeof saved.all === "boolean") state.all = saved.all;
+      if (typeof saved.sel === "string") selId = saved.sel;
+    }
+  }
   // The grammar's key table: embedded in a snapshot, fetched once (keys=1)
   // from the model route when served.
   let searchKeys = null;
@@ -1055,6 +1075,15 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     if (t) p.set("t", t);
     if (openId) p.set("node", openId);
     history.replaceState(null, "", location.pathname + "?" + p.toString());
+    savePrefs();
+  }
+  // The store write behind syncUrl and setSel: one localStorage key
+  // holding the whole remembered board. Storage can refuse; the board
+  // then just never remembers.
+  function savePrefs() {
+    const prefs = { lanes: state.lanes, view: state.view, q: state.q, all: state.all, sel: selId };
+    for (const k of FILTER_KEYS) prefs[k] = state[k];
+    lsSet(PREFS_KEY, JSON.stringify(prefs));
   }
   function fillSelect(id, pairs, current) {
     const sel = document.getElementById(id);
@@ -2274,6 +2303,17 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     syncUrl();
     fetchBoard();
   });
+  document.getElementById("f-reset").addEventListener("click", () => {
+    for (const k of FILTER_KEYS) state[k] = [];
+    state.q = "";
+    state.all = false;
+    searchInput.value = "";
+    searchClear.hidden = true;
+    reparse();
+    syncUrl();
+    syncControls();
+    fetchBoard();
+  });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) fetchBoard();
   });
@@ -2318,6 +2358,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const prev = gridEl.querySelector(".sel");
     if (prev) prev.classList.remove("sel");
     selId = id;
+    savePrefs();
     if (!id) return;
     const el = gridEl.querySelector('[data-id="' + id + '"]');
     if (el) {

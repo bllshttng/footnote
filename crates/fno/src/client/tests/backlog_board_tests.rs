@@ -1379,3 +1379,81 @@ fn paint_stats_flush_reports_count_avg_max() {
     assert!(line.contains("max 2.5ms"), "{line}");
     assert_eq!(s.count, 0, "take resets the window");
 }
+
+/// x-5926: the board remembers its state. Set a filter, a search text, the
+/// list view and a selection, close, reopen: the fresh board holds the same
+/// query, and its first gather parks the cursor back on the saved card.
+#[test]
+fn board_remembers_filters_search_view_and_selection_across_reopen() {
+    let prefs = tempfile::tempdir().expect("tempdir");
+    crate::view_store::set_test_path(prefs.path());
+    // Session one: filter to priority p2, search "mux", list view, one
+    // lane, cursor on x-2.
+    let mut b = board_with(board_inputs());
+    b.query.sets.insert("priority", vec!["p2".into()]);
+    b.query.q = Some("mux".into());
+    b.query.view = backlog_model::View::List;
+    b.query.lanes = backlog_model::LanesBy::None;
+    rederive(&mut b);
+    focus_card(&mut b, Some("x-2"));
+    assert_eq!(cursor_card_id(&b).as_deref(), Some("x-2"), "fixture cursor");
+    save_board_prefs(&b);
+    drop(b);
+    // Close, reopen through the real open path: the query comes back, the
+    // saved card rides along as the pending focus.
+    let mut v = key_view(board_with(board_inputs()));
+    v.backlog_board = None;
+    backlog_board_open_fresh(&mut v);
+    {
+        let b = v.backlog_board.as_ref().expect("reopen opens the board");
+        assert_eq!(
+            b.query.sets.get("priority").map(Vec::as_slice),
+            Some(&["p2".to_string()][..])
+        );
+        assert_eq!(b.query.q.as_deref(), Some("mux"));
+        assert_eq!(b.query.view, backlog_model::View::List);
+        assert_eq!(b.query.lanes, backlog_model::LanesBy::None);
+        assert_eq!(b.pending_focus.as_deref(), Some("x-2"));
+    }
+    // The first gather parks the cursor on the saved card (x-2 is the one
+    // card the restored filter set keeps).
+    let gen = v.backlog_board.as_ref().expect("open").gen;
+    apply_fold(
+        &mut v,
+        gen,
+        BoardMsg::Gathered {
+            inputs: board_inputs(),
+        },
+    );
+    let b = v.backlog_board.as_ref().expect("gather keeps the board");
+    assert_eq!(
+        cursor_card_id(b).as_deref(),
+        Some("x-2"),
+        "selection restored"
+    );
+}
+
+/// x-5926: `x` (reset filters) returns the query to `any` and the store's
+/// memory to the defaults, so the next open starts clean too.
+#[test]
+fn reset_filters_returns_every_filter_to_any_and_clears_the_memory() {
+    let prefs = tempfile::tempdir().expect("tempdir");
+    crate::view_store::set_test_path(prefs.path());
+    let mut v = key_view(board_with(board_inputs()));
+    {
+        let b = v.backlog_board.as_mut().expect("fixture board");
+        b.query.sets.insert("status", vec!["ready".into()]);
+        b.query.q = Some("mux".into());
+        save_board_prefs(b);
+    }
+    reset_filters(&mut v);
+    let b = v.backlog_board.as_ref().expect("reset keeps the board");
+    assert!(b.query.sets.is_empty());
+    assert_eq!(b.query.q, None);
+    assert_eq!(b.query.view, backlog_model::View::Kanban);
+    assert_eq!(b.query.lanes, backlog_model::LanesBy::Project);
+    assert_eq!(b.pending_focus, None);
+    let remembered = crate::view_store::load_board_query().expect("reset saves the defaults");
+    assert_eq!(remembered.sets.len(), 0);
+    assert_eq!(remembered.q, None);
+}
