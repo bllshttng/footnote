@@ -231,7 +231,7 @@ fn bind(rows: &mut [Value], graph: GraphRead) {
     }
 }
 
-fn origin_slug(cwd: &Path, git_ceiling: Option<&Path>) -> Result<String, String> {
+pub(crate) fn origin_slug(cwd: &Path, git_ceiling: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(["remote", "get-url", "origin"]).current_dir(cwd);
     if let Some(ceiling) = git_ceiling {

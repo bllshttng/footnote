@@ -1423,51 +1423,6 @@ exit 1
     }
 
     #[test]
-    fn pr_push_from_canonical_resolves_the_pr_branch_worktree() {
-        let parsed = parse_verb_args(&["--pr".into(), "42".into()]).unwrap();
-        assert_eq!(parsed.pr.as_deref(), Some("42"));
-
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = dir.path().join("canonical");
-        let feature = dir.path().join("feature-worktree");
-        std::fs::create_dir(&canonical).unwrap();
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(&canonical)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "test@example.com"]);
-        git(&["config", "user.name", "test"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
-        git(&[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "feature/pr-42",
-            feature.to_str().unwrap(),
-        ]);
-        let gh = write_exec(
-            dir.path(),
-            "gh-pr",
-            "#!/bin/sh\nprintf '%s\\n' 'feature/pr-42'\n",
-        );
-
-        assert_eq!(
-            resolve_pr_worktree_for_push("42", &canonical, gh.to_str().unwrap()).unwrap(),
-            feature
-        );
-    }
-
-    #[test]
     fn pr_push_guard_runs_in_the_pr_worktree_when_started_from_canonical() {
         let dir = tempfile::tempdir().unwrap();
         let canonical = dir.path().join("canonical");

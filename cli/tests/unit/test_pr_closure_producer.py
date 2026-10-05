@@ -194,6 +194,8 @@ def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
     ]
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ), patch("fno.pr._preflight.local_verification_required", lambda **_k: (False, "")), \
             patch("fno.pr.closure.known_node_ids", lambda: KNOWN):
         from fno.worker.ship import ship
@@ -229,6 +231,8 @@ def test_worker_ship_reports_incomplete_delivery_when_graph_binding_fails(tmp_pa
     ]
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch(
+        "fno.pr._preflight.check_duplicate_pr", return_value=""
     ), patch("fno.pr._preflight.local_verification_required", lambda **_k: (False, "")), \
             patch("fno.pr.closure.known_node_ids", lambda: KNOWN):
         from fno.worker.ship import ship

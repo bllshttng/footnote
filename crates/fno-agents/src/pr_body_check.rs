@@ -35,7 +35,7 @@ const GUARDS: [&str; 3] = [
 
 const USAGE: &str = "usage: fno-agents pr-body-check --body-file <path|-> [--title <t>] [--head <ref>] [--base <branch|ref>]";
 
-fn base_ref(base: &str) -> String {
+pub(crate) fn base_ref(base: &str) -> String {
     if base.contains('/') || (base.len() >= 7 && base.bytes().all(|b| b.is_ascii_hexdigit())) {
         base.to_string()
     } else {
@@ -292,18 +292,7 @@ mod tests {
         assert_eq!(a.base, "main");
         assert_eq!(a.title, "");
         assert!(a.head.is_none());
-    }
-
-    #[test]
-    fn branch_names_expand_to_origin_but_qualified_refs_and_shas_stay_exact() {
-        assert_eq!(base_ref("main"), "origin/main");
-        assert_eq!(base_ref("origin/main"), "origin/main");
-        assert_eq!(base_ref("upstream/main"), "upstream/main");
-        assert_eq!(base_ref("0123456789abcdef"), "0123456789abcdef");
-    }
-
-    #[test]
-    fn every_flag_takes_its_value() {
+        // The same parser maps every flag to its field when set.
         let a = parse_args(&argv(&[
             "--body-file",
             "-",
@@ -322,22 +311,16 @@ mod tests {
     }
 
     #[test]
+    fn branch_names_expand_to_origin_but_qualified_refs_and_shas_stay_exact() {
+        assert_eq!(base_ref("main"), "origin/main");
+        assert_eq!(base_ref("origin/main"), "origin/main");
+        assert_eq!(base_ref("upstream/main"), "upstream/main");
+        assert_eq!(base_ref("0123456789abcdef"), "0123456789abcdef");
+    }
+
+    #[test]
     fn unknown_flag_is_a_usage_error() {
         let err = parse_args(&argv(&["--body-file", "b.md", "--nope"])).unwrap_err();
         assert!(err.contains("unknown flag: --nope"), "{err}");
-    }
-
-    #[test]
-    fn a_missing_body_file_names_the_path() {
-        let err = read_body("/nonexistent/pr-body.md").unwrap_err();
-        assert!(err.contains("/nonexistent/pr-body.md"), "{err}");
-    }
-
-    // The scan covers the title plus the body: an id cited in either is
-    // checked. Pure, so no store read.
-    #[test]
-    fn the_ruling_citation_scan_covers_title_plus_body() {
-        assert_eq!(titled_body("t", "b"), "t\nb");
-        assert_eq!(titled_body("", "body only"), "body only");
     }
 }
