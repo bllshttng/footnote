@@ -2954,7 +2954,7 @@ event_types:
   - {name: team_succession_reverted, alias_of: crown_succession_reverted, sources: [daemon]}
   - name: team_succession_announced
     description: "The succession transaction's announce step: one fleet announcement from the heir's name naming the handoff, from the succeeded team-settle or the rollback. The registry commit stays the authority; a failed announce never undoes the transfer."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope, heir_name, predecessor_name]
       properties:
@@ -2968,7 +2968,7 @@ event_types:
           type: string
   - name: team_succession_announce_failed
     description: "The succession transaction's announce step could not write its fleet announcement: one stderr line carries the error and the transfer stands."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope, heir_name, predecessor_name]
       properties:
@@ -2982,7 +2982,7 @@ event_types:
           type: string
   - name: team_succession_transferred
     description: "The succession transaction's transfer receipt: carry_succession committed the regnal bump and the pending record on a succeeded settle."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope, heir_name, predecessor_name]
       properties:
@@ -2996,7 +2996,7 @@ event_types:
           type: string
   - name: team_succession_verified
     description: "The heir's first beat bound the carried name: the verify step of the succession transaction, keyed by succession_id."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope, heir_name]
       properties:
@@ -3010,7 +3010,7 @@ event_types:
           type: string
   - name: team_succession_released
     description: "The release readback passed at verify: no live registry row still holds the predecessor's crown over the scope."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope, heir_name]
       properties:
@@ -3022,7 +3022,7 @@ event_types:
           type: string
   - name: team_succession_release_unproven
     description: "The release readback could not prove the predecessor's crown vacated over the scope: a live row still holds it, or the registry read failed. reason names the row or the error."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope]
       properties:
@@ -3034,7 +3034,7 @@ event_types:
           type: string
   - name: team_succession_retro_filed
     description: "The retro step launched the intel writer detached for the predecessor's session and named the eval dir it writes."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope, session, dir]
       properties:
@@ -3048,7 +3048,7 @@ event_types:
           type: string
   - name: team_succession_retro_unmeasured
     description: "The retro step could not run: no predecessor session id, or no resolvable plans dir. reason names which."
-    sources: [agents]
+    sources: [agents, daemon]
     data:
       required: [scope]
       properties:
