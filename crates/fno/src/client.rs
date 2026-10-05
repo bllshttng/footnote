@@ -4297,8 +4297,8 @@ impl View {
 
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
-        // steals focus - only moving over pane content does.
-        if !self.hover_focus {
+        // steals focus, and a focused feed or board never loses it.
+        if !self.hover_focus || self.input_owner() != region_focus::RegionOwner::Pane {
             self.hover_pending = None;
             return;
         }
@@ -5252,8 +5252,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
-            && self.backlog_board.is_none()
-            && !(self.org_board.is_some()
+            && !((self.backlog_board.is_some() || self.org_board.is_some())
                 && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
             && self.messages_board.is_none()
         {

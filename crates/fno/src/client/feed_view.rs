@@ -630,6 +630,11 @@ impl View {
             None
         };
         for (r, row) in span_rows.iter().enumerate() {
+            if r == 0 && focused {
+                // Row 0 is the header: the title-row fill paints it when
+                // the panel owns typing.
+                continue;
+            }
             if r >= rows {
                 break;
             }
@@ -679,6 +684,22 @@ impl View {
                     }
                 }
             }
+        }
+        // The focused header row 0 carries the accent title fill - the one
+        // visible mark that the feed owns typing (the pane seam drops its
+        // own mark through input_owner in the same frame).
+        if focused {
+            backlog_style::paint_title_row(
+                cells,
+                rows,
+                cols,
+                0,
+                x0 + 1,
+                w - 1,
+                &header_line(focused, f.order, w - 1),
+                true,
+                &self.theme,
+            );
         }
         let border_active = self.hover_feed_border
             || self.feed_drag.is_some()

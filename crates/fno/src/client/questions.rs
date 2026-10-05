@@ -405,8 +405,12 @@ pub(super) fn draw_detail(
         "j/k move \u{b7} Enter opens \u{b7} Tab page \u{b7} n notes \u{b7} 0 none of these \u{b7} x archive \u{b7} X archive all \u{b7} </> split \u{b7} Esc close"
     };
     if hint_h > 0 {
-        let [a, b] = super::backlog_board::backlog_panes::hint_rows(hint, cols);
-        let hint_lines = [backlog_style::BLine::meta(a), backlog_style::BLine::meta(b)];
+        let wrapped = super::backlog_board::backlog_panes::hint_rows(hint, cols);
+        let hint_lines: Vec<backlog_style::BLine> = wrapped
+            .into_iter()
+            .take(2)
+            .map(backlog_style::BLine::meta)
+            .collect();
         backlog_style::paint_panel(
             cells,
             rows,
