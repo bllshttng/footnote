@@ -4341,8 +4341,8 @@ event_types:
       properties:
         span_kind:
           type: string
-          enum: [ask, route, correction, block, merge_landed, merge_armed, merge_requested, merged_outside_fno]
-          description: "The hop this row records: ask (a worker asked its lead), route (the lead answered itself or escalated), correction (a later ruling overturns a span), block (a guard refused a chat ask that skipped the route span), merge_landed and merge_armed (the merge owner recorded a Merged or Armed outcome, attrs pr/repo/head/path/grant), merge_requested (the gh proxy or the PostToolUse hook saw a merge argv, attrs pr/repo/path), merged_outside_fno (reconcile closed a node whose merge the journal never saw, attrs pr/repo/merged_at/merge_sha). More values land as later surfaces adopt the envelope."
+          enum: [ask, route, correction, block, nudge, notify, merge_landed, merge_armed, merge_requested, merged_outside_fno]
+          description: "The hop this row records: ask (a worker asked its lead), route (the lead answered itself or escalated), correction (a later ruling overturns a span), block (a guard refused a chat ask that skipped the route span, or an event_rules row blocked a Stop, attrs rule/matched_event), nudge and notify (an event_rules row fired once per matched event or sent the operator an FYI, attrs rule/matched_event), merge_landed and merge_armed (the merge owner recorded a Merged or Armed outcome, attrs pr/repo/head/path/grant), merge_requested (the gh proxy or the PostToolUse hook saw a merge argv, attrs pr/repo/path), merged_outside_fno (reconcile closed a node whose merge the journal never saw, attrs pr/repo/merged_at/merge_sha). More values land as later surfaces adopt the envelope."
         trace:
           type: object
           required: [trace_id, span_id, actor_kind, comms]
@@ -4395,6 +4395,12 @@ event_types:
         overturns:
           type: string
           description: "Optional, span_kind=correction. The span id this correction overturns."
+        rule:
+          type: string
+          description: "Optional, span_kind=block, nudge or notify. The event_rules row id that fired (docs/architecture/event-rules.md)."
+        matched_event:
+          type: string
+          description: "Optional, span_kind=block, nudge or notify. The event id or Stop turn key the row fired on; with rule it is the fire's dedupe ledger entry."
     consumers: [notifications, evals]
 
   - name: operator_notice
