@@ -89,6 +89,11 @@ pub struct FeedRow {
     /// The PR URL, on a ship row. The mux's provenance action opens it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The row's position in the total order, as a six-string JSON array
+    /// (`[ts, kind, node, session_id, ref, title]`, absent fields as "").
+    /// The `--before` / `--after` flags take one back. Always serialized:
+    /// the client pages by it without parsing anything else.
+    pub cursor: String,
 }
 
 /// Rows plus what the projection had to skip. Malformed question lines and
@@ -163,6 +168,49 @@ pub(crate) fn ts_key(ts: &str) -> (u8, i64) {
         Ok(t) => (1, t.timestamp_millis()),
         Err(_) => (0, 0),
     }
+}
+
+/// The total row order: parsed time first, then kind, node, session, ref and
+/// title as strings. Hundreds of rows share a ts, so the ts alone cannot
+/// bound a page; this key can, and the cursor is exactly its string half.
+pub(crate) fn order_key(r: &FeedRow) -> ((u8, i64), &str, &str, &str, &str, &str) {
+    (
+        ts_key(&r.ts),
+        &r.kind,
+        r.node.as_deref().unwrap_or(""),
+        r.session_id.as_deref().unwrap_or(""),
+        r.r#ref.as_deref().unwrap_or(""),
+        &r.title,
+    )
+}
+
+/// The cursor string for a row: the six order strings as one JSON array.
+fn cursor_of(r: &FeedRow) -> String {
+    serde_json::to_string(&[
+        r.ts.clone(),
+        r.kind.clone(),
+        r.node.clone().unwrap_or_default(),
+        r.session_id.clone().unwrap_or_default(),
+        r.r#ref.clone().unwrap_or_default(),
+        r.title.clone(),
+    ])
+    .expect("serializing six strings never fails")
+}
+
+/// Decode a cursor into the six strings it must carry. The ts element is
+/// re-parsed through `ts_key` when the key is compared, so a decoded cursor
+/// orders exactly as the rows around it do.
+fn parse_cursor(raw: &str) -> Result<[String; 6], String> {
+    let v: Value = serde_json::from_str(raw).map_err(|_| "not a JSON array".to_string())?;
+    let arr = v.as_array().ok_or("not a JSON array")?;
+    if arr.len() != 6 {
+        return Err(format!("expected six elements, got {}", arr.len()));
+    }
+    let mut out = [const { String::new() }; 6];
+    for (slot, v) in out.iter_mut().zip(arr) {
+        *slot = v.as_str().ok_or("element is not a string")?.to_string();
+    }
+    Ok(out)
 }
 
 /// The pure projection: questions text + graph entries + removals + the
@@ -683,8 +731,11 @@ pub fn project(
         }
     }
 
-    rows.sort_by(|a, b| ts_key(&a.ts).cmp(&ts_key(&b.ts)));
+    rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
     assign_owners(&mut rows, &team_events, graph_entries);
+    for r in &mut rows {
+        r.cursor = cursor_of(r);
+    }
     Projection {
         rows,
         skipped_lines,
@@ -888,16 +939,28 @@ fn scope_holds(scope: &str, node: &str) -> bool {
 
 /// The filters the CLI flags express, applied after ordering: `--node`,
 /// `--session`, `--kind`, `--since-epoch` (unparseable ts rows survive a since
-/// filter), then `--limit` from the newest end, output kept ascending. Pure so
-/// the flags are testable without files.
+/// filter), then the page bounds. `--before` keeps the rows strictly below
+/// the cursor key and trims to the newest `limit`; `--after` keeps the rows
+/// strictly above and trims to the OLDEST `limit`, so the page stays
+/// contiguous with its cursor. Without a cursor `--limit` keeps the newest,
+/// as it always has. Output stays ascending. Pure so the flags are testable
+/// without files.
 pub fn filter_rows(
     rows: Vec<FeedRow>,
+    page: &Page,
     node: Option<&str>,
     session: Option<&str>,
     kind: Option<&str>,
     since_epoch: Option<u64>,
-    limit: Option<usize>,
 ) -> Vec<FeedRow> {
+    // The parsed cursors stay in locals; the comparison keys borrow from
+    // them, so a page bound costs no per-row allocation.
+    let before_cur = page.before.as_deref().and_then(|raw| parse_cursor(raw).ok());
+    let after_cur = page.after.as_deref().and_then(|raw| parse_cursor(raw).ok());
+    let before =
+        before_cur.as_ref().map(|c| (ts_key(&c[0]), c[1].as_str(), c[2].as_str(), c[3].as_str(), c[4].as_str(), c[5].as_str()));
+    let after =
+        after_cur.as_ref().map(|c| (ts_key(&c[0]), c[1].as_str(), c[2].as_str(), c[3].as_str(), c[4].as_str(), c[5].as_str()));
     let mut rows: Vec<FeedRow> = rows
         .into_iter()
         .filter(|r| node.is_none_or(|n| r.node.as_deref() == Some(n)))
@@ -910,19 +973,36 @@ pub fn filter_rows(
             },
             None => true,
         })
+        .filter(|r| before.is_none_or(|b| order_key(r) < b))
+        .filter(|r| after.is_none_or(|a| order_key(r) > a))
         .collect();
-    if let Some(limit) = limit {
+    if let Some(limit) = page.limit {
         let keep = limit.min(rows.len());
-        let start = rows.len() - keep;
-        rows.drain(0..start);
+        if page.after.is_some() {
+            rows.truncate(keep);
+        } else {
+            let start = rows.len() - keep;
+            rows.drain(0..start);
+        }
     }
     rows
 }
 
+/// One keyset page request: the cursor bounds and the size. `--before` keeps
+/// the rows strictly below the cursor key, newest `limit` of them; `--after`
+/// keeps the rows strictly above, OLDEST `limit`. Both at once is refused.
+#[derive(Debug, Default)]
+struct Page {
+    before: Option<String>,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug)]
 struct FeedArgs {
     json: bool,
     since_epoch: Option<u64>,
-    limit: Option<usize>,
+    page: Page,
     node: Option<String>,
     session: Option<String>,
     kind: Option<String>,
@@ -932,7 +1012,7 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
     let mut args = FeedArgs {
         json: false,
         since_epoch: None,
-        limit: None,
+        page: Page::default(),
         node: None,
         session: None,
         kind: None,
@@ -949,17 +1029,30 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
                 )
             }
             "--limit" => {
-                args.limit = Some(
+                args.page.limit = Some(
                     it.next()
                         .and_then(|v| v.parse::<usize>().ok())
                         .ok_or("--limit needs a positive integer")?,
                 )
+            }
+            "--before" => {
+                let raw = it.next().ok_or("--before needs a cursor")?;
+                parse_cursor(&raw).map_err(|e| format!("--before: {e}"))?;
+                args.page.before = Some(raw);
+            }
+            "--after" => {
+                let raw = it.next().ok_or("--after needs a cursor")?;
+                parse_cursor(&raw).map_err(|e| format!("--after: {e}"))?;
+                args.page.after = Some(raw);
             }
             "--node" => args.node = Some(it.next().ok_or("--node needs an id")?),
             "--session" => args.session = Some(it.next().ok_or("--session needs an id")?),
             "--kind" => args.kind = Some(it.next().ok_or("--kind needs a kind name")?),
             other => return Err(format!("unknown feed flag: {other}")),
         }
+    }
+    if args.page.before.is_some() && args.page.after.is_some() {
+        return Err("--before and --after cannot combine: page from one edge".into());
     }
     Ok(args)
 }
@@ -1103,13 +1196,16 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         eprintln!("fno-agents feed: skipped {skipped_entries} non-object graph entr(ies)");
     }
 
+    let mut page = args.page;
+    // A page the caller did not size is the head page: the newest 200.
+    page.limit = page.limit.or(Some(200));
     let rows = filter_rows(
         rows,
+        &page,
         args.node.as_deref(),
         args.session.as_deref(),
         args.kind.as_deref(),
         args.since_epoch,
-        Some(args.limit.unwrap_or(200)),
     );
 
     if args.json {
@@ -1283,14 +1379,14 @@ mod tests {
         let p = project(&questions, &[], &[], "", "", "");
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
-        let kept = filter_rows(p.rows, None, None, None, Some(1_700_000_000), None);
+        let kept = filter_rows(p.rows, &Page::default(), None, None, None, Some(1_700_000_000));
         assert_eq!(kept.len(), 1);
     }
 
     #[test]
     fn filter_gate_rows() {
         let p = project(&questions_fixture(), &graph_fixture(), &[], "", "", "");
-        let node_rows = filter_rows(p.rows.clone(), Some("x-aaaa"), None, None, None, None);
+        let node_rows = filter_rows(p.rows.clone(), &Page::default(), Some("x-aaaa"), None, None, None);
         // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
         // closure inherits the association from the row that asked.
@@ -1305,7 +1401,7 @@ mod tests {
                 "node_ended"
             ]
         );
-        let ship_rows = filter_rows(p.rows.clone(), None, Some("s-ship"), None, None, None);
+        let ship_rows = filter_rows(p.rows.clone(), &Page::default(), None, Some("s-ship"), None, None);
         assert_eq!(kinds(&ship_rows), ["node_shipped", "node_ended"]);
         let shipped = ship_rows.iter().find(|r| r.kind == "node_shipped").unwrap();
         assert_eq!(
@@ -1313,7 +1409,7 @@ mod tests {
             Some("https://github.com/bllshttng/footnote/pull/1395"),
             "the ship row carries the PR URL the provenance action opens"
         );
-        let newest_two = filter_rows(p.rows, None, None, None, None, Some(2));
+        let newest_two = filter_rows(p.rows, &Page { limit: Some(2), ..Page::default() }, None, None, None, None);
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
 
         // The live shape: `decided_by` is the literal verb on every decision
@@ -1350,6 +1446,87 @@ mod tests {
             Some("20260904T151442Z-cl54345-58af0c")
         );
         assert_eq!(closed.actor, None);
+
+        // Keyset pages: 450 rows, 20 sharing each ts stamp, pages of 200
+        // chained by --before concatenate to the whole set in order with no
+        // row read twice or skipped.
+        let mut rows = Vec::new();
+        for i in 0..450usize {
+            rows.push(FeedRow {
+                ts: format!("2026-09-01T00:{:02}:00Z", i / 20),
+                kind: format!("k{i:03}"),
+                title: format!("row {i}"),
+                ..FeedRow::default()
+            });
+        }
+        rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+        for r in &mut rows {
+            r.cursor = cursor_of(r);
+        }
+        let back = parse_cursor(&rows[0].cursor).unwrap();
+        assert_eq!(back[1], rows[0].kind, "cursor round-trips the key strings");
+        let mut before: Option<String> = None;
+        let mut chain: Vec<Vec<FeedRow>> = Vec::new();
+        loop {
+            let got = filter_rows(
+                rows.clone(),
+                &Page {
+                    before: before.clone(),
+                    limit: Some(200),
+                    ..Page::default()
+                },
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(!got.is_empty(), "page chain ended empty");
+            chain.push(got);
+            before = Some(chain.last().unwrap()[0].cursor.clone());
+            if chain.last().unwrap().len() < 200 {
+                break;
+            }
+        }
+        assert_eq!(chain.len(), 3, "450 rows page into three");
+        // The chain runs newest page first and every page is internally
+        // ascending; the client prepends each older page, so the window is
+        // the chain walked oldest page first.
+        let all: Vec<FeedRow> = chain.iter().rev().flatten().cloned().collect();
+        assert_eq!(all.len(), 450, "no row read twice or skipped");
+        for (i, r) in all.iter().enumerate() {
+            assert_eq!(r.kind, rows[i].kind, "row {i} out of order");
+        }
+
+        // --after keeps the rows strictly above the cursor, trimmed to the
+        // OLDEST limit, so the page stays contiguous with its cursor.
+        let got = filter_rows(
+            rows.clone(),
+            &Page {
+                after: Some(rows[10].cursor.clone()),
+                limit: Some(200),
+                ..Page::default()
+            },
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(got.len(), 200);
+        assert_eq!(got[0].kind, rows[11].kind, "after starts just past the cursor");
+
+        // Both cursors at once is refused; an unparseable cursor names its flag.
+        let err = parse_args(&[
+            "--before".into(),
+            r#"["a","b","c","d","e","f"]"#.into(),
+            "--after".into(),
+            r#"["a","b","c","d","e","f"]"#.into(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--before") && err.contains("--after"), "{err}");
+        let err = parse_args(&["--before".into(), "not json".into()]).unwrap_err();
+        assert!(err.starts_with("--before"), "{err}");
+        let err = parse_args(&["--after".into(), "[1,2]".into()]).unwrap_err();
+        assert!(err.starts_with("--after"), "{err}");
     }
 
     fn removal_fixture() -> crate::removals::Removal {
@@ -1398,7 +1575,7 @@ mod tests {
             row.session_id.as_deref(),
             Some("00847995-e0db-47c2-ab5b-24468ba1a4f5")
         );
-        let only_reaped = filter_rows(p.rows, None, None, Some("session_reaped"), None, None);
+        let only_reaped = filter_rows(p.rows, &Page::default(), None, None, Some("session_reaped"), None);
         assert_eq!(only_reaped.len(), 1);
 
         let mut r = removal_fixture();
