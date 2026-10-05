@@ -1313,6 +1313,12 @@ pub(crate) mod tests {
             assert_eq!(status["clock_live"], true);
             assert_eq!(status["delivery_policy"], "bus-only");
             assert_eq!(status["conversation"], true);
+            // The check-in label rides the same fact: the conversation leg
+            // of the shared helper, at its live integration point.
+            assert_eq!(
+                crate::hold_label::hold_attention(&status).unwrap(),
+                "mail held while the user talks to you (machine-armed; lifts about 2 min after your answer)"
+            );
             // The status verb addresses the same hold by the canonical
             // short handle; the gate must hold on it, not deliver.
             let first8 = identity_key(SID).get(..8).unwrap().to_string();
@@ -1456,9 +1462,14 @@ pub(crate) mod tests {
             .unwrap();
             set_policy(SID, Some("bus-only"));
             // A manual hold carries no source, so the same registry stamp
-            // reads as plain DND, never the machine-armed state.
+            // reads as plain DND, never the machine-armed state - at the
+            // fact and at the label.
             let status = self_status(SID).unwrap();
             assert_eq!(status["conversation"], false);
+            assert_eq!(
+                crate::hold_label::hold_attention(&status).unwrap(),
+                "DND on"
+            );
             let before = std::fs::read_to_string(clock_path(dir, SID)).unwrap();
             witness_row(SID, now_ms() - 1_000);
             conversation_prompt(SID, "hello");

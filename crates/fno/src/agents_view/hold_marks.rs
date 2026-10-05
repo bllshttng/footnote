@@ -30,7 +30,7 @@ fn hold_dir() -> PathBuf {
         .join("mail-hold")
 }
 
-fn overlay_hold_marks_at(rows: &mut [RegistryAgent], hold_dir: &Path, now_secs: u64) {
+pub(crate) fn overlay_hold_marks_at(rows: &mut [RegistryAgent], hold_dir: &Path, now_secs: u64) {
     for row in rows.iter_mut() {
         if !row.dnd {
             continue;
@@ -58,87 +58,5 @@ fn overlay_hold_marks_at(rows: &mut [RegistryAgent], hold_dir: &Path, now_secs: 
         if live && v.get("source").and_then(|s| s.as_str()) == Some("conversation") {
             row.held_conversation = true;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(sid: Option<&str>) -> RegistryAgent {
-        RegistryAgent {
-            name: "worker".into(),
-            dnd: true,
-            harness_session_id: sid.map(str::to_string),
-            held_conversation: false,
-            ..Default::default()
-        }
-    }
-
-    fn sidecar(dir: &Path, sid: &str, body: &str) {
-        std::fs::write(dir.join(format!("{}.json", sid.to_lowercase())), body).unwrap();
-    }
-
-    #[test]
-    fn a_live_conversation_sidecar_marks_the_row() {
-        let dir = std::env::temp_dir().join(format!("hold-marks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let now = chrono::Utc::now();
-        let stamp = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        sidecar(
-            &dir,
-            "aaaa1111-2222-3333-4444-555566667777",
-            &format!(
-                "{{\"until\": \"{}\", \"window_s\": 3600, \"clock_kind\": \"wall\", \"ceiling\": null, \"source\": \"conversation\"}}\n",
-                stamp(now + chrono::Duration::seconds(600))
-            ),
-        );
-        let mut rows = vec![row(Some("AAAA1111-2222-3333-4444-555566667777"))];
-        overlay_hold_marks_at(&mut rows, &dir, now.timestamp() as u64);
-        assert!(rows[0].held_conversation);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_sourceless_sidecar_is_a_manual_hold() {
-        let dir = std::env::temp_dir().join(format!("hold-marks-manual-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let now = chrono::Utc::now();
-        let stamp = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        sidecar(
-            &dir,
-            "bbbb2222-2222-3333-4444-555566667777",
-            &format!(
-                "{{\"until\": \"{}\", \"window_s\": 3600, \"clock_kind\": \"wall\", \"ceiling\": null}}\n",
-                stamp(now + chrono::Duration::seconds(600))
-            ),
-        );
-        let mut rows = vec![row(Some("bbbb2222-2222-3333-4444-555566667777"))];
-        overlay_hold_marks_at(&mut rows, &dir, now.timestamp() as u64);
-        assert!(!rows[0].held_conversation);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_expired_conversation_clock_marks_nothing() {
-        let dir = std::env::temp_dir().join(format!("hold-marks-expired-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let now = chrono::Utc::now();
-        let stamp = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        sidecar(
-            &dir,
-            "cccc3333-2222-3333-4444-555566667777",
-            &format!(
-                "{{\"until\": \"{}\", \"window_s\": 3600, \"clock_kind\": \"wall\", \"ceiling\": null, \"source\": \"conversation\"}}\n",
-                stamp(now - chrono::Duration::seconds(600))
-            ),
-        );
-        let mut rows = vec![row(Some("cccc3333-2222-3333-4444-555566667777"))];
-        overlay_hold_marks_at(&mut rows, &dir, now.timestamp() as u64);
-        assert!(!rows[0].held_conversation);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

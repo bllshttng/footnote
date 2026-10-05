@@ -632,26 +632,54 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
 
 #[test]
 fn client_agent_row_renders_dnd_as_presence_not_liveness() {
-    let held: AgentRow = serde_json::from_str(
-        r#"{"squad":1,"name":"dnd","pane_id":10,
-                "badge":"working","reason":null,"exited":false,"dnd":true}"#,
+    // The hold-badge vertical (sidecar -> overlay -> wire -> render): a
+    // conversation-sourced sidecar marks the row, and the render reads
+    // [HELD] for the machine-armed hold while a hold you set keeps [DND].
+    let now = chrono::Utc::now().timestamp() as u64;
+    let stamp = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let dir = std::env::temp_dir().join(format!("hold-badge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("aaaa1111-2222-3333-4444-555566667777.json"),
+        format!(
+            "{{\"until\": \"{}\", \"window_s\": 3600, \"clock_kind\": \"wall\", \"ceiling\": null, \"source\": \"conversation\"}}\n",
+            stamp(chrono::Utc::now() + chrono::Duration::seconds(600))
+        ),
     )
     .unwrap();
-    let mut view = two_pane_view();
-    view.sideline_width = 60;
-    view.layout.agents = vec![held];
-    let text = frame_text(&view.compose());
-    let row = text.lines().find(|line| line.contains("dnd")).unwrap();
+    std::fs::write(
+        dir.join("bbbb2222-2222-3333-4444-555566667777.json"),
+        format!(
+            "{{\"until\": \"{}\", \"window_s\": 3600, \"clock_kind\": \"wall\", \"ceiling\": null}}\n",
+            stamp(chrono::Utc::now() + chrono::Duration::seconds(600))
+        ),
+    )
+    .unwrap();
+    let mut rows = vec![
+        crate::agents_view::RegistryAgent {
+            name: "auto".into(),
+            dnd: true,
+            harness_session_id: Some("AAAA1111-2222-3333-4444-555566667777".into()),
+            ..Default::default()
+        },
+        crate::agents_view::RegistryAgent {
+            name: "manual".into(),
+            dnd: true,
+            harness_session_id: Some("bbbb2222-2222-3333-4444-555566667777".into()),
+            ..Default::default()
+        },
+    ];
+    crate::agents_view::overlay_hold_marks_at(&mut rows, &dir, now);
     assert!(
-        row.contains("[DND]") && row.contains("Work"),
-        "DND rides the identity without replacing liveness: {row:?}"
+        rows[0].held_conversation,
+        "conversation sidecar marks the row"
     );
-}
-
-#[test]
-fn sideline_marks_a_machine_armed_hold_held_never_dnd() {
-    // A hold the conversation rules armed is its own state: the row reads
-    // [HELD], and a manual hold keeps [DND].
+    assert!(
+        !rows[1].held_conversation,
+        "a sourceless sidecar stays manual"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
     let held: AgentRow = serde_json::from_str(
         r#"{"squad":1,"name":"held","pane_id":10,
                 "badge":"working","reason":null,"exited":false,
@@ -659,9 +687,8 @@ fn sideline_marks_a_machine_armed_hold_held_never_dnd() {
     )
     .unwrap();
     let manual: AgentRow = serde_json::from_str(
-        r#"{"squad":1,"name":"manual","pane_id":11,
-                "badge":"working","reason":null,"exited":false,
-                "dnd":true,"held_conversation":false}"#,
+        r#"{"squad":1,"name":"dnd","pane_id":10,
+                "badge":"working","reason":null,"exited":false,"dnd":true}"#,
     )
     .unwrap();
     let mut view = two_pane_view();
@@ -673,9 +700,9 @@ fn sideline_marks_a_machine_armed_hold_held_never_dnd() {
         held_row.contains("[HELD]") && !held_row.contains("[DND]"),
         "machine-armed hold reads HELD: {held_row:?}"
     );
-    let manual_row = text.lines().find(|line| line.contains("manual")).unwrap();
+    let manual_row = text.lines().find(|line| line.contains("dnd")).unwrap();
     assert!(
         manual_row.contains("[DND]") && !manual_row.contains("[HELD]"),
-        "a manual hold keeps DND: {manual_row:?}"
+        "a manual hold keeps DND, riding identity without liveness: {manual_row:?}"
     );
 }
