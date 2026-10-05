@@ -794,7 +794,7 @@ def _widen_answer(scope: str, caller, target_name: str) -> dict:
 
     by_id = _graph_index() or {}
     fields = ("name", "status", "crown_scope", "crown_grantor",
-              "harness_session_id", "cc_session_id")
+              "harness_session_id", "cc_session_id", "pid")
     member_ids = dict.fromkeys(split_scope(scope) + split_scope(getattr(caller, "crown_scope", None)))
     try:
         return spawn_overlay_call({
