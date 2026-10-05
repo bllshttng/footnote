@@ -40,7 +40,7 @@ How a crown is bestowed, the ladder and succession: [the crown model](references
 - Register as a roster citizen if absent: `/fno:fno-me`.
 - Verify the merge machinery is alive: `fno doctor`, pr-watch row.
 - Declare the shape now: `fno agents org shape pass` for a one-wave pass, and `fno agents org shape court` THE MOMENT the reign spawns its first worker. This is the field the Stop nudge reads; an undeclared court is nagged at every stop.
-- Declare the term now: `fno agents org term <span:Nh|compactions:N>` (e.g. `fno agents org term span:96h`). An undeclared term still reads a 96h default. This is optional, but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --crown <scope> --succeed`, or extend it with a written reason: `fno agents org term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt. The handoff verb runs the whole succession itself: it announces the handoff to the fleet, verifies the heir on its first check-in beat, and files the retro for your session at that verify. Do none of those by hand.
+- Declare the term now: `fno agents org term <span:Nh|compactions:N>` (e.g. `fno agents org term span:96h`). An undeclared term still reads a 96h default. This is optional, but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --crown <scope> --succeed`. To extend instead, write the reason on the declaration: `fno agents org term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt. The handoff verb runs the whole succession itself. It announces the handoff, verifies the heir on its first beat, and files the retro at that verify. Do none of those by hand.
 
 ## One wave: --once
 
@@ -173,7 +173,7 @@ A quiet window is not a halt. When the user asks you not to interrupt them, run 
 
 ## Abdicate
 
-At handoff or before `fno agents org done`, the succession files parts 1 and 2 for you: the verify step of the handoff transaction launches `fno-agents intel --windows --session <predecessor session> --write` for every harness. Your part is the reading: write `part3-failures.md` and `part4-reforms.md` from `part1-metrics.md` and `part2-timeline.md`, filing each reform as a node. With `--once`, `fno agents org done` is the last act of pass step 5 or of the court's wave boundary.
+At handoff or before `fno agents org done`, the succession files parts 1 and 2 for you. The verify step launches `fno-agents intel --windows --session <predecessor session> --write` for every harness. Your part is the reading: write `part3-failures.md` and `part4-reforms.md` from `part1-metrics.md` and `part2-timeline.md`, filing each reform as a node. With `--once`, `fno agents org done` is the last act of pass step 5 or of the court's wave boundary.
 
 The one-wave pass, the crown model, and the minion contract are in [references/](references/): [once.md](references/once.md), [minion-clause.md](references/minion-clause.md), [court-operations.md](references/court-operations.md), [cli-commands.md](references/cli-commands.md), [review.md](references/review.md), [retro-interview.md](references/retro-interview.md), [workflow-routes.md](references/workflow-routes.md), [postcompact-brief.md](references/postcompact-brief.md).
 
