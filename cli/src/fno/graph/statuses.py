@@ -334,10 +334,8 @@ def live_worked_node_ids(
     The fleet read and the transcript liveness stay here; the join itself
     (seat records, crown exclusion, provenance, ship rows, closed receipts)
     is the Rust `fno-agents worked-nodes` verb: one owner, no Python twin.
-
     ``reading`` hands in an already-paid fleet read; a caller that read the
-    roster itself must pass it here rather than pay a second probe, which is
-    why this is the ONE resolver other readers join through.
+    roster itself must pass it here rather than pay a second probe.
     """
     try:
         from fno.claims.roster import read_roster
@@ -353,11 +351,8 @@ def live_worked_node_ids(
             reading = read_roster(require_live_probe=False)
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
-
         live_rows = _live_rows(reading)
-        if not live_rows:
-            return {}
-        return _worked_nodes_reply(live_rows)
+        return _worked_nodes_reply(live_rows) if live_rows else {}
     except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
         if strict:
             raise
@@ -387,12 +382,10 @@ def _live_rows(reading: RosterReading) -> list[dict[str, object]]:
         if verdict not in (REACHABLE, UNKNOWN):
             return
         name = str(row.get("name") or "")
-        label = name
-        if verdict != REACHABLE:
-            label = f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"
         rows.append({
             "name": name,
-            "label": label,
+            "label": name if verdict == REACHABLE else
+            f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)",
             "session": str(row.get("row_id") or ""),
             "node": node,
         })
@@ -404,13 +397,12 @@ def _live_rows(reading: RosterReading) -> list[dict[str, object]]:
         for row in (reading.rows_by_session or {}).values():
             collect(row, None)
         for node, names in (reading.unmeasurable_by_node or {}).items():
-            for name in names:
-                rows.append({
-                    "name": str(name),
-                    "label": f"{name} {UNMEASURABLE_LABEL_MARK} no harness session id)",
-                    "session": "",
-                    "node": node,
-                })
+            rows.extend({
+                "name": str(name),
+                "label": f"{name} {UNMEASURABLE_LABEL_MARK} no harness session id)",
+                "session": "",
+                "node": node,
+            } for name in names)
     return rows
 
 
@@ -424,19 +416,14 @@ def _worked_nodes_reply(rows: list[dict[str, object]]) -> dict[str, list[str]]:
 
     binary = resolve_binary()
     if binary is None:
-        raise RuntimeError(
-            "worked-nodes unavailable: set FNO_AGENTS_BIN or reinstall fno"
-        )
+        raise RuntimeError("worked-nodes unavailable: set FNO_AGENTS_BIN or reinstall fno")
     result = subprocess.run(
         [str(binary), "worked-nodes", "--rows-file", "-"],
-        input=json.dumps({"rows": rows}),
-        capture_output=True,
-        text=True,
-        timeout=60,
+        input=json.dumps({"rows": rows}), capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
-        detail = result.stderr.strip()[:200]
-        raise RuntimeError(f"worked-nodes exited {result.returncode}: {detail}")
+        raise RuntimeError(
+            f"worked-nodes exited {result.returncode}: {result.stderr.strip()[:200]}")
     reply = json.loads(result.stdout)
     worked = reply.get("worked") if isinstance(reply, dict) else None
     if not isinstance(worked, dict):
