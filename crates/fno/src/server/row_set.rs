@@ -42,7 +42,7 @@ fn activity_key(a: &RegistryAgent) -> String {
 /// The ring sampler, free so the gate math is testable without a `Core`:
 /// at most one cell per row per [`ACTIVITY_EVERY`]; a row the batch stops
 /// naming keeps its ring, and rings with no sample in ten minutes drop.
-fn sample_rings(
+pub(super) fn sample_rings(
     rings: &mut HashMap<String, ActivityRing>,
     rows: &[RegistryAgent],
     now: std::time::Instant,
@@ -793,52 +793,5 @@ impl Core {
                 }
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod activity_ring_tests {
-    use super::*;
-
-    fn row(name: &str, sid: &str, counts: Option<(u64, u64)>) -> RegistryAgent {
-        let mut a = RegistryAgent::default();
-        a.name = name.into();
-        a.harness_session_id = Some(sid.into());
-        a.tool_counts = counts;
-        a
-    }
-
-    /// One cell per 5s gate: an immediate re-sample is gated out, a later
-    /// sample over unchanged cumulative counts reads an idle interval, and
-    /// the ring caps at eight with the oldest sliding out.
-    #[test]
-    fn the_ring_samples_one_cell_per_gate_and_caps_at_eight() {
-        let t = std::time::Instant::now();
-        let mut rings = HashMap::new();
-        let rows = vec![row("w", "sess-w", Some((10, 2)))];
-        sample_rings(&mut rings, &rows, t);
-        sample_rings(&mut rings, &rows, t + std::time::Duration::from_secs(1));
-        sample_rings(&mut rings, &rows, t + std::time::Duration::from_secs(6));
-        let ring = rings.get("sess-w").expect("the counted row holds a ring");
-        assert_eq!(ring.cells.len(), 2, "the 1s re-sample was gated out");
-        assert_eq!(ring.cells[0], (10, 2));
-        assert_eq!(ring.cells[1], (0, 0), "unchanged counts read idle");
-        // Samples past the gate, each with a grown cumulative count: the
-        // ninth cell pushes the oldest out, and eight remain.
-        for k in 3..=9 {
-            let rows = vec![row("w", "sess-w", Some((10 + k, 2 + k)))];
-            sample_rings(&mut rings, &rows, t + std::time::Duration::from_secs(k * 6));
-        }
-        let ring = rings.get("sess-w").unwrap();
-        assert_eq!(ring.cells.len(), 8, "the ring caps at eight");
-        assert_ne!(ring.cells[0], (10, 2), "the first cell slid out");
-        assert_eq!(ring.cells[7], (1, 1), "the newest cell carries k=9's delta");
-        // Absence: a row with no counts (no readable transcript) never
-        // enters a ring - absence on the wire, never a fabricated flat line.
-        let t = std::time::Instant::now();
-        let mut rings = HashMap::new();
-        let rows = vec![row("bare", "sess-bare", None)];
-        sample_rings(&mut rings, &rows, t);
-        assert!(rings.is_empty());
     }
 }

@@ -23,10 +23,10 @@ use std::time::Instant;
 
 /// The per-session fold: byte offset plus the cumulative counts.
 #[derive(Default)]
-struct ToolFold {
-    offset: u64,
-    calls: u64,
-    errors: u64,
+pub(crate) struct ToolFold {
+    pub(crate) offset: u64,
+    pub(crate) calls: u64,
+    pub(crate) errors: u64,
     /// The last pass that counted this fold: the prune's clock.
     last_seen: Option<Instant>,
 }
@@ -36,7 +36,7 @@ impl ToolFold {
     /// newline-terminated lines are consumed; a partial tail stays for the
     /// next pass. A file shorter than the remembered offset (rotated,
     /// replaced) resets the fold and recounts once.
-    fn absorb(&mut self, path: &Path, harness: &str) {
+    pub(crate) fn absorb(&mut self, path: &Path, harness: &str) {
         let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
             return;
         };
@@ -187,101 +187,3 @@ pub(crate) fn maybe_scan(
 
 /// The counting ceiling the user set: at most one parse pass per 5s.
 const SCAN_CADENCE: std::time::Duration = std::time::Duration::from_secs(5);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    fn write_file(path: &Path, text: &str) {
-        std::fs::write(path, text).unwrap();
-    }
-
-    fn claude_pair(id: &str, is_error: bool) -> String {
-        let call = serde_json::json!({"message": {"content": [
-            {"type": "tool_use", "id": id, "name": "Bash"},
-        ]}});
-        let result = serde_json::json!({"message": {"content": [
-            {"type": "tool_result", "tool_use_id": id, "is_error": is_error, "content": "out"},
-        ]}});
-        call.to_string() + "\n" + &result.to_string() + "\n"
-    }
-
-    fn codex_row(ptype: &str, call_id: &str, text: &str) -> String {
-        let mut payload = serde_json::json!({"type": ptype});
-        if !call_id.is_empty() {
-            payload["call_id"] = serde_json::json!(call_id);
-        }
-        if !text.is_empty() {
-            payload["output"] = serde_json::json!(text);
-        }
-        serde_json::json!({"payload": payload}).to_string() + "\n"
-    }
-
-    /// The fold reads only appended bytes: a first pass over a clean pair
-    /// counts once, a second pass over unchanged bytes counts nothing, and
-    /// a partial (newline-less) tail is held until it completes.
-    #[test]
-    fn absorb_reads_only_appended_bytes_and_holds_a_partial_tail() {
-        let dir = std::env::temp_dir().join("fno-tool-activity-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("hold.jsonl");
-        write_file(&path, "");
-        let mut fold = ToolFold::default();
-        fold.absorb(&path, "claude");
-        assert_eq!((fold.calls, fold.errors), (0, 0));
-        write_file(&path, &claude_pair("t1", false));
-        fold.absorb(&path, "claude");
-        assert_eq!((fold.calls, fold.errors), (1, 0));
-        let base = std::fs::read_to_string(&path).unwrap();
-        // A complete pair appends and is counted once.
-        write_file(&path, &(base.clone() + &claude_pair("t2", true)));
-        fold.absorb(&path, "claude");
-        assert_eq!((fold.calls, fold.errors), (2, 1));
-        // An incomplete tail is held: nothing parses, nothing advances.
-        write_file(
-            &path,
-            &(base.clone() + &claude_pair("t2", true) + "{\"partial"),
-        );
-        let held_offset = fold.offset;
-        fold.absorb(&path, "claude");
-        assert_eq!(
-            (fold.calls, fold.errors),
-            (2, 1),
-            "the held tail never parses half a row"
-        );
-        assert_eq!(fold.offset, held_offset);
-        // Completing the held line consumes it exactly once (the row is
-        // not a countable event, but the bytes must clear cleanly).
-        write_file(&path, &(base + &claude_pair("t2", true) + "{\"partial\n"));
-        fold.absorb(&path, "claude");
-        assert_eq!(fold.offset, held_offset + "{\"partial\n".len() as u64);
-        // A file that shrank under the fold's offset (rotated, replaced)
-        // resets the fold and recounts.
-        let path = dir.join("rotate.jsonl");
-        write_file(&path, &claude_pair("t1", false));
-        let mut rotated = ToolFold::default();
-        rotated.absorb(&path, "claude");
-        assert_eq!(rotated.calls, 1);
-        write_file(&path, "");
-        rotated.absorb(&path, "claude");
-        assert_eq!((rotated.calls, rotated.errors, rotated.offset), (0, 0, 0));
-        // Codex: call rows count; outputs grade by the refusal buckets -
-        // the failed-read the lead check-in prices refusal_rate with.
-        let path = dir.join("codex.jsonl");
-        write_file(
-            &path,
-            &[
-                codex_row("function_call", "c1", ""),
-                codex_row("function_call_output", "c1", "Usage: bad args"),
-                codex_row("function_call", "c2", ""),
-                codex_row("function_call_output", "c2", "all good"),
-            ]
-            .join(""),
-        );
-        let mut codex = ToolFold::default();
-        codex.absorb(&path, "codex");
-        assert_eq!(codex.calls, 2);
-        assert_eq!(codex.errors, 1);
-    }
-}
