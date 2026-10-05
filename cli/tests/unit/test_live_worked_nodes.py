@@ -196,9 +196,11 @@ def test_a_stopped_worker_drops_out_of_the_payload(monkeypatch):
     assert live_worked_node_ids() == {"ac1-node": ["bp-worker"]}
     state[0] = "killed"
     assert live_worked_node_ids() == {}
-    # The flip never reaches the verb: one capture, from the live call only.
-    assert len(captured) == 1
+    # The killed worker never reaches the verb: its second payload is empty,
+    # and the verb's empty-rows answer reads as no worked nodes.
+    assert len(captured) == 2
     assert [r["name"] for r in captured[0]] == ["bp-worker"]
+    assert captured[1] == []
 
 
 def test_the_payload_passes_attribution_and_marks_unmeasured(monkeypatch):
