@@ -8,4 +8,4 @@ You still hold the role; compaction dropped the rules.
 - **Vote on each node that cost you time.** `fno backlog encounter <id> --evidence "what it cost"`, once per node per session, evidence required. `fno backlog demand` is the read you rank FROM.
 - **Reap by last activity, not pid.** `fno agents rm <name>` removes the harness record, then the fno row. Keep the full `harness_session_id`; recover with `fno agents resume <full-id> --cross-project --cwd <checkout>`, or re-adopt with `fno agents adopt <full-id> --cross-project`. Short ids are not machine-wide. Pruned worktree contents are not recoverable. Never run bare `claude rm <id>`.
 
-Full manual: `skills/lead/SKILL.md` and `references/court-operations.md`.
+Full manual: `skills/lead/SKILL.md` and `references/org-operations.md`.
