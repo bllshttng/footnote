@@ -1203,7 +1203,7 @@ fn ac2_hp_dead_worker_on_in_progress_node_is_kept_and_laddered() {
         };
         std::fs::write(
             claims_dir.join("node:x-abcd.lock"),
-            crate::claims::serialize_claim(&rec).unwrap(),
+            serde_yaml_ng::to_string(&rec).unwrap(),
         )
         .unwrap();
         let graph = Some(GraphRead {

@@ -6,6 +6,7 @@ use std::sync::{Arc, Barrier};
 fn options(root: &std::path::Path) -> AcquireOpts {
     AcquireOpts {
         root: Some(root.to_path_buf()),
+        events_dir: Some(root.to_path_buf()),
         pid: Some(std::process::id()),
         ttl_ms: Some(60_000),
         identity: Some(("store-owner".into(), "claude".into())),
@@ -62,7 +63,13 @@ fn independent_claimants_share_one_table_and_stale_owners_cannot_release_a_succe
         claims::acquire("node:contended", "successor", options(temp.path())),
         AcquireOutcome::Acquired(_)
     ));
-    claims::release("node:contended", &holder, Some(temp.path()), None).unwrap();
+    claims::release(
+        "node:contended",
+        &holder,
+        Some(temp.path()),
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(!claims::renew("node:contended", &holder, 60_000, Some(temp.path())).unwrap());
     assert_eq!(
         claims::status("node:contended", Some(temp.path()))
@@ -91,7 +98,13 @@ fn migration_imports_legacy_claims_once_and_does_not_resurrect_a_release() {
     let (state, imported) = claims::status("node:legacy", Some(temp.path()));
     assert!(matches!(state, ClaimState::Live | ClaimState::Suspect));
     assert_eq!(imported.unwrap().metadata["opaque"]["keep"], true);
-    claims::release("node:legacy", "legacy-owner", Some(temp.path()), None).unwrap();
+    claims::release(
+        "node:legacy",
+        "legacy-owner",
+        Some(temp.path()),
+        Some(temp.path()),
+    )
+    .unwrap();
     assert_eq!(
         claims::status("node:legacy", Some(temp.path())).0,
         ClaimState::Free

@@ -2,9 +2,11 @@
 //! One implementation serves the daemon (direct call) and the Python leg (through the release-stopped op), so no parity guard is needed.
 
 use crate::claims::{
-    common_event_data, emit_audit_event, encode_key, is_same_machine, list_in_result, now_ms,
-    probe_pid, read_claim_file, ClaimRecord, PidProbe, ReadError,
+    common_event_data, emit_audit_event, is_same_machine, list_in_result, now_ms, probe_pid,
+    ClaimRecord, PidProbe,
 };
+#[cfg(test)]
+use crate::claims::{encode_key, read_claim_file};
 use serde_json::Value;
 
 use std::path::{Path, PathBuf};

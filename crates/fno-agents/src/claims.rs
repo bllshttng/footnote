@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -693,11 +692,6 @@ pub(crate) enum ReadError {
     GoneAway,
     /// Unparseable YAML, non-mapping root, schema violation, or io error.
     Corrupted(String),
-}
-
-pub(crate) fn serialize_claim(rec: &ClaimRecord) -> Result<String, String> {
-    validate_record(rec).map_err(|e| format!("claim YAML serialize failed: {e}"))?;
-    serde_yaml_ng::to_string(rec).map_err(|e| format!("claim YAML serialize failed: {e}"))
 }
 
 fn validate_record(rec: &ClaimRecord) -> Result<(), String> {
@@ -1640,6 +1634,13 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     crate::claim_store::renew(key, holder, ttl_ms, root)
 }
 
+/// Resolve the harness ancestor rather than this short-lived command's pid.
+pub(crate) fn durable_session_pid() -> Option<i32> {
+    crate::spawn_context::session_identity_ambient(std::process::id())
+        .0
+        .map(|pid| pid as i32)
+}
+
 /// The durable harness pid, when one can be proved.
 pub fn open_session_pid() -> Option<i32> {
     durable_session_pid()
@@ -2242,7 +2243,7 @@ mod tests {
         rec.expires_at = Some(now_ms() - 1);
         replace_fixture(
             &lockfile(&td, "node:x-expired"),
-            &serialize_claim(&rec).unwrap(),
+            &serde_yaml_ng::to_string(&rec).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -2271,7 +2272,7 @@ mod tests {
         rec.expires_at = Some(now_ms() - 1);
         replace_fixture(
             &lockfile(&td, "node:x-expired-live"),
-            &serialize_claim(&rec).unwrap(),
+            &serde_yaml_ng::to_string(&rec).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -2310,7 +2311,7 @@ mod tests {
         rec.pid_provenance = Some("session-prover".into());
         rec.expires_at = Some(now_ms() - 1);
         let path = lockfile(&td, "node:x-expired-corpse");
-        let bytes = serialize_claim(&rec).unwrap();
+        let bytes = serde_yaml_ng::to_string(&rec).unwrap();
         replace_fixture(&path, &bytes).unwrap();
         assert_eq!(
             classify(&rec, None),
@@ -2327,7 +2328,7 @@ mod tests {
             Ok(false)
         );
         assert_eq!(
-            serialize_claim(&read_claim_file(&path).unwrap()).unwrap(),
+            serde_yaml_ng::to_string(&read_claim_file(&path).unwrap()).unwrap(),
             bytes,
             "a refused renew must not change the row"
         );
@@ -2504,7 +2505,7 @@ mod tests {
             machine_id: Some("mid".into()),
             metadata: meta,
         };
-        let text = serialize_claim(&rec).unwrap();
+        let text = serde_yaml_ng::to_string(&rec).unwrap();
         let back = parse_claim_str(&text).unwrap();
         assert_eq!(back, rec);
     }
@@ -3231,7 +3232,7 @@ mod tests {
         let stale = record(std::process::id() as i32, 1, None, &hostname());
         let path = lockfile(&td, "session:x");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, serialize_claim(&stale).unwrap()).unwrap();
+        std::fs::write(&path, serde_yaml_ng::to_string(&stale).unwrap()).unwrap();
 
         let rec = match acquire("session:x", "pty:new", o) {
             AcquireOutcome::Acquired(r) => r,
