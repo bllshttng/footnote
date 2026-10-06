@@ -16,6 +16,22 @@ SERVER=demo
 ROOT="$(cd "$(mktemp -d /tmp/fno-demo.XXXXXX)" && pwd -P)"
 PANES=()
 
+# The shot runs from $ROOT/code/checkout, so a relative --out would land in
+# the throwaway root and die with it. Absolutize against the caller's cwd.
+ARGS=()
+PREV=""
+for a in "$@"; do
+  if [ "$PREV" = "--out" ]; then
+    mkdir -p -- "$(dirname -- "$a")"
+    ARGS+=("$(cd "$(dirname -- "$a")" && pwd -P)/$(basename -- "$a")")
+  else
+    ARGS+=("$a")
+  fi
+  PREV="$a"
+done
+# bash 3.2 (stock macOS) reads an empty array under set -u as unbound.
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
 cleanup() {
   for p in "${PANES[@]+"${PANES[@]}"}"; do
     "$FNO" mux pane kill "$p" --server "$SERVER" >/dev/null 2>&1 || true
