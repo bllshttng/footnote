@@ -1325,32 +1325,24 @@ def cmd_spawn(
     promote: list[str] = typer.Option(
         [],
         "--promote",
+        "--crown",
+        "-k",
         help=(
             "Promote the spawned worker to a titled role over a territory: "
             "epic id(s), one project, or several. Contract: "
-            "docs/guides/agents-spawn-flags.md."
+            "docs/guides/agents-spawn-flags.md. --crown/-k is the retired "
+            "spelling; it answers for one release."
         ),
-    ),
-    crown: list[str] = typer.Option(
-        [],
-        "--crown",
-        "-k",
-        hidden=True,
-        help="Retired spelling of --promote; answers for one release.",
     ),
     hand_off: bool = typer.Option(
         False,
         "--hand-off",
+        "--succeed",
         help=(
             "Hand the caller-held role to the spawned worker. Without it, a "
-            "same-scope promote is refused and the caller keeps its role."
+            "same-scope promote is refused and the caller keeps its role. "
+            "--succeed is the retired spelling."
         ),
-    ),
-    succeed: bool = typer.Option(
-        False,
-        "--succeed",
-        hidden=True,
-        help="Retired spelling of --hand-off; answers for one release.",
     ),
     node: str | None = typer.Option(
         None,
@@ -1604,17 +1596,26 @@ def cmd_spawn(
 
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
-    # Retired spellings answer for one release and name their replacements.
-    for retired, current, alias_vals in (
-        ("--crown", "--promote", crown), ("--succeed", "--hand-off", succeed),
+    # Retired spellings bind the same options; name the replacement when the
+    # argv used one. Read from Click's raw args, never sys.argv: the CLI runs
+    # under test runners and in-process dispatches where sys.argv lies.
+    _raw = typer.get_current_context().raw_args or []
+
+    def _used(flag: str) -> bool:
+        return any(t == flag or t.startswith(flag + "=") for t in _raw)
+
+    if _used("--crown") or any(
+        t.startswith("-k") and not t.startswith("--") for t in _raw
     ):
-        if alias_vals:
-            print(
-                f"{retired} is now {current}; the old spelling answers for one release.",
-                file=sys.stderr,
-            )
-    promote = list(promote) + list(crown)
-    hand_off = hand_off or bool(succeed)
+        print(
+            "--crown is now --promote; the old spelling answers for one release.",
+            file=sys.stderr,
+        )
+    if _used("--succeed"):
+        print(
+            "--succeed is now --hand-off; the old spelling answers for one release.",
+            file=sys.stderr,
+        )
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
     seedless = seedless_thread_refusal(

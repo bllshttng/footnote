@@ -22,8 +22,6 @@ agents spawn !--bounded-placement
 agents spawn !--recorded-provider
 agents spawn !--squad
 agents spawn !--mux-session
-agents spawn !--crown
-agents spawn !--succeed
 agents worker external !--pr
 approvals decide !--db
 approvals ls !--db
