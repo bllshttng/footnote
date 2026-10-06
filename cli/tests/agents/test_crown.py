@@ -682,10 +682,12 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
     import fno.agents.crown as crown_mod
 
     # The receipt's delivery line is asserted by its own tests below; pin it
-    # here so this exact-dict assertion stays about the crown fields.
+    # here so this exact-dict assertion stays about the crown fields. The
+    # team-name carry line is the same shape of advisory receipt data.
     monkeypatch.setattr(
         crown_mod, "_send_reign_verb", lambda address, verb: "msg-t delivered (hosted)"
     )
+    monkeypatch.setattr(crown_mod, "_carry_team_name", lambda *args: "carried")
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 0, result.output
@@ -699,6 +701,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "stranded_subordinates": [],
         "missions_armed": [],
         "king_loop_armed": True,
+        "team_name": "carried",
         "reign_delivery": "msg-t delivered (hosted)",
     }
     row = load_registry()[0]
