@@ -12714,7 +12714,7 @@ async fn sideline_menu_and_new_workspace_chords() {
         .iter()
         .find(|kb| kb.action == "sideline-menu")
         .expect("bound");
-    assert_eq!(menu.key, b'u');
+    assert_eq!(menu.key, b'P');
     assert!(matches!(menu.event, crate::keys::Event::OpenSidelineMenu));
     let new_ws = rows
         .iter()

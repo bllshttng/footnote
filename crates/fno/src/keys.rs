@@ -541,9 +541,8 @@ pub enum Event {
     /// expanded -> live-only -> collapsed (prefix+z). The client owns
     /// the state and resolves the active squad; the chord only fires the step.
     CycleSection,
-    /// Open the sideline MENU popup (prefix+u): the footer `menu` button's
-    /// action, reached from the keyboard. `M` belongs to open-messages; both
-    /// landed claiming this byte and the chord table refuses a duplicate.
+    /// Open the sideline MENU popup (prefix+P): the footer `menu` button's
+    /// action, reached from the keyboard. `M` belongs to open-messages.
     OpenSidelineMenu,
     /// Open the new-workspace name overlay (prefix+N): the `+ new workspace`
     /// footer's action, reached from the keyboard. Case pair with `n`
@@ -1299,11 +1298,11 @@ fn default_bindings() -> Vec<KeyBinding> {
             "the yard (fleet as a menagerie)",
         ),
         b(
-            b'u',
+            b'P',
             "sideline-menu",
             OpenSidelineMenu,
             Global,
-            "sideline menu",
+            "sideline menu (palette)",
         ),
         b(
             b'C',
@@ -2619,8 +2618,8 @@ mod tests {
 
     #[test]
     fn client_keys_prefix_unmapped_swallows_with_bell() {
-        // An unbound byte ('Z' here) must NOT be forwarded - swallow + BEL.
-        assert_eq!(scan_all(&[b"\x02Z"]), vec![Event::Bell]);
+        // An unbound byte ('u' here) must NOT be forwarded - swallow + BEL.
+        assert_eq!(scan_all(&[b"\x02u"]), vec![Event::Bell]);
 
         // (AC2-INV) The never-leak guarantee, swept over the whole byte
         // space rather than one specimen. adds ONE deliberate held-byte
