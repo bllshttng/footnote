@@ -51,6 +51,7 @@ fn main() {
     // other child inherits it even when the daemon's parent passed no value.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     fno_agents::cargo_build_dirs::fill_build_dir_env(&cwd);
+    fno_agents::cargo_build_dirs::fill_sccache_env(&cwd);
 
     // A failed daemon must surface a non-zero exit and a clear stderr line; it
     // must never panic silently (Silent-Failure-Hunter posture).

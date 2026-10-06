@@ -50,44 +50,65 @@ fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
     })
 }
 
+/// The key a registry row answers to: its fno_id when one stands, else the
+/// session id (law d-e952ed19: a name is a label, the id is the key).
+fn registry_key(row: &Value) -> Option<String> {
+    row.get("fno_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| row.get("harness_session_id").and_then(Value::as_str))
+        .or_else(|| row.get("session_id").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// The resolved key for a mail address: its registry row's key, else - when
+/// the address is a UNIQUE prefix of exactly one row's id (a short id pasted
+/// from a transcript) - that row's key, else the raw string. Resolving to the
+/// fno_id is what keeps one agent one participant: rows that carry the id and
+/// rows that carry the name join here, never split.
+fn resolve_key(key: &str, registry: &[Value]) -> String {
+    if key.is_empty() {
+        return key.to_string();
+    }
+    if let Some(row) = registry_lookup(registry, key) {
+        return registry_key(row).unwrap_or_else(|| key.to_string());
+    }
+    if key.len() >= 6 {
+        let hits: Vec<&Value> = registry
+            .iter()
+            .filter(|row| {
+                ["fno_id", "harness_session_id", "session_id"]
+                    .iter()
+                    .filter_map(|f| row.get(*f).and_then(Value::as_str))
+                    .any(|id| id.starts_with(key))
+            })
+            .collect();
+        if let [row] = hits[..] {
+            if let Some(k) = registry_key(row) {
+                return k;
+            }
+        }
+    }
+    key.to_string()
+}
+
 /// A system sender keys by its canonical `fno/<arm>` name, never by a
 /// registry row, so a legacy stamp and its new name join as one voice.
 fn participant_key(from_session: &str, name: &str, registry: &[Value]) -> String {
     if !from_session.is_empty() {
-        return from_session.to_string();
+        return resolve_key(from_session, registry);
     }
     if crate::system_sender::is_system_sender(name) {
         return crate::system_sender::canonical(name).to_string();
     }
-    match registry_lookup(registry, name) {
-        Some(row) => row
-            .get("fno_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .or_else(|| row.get("harness_session_id").and_then(Value::as_str))
-            .unwrap_or(name)
-            .to_string(),
-        None => name.to_string(),
-    }
+    resolve_key(name, registry)
 }
 
 /// The addressee's key: the registry row of the addressed name, else the raw
 /// string (a project address or a name no registry row ever held becomes its
 /// own participant, the judge disposition).
 fn recipient_key(to: &str, registry: &[Value]) -> String {
-    if to.is_empty() {
-        return to.to_string();
-    }
-    match registry_lookup(registry, to) {
-        Some(row) => row
-            .get("fno_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .or_else(|| row.get("harness_session_id").and_then(Value::as_str))
-            .unwrap_or(to)
-            .to_string(),
-        None => to.to_string(),
-    }
+    resolve_key(to, registry)
 }
 
 /// The broadcast scope an announce row answers to (the chats store's rule).
@@ -129,7 +150,10 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
     let mut scope_votes: BTreeMap<String, BTreeMap<String, (usize, String)>> = BTreeMap::new();
     // Each participant's most recent row ts (item 8's sort key).
     let mut last_seen: BTreeMap<String, String> = BTreeMap::new();
-    let mut threads: Vec<Value> = Vec::new();
+    // Pair rows keyed by the resolved, sorted participant pair; the threads
+    // themselves are built once, after the walk, so both store dirs of an
+    // exchange merge into one conversation.
+    let mut pair_rows: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut system: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut channels: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut announcements: Vec<Value> = Vec::new();
@@ -149,10 +173,9 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
         }
     };
     for entry in rd.flatten() {
-        let chat_id = match entry.file_name().into_string() {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
+        if entry.file_name().into_string().is_err() {
+            continue;
+        }
         let file = entry.path().join("messages.jsonl");
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
@@ -174,16 +197,25 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             }
             let from_key = participant_key(from_session, from, registry);
             let to_key = recipient_key(to, registry);
-            let reg_from = if from_session.is_empty() && !from.is_empty() {
-                registry_lookup(registry, from)
-            } else {
-                registry_lookup(registry, &from_key)
-            };
+            // The join reads the RESOLVED key, so a prefix-resolved short id
+            // takes its row's display name, not the raw id (item 3).
+            let reg_from = registry_lookup(registry, &from_key);
             let reg_to = registry_lookup(registry, to);
+            // A `fleet:` address is a broadcast group, never an agent (the
+            // operator's 2026-10-05 screenshots): it names no participant and
+            // holds no last-seen vote.
+            let to_is_broadcast = to.starts_with("fleet:");
             note(&mut participants, &from_key, reg_from, Some(from));
-            note(&mut participants, &to_key, reg_to, None);
+            if !to_is_broadcast {
+                note(&mut participants, &to_key, reg_to, None);
+            }
             let ts = v.get("ts").and_then(Value::as_str).unwrap_or("");
-            for key in [&from_key, &to_key] {
+            let seen_keys: Vec<&String> = if to_is_broadcast {
+                vec![&from_key]
+            } else {
+                vec![&from_key, &to_key]
+            };
+            for key in seen_keys {
                 match last_seen.get_mut(key) {
                     Some(seen) if seen.as_str() >= ts => {}
                     _ => {
@@ -252,11 +284,6 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
         if rows.is_empty() {
             continue;
         }
-        rows.sort_by(|a, b| {
-            a.get("ts")
-                .and_then(Value::as_str)
-                .cmp(&b.get("ts").and_then(Value::as_str))
-        });
         let keys = {
             let mut k: Vec<String> = rows
                 .iter()
@@ -272,17 +299,10 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             k.dedup();
             k
         };
-        let last_ts = rows
-            .last()
-            .and_then(|r| r.get("ts"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        threads.push(json!({
-            "chat_id": chat_id,
-            "participants": keys,
-            "rows": rows,
-            "last_ts": last_ts,
-        }));
+        pair_rows
+            .entry(keys.join("\u{1}"))
+            .or_default()
+            .extend(rows);
     }
     // R3: an ended participant archives under the scope its registry row
     // still holds, else the scope it mailed most, latest on a tie.
@@ -302,6 +322,17 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             if let Some(obj) = p.as_object_mut() {
                 obj.insert("archive_scope".into(), json!(scope));
             }
+        } else {
+            // No scope ever named this participant: an ended sender with no
+            // registry row (a leaked test fixture) or a dead agent whose scope
+            // is gone reads as Archive, never as live-list pollution. The
+            // operator's own journal voice stays out of the bucket.
+            let live = p.get("live").and_then(Value::as_bool).unwrap_or(false);
+            if !live && key != "user" {
+                if let Some(obj) = p.as_object_mut() {
+                    obj.insert("archive_scope".into(), json!("unresolved"));
+                }
+            }
         }
         if let Some(ts) = last_seen.get(key) {
             if let Some(obj) = p.as_object_mut() {
@@ -309,15 +340,43 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
             }
         }
     }
-    let mut sorted_threads = threads;
-    sorted_threads.sort_by(|a, b| {
+    // One conversation per unordered agent pair: rows the store holds in
+    // separate per-direction dirs interleave here by ts, and the chat id keys
+    // off the RESOLVED pair (fno_id on both sides), never the dir name, so
+    // read marks and selections survive the merge.
+    let mut threads: Vec<Value> = pair_rows
+        .into_iter()
+        .map(|(pair, mut rows)| {
+            rows.sort_by(|a, b| {
+                a.get("ts")
+                    .and_then(Value::as_str)
+                    .cmp(&b.get("ts").and_then(Value::as_str))
+            });
+            let keys: Vec<String> = pair.split('\u{1}').map(str::to_string).collect();
+            let first = keys.first().cloned().unwrap_or_default();
+            let second = keys.get(1).cloned().unwrap_or_else(|| first.clone());
+            let last_ts = rows
+                .last()
+                .and_then(|r| r.get("ts"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            json!({
+                "chat_id": crate::chats::chat_id_for_pair(&first, &second),
+                "participants": keys,
+                "rows": rows,
+                "last_ts": last_ts,
+            })
+        })
+        .collect();
+    threads.sort_by(|a, b| {
         a.get("last_ts")
             .and_then(Value::as_str)
             .cmp(&b.get("last_ts").and_then(Value::as_str))
     });
     json!({
         "participants": participants.values().cloned().collect::<Vec<_>>(),
-        "threads": sorted_threads,
+        "threads": threads,
         "system": system,
         "channels": channels.into_iter().map(|(scope, rows)| json!({"scope": scope, "rows": rows})).collect::<Vec<_>>(),
         "announcements": announcements,
@@ -661,9 +720,7 @@ fn transcript_tokens(sid: &str, harness: &str) -> Option<Value> {
 /// reads as null, never an error exit: this modal informs, it never blocks.
 fn ledger_cost(sid: &str) -> Option<f64> {
     let db = crate::state_layout::place(&crate::backlog::settings::state_dir()?, "graph.db");
-    let conn =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
+    let conn = crate::store_conn::open_read(&db).ok()?;
     conn.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
     conn.query_row(
         "SELECT COALESCE(SUM(cost_usd), 0.0) FROM node_costs WHERE session_id = ?1",
@@ -728,6 +785,9 @@ mod tests {
             json!({"name": "quill", "fno_id": "s-quill", "harness_session_id": "s-quill",
                    "harness": "claude", "liveness": "dead", "status": "exited",
                    "exited_at": "2026-10-01T10:00:00Z"}),
+            json!({"name": "prefix-agent", "fno_id": "f2571a54-full",
+                   "harness_session_id": "f2571a54-full",
+                   "harness": "claude", "liveness": "alive", "status": "live"}),
         ];
         let root = temp_root("projection");
         let chats = root.join("chats");
@@ -805,6 +865,57 @@ mod tests {
                 ),
             ],
         );
+        // The exchange's OTHER half, stored in its own per-direction dir:
+        // the projection merges the pair into ONE interleaved conversation.
+        write_chat(
+            &chats,
+            "chat-mmmmmmmmmmmmmmmm",
+            &[json!({
+                "type": "message", "kind": "send", "v": 1,
+                "id": "fmail-222222222223", "ts": "2026-10-01T09:02:00Z", "thread": "fmail-222222222223",
+                "from": "s-vellum", "from_session": "s-vellum", "to": "s-candor",
+                "body": "Halfway there.",
+            })],
+        );
+        // A bare short session id resolves to its one registry row: the
+        // participant keys by the full fno_id and shows the row's name.
+        write_chat(
+            &chats,
+            "chat-nnnnnnnnnnnnnnnn",
+            &[msg(
+                "fmail-c1c1c1c1c1c1",
+                "2026-10-01T09:19:00Z",
+                "f2571a54",
+                "vellum",
+                "Short id ping.",
+            )],
+        );
+        // An unresolvable leaked fixture reads as Archive, not live-list. It
+        // mails candor, whose registry row holds no crown scope, so no
+        // scope vote ever names it and the unresolved bucket takes it.
+        write_chat(
+            &chats,
+            "chat-oooooooooooooooo",
+            &[msg(
+                "fmail-d1d1d1d1d1d1",
+                "2026-10-01T09:21:00Z",
+                "lead-a",
+                "candor",
+                "Fixture leak.",
+            )],
+        );
+        // A pair-kind row addressed `fleet:all` names no fleet participant.
+        write_chat(
+            &chats,
+            "chat-pppppppppppppppp",
+            &[msg(
+                "fmail-e1e1e1e1e1e1",
+                "2026-10-01T09:22:00Z",
+                "s-candor",
+                "fleet:all",
+                "Straight to the group.",
+            )],
+        );
         // A system arm mails the live worker (the ONE System row, inbound).
         write_chat(
             &chats,
@@ -869,7 +980,9 @@ mod tests {
             .get("participants")
             .and_then(Value::as_array)
             .unwrap();
-        assert_eq!(threads.len(), 5, "pair chats only: {threads:?}");
+        // a+m+e merge into the one candor/vellum pair thread; b, f0, n, o, p
+        // each stand alone; the system and announce dirs contribute none.
+        assert_eq!(threads.len(), 7, "pair chats only: {threads:?}");
         // Old mail: an unmigrated legacy row shows the raw tag (the prompt
         // to run the one-time migration), the pasted header-summary repeat
         // strips once, mid-text mention untouched (AC7-AC9-HP).
@@ -886,10 +999,9 @@ mod tests {
                 })
                 .unwrap_or_default()
         };
-        assert_eq!(
-            body_of("fmail-b1b1b1b1b1b1"),
-            "<fno_mail from=\"a\" id=\"fmail-b1b1b1b1b1b1\">Ship it.</fno_mail>"
-        );
+        // Display strips the legacy paired envelope at render (the store
+        // still holds it until `chats migrate --envelopes` runs).
+        assert_eq!(body_of("fmail-b1b1b1b1b1b1"), "Ship it.");
         assert_eq!(body_of("fmail-b2b2b2b2b2b2"), "Ship it. Then merge.");
         assert_eq!(body_of("fmail-b3b3b3b3b3b3"), "see <fno_mail> docs");
         // AC4-HP: the registry never named s-lone; its from name shows and
@@ -962,6 +1074,66 @@ mod tests {
         let bodies = serde_json::to_string(&projection).unwrap();
         assert!(!bodies.contains("digest line"), "hold dropped: {bodies}");
         assert_eq!(projection.get("unreadable"), Some(&json!(1)));
+
+        // One chat per unordered pair: both stored halves interleave by ts
+        // under a chat id keyed off the resolved pair.
+        let merged = threads
+            .iter()
+            .find(|t| {
+                t.get("chat_id").and_then(Value::as_str)
+                    == Some(crate::chats::chat_id_for_pair("s-candor", "s-vellum").as_str())
+            })
+            .expect("the candor/vellum halves merge");
+        let ids: Vec<&str> = merged
+            .get("rows")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "fmail-111111111111",
+                "fmail-222222222223",
+                "fmail-222222222222",
+                "fmail-b1b1b1b1b1b1",
+                "fmail-b2b2b2b2b2b2",
+                "fmail-b3b3b3b3b3b3"
+            ],
+            "interleaved by ts: {ids:?}"
+        );
+        // The short id joins its registry row: one participant, named.
+        let prefix_p = participants
+            .iter()
+            .find(|p| p.get("key").and_then(Value::as_str) == Some("f2571a54-full"))
+            .expect("short id resolves to its row");
+        assert_eq!(
+            prefix_p.get("name").and_then(Value::as_str),
+            Some("prefix-agent")
+        );
+        assert!(
+            !participants
+                .iter()
+                .any(|p| p.get("key").and_then(Value::as_str) == Some("f2571a54")),
+            "the short id never stands alone"
+        );
+        // A fleet address is a group, not an agent.
+        assert!(
+            !participants
+                .iter()
+                .any(|p| p.get("key").and_then(Value::as_str) == Some("fleet:all")),
+            "broadcast addresses never become participants"
+        );
+        // An unresolvable ended sender archives.
+        let fixture = participants
+            .iter()
+            .find(|p| p.get("key").and_then(Value::as_str) == Some("lead-a"))
+            .expect("the fixture participant exists");
+        assert_eq!(
+            fixture.get("archive_scope").and_then(Value::as_str),
+            Some("unresolved")
+        );
 
         let state = temp_root("journal-reply");
         let state_root = state.join(".fno");

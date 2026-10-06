@@ -203,9 +203,6 @@ struct StoreFile {
     org_mode: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     org_sessions: Option<serde_json::Value>,
-    /// The questions view's list pane width, in percent. Default absent = 45.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    questions_split: Option<serde_json::Value>,
     /// The Messages tab's per-thread read marks: chat id -> the ts of the
     /// last row the user opened (a ts, not a row id: fmail ids are random
     /// hex, so only a ts answers "rows newer than the mark"). Persisted like
@@ -360,32 +357,6 @@ pub fn load_board_full() -> bool {
 pub fn save_board_full(full: bool) {
     mutate(|file| {
         file.board_full = serde_json::to_value(full).ok();
-    });
-}
-
-/// The questions view's shipped list pane width, in percent.
-pub const QUESTIONS_DEFAULT_SPLIT: u8 = 45;
-
-/// Read the questions view's list/detail split. Absent, corrupt, or out of
-/// range reads as the shipped default.
-pub fn load_questions_split() -> u8 {
-    #[cfg(test)]
-    if TEST_PATH.with(|c| c.borrow().is_none()) {
-        return QUESTIONS_DEFAULT_SPLIT;
-    }
-    read_raw()
-        .questions_split
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u8::try_from(v).ok())
-        .filter(|p| (20..=80).contains(p))
-        .unwrap_or(QUESTIONS_DEFAULT_SPLIT)
-}
-
-/// Persist the questions view's split, clamped to the legal range.
-pub fn save_questions_split(pct: u8) {
-    let clamped = pct.clamp(20, 80);
-    mutate(|file| {
-        file.questions_split = serde_json::to_value(clamped).ok();
     });
 }
 
@@ -996,17 +967,6 @@ mod tests {
             Some("2026-10-01T10:00:00Z")
         );
         assert_eq!(marks.len(), 2);
-    }
-
-    // The questions detail split defaults cleanly and clamps invalid values.
-    #[test]
-    fn questions_split_absent_corrupt_and_round_trip() {
-        let _s = Scratch::new("questions-split");
-        assert_eq!(load_questions_split(), QUESTIONS_DEFAULT_SPLIT);
-        std::fs::write(view_path(), r#"{"questions_split":95}"#).unwrap();
-        assert_eq!(load_questions_split(), QUESTIONS_DEFAULT_SPLIT);
-        save_questions_split(95);
-        assert_eq!(load_questions_split(), 80, "an out-of-range save clamps");
     }
 
     // The board layout pref: absent reads the shipped default (every model

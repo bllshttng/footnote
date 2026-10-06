@@ -85,7 +85,7 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "note",
-        purpose: "Record progress or a blocking finding",
+        purpose: "Append a comment to the node thread (older comments stay)",
         actions: &[("comment", "comment"), ("state", "note")],
     },
     Group {

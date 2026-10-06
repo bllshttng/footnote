@@ -16,12 +16,15 @@ name: release
 #              cli-ci push run succeeded, publishes a rolling pre-release
 #              named `nightly` with no approval (rolling, replaceable, no
 #              registry).
-#   rc       - the Monday schedule, or dispatch: builds the newest green
-#              main sha (or inputs.sha, or the nightly tag for a dispatch)
-#              and stops at the `release` environment approval. PyPI +
-#              GitHub Release + the v<src>rc1 tag all happen in the
-#              approved job. The weekly cadence is the point: a candidate
-#              every Monday so no release ever stacks a year of PRs.
+#   rc       - the daily candidate: once the scheduled nightly publishes,
+#              it dispatches channel=rc at the same green sha (or dispatch
+#              by hand, with or without inputs.sha) and the run stops at
+#              the `release` environment approval. PyPI + GitHub Release +
+#              the v<base>rcN tag all happen in the approved job. The daily
+#              cadence is the point: a fresh candidate every day, so a
+#              release costs one click and no release ever stacks a year
+#              of PRs. When the newest candidate tag already carries the
+#              picked sha, the run skips - a quiet day opens nothing.
 #   stable   - dispatch only: promotes the newest v*rc* tag (or
 #              inputs.sha) in the approved job: PyPI, crates.io, the tag,
 #              the GitHub Release, the Homebrew tap, the `stable` branch
@@ -29,9 +32,10 @@ name: release
 #              of main (nightly refuses while v<src> exists, so without
 #              the sync every promotion wedges the nightly).
 #
-# The cadence is backed by a nudge, not a memory act: the remind-stable job
-# opens one issue once a candidate has waited 3+ days on the promotion
-# click. Curated notes are drafted on a machine with the vault checkout:
+# The cadence is backed by a nudge, not a memory act: the remind job opens
+# one issue once a candidate has waited a day on the approval click, and
+# another once a published candidate has waited 3+ days on the stable
+# promotion. Curated notes are drafted on a machine with the vault checkout:
 # scripts/release/draft-release-notes.py <tag> writes
 # internal/fno/releases/<version>.md for the user to trim.
 #
@@ -41,12 +45,8 @@ name: release
 on:
   schedule:
     # Daily; the channel input is absent on schedule, which resolves to
-    # nightly - except the Monday slot below, which resolves to rc.
+    # nightly. The nightly publish then dispatches the day's rc candidate.
     - cron: "23 6 * * *"
-    # Weekly release candidate: Monday 06:43 UTC. github.event.schedule
-    # carries this exact string; resolve maps it to channel=rc on the
-    # newest green main sha.
-    - cron: "43 6 * * 1"
   workflow_dispatch:
     inputs:
       channel:
@@ -58,20 +58,28 @@ on:
           - rc
           - stable
       sha:
-        description: "Commit to release (rc/stable only); defaults to the nightly tag (rc) or the newest rc tag (stable)"
+        description: "Commit to release (rc/stable only); defaults to the newest green main sha (rc) or the newest rc tag (stable)"
         type: string
         default: ""
+      from_nightly:
+        description: "Set by the nightly publish when it dispatches the daily rc candidate; enables the already-carried skip"
+        type: boolean
+        default: false
       dry_run:
         description: "Rehearse: no registry uploads, the GitHub Release is a draft"
         type: boolean
         default: false
 
 # Per channel: an rc or stable run can wait at the approval for days, and a
-# shared group would park every nightly behind it (GitHub keeps one pending
-# run per group and cancels the older pending one).
+# shared group would park every nightly behind it. The nightly-dispatched
+# daily candidate cancels its own group in progress, which is what makes
+# the candidate roll in code instead of by platform courtesy: when today's
+# dispatch enters release-rc, yesterday's still-parked run (waiting or
+# building) is cancelled, so the click always holds the newest sha. A
+# hand-dispatched rc keeps cancel-in-progress false and parks safely.
 concurrency:
-  group: release-${{ inputs.channel || (github.event.schedule == '43 6 * * 1' && 'rc-weekly' || 'nightly') }}
-  cancel-in-progress: false
+  group: release-${{ inputs.channel || 'nightly' }}
+  cancel-in-progress: ${{ inputs.channel == 'rc' && inputs.from_nightly == true }}
 
 permissions:
   contents: write # tags, branches, releases
@@ -87,7 +95,6 @@ jobs:
       actions: read
     outputs:
       channel: ${{ steps.pick.outputs.channel }}
-      scheduled_rc: ${{ steps.pick.outputs.scheduled_rc }}
       sha: ${{ steps.pick.outputs.sha }}
       version: ${{ steps.math.outputs.version }}
       tag: ${{ steps.math.outputs.tag }}
@@ -104,7 +111,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           CHANNEL: ${{ inputs.channel }}
-          SCHEDULE: ${{ github.event.schedule }}
+          FROM_NIGHTLY: ${{ inputs.from_nightly }}
           WANTED_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
@@ -118,19 +125,9 @@ jobs:
             exit 1
           fi
 
-          # A dispatch names its channel. A schedule carries only its cron
-          # string, so the Monday weekly slot resolves to channel=rc; any
-          # other schedule is the nightly.
-          channel="${CHANNEL}"
-          scheduled_rc=""
-          if [ -z "$channel" ]; then
-            if [ "$SCHEDULE" = "43 6 * * 1" ]; then
-              channel="rc"
-              scheduled_rc="1"
-            else
-              channel="nightly"
-            fi
-          fi
+          # A dispatch names its channel; a schedule carries none and is
+          # the nightly (the nightly publish dispatches the day's rc).
+          channel="${CHANNEL:-nightly}"
           echo "channel: ${channel}"
 
           git fetch origin "${default_branch}" --no-tags
@@ -201,9 +198,11 @@ jobs:
           }
 
           #    nightly: the green-main selection.
-          #    rc: the wanted sha; else the weekly slot takes the
-          #        green-main selection; else a plain dispatch promotes the
-          #        nightly tag's commit.
+          #    rc: the wanted sha; else the green-main selection. (The
+          #        nightly-tag fallback this branch once had is gone: the
+          #        tag carries a synthetic stamp commit that is not an
+          #        ancestor of main, so the ancestry check below refused
+          #        every plain dispatch.)
           #    stable: the wanted sha, else the newest v*rc* tag's commit.
           case "$channel" in
             nightly)
@@ -213,14 +212,8 @@ jobs:
             rc)
               if [ -n "$WANTED_SHA" ]; then
                 sha="$WANTED_SHA"
-              elif [ -n "$scheduled_rc" ]; then
-                sha="$(pick_green_sha)"
               else
-                sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null || true)"
-                if [ -z "$sha" ]; then
-                  echo "::error::no nightly tag exists to promote; dispatch channel=rc with an explicit sha"
-                  exit 1
-                fi
+                sha="$(pick_green_sha)"
               fi
               ;;
 
@@ -255,13 +248,12 @@ jobs:
 
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
           echo "channel=${channel}" >> "$GITHUB_OUTPUT"
-          echo "scheduled_rc=${scheduled_rc}" >> "$GITHUB_OUTPUT"
 
       - name: Idempotence - skip a nightly already published
         id: skip
         env:
           CHANNEL: ${{ steps.pick.outputs.channel }}
-          SCHEDULED_RC: ${{ steps.pick.outputs.scheduled_rc }}
+          FROM_NIGHTLY: ${{ inputs.from_nightly }}
           SHA: ${{ steps.pick.outputs.sha }}
         run: |
           set -euo pipefail
@@ -273,16 +265,19 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-          # The weekly rc is a schedule, not a request: a quiet week must
-          # skip, not stack an identical candidate. If the newest v*rc* tag
-          # already carries the picked sha (or newer), there is nothing new
-          # to candidate.
-          if [ "$channel" = "rc" ] && [ "$SCHEDULED_RC" = "1" ]; then
+          # The daily candidate is a schedule, not a request: if the newest
+          # v*rc* tag already carries the picked sha (or newer), the content
+          # already shipped as a candidate. The ancestor test reads sha ->
+          # rc_sha: the tag must contain the picked sha for a skip. The
+          # arguments once ran the other way round, which skipped every
+          # candidate whose picked sha was NEWER than the tag - the exact
+          # runs a daily cadence exists to open.
+          if [ "$channel" = "rc" ] && [ "$FROM_NIGHTLY" = "true" ]; then
             newest_rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
             if [ -n "$newest_rc_tag" ] \
                && rc_sha="$(git rev-parse --verify "refs/tags/${newest_rc_tag}^{commit}" 2>/dev/null)" \
-               && git merge-base --is-ancestor "$rc_sha" "$sha"; then
-              echo "the newest candidate ${newest_rc_tag} already carries ${sha} (or newer) - skipping this week's rc"
+               && git merge-base --is-ancestor "$sha" "$rc_sha"; then
+              echo "the newest candidate ${newest_rc_tag} already carries ${sha} (or newer) - skipping today's rc"
               echo "skip=true" >> "$GITHUB_OUTPUT"
             fi
           fi
@@ -348,6 +343,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: write # dispatch the day's rc candidate
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -435,6 +431,24 @@ jobs:
             dist/*.tar.gz dist/*.whl scripts/install/fno.sh
 
           echo "nightly ${version} published at ${stamped}"
+
+      - name: Dispatch the day's rc candidate
+        # Each green nightly also opens an rc: a second run of this workflow
+        # at the same green sha, which builds the rc artifacts and parks on
+        # the release-environment approval. One click a day releases it; a
+        # day without new commits opens nothing (the nightly idempotence
+        # skip above keeps this step off the skipped path). A fresh
+        # candidate landing in the release-rc group cancels the still
+        # parked older one, so the newest sha is always the one waiting.
+        if: github.event_name == 'schedule'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref "${DEFAULT_BRANCH:-main}" \
+            -f channel=rc -f sha="$SHA" -f from_nightly=true
+          echo "dispatched the daily rc candidate at ${SHA}; it parks on the release approval"
 
   publish:
     name: publish rc / stable (one approval click)
@@ -632,10 +646,12 @@ jobs:
   remind-stable:
     name: remind when a candidate waits on promotion
     # The stable channel stays hand-promoted by design: the approval click
-    # is the gate, and no schedule may click it. What was missing is the
-    # nudge - without it a candidate waits on memory, and next Monday's rc
-    # stacks on top of an unpromoted one. One issue at a time, opened only
-    # once the candidate is 3+ days old, naming the approval door and the
+    # is the gate, and no schedule may click it. What is missing is the
+    # nudge - without it a candidate waits on memory. Two nudges, one issue
+    # each: the daily click reminder opens once a candidate has waited a
+    # day on the approval (and closes itself once a click lands), and the
+    # stable reminder opens once a published candidate has waited 3+ days
+    # on the promotion click, naming the approval door and the
     # notes-drafting command.
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -651,7 +667,7 @@ jobs:
         with:
           fetch-depth: 0 # tags: candidate age and promotion state
 
-      - name: Open the promotion reminder once the candidate is 3+ days old
+      - name: Remind when a candidate waits (click after a day, stable after 3)
         run: |
           set -euo pipefail
           rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
@@ -661,17 +677,56 @@ jobs:
           fi
           version="${rc_tag#v}"
           version="${version%rc*}"
-          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
-            echo "${rc_tag} is already promoted; nothing to remind about"
-            exit 0
-          fi
+          rc_sha="$(git rev-parse --verify "refs/tags/${rc_tag}^{commit}")"
           cut="$(git for-each-ref "refs/tags/${rc_tag}" --format='%(creatordate:unix)')"
           age_days=$(( ($(date -u +%s) - cut) / 86400 ))
-          if [ "$age_days" -lt 3 ]; then
-            echo "${rc_tag} is ${age_days}d old; the reminder opens at 3 days"
+          cut_day="$(date -u -d "@${cut}" +%Y-%m-%d)"
+
+          # Click reminder. The candidate tag's creation IS the last click,
+          # and a fresh stable promotion (rarer than the click) counts as a
+          # release and silences the nudge for its own day.
+          title="release candidate waiting on the approval click"
+          open="$(gh issue list --state open --search "in:title \"${title}\"" --json number --jq '.[0].number // empty')"
+          stable_tag="$(git tag -l 'v[0-9]*' | grep -Ev 'rc|dev' | sort -V | tail -1 || true)"
+          stable_cut=0
+          if [ -n "$stable_tag" ]; then
+            stable_cut="$(git for-each-ref "refs/tags/${stable_tag}" --format='%(creatordate:unix)')"
+          fi
+          nightly_sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null || true)"
+          if [ "$age_days" -lt 1 ]; then
+            # A click landed inside the day: the nudge did its job.
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "candidate ${rc_tag} published; closing the reminder"
+            fi
+          elif [ -z "$nightly_sha" ] || [ "$stable_cut" -gt "$cut" ]; then
+            echo "no candidate is waiting on the click"
+          elif git merge-base --is-ancestor "$rc_sha" "${nightly_sha}^"; then
+            # The stamped nightly commit's parent is the green sha it
+            # released, so the parent is the strictness cut: a candidate
+            # waits only when the nightly carries content past the click.
+            if [ -n "$open" ]; then
+              echo "reminder issue #${open} is already open"
+            else
+              body="$(printf '%s\n%s\n%s\n%s\n' \
+                "The nightly published a candidate ${age_days}d ago and it is still parked on the release approval." \
+                "1. Actions -> release -> the run waiting on the release environment -> review it and approve. One click ships the candidate." \
+                "2. Judge it first: main green, no open p0, your own use of the nightly." \
+                "Autonomy ends at the click; nothing auto-approves. The reminder closes itself once a candidate ships.")"
+              gh issue create --title "$title" --body "$body"
+            fi
+          else
+            echo "the nightly carries nothing past ${rc_tag}; no candidate is waiting"
+          fi
+
+          # Stable reminder: the candidate is published but unpromoted.
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "${rc_tag} is already promoted; no stable reminder"
             exit 0
           fi
-          cut_day="$(date -u -d "@${cut}" +%Y-%m-%d)"
+          if [ "$age_days" -lt 3 ]; then
+            echo "${rc_tag} is ${age_days}d old; the stable reminder opens at 3 days"
+            exit 0
+          fi
           title="stable promotion waiting: v${version} (${rc_tag} cut ${cut_day})"
           open="$(gh issue list --state open --search "in:title \"stable promotion waiting: v${version}\"" --json number --jq '.[0].number // empty')"
           if [ -n "$open" ]; then
@@ -682,5 +737,5 @@ jobs:
             "Candidate ${rc_tag} has waited ${age_days} days since ${cut_day}. Promote by hand when the notes read well:" \
             "1. Actions -> release -> Run workflow -> channel: stable (the release environment approval is the gate; nothing auto-clicks it)." \
             "2. Trim the draft first if you have not: python3 scripts/release/draft-release-notes.py ${rc_tag} writes internal/fno/releases/${version}.md, then \`gh release edit ${rc_tag} --notes-file <file>\`." \
-            "Weekly rcs keep coming either way; an unpromoted candidate does not block the next one.")"
+            "Daily candidates keep coming either way; an unpromoted candidate does not block the next one.")"
           gh issue create --title "$title" --body "$body"

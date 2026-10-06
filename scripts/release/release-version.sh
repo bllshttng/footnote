@@ -4,11 +4,12 @@
 #
 # Rules (reads existing tags with `git tag -l`; run inside a full checkout):
 # - nightly: version=<src>.dev<yyyymmdd>, tag=nightly (rolling, no v* tag).
-# - rc:      weekly-cadence math; every candidate gets a fresh patch so no
-#            two weekly rcs share a base (0.4.1rc1, 0.4.2rc1, ...):
+# - rc:      daily-cadence math; candidates bump rcN within a base
+#            (0.4.1rc1, 0.4.1rc2, ...), and the base moves only when main's
+#            __version__ passes it (the post-promotion sync):
 #              no v*rc* tag yet       -> <src>rc1
 #              newest rc base < src   -> <src>rc1     (main synced past it)
-#              newest rc base >= src  -> <base.patch+1>rc1
+#              newest rc base >= src  -> <base>rc<N+1> (highest N at base)
 # - stable:  promotes the NEWEST v*rc* tag: version = its base, tag=v<base>.
 #            Going by the candidate (not <src>) is what lets a candidate cut
 #            on a later patch than main's __version__ still promote.
@@ -40,7 +41,7 @@ esac
 
 # Nightly is the only channel pinned to src, so it is the only one a released
 # v<src> stops. Stable exits 3 on an already-promoted candidate, and rc's
-# weekly-cadence math below always lands past both.
+# daily-cadence math below always lands past both.
 if [ "$channel" = "nightly" ] && git rev-parse -q --verify "refs/tags/v${src}" >/dev/null; then
   echo "release-version: v${src} is released; bump main with scripts/release/sync-version.sh <next>" >&2
   exit 1
@@ -54,16 +55,18 @@ case "$channel" in
   rc)
     newest_rc="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
     base="$src"
+    n=0
     if [ -n "$newest_rc" ]; then
-      rc_base="${newest_rc%rc*}"
-      cand="${rc_base#v}"
+      cand="${newest_rc%rc*}"
+      cand="${cand#v}"
       newer="$(printf '%s\n%s\n' "$cand" "$src" | sort -V | tail -1)"
       if [ "$newer" = "$cand" ]; then
-        base="$(printf '%s' "$cand" | awk -F. -v OFS=. '{$NF += 1; print}')"
+        base="$cand"
+        n="$(printf '%s' "$newest_rc" | sed -E 's/.*rc([0-9]+)$/\1/')"
       fi
     fi
-    echo "version=${base}rc1"
-    echo "tag=v${base}rc1"
+    echo "version=${base}rc$((n + 1))"
+    echo "tag=v${base}rc$((n + 1))"
     ;;
   stable)
     newest_rc="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"

@@ -20,6 +20,14 @@ from fno.graph.statuses import live_worked_node_ids as _real_live_worked_node_id
 runner = CliRunner()
 
 NODE = "node:ac1-node"
+def _reply_from_payload(monkeypatch):
+    """Map the payload rows the delegate sends into the worked reply, so the
+    reachability-to-display contract stays end-to-end without a verb."""
+    def fake_reply(rows):
+        return {"ac1-node": [r["label"] for r in rows]}
+
+    monkeypatch.setattr("fno.graph.statuses._worked_nodes_reply", fake_reply)
+
 
 
 def _unresolved(name: str, cwd: str) -> dict:
@@ -188,6 +196,7 @@ def test_a_fresh_transcript_outranks_a_dead_pid(cwd_tmp, roster, monkeypatch):
     roster(_workers({"name": "t-resumed", "state": "working",
                      "cwd": "/wt/ac1-node", "row_id": "t-resumed",
                      "pid": 999999, "pid_start_time": 12345, "mux": None}))
+    _reply_from_payload(monkeypatch)
     r = runner.invoke(cli, ["status", NODE, "--json"])
     assert r.exit_code == 0, r.output
     info = json.loads(r.output)
@@ -219,6 +228,7 @@ def test_degraded_coverage_hedges_the_basis(cwd_tmp, roster, monkeypatch):
     roster(RosterReading(True, 53, {NODE.removeprefix("node:"): [
         {"name": "t-live", "state": "working", "cwd": "/wt/ac1-node", "row_id": "t-live"},
     ]}, "", {}, len(unresolved), tuple(unresolved)))
+    _reply_from_payload(monkeypatch)
     r = runner.invoke(cli, ["status", NODE, "--json"])
     assert r.exit_code == 0, r.output
     info = json.loads(r.output)

@@ -40,6 +40,9 @@ mod watch_projection;
 #[path = "lead_checkin_posture.rs"]
 mod posture;
 
+#[path = "lead_checkin_peer_blocked.rs"]
+mod peer_blocked;
+
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
@@ -975,7 +978,7 @@ fn r_wake_meter(since: Option<&str>) -> Result<Value, String> {
 }
 
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
-    let (_, out, err) = fno_verb(&["agents", "lead", "drain", &ctx.scope])?;
+    let (_, out, err) = fno_verb(&["agents", "org", "drain", &ctx.scope])?;
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("drain payload did not parse: {e}: {}", err.trim()))?;
     Ok(payload.get("undelivered").cloned().unwrap_or(Value::Null))
@@ -1188,6 +1191,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("blocked_child", r_blocked_child(&beat.board));
     take("org", r_org(&beat.folded));
     take("territory", r_territory(ctx));
+    take("peer_blocked", peer_blocked::reading());
     take("state_root_drift", r_state_root_drift());
     take("capacity", r_capacity());
     take(
@@ -1384,6 +1388,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             cp.value.get("attention").cloned().unwrap_or(json!([])),
         );
     }
+    if let Some(pb) = get("peer_blocked").filter(|r| r.ok) {
+        data.insert("peer_blocked_rows".into(), pb.value.clone());
+    }
     if let Some(hold) = get("self_hold").filter(|r| r.ok) {
         data.insert("self_hold".into(), hold.value.clone());
     }
@@ -1512,6 +1519,7 @@ fn derive_change(
                 .collect()
         })
         .unwrap_or_default();
+    attention.extend(peer_blocked::attention(data));
     let self_hold = data.get("self_hold");
     if let Some(label) = crate::hold_label::hold_attention(self_hold.unwrap_or(&Value::Null)) {
         attention.push(label);
@@ -1993,6 +2001,7 @@ fn render_lines_with(
         }
     }
     lines.extend(posture::lines(readings));
+    lines.extend(peer_blocked::lines(readings));
 
     match failed("refusal_rate") {
         Some(r) => lines.push(format!("READER FAILED refusal_rate: {}", r.error)),
@@ -2341,7 +2350,7 @@ fn frontmatter_scope(text: &str) -> Option<&str> {
     None
 }
 
-const FAQ_PROMPT: &str = "fno agents lead faq add --question \"...\" --answer \"...\" \
+const FAQ_PROMPT: &str = "fno agents org faq add --question \"...\" --answer \"...\" \
 --specimen \"<node or PR>, <date>\" --exit \"<the change that retires this>\"";
 
 /// The one `lead_checkin` writer. `source` is the emitting half (`loop` for
@@ -2404,7 +2413,7 @@ fn finish_checkin(
     }
     if emit_requested && !emitted {
         eprintln!(
-            "lead-checkin: beat ran but no lead_checkin row was journalled; fno agents lead history will not see it"
+            "lead-checkin: beat ran but no lead_checkin row was journalled; fno agents org history will not see it"
         );
         return 3;
     }
@@ -2825,6 +2834,11 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
             .unwrap_or(true);
     if faq_needed {
         lines.push(FAQ_PROMPT.into());
+    }
+    // The predecessor's open reforms ride every beat until filled: the
+    // heir's first beat names each unfilled part4 so it gets done.
+    for path in crate::eval_part4::unfilled_part4s(&ctx.cwd) {
+        lines.push(format!("unfilled part4: {}", path.display()));
     }
 
     let emitted = if ctx.emit {

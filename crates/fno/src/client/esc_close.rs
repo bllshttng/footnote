@@ -105,7 +105,7 @@ mod tests {
                 )],
                 ..Default::default()
             });
-            v.open_questions_list();
+            v.open_detail_on("q-1");
         };
         let walk: Vec<(&str, Open, Closed)> = vec![
             (

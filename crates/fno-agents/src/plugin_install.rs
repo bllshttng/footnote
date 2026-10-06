@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::paths::{dirs_home, AgentsHome};
 
 const BUILD_DIR_KEY: &str = "CARGO_BUILD_BUILD_DIR";
+const SCCACHE_DIR_KEY: &str = "SCCACHE_DIR";
 const RC_MARK: &str = "# fno: cargo build-dir";
 
 /// Same shape as the Python gate in cli/src/fno/hook_config.py:29.
@@ -34,6 +35,18 @@ pub(crate) fn state_root() -> PathBuf {
 fn build_dir_value() -> String {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     crate::cargo_build_dirs::build_dir_env_value(&cwd)
+}
+
+/// The fleet sccache cache path, only when sccache is installed. A machine
+/// without it gets a build-dir export and nothing else.
+fn sccache_dir_value() -> Option<String> {
+    crate::cargo_build_dirs::sccache_bin()?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Some(
+        crate::cargo_build_dirs::sccache_dir(&cwd)
+            .display()
+            .to_string(),
+    )
 }
 
 fn run_checked(cmd: &[String], cwd: Option<&Path>) -> Result<String, String> {
@@ -890,6 +903,9 @@ fn export_claude_env() -> Result<(), String> {
         })?,
     };
     set_env_entry(&mut data, BUILD_DIR_KEY, build_dir_value());
+    if let Some(dir) = sccache_dir_value() {
+        set_env_entry(&mut data, SCCACHE_DIR_KEY, dir);
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("claude env: {e}"))?;
     }
@@ -936,10 +952,10 @@ fn export_codex_env() -> Result<(), String> {
         .or_insert(toml::Value::Table(Default::default()))
         .as_table_mut()
         .ok_or("codex env: shell_environment_policy.set is not a table")?;
-    set.insert(
-        BUILD_DIR_KEY.to_string(),
-        toml::Value::String(build_dir_value()),
-    );
+    set.insert(BUILD_DIR_KEY.into(), toml::Value::String(build_dir_value()));
+    if let Some(dir) = sccache_dir_value() {
+        set.insert(SCCACHE_DIR_KEY.into(), toml::Value::String(dir));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("codex env: {e}"))?;
     }
@@ -955,35 +971,58 @@ fn export_rc_env() -> Option<PathBuf> {
         ".bashrc"
     });
     let mut text = std::fs::read_to_string(&rc).unwrap_or_default();
-    let fresh_line = format!(
-        "{RC_MARK}\nexport {BUILD_DIR_KEY}=\"{}\"",
-        build_dir_value()
-    );
+    let fresh_block = rc_block(&build_dir_value(), sccache_dir_value().as_deref());
     if let Some(mark_at) = text.find(RC_MARK) {
         // The marked block is ours to keep current: rewrite it in place when
-        // the exported value drifted (a later cargo_targets_base change must
-        // reach the shell), instead of freezing the first exported path.
-        let line_end = text[mark_at..]
-            .find('\n')
-            .map(|i| mark_at + i)
-            .unwrap_or(text.len());
-        let value_end = text[line_end + 1..]
-            .find('\n')
-            .map(|i| line_end + 1 + i)
-            .unwrap_or(text.len());
+        // an exported value drifted (a later cargo_targets_base change must
+        // reach the shell). The block spans the mark plus every consecutive
+        // export of a key we own, so a one-line legacy block and the current
+        // two-line one replace the same way.
+        let block_end = marked_block_end(&text, mark_at);
         let mut updated = String::with_capacity(text.len());
         updated.push_str(&text[..mark_at]);
-        updated.push_str(&fresh_line);
-        updated.push_str(&text[value_end..]);
+        updated.push_str(&fresh_block);
+        updated.push('\n');
+        updated.push_str(&text[block_end..]);
         return std::fs::write(&rc, updated).ok().map(|_| rc);
     }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    text.push_str(&fresh_line);
+    text.push_str(&fresh_block);
     text.push('\n');
     std::fs::write(&rc, text).ok()?;
     Some(rc)
+}
+
+/// The marked rc block: the build-dir export, plus the sccache cache export
+/// when sccache is installed. An RUSTC_WRAPPER export is deliberately absent:
+/// the bare env var overrides the tracked build.rustc-wrapper config, which
+/// would route fleet builds around the admission wrapper.
+fn rc_block(build_dir: &str, sccache_dir: Option<&str>) -> String {
+    let mut block = format!("{RC_MARK}\nexport {BUILD_DIR_KEY}=\"{build_dir}\"");
+    if let Some(dir) = sccache_dir {
+        block.push_str(&format!("\nexport {SCCACHE_DIR_KEY}=\"{dir}\""));
+    }
+    block
+}
+
+/// Where the marked block ends in `text`: past the mark line plus every
+/// consecutive export of a key we own. The mark line's own newline is
+/// consumed first, so the scan starts on the first export, never on the
+/// empty string before it.
+fn marked_block_end(text: &str, mark_at: usize) -> usize {
+    let after_mark = mark_at + RC_MARK.len();
+    let mut block_end = (after_mark + 1).min(text.len());
+    for line in text[block_end..].split('\n') {
+        let ours = line.starts_with(&format!("export {BUILD_DIR_KEY}="))
+            || line.starts_with(&format!("export {SCCACHE_DIR_KEY}="));
+        if !ours {
+            break;
+        }
+        block_end += line.len() + 1;
+    }
+    block_end.min(text.len())
 }
 
 /// Remove the second copies a successful install leaves behind. The gemini
@@ -2473,6 +2512,56 @@ fn swap_grok_symlink(plugins: &Path, link: &Path, stage: &Path) -> Result<(), St
 mod tests {
     use super::*;
     use std::fs;
+
+    // The block rewrite consumes the legacy one-line block and the current
+    // two-line one, and stops at the first export of a key we do not own.
+    #[test]
+    fn marked_block_end_scans_owned_exports_only() {
+        let mark = "# fno: cargo build-dir";
+        let cargo = "export CARGO_BUILD_BUILD_DIR=\"/u/b\"";
+        let sccache = "export SCCACHE_DIR=\"/u/b/sccache\"";
+        let keep = "export KEEP=1";
+        let legacy = [mark, "\n", cargo, "\n", keep, "\n"].concat();
+        assert_eq!(
+            marked_block_end(&legacy, legacy.find(mark).unwrap()),
+            legacy.find(keep).unwrap()
+        );
+        let current = [mark, "\n", cargo, "\n", sccache, "\n", keep, "\n"].concat();
+        assert_eq!(
+            marked_block_end(&current, current.find(mark).unwrap()),
+            current.find(keep).unwrap()
+        );
+        // A block at EOF without a trailing newline clamps to the text end.
+        let bare = [mark, "\n", cargo].concat();
+        assert_eq!(
+            marked_block_end(&bare, bare.find(mark).unwrap()),
+            bare.len()
+        );
+    }
+    // rc_block: build-dir only without sccache, both exports with it.
+    // No RUSTC_WRAPPER line ever: the bare env var overrides the tracked
+    // build.rustc-wrapper config and would bypass the admission wrapper.
+    #[test]
+    fn rc_block_lists_owned_keys_only() {
+        let b = "/u/.fno/cargo-build/{workspace-path-hash}";
+        let s = "/u/.fno/cargo-build/sccache";
+        let mark = "# fno: cargo build-dir";
+        let n = "\n";
+        let e1 = "export CARGO_BUILD_BUILD_DIR=\"";
+        let e2 = "export SCCACHE_DIR=\"";
+        assert_eq!(rc_block(b, None), [mark, n, e1, b, "\""].concat());
+        assert_eq!(
+            rc_block(b, Some(s)),
+            [
+                mark.to_string(),
+                n.to_string(),
+                [e1, b, "\""].concat(),
+                n.to_string(),
+                [e2, s, "\""].concat()
+            ]
+            .concat()
+        );
+    }
 
     // zcode install: a malformed config is refused byte-identical.
     #[test]

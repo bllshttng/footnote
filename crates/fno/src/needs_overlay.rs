@@ -13,6 +13,12 @@ use std::time::Duration;
 /// Same 800ms cap as the digest overlay: a fold slower than this degrades the
 /// queue to its live badge leg with a visible notice, never blocks the UI.
 const SHELLOUT_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// The questions leg's bound. The bell renders the index fold at once and
+/// applies this read whenever it lands, so the projection is a background
+/// refresh, never a deadline the UI waits under (the 800ms cap turned a
+/// loaded machine into "questions unavailable" with ten questions open).
+const QUESTIONS_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(45);
 const ANSWER_TIMEOUT_MESSAGE: &str =
     "timed out after 45s; the answer may have landed - rerun it, a rerun resumes";
@@ -243,10 +249,10 @@ pub async fn mine_now() -> Option<Vec<MineItem>> {
     parse_mine(&output.stdout)
 }
 
-/// Fold open questions through the Rust projection verb - under the cap with
-/// the store's cursor fast path (a store-sized read measured 4.99 s before
-/// it). Same bounded shape as the other legs, but a failure carries a reason:
-/// the toggle toast names it instead of toasting "shown" over an empty fold.
+/// Fold open questions through the Rust projection verb - bounded by
+/// [`QUESTIONS_TIMEOUT`], with the store's cursor fast path (a store-sized
+/// read measured 4.99 s before it). A failure carries a reason: the bell
+/// names it over the last good fold instead of blanking the board.
 pub async fn questions_now() -> Result<QuestionsFold, String> {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
@@ -256,13 +262,13 @@ pub async fn questions_now() -> Result<QuestionsFold, String> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    let output = match tokio::time::timeout(SHELLOUT_TIMEOUT, fut).await {
+    let output = match tokio::time::timeout(QUESTIONS_TIMEOUT, fut).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => return Err(e.to_string()),
         Err(_) => {
             return Err(format!(
                 "timed out after {}ms",
-                SHELLOUT_TIMEOUT.as_millis()
+                QUESTIONS_TIMEOUT.as_millis()
             ))
         }
     };

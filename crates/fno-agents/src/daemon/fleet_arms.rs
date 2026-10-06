@@ -122,7 +122,10 @@ impl FleetArms {
             ctx.opts.agents_config_cwd.clone(),
             ctx.home.events_jsonl(),
             retire_interval,
-            || crate::gc::mux_tab_sweep(false, false),
+            {
+                let prune_cwd = ctx.opts.agents_config_cwd.clone();
+                move || crate::gc::mux_tab_sweep(None, &prune_cwd, false, false)
+            },
             crate::gc::production_roster_sweep,
             crate::gc::production_team_sweep,
         );

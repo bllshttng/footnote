@@ -510,6 +510,10 @@ pub enum Event {
     OpenNav,
     /// Open or close the notifications bell panel (prefix+q).
     ToggleBell,
+    /// Open the Messages tab (prefix+M) from anywhere: the mail overlay
+    /// takes the keyboard, its own bare keys move and open (the messages
+    /// help section). Case pair with `m` (the yard), the h/H convention.
+    OpenMessages,
     /// Open the settings modal (prefix+S). The same surface the sideline
     /// menu's `settings` row opens, reached from the keyboard. Case pair
     /// with `s` (toggle-status), the h/H focus/resize convention.
@@ -537,6 +541,13 @@ pub enum Event {
     /// expanded -> live-only -> collapsed (prefix+z). The client owns
     /// the state and resolves the active squad; the chord only fires the step.
     CycleSection,
+    /// Open the sideline MENU popup (prefix+M): the footer `menu` button's
+    /// action, reached from the keyboard. Case pair with `m` (the yard).
+    OpenSidelineMenu,
+    /// Open the new-workspace name overlay (prefix+N): the `+ new workspace`
+    /// footer's action, reached from the keyboard. Case pair with `n`
+    /// (next tab).
+    OpenCreate,
     /// Swallowed unmapped chord: the client sounds BEL.
     Bell,
 }
@@ -991,6 +1002,9 @@ pub enum KeySection {
     /// through [`meta_rows`] purely as reference, which is why removing a dead
     /// row was undiscoverable before.
     SidelineRows,
+    /// Bare keys the Messages tab owns while it holds the keyboard
+    /// (the operator's item 8): no prefix, no rebind, reference only.
+    Messages,
 }
 
 impl KeySection {
@@ -1003,6 +1017,7 @@ impl KeySection {
             KeySection::WorkspacesTabs => "workspaces & tabs",
             KeySection::Panes => "panes",
             KeySection::SidelineRows => "sideline rows (no prefix, not rebindable)",
+            KeySection::Messages => "messages (while the tab holds the keyboard)",
         }
     }
 }
@@ -1139,6 +1154,13 @@ fn default_bindings() -> Vec<KeyBinding> {
         // workspaces & tabs
         b(b'c', "new-tab", Cmd(C::NewTab), WorkspacesTabs, "new tab"),
         b(
+            b'N',
+            "new-workspace",
+            OpenCreate,
+            WorkspacesTabs,
+            "new workspace",
+        ),
+        b(
             b'n',
             "next-tab",
             Cmd(C::NextTab),
@@ -1247,6 +1269,13 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
         b(
+            b'M',
+            "open-messages",
+            OpenMessages,
+            Global,
+            "open Messages (mail)",
+        ),
+        b(
             b'A',
             "connections",
             OpenConnections,
@@ -1267,6 +1296,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             OpenYard,
             Global,
             "the yard (fleet as a menagerie)",
+        ),
+        b(
+            b'M',
+            "sideline-menu",
+            OpenSidelineMenu,
+            Global,
+            "sideline menu",
         ),
         b(
             b'C',
@@ -1693,6 +1729,50 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             format!("{p} w then r/J/K/x"),
             "rename · move · remove (confirm) the workspace row".into(),
             KeySection::SidelineRows,
+        ),
+        // The Messages tab's bare keys (item 8): no prefix, no rebind -
+        // reference rows so the tab's keyboard is discoverable from the
+        // help surface, not only from its painted hint line.
+        (
+            "j/k".into(),
+            "move within a column".into(),
+            KeySection::Messages,
+        ),
+        (
+            "h/l or arrows".into(),
+            "move between the 3 columns".into(),
+            KeySection::Messages,
+        ),
+        (
+            "enter".into(),
+            "open the selection".into(),
+            KeySection::Messages,
+        ),
+        (
+            "esc".into(),
+            "back one column; from column 1 close the tab".into(),
+            KeySection::Messages,
+        ),
+        (
+            "a/b".into(),
+            "all · broadcasts filter (column 1)".into(),
+            KeySection::Messages,
+        ),
+        (
+            "s".into(),
+            "toggle the agent sort".into(),
+            KeySection::Messages,
+        ),
+        ("d".into(), "session details".into(), KeySection::Messages),
+        (
+            "m".into(),
+            "the conversation's chat id".into(),
+            KeySection::Messages,
+        ),
+        (
+            "y/Y".into(),
+            "copy the bubble's fmail id / body".into(),
+            KeySection::Messages,
         ),
     ];
     // Bindable, no default chord: the two split directions with no free key.
