@@ -4795,6 +4795,8 @@ def dispatch_spawn_pane(
             from fno.agents import dispatch as _dispatch
 
             _dispatch.reconcile_agents()
+            # Its codex backfill and codex_pane.stamp_late_bind below apply the
+            # same compare-and-set guards; change them together.
             this_mux = {"session": session, "pane_id": pane_id}
             backfilled_row = next(
                 (
