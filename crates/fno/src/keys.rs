@@ -2619,8 +2619,8 @@ mod tests {
 
     #[test]
     fn client_keys_prefix_unmapped_swallows_with_bell() {
-        // An unbound byte ('u' here) must NOT be forwarded - swallow + BEL.
-        assert_eq!(scan_all(&[b"\x02u"]), vec![Event::Bell]);
+        // An unbound byte ('Z' here) must NOT be forwarded - swallow + BEL.
+        assert_eq!(scan_all(&[b"\x02Z"]), vec![Event::Bell]);
 
         // (AC2-INV) The never-leak guarantee, swept over the whole byte
         // space rather than one specimen. adds ONE deliberate held-byte
