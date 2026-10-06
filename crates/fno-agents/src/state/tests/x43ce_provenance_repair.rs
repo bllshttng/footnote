@@ -21,13 +21,6 @@ fn adopted_row_with_owner_only_provenance(name: &str) -> String {
     )
 }
 
-/// An adopted row whose provenance block is well formed (origin plus owner).
-fn adopted_row_with_valid_provenance(name: &str) -> String {
-    format!(
-        r#"{{"name":"{name}","cwd":"/w","harness":"codex","harness_session_id":"{name}-sess","status":"live","created_at":"2026-10-06T00:00:00Z","origin":"adopted","spawned_by_session":"p-sess","spawn_provenance":{{"origin":{{"kind":"session","parent":{{"harness":"claude","session_id":"p-sess","cwd":"/w"}},"invocation":null}},"owner":{{"kind":"session","harness":"codex","session_id":"heir-sess","cwd":"/w"}}}}}}"#
-    )
-}
-
 fn three_row_registry(middle: String) -> String {
     format!(
         r#"{{"schema_version":{},"agents":[{}, {}, {}]}}"#,
@@ -67,65 +60,7 @@ fn an_owner_only_spawn_provenance_block_no_longer_zeroes_the_decode() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-#[test]
-fn a_well_formed_spawn_provenance_block_decodes_intact() {
-    // Cross-leg round trip: a provenance block the two legs agree on keeps
-    // decoding as before; the repair never touches a healthy row.
-    let dir = tmpdir("x43ce-valid-provenance");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("registry.json");
-    std::fs::write(
-        &path,
-        three_row_registry(adopted_row_with_valid_provenance("spawned-worker")),
-    )
-    .unwrap();
-
-    let (reg, raw) = load_registry_with_counts(&path).unwrap();
-    assert_eq!(raw, 3);
-    assert_eq!(reg.entries.len(), 3);
-    let row = reg.find("spawned-worker").expect("spawned row survives");
-    let provenance = row
-        .spawn_provenance
-        .as_ref()
-        .expect("a well formed block survives the load");
-    let crate::spawn_contract::SpawnProvenance { origin, owner } = provenance;
-    assert!(matches!(
-        origin,
-        crate::spawn_contract::SpawnOrigin::Session { .. }
-    ));
-    match owner {
-        crate::spawn_contract::SpawnOwner::Session(session_ref) => {
-            assert_eq!(session_ref.session_id, "heir-sess");
-        }
-        other => panic!("expected a session owner, got {other:?}"),
-    }
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn damage_elsewhere_still_fails_the_read() {
-    // The heal is narrow: a row that CARRIES a healable-looking block but
-    // fails elsewhere (here a status value with the wrong type) is not
-    // healed - the same-schema read still fails by name, exactly as before
-    // this repair existed.
-    let dir = tmpdir("x43ce-damage-elsewhere");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("registry.json");
-    std::fs::write(
-        &path,
-        r#"{"schema_version":35,"agents":[
-            {"name":"worker-alpha","cwd":"/w","harness":"claude","harness_session_id":"alpha-sess","status":"live","created_at":"2026-10-06T00:00:00Z"},
-            {"name":"broken","cwd":"/w","harness":"claude","harness_session_id":"broken-sess","status":17,"created_at":"2026-10-06T00:00:00Z","spawn_provenance":{"origin":{"kind":"session","parent":{"harness":"claude","session_id":"p-sess","cwd":"/w"},"invocation":null},"owner":{"kind":"session","harness":"claude","session_id":"p-sess","cwd":"/w"}}}
-        ]}"#,
-    )
-    .unwrap();
-
-    let err = load_registry(&path).expect_err("damage beyond the block must still fail");
-    let msg = err.to_string();
-    assert!(
-        matches!(err, StateError::InvariantViolation(_)),
-        "same-schema damage stays fatal by name: {msg}"
-    );
-    assert!(msg.contains("raw_rows=2"), "names the raw count: {msg}");
-    std::fs::remove_dir_all(&dir).ok();
-}
+// The heal's two guardrails live with their primary owners: a well-formed
+// block decoding intact is owned by the v33 round-trip family in mod.rs, and
+// damage beside a healable-looking block staying fatal is owned by
+// x4c87_row_counts (its broken row carries a valid block for exactly that).
