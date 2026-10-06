@@ -9,6 +9,7 @@
 //! the single source of truth; the client never emulates VT itself.
 
 use std::collections::VecDeque;
+use std::path::Path;
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -472,18 +473,23 @@ impl Pane {
     /// Everything else is linkified from the text, because the common case is a
     /// plain URL printed by a tool that never heard of OSC 8.
     ///
-    /// Returns only what [`crate::link::is_openable`] accepts. The OSC 8 URI is
-    /// chosen by whatever runs in the pane, so the allowlist is applied at this
-    /// end rather than trusted to the client.
-    pub fn link_at(&self, row: u16, col: u16) -> Option<String> {
-        self.link_span(row, col).map(|span| span.uri)
+    /// Returns only what the pane-sourced gates accept: web URLs pass
+    /// [`crate::link::is_openable`], and a detected path comes back as a
+    /// strict [`crate::link::FILE_SCHEME`] URI. The OSC 8 URI is chosen by
+    /// whatever runs in the pane, so the allowlist is applied at this end
+    /// rather than trusted to the client.
+    pub fn link_at(&self, row: u16, col: u16, cwd: &str) -> Option<String> {
+        self.link_span(row, col, cwd).map(|span| span.uri)
     }
 
-    /// One resolved link: the validated URL plus every VISIBLE pane-local cell
+    /// One resolved link: the validated URI plus every VISIBLE pane-local cell
     /// belonging to it, so a hover affordance can underline exactly what a
-    /// click would open. The click path keeps [`Pane::link_at`] as the URL-only
+    /// click would open. The click path keeps [`Pane::link_at`] as the URI-only
     /// projection of this match, so click and hover cannot disagree.
-    pub fn link_span(&self, row: u16, col: u16) -> Option<LinkSpan> {
+    ///
+    /// `cwd` is the pane's live working directory, from which bare relative
+    /// candidates are resolved; see [`crate::link::find_paths`].
+    pub fn link_span(&self, row: u16, col: u16, cwd: &str) -> Option<LinkSpan> {
         let point = self.viewport_point(row, col);
         if let Some(h) = self.term.grid()[point.line][point.column].hyperlink() {
             // OSC 8 wins when present (see `link_at`); the span is the run of
@@ -513,13 +519,22 @@ impl Pane {
                 });
             }
         }
-        let (start, end) = crate::link::find_urls(&text)
+        if let Some((start, end)) = crate::link::find_urls(&text)
             .into_iter()
-            .find(|&(a, b)| idx >= a && idx < b)?;
-        let uri: String = text.chars().skip(start).take(end - start).collect();
-        crate::link::is_openable(&uri).then(|| LinkSpan {
-            uri,
-            cells: self.visible_cells(&points[start..end]),
+            .find(|&(a, b)| idx >= a && idx < b)
+        {
+            let uri: String = text.chars().skip(start).take(end - start).collect();
+            return crate::link::is_openable(&uri).then(|| LinkSpan {
+                uri,
+                cells: self.visible_cells(&points[start..end]),
+            });
+        }
+        let hit = crate::link::find_paths(&text, Path::new(cwd))
+            .into_iter()
+            .find(|p| idx >= p.start && idx < p.end)?;
+        Some(LinkSpan {
+            uri: hit.uri,
+            cells: self.visible_cells(&points[hit.start..hit.end]),
         })
     }
 
@@ -1968,26 +1983,64 @@ mod tests {
         // on registered app schemes, so the grid walk must drop it.
         let mut pane = Pane::new(4, 40);
         pane.feed(b"\x1b]8;;file:///etc/passwd\x07innocent\x1b]8;;\x07");
-        assert_eq!(pane.link_at(0, 2), None);
+        assert_eq!(pane.link_at(0, 2, "/nonexistent"), None);
 
         // The click column is clamped into the grid; a click on padding finds
         // no link rather than panicking or reaching the previous row's URL.
         let mut pane = Pane::new(4, 20);
         pane.feed(b"https://example.com");
-        assert_eq!(pane.link_at(3, 19), None);
-        assert_eq!(pane.link_at(200, 200), None, "out-of-range click clamps");
+        assert_eq!(pane.link_at(3, 19, "/nonexistent"), None);
+        assert_eq!(
+            pane.link_at(200, 200, "/nonexistent"),
+            None,
+            "out-of-range click clamps"
+        );
 
         // The allowlist applies to the span exactly as it does to the click.
         // Positive control beside it: a safe anchor in the same pane resolves.
         // Visible text: "bad good".
         let mut pane = Pane::new(4, 60);
         pane.feed(b"\x1b]8;;file:///etc/passwd\x07bad\x1b]8;;\x07 \x1b]8;;https://ok.example\x07good\x1b]8;;\x07");
-        assert!(pane.link_span(0, 2).is_none(), "file:// answers nothing");
-        let span = pane.link_span(0, 6).expect("the https anchor resolves");
+        assert!(
+            pane.link_span(0, 2, "/nonexistent").is_none(),
+            "file:// answers nothing"
+        );
+        let span = pane
+            .link_span(0, 6, "/nonexistent")
+            .expect("the https anchor resolves");
         assert_eq!(span.uri, "https://ok.example");
         assert_eq!(span.cells, (4..8).map(|c| (0, c)).collect::<Vec<_>>());
     }
 
+    #[test]
+    fn path_span_in_a_pane_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("slash.md");
+        std::fs::write(&file, b"hi").expect("write");
+        let canon = std::fs::canonicalize(&file).expect("canonical");
+        let cwd = dir.path().to_string_lossy().to_string();
+        let mut pane = Pane::new(4, 60);
+        pane.feed(format!("see {} hard", file.display()).as_bytes());
+        let span = pane
+            .link_span(0, 6, "/nonexistent")
+            .expect("absolute path resolves");
+        assert_eq!(span.uri, format!("fno-file:{}", canon.display()));
+        assert!(!span.cells.is_empty());
+        // A relative candidate with a separator resolves against the pane cwd.
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"see ./slash.md hard");
+        let span = pane
+            .link_span(0, 5, cwd.as_str())
+            .expect("relative path resolves");
+        assert_eq!(span.uri, format!("fno-file:{}", canon.display()));
+    }
+
+    #[test]
+    fn missing_path_resolves_no_span() {
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"see docs/gone.md hard");
+        assert!(pane.link_span(0, 6, "/nonexistent").is_none());
+    }
     // -- hover affordance: the shared span behind click and hover ---------------
 
     #[test]
@@ -1996,7 +2049,9 @@ mod tests {
         let line = "`@t-glm-9663 · fmail-840a07863897 · fix the gate`";
         let mut pane = Pane::new(4, 60);
         pane.feed(line.as_bytes());
-        let span = pane.link_span(0, 2).expect("a cell inside @name resolves");
+        let span = pane
+            .link_span(0, 2, "/nonexistent")
+            .expect("a cell inside @name resolves");
         assert_eq!(span.uri, "fno-sender:fmail-840a07863897");
         assert_eq!(
             span.cells,
@@ -2004,19 +2059,27 @@ mod tests {
             "cols 1..=11, the @name run and nothing else"
         );
         // The ID opens the message; the summary remains plain text.
-        let message = pane.link_span(0, 15).expect("the fmail ID resolves");
+        let message = pane
+            .link_span(0, 15, "/nonexistent")
+            .expect("the fmail ID resolves");
         assert_eq!(message.uri, "fno-message:fmail-840a07863897");
         assert_eq!(
             message.cells,
             (15..33).map(|c| (0, c)).collect::<Vec<_>>(),
             "the fmail token alone is clickable"
         );
-        assert!(pane.link_span(0, 36).is_none(), "the summary is not");
+        assert!(
+            pane.link_span(0, 36, "/nonexistent").is_none(),
+            "the summary is not"
+        );
 
         // The matcher tolerates a harness prompt prefix before the header.
         let mut pane = Pane::new(4, 60);
         pane.feed("❯ `@worker · fmail-0123456789ab · hi`".as_bytes());
-        assert!(pane.link_span(0, 4).is_some(), "prompt prefix still spans");
+        assert!(
+            pane.link_span(0, 4, "/nonexistent").is_some(),
+            "prompt prefix still spans"
+        );
         // A malformed id, a spaced name, an empty summary, a legacy msg- id,
         // and a nameless separator resolve no span at all.
         for bad in [
@@ -2030,7 +2093,10 @@ mod tests {
         ] {
             let mut pane = Pane::new(4, 60);
             pane.feed(bad.as_bytes());
-            assert!(pane.link_span(0, 2).is_none(), "no sender span for {bad}");
+            assert!(
+                pane.link_span(0, 2, "/nonexistent").is_none(),
+                "no sender span for {bad}"
+            );
         }
         // The sender URI must never read as openable: the platform opener
         // can never receive it.
@@ -2043,7 +2109,9 @@ mod tests {
         // hover underline paints what a click would open - no more, no less.
         let mut pane = Pane::new(4, 40);
         pane.feed(b"see https://example.com/a now");
-        let span = pane.link_span(0, 4).expect("the URL's own cell resolves");
+        let span = pane
+            .link_span(0, 4, "/nonexistent")
+            .expect("the URL's own cell resolves");
         assert_eq!(span.uri, "https://example.com/a");
         assert_eq!(
             span.cells,
@@ -2053,15 +2121,15 @@ mod tests {
         // Negative with a positive control in the same fixture: "see" is not a
         // link; the URL cell beside it still resolves.
         assert!(
-            pane.link_span(0, 0).is_none(),
+            pane.link_span(0, 0, "/nonexistent").is_none(),
             "the leading word is no link"
         );
         assert!(
-            pane.link_span(0, 26).is_none(),
+            pane.link_span(0, 26, "/nonexistent").is_none(),
             "the trailing word is no link"
         );
         assert!(
-            pane.link_span(0, 10).is_some(),
+            pane.link_span(0, 10, "/nonexistent").is_some(),
             "control: the URL still does"
         );
 
@@ -2072,7 +2140,7 @@ mod tests {
         let url = "https://example.com/a/very/long/path";
         pane.feed(url.as_bytes());
         let span = pane
-            .link_span(1, 2)
+            .link_span(1, 2, "/nonexistent")
             .expect("the wrapped continuation resolves");
         assert_eq!(span.uri, url);
         assert!(
@@ -2094,14 +2162,19 @@ mod tests {
         assert!(url.len() > 20 * 8, "must outrun the old cap");
         let mut pane = Pane::new(14, 20);
         pane.feed(url.as_bytes());
-        let span = pane.link_span(0, 0).expect("the outrunning URL resolves");
+        let span = pane
+            .link_span(0, 0, "/nonexistent")
+            .expect("the outrunning URL resolves");
         assert_eq!(
             span.uri, url,
             "a wrapped URL must resolve whole; a prefix is a different address"
         );
 
         // Click and hover cannot disagree: the projection answers the same URI.
-        assert_eq!(pane.link_at(0, 0).as_deref(), Some(url.as_str()));
+        assert_eq!(
+            pane.link_at(0, 0, "/nonexistent").as_deref(),
+            Some(url.as_str())
+        );
 
         // OSC 8: the span is the run of cells carrying the SAME anchor. A
         // second, separate anchor that happens to reuse the URI sits mid-row
@@ -2109,7 +2182,9 @@ mod tests {
         // underline both. Visible text: "open it mid also".
         let mut pane = Pane::new(4, 60);
         pane.feed(b"\x1b]8;;https://example.com/pr/700\x07open it\x1b]8;;\x07 mid \x1b]8;;https://example.com/pr/700\x07also\x1b]8;;\x07");
-        let span = pane.link_span(0, 2).expect("the first anchor's text");
+        let span = pane
+            .link_span(0, 2, "/nonexistent")
+            .expect("the first anchor's text");
         assert_eq!(span.uri, "https://example.com/pr/700");
         assert_eq!(
             span.cells,
@@ -2117,7 +2192,9 @@ mod tests {
             "exactly 'open it' (cols 0..=6); the later anchor never joins"
         );
         // The later anchor still resolves on its own cells - a separate span.
-        let second = pane.link_span(0, 13).expect("the second anchor's text");
+        let second = pane
+            .link_span(0, 13, "/nonexistent")
+            .expect("the second anchor's text");
         assert_eq!(second.uri, "https://example.com/pr/700");
         assert_eq!(second.cells, vec![(0, 12), (0, 13), (0, 14), (0, 15)]);
 
@@ -2130,7 +2207,9 @@ mod tests {
         pane.feed(b"\x1b]8;;https://example.com/wrapped\x07");
         pane.feed(b"aaaaaaaaaaaaaaaaaaaaaaaaa");
         pane.feed(b"\x1b]8;;\x07");
-        let span = pane.link_span(1, 3).expect("the middle row resolves");
+        let span = pane
+            .link_span(1, 3, "/nonexistent")
+            .expect("the middle row resolves");
         assert_eq!(span.uri, "https://example.com/wrapped");
         let mut cells = span.cells.clone();
         cells.sort();
@@ -2143,7 +2222,9 @@ mod tests {
         assert_eq!(span.cells.len(), 25, "no row duplicated by the two walks");
         // Hovering the TOP row yields the same single span: the anchor is one
         // link whichever half the pointer sits on.
-        let top = pane.link_span(0, 0).expect("the top row resolves");
+        let top = pane
+            .link_span(0, 0, "/nonexistent")
+            .expect("the top row resolves");
         assert_eq!(top.cells.len(), 25);
     }
 

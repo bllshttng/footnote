@@ -36,11 +36,12 @@ use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
 mod open_chooser;
+mod open_link;
 mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
 mod wire_version;
-use open_chooser::{open_for_session, resolve_sender};
+use open_chooser::open_for_session;
 use row_menu::execute_row_menu_action;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
@@ -8025,28 +8026,16 @@ async fn attach_and_run(
                     });
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
-                    // External URL opens run off-loop; a cold browser must not stall rendering.
-                    if let Some(id) = crate::link::message_id_from_uri(&url) {
-                        messages_view::open_message(&mut view, id.to_string());
+                    // External opens run off-loop; a cold browser must not stall
+                    // rendering. The router names the opener for each pseudo
+                    // scheme; the message leg finishes here on the UI loop.
+                    if let Some(routed) =
+                        crate::client::open_link::start(&url, link_tx.clone(), sender_tx.clone())
+                    {
+                        messages_view::open_message(&mut view, routed.id);
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
                         }
-                    } else if crate::link::is_sender_uri(&url) {
-                        // Resolve the sender session, then open its chooser row.
-                        let tx = sender_tx.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let id = url
-                                .trim_start_matches(crate::link::SENDER_SCHEME)
-                                .to_string();
-                            let resolved = resolve_sender(&id);
-                            let _ = tx.send((id, resolved));
-                        });
-                    } else {
-                        let tx = link_tx.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let outcome = crate::link::open_url(&url);
-                            let _ = tx.send((url, outcome));
-                        });
                     }
                 }
                 Ok(ServerMsg::LinkHover {

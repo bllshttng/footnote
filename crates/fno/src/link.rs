@@ -163,6 +163,160 @@ pub const SENDER_SCHEME: &str = "fno-sender:";
 /// opener.
 pub const MESSAGE_SCHEME: &str = "fno-message:";
 
+/// The pseudo scheme for a clicked bare file path (`crates/fno/src/link.rs:42`
+/// printed in a pane). The URI carries the CANONICAL absolute path plus an
+/// optional `:<line>` tail. It is intercepted by the mux client - open the
+/// file today, hand it to the file viewer when that lands - and
+/// [`OPENABLE_SCHEMES`] stays at two, so it can never reach the platform
+/// opener through the pane-sourced door.
+pub const FILE_SCHEME: &str = "fno-file:";
+
+/// Parse an exact [`FILE_SCHEME`] URI into its canonical path and optional
+/// line. Strict, because it is the trust gate on pane-sourced bytes: the path
+/// must be absolute and free of whitespace or control characters, or the URI
+/// resolves nothing.
+pub fn file_uri_parts(uri: &str) -> Option<(PathBuf, Option<u32>)> {
+    let rest = uri.strip_prefix(FILE_SCHEME)?;
+    let (path, line) = match rest.rfind(':') {
+        Some(pos) => match rest[pos + 1..].parse::<u32>() {
+            Ok(n) => (&rest[..pos], Some(n)),
+            Err(_) => (rest, None),
+        },
+        None => (rest, None),
+    };
+    if !Path::new(path).is_absolute()
+        || path.is_empty()
+        || path.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    Some((PathBuf::from(path), line))
+}
+
+/// True when `s` is a well-formed [`FILE_SCHEME`] URI.
+pub fn is_file_uri(s: &str) -> bool {
+    file_uri_parts(s).is_some()
+}
+
+/// Characters that may appear inside a bare-path candidate: everything but
+/// whitespace, controls, and the punctuation that prose and shells wrap paths
+/// in. `:` is admitted so `path:line` scans as one run; the line is split
+/// back off before the candidate is resolved. Permissiveness is safe here
+/// because a candidate only linkifies if it EXISTS on disk - a prose token
+/// dies at the stat, not at the scan.
+fn is_path_char(c: char) -> bool {
+    !c.is_whitespace() && !c.is_control() && !"<>()[]{}\"'`,;!?&|*".contains(c)
+}
+
+/// One detected path: its half-open CHAR range in the line plus the
+/// [`FILE_SCHEME`] URI it resolves to (canonical path, optional `:<line>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathLink {
+    pub start: usize,
+    pub end: usize,
+    pub uri: String,
+}
+
+/// Every bare path in `text` that exists, resolved against the pane's cwd.
+/// The impure twin of [`find_urls`]: each candidate is a filesystem probe,
+/// which is the whole point - ambiguity is settled by existence, not by more
+/// syntax. Only tokens containing a separator (`/`, or a `~/` prefix)
+/// qualify, so ordinary prose words never reach the stat.
+pub fn find_paths(text: &str, cwd: &Path) -> Vec<PathLink> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    find_paths_with(text, cwd, home.as_deref(), |p| {
+        std::fs::canonicalize(p).ok()
+    })
+}
+
+/// [`find_paths`] with the filesystem and HOME injected, mirroring the
+/// `open_url_with` seam: detection is assertable without touching the real
+/// tree, and the one real-filesystem test pins the probe's contract
+/// (canonicalize = existence + symlink resolution in one call).
+pub fn find_paths_with(
+    text: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    probe: impl Fn(&Path) -> Option<PathBuf>,
+) -> Vec<PathLink> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        // A candidate starts at a path char that is not continuing a run.
+        if !is_path_char(chars[i]) || i > 0 && is_path_char(chars[i - 1]) {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < chars.len() && is_path_char(chars[end]) {
+            end += 1;
+        }
+        let trimmed = i + trim_tail(&chars[i..end]);
+        let raw: String = chars[i..trimmed].iter().collect();
+        let start = i;
+        i = end;
+        match resolve_path_candidate(&raw, cwd, home, &probe) {
+            Some((path, line)) => out.push(PathLink {
+                start,
+                end: trimmed,
+                uri: file_uri(&path, line),
+            }),
+            None => continue,
+        }
+    }
+    out
+}
+
+/// Resolve one trimmed candidate to a canonical path plus optional line.
+/// `None` when it is prose: no separator, a `~user/` form, or a probe miss.
+fn resolve_path_candidate(
+    raw: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    probe: &impl Fn(&Path) -> Option<PathBuf>,
+) -> Option<(PathBuf, Option<u32>)> {
+    // `path:line`: the valuable half of the feature. The tail after the LAST
+    // colon must be all digits to count, so `a/b:c` stays a path.
+    let (path_str, line) = match raw.rfind(':') {
+        Some(pos) => match raw[pos + 1..].parse::<u32>() {
+            Ok(n) => (&raw[..pos], Some(n)),
+            Err(_) => (raw, None),
+        },
+        None => (raw, None),
+    };
+    // The crate's one tilde-expansion helper, shared with the obsidian vault
+    // root. Only `~/rest` expands; a bare `~` is prompt text more often than
+    // a path, and `~user/` passes through to die at the probe. With no HOME
+    // the helper passes it through and the probe rejects the literal.
+    let expanded = if path_str.starts_with("~/") {
+        PathBuf::from(crate::connections_view::expand_tilde(
+            path_str,
+            home.map(Path::as_os_str),
+        ))
+    } else if Path::new(path_str).is_absolute() {
+        PathBuf::from(path_str)
+    } else {
+        if !path_str.contains('/') {
+            return None;
+        }
+        cwd.join(path_str)
+    };
+    // `./` and `../` need no lexical normalizing: the probe resolves them,
+    // and the URI carries the canonical answer.
+    let canonical = probe(&expanded)?;
+    Some((canonical, line))
+}
+
+/// Build a [`FILE_SCHEME`] URI for a canonical path and optional line.
+pub fn file_uri(path: &Path, line: Option<u32>) -> String {
+    let mut uri = format!("{FILE_SCHEME}{}", path.display());
+    if let Some(line) = line {
+        uri.push_str(&format!(":{line}"));
+    }
+    uri
+}
+
 /// True when `s` is exactly the sender pseudo URI for a `fmail-` id: scheme
 /// plus `fmail-` plus 12 hex, nothing else. A legacy `msg-` header has no
 /// sender session to find, so it resolves no span and no URI.
@@ -471,9 +625,13 @@ where
     run_opener(spawn, uri)
 }
 
-/// Open a plan that resolved OUTSIDE the vault as a plain file. The path is
-/// fno-constructed (from the graph), never pane-sourced, so no scheme gate
-/// applies; the spawn discipline is shared via [`run_opener`].
+/// Open an fno-resolved plain path with the platform opener. Callers are the
+/// graph's plan paths and, since path linkification, the client's
+/// [`FILE_SCHEME`] router: the pane-sourced URI is gated there by
+/// [`file_uri_parts`] (absolute, no whitespace) and by the server's
+/// `is_file_uri` send gate before it ever reaches this call. No scheme gate
+/// applies to the path itself; the spawn discipline is shared via
+/// [`run_opener`].
 pub fn open_fno_path(path: &Path) -> Result<(), String> {
     open_fno_path_with(spawn_opener, path)
 }
@@ -795,5 +953,128 @@ mod tests {
             i += 1;
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// A candidate resolves iff a listed ABSOLUTE path equals the probe's
+    /// input. Tests list what "exists" and feed candidates accordingly.
+    fn fake_probe(entries: &[&str]) -> impl Fn(&Path) -> Option<PathBuf> {
+        let owned: Vec<String> = entries.iter().map(|s| s.to_string()).collect();
+        move |p: &Path| {
+            // Lexically normalize like canonicalize does (no symlinks here):
+            // resolve `.` and `..`, drop empty segments, keep a leading `/`.
+            let mut parts: Vec<&str> = Vec::new();
+            let lossy = p.to_string_lossy().to_string();
+            for seg in lossy.split('/') {
+                match seg {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    other => parts.push(other),
+                }
+            }
+            let s = format!("/{}", parts.join("/"));
+            owned
+                .iter()
+                .find(|e| e.as_str() == s)
+                .map(|e| PathBuf::from(e))
+        }
+    }
+
+    fn hits(text: &str, cwd: &Path, probe: impl Fn(&Path) -> Option<PathBuf>) -> Vec<String> {
+        find_paths_with(text, cwd, Some(Path::new("/Users/jn")), probe)
+            .into_iter()
+            .map(|l| l.uri)
+            .collect()
+    }
+
+    #[test]
+    fn finds_a_relative_path_that_exists() {
+        let probe = fake_probe(&["/w/crates/fno/src/link.rs"]);
+        assert_eq!(
+            hits(
+                "see crates/fno/src/link.rs:42 there",
+                Path::new("/w"),
+                probe
+            ),
+            vec!["fno-file:/w/crates/fno/src/link.rs:42"]
+        );
+    }
+
+    #[test]
+    fn prose_never_resolves() {
+        // No separator: "foo.md" is a word, not a path.
+        assert!(hits("see foo.md and bar", Path::new("/w"), fake_probe(&[])).is_empty());
+        // A separator but no file on disk.
+        assert!(hits("see docs/missing.md here", Path::new("/w"), fake_probe(&[])).is_empty());
+        // Wrapping comma given back; ./README.md joins the cwd.
+        assert_eq!(
+            hits(
+                "read ./README.md, then go",
+                Path::new("/w"),
+                fake_probe(&["/w/README.md"])
+            ),
+            vec!["fno-file:/w/README.md"]
+        );
+    }
+
+    #[test]
+    fn tilde_expands_against_home() {
+        let probe = fake_probe(&["/Users/jn/code/AGENTS.md"]);
+        assert_eq!(
+            hits("check ~/code/AGENTS.md out", Path::new("/w"), probe),
+            vec!["fno-file:/Users/jn/code/AGENTS.md"]
+        );
+    }
+
+    #[test]
+    fn absolute_path_resolves_as_itself() {
+        let probe = fake_probe(&["/w/README.md"]);
+        assert_eq!(
+            hits("at /w/README.md end", Path::new("/w"), probe),
+            vec!["fno-file:/w/README.md"]
+        );
+    }
+
+    #[test]
+    fn trailing_punctuation_is_given_back() {
+        // Sentence punctuation and a wrapping closer never enter the span;
+        // the line tail survives a trailing period.
+        let probe = fake_probe(&["/w/a/b.md"]);
+        assert_eq!(
+            hits("open a/b.md:7, please", Path::new("/w"), probe),
+            vec!["fno-file:/w/a/b.md:7"]
+        );
+    }
+
+    #[test]
+    fn is_file_uri_gates_junk() {
+        assert!(is_file_uri("fno-file:/abs/ok.md"));
+        assert!(is_file_uri("fno-file:/abs/ok.md:7"));
+        assert!(!is_file_uri("fno-file:relative.md"));
+        assert!(!is_file_uri("fno-file:/has space.md"));
+        assert!(!is_file_uri("fno-file:"));
+        assert!(!is_file_uri("https://example.com"));
+    }
+
+    #[test]
+    fn file_uri_parts_round_trips_line_and_path() {
+        let (p, l) = file_uri_parts("fno-file:/w/a.md:42").expect("parses");
+        assert_eq!(p, PathBuf::from("/w/a.md"));
+        assert_eq!(l, Some(42));
+        assert_eq!(
+            file_uri_parts("fno-file:/w/a.md"),
+            Some((PathBuf::from("/w/a.md"), None))
+        );
+        // A literal colon-path keeps its non-digit tail as path.
+        assert_eq!(
+            file_uri_parts("fno-file:/w/a.md:9:9"),
+            Some((PathBuf::from("/w/a.md:9"), Some(9)))
+        );
     }
 }
