@@ -155,7 +155,9 @@ def test_promote_is_primary_and_crown_aliases_with_a_notice(
 ) -> None:
     """`--promote` is the taught spelling and lands the same registry fields;
     `--crown` still answers for one release and prints the replacement. The
-    notice reads the process argv, so the test pins the argv it asserts."""
+    notice reads the process argv, so the test pins the argv it asserts. The
+    alias leg rides the headless refusal: the fake claude mints one short id,
+    so a second live row would collide in the registry."""
     monkeypatch.setattr(
         "sys.argv",
         ["fno", "agents", "spawn", "--name", "promote-primary", "-H", "claude",
@@ -172,16 +174,15 @@ def test_promote_is_primary_and_crown_aliases_with_a_notice(
 
     monkeypatch.setattr(
         "sys.argv",
-        ["fno", "agents", "spawn", "--name", "promote-alias", "-H", "claude",
-         "reign", "--substrate", "thread", "--crown", "alpha", "--hand-off"],
+        ["fno", "agents", "spawn", "--crown", "alpha",
+         "--substrate", "headless", "hi"],
     )
     aliased = _spawn(
-        "spawn", "--name", "promote-alias", "-H", "claude", "reign",
-        "--substrate", "thread", "--crown", "alpha", "--hand-off",
+        "spawn", "--crown", "alpha", "--substrate", "headless", "hi",
     )
-    assert aliased.exit_code == 0, aliased.output
+    assert aliased.exit_code == 2, aliased.output
     assert "--crown is now --promote" in aliased.output
-    assert _row("promote-alias").crown_level == 1
+    assert "--promote needs a session that outlives the grant" in aliased.output
 
 
 def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> None:
