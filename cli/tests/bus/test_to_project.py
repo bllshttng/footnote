@@ -255,6 +255,8 @@ def runner() -> CliRunner:
 
 
 def test_cli_send_to_project_durable_stdout(env, tmp_path, runner):
+    import json as _json
+
     from fno.mail.cli import mail_app
 
     _project_cwd(tmp_path, "projA")
@@ -262,14 +264,17 @@ def test_cli_send_to_project_durable_stdout(env, tmp_path, runner):
         mail_app, ["send", "--to-project", "projA", "hi there project"]
     )
     assert res.exit_code == 0, res.output
-    out = res.stdout.strip()
-    assert out.startswith("fmail-")
-    assert "queued (durable) for project projA" in out
+    receipt = _json.loads(res.stdout.strip())
+    assert receipt["msg_id"].startswith("fmail-")
+    assert receipt["to"] == "projA"
+    assert "queued (durable)" in receipt["status"]
 
 
 def test_cli_send_to_project_demoted_peer_reports_peer_not_project(env, tmp_path, runner, monkeypatch):
-    # One live peer resolved, but injection demotes to durable: the envelope is
-    # addressed to the peer, so the line must say "for <peer>", not "for project".
+    # One live peer resolved, but injection demotes to durable: the receipt is
+    # addressed to the peer, so `to` must name "alpha", not the project.
+    import json as _json
+
     from fno.agents import dispatch as dmod
     from fno.mail.cli import mail_app
 
@@ -283,9 +288,9 @@ def test_cli_send_to_project_demoted_peer_reports_peer_not_project(env, tmp_path
 
     res = runner.invoke(mail_app, ["send", "--to-project", "projA", "hi"])
     assert res.exit_code == 0, res.output
-    out = res.stdout.strip()
-    assert "queued (durable) for alpha" in out
-    assert "for project projA" not in out  # would be the misleading mismatch
+    receipt = _json.loads(res.stdout.strip().splitlines()[0])
+    assert receipt["to"] == "alpha"
+    assert "queued (durable)" in receipt["status"]
 
 
 def test_cli_send_to_project_carries_the_lock_timeout_reason(env, tmp_path, runner, monkeypatch):

@@ -1359,9 +1359,12 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
     )
     assert result.exit_code == 14, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    assert out.startswith("fmail-"), f"stdout: {out!r}"
-    assert "queued (durable)" in out, f"stdout: {out!r}"
-    assert "delivered" not in out, "stdout must not say 'delivered' for durable path"
+    import json as _json
+
+    receipt = _json.loads(out.splitlines()[0])
+    assert receipt["msg_id"].startswith("fmail-"), f"stdout: {out!r}"
+    assert "queued (durable)" in receipt["status"], f"stdout: {out!r}"
+    assert "delivered" not in receipt["status"], "stdout must not say 'delivered' for durable path"
     assert "NOT LANDED" in out, f"the unconfirmed floor must end NOT LANDED: {out!r}"
 
 
