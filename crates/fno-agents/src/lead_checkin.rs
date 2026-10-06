@@ -2826,6 +2826,11 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     if faq_needed {
         lines.push(FAQ_PROMPT.into());
     }
+    // The predecessor's open reforms ride every beat until filled: the
+    // heir's first beat names each unfilled part4 so it gets done.
+    for path in crate::eval_part4::unfilled_part4s(&ctx.cwd) {
+        lines.push(format!("unfilled part4: {}", path.display()));
+    }
 
     let emitted = if ctx.emit {
         match ctx.emit_path.as_ref() {
