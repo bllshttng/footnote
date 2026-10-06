@@ -286,7 +286,7 @@ fn live_frame(
         };
         View::new(t, server.into(), empty).content_dims()
     });
-    let mut seen = runtime.block_on(observe(&socket, cwd, dims))?;
+    let mut seen = runtime.block_on(observe(&socket, cwd.clone(), dims))?;
     if let Some(name) = squad {
         let target = seen
             .layout
@@ -309,6 +309,9 @@ fn live_frame(
     let area = seen.layout.area;
     let mut view = View::new(area, server.into(), seen.layout);
     view.theme = chrome;
+    // The snapshot paints what a live client in this cwd would, so the
+    // card-graph config latches here the way attach_and_run does.
+    view.card_graph = crate::digest_overlay::card_graph(Path::new(&cwd));
     view.frames = seen.frames;
     view.term = match size {
         Some(t) => t,
