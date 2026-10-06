@@ -107,9 +107,17 @@ pub(crate) fn index_path() -> PathBuf {
     dir
 }
 
-/// `<FNO_AGENTS_HOME>/..` when a home is declared; `None` keeps the
+/// `<FNO_AGENTS_HOME>/..` when a home is declared alone; `None` keeps the
 /// `state_dir()` ladder (and the undeclared test process honest).
+///
+/// A set `FNO_STATE_DIR` wins: tests pin both vars to one tempdir (the flat
+/// shape, where the agents root IS the state root), and the store they write
+/// is `FNO_STATE_DIR/chats` - the ladder's answer. Re-deriving from the
+/// agents home's parent there would read one level above the fixtures.
 fn declared_dot_fno() -> Option<PathBuf> {
+    if std::env::var_os("FNO_STATE_DIR").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
     let home = crate::paths::AgentsHome::from_env_opt()?;
     let dot_fno = home.root().parent().unwrap_or_else(|| home.root());
     Some(dot_fno.to_path_buf())
