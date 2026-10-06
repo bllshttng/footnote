@@ -314,7 +314,7 @@ fn ordinary_acquire(
     };
     // task: leases keep the lazy session witness the old engine arm gave
     // them: a pid-less thread claim is assessed through it on contention.
-    let outcome = if key.starts_with("task:") {
+    let outcome = if key.starts_with("task:") || key.starts_with("node:") {
         let witness = |record: &ClaimRecord| {
             let (witness, _drain) = crate::claim_verbs::default_session_witness();
             witness(record)
@@ -424,13 +424,7 @@ fn compare_and_rebind(
         resolved_harness.as_deref(),
     );
     let path = claims::claim_path(key, root).map_err(|e| e.to_string())?;
-    let recovery_lock = claims::recovery_lock_path(&path);
-    let Some(token) =
-        claims::acquire_dir_mutex(&recovery_lock, std::time::Duration::from_secs(5), true)
-    else {
-        return Err("claim recovery mutex busy; retry the resume bind".into());
-    };
-    let outcome = rebind_locked(
+    rebind_locked(
         path.as_path(),
         key,
         expected_holder,
@@ -443,9 +437,7 @@ fn compare_and_rebind(
         resolved_harness,
         resolved_session,
         resolved_provenance,
-    );
-    claims::release_dir_mutex(&recovery_lock, &token);
-    outcome
+    )
 }
 
 /// The critical section: re-read + re-classify under the recovery mutex,
@@ -554,8 +546,10 @@ fn rebind_locked(
             npid_unavailable,
             resolved_session.clone(),
         );
-        let payload = claims::serialize_claim(&rebound)?;
-        claims::atomic_replace(path, &payload).map_err(|e| e.to_string())?;
+        let Some(rebound) = crate::claim_store::replace_observed_at(path, &existing, &rebound)?
+        else {
+            return Err("claim changed during resume bind; retry".into());
+        };
         emit_rebound(&rebound, existing.pid, state.as_str(), "handover");
         return Ok(Some(rebound));
     }
@@ -579,8 +573,10 @@ fn rebind_locked(
                 npid_unavailable,
                 keep_session,
             );
-            let payload = claims::serialize_claim(&rebound)?;
-            claims::atomic_replace(path, &payload).map_err(|e| e.to_string())?;
+            let Some(rebound) = crate::claim_store::replace_observed_at(path, &existing, &rebound)?
+            else {
+                return Err("claim changed during resume bind; retry".into());
+            };
             emit_rebound(&rebound, existing.pid, state.as_str(), "idempotent");
             return Ok(None);
         }
@@ -621,8 +617,9 @@ fn rebind_locked(
         npid_unavailable,
         session_for_row,
     );
-    let payload = claims::serialize_claim(&rebound)?;
-    claims::atomic_replace(path, &payload).map_err(|e| e.to_string())?;
+    let Some(rebound) = crate::claim_store::replace_observed_at(path, &existing, &rebound)? else {
+        return Err("claim changed during resume bind; retry".into());
+    };
     let mode = if handover_allowed {
         "handover"
     } else {

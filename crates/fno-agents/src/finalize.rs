@@ -2009,21 +2009,16 @@ fn merge_gating_optout_block_reason_for(key: &str, claim: &crate::claims::ClaimR
 }
 
 fn merge_gating_optout_block_reason() -> Option<String> {
-    let directory = crate::claims::claims_dir_for(None)?;
-    if directory.is_dir() {
-        // A claims directory that exists but cannot be read is not evidence of
-        // no opt-out. Refuse ambient auto-merge until the instrument is readable.
-        if std::fs::read_dir(&directory).is_err() {
-            return Some(format!(
-                "merge-gating opt-out instrument unreadable at {}; sanctioned path: restore claims access before unattended merge",
-                directory.display()
-            ));
-        }
-    }
     for key in crate::claims::MERGE_GATING_OPTOUT_KEYS {
         let claim_key = format!("config-optout:{key}");
         let (state, claim) = crate::claims::status(&claim_key, None);
-        if state == crate::claims::ClaimState::Live {
+        if state == crate::claims::ClaimState::Corrupted {
+            return Some(format!("merge-gating opt-out instrument unreadable for {claim_key}; restore claim store access before unattended merge"));
+        }
+        if matches!(
+            state,
+            crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+        ) {
             if let Some(claim) = claim {
                 return Some(merge_gating_optout_block_reason_for(key, &claim));
             }

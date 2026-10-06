@@ -226,7 +226,11 @@ pub fn run_claim(args: &[String]) -> i32 {
                 .map(|record| claim_status_value(&record))
                 .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
             println!("{payload}");
-            0
+            if state == crate::claims::ClaimState::Corrupted {
+                2
+            } else {
+                0
+            }
         }
         other => {
             eprintln!(
@@ -388,7 +392,7 @@ fn run_claim_list(args: &[String]) -> i32 {
 }
 
 #[allow(dead_code)]
-fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
+pub(crate) fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
     claim_status_value_with_witness(
@@ -1062,7 +1066,13 @@ fn registry_session_live(registry: &SessionRegistryIndex, session: &str) -> Opti
     if registry
         .by_session
         .get(session)
-        .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)))
+        .is_some_and(|&(pid, start)| {
+            registry
+                .rows
+                .get(session)
+                .is_some_and(|row| crate::claims::pid_dies_with_session(row.harness.as_deref()))
+                && crate::daemon::pid_is_ours(pid, Some(start))
+        })
     {
         return Some(crate::claims::basis::REGISTRY_SESSION_LIVE);
     }
@@ -1086,10 +1096,11 @@ const ROW_VERDICT_LIVE: &str = "row-verdict-live";
 /// Absent and Unknown answer false: the door decides liveness, never death.
 fn row_verdict_live(registry: &SessionRegistryIndex, session: &str) -> bool {
     registry.rows.get(session).is_some_and(|entry| {
-        matches!(
-            crate::row_verdict::fno_verdict(entry),
-            crate::row_verdict::RowVerdict::Live(_)
-        )
+        crate::claims::pid_dies_with_session(entry.harness.as_deref())
+            && matches!(
+                crate::row_verdict::fno_verdict(entry),
+                crate::row_verdict::RowVerdict::Live(_)
+            )
     })
 }
 

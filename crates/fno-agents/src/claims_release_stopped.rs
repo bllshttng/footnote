@@ -102,23 +102,16 @@ fn release_stopped_at(
     rec: &ClaimRecord,
     events_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let path = dir.join(format!("{}.lock", encode_key(&rec.key)));
-    crate::claims::with_recovery_lock(&path, || {
-        let existing = match read_claim_file(&path) {
-            Ok(existing) => existing,
-            Err(ReadError::GoneAway) => return Err("claim already gone".into()),
-            Err(ReadError::Corrupted(error)) => return Err(error),
-        };
-        if &existing != rec {
-            return Err("claim changed since the scan".into());
-        }
-        let duration_ms = (now_ms() - existing.acquired_at).max(0);
-        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-        let mut data = common_event_data(&existing);
-        data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
-        emit_audit_event(events_dir, "claim_released", data);
-        Ok(path.clone())
-    })
+    if !crate::claim_store::delete_observed(dir, rec)? {
+        return Err("claim changed since the scan".into());
+    }
+    let mut data = common_event_data(rec);
+    data.insert(
+        "duration_held_ms".into(),
+        Value::Number((now_ms() - rec.acquired_at).max(0).into()),
+    );
+    emit_audit_event(events_dir, "claim_released", data);
+    crate::claim_store::database_path_from_directory(dir)
 }
 
 /// The stopped worker's harness session id, read from the registry row a
@@ -167,6 +160,7 @@ pub fn release_for_stopped_session(
             Some(_pid) if !is_same_machine(&rec.host, rec.machine_id.as_deref()) => {
                 Some(format!("off-host {}", rec.host))
             }
+            Some(_) if !crate::claims::pid_dies_with_session(rec.harness.as_deref()) => None,
             Some(pid) => match probe_pid(pid) {
                 PidProbe::Absent => None,
                 PidProbe::Refused => Some(format!("pid {pid} access-denied")),
@@ -351,7 +345,7 @@ mod tests {
         );
         for untouched in ["node:x-d", "node:x-e"] {
             assert!(
-                lockfile_of(&claims_dir, untouched).exists(),
+                read_claim_file(&lockfile_of(&claims_dir, untouched)).is_ok(),
                 "{untouched} must stay on disk"
             );
             assert!(!receipt.released.iter().any(|r| r.key == untouched));
@@ -378,28 +372,13 @@ mod tests {
         );
         write_rec(&claims_dir, &old);
         let path = lockfile_of(&claims_dir, &old.key);
-        let lock = crate::claims::recovery_lock_path(&path);
-        let token =
-            crate::claims::acquire_dir_mutex(&lock, std::time::Duration::from_secs(2), true)
-                .unwrap();
-        let dir = claims_dir.clone();
-        let events_dir = td.path().to_path_buf();
-        let old_for_release = old.clone();
-        let release = std::thread::spawn(move || {
-            release_stopped_at(&dir, &old_for_release, Some(&events_dir))
-        });
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        let mut fresh = old.clone();
+        let observed = read_claim_file(&path).unwrap();
+        let mut fresh = observed.clone();
         fresh.reason = Some("same-holder replacement".into());
-        write_rec(&claims_dir, &fresh);
-        crate::claims::release_dir_mutex(&lock, &token);
-
-        assert!(
-            release.join().unwrap().is_err(),
-            "stop release must refuse a later claim generation"
-        );
-        assert!(path.exists(), "the reacquired holder's lockfile survives");
+        crate::claim_store::replace_observed_at(&path, &observed, &fresh)
+            .unwrap()
+            .unwrap();
+        assert!(release_stopped_at(&claims_dir, &old, Some(td.path())).is_err());
         assert_eq!(read_claim_file(&path).unwrap().reason, fresh.reason);
     }
 
@@ -417,7 +396,7 @@ mod tests {
             harness_session_id: None,
         };
         let receipt = release_for_stopped_session(&target, &[missing_a, missing_b], None).unwrap();
-        assert_eq!(receipt.read_dirs, Vec::<PathBuf>::new());
+        assert_eq!(receipt.read_dirs, receipt.dirs);
         assert_eq!(receipt.dirs.len(), 2);
         assert_eq!(receipt.scanned, 0);
     }
