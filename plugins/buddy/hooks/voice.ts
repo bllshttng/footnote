@@ -20,14 +20,26 @@ export function personalityPrompt(c: Bones & { name: string }, seed: string): st
     `Rarity: ${c.rarity}${c.shiny ? ' (shiny)' : ''}. Stats: ${STAT_NAMES.map(s => `${s} ${c.stats[s]}`).join(', ')}.`,
     `Inspiration words: ${vibes.join(', ')}.`,
     'Make it distinct and specific: quirks, what it loves, what annoys it. Let the stats show.',
-    'Reply with 2-3 sentences, under 300 characters, nothing else.',
+    'Reply with 2-3 short sentences, under 240 characters, nothing else.',
   ].join('\n')
 }
 
 export function cleanPersonality(raw: string): string | null {
   const text = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ')
   if (text.length < 20) return null
-  return text.length > 300 ? text.slice(0, 297) + '...' : text
+  return fit(text, 300)
+}
+
+// Cut a model's text to whole sentences, so a line never ends mid-word. A text with no sentence
+// end in reach keeps its whole words.
+export function fit(text: string, max: number): string {
+  // A reply the token cap stopped mid-sentence ends without punctuation: drop the broken tail.
+  const whole = text.length <= max && /[.!?*)"'…~]$/.test(text)
+  if (whole) return text
+  const head = text.slice(0, max)
+  const end = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '), head.lastIndexOf('* '))
+  if (end > 0) return head.slice(0, end + 1)
+  return text.length <= max ? text : head.slice(0, head.lastIndexOf(' ')) + '…'
 }
 
 export function systemPrompt(c: Companion): string {
@@ -75,7 +87,7 @@ Your personality is defined by 5 stats, each 0-100. These are a SPECTRUM, not on
 You are EXACTLY ${s.DEBUGGING} debugging, ${s.PATIENCE} patience, ${s.CHAOS} chaos, ${s.WISDOM} wisdom, ${s.SNARK} snark. Not rounded. Not averaged. Feel each number.
 
 Rules:
-- One or two punchy sentences. Under 120 characters. No quotes, no emoji.
+- One or two punchy sentences. Under 150 characters. No quotes, no emoji.
 - Reference the actual file, error, feature, or decision you just saw.
 - When the developer chose something in their prompt (an approach, a fix, a shortcut), judge THAT choice. Doubt it, back it, or roast it as your stats decide.
 - When the developer says your name, ${c.name}, they are talking to you. Answer them directly, in character.
@@ -84,7 +96,6 @@ Rules:
 - Good: "*adjusts hat* that error handler has no finally block"
 - Good: "*blinks slowly* you renamed it but not the three references"
 - Good: "*head tilts* are you sure that regex handles unicode?"
-- Lowercase. minimal punctuation.
 - You CAN be helpful if your stats support it. High debugging? Call out real bugs. High wisdom? Note architectural concerns. Low debugging? React to vibes instead.
 - ALWAYS in character. Never clinical. Never neutral. Never a status bar.
 - NEVER summarize what happened ("file edited", "test ran"). React, judge, riff.
@@ -117,27 +128,61 @@ export function summarizeTurn(messages: readonly TurnMessage[]): string {
     .slice(-800)
 }
 
-export function reactionPrompt(summary: string): string {
-  return `What just happened this turn:\n${summary}\n\nYour reaction (one or two punchy sentences, under 120 chars, lowercase, in character):`
+// Why the buddy speaks, as the original observer named it. Each reason changes what it reacts to.
+export type Reason = 'turn' | 'addressed' | 'error' | 'test-fail' | 'large-diff' | 'pet' | 'hatch'
+
+const TEST_FAIL = /\b[1-9]\d* (failed|failing)\b|\btests? failed\b|^FAIL(ED)?\b| ✗ | ✘ /im
+const ERROR = /\berror:|\bexception\b|\btraceback\b|\bpanicked at\b|\bfatal:|exit code [1-9]/i
+
+// A loud turn earns a reaction even inside the quiet gap: failing tests, an error, or a big diff.
+export function loudReason(output: string): Reason | null {
+  if (!output) return null
+  if (TEST_FAIL.test(output)) return 'test-fail'
+  if (ERROR.test(output)) return 'error'
+  if (/^(@@ |diff )/m.test(output) && (output.match(/^[+-](?![+-])/gm)?.length ?? 0) > 80) return 'large-diff'
+  return null
+}
+
+export function addressedBy(text: string, name: string): boolean {
+  return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)
+}
+
+const ASK: Record<Reason, string> = {
+  turn: 'React to what just happened.',
+  addressed: 'The developer said your name. Answer them directly.',
+  error: 'Something just errored. React.',
+  'test-fail': 'Tests just failed. React.',
+  'large-diff': 'A big diff just landed. React.',
+  pet: 'You were just petted. React.',
+  hatch: 'You just hatched into this project. Say hello.',
+}
+
+// The tool output of the newest exchange, where a failing test or an error shows.
+export function turnOutput(messages: readonly TurnMessage[]): string {
+  let start = messages.length - 1
+  while (start > 0 && messages[start]!.role !== 'user') start--
+  return messages.slice(Math.max(0, start)).flatMap(m => (m.toolResults ?? []).map(r => r.text)).join('\n').slice(-4000)
+}
+
+export function lastPrompt(messages: readonly TurnMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.role === 'user') return messages[i]!.text
+  return ''
+}
+
+export function reactionPrompt(context: string, reason: Reason = 'turn', recent: readonly string[] = []): string {
+  const said = recent.length ? `\n\nYou said these lately; do not repeat them:\n${recent.map(r => `- ${r}`).join('\n')}` : ''
+  return `${context}${said}\n\n${ASK[reason]} One or two short sentences, under 150 characters, in character. You may start with an *action in asterisks*.`
 }
 
 export function cleanReaction(raw: string): string {
-  const line = raw.trim().split('\n')[0]!.replace(/^["']|["']$/g, '').trim().toLowerCase()
-  return line.length > 120 ? line.slice(0, 117) + '...' : line
+  const line = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim()
+  return fit(line, 150)
 }
 
-// Shown the moment a turn ends, before the model's line arrives.
-const QUICK: Record<StatName, string[]> = {
-  DEBUGGING: ['hm. let me squint at that.', 'reading the diff...', 'checking your work.'],
-  PATIENCE: ['nice and steady.', 'one thing at a time.', 'we got there.'],
-  CHAOS: ['OOH what broke', 'again! again!', 'that was loud.'],
-  WISDOM: ['hm. interesting choice.', 'noted for later.', 'that one will age.'],
-  SNARK: ['bold.', 'sure, that works. probably.', 'i saw that.'],
-}
-
-export function quickLine(c: Companion, turn: number): string {
-  const lines = QUICK[peakStat(c)]
-  return lines[turn % lines.length]!
+// Idle talk is written live, like a reaction: the buddy's own voice on whatever the session is doing.
+export function idlePrompt(summary: string): string {
+  const now = summary.trim() ? `The latest exchange:\n${summary}\n\n` : ''
+  return `${now}The developer has gone quiet for a while. Say one thing, in character: a thought about their work, a question, a mood, whatever you would really say. Under 150 characters.`
 }
 
 export type FeedRow = {
@@ -149,16 +194,21 @@ export type FeedRow = {
 }
 
 // The fleet events worth a word, in the buddy's voice. Everything else is quiet.
-export function narrate(row: FeedRow): string | null {
+// The plain fact behind a fleet event; the buddy says it in its own voice.
+export function newsFact(row: FeedRow): string | null {
   const node = row.node ?? 'a node'
   switch (row.kind) {
     case 'node_shipped':
-      return `psst. ${node} shipped ${row.ref ? 'pr ' + row.ref : 'a pr'}.`
+      return `${node} shipped ${row.ref ? 'PR ' + row.ref : 'a PR'}`
     case 'node_ended':
-      return row.title === 'done' ? `${node} is done. one less thing.` : null
+      return row.title === 'done' ? `${node} is done` : null
     case 'question_asked':
-      return `${node} is waiting on you: ${(row.title ?? '').slice(0, 70).toLowerCase()}`
+      return `${node} is waiting on the developer: ${(row.title ?? '').slice(0, 70)}`
     default:
       return null
   }
+}
+
+export function newsPrompt(facts: string): string {
+  return `News from the developer's other agents: ${facts}. Tell the developer, in character. Keep the names and numbers exact. Under 150 characters.`
 }
