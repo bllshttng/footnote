@@ -31,6 +31,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
+from tempfile import TemporaryDirectory
 
 from fno import _subprocess_util
 from datetime import datetime, timezone
@@ -203,18 +204,25 @@ def sources_path(topic: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def _run_ddgs(query: str, max_results: int) -> str:
-    """Shell out to the ddgs CLI, return raw stdout (JSON array of hits).
+    """Shell out to the ddgs CLI, return JSON from stdout or its output file.
 
     Raises DdgsUnavailable if the binary is absent or it errors / rate-limits.
     """
     try:
-        proc = subprocess.run(
-            ["ddgs", "text", "-q", query, "-m", str(max_results), "-o", "json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,  # ddgs hits the network; never block the CLI indefinitely
-        )
+        with TemporaryDirectory(prefix="fno-ddgs-") as output_dir:
+            proc = subprocess.run(
+                ["ddgs", "text", "-q", query, "-m", str(max_results), "-o", "json"],
+                cwd=output_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,  # ddgs hits the network; never block the CLI indefinitely
+            )
+            raw = proc.stdout or ""
+            if proc.returncode == 0 and not raw.strip():
+                for output in Path(output_dir).glob("*.json"):
+                    raw = output.read_text(encoding="utf-8")
+                    break
     except FileNotFoundError as e:
         raise DdgsUnavailable(
             "ddgs not found. Install the backbone: `pip install ddgs` "
@@ -225,7 +233,7 @@ def _run_ddgs(query: str, max_results: int) -> str:
     if proc.returncode != 0:
         err = (proc.stderr or "").strip() or f"exit {proc.returncode}"
         raise DdgsUnavailable(f"ddgs failed (rate-limited?): {err}")
-    return proc.stdout or ""
+    return raw
 
 
 def _parse_ddgs(raw: str) -> list[str]:
