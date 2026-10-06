@@ -114,7 +114,7 @@ fn done_session_ids_in(entries: &[serde_json::Value]) -> HashSet<(String, String
 /// positively - restore keeps every worker (today's behavior) when the
 /// instrument cannot read (fail open, AC2-EDGE).
 pub fn done_session_ids() -> HashSet<(String, String)> {
-    match crate::store_client::rows(&graph_path()) {
+    match crate::store_client::rows(&graph_path(), None, None) {
         Ok(rows) => done_session_ids_in(&rows),
         Err(_) => HashSet::new(),
     }

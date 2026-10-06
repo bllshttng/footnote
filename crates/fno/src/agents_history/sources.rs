@@ -30,7 +30,7 @@ pub(super) struct Paths {
 pub(super) fn load_sources(paths: &Paths) -> Sources {
     let registry = read_rows(&registry_path(&paths.agents_home), "agents");
     let receipts = read_receipts(&paths.agents_home.join("reap-receipts"));
-    let graph = store_client::rows(&paths.graph);
+    let graph = store_client::rows(&paths.graph, None, None);
     let ledger = read_rows(&paths.ledger, "entries");
     let events = Ok(read_events(&paths.agents_home, &paths.events));
     Sources {

@@ -156,6 +156,15 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
     let req: Value = serde_json::from_slice(payload).ok()?;
     let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
     let method = req.get("method").and_then(Value::as_str)?;
+    if matches!(method, "read" | "api")
+        && req.get("params").is_some_and(|params| {
+            params.get("filter").is_some()
+                || params.get("fields").is_some()
+                || params.get("include_archived").and_then(Value::as_bool) == Some(false)
+        })
+    {
+        return None;
+    }
     let mut rows_op = false;
     match method {
         "read" => {

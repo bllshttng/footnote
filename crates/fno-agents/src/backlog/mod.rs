@@ -1394,6 +1394,19 @@ fn query_rows(
     query: &RowQuery,
     keep_malformed: Option<bool>,
 ) -> Result<Vec<Value>, String> {
+    let transaction = if connection.is_autocommit() {
+        Some(
+            connection
+                .unchecked_transaction()
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let connection = transaction
+        .as_ref()
+        .map(|transaction| &**transaction)
+        .unwrap_or(connection);
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
@@ -1527,9 +1540,23 @@ fn query_rows(
     }
     let mut rows: Vec<Value> = merged.into_iter().map(|(_, _, row)| row).collect();
     let asked_count = rows.len();
-    let support_fields: Vec<String> = crate::graph_store::SLIM_FIELDS
+    let support_fields: Vec<String> = crate::graph_store::CHILD_SUMMARY_FIELDS
         .iter()
-        .chain(["superseded_by", "supersession", "deferred_at"].iter())
+        .chain(
+            [
+                "parent",
+                "completed_at",
+                "deferred_at",
+                "blocked_by",
+                "superseded_by",
+                "locked_by",
+                "locked_by_harness",
+                "locked_by_harness_session",
+                "locked_at",
+                "session_id",
+            ]
+            .iter(),
+        )
         .map(|field| (*field).into())
         .collect();
     let mut loaded: std::collections::HashSet<String> = rows
@@ -1571,7 +1598,7 @@ fn query_rows(
             }
         }
     }
-    if query.with_blockers {
+    if query.with_blockers && !(filter.is_empty() && query.include_archived) {
         let blockers: Vec<String> = rows
             .iter()
             .flat_map(|row| {
@@ -2186,10 +2213,18 @@ mod tests {
             crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
             "blocked"
         );
+        nodes::delete_raw(&connection, "q-old").unwrap();
+        save_aggregate(&connection, &model::Node::from_json(&serde_json::json!({
+            "id":"q-old", "slug":"old", "title":"Old", "status":"done", "completed_at":"2026-09-11T00:00:00Z"
+        })).unwrap()).unwrap();
         connection.execute_batch("DROP TABLE sessions; DROP TABLE comments; DROP TABLE encounters; DROP TABLE findings; DROP TABLE node_costs; DROP TABLE node_dispatch; DROP TABLE node_provenance; DROP TABLE pull_requests;").unwrap();
         assert!(
             crate::graph_store::read_rows_where(&query_graph, &projected).is_ok(),
             "unrequested aggregates are not read"
+        );
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
+            "ready"
         );
         assert!(
             crate::graph_store::read_rows(&query_graph).is_err(),

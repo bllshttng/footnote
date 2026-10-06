@@ -1554,7 +1554,7 @@ fn gather_blocking(
             ),
         }
     } else {
-        match store_client::rows(graph) {
+        match store_client::rows(graph, None, None) {
             Ok(r) => (r, None, Vec::new()),
             Err(e) => (Vec::new(), Some(e), Vec::new()),
         }
