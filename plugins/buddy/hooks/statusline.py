@@ -45,12 +45,13 @@ def bubble(text, room, widest=BUBBLE_W):
 
     Three rows or more get the outline; fewer get the bare words.
     """
-    framed = room >= 3
+    # The outline needs its full width beside the user's rows; without it the words go bare.
+    framed = room >= 3 and widest >= BUBBLE_W + 4
     rows = room - 2 if framed else room
     if rows < 1 or not text.strip():
         return [""] * room
     # Start at the original's 30 columns and widen until the words fit the rows beside the buddy.
-    w = BUBBLE_W
+    w = min(BUBBLE_W, max(widest, 8))
     lines = wrap(text, w)
     while len(lines) > rows and w < widest:
         w = min(widest, w + 4)
@@ -147,7 +148,7 @@ def layout(left, frame, cols):
     labels = [""] * len(art)
     labels[-1] = fleet
     # The bubble may widen into the room the user's rows leave free beside the buddy.
-    widest = max(BUBBLE_W, min(BUBBLE_W * 2, cols - max([width(l) for l in left] + [0]) - aw - 12))
+    widest = min(BUBBLE_W * 2, cols - max([width(l) for l in left] + [0]) - aw - 12)
     for i, line in enumerate(bubble(frame.get("speech") or "", len(art) - 1, widest)):
         labels[i] = line
 
