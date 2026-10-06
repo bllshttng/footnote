@@ -44,3 +44,12 @@ pub(crate) fn incident_line(incidents: &Value) -> String {
         field("updated_at")
     )
 }
+
+/// The stderr note under the same line: the wait instruction the whole
+/// probe exists for.
+pub(crate) fn incident_note(incidents: &Value) -> String {
+    format!(
+        "note: {} - the cancelled check(s) coincide with the outage; wait it out instead of rerunning or filing a main repair",
+        incident_line(incidents)
+    )
+}
