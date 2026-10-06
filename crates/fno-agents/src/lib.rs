@@ -459,6 +459,7 @@ pub mod test_delta;
 pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod tool_activity;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
@@ -1803,6 +1804,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // (unknown session / third distinct id) without storing.
     "session_report_stored",
     "session_report_dropped",
+    // The same failure the Python identification arm emits: the manifest
+    // rebind at a crowned row's first self-identification did not land.
+    "crown_manifest_arm_failed",
     // Ordered exit teardown (daemon-emitted, inside-out E3.3): a claude row with
     // an inside-leg report is going Exited; the completion is published before
     // the registry clears the report (AC-X2-4).

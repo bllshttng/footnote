@@ -185,20 +185,20 @@ no  'post-spawn unproven-claim does NOT assert a live worker' "$out" 'live worke
 # The receipt must name the worker and the peek/stop way out, never a claim
 # holder: an operator followed that text to a claim `fno agents claim status`
 # read as UNCLAIMED, and releasing it frees nothing.
-out="$(STUB_VERDICT='{"verdict":"already-running","reason":"worker-row","worker":"king-a792-control","truth_status":"unknown"}' \
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"worker-row","worker":"lead-a792-control","truth_status":"unknown"}' \
   run --name w2w --provider claude --message '/target x' --node "$NODE")"
 ok  'worker-row -> already-running' "$(field "$out")" 'already-running'
-has 'worker-row names the worker row' "$out" 'worker row king-a792-control'
+has 'worker-row names the worker row' "$out" 'worker row lead-a792-control'
 has 'worker-row names the peek-and-stop way out' "$out" 'stop it if its run is finished'
 no  'worker-row does NOT print is-held-by' "$out" 'is held by'
 no  'worker-row did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- worker-row on the POST-SPAWN refusal, the path a real dispatch takes -----
-out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=worker-row STUB_CLI_GUARD_WORKER=king-a792-control \
+out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=worker-row STUB_CLI_GUARD_WORKER=lead-a792-control \
   run --name w2wp --provider claude --message '/target x' --node "$NODE")"; rc=$?
 ok  'post-spawn worker-row -> already-running' "$(field "$out")" 'already-running'
 ok  'post-spawn worker-row exits 0' "$rc" '0'
-has 'post-spawn worker-row names the worker row' "$out" 'worker row king-a792-control'
+has 'post-spawn worker-row names the worker row' "$out" 'worker row lead-a792-control'
 has 'post-spawn worker-row names the peek-and-stop way out' "$out" 'stop it if its run is finished'
 no  'post-spawn worker-row does NOT print is-held-by' "$out" 'is held by'
 

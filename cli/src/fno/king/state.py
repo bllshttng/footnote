@@ -140,6 +140,7 @@ def arm_king_manifest(
     crown_scope: Optional[str] = None,
     crown_grantor: Optional[str] = None,
     model: Optional[str] = None,
+    harness: Optional[str] = None,
     row: Any = None,
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
@@ -153,6 +154,10 @@ def arm_king_manifest(
         # The crowned row's own request is the pin the wake must repeat; a
         # manifest without it wakes the king on the account default model.
         model = model or getattr(row, "requested_model", None)
+        # The holder's own harness, never the arming caller's: a claude lead
+        # promoting a codex heir must not write `harness: claude` beside a
+        # codex session id, or every transcript reader resolves blind.
+        harness = harness or getattr(row, "harness", None)
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -180,6 +185,7 @@ def arm_king_manifest(
             crown_scope=crown_scope,
             crown_grantor=crown_grantor,
             model=model,
+            harness=harness,
         )
         path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
@@ -242,11 +248,14 @@ def write_manifest(
     crown_scope: Optional[str] = None,
     crown_grantor: Optional[str] = None,
     model: Optional[str] = None,
+    harness: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once; raises KingManifestExists if it is there.
 
     ``respawn_count`` and ``wake_times`` start at 0 (a successor coronation
-    is a new reign generation). ``shape`` rides from birth.
+    is a new reign generation). ``shape`` rides from birth. ``harness`` names
+    the holder's own harness; only its absence falls back to the arming
+    session's ambient harness.
     """
     path = Path(path)
     if path.exists() and not force:
@@ -259,7 +268,7 @@ def write_manifest(
         "created_at": _utc_now(),
         "scope": scope,
         "shape": shape if shape in ("pass", "court") else "pass",
-        "harness": os.environ.get("FNO_HARNESS", "claude"),
+        "harness": harness or os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
         "model": (model or "").strip(),
         "owner_cwd": owner_cwd or str(Path.cwd()),

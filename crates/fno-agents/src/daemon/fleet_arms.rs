@@ -21,6 +21,8 @@ pub(super) struct FleetArms {
     last_orphan_sweep: Instant,
     liveness_sweep_in_flight: Arc<std::sync::atomic::AtomicBool>,
     last_liveness_sweep: Instant,
+    tool_scan_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    last_tool_scan: Instant,
     // The periodic arms: each module owns its cadence, gate and memory.
     machine_watch: crate::machine_watch::Arm,
     merge_close: crate::merge_close::Arm,
@@ -66,6 +68,8 @@ impl FleetArms {
                 .unwrap_or(now),
             liveness_sweep_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_liveness_sweep: Instant::now(),
+            tool_scan_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_tool_scan: Instant::now(),
             machine_watch: crate::machine_watch::Arm::default(),
             merge_close: crate::merge_close::Arm::default(),
             team_ledger: crate::rundown::Arm::default(),
@@ -223,6 +227,14 @@ impl FleetArms {
                     Err(_) => true,
                 }
             }),
+        );
+        // Tool-activity tail scan: the sideline activity ramp's source. The
+        // 5s counting ceiling, one-in-flight, off-loop; counts land on the
+        // registry row and the fold (offset) stays in daemon memory.
+        crate::tool_activity::maybe_scan(
+            &mut self.last_tool_scan,
+            &self.tool_scan_in_flight,
+            ctx.home.clone(),
         );
         // Terminal-stop sweep: exit fire-and-forget `claude --bg`
         // workers finalize marked terminal, so a shipped bg /target frees

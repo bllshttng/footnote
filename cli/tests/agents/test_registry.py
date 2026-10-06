@@ -906,7 +906,9 @@ def test_us2_schema_version_is_three() -> None:
     # v34: additive `lineage_kind` - the served CHILD/PEER word the liveness
     # sweep stamps on rows with a spawn edge.
     # v38: sweep-owned context and unread facts survive compatibility writes.
-    assert SCHEMA_VERSION == 38
+    # v39 (x-fdab): additive `tool_calls`/`tool_errors` - the daemon's
+    # incremental transcript fold, the sideline card graph's input.
+    assert SCHEMA_VERSION == 39
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -1538,6 +1540,23 @@ def test_phase5_v3_round_trip_preserves_mcp_channel_id(tmp_path: Path, monkeypat
     loaded = load_registry(path=registry_path)
     assert len(loaded) == 1
     assert loaded[0].mcp_channel_id == "ch-abc-123"
+
+
+def test_agent_entry_accepts_every_field_in_registry_schema() -> None:
+    """Every field the Rust writer declares in registry_schema.toml loads into AgentEntry."""
+    import dataclasses
+    import tomllib
+
+    import fno.agents
+    from fno.agents.registry import AgentEntry
+
+    schema = Path(fno.agents.__file__).parent / "registry_schema.toml"
+    declared = set(tomllib.loads(schema.read_text())["fields"])
+    # Read-time legacy keys: load_registry folds or drops these before building the entry.
+    legacy = {"claude_session_uuid", "claude_short_id", "codex_session_id",
+              "gemini_session_id", "legacy_provider", "session_id"}
+    missing = declared - legacy - {f.name for f in dataclasses.fields(AgentEntry)}
+    assert not missing, f"AgentEntry lacks registry_schema.toml fields: {sorted(missing)}"
 
 
 def test_phase5_v2_entries_synthesized_to_v3_at_read(tmp_path: Path, monkeypatch) -> None:

@@ -1,6 +1,6 @@
 # The resource meter and the lane advisor
 
-The operator ask behind this feature was a live monitor. It must say how the machine is doing and make a best guess on how many more lanes the fleet can take. Three surfaces answer it. `fno doctor lanes` is the on-demand verb: one number and its reasoning. The status row carries the same reading as a live one-line meter, once you switch the meter on. The court panel puts both in front of a person, behind `prefix` then `C` in the mux.
+The operator ask behind this feature was a live monitor. It must say how the machine is doing and make a best guess on how many more lanes the fleet can take. Three surfaces answer it. `fno doctor lanes` is the on-demand verb: one number and its reasoning. The status row carries the same reading as a live one-line meter, once you switch the meter on. The org panel puts both in front of a person, behind `prefix` then `C` in the mux.
 
 ## Is this page for you?
 
@@ -30,7 +30,7 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 `fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold or an undecidable band. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
 
-## The court panel
+## The org panel
 
 Press `prefix` then `C` in the mux. The panel shows the fleet's CPU share against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
 
@@ -40,7 +40,7 @@ Three render rules keep the panel honest, and each closes a way a monitor can li
 
 The `read` line always shows the fold's age. A reading past the cache TTL renders with its age and the word `stale`, never as `unknown`. An operator watching `unknown` every second learns nothing from the panel and reaches for `--force`, which is how a guard becomes a formality.
 
-The attribution gap gets its own line and is never folded into a count. The gap is a failure to attribute a PROCESS to a registry ROW. It cannot change how many rows exist, because every row carries its crown level with or without a pid. The gap belongs beside the CPU reading it qualifies. There it says what it means: the fleet CPU share is an undercount, not headroom.
+The attribution gap gets its own line and is never folded into a count. The gap is a failure to attribute a PROCESS to a registry ROW. It cannot change how many rows exist, because every row carries its role level with or without a pid. The gap belongs beside the CPU reading it qualifies. There it says what it means: the fleet CPU share is an undercount, not headroom.
 
 A refusal prints the advisor's own words with no lane number beside them. A dark sensor is not headroom, and only the advisor knows which sensor went dark.
 
@@ -56,7 +56,7 @@ A long fold budget costs nothing here. The fold runs off the UI loop, one at a t
 
 `census.kings` and `census.workers` are counts of registry ROWS. `census.tests` is a count of PROCESSES. The two must never be added together or folded into each other.
 
-Kings come from `gather_court` over the same live rows list the per-lane cost divides by. So `kings` plus `workers` always equals `roster_rows`, and the two halves can never describe different fleets. The panel reports `king_conflicts` beside the count, because a bare king number hides the case that matters. Two live rows over one scope both report agreement while the fleet has two kings.
+Kings come from `gather_court` over the same live rows list the per-lane cost divides by. So `kings` plus `workers` always equals `roster_rows`, and the two halves can never describe different fleets. The panel reports `king_conflicts` beside the count, because a bare lead number hides the case that matters. Two live rows over one scope both report agreement while the fleet has two leads.
 
 A running test is a process whose OWN program is a test runner, matched on `argv[0]` plus the first non-flag arguments. Never on the whole command line. On the machine this was measured against, `ps | grep -i pytest` reported four running tests while two ran. One decoy was a shell wrapper whose command line happened to hold `cargo test`. The other was a leaked keeper process whose socket path sat under a `pytest-of-<user>` temp directory. The substring was in the path, never in the program.
 

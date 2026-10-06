@@ -496,10 +496,9 @@ def grant_error(
         if allow_succession:
             return None
         return (
-            f"this session already holds its own crown over {requested_scope!r}; "
+            f"this session already holds its own role over {requested_scope!r}; "
             "a same-scope spawn is a transfer, not a grant. Re-run with "
-            "`--succeed` to name the succession explicitly, or choose a "
-            "different scope so this session keeps its crown."
+            "`--hand-off`, or choose a different scope so this session keeps its role."
         )
     if not scope_contains(holder, requested_scope):
         return (
@@ -1020,6 +1019,7 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                     crown_scope=scope,
                     crown_grantor=returned_by,
                     model=getattr(target, "requested_model", None),
+                    harness=getattr(target, "harness", None),
                 )
                 is not None
             )
@@ -1111,11 +1111,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     ):
         raise CrownPromotionError(
             f"refusing to crown {handle!r}: {scope!r} is your OWN scope, and "
-            "this verb only stamps the target, so it cannot hand a crown over. "
-            "Succession runs through `fno agents spawn --crown --succeed` "
-            "instead, which vacates you and stamps the heir in a single "
-            "registry write, so the scope is never doubly ruled and never "
-            "briefly unruled."
+            "this verb only stamps the target, so it cannot hand a role over. "
+            "Succession runs through `fno agents spawn --promote <scope> "
+            "--hand-off` instead, which vacates you and stamps the new holder "
+            "in a single registry write, so the scope is never doubly ruled "
+            "and never briefly unruled."
         )
     # The authority check ran OUTSIDE the lock, so the grantor's crown can move
     # before the stamp. Re-running grant_error under the lock would put graph
@@ -1239,6 +1239,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 crown_scope=scope,
                 crown_grantor=recorded_grantor,
                 model=getattr(target, "requested_model", None),
+                harness=target.harness,
             )
         except (OSError, ValueError) as exc:
             raise CrownPromotionError(

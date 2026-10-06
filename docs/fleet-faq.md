@@ -1,6 +1,6 @@
 # Fleet FAQ
 
-Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
+Questions a lead or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
 This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/lead/references/cli-commands.md](../skills/lead/references/cli-commands.md).
 
@@ -20,7 +20,7 @@ An entry with no exit is a permanent workaround dressed as documentation. The co
 
 This convention matches the pitfalls corpus in AGENTS.md, which removes an entry in the PR where its guard lands. Do the same here.
 
-One entry already left this way. A king contributed a hook that fails with exit code 126 because its mode is 644. The fix and its CI guard had merged the same day, so the entry graduated before it landed.
+One entry already left this way. A lead contributed a hook that fails with exit code 126 because its mode is 644. The fix and its CI guard had merged the same day, so the entry graduated before it landed.
 
 ## How this list is kept
 
@@ -32,9 +32,9 @@ Run the `/simple-english` skill over your entry before you send it. That is ASD-
 
 **Retiring one.** The PR that satisfies a `Graduates to:` line replaces that entry with one Retired line, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
-**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A reigning king's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/lead/SKILL.md](../skills/lead/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
+**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A reigning lead's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/lead/SKILL.md](../skills/lead/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
 
-Do not trust that backstop on its own. This file's own beat entry records a reign losing its check-in loop at a compact, with no reader that reported the loss. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
+Do not trust that backstop on its own. This file's own beat entry records a lead losing its check-in loop at a compact, with no reader that reported the loss. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
 The list shrinking is the point. A workaround that survives here for months is a gap nobody funded.
 
@@ -126,7 +126,7 @@ Before any spawn, check for a duplicate. A node with a live claim or a sibling w
 
 ## A gate refused me
 
-Escalate, never synthesize. A refused gate is a message to the king or the operator. Flipping config or an environment variable to get past it turns a safety property into a silent one.
+Escalate, never synthesize. A refused gate is a message to the lead or the operator. Flipping config or an environment variable to get past it turns a safety property into a silent one.
 
 Refusals seen in practice, all correct:
 
@@ -162,23 +162,23 @@ The shapes, each measured:
 
 **A refusal exits 0.** The spawn gate writes its refusal to stdout as JSON and still exits 0: `{"status": "refused", "reason": "queue_timeout", "max_live": 30, ...}` followed by `[exited with code 0]`.
 
-**A guard that lists a wrong value as legal lets it pass.** A king wrote this arm for one session. It is not shipped machinery, so do not go looking for the file. That arm read the commit status API and printed `main:pending` every tick. Its guard allowed `success|pending|failure|error` and made anything else UNREADABLE, so a permanently wrong value passed as a legal one. This repo publishes check-runs, not commit statuses, and the status API returns `state` pending with zero statuses forever. Measured directly it read `{"state":"pending","total":0}` while the check-runs API read 21 success and 6 skipped, none failing and none running. Zero statuses is the tell: a ref with no statuses is not pending, it is unmeasured by that API. Every caller of that endpoint found in the tree reads `.statuses[]` rather than the top-level `state`, which is the correct read. The hand-rolled arm was the only thing that got it wrong.
+**A guard that lists a wrong value as legal lets it pass.** A lead wrote this arm for one session. It is not shipped machinery, so do not go looking for the file. That arm read the commit status API and printed `main:pending` every tick. Its guard allowed `success|pending|failure|error` and made anything else UNREADABLE, so a permanently wrong value passed as a legal one. This repo publishes check-runs, not commit statuses, and the status API returns `state` pending with zero statuses forever. Measured directly it read `{"state":"pending","total":0}` while the check-runs API read 21 success and 6 skipped, none failing and none running. Zero statuses is the tell: a ref with no statuses is not pending, it is unmeasured by that API. Every caller of that endpoint found in the tree reads `.statuses[]` rather than the top-level `state`, which is the correct read. The hand-rolled arm was the only thing that got it wrong.
 
 **A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback. It returned exit 0 and 5,610 bytes. The next run of the verb then gave the ordinary refusal the crash had hidden.
 
-**A peer's zero is still a zero.** A control can also validate the wrong thing. A king proposed widening a lint's scope to the code tree, calling it free that day. The stated grounds were zero hits repo-wide, with controls passing. Measured before acting, the code tree held thousands of hits across more than a thousand files. Most are synthetic test fixtures, and real ids sit among them. The change turns those files red.
+**A peer's zero is still a zero.** A control can also validate the wrong thing. A lead proposed widening a lint's scope to the code tree, calling it free that day. The stated grounds were zero hits repo-wide, with controls passing. Measured before acting, the code tree held thousands of hits across more than a thousand files. Most are synthetic test fixtures, and real ids sit among them. The change turns those files red.
 
 The cause is worth more than the correction. POSIX ERE has no `\b`, so a `git grep -nE` pattern written with word boundaries matches nothing and returns a confident zero. The probe, on one fixture token: without boundaries 181 hits, with them 0. Same tool, same tree, reproduced from a second session.
 
-The control did not catch it because the control ran somewhere else. In the king's own words: it validated the regex in BSD grep, then the search ran in `git grep`. **The control checked the tool, not the target.** The AGENTS.md pitfalls corpus already names that trap. This is a fresh specimen of it. A green control aimed at the wrong engine still reads as proof.
+The control did not catch it because the control ran somewhere else. In the lead's own words: it validated the regex in BSD grep, then the search ran in `git grep`. **The control checked the tool, not the target.** The AGENTS.md pitfalls corpus already names that trap. This is a fresh specimen of it. A green control aimed at the wrong engine still reads as proof.
 
-**An absence with no reader at all.** A king wrote in a durable note that a peer's `operator_request` stamp had no operator turn behind it. No reader exposes another session's operator turns. The claim had no instrument, so there was no control to run. The turn existed. Here the remedy is not a positive control, because none is available. Do not assert the absence. Ask the session that holds the transcript.
+**An absence with no reader at all.** A lead wrote in a durable note that a peer's `operator_request` stamp had no operator turn behind it. No reader exposes another session's operator turns. The claim had no instrument, so there was no control to run. The turn existed. Here the remedy is not a positive control, because none is available. Do not assert the absence. Ask the session that holds the transcript.
 
 *Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Then, per shape. A refusal that separates "unreadable" from "still present". One decision function shared by the dry run and the real run. A non-zero exit on a refusal. A killed subprocess reported as a kill, with its signal named. For a claim about another session's interior, no helper can help, because the fleet exposes no such reader.
 
 ## My check-in keeps saying nothing changed
 
-Check what your check-in is not reading. A reign check-in that reads the board, the court, agent status, capacity and the PR, but never reads the decision record, cannot notice being unblocked.
+Check what your check-in is not reading. A lead check-in that reads the board, the org, agent status, capacity and the PR, but never reads the decision record, cannot notice being unblocked.
 
 One session reported "waiting on an operator ruling" every thirty minutes for eleven hours. The ruling had landed three minutes after the question was filed, recorded against a different subject. `fno backlog decisions` with no argument lists recent rulings across every subject and catches this on the next beat.
 
@@ -211,9 +211,9 @@ Holding is cheap and reversible. A worker killed to satisfy the wrong side of an
 
 *Graduates to:* `fno backlog decisions` flagging two live rulings that contradict each other on one subject.
 
-## Entries from other kings
+## Entries from other leads
 
-**Where these came from.** Four reigns answered on one day, and their entries are mixed together below rather than kept in blocks. Some are not below at all. A contribution that matched an existing entry was folded into it. Several became shapes inside the absence section above. The reigns that sent those do not read as authors anywhere. A reaper crown sent three, on hidden sessions, a null field, and a compact that drops the beat. A project crown sent eight, on claim status, spawn share, the rebase reflex, and the merge gate. A state-isolation crown sent seven, on roster refusals, a dry run that overpromised, the operator-turn queue, and a check-run named for the wrong rule. An epic crown sent seven, on blocked nodes, codex cold starts, provider stamps, a stale sync report, and an arm that blamed the wrong thing.
+**Where these came from.** Four tenures answered on one day, and their entries are mixed together below rather than kept in blocks. Some are not below at all. A contribution that matched an existing entry was folded into it. Several became shapes inside the absence section above. The tenures that sent those do not read as authors anywhere. A reaper role sent three, on hidden sessions, a null field, and a compact that drops the beat. A project role sent eight, on claim status, spawn share, the rebase reflex, and the merge gate. A state-isolation role sent seven, on roster refusals, a dry run that overpromised, the operator-turn queue, and a check-run named for the wrong rule. An epic role sent seven, on blocked nodes, codex cold starts, provider stamps, a stale sync report, and an arm that blamed the wrong thing.
 
 ## A node is blocked and I cannot unblock it
 
@@ -267,7 +267,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 
 ## `fno agents top` says a row is retirable, but reap refuses it. Which is right?
 
-**Answer.** Reap is right. This looks like the dry-run entry above and the polarity is opposite, which is why it stands alone. Reap keeps a row for reasons the label in `top` does not read: the session is crowned, or it was active seconds ago.
+**Answer.** Reap is right. This looks like the dry-run entry above and the polarity is opposite, which is why it stands alone. Reap keeps a row for reasons the label in `top` does not read: the session is titled, or it was active seconds ago.
 
 Do not change reap to agree with `top`. Reap holds the correct guards, and a change there removes them.
 
@@ -289,7 +289,7 @@ Do not change reap to agree with `top`. Reap holds the correct guards, and a cha
 
 The two corrections are opposite. Shrink-only means this file can only get smaller. The aggregate means the tree grew too much and lines must leave it. A worker holding the wrong rule moves code between files in the same tree, which satisfies the per-file rule and does not change the aggregate.
 
-**Specimen.** Under a check-run named `guards[Oversized files are shrink-only]`, the log gave `ok <file> ... shrink banked` twice, then `<tree> grew by +689/-440 net +249 (allowance 100)`. The king who wrote this pattern up made the error himself a minute later, from the name alone.
+**Specimen.** Under a check-run named `guards[Oversized files are shrink-only]`, the log gave `ok <file> ... shrink banked` twice, then `<tree> grew by +689/-440 net +249 (allowance 100)`. The lead who wrote this pattern up made the error himself a minute later, from the name alone.
 
 *Graduates to:* the step taking the name of its script, or splitting in two so the failed check-run names the rule that failed.
 
@@ -297,7 +297,7 @@ The two corrections are opposite. Shrink-only means this file can only get small
 
 **Answer.** A bold lead-in before the sentence trips rule 5. The splitter counts the lead-in as its own sentence, so the condition that opens the real sentence reads as trailing.
 
-**Specimen.** `When the run fails, do not write the day key.` passes clean. `**Change.** When the run fails, do not write the day key.` is flagged `rule 5 (condition): sentence 1 puts "when" after the command`. Same sentence, same words, one bold prefix apart. Found by a king rewriting prose that was already correct.
+**Specimen.** `When the run fails, do not write the day key.` passes clean. `**Change.** When the run fails, do not write the day key.` is flagged `rule 5 (condition): sentence 1 puts "when" after the command`. Same sentence, same words, one bold prefix apart. Found by a lead rewriting prose that was already correct.
 
 *Graduates to:* the sentence splitter treating a bold lead-in as part of the sentence that follows it.
 
@@ -305,21 +305,21 @@ The two corrections are opposite. Shrink-only means this file can only get small
 
 **Answer.** The top-level `state` field and the `roster_workers` array answer different questions in one payload. Only the array is correct.
 
-**Specimen.** `fno agents claim status node:<id>` returned `"state": "unknown"` while the same JSON showed `roster_rows_scanned: 138` and `roster_rows_unresolved: 77`, and its `roster_workers` array named the live worker. A peer king reported `free` for nine nodes. One of those was held live. Earlier the same night the unresolved ratio was 65 of 101, so it is getting worse.
+**Specimen.** `fno agents claim status node:<id>` returned `"state": "unknown"` while the same JSON showed `roster_rows_scanned: 138` and `roster_rows_unresolved: 77`, and its `roster_workers` array named the live worker. A peer lead reported `free` for nine nodes. One of those was held live. Earlier the same night the unresolved ratio was 65 of 101, so it is getting worse.
 
 Until the fix merges, confirm ownership against the worker roster. Do not trust `claim status` alone.
 
 *Graduates to:* one ownership answer per payload, with the resolver reporting an unresolved roster as unresolved rather than free.
 
-## My king has no spawn share and its workers are finished
+## My lead has no spawn share and its workers are finished
 
 **Answer.** Share counts live harness rows, and a session never ends. A finished worker holds its lane forever.
 
-**Specimen.** `spawn-gate: king <id> holds 6 of max_live 30 across 5 kings (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every king's share fills with dead rows, dispatch stops, and no reader reports it.
+**Specimen.** `spawn-gate: king <id> holds 6 of max_live 30 across 5 kings (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every lead's share fills with dead rows, dispatch stops, and no reader reports it.
 
 **Specimen, the clean case.** A worker shipped its pull request and the pull request merged. The node closed with its claim released. The loop reported the terminal reason `DonePRGreen`. Its row then read `parked` rather than disappearing, and the share stayed full. Four terminal events, and none released the lane. Nothing further is available to that worker to give the slot back.
 
-**Specimen, the stop verb.** `fno agents stop` is the lever that works, and its receipt is incomplete. It printed `stopped: <name> (<session>)` for two finished workers, and `ps` confirmed both processes dead. The share freed, and a dispatch that had refused for hours went through at once. Both registry rows still read `parked` afterwards, and the row count did not change. So the row outlives the worker while the slot returns. A king reading the roster still sees a full crown. Two readers disagree here. Trust the lane. A peer confirmed the lane read 9 of 10, with both rows absent from its holders. The roster still listed them as `parked`.
+**Specimen, the stop verb.** `fno agents stop` is the lever that works, and its receipt is incomplete. It printed `stopped: <name> (<session>)` for two finished workers, and `ps` confirmed both processes dead. The share freed, and a dispatch that had refused for hours went through at once. Both registry rows still read `parked` afterwards, and the row count did not change. So the row outlives the worker while the slot returns. A lead reading the roster still sees a full role. Two readers disagree here. Trust the lane. A peer confirmed the lane read 9 of 10, with both rows absent from its holders. The roster still listed them as `parked`.
 
 *Graduates to:* a lane released on delivery, rather than on an exit event that never arrives.
 
@@ -329,7 +329,7 @@ Until the fix merges, confirm ownership against the worker roster. Do not trust 
 
 A rebase is destructive on a branch carrying attestations, and it does nothing against a content gate.
 
-**Specimen.** One king told two workers to rebase. On the first PR the worker merged `origin/main` instead, which was correct. Six of its commits carry head-pinned review attestations. A rebase rewrites those commits, and a rewrite voids every attestation and stops the `attestation_in_scope` arm. On the second PR the red came from the file-budget gate at +899 against an allowance of 100, and no rebase touches that gate. That branch was 68 commits behind, and 25 behind one hour earlier.
+**Specimen.** One lead told two workers to rebase. On the first PR the worker merged `origin/main` instead, which was correct. Six of its commits carry head-pinned review attestations. A rebase rewrites those commits, and a rewrite voids every attestation and stops the `attestation_in_scope` arm. On the second PR the red came from the file-budget gate at +899 against an allowance of 100, and no rebase touches that gate. That branch was 68 commits behind, and 25 behind one hour earlier.
 
 *Graduates to:* nothing. This entry is documentation, and it stays until the reflex does.
 
@@ -339,7 +339,7 @@ A rebase is destructive on a branch carrying attestations, and it does nothing a
 
 **Specimen.** Principle 6 in AGENTS.md read "Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them)". That script blocks four leak classes, named in its own header: a vault path, a node id, a session URL, and a competitor name. It has no ticket pattern and no PR pattern. Its own help also says the code tree is not scanned, which holds for three of the four classes. The competitor class scans every tracked file, code included. Principle 6 governs code comments. So the rule named a gate that catches one of its three targets, in the one place the rule does not apply.
 
-Two kings acted on the false half within an hour. One warned the other that PR numbers fail the gate. The other stripped real PR numbers out of quoted specimens on that warning, then had to be told to keep them.
+Two leads acted on the false half within an hour. One warned the other that PR numbers fail the gate. The other stripped real PR numbers out of quoted specimens on that warning, then had to be told to keep them.
 
 A citation has siblings. Correcting one sentence leaves every copy of it standing, so grep the gate's own name before you call the drift fixed. This one had a second home in `docs/architecture/dual-implementation-inventory.md`, found by a review of the PR that corrected the first.
 
@@ -351,7 +351,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Answer.** The default read returns only the sessions that are not complete. Pass `--all` to include the completed ones. The completed rows are the ones you reap, so a reaper that omits the flag cannot see its own work.
 
-**Specimen.** On 2026-09-08 the bare call returned 24 rows and `--all` returned 114. The 90 hidden rows were 79 done, 11 stopped and 4 failed. The king who found this had already reported the 24 figure to the operator.
+**Specimen.** On 2026-09-08 the bare call returned 24 rows and `--all` returned 114. The 90 hidden rows were 79 done, 11 stopped and 4 failed. The lead who found this had already reported the 24 figure to the operator.
 
 *Graduates to:* a default read that includes the completed rows, or an output line naming the hidden count.
 
@@ -359,7 +359,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Answer.** The reader can omit the field. A null then means the reader did not select it, not that the row has no value. Read the same fact through a second reader before you act on it.
 
-**Specimen.** `fno agents registry-json` returned `provider` as null for all 26 live rows, which reads as 26 rows with no provider stamp. `fno agents list --json` returned a provider for 42 rows and none for 7. A king acted on the first read and named the wrong cause for a dispatch outage.
+**Specimen.** `fno agents registry-json` returned `provider` as null for all 26 live rows, which reads as 26 rows with no provider stamp. `fno agents list --json` returned a provider for 42 rows and none for 7. A lead acted on the first read and named the wrong cause for a dispatch outage.
 
 *Graduates to:* a projection that drops the key for any field it does not select, so a null can only ever mean no value.
 
@@ -367,7 +367,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Answer.** No. Re-arm them by hand after a compact, and test each arm rather than trusting a receipt.
 
-**Specimen.** `hooks/king-postcompact-reinject.sh:100` states that the loop, goal and monitors survive a compact, then tells the reader to verify and re-arm any that is missing. The two halves contradict each other, and a king who reads the first half stops checking. After a compact on 2026-09-08 `CronList` returned no scheduled jobs, and both monitors were reported stopped as orphans with no completion record. All three were re-armed by hand.
+**Specimen.** `hooks/king-postcompact-reinject.sh:100` states that the loop, goal and monitors survive a compact, then tells the reader to verify and re-arm any that is missing. The two halves contradict each other, and a lead who reads the first half stops checking. After a compact on 2026-09-08 `CronList` returned no scheduled jobs, and both monitors were reported stopped as orphans with no completion record. All three were re-armed by hand.
 
 *Graduates to:* the sentence stating what actually survives, and a recovery step that tests each arm and reports each result.
 
@@ -375,7 +375,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Answer.** Read what the gate skips on a shallow clone. A check that reads repository history needs a fallback for a one-commit history. The fallback is often a different rule, not a refusal.
 
-**Specimen.** `check-pitfalls.sh` guards its first-appearance query on `rev-parse --is-shallow-repository` reading false. The workflow uses `actions/checkout@v4` with no `fetch-depth`, so CI clones one commit deep and that query never runs. Locally the history date decides staleness and the oldest entry expires 2026-10-09. In CI the prose `added:` date decides and the same entry expires 2026-09-25. Two kings each measured one side, and each told the other they had it wrong.
+**Specimen.** `check-pitfalls.sh` guards its first-appearance query on `rev-parse --is-shallow-repository` reading false. The workflow uses `actions/checkout@v4` with no `fetch-depth`, so CI clones one commit deep and that query never runs. Locally the history date decides staleness and the oldest entry expires 2026-10-09. In CI the prose `added:` date decides and the same entry expires 2026-09-25. Two leads each measured one side, and each told the other they had it wrong.
 
 *Graduates to:* the gate naming which date source it used, so the two runs are told apart from their output alone.
 
@@ -389,7 +389,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 ## The orphan warning cannot see the workers most likely to be orphaned
 
-**Answer.** The stop hook lists live workers by their `spawned_by_session` link. A row with no link is not listed. So the warning names the workers that have a king, and stays silent about the ones that do not.
+**Answer.** The stop hook lists live workers by their `spawned_by_session` link. A row with no link is not listed. So the warning names the workers that have a lead, and stays silent about the ones that do not.
 
 **Specimen.** On 2026-09-08 the hook named two workers and both were correct. The same registry read showed 27 live rows, and 12 carried a null link. All 12 were codex target rows, and they matched the 12 pidless rows the footprint had already reported as an attribution gap. The hook's own text warns about this, which is the only reason anyone checked.
 
@@ -411,9 +411,9 @@ Review on the PR's own branch, in a worktree that has it checked out. A review d
 
 **Answer.** A confirmation that re-runs the original method, on the original file, at the original layer, is the same instrument twice. It cannot fail. A cross-check must change the layer, not only the reader.
 
-**Specimen.** A peer reported that idle-release removes a registry row and writes no receipt. The evidence was `stream_worker.rs:1067` and a grep of that file: 4 hits for receipt, claude_rm and active_surface, against 62 in `gc_sweep.rs` as a control. A second king re-ran that grep on that file and confirmed it. Both were wrong. `state.rs:2064` calls `account_for_removed_rows` inside `update_registry`, which is defined at `state.rs:2246`. The accounting sits at the write choke point, so every path through it stages a receipt.
+**Specimen.** A peer reported that idle-release removes a registry row and writes no receipt. The evidence was `stream_worker.rs:1067` and a grep of that file: 4 hits for receipt, claude_rm and active_surface, against 62 in `gc_sweep.rs` as a control. A second lead re-ran that grep on that file and confirmed it. Both were wrong. `state.rs:2064` calls `account_for_removed_rows` inside `update_registry`, which is defined at `state.rs:2246`. The accounting sits at the write choke point, so every path through it stages a receipt.
 
-The second king already held the disproof. An hour earlier the same king measured the receipts on disk. 192 of 194 rows named in `registry_rows_lost` had one. So did 218 of 218 rows removed by an update_registry write. Universal receipt coverage across a write path is what accounting at a choke point produces. That number was quoted in the same thread.
+The second lead already held the disproof. An hour earlier the same lead measured the receipts on disk. 192 of 194 rows named in `registry_rows_lost` had one. So did 218 of 218 rows removed by an update_registry write. Universal receipt coverage across a write path is what accounting at a choke point produces. That number was quoted in the same thread.
 
 What settled it was neither grep. It was a count of the 499 receipt files on disk, which is a different kind of measurement.
 
@@ -423,7 +423,7 @@ What settled it was neither grep. It was a count of the 499 receipt files on dis
 
 **Answer.** Measure that a mechanism fires before you build on it. A doc saying a thing exists is not evidence it happens. Get its event count over the window you care about. Prove the reader works with a control that returns a non-zero number from the same journal.
 
-**Specimen.** On 2026-09-08 a king proposed hanging this list's upkeep on the post-merge ritual. That ritual's own design doc says its merge trigger is deferred and was never built. Measured only after the operator asked: at least 99 merged PRs in two days and 0 ritual events. The control in that same journal returned 171 check-ins. The first attempt at that count read the wrong journal, where the control also returned 0.
+**Specimen.** On 2026-09-08 a lead proposed hanging this list's upkeep on the post-merge ritual. That ritual's own design doc says its merge trigger is deferred and was never built. Measured only after the operator asked: at least 99 merged PRs in two days and 0 ritual events. The control in that same journal returned 171 check-ins. The first attempt at that count read the wrong journal, where the control also returned 0.
 
 The same session had verified six claims that arrived from other people that day, from a worker, a reviewer and two peers. It verified none of its own proposals. A second unverified one sits in this file's history. It told readers to trust a route-inspection flag as a liveness reader. A reviewer caught that one too.
 
@@ -431,27 +431,27 @@ The same session had verified six claims that arrived from other people that day
 
 *Graduates to:* a review question asking, of any proposed hook, how many times it fired last week. Until a proposal has to carry that number, this stays a habit.
 
-## Does my reign still have a beat?
+## Does my lead still have a beat?
 
-**Answer.** Check it, do not assume it. List the scheduled jobs. An empty list means the check-in loop is gone and the reign is now purely reactive. Re-arm before doing anything else. A king with no clock still answers messages, so it reads as active from the outside and from the inside.
+**Answer.** Check it, do not assume it. List the scheduled jobs. An empty list means the check-in loop is gone and the lead is now purely reactive. Re-arm before doing anything else. A lead with no clock still answers messages, so it reads as active from the outside and from the inside.
 
 Do not check the monitors with a task reader. A task reader covers the planning task list and never sees a monitor.
 
-**Specimen.** On 2026-09-08 a crowned session was asked whether it still held its beat. The cron reader returned none, and the loop had died at a compact hours earlier. Every check-in it had journaled that day was typed by hand in reply to an operator message. The same session had merged an entry about this exact failure earlier the same day and never ran the command on itself.
+**Specimen.** On 2026-09-08 a titled session was asked whether it still held its beat. The cron reader returned none, and the loop had died at a compact hours earlier. Every check-in it had journaled that day was typed by hand in reply to an operator message. The same session had merged an entry about this exact failure earlier the same day and never ran the command on itself.
 
 An earlier version of this entry cited a task reader here, and that citation was wrong. Measured the same day, a task list returned none while two monitors ran, named by their ids. A task get on one of those ids returned not found.
 
-**You cannot answer this for anyone else.** A check-in event carries a timestamp, a type, a source and a data blob. It names no session, no king and no crown scope. With no state file present, the source field defaults to `test`. A king session has none, so every reign check-in journals as a test event. A fleet-wide question about which kings still have a beat has no reader at all.
+**You cannot answer this for anyone else.** A check-in event carries a timestamp, a type, a source and a data blob. It names no session, no lead and no role scope. With no state file present, the source field defaults to `test`. A lead session has none, so every lead check-in journals as a test event. A fleet-wide question about which leads still have a beat has no reader at all.
 
-The source field cannot be fixed by hand either. `fno doctor event emit -s king-<id>` is refused, because the enum is closed and carries no king value. Its one extensible pattern is `worker:` or `stream-worker:`. So a king defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
+The source field cannot be fixed by hand either. `fno doctor event emit -s king-<id>` is refused, because the enum is closed and carries no lead value. Its one extensible pattern is `worker:` or `stream-worker:`. So a lead defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
 
-*Graduates to:* a check-in verb that stamps source, crown scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
+*Graduates to:* a check-in verb that stamps source, role scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
 
 ## A stacked pull request does not stand out in `fno do pr list`
 
 **Answer.** A `fno do pr list` row names number, state, title, head ref, and URL, but not the base. The list shows every open pull request whatever its base. A stacked pull request targets its parent branch, so nothing in the row says where it targets. Read the pull request by number, or from its own branch, before you decide where a branch's pull request targets.
 
-**Specimen.** An L1 king asked the crown to open pull requests for two branches. All three were already open. PR 1651 targeted `main` from `feature/<node>`. PR 1660 targeted `feature/<node>` from `feature/<node>-wave2`. PR 1663 targeted `feature/<node>-wave2` from `feature/<node>-wave3`. Only the first targets `main`, and nothing in the list's output marked the two children as members of a stack. A caller who acts on that read opens a duplicate pull request on a branch that already carries one.
+**Specimen.** An L1 lead asked the role to open pull requests for two branches. All three were already open. PR 1651 targeted `main` from `feature/<node>`. PR 1660 targeted `feature/<node>` from `feature/<node>-wave2`. PR 1663 targeted `feature/<node>-wave2` from `feature/<node>-wave3`. Only the first targets `main`, and nothing in the list's output marked the two children as members of a stack. A caller who acts on that read opens a duplicate pull request on a branch that already carries one.
 
 The same read reported both branches as 32 commits behind `main`. That is the normal state of a stack, because each branch tracks its parent and not `main`. A behind-count is not evidence of neglect on a stacked branch.
 
@@ -479,4 +479,4 @@ Closed gaps, newest first. Each line names the PR that closed it, so a reader ca
 - [troubleshooting.md](troubleshooting.md) for run-level failures
 - [architecture/coordination.md](architecture/coordination.md) for claims and the work-claim primitive
 - [architecture/fleet-watchdog.md](architecture/fleet-watchdog.md) for automated wake, reroute and reap
-- [../skills/lead/references/court-operations.md](../skills/lead/references/court-operations.md) for the court primitives
+- [../skills/lead/references/org-operations.md](../skills/lead/references/org-operations.md) for the org primitives

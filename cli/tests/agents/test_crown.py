@@ -763,6 +763,35 @@ def test_crown_and_manifest_are_written_in_one_call(tmp_path: Path, monkeypatch)
     assert int(manifest["crown_level"]) == row.crown_level == 1
 
 
+def test_promote_stamps_the_holders_own_harness(tmp_path: Path, monkeypatch) -> None:
+    """x-f845: a claude lead promoting a codex heir must not write
+    `harness: claude` beside a codex session id. The manifest harness keys
+    every transcript reader (hygiene, compactions), so the caller's ambient
+    harness there resolves the heir blind."""
+    import fno.king.state as king_state
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness="codex",
+                harness_session_id="0197aaaa-1234-7abc-9def-0123456789ab",
+                status="idle",
+            )
+        ],
+    )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    manifest = king_state.parse_manifest(_space_manifest(tmp_path, "alpha"))
+    assert manifest["harness"] == "codex"
+    assert manifest["harness_session_id"] == "0197aaaa-1234-7abc-9def-0123456789ab"
+
+
 def test_in_place_crown_aborts_before_registry_publish_when_manifest_write_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2137,7 +2166,7 @@ def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     assert result.exit_code == 2
     out = result.output.lower()
     assert "your own scope" in out
-    assert "fno agents spawn --crown" in out
+    assert "fno agents spawn --promote" in out
     # The remedies that contradict the refusal must not appear: every one of
     # them tells the caller to act on its own live row.
     assert "already held" not in out
@@ -2218,6 +2247,7 @@ def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
     assert "re-scope" in result.output.lower()
     assert "--level" not in result.output
     assert "--succeed" not in result.output
+    assert "--hand-off" not in result.output
 
 
 def test_in_place_crown_emits_one_success_event_only_after_commit(
@@ -2436,7 +2466,7 @@ def test_spawn_crown_refuses_before_launch_when_scope_already_occupied(
     # caller is an attended human (no agent identity), so it is authorized to
     # attempt the grant; the pre-launch check still refuses because the
     # incumbent holds the scope and no --succeed named the transfer.
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_crowned(
             monkeypatch, tmp_path,
             grantor_env=None,

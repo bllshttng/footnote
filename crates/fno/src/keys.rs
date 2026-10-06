@@ -541,8 +541,8 @@ pub enum Event {
     /// expanded -> live-only -> collapsed (prefix+z). The client owns
     /// the state and resolves the active squad; the chord only fires the step.
     CycleSection,
-    /// Open the sideline MENU popup (prefix+M): the footer `menu` button's
-    /// action, reached from the keyboard. Case pair with `m` (the yard).
+    /// Open the sideline MENU popup (prefix+P): the footer `menu` button's
+    /// action, reached from the keyboard. `M` belongs to open-messages.
     OpenSidelineMenu,
     /// Open the new-workspace name overlay (prefix+N): the `+ new workspace`
     /// footer's action, reached from the keyboard. Case pair with `n`

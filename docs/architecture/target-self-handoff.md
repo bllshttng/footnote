@@ -10,7 +10,7 @@ The automatic path also collapsed five independent axes. It named the child from
 
 Context pressure triggers compaction. It never triggers capability escalation. Blueprint/do and wave boundaries continue in the current session.
 
-Capability escalation is explicit. An external operator or supervising king selects a stronger destination after reading evidence that the current worker cannot finish. The worker signals that it is stuck. It must not select its own successor. The daemon's burn arm supplies the evidence. It samples five counters per live execute worker. When a threshold trips, it sends the supervising crown one note. It never selects a destination and never moves a worker.
+Capability escalation is explicit. An external operator or supervising lead selects a stronger destination after reading evidence that the current worker cannot finish. The worker signals that it is stuck. It must not select its own successor. The daemon's burn arm supplies the evidence. It samples five counters per live execute worker. When a threshold trips, it sends the supervising role one note. It never selects a destination and never moves a worker.
 
 Invoke the bundled transaction with an explicit destination:
 
@@ -62,7 +62,7 @@ The former `target.handoff.generation_cap` setting is retired. Legacy config con
 
 ## Context compaction
 
-`hooks/context-nudge.sh` remains the single context-pressure decision path. `target.handoff.used_pct_trigger` and `target.handoff.king_used_pct_trigger` now describe general and king compact nudges. The retired PreCompact arm hook and PostCompact handoff marker no longer exist. Normal PostCompact target context reinjection remains.
+`hooks/context-nudge.sh` remains the single context-pressure decision path. `target.handoff.used_pct_trigger` and `target.handoff.king_used_pct_trigger` now describe general and lead compact nudges. The retired PreCompact arm hook and PostCompact handoff marker no longer exist. Normal PostCompact target context reinjection remains.
 
 ## Observability
 

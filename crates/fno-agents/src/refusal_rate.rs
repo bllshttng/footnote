@@ -292,6 +292,44 @@ mod tests {
         assert_eq!(result["window"], 3);
         assert!((result["rate"].as_f64().unwrap() - (2.0 / 3.0)).abs() < 1e-9);
         assert_eq!(result["load_discounted"], false);
+        // The tool-activity fold shares this fixture: a claude pair counts one
+        // call, the result's is_error flag grades the failure, appended bytes
+        // parse once, a partial tail holds, and a shrunken file resets.
+        use crate::tool_activity::ToolFold;
+        let dir = std::env::temp_dir().join("fno-refusal-tool-claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fold.jsonl");
+        std::fs::write(&path, transcript_line("t1", "Bash", None) + "\n").unwrap();
+        let mut fold = ToolFold::default();
+        fold.absorb(&path, "claude");
+        assert_eq!(
+            (fold.calls, fold.errors),
+            (1, 0),
+            "a call with no result never reads as failed"
+        );
+        let mut with_flag = serde_json::json!({
+            "message": {"content": [
+                {"type": "tool_use", "id": "t9", "name": "Bash"},
+                {"type": "tool_result", "tool_use_id": "t9", "is_error": true, "content": "boom"}
+            ]}
+        })
+        .to_string();
+        with_flag.push('\n');
+        let base = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, &(base.clone() + &with_flag)).unwrap();
+        fold.absorb(&path, "claude");
+        assert_eq!((fold.calls, fold.errors), (2, 1));
+        let held = fold.offset;
+        std::fs::write(&path, &(base + &with_flag + "{\"partial")).unwrap();
+        fold.absorb(&path, "claude");
+        assert_eq!(fold.offset, held, "a partial tail never parses half a row");
+        std::fs::write(&path, "").unwrap();
+        fold.absorb(&path, "claude");
+        assert_eq!(
+            (fold.calls, fold.errors, fold.offset),
+            (0, 0, 0),
+            "a rotated file resets the fold"
+        );
     }
 
     /// The codex rollout pairing: an output answers its `call_id` when the
@@ -326,6 +364,17 @@ mod tests {
         assert_eq!(discounted["load_discounted"], true);
         assert_eq!(discounted["refused"], 1, "the timeout bucket left");
         assert_eq!(discounted["rate_full"], full["rate"]);
+        // The tool-activity fold shares this rollout fixture: call rows count,
+        // and an output grades failed by the same buckets.
+        use crate::tool_activity::ToolFold;
+        let dir = std::env::temp_dir().join("fno-refusal-tool-codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fold.jsonl");
+        std::fs::write(&path, text + "\n").unwrap();
+        let mut fold = ToolFold::default();
+        fold.absorb(&path, "codex");
+        assert_eq!(fold.calls, 2);
+        assert_eq!(fold.errors, 2, "both outputs matched a bucket");
     }
 
     #[test]

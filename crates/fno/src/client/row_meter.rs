@@ -14,6 +14,12 @@ const EIGHTHS: [char; 8] = [
 /// blank. No brackets, no pipe, no ellipsis.
 pub(super) fn ctx_meter_text(pct: u8, cells: usize) -> String {
     let eighths = (usize::from(pct.min(100)) * cells * 8).div_ceil(100);
+    format!("{} {pct}%", bar_of(eighths, cells))
+}
+
+/// The bar alone: `eighths` total eighth-cells spread left to right over
+/// `cells` cells, a partial glyph in its own cell, the rest blank.
+pub(super) fn bar_of(eighths: usize, cells: usize) -> String {
     let mut bar = String::new();
     for i in 0..cells {
         let level = eighths.saturating_sub(i * 8).min(8);
@@ -23,7 +29,7 @@ pub(super) fn ctx_meter_text(pct: u8, cells: usize) -> String {
             bar.push(EIGHTHS[level - 1]);
         }
     }
-    format!("{bar} {pct}%")
+    bar
 }
 
 /// The list row's context meter: three cells, percent after the bar.
@@ -31,16 +37,6 @@ pub(super) fn ctx_meter_text(pct: u8, cells: usize) -> String {
 pub(super) fn ctx_cell(pct: Option<u8>) -> String {
     let Some(pct) = pct else { return "-".into() };
     ctx_meter_text(pct, 3)
-}
-
-/// A four-cell context sparkline whose ramp shifts with the measured load.
-pub(super) fn ctx_sparkline(pct: u8) -> &'static str {
-    match pct.min(100) {
-        0..=12 => "▁▁▂▂",
-        13..=32 => "▂▃▄▅",
-        33..=65 => "▃▄▅▆",
-        _ => "▄▅▆▇",
-    }
 }
 
 /// The loading skeleton's breathe: one shade step up and back down, every
@@ -142,7 +138,7 @@ impl View {
 
 #[cfg(test)]
 mod tests {
-    use super::{cost_cell, ctx_sparkline, name_w, skeleton_cell, token_cell};
+    use super::{cost_cell, name_w, skeleton_cell, token_cell};
     #[test]
     fn cost_is_dollars_and_tokens_compact() {
         assert_eq!(cost_cell(42), "~$0.42");
@@ -155,10 +151,6 @@ mod tests {
         assert_eq!(token_cell(367_000_000), "367M tok");
         assert_eq!(token_cell(1_416_159_173), "1.4B tok");
         assert_eq!(token_cell(1_000_000_000), "1B tok");
-        assert_eq!(ctx_sparkline(10), "▁▁▂▂");
-        assert_eq!(ctx_sparkline(16), "▂▃▄▅");
-        assert_eq!(ctx_sparkline(49), "▃▄▅▆");
-        assert_eq!(ctx_sparkline(129), "▄▅▆▇");
         assert_eq!(skeleton_cell(3, None), "░░░");
         assert_eq!(skeleton_cell(2, Some(0)), "░░");
         assert_eq!(skeleton_cell(2, Some(250)), "▒▒");
