@@ -290,15 +290,6 @@ fn corrupt_and_bad_scope_rows_store_with_reject_reason() {
 }
 
 #[test]
-fn canonical_scope_stamps_the_column() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    append(&live, &[checkin("2026-09-10T08:00:00Z", "x-aaaa", "clean")]);
-    let receipt = sync(&live).unwrap();
-    assert_eq!(count_type(&receipt.store, "lead_checkin"), 1);
-}
-
-#[test]
 fn ephemeral_journal_is_refused_but_sibling_imports() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");

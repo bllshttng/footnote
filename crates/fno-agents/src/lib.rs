@@ -427,6 +427,7 @@ pub mod state_layout;
 pub mod state_layout_sqlite;
 pub mod state_path;
 pub mod state_root_drift;
+pub mod store_conn;
 pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
