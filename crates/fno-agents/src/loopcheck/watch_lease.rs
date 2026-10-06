@@ -98,7 +98,7 @@ pub(crate) const CODEX_UNROUTABLE_REFUSAL: &str = "watching ignored: the fno dae
 this codex thread (no app-server daemon, or thread not loaded), so no watcher would wake this \
 park. Stop instead of idling; when the daemon is up again the next stop may idle.";
 
-/// AC4-ERR: on codex the `loop_check_watch_idle` event IS the daemon's watch
+/// The `loop_check_watch_idle` event IS the daemon's watch
 /// registration, so a failed write refuses the idle.
 pub(crate) const EMIT_FAILED_REFUSAL: &str = "watching ignored: the watch registration \
 (loop_check_watch_idle) failed to write, so no watcher is registered. Do not idle on this \

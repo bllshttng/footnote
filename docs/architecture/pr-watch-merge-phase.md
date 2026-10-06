@@ -23,6 +23,8 @@ The queue itself is Rust's (`crates/fno-agents/src/merge_grant.rs`). It drops `s
 
 ## Why every cure defers to a live tick
 
+A head-bound hold parks with `observed_head` from the merge decision's receipt. The watcher writes that baseline before notifying the operator and makes no later head request. A concurrent push therefore stays visible to the park sweep. The shared head probe runs in Rust with a 15-second subprocess bound. A stalled read terminates its process group and returns an unknown head.
+
 A bounce fired mid-tick runs `bootout` plus `kickstart -k`. The `-k` SIGTERMs the running tick. During one outage that killed eight ticks in one hour, one per session start, and kept the verdict dead. Three points own the guard since the launchd-backed rewrite.
 
 First, the in-flight read is launchd's. `launchctl list sh.fno.pr-watcher` names the service's PID, and `ps -o etime=` ages it. A PID younger than one 600s StartInterval defers. An older tick is hung, and it still bounces. This replaces the cwd-routed `pr-watch:tick` claim, which covered only the sweep phase and read free while merge or recovery ran.

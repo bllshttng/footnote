@@ -45,7 +45,13 @@ fn lead_holders(
 
 /// Append one durable envelope under the bus sidecar flock. Body rides raw:
 /// the bus is the delivery, and a fleet-plain row renders in every drain.
-fn append_mail(bus_live: &Path, sender: &str, holder: &str, text: &str) -> Result<(), String> {
+fn append_mail(
+    bus_live: &Path,
+    chats_dir: &Path,
+    sender: &str,
+    holder: &str,
+    text: &str,
+) -> Result<(), String> {
     let id = crate::announce::new_msg_id();
     let word_count = text.split_whitespace().count() as i64;
     let mut obj = Map::new();
@@ -59,7 +65,7 @@ fn append_mail(bus_live: &Path, sender: &str, holder: &str, text: &str) -> Resul
     obj.insert("to_kind".into(), json!("name"));
     obj.insert("word_count".into(), json!(word_count));
     obj.insert("body".into(), json!(text));
-    crate::announce::append_line(bus_live, &Value::Object(obj))
+    crate::announce::append_line(bus_live, &Value::Object(obj), chats_dir)
 }
 
 /// Send one lead mail in process: resolve the scope's live holders and
@@ -69,6 +75,7 @@ fn append_mail(bus_live: &Path, sender: &str, holder: &str, text: &str) -> Resul
 pub fn send_at(
     registry: &Path,
     bus_live: &Path,
+    chats_dir: &Path,
     sender: &str,
     scope: &str,
     text: &str,
@@ -81,7 +88,7 @@ pub fn send_at(
     match holders.len() {
         0 => Err(format!("lead mail: no live team answers {scope:?}")),
         1 => {
-            append_mail(bus_live, sender, &holders[0], text)?;
+            append_mail(bus_live, chats_dir, sender, &holders[0], text)?;
             Ok(holders)
         }
         n => Err(format!(
@@ -105,6 +112,7 @@ pub fn send(sender: &str, scope: &str, text: &str) -> Result<Vec<String>, String
     send_at(
         &home.registry_json(),
         &dot_fno.join("bus").join("messages.jsonl"),
+        &crate::chats::chats_dir(),
         sender,
         scope,
         text,
@@ -123,6 +131,10 @@ mod tests {
 
     fn bus_path(tmp: &Path) -> PathBuf {
         tmp.join("bus").join("messages.jsonl")
+    }
+
+    fn chats_dir(tmp: &Path) -> PathBuf {
+        tmp.join("chats")
     }
 
     fn write_registry(tmp: &Path, rows: Value) {
@@ -173,6 +185,7 @@ mod tests {
         let mailed = send_at(
             &registry_path(tmp.path()),
             &bus_path(tmp.path()),
+            &chats_dir(tmp.path()),
             SETTLE_SENDER,
             "x-aaaa",
             "PR #7 on x-1 settled green at abc123.",
@@ -194,6 +207,14 @@ mod tests {
         for key in ["v", "id", "ts", "thread"] {
             assert!(row.get(key).is_some(), "{key} missing");
         }
+        // The chat mirror follows the passed dir, never the env store:
+        // a fixture send records beside the fixture bus.
+        let chat_dirs = std::fs::read_dir(chats_dir(tmp.path()))
+            .expect("chats dir created beside the fixture bus")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("chat-"))
+            .count();
+        assert!(chat_dirs >= 1, "mirror landed in the passed chats dir");
     }
 
     #[test]
@@ -203,6 +224,7 @@ mod tests {
         let err = send_at(
             &registry_path(tmp.path()),
             &bus_path(tmp.path()),
+            &chats_dir(tmp.path()),
             SETTLE_SENDER,
             "x-bbbb",
             "text",
@@ -225,6 +247,7 @@ mod tests {
         let err = send_at(
             &registry_path(tmp.path()),
             &bus_path(tmp.path()),
+            &chats_dir(tmp.path()),
             SETTLE_SENDER,
             "x-cccc",
             "text",
@@ -248,6 +271,7 @@ mod tests {
         let mailed = send_at(
             &registry_path(tmp.path()),
             &bus_path(tmp.path()),
+            &chats_dir(tmp.path()),
             SETTLE_SENDER,
             "x-aaaa",
             "text",
@@ -267,6 +291,7 @@ mod tests {
         let err = send_at(
             &registry_path(tmp.path()),
             &bus_path(tmp.path()),
+            &chats_dir(tmp.path()),
             SETTLE_SENDER,
             "x-dddd",
             "text",
@@ -276,6 +301,7 @@ mod tests {
         let mailed = send_at(
             &registry_path(tmp.path()),
             &bus_path(tmp.path()),
+            &chats_dir(tmp.path()),
             SETTLE_SENDER,
             "x-eeee",
             "text",

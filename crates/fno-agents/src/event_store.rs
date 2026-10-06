@@ -19,7 +19,7 @@
 //! ever dropped at import: the first parse failure lands in `reject_reason`
 //! and the row stays queryable verbatim.
 //!
-//! ponytail: sync reads a whole file into memory, so one sync's memory scales
+//! Sync reads a whole file into memory, so one sync's memory scales
 //! with the file size. Bounded in practice by the rotation threshold; only a
 //! long deferred-rotation window (broken store) grows past it, and that window
 //! already screams on stderr per emit. Upgrade path: stream from the cursor
@@ -322,16 +322,17 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut total = FileTally::default();
     for source in sources {
-        let tally = import_file(&tx, source, now_ms)?;
+        let tally = import_file(&tx, source, &store, now_ms)?;
         total.ingested += tally.ingested;
         total.corrupt += tally.corrupt;
         total.coalesced += tally.coalesced;
         total.read_bytes += tally.read_bytes;
     }
-    observation::sweep_expired_windows(&tx, now_ms)?;
+    observation::sweep_expired_windows(&tx, now_ms)
+        .map_err(|e| format!("{}: {e}", store.display()))?;
     tx.commit()
         .map_err(|e| format!("{}: {e}", store.display()))?;
-    prune(&mut conn, now_ms)?;
+    prune(&mut conn, now_ms).map_err(|e| format!("{}: {e}", store.display()))?;
     Ok(SyncReceipt {
         store,
         ingested: total.ingested,
@@ -347,7 +348,8 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 fn open_store(store: &Path) -> Result<Connection, String> {
     let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
-    observation::ensure_observation_tables(&conn)?;
+    observation::ensure_observation_tables(&conn)
+        .map_err(|e| format!("{}: {e}", store.display()))?;
     Ok(conn)
 }
 
@@ -690,7 +692,15 @@ pub fn extract_identity(line: &str) -> EventIdentity {
 /// source works here - rotated, live, ephemeral sibling, an agents lifecycle
 /// journal, or shell-writer fragments - because the `row_hash` key dedupes
 /// overlap and the class comes from the event type, never the file.
-fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
+fn import_file(
+    tx: &Transaction,
+    path: &Path,
+    store: &Path,
+    now_ms: i64,
+) -> Result<FileTally, String> {
+    let sql_error = |error: &dyn std::fmt::Display| {
+        format!("{}: importing {}: {error}", store.display(), path.display())
+    };
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FileTally::default()),
@@ -710,7 +720,8 @@ fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
             params![dev, ino],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok();
+        .optional()
+        .map_err(|e| sql_error(&e))?;
     // Resume only when the head line still hashes equal AND the file has not
     // shrunk under the cursor; anything else re-reads from zero and lets
     // row_hash dedupe the overlap.
@@ -768,7 +779,7 @@ fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
                     continue;
                 }
                 Ok(observation::ObservationGate::Insert) => {}
-                Err(e) => return Err(format!("{}: {e}", path.display())),
+                Err(e) => return Err(sql_error(&e)),
             }
         }
         let inserted = insert_v2_row(
@@ -785,7 +796,7 @@ fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
                 line,
             },
         )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        .map_err(|e| sql_error(&e))?;
         tally.ingested += inserted as u64;
     }
     tx.execute(
@@ -802,7 +813,7 @@ fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
             now_ms
         ],
     )
-    .map_err(|e| format!("{}: {e}", path.display()))?;
+    .map_err(|e| sql_error(&e))?;
     Ok(tally)
 }
 

@@ -289,11 +289,17 @@ class FakeRun:
 
 @pytest.fixture
 def enabled(monkeypatch, tmp_path):
+    from functools import partial
+    from fno.claims import core as claims
+
+    monkeypatch.setattr(claims, "acquire_claim", partial(claims.acquire_claim, root=tmp_path))
+    monkeypatch.setattr(claims, "release_claim", partial(claims.release_claim, root=tmp_path))
     monkeypatch.setattr(
         "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
     )
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
-    monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    real_which = _merge.shutil.which
+    monkeypatch.setattr(_merge.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else real_which(tool))
     # The posture floor (merge step 1b) reads live settings; hermetic tests
     # resolve to the shipped default rung (self_review), never the operator's
     # real config, and never through the real loader (some tests break the
@@ -2025,7 +2031,8 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     covered head outranks the checks-verdict head on the one merge call)."""
     (tmp_path / ".fno").mkdir()
     _checks_enabled(monkeypatch)
-    monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    real_which = _merge.shutil.which
+    monkeypatch.setattr(_merge.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else real_which(tool))
     # Same hermeticity as the `enabled` fixture: the closure fetch a populated
     # per-worker sandbox graph triggers answers non-JSON and holds the merge
     # before any merge command is recorded.
