@@ -44,18 +44,38 @@ run_capture_bounded() {
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$max" ]; then
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-      OUT="exceeded the ${max}s bound; last output: $(tail -3 "$log" | tr '\n' ' ')"
-      RC=124
-      return 0
+      break
     fi
     sleep 5
     waited=$((waited + 5))
   done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null
+    RC=$?
+    OUT="$(cat "$log")"
+    return 0
+  fi
+  # The bound fired. TERM the job AND its live children: brew's auto-update
+  # phase runs git/curl beneath it, and a plain TERM to the wrapper can leave
+  # the tree running while wait returns. Grace-wait, then KILL, then reap;
+  # no step here can block past the grace bound.
+  echo "bound fired at ${waited}s on pid ${pid} ($(printf '%s' "$*" | head -1))"
+  pkill -TERM -P "$pid" 2>/dev/null
+  kill -TERM "$pid" 2>/dev/null
+  local grace=0
+  while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+    sleep 1
+    grace=$((grace + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "bound kill: pid ${pid} survived TERM, escalating to KILL"
+    pkill -KILL -P "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+  fi
   wait "$pid" 2>/dev/null
-  RC=$?
-  OUT="$(cat "$log")"
+  echo "bound kill done on pid ${pid}; last output: $(tail -3 "$log" | tr '\n' ' ')"
+  OUT="exceeded the ${max}s bound; last output: $(tail -3 "$log" | tr '\n' ' ')"
+  RC=124
 }
 # The bound helper self-checks its two modes once the scratch base exists: a
 # bounded command keeps its real rc, and an overrun is killed at the bound with
@@ -498,6 +518,7 @@ row_pypi_uv_pinned() {
 row_brew() {
   assert_clean_machine
   export PATH="/opt/homebrew/bin:$PATH"
+  echo "row brew: install starting under the 900s bound"
   # 900s: a cold brew install (auto-update + bottles + pip) fits well under
   # it, and it stays 600s clear of the 1500s row watchdog, so a stalled fetch
   # scores as an honest fail here instead of a row hang.

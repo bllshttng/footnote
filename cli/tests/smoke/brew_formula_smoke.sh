@@ -71,18 +71,34 @@ run_capture_bounded() {
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$max" ]; then
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-      OUT="exceeded the ${max}s bound; last output: $(tail -3 "$BOUND_LOG" | tr '\n' ' ')"
-      RC=124
-      return 0
+      break
     fi
     sleep 5
     waited=$((waited + 5))
   done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null
+    RC=$?
+    OUT="$(cat "$BOUND_LOG")"
+    return 0
+  fi
+  # The bound fired. TERM the job AND its live children (brew's auto-update
+  # runs git/curl beneath it), grace-wait, then KILL; no step here can block
+  # past the grace bound.
+  pkill -TERM -P "$pid" 2>/dev/null
+  kill -TERM "$pid" 2>/dev/null
+  local grace=0
+  while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+    sleep 1
+    grace=$((grace + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    pkill -KILL -P "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+  fi
   wait "$pid" 2>/dev/null
-  RC=$?
-  OUT="$(cat "$BOUND_LOG")"
+  OUT="exceeded the ${max}s bound; last output: $(tail -3 "$BOUND_LOG" | tr '\n' ' ')"
+  RC=124
 }
 # The bound helper self-checks its two modes: a bounded command keeps its real
 # rc, and an overrun is killed at the bound with rc=124. A silent regression
