@@ -1020,6 +1020,9 @@ pub(crate) struct View {
     /// `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
+    /// `config.mux.card_graph`: what the card's graph slot plots. Latched
+    /// once at startup from the same ladder `hover_focus` reads.
+    card_graph: crate::client::card_line::CardGraph,
     /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `footnote-superscript` is
@@ -2020,6 +2023,7 @@ impl View {
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
+            card_graph: crate::client::card_line::CardGraph::Activity,
             theme: Theme::default_theme(),
             user_themes: Vec::new(),
             pending_ground: None,
@@ -7421,6 +7425,7 @@ async fn attach_and_run(
     // Latch the focus-follows-mouse off-switch once; a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    view.card_graph = crate::digest_overlay::card_graph(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
     view.org = crate::org_overlay::Panel::with_detail(
         crate::digest_overlay::load_readout_detailed(Path::new(&cwd)),
@@ -10847,6 +10852,7 @@ mod org_block;
 mod glyph_legend;
 
 mod card_line;
+pub(crate) use card_line::CardGraph;
 
 #[path = "client/confirm_anchor.rs"]
 mod confirm_anchor;

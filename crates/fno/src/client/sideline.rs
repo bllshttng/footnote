@@ -570,6 +570,7 @@ impl View {
                             "",
                             card_line::metrics(
                                 a,
+                                self.card_graph,
                                 now,
                                 row_message_text(a).as_deref(),
                                 text_w.saturating_sub(pad),
@@ -1246,7 +1247,10 @@ impl View {
         a: &AgentRow,
         pad: usize,
     ) {
-        let Some(cell) = card_line::activity_cell(a) else {
+        if self.card_graph != crate::client::CardGraph::Activity {
+            return;
+        }
+        let Some(cell) = card_line::activity_cell(a, self.card_graph) else {
             return;
         };
         let line = &mut cells[row * cols..row * cols + text_w];

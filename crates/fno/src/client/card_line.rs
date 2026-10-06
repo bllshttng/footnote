@@ -51,6 +51,16 @@ pub(super) enum MetricCell {
     Hidden,
 }
 
+/// What the card's graph slot plots, from `config.mux.card_graph`:
+/// the tool-activity ramp (default, blank until two intervals exist) or
+/// the context percent's fill bar (steady for the whole session).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum CardGraph {
+    #[default]
+    Activity,
+    Context,
+}
+
 /// The four metrics-line fields in paint order: activity, context,
 /// compactions, tokens. Cost moved to line 2 (the operator's 2026-10-04
 /// mockup; ruled d-027912c6), where card_detail_text paints it served-only.
@@ -60,7 +70,7 @@ pub(super) enum MetricCell {
 /// resolve at all (`SessionTranscripts::find`), so any other harness shows
 /// a dash for the activity cell - never a fabricated flat line - and a
 /// bare pane or an exited row's unserved fields hide instead of pulsing.
-pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
+pub(super) fn metric_cells(a: &AgentRow, mode: CardGraph) -> [MetricCell; 4] {
     let reportable = !a.exited && matches!(a.harness.as_deref(), Some("claude" | "codex"));
     let codex = a.harness.as_deref() == Some("codex");
     let field = |value: Option<String>, hidden: bool| {
@@ -75,9 +85,9 @@ pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
         }
     };
     let activity = match a.harness.as_deref() {
-        Some("claude" | "codex") => match activity_cell(a) {
+        Some("claude" | "codex") => match activity_cell(a, mode) {
             Some(cell) => MetricCell::Value(cell.text),
-            None => field(None::<String>, false),
+            None => MetricCell::Hidden,
         },
         // A transcriptless harness (opencode, pi): a dash, never a fake zero.
         Some(_) => MetricCell::Value("-".into()),
@@ -92,12 +102,11 @@ pub(super) fn metric_cells(a: &AgentRow) -> [MetricCell; 4] {
     ]
 }
 
-/// The line-3 activity cell: the served intervals from the server's ring,
-/// drawn as up to 8 ramp cells scaled to the card's own max, one height per
-/// refresh interval. Fewer than two intervals reads as the narrow 5-cell
-/// fill bar of the latest level; none reads as waiting (the skeleton). The
-/// ramp glyph set carries all eight block heights so one row still shows
-/// shape; the painter colors each cell by its failed share.
+/// The line-3 activity cell, per `config.mux.card_graph`. `Activity`
+/// draws the served intervals from the server's ring as up to 8 ramp cells
+/// scaled to the card's own max, blank until two intervals exist; the
+/// painter colors each cell by its failed share. `Context` draws the
+/// context percent's fill bar, steady for the whole session.
 const ACTIVITY_CELLS: usize = 8;
 const FILL_BAR_CELLS: usize = 5;
 const ACTIVITY_RAMP: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -121,24 +130,21 @@ fn color_kind(calls: u8, failed: u8) -> u8 {
     }
 }
 
-pub(super) fn activity_cell(a: &AgentRow) -> Option<ActivityCell> {
-    let pairs = a.activity.as_ref()?;
-    if pairs.is_empty() {
-        return None; // no interval closed yet: the skeleton waits
-    }
-    if pairs.len() < 2 {
-        // The narrow fill bar of the latest level: busy or idle at the
-        // coarsest resolution. One interval has no share to grade, so the
-        // bar paints in the color that pair earns and the rest stays ok.
-        let (calls, failed) = pairs[0];
-        let eighths = if calls == 0 { 0 } else { FILL_BAR_CELLS * 8 };
+pub(super) fn activity_cell(a: &AgentRow, mode: CardGraph) -> Option<ActivityCell> {
+    if mode == CardGraph::Context {
+        // The steady fill bar of the context percent for the whole
+        // session, bare of the percent (the number sits beside it);
+        // uncolored, so every kind reads ok.
+        let p = a.context_used_pct?;
+        let eighths = (usize::from(p.min(100)) * FILL_BAR_CELLS * 8).div_ceil(100);
         let bar = super::row_meter::bar_of(eighths, FILL_BAR_CELLS);
-        let kind = color_kind(calls, failed);
-        let kinds = bar
-            .chars()
-            .map(|c| if c == ' ' { 0 } else { kind })
-            .collect();
+        let kinds = vec![0; bar.chars().count()];
         return Some(ActivityCell { text: bar, kinds });
+    }
+    let pairs = a.activity.as_ref()?;
+    // The ramp waits for two intervals; before that the slot stays blank.
+    if pairs.len() < 2 {
+        return None;
     }
     let max = pairs.iter().map(|p| p.0).max().unwrap_or(0);
     let pad = ACTIVITY_CELLS.saturating_sub(pairs.len());
@@ -167,8 +173,8 @@ const LOADING_DASH_AFTER_S: u64 = 10;
 /// Whether any field still waits on the fold: the breathe timer's arm signal.
 /// A row whose Loading fields are all past [`LOADING_DASH_AFTER_S`] holds a
 /// static dash and arms no more frames.
-pub(super) fn has_loading(a: &AgentRow, now: u64) -> bool {
-    metric_cells(a)
+pub(super) fn has_loading(a: &AgentRow, mode: CardGraph, now: u64) -> bool {
+    metric_cells(a, mode)
         .iter()
         .any(|c| matches!(c, MetricCell::Loading))
         && !loading_gave_up(a, now)
@@ -185,10 +191,16 @@ pub(super) fn loading_gave_up(a: &AgentRow, now: u64) -> bool {
 /// tokens) so a landing fold does not reflow the line.
 const LOADING_W: [usize; 4] = [8, 4, 3, 8];
 
-pub(super) fn metrics(a: &AgentRow, now: u64, message: Option<&str>, width: usize) -> String {
+pub(super) fn metrics(
+    a: &AgentRow,
+    mode: CardGraph,
+    now: u64,
+    message: Option<&str>,
+    width: usize,
+) -> String {
     let phase = crate::lattice::spin_epoch().map(|t0| t0.elapsed().as_millis() as u64);
     let gave_up = loading_gave_up(a, now);
-    let fields: Vec<String> = metric_cells(a)
+    let fields: Vec<String> = metric_cells(a, mode)
         .iter()
         .enumerate()
         .filter_map(|(i, c)| match c {

@@ -93,6 +93,18 @@ pub fn hover_focus_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "hover_focus", true)
 }
 
+/// `config.mux.card_graph` (default `activity`) — what the sideline card's
+/// graph slot plots. `activity` draws the tool-call ramp, blank until two
+/// intervals exist; `context` draws the context percent's fill bar, steady
+/// for the whole session. The slot never switches between them mid-session.
+/// Latched once at client startup. Anything unparsable reads the default.
+pub fn card_graph(cwd: &Path) -> crate::client::CardGraph {
+    match mux_str(cwd, "card_graph").as_deref() {
+        Some("context") => crate::client::CardGraph::Context,
+        _ => crate::client::CardGraph::Activity,
+    }
+}
+
 /// `config.mux.status_row` (default ON), latched once at client startup.
 pub fn status_row_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "status_row", true)
