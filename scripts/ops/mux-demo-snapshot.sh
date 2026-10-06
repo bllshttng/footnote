@@ -29,7 +29,8 @@ for a in "$@"; do
   fi
   PREV="$a"
 done
-set -- "${ARGS[@]}"
+# bash 3.2 (stock macOS) reads an empty array under set -u as unbound.
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 cleanup() {
   for p in "${PANES[@]+"${PANES[@]}"}"; do
