@@ -858,7 +858,7 @@ pub(crate) fn paint_full(view: &View, cells: &mut [Cell], rows: usize, cols: usi
     super::messages_reply::paint(view, cells, rows, cols);
 }
 
-/// The chord door (prefix+M, item 8): open Messages from anywhere. The tab
+/// The chord door (prefix+I, item 8): open Messages from anywhere. The tab
 /// paints full surface, but only while the sideline shows: a hidden
 /// sideline would swallow the open, so the chord reveals it first.
 pub(crate) fn open_from_chord(view: &mut View) {

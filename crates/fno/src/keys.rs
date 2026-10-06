@@ -510,7 +510,7 @@ pub enum Event {
     OpenNav,
     /// Open or close the notifications bell panel (prefix+q).
     ToggleBell,
-    /// Open the Messages tab (prefix+M) from anywhere: the mail overlay
+    /// Open the Messages tab (prefix+I) from anywhere: the mail overlay
     /// takes the keyboard, its own bare keys move and open (the messages
     /// help section). Case pair with `m` (the yard), the h/H convention.
     OpenMessages,
@@ -1269,7 +1269,7 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
         b(
-            b'M',
+            b'I',
             "open-messages",
             OpenMessages,
             Global,
