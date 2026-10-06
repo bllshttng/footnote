@@ -1303,7 +1303,9 @@ def tick() -> None:
                     woke_n = len(wake_summary.get("woke", []) or [])
                     evaluated = int(wake_summary.get("evaluated", 0) or 0)
                     truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
-                    if crowns == 0:
+                    if crowns == 0 and wake_summary.get("court_incomplete"):
+                        skip = "court_read_incomplete"
+                    elif crowns == 0:
                         skip = "no_crowned_target"
                     elif woke_n:
                         skip = None
