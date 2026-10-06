@@ -742,7 +742,10 @@ export function register(on: On) {
       void $.ui.close({ id: CARD_ID }).catch(() => {})
     }
     // An empty field holds the focus: any typed key or Enter closes the card, and Esc does too.
-    const close = ui.Input({ key: 'close', placeholder: 'press any key', value: '', submitLabel: 'close', autoFocus: true, onInput: shut, onSubmit: shut })
+    // Desktop draws an Input as a text box, so there the card closes with a button or Esc.
+    const close = e.surface === 'desktop'
+      ? ui.Button({ key: 'close', label: 'close', onPress: shut })
+      : ui.Input({ key: 'close', placeholder: 'press any key', value: '', submitLabel: 'close', autoFocus: true, onInput: shut, onSubmit: shut })
     return showTree(ui, cardSnap, await $.clock.now(), close)
   })
 

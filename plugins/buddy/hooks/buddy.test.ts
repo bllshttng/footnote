@@ -182,6 +182,12 @@ test('a fresh buddy hatches from the egg into the original card, and any key clo
   await shown.unmount()
   const gone = await $.ui.mount(row)
   expect(await gone.find({ type: 'Text', text: /chime in as you code$/ })).toBeUndefined()
+  // Desktop draws an Input as a text box, so the card there closes with a button.
+  await $.command.run({ command: 'buddy', args: '' })
+  const desk = await $.ui.mount({ ...row, surface: 'desktop' })
+  await desk.press({ key: 'close' })
+  await desk.unmount()
+  expect(await (await $.ui.mount({ ...row, surface: 'desktop' })).find({ type: 'Text', text: /chime in as you code$/ })).toBeUndefined()
 })
 
 test('on Desktop the buddy shows above the prompt even when it wraps the terminal status line', async ($, on) => {
