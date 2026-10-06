@@ -1224,7 +1224,7 @@ def tick() -> None:
                                 "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd()),
                                 "deadline_ms": int(grant_timeout * 1000)},
-                                timeout=grant_timeout + 5.0)
+                                timeout=grant_timeout)
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
                 queue = [
