@@ -103,6 +103,7 @@ Then run `fno agents org checkin` (bare from the titled session, or `--scope <sc
 - `escalations:` open and overdue escalation notes in this scope's escalations directory, filtered to the role fold. Take the recommended option, or wait; irreversible always waits.
 - `control plane:` list overdue arms, hung verbs (over 3× their `--timeout`), and `flight:` holders with dead PIDs. A change that starts `attention:` is never a quiet beat. Trace each entry with `fno agents status`. Tell the user in the next report.
  - `parked:` open PR parks, each with its reason, age and node, and the `fno-agents pr-park unpark <key>` remedy. When nothing is parked, the line reads `parked: none`.
+ - `prompt parked:` one `WAITING ON APPROVAL` line per worker sitting on a harness permission, approval, or picker prompt. Each line names the worker, the pane, the prompt head, and the answering `fno mux pane send` key. Its absence IS the clean read (`prompt parked: none` is never printed). A failed read prints `READER FAILED prompt_parked` and the beat continues without it.
 
 A failed reader prints `READER FAILED <name>: <reason>` on its own line, and the beat continues without it. One refused instrument can never blank a line or masquerade as a healthy value on another axis. The `coverage: N of M readings ok` line counts M as the readings this beat ran and N as the ones that answered. A `failed readers:` line names each one that failed, so a beat with a failed reader can never read as a clean beat. A `vs last beat` line diffs the numeric keys against the previous canonical row. A `change:` line states what moved. When this scope's FAQ store is empty or any reader failed, the ready-to-run `fno agents org faq add` command prints.
 
@@ -116,6 +117,17 @@ Apply the first matching lever to each row, in this order:
 5. Keep a worker on the territory's top unplanned node. Run the verb the line names: `start /fno:blueprint subagent <id>` or `target-ready: /fno:target <id>`. This designs or builds work without a user request. The floor is `dispatch.blueprint_floor`. A lead can still blueprint one medium node by hand.
 
 For each `start` or `target-ready` line, run the verb it names, in check-in order. Do not start nodes the check-in omits. Its list is the ceiling. A `skip` needs no action. The row records it. A chat ask blocks Stop (rule chat_ask_unfiled).
+
+### Answering a parked prompt
+
+A `WAITING ON APPROVAL` line is an action item, not a status line. Answer it the same beat, in this order:
+
+1. Judge whether answering is inside the worker's task. The check-in line names the prompt head, and the worker's claim or its mail thread names its node and brief. A worktree tool call from the worker's own plan is inside the task. So is a model switch, or a trust prompt for the worker's own cwd. Answer those. A prompt outside the task (a deploy, a protected-surface push) is not. Escalate that one to the user instead of answering.
+2. Answerable line (a numbered menu): run `fno mux pane send <pane> --raw <key>` with exactly the key the line prints. Then verify with one `fno mux pane read <pane> --json`. A pane that still shows the prompt after the send names the failure and the `fno agents attach <worker>` fallback.
+3. Focus-only line (no numbered menu): `fno agents attach <worker>`, answer the menu with its arrow keys and Enter, then detach. Run one `fno mux pane read` to verify. A picker with a supported verb takes the verb first: `fno agents ask` retasks a model switch.
+4. Record it: `fno backlog note <node> "answered <tool> prompt on pane <id> (<prompt head>)"`. A second WAITING ON APPROVAL line for the same worker across beats means the answer did not land. Escalate instead of re-sending.
+
+Never answer blind: the check-in line is evidence a prompt is up, never proof of what it asks. If the pane read shows text the line did not capture (a question you cannot judge from the head), read the pane before sending keys.
 
 To pause or redirect a running worker, use `fno agents ask <name> "<instruction>"` (or mail). Never steer with `fno agents stop`: on claude it ends the session, and the worker reads Done.
 

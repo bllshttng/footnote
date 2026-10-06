@@ -11,6 +11,7 @@ const WORKER_BIN: &str = env!("CARGO_BIN_EXE_fno-agents-worker");
 
 fn exec_request(graph: &std::path::Path, body: &str) -> (i32, Option<Value>) {
     let mut child = Command::new(WORKER_BIN)
+        .env("FNO_STORE_EXEC_LOG", graph.with_file_name("requests.jsonl"))
         .args([
             "--store-exec",
             "--graph",
@@ -92,7 +93,8 @@ fn store_exec_serves_read_begin_commit_across_processes() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
     fno_agents::graph_store::seed_rows(&graph, &[
-        json!({"id": "x-exe", "slug": "exec-node", "title": "e", "type": "feature", "status": "ready", "priority": "p2"})
+        json!({"id": "x-exe", "slug": "exec-node", "title": "e", "type": "feature", "status": "ready", "priority": "p2", "tags":["important"], "sessions":[{"phase":"think", "harness":"codex", "session_id":"test-session"}]}),
+        json!({"id": "x-closed", "slug": "closed-node", "title": "c", "type": "feature", "status": "done", "priority": "p2", "completed_at":"2026-09-01T00:00:00Z", "archived_at":"2026-09-02T00:00:00Z"})
     ]).unwrap();
 
     // A read answers and binds no socket beside the graph file.
@@ -138,6 +140,93 @@ fn store_exec_serves_read_begin_commit_across_processes() {
         .unwrap()
         .clone();
     assert_eq!(landed["title"], json!("executed"));
+    let (_, unarchived) = exec_request(
+        &graph,
+        r#"{"id":8,"method":"read","params":{"include_archived":false}}"#,
+    );
+    let unarchived = unarchived.unwrap();
+    let unarchived = unarchived["result"]["entries"].as_array().unwrap();
+    assert_eq!(unarchived.len(), 1);
+    assert_eq!(unarchived[0]["id"], "x-exe");
+    for (method, params, key) in [
+        (
+            "read",
+            json!({"filter":{"state_type":"open"},"fields":["id"]}),
+            "entries",
+        ),
+        (
+            "api",
+            json!({"op":"rows","filter":{"id_in":["EXEC-NODE"]},"fields":["id"]}),
+            "rows",
+        ),
+        (
+            "api",
+            json!({"op":"nodes","filter":{"state_type":"open"},"fields":["id"]}),
+            "nodes",
+        ),
+        (
+            "api",
+            json!({"op":"nodes","filter":{"label":"important"},"fields":["id"]}),
+            "nodes",
+        ),
+        (
+            "api",
+            json!({"op":"nodes","filter":{"session_id":"test-session"},"fields":["id"]}),
+            "nodes",
+        ),
+    ] {
+        let body = json!({"id":9,"method":method,"params":params}).to_string();
+        let (code, reply) = exec_request(&graph, &body);
+        assert_eq!(code, 0, "{reply:?}");
+        assert_eq!(reply.unwrap()["result"][key], json!([{"id":"x-exe"}]));
+    }
+    let (_, ids) = exec_request(
+        &graph,
+        &json!({"id":10,"method":"read_ids","params":{"ids":["EXEC-NODE","missing","x-exe"]}})
+            .to_string(),
+    );
+    let ids = ids.unwrap();
+    assert_eq!(ids["result"]["missing"], json!(["missing"]));
+    assert_eq!(
+        ids["result"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("x-exe"), json!("x-exe")]
+    );
+    let (_, refs) = exec_request(&graph, r#"{"id":11,"method":"plan_refs"}"#);
+    assert_eq!(
+        refs.unwrap()["result"]["entries"][0],
+        json!({"id":"x-exe","plan_path":null,"cwd":null})
+    );
+    for params in [json!({"filter":"bad"}), json!({"fields":[1]})] {
+        let (_, reply) = exec_request(
+            &graph,
+            &json!({"id":12,"method":"read","params":params}).to_string(),
+        );
+        assert_eq!(reply.unwrap()["error"]["kind"], "invalid");
+    }
+    let unreadable_graph = dir.path().join("unreadable.json");
+    fno_agents::graph_store::seed_rows(&unreadable_graph, &[]).unwrap();
+    rusqlite::Connection::open(fno_agents::backlog::database_path(&unreadable_graph))
+        .unwrap()
+        .execute("DELETE FROM graph_meta WHERE key = 'version'", [])
+        .unwrap();
+    let (_, unreadable) = exec_request(
+        &unreadable_graph,
+        r#"{"id":13,"method":"read_strict","params":{"fields":["id"]}}"#,
+    );
+    assert_eq!(unreadable.unwrap()["error"]["kind"], "unreadable");
+    let log = std::fs::read_to_string(dir.path().join("requests.jsonl")).unwrap();
+    for row in log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["method"] == "api")
+    {
+        assert_eq!(row["kind"], "read", "API queries must be measured as reads");
+    }
 }
 
 #[test]

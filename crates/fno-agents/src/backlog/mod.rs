@@ -1331,50 +1331,342 @@ pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, Stri
     Ok(entries)
 }
 
-/// The rows behind an open connection, in ordinal order. One scan per
-/// table; the batched assembler shares every row mapper with the
-/// single-node load.
+/// The whole canonical export in store order, including raw-carried and archived rows.
 pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
+    query_rows(connection, &RowQuery::default(), None)
+}
+
+/// Narrow selection and projection. Whole-read defaults retain archived rows;
+/// readiness support stays internal when requested through `with_blockers`.
+#[derive(Clone, Debug)]
+pub struct RowQuery {
+    pub filter: api::NodeFilter,
+    pub fields: Option<Vec<String>>,
+    pub include_archived: bool,
+    pub with_blockers: bool,
+}
+
+impl Default for RowQuery {
+    fn default() -> Self {
+        Self {
+            filter: Default::default(),
+            fields: None,
+            include_archived: true,
+            with_blockers: false,
+        }
+    }
+}
+
+/// Query rows after defaults, exact filtering, and projection. The empty query
+/// preserves the raw export; hidden blocker and child support never escapes.
+pub fn read_entries_where(graph: &Path, query: &RowQuery) -> Result<Vec<Value>, String> {
+    query_rows(&read_connection(graph)?, query, None)
+}
+
+pub(crate) fn read_entries_where_defaulted(
+    graph: &Path,
+    query: &RowQuery,
+    keep_malformed: bool,
+) -> Result<Vec<Value>, String> {
+    query_rows(&read_connection(graph)?, query, Some(keep_malformed))
+}
+
+/// The old whole-export enumeration, without materializing any node bodies.
+pub fn row_ordinals(graph: &Path) -> Result<std::collections::HashMap<String, i64>, String> {
+    let connection = read_connection(graph)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM (SELECT id, ordinal FROM nodes UNION ALL
+         SELECT id, ordinal FROM nodes_raw WHERE json_type(body) = 'object') ORDER BY ordinal, id",
+        )
+        .map_err(|error| error.to_string())?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    ids.enumerate()
+        .map(|(ordinal, id)| id.map(|id| (id, ordinal as i64)))
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn query_rows(
+    connection: &Connection,
+    query: &RowQuery,
+    keep_malformed: Option<bool>,
+) -> Result<Vec<Value>, String> {
+    let transaction = if connection.is_autocommit() {
+        Some(
+            connection
+                .unchecked_transaction()
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let connection = transaction
+        .as_ref()
+        .map(|transaction| &**transaction)
+        .unwrap_or(connection);
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
-    // Project the external claim store once for the whole export: the claim
-    // is the holder of record, and the stored lock fields are the retired
-    // mirror. Loading each node through `nodes::load` would rescan every
-    // lockfile for every row.
+    let filter = &query.filter;
+    let mut predicates = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    let mut in_values = |column: &str, values: &[String]| {
+        let slots = values
+            .iter()
+            .map(|value| {
+                params.push(value.clone().into());
+                format!("?{}", params.len())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{column} IN ({slots})")
+    };
+    if let Some(ids) = &filter.id_in {
+        predicates.push(format!(
+            "({} OR {})",
+            in_values("id COLLATE NOCASE", ids),
+            in_values("slug COLLATE NOCASE", ids)
+        ));
+    }
+    if let Some(statuses) = &filter.status_in {
+        let mut statuses: Vec<String> = statuses
+            .iter()
+            .map(|status| {
+                if status == "claimed" {
+                    "in_progress".to_owned()
+                } else {
+                    status.clone()
+                }
+            })
+            .collect();
+        if statuses.iter().any(|status| status == "in_progress") {
+            statuses.extend(["claimed", "idea", "ready"].map(str::to_owned));
+        }
+        let expression = in_values("status", &statuses);
+        predicates.push(if statuses.iter().any(|status| status == "blocked") {
+            format!("({expression} OR status NOT IN ('done','deferred','superseded','in_review'))")
+        } else {
+            expression
+        });
+    }
+    for (column, value) in [("project", &filter.project), ("parent_id", &filter.parent)] {
+        if let Some(value) = value {
+            params.push(value.clone().into());
+            predicates.push(format!("{column} = ?{}", params.len()));
+        }
+    }
+    if filter.state_type.as_deref() == Some("open") {
+        predicates.push("status NOT IN ('done','deferred','superseded')".into());
+    }
+    if !query.include_archived {
+        predicates.push("archived_at IS NULL".into());
+    }
+    let where_sql = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    };
     let node_claims = nodes::node_claims_by_id()?;
+    let mut fields = query.fields.clone();
+    if let Some(fields) = &mut fields {
+        if filter.session_id.is_some() {
+            fields.push("sessions".into());
+        }
+        if query.with_blockers {
+            fields.extend(
+                ["blocked_by", "superseded_by", "supersession", "deferred_at"].map(str::to_owned),
+            );
+        }
+    }
+    let load = |id: &str, fields: Option<&[String]>| -> Result<Option<Value>, String> {
+        let claim = node_claims.get(id).cloned().unwrap_or_default();
+        let mut row = match nodes::load_with_claim(connection, id, Some(claim.clone()), fields)? {
+            Some(node) => Some(node.to_json()),
+            None => nodes::raw_rows_where(connection, Some(&[id.to_owned()]))?
+                .into_iter()
+                .find(|(raw_id, _, _)| raw_id == id)
+                .map(|(_, _, row)| row),
+        };
+        if let Some(row) = &mut row {
+            nodes::project_claim_value(row, claim);
+        }
+        Ok(row)
+    };
     let mut statement = connection
-        .prepare("SELECT id, ordinal FROM nodes ORDER BY ordinal, id")
+        .prepare(&format!(
+            "SELECT id, ordinal FROM nodes{where_sql} ORDER BY ordinal, id"
+        ))
         .map_err(|error| error.to_string())?;
     let ids = statement
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let mut typed: Vec<(i64, String, Value)> = Vec::new();
-    for id in ids {
-        let (id, ordinal) = id.map_err(|error| error.to_string())?;
-        let claim = node_claims.get(&id).cloned().unwrap_or_default();
-        let Some(node) = nodes::load_with_claim(&connection, &id, Some(claim))? else {
-            return Err(format!("node {id} vanished mid-export"));
-        };
-        typed.push((ordinal, id, node.to_json()));
+    let mut merged = Vec::new();
+    for (id, ordinal) in ids {
+        let body = load(&id, fields.as_deref())?
+            .ok_or_else(|| format!("node {id} vanished mid-export"))?;
+        merged.push((ordinal, id, body));
     }
-    // Raw-carried rows round-trip verbatim, merged into ordinal order.
-    let mut merged: Vec<(i64, String, Value)> = nodes::raw_rows(connection)?
-        .into_iter()
-        .map(|(id, ordinal, body)| (ordinal, id, body))
-        .collect();
-    merged.append(&mut typed);
-    // One projection for every served row, typed and raw alike: a typed
-    // row carries the retired mirror's lock fields in its extras, so only
-    // a uniform pass serves the claim store's word everywhere.
-    for (_, id, body) in &mut merged {
-        let claim = node_claims.get(id).cloned().unwrap_or_default();
-        nodes::project_claim_value(body, claim);
+    for (id, ordinal, mut body) in nodes::raw_rows_where(connection, filter.id_in.as_deref())? {
+        if !query.include_archived
+            && body
+                .get("archived_at")
+                .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+        nodes::project_claim_value(&mut body, node_claims.get(&id).cloned().unwrap_or_default());
+        merged.push((ordinal, id, body));
     }
     merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    Ok(merged.into_iter().map(|(_, _, row)| row).collect())
+    let raw_export = keep_malformed.is_none()
+        && filter.is_empty()
+        && query.include_archived
+        && query.fields.is_none()
+        && !query.with_blockers;
+    if raw_export {
+        return Ok(merged.into_iter().map(|(_, _, row)| row).collect());
+    }
+    let mut rows: Vec<Value> = merged.into_iter().map(|(_, _, row)| row).collect();
+    let asked_count = rows.len();
+    let support_fields: Vec<String> = crate::graph_store::CHILD_SUMMARY_FIELDS
+        .iter()
+        .chain(
+            [
+                "parent",
+                "completed_at",
+                "deferred_at",
+                "blocked_by",
+                "superseded_by",
+                "locked_by",
+                "locked_by_harness",
+                "locked_by_harness_session",
+                "locked_at",
+                "session_id",
+            ]
+            .iter(),
+        )
+        .map(|field| (*field).into())
+        .collect();
+    let mut loaded: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    // Child summaries need the omitted direct children, even on a filtered full read.
+    if (!filter.is_empty() || !query.include_archived)
+        && query
+            .fields
+            .as_ref()
+            .is_none_or(|fields| fields.iter().any(|field| field == "children"))
+    {
+        let parents: Vec<String> = loaded.iter().cloned().collect();
+        for (id, _, mut body) in nodes::raw_children(connection, &parents)? {
+            if loaded.insert(id.clone()) {
+                nodes::project_claim_value(
+                    &mut body,
+                    node_claims.get(&id).cloned().unwrap_or_default(),
+                );
+                rows.push(body);
+            }
+        }
+        for parent in parents {
+            let mut statement = connection
+                .prepare_cached("SELECT id FROM nodes WHERE parent_id = ?1 ORDER BY ordinal, id")
+                .map_err(|error| error.to_string())?;
+            let ids = statement
+                .query_map(params![parent], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            for id in ids {
+                if loaded.insert(id.clone()) {
+                    if let Some(row) = load(&id, Some(&support_fields))? {
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+    }
+    if query.with_blockers && !(filter.is_empty() && query.include_archived) {
+        let blockers: Vec<String> = rows
+            .iter()
+            .flat_map(|row| {
+                row.get("blocked_by")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        for blocker in blockers {
+            let mut current = Some(blocker);
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..=crate::graph_store::MAX_CHAIN_HOPS {
+                let Some(id) = current.take() else {
+                    break;
+                };
+                if !seen.insert(id.clone()) {
+                    break;
+                }
+                if loaded.insert(id.clone()) {
+                    if let Some(row) = load(&id, Some(&support_fields))? {
+                        rows.push(row);
+                    }
+                }
+                current = rows
+                    .iter()
+                    .find(|row| row.get("id").and_then(Value::as_str) == Some(&id))
+                    .and_then(|row| row.get("superseded_by"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
+    }
+    crate::graph_store::apply_defaults(&mut rows, true);
+    rows.truncate(asked_count);
+    if !filter.is_empty() || query.fields.is_some() {
+        for row in &mut rows {
+            if row
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| node_claims.get(id))
+                .is_some_and(|claim| claim.work)
+                && row.get("locked_by").is_some_and(|value| !value.is_null())
+                && row
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| matches!(status, "idea" | "ready"))
+            {
+                row["status"] = Value::String("in_progress".into());
+            }
+        }
+    }
+    if !filter.is_empty() {
+        rows.retain(|row| match model::Node::from_json(row) {
+            Ok(mut node) => {
+                node.claim = node_claims.get(&node.id).cloned().unwrap_or_default();
+                api::filter_matches(&node, filter)
+            }
+            Err(_) => filter.only_ids(),
+        });
+    }
+    if !keep_malformed.unwrap_or(false) {
+        rows.retain(Value::is_object);
+    }
+    if let Some(fields) = &query.fields {
+        for row in &mut rows {
+            if let Some(object) = row.as_object_mut() {
+                object.retain(|key, _| fields.contains(key));
+            }
+        }
+    }
+    Ok(rows)
 }
 
 pub(crate) fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -1603,6 +1895,17 @@ mod tests {
         let graph = two_node_graph(&dir);
         let entries = read_entries(&graph).unwrap();
         assert_eq!(entries.len(), 2, "both rows imported");
+        let live = api::nodes(
+            &api::Store::new(&graph),
+            &api::NodeFilter {
+                state_type: Some("open".into()),
+                ..Default::default()
+            },
+            &api::Page::default(),
+        )
+        .unwrap();
+        assert_eq!(live.nodes.len(), 2, "open reads keep live rows");
+
         let connection = open(&graph).unwrap();
         let sessions: i64 = connection
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
@@ -1665,6 +1968,290 @@ mod tests {
             read_entries(&graph).unwrap().len(),
             2,
             "the store still answers"
+        );
+
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _claims_root =
+            crate::claims::EnvVarGuard::set("FNO_CLAIMS_ROOT", dir.path().to_str().unwrap());
+        let query_graph = dir.path().join("query.json");
+        let mut fixture = serde_json::json!([
+            {"id":"q-done", "title":"Done", "slug":"closed", "status":"done", "completed_at":"2026-09-11T00:00:00Z", "parent":"q-live"},
+            {"id":"q-live", "title":"Live", "slug":"live", "status":"ready", "project":"fno", "blocked_by":["q-old"], "tags":["a"], "sessions":[{"phase":"execute","harness":"codex","session_id":"test-session"}]},
+            {"id":"q-old", "title":"Old", "slug":"old", "status":"superseded", "superseded_by":"q-done"},
+            {"id":"q-archived", "title":"Archived", "slug":"archived", "status":"ready", "archived_at":"2026-09-11T00:00:00Z"},
+            {"id":"q-deferred", "title":"Deferred", "slug":"deferred", "status":"deferred"},
+            {"id":"q-claimed", "title":"Claimed", "slug":"claimed", "status":"claimed"},
+            {"id":"q-raw", "title": 4, "status":"legacy-unknown", "slug":"raw", "parent":"q-live"}
+        ]);
+        for row in fixture.as_array_mut().unwrap() {
+            if !matches!(row["id"].as_str(), Some("q-live" | "q-raw")) {
+                row["type"] = serde_json::json!("feature");
+                row["priority"] = serde_json::json!("p2");
+            }
+        }
+        crate::graph_store::seed_rows(&query_graph, fixture.as_array().unwrap()).unwrap();
+        let full_raw = read_entries(&query_graph).unwrap();
+        assert_eq!(
+            read_entries_where(&query_graph, &RowQuery::default()).unwrap(),
+            full_raw
+        );
+        let mut full = full_raw.clone();
+        crate::graph_store::apply_defaults(&mut full, false);
+        assert_eq!(crate::graph_store::read_rows(&query_graph).unwrap(), full);
+        let query = RowQuery {
+            filter: api::NodeFilter {
+                state_type: Some("open".into()),
+                ..Default::default()
+            },
+            include_archived: false,
+            with_blockers: true,
+            ..Default::default()
+        };
+        let narrowed = crate::graph_store::read_rows_where(&query_graph, &query).unwrap();
+        let expected: Vec<Value> = full
+            .iter()
+            .filter(|row| {
+                row["archived_at"].is_null()
+                    && matches!(row["id"].as_str(), Some("q-live" | "q-claimed"))
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            narrowed, expected,
+            "closed children and hidden successor preserve row parity"
+        );
+        let ordinals = row_ordinals(&query_graph).unwrap();
+        let page = api::Page {
+            first: Some(1),
+            ..Default::default()
+        };
+        let old_page = api::nodes_in(&full, &query.filter, &page);
+        let new_page = api::nodes_in_with_ordinals(&narrowed, &query.filter, &page, &ordinals);
+        assert_eq!(new_page.page_info.end_cursor, old_page.page_info.end_cursor);
+        let next_page = api::Page {
+            after: new_page.page_info.end_cursor,
+            ..page
+        };
+        let next = api::nodes(&api::Store::new(&query_graph), &query.filter, &next_page).unwrap();
+        assert_eq!(next.nodes[0].id, "q-claimed");
+        for (filter, wanted) in [
+            (
+                api::NodeFilter {
+                    id_in: Some(vec!["LIVE".into()]),
+                    ..Default::default()
+                },
+                "q-live",
+            ),
+            (
+                api::NodeFilter {
+                    project: Some("fno".into()),
+                    ..Default::default()
+                },
+                "q-live",
+            ),
+            (
+                api::NodeFilter {
+                    parent: Some("q-live".into()),
+                    ..Default::default()
+                },
+                "q-done",
+            ),
+            (
+                api::NodeFilter {
+                    label: Some("a".into()),
+                    ..Default::default()
+                },
+                "q-live",
+            ),
+            (
+                api::NodeFilter {
+                    session_id: Some("test-session".into()),
+                    ..Default::default()
+                },
+                "q-live",
+            ),
+            (
+                api::NodeFilter {
+                    status_in: Some(vec!["in_progress".into()]),
+                    ..Default::default()
+                },
+                "q-claimed",
+            ),
+            (
+                api::NodeFilter {
+                    id_in: Some(vec!["raw".into()]),
+                    ..Default::default()
+                },
+                "q-raw",
+            ),
+        ] {
+            let rows = crate::graph_store::read_rows_where(
+                &query_graph,
+                &RowQuery {
+                    filter,
+                    fields: Some(vec!["id".into()]),
+                    with_blockers: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(rows, vec![serde_json::json!({"id":wanted})]);
+        }
+
+        let claim_options = crate::claims::AcquireOpts {
+            root: Some(dir.path().into()),
+            events_dir: Some(dir.path().into()),
+            ttl_ms: Some(60_000),
+            ..Default::default()
+        };
+        for (key, holder) in [
+            ("node:q-live", "test-worker"),
+            ("node:q-archived", "blueprint-session:test"),
+        ] {
+            assert!(matches!(
+                crate::claims::acquire(key, holder, claim_options.clone()),
+                crate::claims::AcquireOutcome::Acquired(_)
+            ));
+        }
+        let whole = crate::graph_store::read_rows_where(
+            &query_graph,
+            &RowQuery {
+                include_archived: false,
+                with_blockers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            whole.iter().find(|row| row["id"] == "q-live").unwrap()["status"],
+            "ready"
+        );
+        let planning = crate::graph_store::read_rows_where(
+            &query_graph,
+            &RowQuery {
+                filter: api::NodeFilter {
+                    id_in: Some(vec!["q-archived".into()]),
+                    ..Default::default()
+                },
+                fields: Some(vec!["status".into()]),
+                with_blockers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            planning[0]["status"], "ready",
+            "a planning claim does not serve work status"
+        );
+        let claimed_query = RowQuery {
+            filter: api::NodeFilter {
+                status_in: Some(vec!["in_progress".into()]),
+                claimed: Some(true),
+                ..Default::default()
+            },
+            fields: Some(vec!["id".into(), "status".into()]),
+            with_blockers: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &claimed_query).unwrap(),
+            vec![serde_json::json!({"id":"q-live", "status":"in_progress"})]
+        );
+        crate::claims::release(
+            "node:q-live",
+            "test-worker",
+            Some(dir.path()),
+            Some(dir.path()),
+        )
+        .unwrap();
+        crate::claims::release(
+            "node:q-archived",
+            "blueprint-session:test",
+            Some(dir.path()),
+            Some(dir.path()),
+        )
+        .unwrap();
+        let mut projected = query.clone();
+        projected.fields = Some(vec!["id".into(), "status".into()]);
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).unwrap(),
+            vec![
+                serde_json::json!({"id":"q-live","status":"ready"}),
+                serde_json::json!({"id":"q-claimed","status":"in_progress"})
+            ]
+        );
+        let unreadable_graph = dir.path().join("unreadable.json");
+        crate::graph_store::seed_rows(&unreadable_graph, &[]).unwrap();
+        open(&unreadable_graph)
+            .unwrap()
+            .execute("DELETE FROM graph_meta WHERE key = 'version'", [])
+            .unwrap();
+        assert!(crate::graph_store::read_rows_where_strict(&unreadable_graph, &projected).is_err());
+        let connection = open(&query_graph).unwrap();
+        let mut done = nodes::load(&connection, "q-done").unwrap().unwrap();
+        done.completed_at = None;
+        done.status = model::Status::Ready;
+        nodes::save(&connection, &done).unwrap();
+        let blocked_query = RowQuery {
+            filter: api::NodeFilter {
+                status_in: Some(vec!["blocked".into()]),
+                ..Default::default()
+            },
+            fields: Some(vec!["id".into()]),
+            with_blockers: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &blocked_query).unwrap(),
+            vec![serde_json::json!({"id":"q-live"})]
+        );
+
+        let connection = open(&query_graph).unwrap();
+        done.superseded_by = Some("q-old".into());
+        done.status = model::Status::Superseded;
+        nodes::save(&connection, &done).unwrap();
+        let rows = crate::graph_store::read_rows_where(&query_graph, &projected).unwrap();
+        assert_eq!(
+            rows[0]["status"], "blocked",
+            "cycles remain unknown dependencies"
+        );
+        nodes::delete(&connection, "q-old").unwrap();
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
+            "blocked"
+        );
+
+        let mut raw_blocker = serde_json::json!({"id":"q-old", "title":4, "status":"done", "completed_at":"2026-09-11T00:00:00Z"});
+        nodes::save_raw(&connection, "q-old", 30, &raw_blocker).unwrap();
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
+            "ready",
+            "raw-carried completed blocker releases a dependent"
+        );
+        raw_blocker["completed_at"] = Value::Null;
+        nodes::save_raw(&connection, "q-old", 30, &raw_blocker).unwrap();
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
+            "blocked"
+        );
+        nodes::delete_raw(&connection, "q-old").unwrap();
+        save_aggregate(&connection, &model::Node::from_json(&serde_json::json!({
+            "id":"q-old", "slug":"old", "title":"Old", "type":"feature", "priority":"p2", "status":"done", "completed_at":"2026-09-11T00:00:00Z"
+        })).unwrap()).unwrap();
+        connection.execute_batch("DROP TABLE sessions; DROP TABLE comments; DROP TABLE encounters; DROP TABLE findings; DROP TABLE node_costs; DROP TABLE node_dispatch; DROP TABLE node_provenance; DROP TABLE pull_requests;").unwrap();
+        assert!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).is_ok(),
+            "unrequested aggregates are not read"
+        );
+        assert_eq!(
+            crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
+            "ready"
+        );
+        assert!(
+            crate::graph_store::read_rows(&query_graph).is_err(),
+            "whole reads still surface aggregate failures"
         );
     }
 

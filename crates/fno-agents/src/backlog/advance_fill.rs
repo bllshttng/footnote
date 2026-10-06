@@ -71,7 +71,18 @@ fn live_worked_entries(root: Option<&Path>, graph: &Path) -> Result<Vec<Value>, 
     if held.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = crate::graph_store::read_rows(graph).unwrap_or_default();
+    let rows = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(held.iter().cloned().collect()),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
     Ok(rows
         .into_iter()
         .filter(|row| {
@@ -166,8 +177,49 @@ fn ready_frontier(
     staleness_days: i64,
 ) -> Result<Vec<Value>, String> {
     let graph = super::settings::graph_path();
-    let entries = crate::graph_store::read_rows_strict(&graph)
-        .map_err(|error| format!("graph unreadable: {error}"))?;
+    let entries = crate::graph_store::read_rows_where_strict(
+        &graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                crate::graph_store::SLIM_FIELDS
+                    .iter()
+                    .copied()
+                    .chain([
+                        "size",
+                        "model",
+                        "dispatch_verb",
+                        "dispatch_brief",
+                        "mission_id",
+                        "mission_wave",
+                        "mission_slug",
+                        "mission_from_msg_id",
+                        "roadmap_id",
+                        "sessions",
+                        "additional_prs",
+                        "dispatch_hold",
+                        "contained_in",
+                        "queued_at",
+                        "queued_reason",
+                        "deferred_at",
+                        "superseded_by",
+                        "supersession",
+                        "encounters",
+                        "orphan_ok",
+                        "batch",
+                        "tags",
+                        "blocked_reason",
+                        "children_total",
+                        "children_done",
+                        "discovery",
+                    ])
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("graph unreadable: {error}"))?;
     let project_filter = project.map(str::to_string);
     let opts = crate::backlog_ready::ReadyOpts {
         project: project_filter.clone(),

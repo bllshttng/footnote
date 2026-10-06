@@ -137,9 +137,19 @@ fn resolve_node_id(
 /// The grid row Python's `_grid_node` read: the node's entry in the graph
 /// store, advisory only.
 fn graph_row_for(node_id: &str) -> Option<Value> {
-    let rows = crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).ok()?;
-    rows.into_iter()
-        .find(|row| row.get("id").and_then(Value::as_str) == Some(node_id))
+    let rows = crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![node_id.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    crate::graph_get::find_entry(&rows, node_id).cloned()
 }
 
 /// The first verb-shaped token anywhere in the seed, sigil and namespace

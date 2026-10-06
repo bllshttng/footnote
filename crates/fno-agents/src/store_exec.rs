@@ -278,7 +278,8 @@ fn request_log_row(payload: &[u8], reply: &Value, reply_bytes: usize, wall: Dura
         "ts_ms": ts_ms,
         "method": method,
         "op": op,
-        "kind": if crate::graph_keeper::is_write_method(method) { "write" } else { "read" },
+        "kind": if crate::graph_keeper::is_write_method(method)
+            && !(method == "api" && op.is_some_and(crate::graph_keeper::api_is_read_op)) { "write" } else { "read" },
         "ok": reply.get("ok").and_then(Value::as_bool) == Some(true),
         "rows": rows,
         "reply_bytes": reply_bytes,

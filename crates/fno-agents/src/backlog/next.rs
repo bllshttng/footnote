@@ -469,10 +469,49 @@ pub fn run(args: &[String]) -> i32 {
 
     // One strict read for the prelude AND selection: the working graph, read
     // at most once for project detection AND parent resolution.
+    let query = crate::backlog::RowQuery {
+        fields: Some(
+            crate::graph_store::SLIM_FIELDS
+                .iter()
+                .copied()
+                .chain([
+                    "size",
+                    "model",
+                    "dispatch_verb",
+                    "dispatch_brief",
+                    "mission_id",
+                    "mission_wave",
+                    "mission_slug",
+                    "mission_from_msg_id",
+                    "roadmap_id",
+                    "sessions",
+                    "additional_prs",
+                    "dispatch_hold",
+                    "contained_in",
+                    "queued_at",
+                    "queued_reason",
+                    "deferred_at",
+                    "superseded_by",
+                    "supersession",
+                    "encounters",
+                    "orphan_ok",
+                    "batch",
+                    "tags",
+                    "blocked_reason",
+                    "children_total",
+                    "children_done",
+                    "discovery",
+                ])
+                .map(str::to_string)
+                .collect(),
+        ),
+        with_blockers: true,
+        ..Default::default()
+    };
     let need_prelude = (o.project.is_none() && !o.all) || o.parent.is_some() || o.claim.is_some();
     let pre_entries = if need_prelude {
         let graph = super::settings::graph_path();
-        match crate::graph_store::read_rows_strict(&graph) {
+        match crate::graph_store::read_rows_where_strict(&graph, &query) {
             Ok(rows) => Some(rows),
             Err(error) => {
                 eprintln!("Error: graph unreadable: {error}; selection refused");
@@ -600,13 +639,14 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         let graph = super::settings::graph_path();
-        entries_for_receipts = crate::graph_store::read_rows(&graph).unwrap_or_default();
+        entries_for_receipts =
+            crate::graph_store::read_rows_where(&graph, &query).unwrap_or_default();
     } else {
         let entries = match pre_entries {
             Some(entries) => entries,
             None => {
                 let graph = super::settings::graph_path();
-                match crate::graph_store::read_rows_strict(&graph) {
+                match crate::graph_store::read_rows_where_strict(&graph, &query) {
                     Ok(rows) => rows,
                     Err(error) => {
                         eprintln!("Error: graph unreadable: {error}; selection refused");

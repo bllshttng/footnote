@@ -12,7 +12,6 @@
 //! over 21 days, one graph read each. A caller naming several ids in one
 //! invocation pays that read once.
 
-use crate::graph_store;
 use serde_json::Value;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -201,7 +200,19 @@ pub fn run_graph_get(args: &[String]) -> i32 {
         return 1;
     }
 
-    let mut entries = match crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path))
+    let mut entries = match crate::graph_store::read_rows_where(
+        &graph_path,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(ids.clone()),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map(|rows| crate::backlog::api::rows_in(&rows))
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
     {
         Ok(e) => e,
         Err(err) => {
@@ -209,7 +220,6 @@ pub fn run_graph_get(args: &[String]) -> i32 {
             return 1;
         }
     };
-    graph_store::apply_readiness_overlay(&mut entries);
 
     let (out, any_missing) = serve(&mut entries, &ids);
     println!(
@@ -386,7 +396,7 @@ mod tests {
         assert_eq!(overridden, 0);
     }
 
-    /// The run path asks the store (`backlog::api::rows`): a seeded fixture
+    /// The run path queries the store for the requested tokens: a seeded fixture
     /// answers and a missing id still flags. The rows seam after a mutation
     /// is covered in backlog::api::tests.
     #[test]

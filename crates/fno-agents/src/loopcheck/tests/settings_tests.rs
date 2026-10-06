@@ -593,16 +593,6 @@ fn parse_settings_github_apps_and_peers_together() {
 }
 
 #[test]
-fn parse_settings_required_bots_single_item() {
-    let cfg = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
-    let s = parse_settings(cfg);
-    assert_eq!(
-        s.required_bots,
-        Some(vec!["chatgpt-codex-connector".to_string()])
-    );
-}
-
-#[test]
 fn parse_settings_peers_single_mapping_is_one_peer() {
     // codex peer review P1: a single top-level table for peers (what
     // Python's coerce_peers wraps as [dict]) must parse as ONE peer, not be

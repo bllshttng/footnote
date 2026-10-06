@@ -45,10 +45,10 @@ def _readable_node_row(monkeypatch):
     re-stub with a medium row so the derived verb agrees with their seed)."""
     row = {"id": NODE, "slug": "sess", "dispatch_verb": "/target", "difficulty": "low"}
 
-    def _load_graph():
-        return [dict(row)]
+    def _load_graph(path, tokens):
+        return {"entries": [dict(row)], "missing": []}
 
-    monkeypatch.setattr("fno.graph.load.load_graph", _load_graph)
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _load_graph)
     yield row
 
 
@@ -385,10 +385,10 @@ def _blueprint_row(monkeypatch) -> None:
     earns it under the lean floor), matching the blueprint seed this types."""
     row = {"id": NODE, "slug": "sess", "dispatch_verb": "", "difficulty": "high"}
 
-    def _load_graph():
-        return [dict(row)]
+    def _load_graph(path, tokens):
+        return {"entries": [dict(row)], "missing": []}
 
-    monkeypatch.setattr("fno.graph.load.load_graph", _load_graph)
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _load_graph)
 
 
 def test_spawn_bare_blueprint_spelling_stamps_blueprint(

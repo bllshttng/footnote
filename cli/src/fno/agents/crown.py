@@ -1281,6 +1281,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             owner_cwd=vacated_owner_cwd,
             expected_harness_session_id=vacated_manifest_owner,
         )
+    # The recorded team name follows the crown (a re-scope used to strand it
+    # on the vacated scope; candor landed anonymous twice on 2026-10-04).
+    row_after = next((r for r in rows_after if r.name == target_name), None)
+    receipt["team_name"] = _carry_team_name(receipt.get("vacated_scope"), scope, row_after, level)
     receipt["missions_armed"] = arm_crowned_missions(scope)
     try:
         receipt["stranded_subordinates"] = _stranded_subordinates(
@@ -1313,6 +1317,31 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     else:
         receipt["reign_delivery"] = _send_reign_verb(address, verb)
     return receipt
+
+
+def _carry_team_name(vacated_scope: Optional[str], scope: str, row_after, level: int) -> str:
+    """Team-name carry behind an in-place grant, via spawn-overlay kind
+    ``team-rescope``: a recorded name moves to the landing scope, an unnamed
+    team takes the row's people-shaped name. Registry-free (the payload
+    names the holder session and level). Advisory: never raises; a store
+    refusal is the receipt line naming what did not happen."""
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    if row_after is None:
+        return "unchanged"
+    session = next((s for s in (getattr(row_after, f, None) for f in
+                     ("harness_session_id", "cc_session_id", "short_id")) if s), "")
+    try:
+        answer = spawn_overlay_call({
+            "kind": "team-rescope", "old_scope": vacated_scope or "",
+            "new_scope": scope, "candidate": row_after.name,
+            "holder_session": session, "level": level,
+        })
+    except SpawnOverlayUnavailable as exc:
+        return f"unavailable: {exc}"
+    if answer.get("named"):
+        return str(answer["named"])
+    return "carried" if answer.get("carried") else str(answer.get("reason") or "unchanged")
 
 
 def _send_reign_verb(address: str, verb: str) -> str:

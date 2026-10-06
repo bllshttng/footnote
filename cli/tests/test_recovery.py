@@ -855,8 +855,9 @@ class TestNodeIsDone:
     """x-370f AC1-EDGE: the already-done guard reads node status, fail-open."""
 
     def _patch_graph(self, monkeypatch, entries):
-        from fno.graph import load as gl
-        monkeypatch.setattr(gl, "load_graph", lambda *a, **k: entries)
+        from fno.graph import store as gl
+        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: {"entries": entries, "missing": []})
+        monkeypatch.setattr(gl, "read_graph_strict", lambda *a, **k: entries)
 
     def test_true_when_done(self, monkeypatch):
         self._patch_graph(monkeypatch, [{"id": "x-370f", "status": "done"}])
@@ -869,14 +870,17 @@ class TestNodeIsDone:
     def test_false_when_absent(self, monkeypatch):
         self._patch_graph(monkeypatch, [{"id": "x-other", "status": "done"}])
         assert recovery._node_is_done("x-370f") is False
+        self._patch_graph(monkeypatch, [{"id": "x-370f", "status": "done", "archived_at": "2026-09-01"}])
+        assert recovery._node_is_done("x-370f") is False
 
     def test_load_error_degrades_to_false(self, monkeypatch):
-        from fno.graph import load as gl
+        from fno.graph import store as gl
 
         def boom(*a, **k):
             raise RuntimeError("corrupt graph")
 
-        monkeypatch.setattr(gl, "load_graph", boom)
+        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: None)
+        monkeypatch.setattr(gl, "read_graph_strict", boom)
         assert recovery._node_is_done("x-370f") is False
 
 
@@ -1030,8 +1034,9 @@ class TestMissionComplete:
     """x-5583: the family-2 artifact probe behind the terminal-suppression gate."""
 
     def _patch_graph(self, monkeypatch, entries):
-        from fno.graph import load as gl
-        monkeypatch.setattr(gl, "load_graph", lambda *a, **k: entries)
+        from fno.graph import store as gl
+        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: {"entries": entries, "missing": []})
+        monkeypatch.setattr(gl, "read_graph_strict", lambda *a, **k: entries)
 
     def _cand(self, name=None, cwd=None):
         return recovery.Candidate(short_id="s1", sock_path="/s", jobs_dir=None,
@@ -1087,6 +1092,7 @@ class TestMissionComplete:
         ({"id": "x-1111", "status": "ready"}, False),
         # AC5: a blueprinted-but-unshipped target node is NOT complete.
         ({"id": "x-1111", "status": "ready", "plan_path": "/p.md"}, False),
+        ({"id": "x-1111", "status": "done", "archived_at": "2026-09-01"}, None),
     ])
     def test_target_artifacts(self, monkeypatch, entry, expected):
         self._patch_graph(monkeypatch, [entry])
@@ -1149,12 +1155,13 @@ class TestMissionComplete:
             self._cand(name="target-x-1111-foo")) is None
 
     def test_graph_error_degrades_to_none(self, monkeypatch):
-        from fno.graph import load as gl
+        from fno.graph import store as gl
 
         def boom(*a, **k):
             raise RuntimeError("corrupt graph")
 
-        monkeypatch.setattr(gl, "load_graph", boom)
+        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: None)
+        monkeypatch.setattr(gl, "read_graph_strict", boom)
         assert recovery.mission_complete(
             self._cand(name="target-x-1111-foo")) is None
 

@@ -15,6 +15,8 @@
 //! * `3` a duplicate refused
 //! * `2` usage or local read error
 //! * `4` a GitHub read failed
+//! * `5` the audited-owners gate refused: a code PR whose mapped owner test
+//!   files went unaudited
 //! * otherwise gh's own create exit code
 
 use crate::pr_push::{gh_api, run_labeled, READ_TIMEOUT};
@@ -254,6 +256,44 @@ pub fn run_pr_create_verb(argv: &[String]) -> i32 {
     run(&a, &|path| gh_api("gh", &a.cwd, path, &[]))
 }
 
+/// The audited-owners gate for the create leg: a code PR (a changed
+/// non-test Python or Rust file) whose mapped owner test files went
+/// unaudited is refused, so every session either prunes the tests that own
+/// its changed files or records in the body why nothing was cut. Returns
+/// `Some(5)` on refusal. A body or diff read failure is exit 2, never a
+/// refusal: the gate refuses on evidence, not on a broken transport.
+fn owners_gate_refusal(a: &Args) -> Option<i32> {
+    let body = match std::fs::read_to_string(&a.body_file) {
+        Ok(b) => b,
+        Err(err) => {
+            eprintln!(
+                "pr-create: could not read the body file {}: {err}",
+                a.body_file
+            );
+            return Some(2);
+        }
+    };
+    let base = crate::pr_body_check::base_ref(&a.base);
+    let diff = match crate::test_delta::diff_range("git", &a.cwd, &format!("{base}...HEAD")) {
+        Ok(d) => d,
+        Err(msg) => {
+            eprintln!("pr-create: could not diff {base}...HEAD for the owners gate: {msg}");
+            return Some(2);
+        }
+    };
+    let census = crate::test_delta::census(&diff);
+    let py_tests = crate::test_delta::python_test_files(&a.cwd);
+    let mut owners = crate::test_delta::owners_of(&census, &py_tests, &a.cwd);
+    owners.sort();
+    owners.dedup();
+    if let Err(msg) = crate::test_delta::owners_gate(&body, &owners, census.total_cuts()) {
+        eprintln!("pr-create: REFUSED: {msg}");
+        Some(5)
+    } else {
+        None
+    }
+}
+
 fn run(a: &Args, gh: Gh) -> i32 {
     let branch = match git(&a.cwd, &["rev-parse", "--abbrev-ref", "HEAD"]) {
         Ok(b) if !b.is_empty() && b != "HEAD" => b,
@@ -315,6 +355,14 @@ fn run(a: &Args, gh: Gh) -> i32 {
             3
         }
         Ok(None) => {
+            // The owners gate runs whenever a body is available: the create
+            // leg always, --check-only when a body file was passed (the
+            // worker paths that pre-check their own body before gh).
+            if !a.body_file.is_empty() {
+                if let Some(code) = owners_gate_refusal(&a) {
+                    return code;
+                }
+            }
             if a.check_only {
                 return 0;
             }
@@ -560,6 +608,70 @@ mod tests {
         assert_eq!(a.not_duplicates, vec![7, 8]);
         assert_eq!(crate::pr_body_check::base_ref("release/9"), "release/9");
         assert_eq!(crate::pr_body_check::base_ref("main"), "origin/main");
+        // The owners gate shares this file's exit-code contract, so its
+        // refusal and pass paths run under the same declaration.
+        checks_a_code_pr_that_audits_no_owner_test_file_refuses_and_names_it();
+    }
+
+    fn checks_a_code_pr_that_audits_no_owner_test_file_refuses_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["remote", "add", "origin", "git@github.com:o/r.git"]);
+        let src = dir.path().join("crates/x/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("lib.rs"),
+            "pub fn f() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn base_case() {}\n}\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["checkout", "-q", "-b", "feature/owners"]);
+        std::fs::write(
+            src.join("lib.rs"),
+            "pub fn f() {}\npub fn g() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn base_case() {}\n}\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "extend"]);
+        let body = dir.path().join("body.md");
+        std::fs::write(&body, "## Summary\n\nadds g\n").unwrap();
+        let mut a = Args {
+            title: "feat: extend the owner surface".into(),
+            body_file: body.to_string_lossy().into_owned(),
+            base: "main".into(),
+            not_duplicates: vec![],
+            check_only: false,
+            cwd: dir.path().to_path_buf(),
+        };
+        // The scan passes (no open PRs); the owners gate then refuses and
+        // the create leg is never reached.
+        let gh = |path: &str| -> Result<String, String> {
+            assert!(path.contains("/pulls?state=open"));
+            Ok("[]".to_string())
+        };
+        assert_eq!(run(&a, &gh), 5);
+        // The authored line satisfies the gate; --check-only then returns
+        // clean without ever reaching gh pr create.
+        std::fs::write(
+            &body,
+            "x\nAudited owners: crates/x/src/lib.rs (no cut: kept, distinct contracts)\n",
+        )
+        .unwrap();
+        a.check_only = true;
+        assert_eq!(run(&a, &gh), 0);
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────
