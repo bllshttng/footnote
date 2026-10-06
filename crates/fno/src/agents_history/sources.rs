@@ -4,6 +4,16 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+// History resolves closed nodes and renders their complete session records.
+pub(super) const GRAPH_FIELDS: &[&str] = &[
+    "id",
+    "graph_node_id",
+    "title",
+    "pr_number",
+    "pr_url",
+    "sessions",
+];
+
 pub(super) type Rows = Result<Vec<Value>, String>;
 
 pub(super) struct Sources {
@@ -30,7 +40,7 @@ pub(super) struct Paths {
 pub(super) fn load_sources(paths: &Paths) -> Sources {
     let registry = read_rows(&registry_path(&paths.agents_home), "agents");
     let receipts = read_receipts(&paths.agents_home.join("reap-receipts"));
-    let graph = store_client::rows(&paths.graph, None, None);
+    let graph = store_client::rows(&paths.graph, None, Some(GRAPH_FIELDS));
     let ledger = read_rows(&paths.ledger, "entries");
     let events = Ok(read_events(&paths.agents_home, &paths.events));
     Sources {
