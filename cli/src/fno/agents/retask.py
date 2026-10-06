@@ -53,8 +53,12 @@ def _resolve_retask_node(node: str) -> str:
         return node
     from fno.graph.fuzzy import resolve_node
     from fno.graph.load import load_graph
+    from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
-    match = resolve_node(node, load_graph())
+    fast = read_nodes_by_ids(GRAPH_JSON, [node])
+    match = resolve_node(node, (fast or {}).get("entries") or [])
+    if match.kind != "exact":
+        match = resolve_node(node, load_graph())
     if match.kind != "exact" or not match.id:
         raise ValueError(f"retask node {node!r} does not resolve to a graph id")
     return match.id

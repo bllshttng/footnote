@@ -64,10 +64,10 @@ def _config_env(monkeypatch, tmp_path, body):
 def _graph_with_target_node(monkeypatch):
     """Verb resolution loads the node record; default it to a planless low
     node so the probe resolves the target verb. A test overrides this by
-    monkeypatching load_graph again inside its own body."""
+    monkeypatching read_nodes_by_ids again inside its own body."""
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: [{"id": "x-bdb9", "difficulty": "low"}],
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{"id": "x-bdb9", "difficulty": "low"}]},
     )
 
 
@@ -78,6 +78,7 @@ def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
         "fno.graph.load.load_graph",
         lambda: [{"id": "x-bdb9", "slug": "retask-destination"}],
     )
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: None)
     monkeypatch.setattr("fno.graph._constants.node_id_prefix", lambda: "x-")
 
     assert retask._resolve_retask_node("retask-destination") == "x-bdb9"
@@ -159,12 +160,12 @@ def test_run_retask_renders_a_non_target_verb_command(tmp_path, monkeypatch):
     import fno.agents.retask as retask
 
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: [{
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{
             "id": "x-bdb9",
             "difficulty": "medium",
             "dispatch_verb": "/fno:blueprint",
-        }],
+        }]},
     )
     _config_env(monkeypatch, tmp_path, '[agents.profiles.target]\nprovider = "codex"\n')
     row = _row()
@@ -293,12 +294,12 @@ def test_planless_blueprint_node_resolves_a_blueprint_coordinate(tmp_path, monke
     import fno.agents.retask as retask
 
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: [{
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{
             "id": "x-bdb9",
             "difficulty": "medium",
             "dispatch_verb": "/fno:blueprint",
-        }],
+        }]},
     )
     profile = (
         'provider = "claude"\nmodel = "claude-opus-5"\n'
@@ -418,14 +419,14 @@ def test_ready_target_node_keeps_the_zai_lane_coordinate(tmp_path, monkeypatch):
     plan = tmp_path / "plan.md"
     plan.write_text("---\nstatus: ready\nkind: quick-plan\n---\n")
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: [{
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{
             "id": "x-bdb9",
             "difficulty": "medium",
             "dispatch_verb": None,
             "cwd": str(tmp_path),
             "plan_path": "plan.md",
-        }],
+        }]},
     )
     _config_env(
         monkeypatch,
@@ -445,7 +446,7 @@ def test_unresolvable_dispatch_verb_refuses_instead_of_guessing(monkeypatch):
     import fno.agents.retask as retask
     from fno.agents.harness_map import DispatchResolveError
 
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": []})
 
     with pytest.raises(DispatchResolveError):
         retask.resolve_target_coordinate("x-bdb9", env={})
@@ -454,7 +455,7 @@ def test_unresolvable_dispatch_verb_refuses_instead_of_guessing(monkeypatch):
 def test_run_retask_refuses_when_the_dispatch_verb_cannot_resolve(monkeypatch):
     import fno.agents.retask as retask
 
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": []})
     row = _row()
     monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
 

@@ -371,15 +371,15 @@ def _head_flag_value(head: Sequence[str], flags: Tuple[str, ...]) -> Optional[st
 
 
 def _node_slug_from_graph(node: str) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort graph read of a node's canonical id and slug.
+    """Return ``(canonical_id, slug)`` from an exact id or slug lookup.
 
-    Returns ``(node_id, slug)``; a slug input normalizes to the id, like
-    ``resolve_provenance``. Raises whatever the graph read raises - the CALLER
-    decides the fallback, because a spawn must never die on a naming lookup.
+    Native read failures fall back to the graph; the caller owns naming fallback.
     """
     from fno.graph.load import load_graph
+    from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
-    for rec in load_graph():
+    fast = read_nodes_by_ids(GRAPH_JSON, [node])
+    for rec in fast["entries"] if fast is not None else load_graph():
         if rec.get("id") == node or rec.get("slug") == node:
             return rec.get("id") or node, rec.get("slug") or None
     return node, None

@@ -31,15 +31,15 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: [
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [
             {
                 "id": node_id,
                 "slug": "s",
                 "dispatch_verb": "/target",
                 "difficulty": "low",
             }
-        ],
+        ]},
     )
 
     result = CliRunner().invoke(

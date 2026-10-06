@@ -301,28 +301,21 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
         return None
     try:
         from fno.graph.load import load_graph
+        from fno.graph.store import read_nodes_by_ids
         from fno.paths import graph_json
 
-        graph_data = load_graph(graph_json())
+        fast = read_nodes_by_ids(graph_json(), tokens)
+        graph_data = fast["entries"] if fast is not None else load_graph(graph_json())
         if not isinstance(graph_data, list):
             return None
-        by_id: dict[str, dict] = {}
-        for entry in graph_data:
-            if isinstance(entry, dict):
-                eid = entry.get("id")
-                if isinstance(eid, str):
-                    by_id[eid.lower()] = entry
-        matched: list[dict] = []
-        seen: set[str] = set()
-        for tok in tokens:
-            hit = by_id.get(tok.lower())
-            if hit is not None:
-                key = hit.get("id", "").lower()
-                if key not in seen:
-                    seen.add(key)
-                    matched.append(hit)
+        by_id = {
+            entry["id"].lower(): entry
+            for entry in graph_data
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        }
+        matched = {tok.lower(): by_id[tok.lower()] for tok in tokens if tok.lower() in by_id}
         if len(matched) == 1:
-            return matched[0].get("plan_path") or None
+            return next(iter(matched.values())).get("plan_path") or None
     except Exception:
         return None
     return None
@@ -2348,18 +2341,10 @@ def _resolve_node_id(node: str, entries: Optional[list] = None) -> str:
 def _find_node(node_id: str) -> Optional[dict]:
     """The graph node dict for an exact id, or None (best-effort, never raises)."""
     try:
-        from fno.graph.load import load_graph
+        from fno.graph.store import _readback_row
         from fno.paths import graph_json
 
-        data = load_graph(graph_json())
-        return next(
-            (
-                e
-                for e in (data if isinstance(data, list) else [])
-                if isinstance(e, dict) and e.get("id") == node_id
-            ),
-            None,
-        )
+        return _readback_row(graph_json(), node_id)[0]
     except Exception:  # noqa: BLE001 - best-effort; caller degrades to default
         return None
 

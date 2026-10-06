@@ -414,8 +414,10 @@ def find_node_row(node: str) -> Optional[dict]:
     One lookup so the door, the seam and retask read the SAME row."""
     try:
         from fno.graph.load import load_graph
+        from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
-        for candidate in load_graph():
+        fast = read_nodes_by_ids(GRAPH_JSON, [node])
+        for candidate in fast["entries"] if fast is not None else load_graph():
             if candidate.get("id") == node or candidate.get("slug") == node:
                 return candidate
     except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn

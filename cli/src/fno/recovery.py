@@ -710,15 +710,13 @@ def _node_is_done(node: str) -> bool:
     The WORK-done read itself is the one shared reader, ``node_is_done``.
     """
     try:
-        from fno.graph.load import load_graph
+        from fno.graph.store import GRAPH_JSON, _readback_row
         from fno.graph.statuses import node_is_done
 
-        for entry in load_graph():
-            if entry.get("id") == node:
-                return node_is_done(entry)
+        entry, _ = _readback_row(GRAPH_JSON, node)
+        return node_is_done(entry) if entry is not None else False
     except Exception:  # noqa: BLE001 - a status read must never crash the sweep
         return False
-    return False
 
 
 # (provenance/spawn_think.py). Only a birth pass is certified by ``plan_path``.
@@ -760,9 +758,9 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
         else:
             return None
 
-        from fno.graph.load import load_graph
+        from fno.graph.store import GRAPH_JSON, _readback_row
 
-        entry = next((e for e in load_graph() if e.get("id") == node_id), None)
+        entry, _ = _readback_row(GRAPH_JSON, node_id)
         if entry is None:
             return None
         if kind == "think":
