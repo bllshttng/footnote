@@ -145,10 +145,10 @@ fn health_at(home: &Path, enabled: bool, now: DateTime<Utc>) -> Result<Value, St
         "offline"
     } else if unknown > 0 {
         "unknown_workers"
-    } else if !uncovered.is_empty() {
-        "uncovered_workers"
     } else if rows == 0 && !live.is_empty() {
         "zero_rows"
+    } else if !uncovered.is_empty() {
+        "uncovered_workers"
     } else if live.is_empty() {
         "idle"
     } else {
