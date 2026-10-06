@@ -30,10 +30,12 @@ pub(super) fn codex_thread_on_done(
         let name = name.clone();
         let turn_id = receipt.turn_id.clone();
         let status = receipt.status.clone();
+        let error = receipt.error.clone();
+        let failed = status == "failed" || error.is_some();
         let registry_path = registry_path.clone();
         tokio::spawn(async move {
             let bump_name = name.clone();
-            let _ = update_registry_offloaded(registry_path, move |registry| {
+            let session_id = update_registry_offloaded(registry_path, move |registry| {
                 if let Some(entry) = registry.find_mut(&bump_name) {
                     // The completion of an INTERRUPTED turn must not
                     // resurrect a row the stop path just settled Exited:
@@ -44,16 +46,29 @@ pub(super) fn codex_thread_on_done(
                         entry.status = crate::AgentStatus::Live;
                         entry.last_message_at = Some(now_rfc3339_like());
                     }
+                    return entry.harness_session_id.clone();
                 }
+                None
             })
-            .await;
+            .await
+            .ok()
+            .flatten();
+            if let Some(session_id) = session_id.as_deref() {
+                crate::mail_hold::conversation_turn_end(session_id);
+            }
             let _ = emitter.emit(
-                "agent_ask_done",
+                if failed {
+                    "codex_turn_error"
+                } else {
+                    "agent_ask_done"
+                },
                 &json!({
                     "name": name,
                     "backend": "codex-thread",
                     "turn_id": turn_id,
                     "turn_status": status,
+                    "error": error,
+                    "session_id": session_id,
                 }),
             );
         });

@@ -107,6 +107,7 @@ pub struct Behavior {
     /// Close the connection on `turn/start` without answering: the ack-loss
     /// shape the seed lane must read as in-flight, never as a failed delivery.
     pub unacked_turn_start: bool,
+    pub failed_turns: usize,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
@@ -139,6 +140,7 @@ impl Default for Behavior {
             thread_status: "idle".to_string(),
             upgrade_marker: None,
             unacked_turn_start: false,
+            failed_turns: 0,
             received: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -396,7 +398,12 @@ async fn serve(conn: UnixStream, home: std::path::PathBuf, behavior: Behavior) {
                 }
                 let Some((turn_id, _)) = pending.take() else { continue };
                 let text = format!("REPLY-{turn_n}");
-                if send(&mut sink, completed(&turn_id, "completed", &text)).await.is_err() {
+                let mut frame = completed(&turn_id, "completed", &text);
+                if turn_n <= behavior.failed_turns {
+                    frame["params"]["turn"]["status"] = json!("failed");
+                    frame["params"]["turn"]["error"] = json!({"message": "workspace routing discovery timed out"});
+                }
+                if send(&mut sink, frame).await.is_err() {
                     return;
                 }
                 continue;

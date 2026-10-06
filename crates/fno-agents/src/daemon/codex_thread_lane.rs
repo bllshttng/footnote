@@ -103,10 +103,11 @@ pub(super) async fn spawn_codex_thread_lane(
                 .collect()
         })
         .unwrap_or_default();
-    let carry = match crate::codex_thread::parse_harness_args(&harness_args) {
+    let mut carry = match crate::codex_thread::parse_harness_args(&harness_args) {
         Ok(carry) => carry,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
+    worker_retry_config(&mut carry.config);
     let mut state_dirs = state_dirs;
     for dir in carry.add_dirs {
         if !state_dirs.iter().any(|existing| existing == &dir) {
@@ -299,6 +300,15 @@ pub(super) async fn spawn_codex_thread_lane(
             "lane": "thread",
         }),
     )
+}
+
+pub(super) fn worker_retry_config(config: &mut serde_json::Map<String, Value>) {
+    for (key, value) in [
+        ("model_providers.openai.stream_max_retries", 20),
+        ("model_providers.openai.stream_idle_timeout_ms", 600_000),
+    ] {
+        config.entry(key.to_string()).or_insert(json!(value));
+    }
 }
 
 /// The crown a spawn request carries: `Some((level, scope))` or None, both
