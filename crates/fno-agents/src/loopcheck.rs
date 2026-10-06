@@ -919,7 +919,7 @@ pub(crate) fn decide_with_payload(
                 "codex_thread_id": codex_thread,
             });
             // The daemon owns settle and expiry wakes on every harness;
-            // a harness task alone cannot survive a context boundary.
+            // a harness task alone cannot guarantee a wake across context boundaries.
             let emit_ok = fire_history::emit_to_both_checked(
                 &project_events,
                 &global_events,

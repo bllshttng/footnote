@@ -262,7 +262,9 @@ pub(crate) fn emit_to_both_checked(
     event_type: &str,
     data: serde_json::Value,
 ) -> Result<(), String> {
-    append_loop_event(project_events, event_type, data.clone());
+    if project_events != global_events {
+        append_loop_event(project_events, event_type, data.clone());
+    }
     append_event_checked(global_events, event_type, data)
 }
 

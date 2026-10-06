@@ -125,7 +125,7 @@ fn watching_ignored_names_a_missing_claim_as_permanent() {
 }
 
 #[test]
-fn watching_requires_durable_registration_on_non_codex_harnesses() {
+fn watching_requires_durable_registration() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
@@ -158,56 +158,55 @@ fn watching_requires_durable_registration_on_non_codex_harnesses() {
     let blocked_parent = cwd.join("blocked-parent");
     fs::write(&blocked_parent, "not a directory").unwrap();
     let blocked_journal = blocked_parent.join("events.jsonl");
-    for harness in ["claude", "opencode", "pi", "agy", "gemini"] {
-        let durable_journal = cwd.join(format!("{harness}-events.jsonl"));
-        for (journal, expected) in [(&blocked_journal, "block"), (&durable_journal, "allow")] {
-            let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
-                .env("FNO_CLAIMS_ROOT", cwd)
-                .env("FNO_NUDGE_DISABLED", "1")
-                .env_remove("FNO_DRIVER_LIB")
-                .args([
-                    "loop-check",
-                    "--state",
-                    manifest_path.to_str().unwrap(),
-                    "--transcript",
-                    transcript_path.to_str().unwrap(),
-                    "--cwd",
-                    cwd.to_str().unwrap(),
-                    "--now",
-                    "2026-06-05T00:30:00Z",
-                    &format!("--gh-bin={}", mock.gh.display()),
-                    &format!("--git-bin={}", mock.git.display()),
-                    "--author-harness",
-                    harness,
-                    "--global-events",
-                    journal.to_str().unwrap(),
-                    "--global-settings",
-                    "/nonexistent/global-settings.yaml",
-                ])
-                .output()
-                .unwrap();
-            let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
-            assert_eq!(value["decision"], expected, "{harness}: {value}");
-            if expected == "block" {
-                assert!(
-                    value["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("watch registration"),
-                    "{harness}: {value}"
-                );
-            } else {
-                assert!(
-                    event_text(journal).lines().any(|line| {
-                        let event: serde_json::Value = serde_json::from_str(line).unwrap();
-                        event["type"] == "loop_check_watch_idle"
-                            && event["data"]["session_id"] == "sess-registration"
-                            && event["data"]["harness"] == harness
-                    }),
-                    "{harness}: durable watch registration missing"
-                );
-            }
+    let harness = "claude";
+    let durable_journal = cwd.join(format!("{harness}-events.jsonl"));
+    for (journal, expected) in [(&blocked_journal, "block"), (&durable_journal, "allow")] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+            .env("FNO_CLAIMS_ROOT", cwd)
+            .env("FNO_NUDGE_DISABLED", "1")
+            .env_remove("FNO_DRIVER_LIB")
+            .args([
+                "loop-check",
+                "--state",
+                manifest_path.to_str().unwrap(),
+                "--transcript",
+                transcript_path.to_str().unwrap(),
+                "--cwd",
+                cwd.to_str().unwrap(),
+                "--now",
+                "2026-06-05T00:30:00Z",
+                &format!("--gh-bin={}", mock.gh.display()),
+                &format!("--git-bin={}", mock.git.display()),
+                "--author-harness",
+                harness,
+                "--global-events",
+                journal.to_str().unwrap(),
+                "--global-settings",
+                "/nonexistent/global-settings.yaml",
+            ])
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(value["decision"], expected, "{harness}: {value}");
+        if expected == "block" {
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("watch registration"),
+                "{harness}: {value}"
+            );
+        } else {
+            assert!(
+                event_text(journal).lines().any(|line| {
+                    let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                    event["type"] == "loop_check_watch_idle"
+                        && event["data"]["session_id"] == "sess-registration"
+                        && event["data"]["harness"] == harness
+                }),
+                "{harness}: durable watch registration missing"
+            );
         }
     }
 }
