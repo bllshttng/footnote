@@ -1374,7 +1374,7 @@ def test_resolve_node_model_uses_route_resolve(monkeypatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
     monkeypatch.setattr(
         "fno.graph.store.read_nodes_by_ids",
-        lambda path, tokens: {"entries": [{"id": "x-d7a7", "model": "glm-5.2", "difficulty": "high"}]},
+        lambda path, tokens: {"entries": [{"id": "x-d7a7", "model": "glm-5.2", "difficulty": "high"}], "missing": []},
     )
     seen = {}
 
@@ -1395,7 +1395,7 @@ def test_resolve_node_model_scopes_by_provider(monkeypatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
     monkeypatch.setattr(
         "fno.graph.store.read_nodes_by_ids",
-        lambda path, tokens: {"entries": [{"id": "x-d7a7", "model": "claude-sonnet-5"}]},
+        lambda path, tokens: {"entries": [{"id": "x-d7a7", "model": "claude-sonnet-5"}], "missing": []},
     )
     seen = {}
 

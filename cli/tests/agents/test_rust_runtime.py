@@ -37,7 +37,7 @@ def _open_node_row(monkeypatch, tmp_path):
         "plan_path": str(tmp_path / "p.md"),
         "cwd": str(tmp_path),
     }
-    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row]})
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row], "missing": []})
     # The verb reads the store itself for the nodeless derive: point its
     # FNO_HOME at a fixture graph naming the same row.
     monkeypatch.setenv("FNO_HOME", str(tmp_path))

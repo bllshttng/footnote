@@ -856,7 +856,7 @@ class TestNodeIsDone:
 
     def _patch_graph(self, monkeypatch, entries):
         from fno.graph import store as gl
-        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: {"entries": entries})
+        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: {"entries": entries, "missing": []})
         monkeypatch.setattr(gl, "read_graph_strict", lambda *a, **k: entries)
 
     def test_true_when_done(self, monkeypatch):
@@ -1035,7 +1035,7 @@ class TestMissionComplete:
 
     def _patch_graph(self, monkeypatch, entries):
         from fno.graph import store as gl
-        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: {"entries": entries})
+        monkeypatch.setattr(gl, "read_nodes_by_ids", lambda *a, **k: {"entries": entries, "missing": []})
         monkeypatch.setattr(gl, "read_graph_strict", lambda *a, **k: entries)
 
     def _cand(self, name=None, cwd=None):

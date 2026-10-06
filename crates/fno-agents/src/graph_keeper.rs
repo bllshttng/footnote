@@ -3134,6 +3134,8 @@ fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
                         "status",
                         "slug",
                         "title",
+                        "type",
+                        "priority",
                         "project",
                         "parent",
                         "archived_at",
@@ -4105,12 +4107,11 @@ mod tests {
             entries[1]["plan_path"].is_null(),
             "a plan-less node ships a null plan_path, not guessed fields"
         );
-        // The cache leg: a second call parses nothing new.
         let _ = handle_plan_refs(&state).unwrap();
         assert_eq!(
             state.file_opens.load(Ordering::SeqCst),
-            1,
-            "plan_refs must ride the cache"
+            0,
+            "plan_refs must not fill the whole cache"
         );
     }
 
@@ -4155,12 +4156,11 @@ mod tests {
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
         assert_eq!(missing, vec!["x-nope".to_string()]);
-        // The cache leg: a second call parses nothing new.
         let _ = handle_read_ids(&state, &json!({"ids": ["x-hit"]})).unwrap();
         assert_eq!(
             state.file_opens.load(Ordering::SeqCst),
-            1,
-            "read_ids must ride the cache"
+            0,
+            "read_ids must not fill the whole cache"
         );
     }
 

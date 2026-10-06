@@ -47,7 +47,7 @@ def _stub_pane_path(monkeypatch, *, rec=None, brief=("the brief", "explicit")):
 
     node_id = (rec or {}).get("id")
     if rec is not None:
-        monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [rec]})
+        monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [rec], "missing": []})
     if brief is not None:
         monkeypatch.setattr(
             "fno.provenance.autobrief.resolve_dispatch_brief", lambda n: brief
@@ -263,7 +263,7 @@ def _row(**fields):
 
 
 def _stub_row(monkeypatch, row):
-    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row] if row else []})
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row] if row else [], "missing": []})
 
 
 def _stub_verb(monkeypatch, answer=None, *, unavailable=None):
@@ -557,7 +557,7 @@ def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
     passes through unchanged (agreement, so no compose rewrite)."""
     from fno.agents import mux_spawn, spawn_gate
 
-    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [_target_row]})
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [_target_row], "missing": []})
 
     class _Gate:
         def release(self) -> None:

@@ -46,7 +46,7 @@ def _readable_node_row(monkeypatch):
     row = {"id": NODE, "slug": "sess", "dispatch_verb": "/target", "difficulty": "low"}
 
     def _load_graph(path, tokens):
-        return {"entries": [dict(row)]}
+        return {"entries": [dict(row)], "missing": []}
 
     monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _load_graph)
     yield row
@@ -386,7 +386,7 @@ def _blueprint_row(monkeypatch) -> None:
     row = {"id": NODE, "slug": "sess", "dispatch_verb": "", "difficulty": "high"}
 
     def _load_graph(path, tokens):
-        return {"entries": [dict(row)]}
+        return {"entries": [dict(row)], "missing": []}
 
     monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _load_graph)
 

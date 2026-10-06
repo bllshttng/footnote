@@ -14,7 +14,7 @@ def _graph_with_target_node(monkeypatch):
     node so the probe resolves the target verb."""
     monkeypatch.setattr(
         "fno.graph.store.read_nodes_by_ids",
-        lambda path, tokens: {"entries": [{"id": "x-bdb9", "difficulty": "low"}]},
+        lambda path, tokens: {"entries": [{"id": "x-bdb9", "difficulty": "low"}], "missing": []},
     )
 
 

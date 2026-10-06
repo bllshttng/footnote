@@ -39,7 +39,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
                 "dispatch_verb": "/target",
                 "difficulty": "low",
             }
-        ]},
+        ], "missing": []},
     )
 
     result = CliRunner().invoke(

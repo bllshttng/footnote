@@ -509,7 +509,7 @@ def test_graph_read_supplies_the_slug_when_flag_absent(monkeypatch):
     monkeypatch.setattr(
         gl,
         "read_nodes_by_ids",
-        lambda path, tokens: {"entries": [{"id": "x-919abcd", "slug": "sentinel-arms", "plan_path": None}]},
+        lambda path, tokens: {"entries": [{"id": "x-919abcd", "slug": "sentinel-arms", "plan_path": None}], "missing": []},
     )
     out = _norm(["spawn", "--node", "x-919abcd", "--model", "glm-5.2", "go"])
     assert out[2] == "t-919abcd-sentinel-glm"

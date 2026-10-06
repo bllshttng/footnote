@@ -1513,21 +1513,16 @@ fn query_rows(
             .ok_or_else(|| format!("node {id} vanished mid-export"))?;
         merged.push((ordinal, id, body));
     }
-    if filter.only_ids() {
-        for (id, ordinal, mut body) in nodes::raw_rows_where(connection, filter.id_in.as_deref())? {
-            if !query.include_archived
-                && body
-                    .get("archived_at")
-                    .is_some_and(|value| !value.is_null())
-            {
-                continue;
-            }
-            nodes::project_claim_value(
-                &mut body,
-                node_claims.get(&id).cloned().unwrap_or_default(),
-            );
-            merged.push((ordinal, id, body));
+    for (id, ordinal, mut body) in nodes::raw_rows_where(connection, filter.id_in.as_deref())? {
+        if !query.include_archived
+            && body
+                .get("archived_at")
+                .is_some_and(|value| !value.is_null())
+        {
+            continue;
         }
+        nodes::project_claim_value(&mut body, node_claims.get(&id).cloned().unwrap_or_default());
+        merged.push((ordinal, id, body));
     }
     merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let raw_export = keep_malformed.is_none()
@@ -1635,7 +1630,7 @@ fn query_rows(
     }
     crate::graph_store::apply_defaults(&mut rows, true);
     rows.truncate(asked_count);
-    if !filter.is_empty() || query.fields.is_some() || query.with_blockers {
+    if !filter.is_empty() || query.fields.is_some() {
         for row in &mut rows {
             if row
                 .get("id")
@@ -1654,7 +1649,10 @@ fn query_rows(
     }
     if !filter.is_empty() {
         rows.retain(|row| match model::Node::from_json(row) {
-            Ok(node) => api::filter_matches(&node, filter),
+            Ok(mut node) => {
+                node.claim = node_claims.get(&node.id).cloned().unwrap_or_default();
+                api::filter_matches(&node, filter)
+            }
             Err(_) => filter.only_ids(),
         });
     }
@@ -1978,7 +1976,7 @@ mod tests {
         let _claims_root =
             crate::claims::EnvVarGuard::set("FNO_CLAIMS_ROOT", dir.path().to_str().unwrap());
         let query_graph = dir.path().join("query.json");
-        let fixture = serde_json::json!([
+        let mut fixture = serde_json::json!([
             {"id":"q-done", "title":"Done", "slug":"closed", "status":"done", "completed_at":"2026-09-11T00:00:00Z", "parent":"q-live"},
             {"id":"q-live", "title":"Live", "slug":"live", "status":"ready", "project":"fno", "blocked_by":["q-old"], "tags":["a"], "sessions":[{"phase":"execute","harness":"codex","session_id":"test-session"}]},
             {"id":"q-old", "title":"Old", "slug":"old", "status":"superseded", "superseded_by":"q-done"},
@@ -1987,6 +1985,12 @@ mod tests {
             {"id":"q-claimed", "title":"Claimed", "slug":"claimed", "status":"claimed"},
             {"id":"q-raw", "title": 4, "status":"legacy-unknown", "slug":"raw", "parent":"q-live"}
         ]);
+        for row in fixture.as_array_mut().unwrap() {
+            if !matches!(row["id"].as_str(), Some("q-live" | "q-raw")) {
+                row["type"] = serde_json::json!("feature");
+                row["priority"] = serde_json::json!("p2");
+            }
+        }
         crate::graph_store::seed_rows(&query_graph, fixture.as_array().unwrap()).unwrap();
         let full_raw = read_entries(&query_graph).unwrap();
         assert_eq!(
@@ -2105,6 +2109,19 @@ mod tests {
         crate::claim_store::acquire_db("node:q-live", "test-worker", &claim_options).unwrap();
         crate::claim_store::acquire_db("node:q-archived", "blueprint-session:test", &claim_options)
             .unwrap();
+        let whole = crate::graph_store::read_rows_where(
+            &query_graph,
+            &RowQuery {
+                include_archived: false,
+                with_blockers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            whole.iter().find(|row| row["id"] == "q-live").unwrap()["status"],
+            "ready"
+        );
         let planning = crate::graph_store::read_rows_where(
             &query_graph,
             &RowQuery {
@@ -2165,12 +2182,10 @@ mod tests {
         )
         .is_err());
         let connection = open(&query_graph).unwrap();
-        connection
-            .execute(
-                "UPDATE nodes SET completed_at = NULL, status = 'ready' WHERE id = 'q-done'",
-                [],
-            )
-            .unwrap();
+        let mut done = nodes::load(&connection, "q-done").unwrap().unwrap();
+        done.completed_at = None;
+        done.status = model::Status::Ready;
+        nodes::save(&connection, &done).unwrap();
         let blocked_query = RowQuery {
             filter: api::NodeFilter {
                 status_in: Some(vec!["blocked".into()]),
@@ -2186,15 +2201,15 @@ mod tests {
         );
 
         let connection = open(&query_graph).unwrap();
-        connection.execute("UPDATE nodes SET superseded_by = 'q-old', completed_at = NULL, status = 'superseded' WHERE id = 'q-done'", []).unwrap();
+        done.superseded_by = Some("q-old".into());
+        done.status = model::Status::Superseded;
+        nodes::save(&connection, &done).unwrap();
         let rows = crate::graph_store::read_rows_where(&query_graph, &projected).unwrap();
         assert_eq!(
             rows[0]["status"], "blocked",
             "cycles remain unknown dependencies"
         );
-        connection
-            .execute("DELETE FROM nodes WHERE id = 'q-old'", [])
-            .unwrap();
+        nodes::delete(&connection, "q-old").unwrap();
         assert_eq!(
             crate::graph_store::read_rows_where(&query_graph, &projected).unwrap()[0]["status"],
             "blocked"
@@ -2215,7 +2230,7 @@ mod tests {
         );
         nodes::delete_raw(&connection, "q-old").unwrap();
         save_aggregate(&connection, &model::Node::from_json(&serde_json::json!({
-            "id":"q-old", "slug":"old", "title":"Old", "status":"done", "completed_at":"2026-09-11T00:00:00Z"
+            "id":"q-old", "slug":"old", "title":"Old", "type":"feature", "priority":"p2", "status":"done", "completed_at":"2026-09-11T00:00:00Z"
         })).unwrap()).unwrap();
         connection.execute_batch("DROP TABLE sessions; DROP TABLE comments; DROP TABLE encounters; DROP TABLE findings; DROP TABLE node_costs; DROP TABLE node_dispatch; DROP TABLE node_provenance; DROP TABLE pull_requests;").unwrap();
         assert!(

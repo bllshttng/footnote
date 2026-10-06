@@ -68,6 +68,8 @@ Both ends of a `relations` row are real nodes. An edge whose far end names no no
 
 `state_type: "open"` excludes `done`, `deferred`, and `superseded`. It includes ideas and work in review. When Rust readers need board or selection fields, they choose `graph_store::SLIM_FIELDS`. A history or completion reader retains closed rows and names the fields its fold consumes.
 
+Raw rows pass through defaults before the exact matcher. A row that defaults into a valid node participates in typed filters. Malformed objects remain available to whole and by-id reads.
+
 A field projection skips child tables whose data the filter, readiness calculation, and returned fields do not require. Defaults and overlays run before the final projection. A projected reply contains only the requested keys, including after the keeper attaches claim or reading markers. Fields needed for an internal calculation do not expand the reply.
 
 With blocker inclusion, the loader reads the selected nodes' blockers and follows their superseded successors within the readiness hop bound. It calculates readiness against that closure and returns only the selected rows. A caller must not recompute readiness against the returned list alone: a completed blocker can be absent from that list.
@@ -75,6 +77,8 @@ With blocker inclusion, the loader reads the selected nodes' blockers and follow
 The keeper's `read_ids` preserves argument order and exact id-before-slug resolution. It reports unresolved tokens in `missing`. A missing token does not trigger a whole export inside the keeper. When the narrow read is unavailable, the client can use its existing fallback.
 
 Whole reads retain their existing export and archive meaning. Rust whole reads include archived rows. The Python `wire_rows` client excludes them by default. Narrow callers state their archive policy explicitly. Typed pagination preserves the previous whole-export cursor positions through an ordinal-only scan, without adding metadata keys to node replies.
+
+Whole API rows retain stored statuses, including when the caller filters archived rows. Filtered or projected queries can serve active work as `in_progress`.
 
 Strict query reads report an unreadable store as an error. They never answer with an empty set to imply that no node exists. Verify read performance and row parity through the store-exec lane on a database copy. `FNO_STORE_EXEC_LOG` records `wall_us`, returned row count, and reply bytes for each request.
 

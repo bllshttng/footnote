@@ -1029,25 +1029,6 @@ pub(crate) fn index_by_id(entries: &[Value]) -> std::collections::HashMap<&str, 
         .collect()
 }
 
-/// The overlay's field half for one row: status + blocked_reason derived
-/// from a borrowed id index, written in the same order the full overlay
-/// has always used.
-pub(crate) fn overlay_entry(entry: &mut Value, by_id: &std::collections::HashMap<&str, &Value>) {
-    if !is_dict(entry) {
-        return;
-    }
-    let (status, reason) = readiness_status(entry, by_id);
-    let obj = entry.as_object_mut().unwrap();
-    obj.insert(
-        "status".to_string(),
-        status.map(Value::String).unwrap_or(Value::Null),
-    );
-    obj.insert(
-        "blocked_reason".to_string(),
-        reason.map(Value::String).unwrap_or(Value::Null),
-    );
-}
-
 /// Overlay read-time dependency readiness onto `status`/`blocked_reason`
 /// (store._apply_readiness_overlay).
 pub fn apply_readiness_overlay(entries: &mut [Value]) {

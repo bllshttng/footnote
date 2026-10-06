@@ -205,7 +205,7 @@ def test_spawn_carries_ambient_policy_override_on_the_pane(
     monkeypatch.setenv("FNO_REPO_ROOT", str(Path.cwd()))
     monkeypatch.setattr(
         "fno.graph.store.read_nodes_by_ids",
-        lambda path, tokens: {"entries": [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}]},
+        lambda path, tokens: {"entries": [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}], "missing": []},
     )
 
     res = CliRunner().invoke(

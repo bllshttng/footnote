@@ -17,8 +17,8 @@ use super::{
     execute_retask, refused_receipt, RetaskRow, RetaskSeams, RetaskTarget, TransportFailure,
 };
 use crate::bounded_cmd::output_with_timeout_result;
+use crate::claude_drive;
 use crate::state::{classify_session_transition, rename_agent, update_registry, RegistryEntry};
-use crate::{claude_drive, graph_store};
 
 /// How long each pane op may run, mirroring the Python transport's budgets.
 const PANE_READ_SECS: u64 = 10;
