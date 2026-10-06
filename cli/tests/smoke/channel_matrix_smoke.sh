@@ -31,6 +31,36 @@ run_capture() {
   OUT="$("$@" 2>&1)"
   RC=$?
 }
+# run_capture_bounded MAX_SECONDS cmd...: run_capture with a wall-clock bound.
+# Homebrew's own fetches (update metadata, bottles) have no mid-transfer
+# deadline, so a stalled ghcr.io/PyPI read sat silent past the 1500s row
+# watchdog and scored rc=43 (2026-10-06, twice). A bound here turns that stall
+# into an honest rc=124 the row scores as a channel failure. Output tees to a
+# file either way so a miss message can name the phase brew died in.
+run_capture_bounded() {
+  local max="$1" pid waited=0 log="$BASE/capture-bounded.log"
+  shift
+  "$@" >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$max" ]; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      OUT="exceeded the ${max}s bound; last output: $(tail -3 "$log" | tr '\n' ' ')"
+      RC=124
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  wait "$pid" 2>/dev/null
+  RC=$?
+  OUT="$(cat "$log")"
+}
+# The bound helper self-checks its two modes once the scratch base exists: a
+# bounded command keeps its real rc, and an overrun is killed at the bound with
+# rc=124 (every row runs this, so a regression here fails loudly on the
+# runner, not silently someday).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -42,6 +72,10 @@ BASE="$(mktemp -d)"
 BASE="$(cd "$BASE" && pwd -P)"
 trap 'rm -rf "$BASE"' EXIT
 mkdir -p "$BASE/home" "$BASE/work"
+run_capture_bounded 5 /usr/bin/false
+[ "$RC" -eq 1 ] || { echo "bounded capture lost the real rc (got $RC, want 1)"; exit 1; }
+run_capture_bounded 1 sleep 9
+[ "$RC" -eq 124 ] || { echo "bounded capture did not fire at the bound (got $RC, want 124)"; exit 1; }
 
 RUNNER_NODE_BIN=""
 if command -v node >/dev/null 2>&1; then
@@ -464,7 +498,10 @@ row_pypi_uv_pinned() {
 row_brew() {
   assert_clean_machine
   export PATH="/opt/homebrew/bin:$PATH"
-  run_capture brew install bllshttng/fno/fno
+  # 900s: a cold brew install (auto-update + bottles + pip) fits well under
+  # it, and it stays 600s clear of the 1500s row watchdog, so a stalled fetch
+  # scores as an honest fail here instead of a row hang.
+  run_capture_bounded 900 brew install bllshttng/fno/fno
   if [ "$RC" -ne 0 ]; then
     miss "brew-install" "rc=$RC: $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
     return 0
