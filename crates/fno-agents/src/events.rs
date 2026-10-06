@@ -145,7 +145,12 @@ impl EventEmitter {
         // transaction (WAL, FULL sync, positive readback) replaces the file
         // append, the sibling routing, and the rotation. The retention class
         // is store metadata derived from the type, never a journal route.
-        crate::event_store::append_envelope(&self.path, &line, None).map_err(EmitError::Store)?;
+        let receipt = crate::event_store::append_envelope(&self.path, &line, None)
+            .map_err(EmitError::Store)?;
+        if event_type == "agent_spawned" {
+            crate::first_check::record_envelope(&self.path, &receipt.event_id, &line)
+                .map_err(EmitError::Store)?;
+        }
         Ok(())
     }
 
