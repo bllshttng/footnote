@@ -147,7 +147,9 @@ fn local_sent_time(value: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn unwrap_held_body(body: &str) -> String {
+/// The inner text of a body that is exactly one legacy paired envelope,
+/// else the body unchanged. A body with prose around the envelope stays.
+fn strip_paired_envelope(body: &str) -> String {
     let trimmed = body.trim();
     let Some(block) = paired_envelope_block(trimmed) else {
         return body.to_string();
@@ -161,21 +163,24 @@ fn unwrap_held_body(body: &str) -> String {
     block[open_end + 1..block.len() - "</fno_mail>".len()].to_string()
 }
 
-/// The held-release re-frame unwraps the released turn's legacy paired
-/// envelope the same way display once did; display itself no longer does.
+fn unwrap_held_body(body: &str) -> String {
+    strip_paired_envelope(body)
+}
 fn parse_sent_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     chrono::DateTime::parse_from_rfc3339(value).ok()
 }
 
 /// The body a reader sees: a leading delivered-header line is removed, a
 /// fence that wraps the whole body under the header (the pane lane's
-/// framing) is stripped, and a header whose summary was also pasted as the
-/// body's own first line loses that repeat. A body still carrying the
-/// legacy paired envelope shows the raw tag - the visible prompt to run
-/// the one-time `chats migrate --envelopes`; display never rewrites bytes.
+/// framing) is stripped, a header whose summary was also pasted as the
+/// body's own first line loses that repeat, and a body that is exactly one
+/// legacy paired envelope reads as its inner text at render time (the
+/// operator's 2026-10-05 ask: the raw tag never shows again; `chats migrate
+/// --envelopes` still rewrites the bytes at rest).
 pub fn display_body(body: &str) -> String {
     let (rest, header) = strip_leading_header(body);
     let rest = strip_body_fence(&rest).to_string();
+    let rest = strip_paired_envelope(&rest);
     match header.as_deref().and_then(header_summary) {
         Some(summary) => strip_display_repeat(&rest, &summary),
         None => rest,
@@ -979,11 +984,11 @@ mod tests {
         );
         assert_eq!(without_first_sentence("Ship it."), "Ship it.");
 
-        // An unmigrated legacy body shows the raw tag unchanged (no panic, no
-        // partial strip): the prompt to run the one-time store migration.
+        // An unmigrated legacy body reads as its inner text at render; the
+        // bytes at rest only change when `chats migrate --envelopes` runs.
         assert_eq!(
             display_body("<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"),
-            "<fno_mail from=\"a\" id=\"fmail-0123456789ab\">Ship it.</fno_mail>"
+            "Ship it."
         );
         assert_eq!(
             display_body("`@a · fmail-0123456789ab · Ship it.`\nShip it. Then merge."),

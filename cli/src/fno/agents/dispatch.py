@@ -2933,12 +2933,8 @@ def dispatch_spawn(
                             exit_code=2,
                         )
                     short_id = _opencode_serve_spawn(
-                        name=name,
-                        message=message,
-                        cwd=cwd,
-                        from_name=from_name,
-                        model=model,
-                        node=node,
+                        name=name, message=message, cwd=cwd,
+                        from_name=from_name, model=model, node=node, effort=effort,
                     )
                     _emit_ev(
                         "agent_ask_done",

@@ -19,6 +19,8 @@
       "high",
       "--route",
       "zai/glm-x",
+      "--permission-mode",
+      "bypassPermissions",
       "--name",
       "w11",
       "/fno:target x-9"
@@ -45,6 +47,11 @@
           "route",
           "zai/glm-x",
           "difficulty-grid"
+        ],
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous.permission_mode"
         ]
       ],
       "fingerprint": "13f7c9b05408",
@@ -85,20 +92,12 @@
         }
       },
       "seed": "/fno:target x-9",
-      "suppressed": [
-        [
-          "permission_mode",
-          "bypassPermissions",
-          "builtin.autonomous",
-          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
-        ]
-      ],
+      "suppressed": [],
       "verb": "target"
     },
     "stderr": [
       "fno agents spawn: account skipped (claude-only, grid harness 'codex'); 'readyrule' ignored",
-      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored",
-      "fno agents spawn: applied grid=grid effort(high) (routing), grid=codex/gpt-acct-x (difficulty-grid), effort=high (difficulty-grid), route=zai/glm-x (difficulty-grid)"
+      "fno agents spawn: applied grid=grid effort(high) (routing), grid=codex/gpt-acct-x (difficulty-grid), effort=high (difficulty-grid), route=zai/glm-x (difficulty-grid), permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"
     ],
     "stdout": null
   },

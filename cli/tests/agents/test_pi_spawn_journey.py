@@ -118,6 +118,18 @@ def _alive(pid: int) -> bool:
     return bool(_ps_field("pid", pid))
 
 
+def _alive_keeper(pid: int) -> bool:
+    """True only when the pid is still a keeper process.
+
+    A bare existence check can shoot a stranger: a pid the keeper exited is
+    recycled within seconds on a busy runner, and this cleanup must never
+    SIGKILL a process the journey did not spawn. The changed-smoke leg
+    carrying the journeys lost its runner mid-suite six runs straight while
+    the sibling legs without them stayed green.
+    """
+    return "fno-agents-worker" in _ps_field("command", pid)
+
+
 def _wait_pi_ready(sock: Path, timeout_s: float = 90.0) -> bool:
     """Read keeper Output frames until pi's own status bar has painted.
 
@@ -437,7 +449,7 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_pi_thread(
             time.sleep(0.2)
         assert not _alive(child_pid), "the child outlived the keeper stop"
     finally:
-        if keeper_pid and _alive(keeper_pid):
+        if keeper_pid and _alive_keeper(keeper_pid):
             try:
                 os.kill(keeper_pid, signal.SIGKILL)
             except OSError:

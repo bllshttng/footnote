@@ -750,6 +750,10 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `authorized-merge`: the one merge/arm authorization (see
     // authorized_merge.rs doc). One payload in, one receipt out, one verdict.
+    if verb == "worked-nodes" {
+        return fno_agents::worked_nodes::run_worked_nodes(&args[1..]);
+    }
+
     if verb == "authorized-merge" {
         return fno_agents::authorized_merge::run_authorized_merge(&args[1..]);
     }
@@ -3400,7 +3404,7 @@ fn run_reap(rest: &[String]) -> i32 {
     let mux = if no_mux {
         fno_agents::reap_render::MuxSweep::Skipped
     } else {
-        fno_agents::gc::mux_tab_sweep(dry_run, true)
+        fno_agents::gc::mux_tab_sweep(None, &cwd, dry_run, true)
     };
     print!(
         "{}",

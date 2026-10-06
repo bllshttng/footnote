@@ -100,6 +100,7 @@ RUST_CLIENT_VERBS = frozenset(
         "stop",
         "rm",
         "reconcile",
+        "worked-nodes",
         # The court/king/reign spellings are aliases the dispatch lane rewrites
         # to the org/lead verbs; client.rs routes them directly.
         "court-fold",
@@ -501,6 +502,7 @@ AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS
 #: future Rust-only verb cannot land without a help entry and re-introduce the
 #: gap.
 RUST_ONLY_VERB_HELP: dict[str, str] = {
+    "worked-nodes": "The worked-overlay join: one JSON rows payload on stdin (--rows-file -); reads the graph, registry, and claims itself and answers the node-to-live-workers map with the crown and provenance gate.",
     # The court/king/reign spellings are aliases the dispatch lane rewrites to
     # the org/lead verbs; the help names the alias target so a reader finds it.
     "court-fold": "Alias of org-fold: --graph PATH [--cwd PATH] [--claims-dir PATH] --teams-json JSON [--format json].",

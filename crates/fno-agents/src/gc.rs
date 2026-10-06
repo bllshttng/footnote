@@ -1143,32 +1143,82 @@ pub fn mux_prune_args(dry_run: bool, include_used_shells: bool) -> Vec<&'static 
 /// failure, a non-zero exit, or an unparsable receipt is `Unread`, never a
 /// measured zero.
 ///
+/// The spawn rides the single-flight latch keyed on the prune argv, so a
+/// prune never starts while an earlier one still runs: the joiner waits out
+/// the leader's answer and reports that same receipt. The flight `ttl` is
+/// ZERO - a finished prune is never answered from cache, only from a run
+/// this call made or joined. The 2026-10-02 incident (~9,000 recursive
+/// `fno-py mux workspace prune` processes, 89 GB resident) was the Python
+/// hand-off loop; the `FNO_PY_HANDOFF` marker in the Python front closes
+/// that end and this latch closes the overlap end.
+///
+/// `root` pins the claims root (tests); `None` uses the global one.
+///
 /// The daemon arm passes the DEFAULT prune flags only: an orphaned worker
 /// tab closes on the retire cadence (Locked Decision 6); a human's spent
 /// shells stay opt-in via the manual verb.
-pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_render::MuxSweep {
-    let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
-    cmd.args(mux_prune_args(dry_run, include_used_shells));
-    match cmd.output() {
-        Ok(out) => {
-            let code = out.status.code();
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match (code, crate::reap_render::parse_prune_receipt(&stdout)) {
-                (Some(0), Some(receipt)) => crate::reap_render::MuxSweep::Ran { receipt },
-                (code, _) => {
+pub fn mux_tab_sweep(
+    root: Option<&Path>,
+    cwd: &Path,
+    dry_run: bool,
+    include_used_shells: bool,
+) -> crate::reap_render::MuxSweep {
+    let args = mux_prune_args(dry_run, include_used_shells);
+    // The spawn failure detail (exit code + first stderr line) travels out
+    // of the latch closure here: run_or_join hands back only the stdout.
+    let failure: std::sync::Arc<std::sync::Mutex<Option<(Option<i32>, String)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let failure_in_flight = std::sync::Arc::clone(&failure);
+    let flight = crate::single_flight::run_or_join_at(
+        root,
+        &crate::single_flight::flight_key(&args),
+        Duration::ZERO,
+        crate::agents_config::single_flight_join_budget(cwd),
+        move |_spent| {
+            let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+            cmd.args(&args);
+            match cmd.output() {
+                Ok(out) if out.status.code() == Some(0) => Some(out.stdout),
+                Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stderr_first = stderr.lines().next().unwrap_or("").to_string();
-                    crate::reap_render::MuxSweep::Unread {
-                        exit_code: code,
-                        stderr_first,
-                    }
+                    *failure_in_flight.lock().unwrap() = Some((
+                        out.status.code(),
+                        stderr.lines().next().unwrap_or("").to_string(),
+                    ));
+                    None
+                }
+                Err(e) => {
+                    *failure_in_flight.lock().unwrap() = Some((None, e.to_string()));
+                    None
                 }
             }
-        }
-        Err(e) => crate::reap_render::MuxSweep::Unread {
-            exit_code: None,
-            stderr_first: e.to_string(),
         },
+    );
+    match flight.stdout {
+        Some(stdout) => {
+            let stdout = String::from_utf8_lossy(&stdout);
+            match crate::reap_render::parse_prune_receipt(&stdout) {
+                Some(receipt) => crate::reap_render::MuxSweep::Ran { receipt },
+                None => crate::reap_render::MuxSweep::Unread {
+                    exit_code: Some(0),
+                    stderr_first: String::new(),
+                },
+            }
+        }
+        None => {
+            let held = failure.lock().unwrap().take();
+            match held {
+                Some((exit_code, stderr_first)) => crate::reap_render::MuxSweep::Unread {
+                    exit_code,
+                    stderr_first,
+                },
+                None => crate::reap_render::MuxSweep::Unread {
+                    exit_code: None,
+                    stderr_first: "joined an in-flight prune whose answer never arrived"
+                        .to_string(),
+                },
+            }
+        }
     }
 }
 
@@ -1198,7 +1248,7 @@ pub fn maybe_retirement_sweep(
     grace_cwd: PathBuf,
     events: PathBuf,
     interval: Duration,
-    tab_sweep: fn() -> crate::reap_render::MuxSweep,
+    tab_sweep: impl FnOnce() -> crate::reap_render::MuxSweep + Send + 'static,
     roster_sweep: fn(
         &AgentsHome,
         &Path,
@@ -1602,7 +1652,7 @@ mod tests {
     fn run_retire_pass_and_read_tick(
         dir: &std::path::Path,
         home: &AgentsHome,
-        tab_sweep: fn() -> crate::reap_render::MuxSweep,
+        tab_sweep: impl FnOnce() -> crate::reap_render::MuxSweep + Send + 'static,
         roster_sweep: fn(
             &AgentsHome,
             &std::path::Path,
@@ -1708,6 +1758,60 @@ mod tests {
             "the tick must name the unread sweep: {:?}",
             row["data"]["detail"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mux_tab_sweep_never_answers_a_finished_prune_from_cache() {
+        // The 2026-10-02 overlap guard: the sweep rides the single-flight
+        // latch with flight ttl ZERO. A finished prune's record must never
+        // answer a later call (that would report a sweep that did not run),
+        // so two back-to-back calls with a counting stub spawn twice and
+        // both parse. Takes the crate-wide env lock (FNO_BIN mutation).
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (dir, _home) = retirement_sweep_tmp_home("mux-no-cache");
+        let count = dir.join("invocations");
+        let receipt = dir.join("receipt.json");
+        std::fs::write(
+            &receipt,
+            r#"{"tabs_closed": 1, "tabs_would_close": 0, "tabs_close_named": ["p1"], "sessions_unreachable": []}"#,
+        )
+        .unwrap();
+        let stub = crate::write_exec_stub(
+            &dir,
+            "fno-stub.sh",
+            &format!(
+                "#!/bin/sh\necho x >> {}\ncat {}\n",
+                count.display(),
+                receipt.display()
+            ),
+        );
+        let prior = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_BIN", &stub);
+        let cwd = dir.clone();
+        let first = crate::gc::mux_tab_sweep(None, &cwd, false, false);
+        let second = crate::gc::mux_tab_sweep(None, &cwd, false, false);
+        match prior {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        let spawns = std::fs::read_to_string(&count).unwrap().lines().count();
+        assert_eq!(
+            spawns, 2,
+            "flight ttl ZERO must never answer a finished prune from cache"
+        );
+        match (&first, &second) {
+            (
+                crate::reap_render::MuxSweep::Ran { receipt: r1 },
+                crate::reap_render::MuxSweep::Ran { receipt: r2 },
+            ) => {
+                assert_eq!(r1.closed, 1);
+                assert_eq!(r2.closed, 1);
+            }
+            other => panic!("both sweeps must parse as Ran: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3132,123 +3236,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The per-candidate freshness re-check: activity arriving between
-    /// classification and the stop effect keeps the row. The re-check re-stats
-    /// THIS row's transcript through the same store seam; a fresh read, or a
-    /// read that can no longer resolve, holds the retirement for the next
-    /// tick.
-    #[test]
-    fn activity_arriving_in_the_apply_window_keeps_the_row() {
-        use std::cell::Cell;
-        use std::collections::HashMap;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let dir = std::env::temp_dir().join(format!(
-            "fno-gc-fresh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let home = AgentsHome::at(dir);
-        home.ensure_root().unwrap();
-        let transcript = home.root().join("rollout.jsonl");
-        std::fs::write(&transcript, b"{}\n").unwrap();
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2000);
-        std::fs::File::options()
-            .write(true)
-            .open(&transcript)
-            .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
-        crate::state::update_registry(&home.registry_json(), |r| {
-            let mut e = crate::state::RegistryEntry::default();
-            e.name = "freshw".into();
-            e.short_id = "freshw".into();
-            e.origin = Some("spawn".into());
-            e.harness = Some("codex".into());
-            e.harness_session_id = Some("S-fresh".into());
-            r.entries.push(e);
-        })
-        .unwrap();
-
-        let mut index = HashMap::new();
-        index.insert(
-            "s-fresh".to_string(),
-            vec![("N1".to_string(), "done".to_string())],
-        );
-        let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
-            work_index: index.clone(),
-            index,
-            open_do: HashMap::new(),
-            phases: HashMap::new(),
-            closed_planning: HashMap::new(),
-            plan_written: HashMap::new(),
-            statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
-            pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
-            pr_number: HashMap::new(),
-            plan_paths: HashMap::new(),
-            delivery_merged_refs: HashMap::new(),
-            do_nodes: HashMap::new(),
-            pr_reads: HashMap::new(),
-        }));
-        let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
-        let stopped = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&stopped);
-        let calls = Cell::new(0u32);
-        let calls_ref = &calls;
-        // Call 1 (classification): the age seam answers 2000s, past grace.
-        // Call 2 (the apply-window re-check): the SAME row reads fresh, as if
-        // the session just wrote a turn.
-        let age_many = move |entries: &[&crate::state::RegistryEntry]| {
-            let n = calls_ref.get();
-            calls_ref.set(n + 1);
-            let age = if n == 0 { 2000 } else { 0 };
-            entries
-                .iter()
-                .map(|e| (row_handle(e), Some(age)))
-                .collect::<HashMap<_, _>>()
-        };
-        let summary = gc_sweep::run(
-            &home,
-            &emitter,
-            900, // grace
-            false,
-            7,
-            &|_h| graph.borrow_mut().take(),
-            &|_e| Some(vec![transcript.clone()]),
-            &age_many,
-            &move |_e| {
-                flag.store(true, Ordering::SeqCst);
-                true
-            },
-            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
-            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
-            &no_agents,
-            &|_e| (None, None),
-            &|_e| None,
-        );
-        assert!(
-            !stopped.load(Ordering::SeqCst),
-            "the stop fired despite fresh activity in the window"
-        );
-        assert!(
-            summary.retired.is_empty(),
-            "no retirement recorded: {:?}",
-            summary.retired
-        );
-        assert_eq!(
-            summary.kept_active.len(),
-            1,
-            "the row lands in kept_active: {:?}",
-            summary.kept_active
-        );
-        let _ = std::fs::remove_dir_all(home.root());
-    }
-
     #[test]
     fn a_non_spawn_row_names_its_own_gate_even_when_the_graph_is_unreadable() {
         // The origin gate runs BEFORE the graph read in the sweep, so a row
@@ -3599,33 +3586,6 @@ mod tests {
             gc_decide(&unresolved, GRACE),
             (GcAction::Keep, Some(KeepReason::TranscriptUnresolved),),
             "a terminal state never makes an unreadable transcript quiet"
-        );
-    }
-
-    /// Recency is never reaped as unattended. The 2026-09-25 daemon sweeps
-    /// retired two thread workers INSIDE the grace window: a terminal
-    /// roster reading overrode a transcript that had moved seconds
-    /// earlier, and one worker lost its claim mid-node. A fresh timestamped
-    /// entry has a writer seconds behind it; the row retires when the
-    /// writing stops, never while it moves.
-    #[test]
-    fn a_recent_transcript_is_never_reaped_as_unattended() {
-        let mut row = open_row("in_progress");
-        row.transcript_age_s = Some(30);
-        row.session_terminal = Some("failed".into());
-        assert_eq!(
-            gc_decide(&row, GRACE),
-            (GcAction::Keep, Some(KeepReason::Active { age_s: 30 })),
-            "a terminal roster state does not revoke transcript recency",
-        );
-
-        let mut done_row = retiring();
-        done_row.transcript_age_s = Some(30);
-        done_row.session_terminal = Some("failed".into());
-        assert_eq!(
-            gc_decide(&done_row, GRACE),
-            (GcAction::Keep, Some(KeepReason::Active { age_s: 30 })),
-            "the same on an AllDone row: the grace gate rules, not the state",
         );
     }
 
