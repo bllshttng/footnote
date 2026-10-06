@@ -178,7 +178,7 @@ Two consequences landed from this measurement:
 
 ## Mail is typed as one line, never a paste (C17)
 
-The typed lanes (`inject_with_submit` in `crates/fno-agents/src/mail_inject.rs`) no longer bracket-paste a multi-line mail body. A delivery is flattened to ONE line by `one_line`. Every newline run becomes the return glyph ` ⏎ `. A tab becomes a space. Every other control byte (ESC included) is dropped. The typed turn is one write, then the separate wire-level CR. The durable bus copy keeps the real newlines. Only the keystrokes are flattened (crown ruling d-9187ccf6: one constant, `NEWLINE_GLYPH`, and the user can change it). A paste is only the user's own, so a delivered message never wears the pasted-content label.
+The typed lanes (`inject_with_submit` in `crates/fno-agents/src/mail_inject.rs`) no longer bracket-paste a multi-line mail body. A delivery is flattened to ONE line by `one_line`. Every newline run becomes the return glyph ` ⏎ `. A tab becomes a space. Every other control byte (ESC included) is dropped. The typed turn is one write, then the separate wire-level CR. The durable bus copy keeps the real newlines. Only the keystrokes are flattened (role ruling d-9187ccf6: one constant, `NEWLINE_GLYPH`, and the user can change it). A paste is only the user's own, so a delivered message never wears the pasted-content label.
 
 Two consequences:
 

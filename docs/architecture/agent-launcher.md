@@ -50,7 +50,7 @@ Force is a deliberate user gesture. Shift+enter arms it, and so does the `--forc
 ## Boundaries not crossed
 
 - The composer launches a thread by default, or a pane through the Where chip's placement rows. Headless workers keep the CLI. Both reuse the same state and render components (`client/agent_launcher.rs`), not a second composer.
-- No raw CLI passthrough, crown granting, or permission escalation. Force exists only as the explicit user gesture above. The request field, not a free argv token, carries it. The override is journaled with the user as the actor. The axes `--force` can never excuse (provider cap, blueprint) stay enforced. Without the gesture, a refusal is still the product.
+- No raw CLI passthrough, role granting, or permission escalation. Force exists only as the explicit user gesture above. The request field, not a free argv token, carries it. The override is journaled with the user as the actor. The axes `--force` can never excuse (provider cap, blueprint) stay enforced. Without the gesture, a refusal is still the product.
 
 ## Tests
 

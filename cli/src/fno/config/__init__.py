@@ -419,7 +419,7 @@ class BacklogBlock(BaseModel):
     # Enforced by the Rust idea cap (idea_cap.rs); 0 turns the cap off.
     max_open_ideas: int = Field(default=25, ge=0)
     render_targets: list[RenderTargetConfig] = Field(default_factory=list)
-    # Seconds an open local board or reign.html tab waits, visible and
+    # Seconds an open local board or lead.html tab waits, visible and
     # untouched, before it reloads itself (0 is off).
     page_reload_s: int = 60
 
@@ -1759,7 +1759,7 @@ class HandoffBlock(BaseModel):
 
     @model_validator(mode="after")
     def king_trigger_below_teammate_trigger(self) -> "HandoffBlock":
-        """A king compacts EARLIER than a teammate, so an EXPLICITLY-set
+        """A lead compacts EARLIER than a teammate, so an EXPLICITLY-set
         king_used_pct_trigger must stay strictly below used_pct_trigger. The
         refusal MESSAGE is the deliverable: the failure mode this prevents is a
         future reader "tidying" 40 up to 50, and the rationale lands in front of
@@ -1767,10 +1767,10 @@ class HandoffBlock(BaseModel):
 
         The rule fires only when king_used_pct_trigger was EXPLICITLY set. A
         DEFAULT silently invalidating an otherwise-valid explicit setting is a
-        trap: a user who sets used_pct_trigger low and never touches the king
-        knob would be refused for a value they never wrote. So a defaulted king
+        trap: a user who sets used_pct_trigger low and never touches the lead
+        knob would be refused for a value they never wrote. So a defaulted lead
         (40) leaves the config valid even when the teammate trigger dips below
-        it; the user who wants king < teammate sets king explicitly.
+        it; the user who wants lead < teammate sets lead explicitly.
         """
         if (
             "king_used_pct_trigger" in self.model_fields_set
@@ -1780,9 +1780,9 @@ class HandoffBlock(BaseModel):
                 "config.target.handoff.king_used_pct_trigger must be BELOW "
                 "used_pct_trigger "
                 f"(got {self.king_used_pct_trigger}, teammate trigger "
-                f"{self.used_pct_trigger}). A king compacts earlier than a "
+                f"{self.used_pct_trigger}). A lead compacts earlier than a "
                 "teammate on purpose: a worker's degradation costs one node, "
-                "a king's propagates into every ruling it issues and every "
+                "a lead's propagates into every ruling it issues and every "
                 "worker it routes, and the handoff itself costs context."
             )
         return self
@@ -2099,7 +2099,7 @@ class DispatchBlock(BaseModel):
     # table (blueprint for medium and up). "low" blueprints every plan-less
     # node; "never" targets everything. Read by the lifecycle verb table
     # (fno-agents effective_verb) through the dispatch doors, and by the
-    # reign check-in's blueprint reading.
+    # lead check-in's blueprint reading.
     blueprint_floor: str = "high"
 
     @field_validator("auto_merge", mode="before")

@@ -36,13 +36,13 @@ Ten campaigns, K1 to K10, run in key order, one PR each. Two or three can run at
 |---|---|---:|---:|---:|---:|---:|---|
 | K1 | tooling (CI gates, hooks, lint, skills, repo tests/, goldens, benchmarks) plus config, paths, setup, doctor, update, worktree | 2,675 | 333 | 3,008 | 185 | 1,504 | [k1-campaign.md](k1-campaign.md) |
 | K2 | spawn and dispatch | 2,093 | 518 | 2,611 | 152 | 1,306 | [k2-campaign.md](k2-campaign.md) |
-| K3 | session registry, watchdog, discover, recovery, reap, crown | 2,534 | 535 | 3,069 | 163 | 1,535 | [k3-campaign.md](k3-campaign.md) |
+| K3 | session registry, watchdog, discover, recovery, reap, role | 2,534 | 535 | 3,069 | 163 | 1,535 | [k3-campaign.md](k3-campaign.md) |
 | K4 | harness adapters and providers (cli/src/fno/adapters colocated tests, harnesses, claude/codex Rust) | 1,593 | 669 | 2,262 | 122 | 1,131 | [k4-campaign.md](k4-campaign.md) |
 | K5 | graph store, board, backlog verbs, claims, carveouts | 3,547 | 999 | 4,546 | 273 | 2,273 | [k5-campaign.md](k5-campaign.md) |
 | K6 | pr, review, merge, pr_watch, mail, bus, events, relay, inbox, decide | 3,208 | 1,041 | 4,249 | 236 | 2,125 | [k6-campaign.md](k6-campaign.md) |
 | K7 | plan, retro, scoreboard, provenance, evals, target | 1,773 | 476 | 2,249 | 132 | 1,125 | [k7-campaign.md](k7-campaign.md) |
 | K8 | mux crate (all of crates/fno) | 0 | 3,012 | 3,012 | 204 | 1,506 | [k8-campaign.md](k8-campaign.md) |
-| K9 | loopcheck, finalize, daemon, gc, king, crown, reign, heal | 0 | 2,200 | 2,200 | 99 | 1,100 | [k9-campaign.md](k9-campaign.md) |
+| K9 | loopcheck, finalize, daemon, gc, lead, role, lead, heal | 0 | 2,200 | 2,200 | 99 | 1,100 | [k9-campaign.md](k9-campaign.md) |
 | K10 | long tail (everything the other keys did not claim) | 2,147 | 1,540 | 3,687 | 321 | 1,844 | [k10-campaign.md](k10-campaign.md) |
 
 ## Ledgers

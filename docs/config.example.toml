@@ -115,7 +115,7 @@ staleness_days = 21
 max_open_ideas = 25
 # Auto-rendered boards (GLOBAL config file only): every graph mutation re-renders each {path, scope, projection=local|backlog|roadmap} target; local (the default) writes the unified board page, backlog and roadmap are retired and warn-skip.
 render_targets = []
-# Seconds an open local board, fleet.html or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off).
+# Seconds an open local board, fleet.html or lead.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off).
 page_reload_s = 60
 
 [backlog.maintain]
@@ -245,7 +245,7 @@ dedupe_dead_duplicates = false
 enabled = true
 # Context-used %% that triggers a general-session compact nudge.
 used_pct_trigger = 50
-# Context-used %% that triggers an earlier king compact nudge.
+# Context-used %% that triggers an earlier lead compact nudge.
 king_used_pct_trigger = 40
 
 [target.blast]
@@ -303,7 +303,7 @@ retire_interval_s = 300
 hold_escalate_after_s = 5400
 # Backstop cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). Sized from RAM, because every live row holds RAM whether or not it works: floor((RAM_GB - 4 GB OS reserve - your desktop apps) / 1 GB per worker). The 1 GB planning figure is generous on purpose (a build or a test suite bursts past the measured 430 MB a quiet worker holds); the CPU axis (max_fleet_cpu_share) binds first on any machine with real headroom, so raise this instead of tuning it.
 max_live = 3
-# Per-territory team cap: the max live workers whose node is contained in one crown scope, enforced in the spawn gate beside agents.max_live (the machine ceiling, which stays independent and authoritative). Rows that work no node (kings, blueprinters, ad-hoc panes) never count. Unknown territory attribution refuses; other-territory headroom is untouched (default 4).
+# Per-territory team cap: the max live workers whose node is contained in one role scope, enforced in the spawn gate beside agents.max_live (the machine ceiling, which stays independent and authoritative). Rows that work no node (leads, blueprinters, ad-hoc panes) never count. Unknown territory attribution refuses; other-territory headroom is untouched (default 4).
 max_live_per_territory = 4
 # Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers. A claude worker with an open operator question and a transcript quiet for 900 s or more is left out of that count until it writes again or its question closes; the lanes probe lists it under `parked`. `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. Renamed from `agents.max_lanes` so no two leaves share that name with `parallel.max_lanes`; the legacy spelling still parses with one deprecation line.
 provider_limits = { zai = { lanes = 5, subagents = 1 } }
@@ -393,7 +393,7 @@ auto_merge = false
 on_exhaustion = "defer"
 # Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0.
 cutover_low_after_minutes = 0
-# The blueprint floor for a plan-less node (lean dispatch). 'high' (the default) routes a plan-less node to /blueprint only when its difficulty is high, its size is L, or an open premise question blocks it (the premise-question tag); every other plan-less node goes straight to /target, which states its own scope. 'medium' restores the pre-lean table (blueprint for medium and up). 'low' blueprints every plan-less node; 'never' targets everything. The reign check-in routes each unplanned row through the same table: blueprint candidates against the one-per-king ceiling, the rest print as target-ready. Any unknown value degrades to 'high'.
+# The blueprint floor for a plan-less node (lean dispatch). 'high' (the default) routes a plan-less node to /blueprint only when its difficulty is high, its size is L, or an open premise question blocks it (the premise-question tag); every other plan-less node goes straight to /target, which states its own scope. 'medium' restores the pre-lean table (blueprint for medium and up). 'low' blueprints every plan-less node; 'never' targets everything. The lead check-in routes each unplanned row through the same table: blueprint candidates against the one-per-lead ceiling, the rest print as target-ready. Any unknown value degrades to 'high'.
 blueprint_floor = "high"
 
 [routing]
@@ -409,7 +409,7 @@ enforce_inventory = false
 operator_access = "unknown"
 
 [sideline]
-# The sideline's row shape: "card" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); "list" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.
+# The sideline's row shape: "card" renders each session as a padded two-line card (state glyph, name, PR, then harness, lead, message, age); "list" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.
 layout = "card"
 
 [sideline.colors]
@@ -717,27 +717,27 @@ http_timeout_secs = 5
 retries = 2
 
 [king]
-# Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false.
+# Arm the lead loop: hold a lead session open while its board names work it can shrink. Defaults false.
 enabled = false
-# Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work.
+# Let the lead merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the lead's own work.
 autonomous_merge = false
-# Arm the pr-watch tick's wake phase: respawn a king whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false.
+# Arm the pr-watch tick's wake phase: respawn a lead whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false.
 wake_enabled = false
-# Wakes allowed per scope per ROLLING 24h (default 32, ~1.5x the worst measured day). Never a lifetime constant: a lifetime cap strands a long-lived reign.
+# Wakes allowed per scope per ROLLING 24h (default 32, ~1.5x the worst measured day). Never a lifetime constant: a lifetime cap strands a long-lived lead.
 wake_ceiling = 32
-# Minimum gap between billed wakes (default 900): a king woken inside the window is still working under its own in-session arm.
+# Minimum gap between billed wakes (default 900): a lead woken inside the window is still working under its own in-session arm.
 wake_debounce_seconds = 900
 # Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement.
 wake_backstop_seconds = 1800
 # Minutes a blocked distress row may sit unanswered before the blocked_child board queue surfaces it (default 30). An answer is mail to that session, a claim release on the node, or the node closing.
 blocked_child_grace_minutes = 30
-# What a crowned court session may write through the king-delegation-guard hook. refuse (default) denies a write whose target resolves inside the repo, outside its .fno state tree, build output and any king.write_roots entry, and names the rejected path. warn prints the refusal on stderr and allows, so a reign adopts the guard without a surprise. off silences the guard. An unknown value degrades to refuse.
+# What a titled org session may write through the lead-delegation-guard hook. refuse (default) denies a write whose target resolves inside the repo, outside its .fno state tree, build output and any lead.write_roots entry, and names the rejected path. warn prints the refusal on stderr and allows, so a lead adopts the guard without a surprise. off silences the guard. An unknown value degrades to refuse.
 implementation_guard = "refuse"
-# In-repo paths a crowned court session may still write through the king-delegation-guard hook. A relative entry resolves against the repo root, and a leading ~/ against $HOME. The match is by realpath, so a symlinked entry covers its target. Default empty: every in-repo path outside .fno and build output is source and refused. A blank entry is dropped. '.' allows the whole repo, the same as implementation_guard = off. Paths outside the repo always allow and need no entry.
+# In-repo paths a titled org session may still write through the lead-delegation-guard hook. A relative entry resolves against the repo root, and a leading ~/ against $HOME. The match is by realpath, so a symlinked entry covers its target. Default empty: every in-repo path outside .fno and build output is source and refused. A blank entry is dropped. '.' allows the whole repo, the same as implementation_guard = off. Paths outside the repo always allow and need no entry.
 write_roots = []
-# The /loop interval a reign self-injects on Claude (default 55m, under the one-hour prompt cache). Fail-safe: a value that is not <digits>[smhd] degrades to 55m at load, never raises.
+# The /loop interval a lead self-injects on Claude (default 55m, under the one-hour prompt cache). Fail-safe: a value that is not <digits>[smhd] degrades to 55m at load, never raises.
 checkin_interval = "55m"
-# The /loop prompt text a reign self-injects at each check-in (default: run fno agents king checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle).
+# The /loop prompt text a lead self-injects at each check-in (default: run fno agents org checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle).
 checkin_text = "reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. "
 
 [accounts]

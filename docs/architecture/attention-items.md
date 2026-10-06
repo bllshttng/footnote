@@ -50,7 +50,7 @@ Is a net-zero Python repair legal with no grant?
 the reconcile fix and the merge fix are both Python edits
 
 ## Why these options
-the three readings kings have acted on
+the three readings leads have acted on
 
 ## Downside
 a repair can hide a feature
@@ -85,7 +85,7 @@ outstanding: refused: a question needs <the missing sections>. Write a question 
 
 Flag options (`--options a --options b`) carry no per-option next, so the door refuses them for questions and points at the question file. The fno-agents binary can be missing on a broken install. The fallback then still records the question. It prints a NOT VISIBLE line: without the readiness gate the row can land not-ready, and the mux will not show it.
 
-A reversible question that carries a recommendation is one the asker must decide itself. The port refuses it too, naming the door: record the ruling as the asking session or its king with `fno backlog decide <node> "<ruling>"`, then continue. It reaches the user only with a user-only reason in a `why_user:` frontmatter key. The four reasons are: irreversible, spends money or a credential, reaches outside the machine, or a product or taste call. The user sees a decide-it-yourself ruling only as a one-line FYI in the check-in, never as a question.
+A reversible question that carries a recommendation is one the asker must decide itself. The port refuses it too, naming the door: record the ruling as the asking session or its lead with `fno backlog decide <node> "<ruling>"`, then continue. It reaches the user only with a user-only reason in a `why_user:` frontmatter key. The four reasons are: irreversible, spends money or a credential, reaches outside the machine, or a product or taste call. The user sees a decide-it-yourself ruling only as a one-line FYI in the check-in, never as a question.
 
 The two trace keys name the hop the question answers. `answers_ask:` is the ask span id. Any other id reads as the ask mail's message id. The intake reads that row off the bus and re-derives the ask span. An unresolvable id still routes, only parentless. `class:` is one of public-surface, irreversible, money-security, law-change, gate-override, none. The intake turns `answers_ask:` into the escalate route span and stamps the question row's trace (docs/architecture/decision-record.md, "Traced decisions"). The ask span id also prints on every Approval: send as `mail-record: ask span <id>`.
 
@@ -97,15 +97,15 @@ Frontmatter carries `question_id`, `kind`, `status`, `title`, `ask`, `recommend`
 
 ## Answering
 
-The Base's Needs you view shows the ask, the option letters `a` `b` `c`, `recommend`, `answer`, created, updated, and an Age (d) column. It also shows the routing facts: session, node, crown as the king name, harness, and model. Answer from the Base: type a letter (a, b, c) into the answer cell, or a number, or words. The arm records only a typed value: an empty cell is never an answer. Answer from the page: tick one option, write words under `## Answer`, or tick a pin's `- [x] Done`. Two ticked options record nothing and earn one notice. After the settle window (120 s), a changed page restarts the window. A frontmatter stamp that only adds keys does not: the settle key mixes the body hash with the answer cell. First answer wins. When another writer changed a page since the arm's read, the close skips it (`skip_reason: file_changed`) and moves it into `done/` on a later beat.
+The Base's Needs you view shows the ask, the option letters `a` `b` `c`, `recommend`, `answer`, created, updated, and an Age (d) column. It also shows the routing facts: session, node, role as the lead name, harness, and model. Answer from the Base: type a letter (a, b, c) into the answer cell, or a number, or words. The arm records only a typed value: an empty cell is never an answer. Answer from the page: tick one option, write words under `## Answer`, or tick a pin's `- [x] Done`. Two ticked options record nothing and earn one notice. After the settle window (120 s), a changed page restarts the window. A frontmatter stamp that only adds keys does not: the settle key mixes the body hash with the answer cell. First answer wins. When another writer changed a page since the arm's read, the close skips it (`skip_reason: file_changed`) and moves it into `done/` on a later beat.
 
 The body holds the title and the question body. `## Options` carries one `- [ ] N. <text>. Next: <next>. Pro: <pros>. Con: <cons>` line per option, with empty parts omitted. `## Context` carries the blocked-because, the options rationale, `Recommended: N, because <why>. Downside: <downside>`, the not-thought-through list, reversible with its cost, and meanwhile. The body ends with `## Answer`.
 
-`questions.md` is the index: one `[[<file stem>|<title>]]` wikilink per open page under `## Open (N)`, newest ask first, and the 20 most recent closed pages under `## Done`. `questions.base` filters `file.hasProperty("question_id")` and carries four views: Needs you, Open by king, Open by node, and Board (cards grouped by status). Every view sorts newest ask first. Both files are generated. They carry a generated marker and are never written over a hand-authored file. The tick detail names it instead.
+`questions.md` is the index: one `[[<file stem>|<title>]]` wikilink per open page under `## Open (N)`, newest ask first, and the 20 most recent closed pages under `## Done`. `questions.base` filters `file.hasProperty("question_id")` and carries four views: Needs you, Open by lead, Open by node, and Board (cards grouped by status). Every view sorts newest ask first. Both files are generated. They carry a generated marker and are never written over a hand-authored file. The tick detail names it instead.
 
 ## The arm
 
-The `attention` arm beats every 30 s, reads the projection, routes each item to its crown, writes pages, settles, records and closes. The settle state lives at `~/.fno/attention/questions.json`. The projection cache at `~/.fno/attention/items.json` gains `questions_dir`, which the king check-in reads. `attention.enabled = false` is the kill switch: it stops every page write and answer read, checked on every beat. The arm computes routing once at page-write time and never refreshes it: a crown crowned later never sees older pages in its check-in. When the graph is unreadable the beat delivers nothing (`skip_reason: routing_unreadable`) and the next beat retries.
+The `attention` arm beats every 30 s, reads the projection, routes each item to its role, writes pages, settles, records and closes. The settle state lives at `~/.fno/attention/questions.json`. The projection cache at `~/.fno/attention/items.json` gains `questions_dir`, which the lead check-in reads. `attention.enabled = false` is the kill switch: it stops every page write and answer read, checked on every beat. The arm computes routing once at page-write time and never refreshes it: a role titled later never sees older pages in its check-in. When the graph is unreadable the beat delivers nothing (`skip_reason: routing_unreadable`) and the next beat retries.
 
 ## Config keys
 
@@ -154,6 +154,6 @@ The arm's mux pass runs on every beat beside the pages. Every unsuperseded `atte
 
 1. `mail` - the clear's mail leg. The posture line decides: `delivered (hosted)` is the end, `rung: mail, outcome: landed`.
 2. `resume` - a durable park under an idle asker. When the asker has a session id, the arm runs `fno agents resume <session_id> --message <answer>`. This is the one resume door, with a 30 s bound and stdin closed. The message carries the question id and a dedupe line. A later beat looks for the question id in the asker's transcript, after the byte offset the resume saved. Seeing it confirms delivery (`rung: resume, outcome: confirmed`).
-3. `crown` - an exit-17 resume, a nonzero exit, a missing transcript, or five unconfirmed minutes. The arm mails the answer, wrapped, to the live crown whose territory names the asker's node (`rung: crown, outcome: sent`). With no crown, the row reads `rung: none, outcome: failed` and the evidence names why.
+3. `crown` - an exit-17 resume, a nonzero exit, a missing transcript, or five unconfirmed minutes. The arm mails the answer, wrapped, to the live role whose territory names the asker's node (`rung: crown, outcome: sent`). With no role, the row reads `rung: none, outcome: failed` and the evidence names why.
 
 Each item's ladder ends with one `attention_delivery` row in `questions.jsonl`. The panel shows the rung on the answered row for 15 minutes.

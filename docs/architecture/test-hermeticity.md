@@ -122,7 +122,7 @@ A dirty-lane failure of the canary is never something to fix by pinning it.
 
 Ambient neutralisation cannot close readers that derive answers from Git, config files, registries, claims, or cached path decisions. The state command runs the Python smoke step twice. It uses an empty profile and a populated profile. It compares JUnit testcase verdicts by node ID.
 
-The populated profile contains a graph node named `STATE_LEAK_CANARY`, a config profile, an agent registry crown, a session identity, and one claim. The canary reads the graph through `fno.paths.graph_json()`. Clean passes because the marker is absent. Populated fails because the marker is present. `tests/ci/test_state_lanes.sh` asserts both outcomes. An empty diff cannot read as green. Neither can an unpopulated profile.
+The populated profile contains a graph node named `STATE_LEAK_CANARY`, a config profile, an agent registry role, a session identity, and one claim. The canary reads the graph through `fno.paths.graph_json()`. Clean passes because the marker is absent. Populated fails because the marker is present. `tests/ci/test_state_lanes.sh` asserts both outcomes. An empty diff cannot read as green. Neither can an unpopulated profile.
 
 The profile is a discovery instrument, not a completeness proof. A populated run proves the listed profile reached the reader. It proves the changed testcase list is real. It does not prove every possible state store was represented. The execution summary must record named escapes.
 
@@ -160,7 +160,7 @@ The rule names the directory, not a state root. `STATE_DIR` cannot be read here.
 
 The Rust runtime carries the same rule inside the lib crate, and only there. `AgentsHome::from_env` and `durable_spaces_root` refuse the ambient `$HOME` fallback under `cfg!(test)` unless a root is declared, because `cargo test` sandboxes no `HOME`. A test declares one with `paths::DeclaredRoot`, which pins `FNO_SPACES_DIR` and `FNO_AGENTS_HOME` under `std::env::temp_dir()` and restores them on drop.
 
-The fno porcelain follows the same rule. Under `cfg!(test)`, `scrape::fno_bin`, `scrape::fno_py` and `loopcheck::loopcheck_fno_bin` answer only a declared `FNO_BIN` / `FNO_PY` / `FNO_LOOPCHECK_FNO_BIN`; undeclared, each answers a path that cannot exec. A raw `cargo test` inherits the calling session's identity, and the installed fno's parent push would mail that session a false `[fno:blocked]` alarm, which is exactly what two distress lib tests did to a king session on 2026-09-21.
+The fno porcelain follows the same rule. Under `cfg!(test)`, `scrape::fno_bin`, `scrape::fno_py` and `loopcheck::loopcheck_fno_bin` answer only a declared `FNO_BIN` / `FNO_PY` / `FNO_LOOPCHECK_FNO_BIN`; undeclared, each answers a path that cannot exec. A raw `cargo test` inherits the calling session's identity, and the installed fno's parent push would mail that session a false `[fno:blocked]` alarm, which is exactly what two distress lib tests did to a lead session on 2026-09-21.
 
 Two resolvers, not every resolver. `claims::global_claims_root` carries the same `$HOME` fallback and is unfenced, so a bare `cargo test --lib` still creates `$HOME/.fno/claims`. That was measured on 2026-09-07. The poisoned-HOME canary is what catches it, so this page names the gap instead of claiming it closed.
 

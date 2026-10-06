@@ -89,7 +89,7 @@ When a PR opens outside the Footnote PR path, acquire the owner claim with `fno 
 
 ## Demand signal: what the agents keep hitting
 
-Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstanding ask` means "I need a decision". `fno king escalate` means "the board is stalled". The `<help>` tag means "I am stuck". None of them means "this keeps costing me". `fno backlog encounter` is the one that does.
+Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstanding ask` means "I need a decision". `fno agents org escalate` means "the board is stalled". The `<help>` tag means "I am stuck". None of them means "this keeps costing me". `fno backlog encounter` is the one that does.
 
 A repeat `fno backlog note` on a node with no encounter from the same session ends its receipt with the encounter command. A note is prose nothing ranks. An encounter is the row `fno backlog demand` reads.
 
@@ -99,14 +99,14 @@ fno backlog encounter <id> --operator --evidence "the operator hit the same seam
 fno backlog idea "title" --evidence "hit this while doing something else."
 fno backlog add "title" --evidence "hit this while doing something else."
 fno backlog demand                 # the divergence table
-fno backlog demand --json          # the same rows, for a groom pass or a king
+fno backlog demand --json          # the same rows, for a groom pass or a lead
 ```
 
 An encounter is a thing that HAPPENED, not a preference. Agents have no preferences, they have contexts. A poll count of N agents who like a node is unfalsifiable. N distinct sessions that each name what the node cost them is falsifiable against a transcript. So evidence is required. `config.style.word_cap.encounter` caps it at 80 words by default. Over-length evidence is refused rather than truncated.
 
 One voter votes once per node. Agent voters use their session identity. The operator uses the stable `operator` voter key with `--operator`, so a plain terminal does not need a harness session. A second attempt is refused, never silently dropped. The refusal names the timestamp of the vote already on file, so the caller can add a `fno backlog note` instead. An agent whose identity cannot be proven cannot vote at all: no provenance means no falsifiability. Run `fno whoami` to see what a session can prove.
 
-`demand` sorts by DIVERGENCE, not by raw vote volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. When the operator voted, the `enc` column shows the split, for example `3 (2a/1o)`. It counts both kinds of voter. The `dispatched` column counts the encountering sessions that were also sent to that node. A row reading `enc 12, dispatched 12` is one king that fanned out. A row reading `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
+`demand` sorts by DIVERGENCE, not by raw vote volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. When the operator voted, the `enc` column shows the split, for example `3 (2a/1o)`. It counts both kinds of voter. The `dispatched` column counts the encountering sessions that were also sent to that node. A row reading `enc 12, dispatched 12` is one lead that fanned out. A row reading `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
 
 `idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
 
@@ -122,7 +122,7 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 ### Progress notes reach the people building the node
 
-`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
+`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the role walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
 
 Pass `--quiet` to note without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
 
@@ -247,11 +247,11 @@ Two hidden verbs serve the migration and the operator:
 
 A child is open: not done, not superseded, not deferred. Children are direct. A sub-epic counts as one child of its parent and carries its own cap.
 
-Every write that sets a parent meets the refusal: `update --parent`, `idea --parent`, `contain`, `decompose`, the rollup crown auto-link, and the api node_create. A hand-up is exempt. That write moves the live children of a closing node to the nearest live ancestor. It moves existing work and adds none. If the crown's single epic is full, a crowned `idea` with no `--parent` meets the same refusal. The auto-link sets the parent in the same write. The filer re-runs with `--parent <new epic>`.
+Every write that sets a parent meets the refusal: `update --parent`, `idea --parent`, `contain`, `decompose`, the rollup role auto-link, and the api node_create. A hand-up is exempt. That write moves the live children of a closing node to the nearest live ancestor. It moves existing work and adds none. If the role's single epic is full, a titled `idea` with no `--parent` meets the same refusal. The auto-link sets the parent in the same write. The filer re-runs with `--parent <new epic>`.
 
-The refusal names the epic, its open count, the cap, and the next step. Run `fno backlog idea "EPIC: <theme>" --type epic` to start a new small epic, then point the write at the new epic id. If a king leads the full epic, it adds the new epic to its own crown: `fno agents crown <its handle> --scope <each epic it holds> --scope <new-epic-id>`. That works for an epic the king's own session created. Any other epic needs an attended shell or a crown that contains both.
+The refusal names the epic, its open count, the cap, and the next step. Run `fno backlog idea "EPIC: <theme>" --type epic` to start a new small epic, then point the write at the new epic id. If a lead leads the full epic, it adds the new epic to its own role: `fno agents org promote <its handle> --scope <each epic it holds> --scope <new-epic-id>`. That works for an epic the lead's own session created. Any other epic needs an attended shell or a role that contains both.
 
-The same count reads before any write, on the `epics:` line of `fno agents king checkin`. `19/15 full` means the next open child is refused at the current cap. `19/- (cap unset)` means no cap is configured, which is the OSS default. `fno agents court --nodes --json` carries the list per crown as `epics` and `epic_cap`.
+The same count reads before any write, on the `epics:` line of `fno agents org checkin`. `19/15 full` means the next open child is refused at the current cap. `19/- (cap unset)` means no cap is configured, which is the OSS default. `fno agents org --nodes --json` carries the list per role as `epics` and `epic_cap`.
 
 ### Unplanned idea cap
 

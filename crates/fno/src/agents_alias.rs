@@ -100,35 +100,10 @@ fn rundown_argv(rest: &[OsString], default_out: Option<OsString>) -> Vec<OsStrin
     argv
 }
 
-/// Rewrite `spawn ... --promote <scope>` (and `--promote=<scope>`) to the
-/// `--crown` form the spawn door answers today, in the spawn head only:
-/// tokens before the first `--` or `--argv` are never touched. Some only
-/// when a rewrite happened.
-fn rewrite_spawn(args: &[OsString]) -> Option<Vec<OsString>> {
-    let spawn_pos = args.iter().position(|a| a == "spawn")?;
-    let mut out = args.to_vec();
-    let mut rewritten = false;
-    let mut i = spawn_pos + 1;
-    while i < out.len() {
-        let tok = out[i].to_str().unwrap_or("").to_string();
-        if tok == "--" || tok == "--argv" {
-            break;
-        }
-        if tok == "--promote" && i + 1 < out.len() {
-            out[i] = os("--crown");
-            rewritten = true;
-            i += 2;
-            continue;
-        }
-        if let Some(value) = tok.strip_prefix("--promote=") {
-            out[i] = OsString::from(format!("--crown={value}"));
-            rewritten = true;
-        }
-        i += 1;
-    }
-    rewritten.then_some(out)
-}
-
+/// The spawn door answers `--promote` natively, so a spawn argv is not
+/// claimed here: it dispatches through the normal front unchanged, and the
+/// retired `--crown`/`--succeed` spellings reach the door's one-release alias
+/// path, which prints the notice.
 fn org(rest: &[OsString]) -> Org {
     let first = rest.first().and_then(|a| a.to_str());
     let tail: Vec<OsString> = rest.iter().skip(1).cloned().collect();
@@ -167,8 +142,8 @@ fn org(rest: &[OsString]) -> Org {
     }
 }
 
-/// The lexical claim: Some whenever this argv belongs to the `org` group,
-/// an old role-verb spelling, or the spawn `--promote` rewrite.
+/// The lexical claim: Some whenever this argv belongs to the `org` group or
+/// an old role-verb spelling.
 pub fn classify(args: &[OsString]) -> Option<Org> {
     if args.first().and_then(|a| a.to_str()) != Some("agents") {
         return None;
@@ -181,9 +156,6 @@ pub fn classify(args: &[OsString]) -> Option<Org> {
         return Some(Org::Refuse(
             "fno agents promote is now fno agents org promote <session> --scope <scope>".into(),
         ));
-    }
-    if verb == "spawn" {
-        return rewrite_spawn(args).map(Org::Forward);
     }
     let notice = old_spelling_notice(verb)?;
     eprintln!("{notice}");
@@ -301,43 +273,8 @@ mod tests {
             assert_eq!(classify(&osv(&["mux", "ls"])), None);
             assert_eq!(classify(&osv(&["agents", "whoami"])), None);
             assert_eq!(classify(&osv(&["agents", "spawn", "n"])), None);
+            assert_eq!(classify(&osv(&["agents", "spawn", "--promote", "x"])), None);
             assert_eq!(classify(&osv(&[])), None);
-        }
-
-        fn spawn_promote_rewrites_the_head_only() {
-            assert_eq!(
-                rewrite_spawn(&osv(&[
-                    "agents",
-                    "spawn",
-                    "--promote",
-                    "x-aaaa",
-                    "--succeed",
-                    "--",
-                    "/fno:lead x-aaaa",
-                    "--promote",
-                    "kept",
-                ])),
-                Some(osv(&[
-                    "agents",
-                    "spawn",
-                    "--crown",
-                    "x-aaaa",
-                    "--succeed",
-                    "--",
-                    "/fno:lead x-aaaa",
-                    "--promote",
-                    "kept",
-                ]))
-            );
-            assert_eq!(
-                rewrite_spawn(&osv(&["agents", "spawn", "--promote=x-aaaa"])),
-                Some(osv(&["agents", "spawn", "--crown=x-aaaa"]))
-            );
-            assert_eq!(
-                rewrite_spawn(&osv(&["agents", "spawn", "n", "--argv", "--promote", "x"])),
-                None
-            );
-            assert_eq!(rewrite_spawn(&osv(&["agents", "spawn", "n"])), None);
         }
         org_bare_and_flags_forward_the_court_argv();
         org_help_is_native_and_names_the_actions();
@@ -349,7 +286,6 @@ mod tests {
         every_old_spelling_forwards_unchanged_with_a_notice();
         bare_promote_refuses_naming_the_group_form();
         argv_this_module_does_not_own_is_none();
-        spawn_promote_rewrites_the_head_only();
     }
     use super::*;
 

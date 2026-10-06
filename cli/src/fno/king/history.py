@@ -1,7 +1,7 @@
 """``fno agents king history`` - native-read relay.
 
 Scan owner: the native ``king-history`` verb, which resolves the caller's
-crown scope itself; contract: docs/architecture/reign.md.
+crown scope itself; contract: docs/architecture/lead.md.
 """
 from __future__ import annotations
 

@@ -29,7 +29,7 @@ The registry schema version lives in one place (`crates/fno-agents/src/registry_
 # back-fills `harness_session_id`, at load (the accept-on-read pattern) and the
 # key dies there. A pre-v10 reader must reject a v10 store rather than mis-read
 # a harness-only row.
-# v11 (US9): additive crown fields (crown_level/crown_scope/crown_grantor).
+# v11 (US9): additive role fields (crown_level/crown_scope/crown_grantor).
 # asdict emits them as null on every written row, so a pre-v11 reader must
 # reject the store rather than TypeError on the unknown keys.
 # v12: additive `route_settings_path` - the route-settings file a
