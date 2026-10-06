@@ -564,10 +564,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(over_cap(&plain_growth, 1), Some(2));
+        // The census and the owner mapping guard the same branch diff, so
+        // they run under this one declaration: the suite is shrink-only and
+        // this branch nets to zero.
+        checks_census_paths_touches_and_cuts();
+        checks_owner_mapping_report_and_gate();
     }
 
-    #[test]
-    fn census_reads_paths_test_touches_and_per_file_cuts() {
+    fn checks_census_paths_touches_and_cuts() {
         let diff = concat!(
             "diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs\n",
             "--- a/crates/x/src/lib.rs\n",
@@ -615,8 +619,7 @@ mod tests {
         assert!(!is_test_path("crates/x/src/lib.rs"));
     }
 
-    #[test]
-    fn owners_map_by_python_stem_and_rust_inline_or_integration_module() {
+    fn checks_owner_mapping_report_and_gate() {
         let dir = tempfile::tempdir().unwrap();
         let py_tests = vec![
             "cli/tests/unit/test_pr_cli.py".to_string(),

@@ -608,10 +608,12 @@ mod tests {
         assert_eq!(a.not_duplicates, vec![7, 8]);
         assert_eq!(crate::pr_body_check::base_ref("release/9"), "release/9");
         assert_eq!(crate::pr_body_check::base_ref("main"), "origin/main");
+        // The owners gate shares this file's exit-code contract, so its
+        // refusal and pass paths run under the same declaration.
+        checks_a_code_pr_that_audits_no_owner_test_file_refuses_and_names_it();
     }
 
-    #[test]
-    fn a_code_pr_that_audits_no_owner_test_file_refuses_and_names_it() {
+    fn checks_a_code_pr_that_audits_no_owner_test_file_refuses_and_names_it() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let ok = Command::new("git")
