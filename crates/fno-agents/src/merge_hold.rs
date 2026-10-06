@@ -40,7 +40,33 @@ pub fn run(op: &str, payload: &Value) -> String {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(default_graph_path);
-    let entries = match graph_store::read_rows(&graph) {
+    let entries = match crate::graph_store::read_rows_where(
+        &graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "slug",
+                    "parent",
+                    "contained_in",
+                    "plan_path",
+                    "cwd",
+                    "dispatch_hold",
+                    "pr_number",
+                    "status",
+                    "completed_at",
+                    "superseded_by",
+                    "deferred_at",
+                    "title",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         Ok(e) => e,
         Err(e) => {
             return receipt("refused", 5, format!("graph read failed: {e}")).to_string();

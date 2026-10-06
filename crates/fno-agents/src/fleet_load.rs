@@ -586,7 +586,21 @@ fn merged_count(home: &AgentsHome, floor_ms: i64, now_ms: i64) -> Option<u64> {
     if !path.exists() {
         return Some(0);
     }
-    let rows = crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)).ok()?;
+    let rows = crate::graph_store::read_rows_where(
+        &path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "slug", "merge_status", "merged_at", "completed_at"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .ok()?;
     let empty: Vec<String> = Vec::new();
     let vocab = crate::scoreboard::TerminalVocabulary {
         doc: &empty,

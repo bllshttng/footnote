@@ -606,7 +606,19 @@ impl LiveSeams {
         else {
             return refused("source_node_unresolved", json!({}));
         };
-        let rows = match graph_store::read_rows(&self.graph_path) {
+        let rows = match crate::graph_store::read_rows_where(
+            &self.graph_path,
+            &crate::backlog::RowQuery {
+                fields: Some(
+                    ["id", "sessions", "status", "pr_number", "merge_status"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                with_blockers: true,
+                ..Default::default()
+            },
+        ) {
             Ok(rows) => rows,
             // Unreadable graph evidence cannot authorize clear.
             Err(error) => {

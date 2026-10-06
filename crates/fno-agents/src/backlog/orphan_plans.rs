@@ -170,7 +170,26 @@ pub fn run_orphan_plans(args: &[String]) -> i32 {
 }
 
 fn run(cfg: &Config) -> i32 {
-    let rows = match graph_store::read_rows(&cfg.graph) {
+    let rows = match crate::graph_store::read_rows_where(
+        &cfg.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "plan_path",
+                    "cwd",
+                    "status",
+                    "created_at",
+                    "deferred_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         Ok(rows) => rows,
         Err(err) => {
             eprintln!("fno-agents backlog-orphan-plans: {err}");
@@ -275,7 +294,26 @@ fn run(cfg: &Config) -> i32 {
             return 1;
         }
         // Readback decides bound_now vs bind_failed, whatever the write said.
-        let fresh = match graph_store::read_rows(&cfg.graph) {
+        let fresh = match crate::graph_store::read_rows_where(
+            &cfg.graph,
+            &crate::backlog::RowQuery {
+                fields: Some(
+                    [
+                        "id",
+                        "plan_path",
+                        "cwd",
+                        "status",
+                        "created_at",
+                        "deferred_at",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ),
+                with_blockers: true,
+                ..Default::default()
+            },
+        ) {
             Ok(fresh) => fresh,
             Err(err) => {
                 eprintln!("fno-agents backlog-orphan-plans: readback: {err}");

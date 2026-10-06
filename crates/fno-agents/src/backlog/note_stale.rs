@@ -78,7 +78,18 @@ pub fn stale_report(graph: &Path, token: &str, plan: &Path) -> Result<Value, Str
     if !plan.is_file() {
         return Err(format!("plan not found: {}", plan.display()));
     }
-    let entries = graph_store::read_rows(graph).unwrap_or_default();
+    let entries = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![token.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
     let Some(row) = crate::graph_get::find_entry(&entries, token) else {
         return Ok(json!({
             "node": token, "plan": plan.display().to_string(),

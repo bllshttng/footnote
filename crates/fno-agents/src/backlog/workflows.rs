@@ -1799,7 +1799,30 @@ pub fn run_queued(tail: &[String]) -> i32 {
         return 0;
     }
     let graph = settings::graph_path();
-    let Ok(rows) = graph_store::read_rows(&graph) else {
+    let Ok(rows) = crate::graph_store::read_rows_where(
+        &graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "title",
+                    "priority",
+                    "project",
+                    "cwd",
+                    "queued_at",
+                    "queued_reason",
+                    "status",
+                    "completed_at",
+                    "deferred_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) else {
         eprintln!("Error: the backlog graph could not be read");
         return 1;
     };

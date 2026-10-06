@@ -211,7 +211,31 @@ pub fn decide(payload: &Value) -> Value {
         .unwrap_or("")
         .is_empty();
     let rows = if nodeless {
-        crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).unwrap_or_default()
+        {
+            let wanted = seed_text(payload)
+                .and_then(|text| {
+                    scan_seed_node(&text).or_else(|| {
+                        text.split_whitespace()
+                            .nth(1)
+                            .map(trim_sentence_punct)
+                            .map(str::to_string)
+                    })
+                })
+                .unwrap_or_default();
+            crate::graph_store::read_rows_where(
+                &crate::graph_get::default_graph_path(),
+                &crate::backlog::RowQuery {
+                    filter: crate::backlog::api::NodeFilter {
+                        id_in: Some(vec![wanted]),
+                        ..Default::default()
+                    },
+                    fields: Some(["id"].into_iter().map(str::to_string).collect()),
+                    with_blockers: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_default()
+        }
     } else {
         Vec::new()
     };
@@ -458,8 +482,26 @@ fn project_params(params: &Value) -> Value {
 /// [`spawn_node_cwd_in`] over the machine graph and the real git resolution.
 pub fn spawn_node_cwd(params: &Value, caller: &Path) -> SpawnNodeCwd {
     let payload = project_params(params);
-    let rows =
-        crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).unwrap_or_default();
+    let resolved = resolve_node(&payload);
+    let wanted = resolved
+        .get("node")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    let rows = crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(wanted),
+                ..Default::default()
+            },
+            fields: Some(["id", "cwd"].into_iter().map(str::to_string).collect()),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
     spawn_node_cwd_in(&payload, caller, &rows, &crate::paths::canonical_repo_root)
 }
 
