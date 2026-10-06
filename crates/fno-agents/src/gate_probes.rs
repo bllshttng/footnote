@@ -529,7 +529,33 @@ pub(crate) fn run_probe(mut cmd: Command) -> Option<Run> {
 pub(crate) fn dispatch_hold(cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
     let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
-    match crate::backlog::api::rows(&store) {
+    match crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "slug",
+                    "parent",
+                    "contained_in",
+                    "plan_path",
+                    "cwd",
+                    "dispatch_hold",
+                    "project",
+                    "pr_number",
+                    "pr_url",
+                    "additional_prs",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    {
         Ok(entries) => dispatch_hold_rows(cwd, facts, &entries),
         Err(e) => ProbeOutcome::Inconclusive(format!(
             "dispatch-hold-invalid: backlog graph unreadable ({e:?}); refusing to assume unheld"

@@ -29,7 +29,20 @@ pub(crate) fn close_ship_rows_at(
     if ends.is_empty() {
         return Vec::new();
     }
-    let Ok(entries) = api::rows(store) else {
+    let Ok(entries) = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "sessions", "cwd", "pr_number", "merge_status"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string())) else {
         return vec![("*".into(), "graph unreadable".into())];
     };
     let open: HashSet<&str> = entries
@@ -51,7 +64,20 @@ pub(crate) fn close_ship_rows_at(
 /// not yet on the local origin/main waits for a later pass.
 pub(crate) fn settle_ship_rows(home: &AgentsHome) -> Vec<(String, String)> {
     let store = Store::new(&crate::gc_sweep::graph_path(home));
-    let Ok(entries) = api::rows(&store) else {
+    let Ok(entries) = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "sessions", "cwd", "pr_number", "merge_status"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string())) else {
         return vec![("*".into(), "graph unreadable".into())];
     };
     end_ship(&store, &ship_backfill_plan(&entries))
@@ -93,7 +119,20 @@ pub(crate) fn close_retired_rows<'a>(
 }
 
 fn close_session_rows(store: &Store, sessions: &HashSet<String>) -> Vec<(String, String)> {
-    let Ok(entries) = api::rows(store) else {
+    let Ok(entries) = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "sessions", "cwd", "pr_number", "merge_status"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string())) else {
         return vec![("*".into(), "graph unreadable".into())];
     };
     let mut refused = Vec::new();

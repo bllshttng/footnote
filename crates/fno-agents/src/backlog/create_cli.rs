@@ -1123,7 +1123,19 @@ pub(crate) fn create_node(
         }
     }
     // The read-back guard: a write the store cannot confirm is an error.
-    let readback = crate::graph_store::read_rows(&graph).ok().and_then(|rows| {
+    let readback = crate::graph_store::read_rows_where(
+        &graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![minted.clone()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .ok()
+    .and_then(|rows| {
         rows.iter()
             .find(|r| r.get("id").and_then(Value::as_str) == Some(minted.as_str()))
             .cloned()
@@ -1606,7 +1618,19 @@ fn file_wave(
     // The receipt prints only after a read-back confirms the note landed:
     // an op that reports success without persisting is a refusal, never a
     // folded-as-wave receipt (the Python leg's _confirm_note_landed).
-    let readback = crate::graph_store::read_rows(&graph).ok().and_then(|rows| {
+    let readback = crate::graph_store::read_rows_where(
+        &graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![target_id.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .ok()
+    .and_then(|rows| {
         rows.iter()
             .find(|r| r.get("id").and_then(Value::as_str) == Some(target_id))
             .cloned()

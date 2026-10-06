@@ -381,8 +381,30 @@ pub(crate) fn resolve_verdict_inputs(
     let window_start = (current - chrono::Duration::seconds(window_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
 
-    let entries = crate::graph_store::read_rows(&crate::org_board::scope::graph_json_path(cwd))
-        .map_err(|e| format!("scope {scope} graph unreadable: {e}"))?;
+    let entries = crate::graph_store::read_rows_where(
+        &crate::org_board::scope::graph_json_path(cwd),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "deferred_kind",
+                    "superseded_by",
+                    "completed_at",
+                    "id",
+                    "type",
+                    "parent",
+                    "project",
+                    "status",
+                    "created_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("scope {scope} graph unreadable: {e}"))?;
     let projects: Result<HashMap<String, String>, String> =
         crate::org_board::scope::project_map(cwd);
     let ids = crate::territory::compile_scope_ids(&scope, &entries, &projects)
