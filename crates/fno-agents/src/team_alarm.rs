@@ -27,26 +27,10 @@ const ORG_READ_BUDGET_S: u64 = 30;
 /// read still answers inside the tick that paid for it.
 const ORG_READ_MAX_S: u64 = 150;
 
-/// The load-scaled budget, the merge phase's `_merge_budget_for_load` shape:
-/// the floor under an idle machine, doubling per 2 jobs per core, capped at
-/// half the beat. A fork-starved machine needs minutes of wall clock for
-/// the same subprocess chain; 30s there SIGKILLs every read.
-fn org_read_budget_for(load_per_core: Option<f64>) -> u64 {
-    match load_per_core {
-        Some(load) => {
-            let scaled = ORG_READ_BUDGET_S as f64 * (load / 2.0).max(1.0);
-            (scaled as u64).clamp(ORG_READ_BUDGET_S, ORG_READ_MAX_S)
-        }
-        None => ORG_READ_BUDGET_S,
-    }
-}
-
+/// The load-scaled budget, `bounded_cmd::load_scaled_budget_s` with this
+/// read's floor and ceiling.
 fn org_read_budget() -> u64 {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get() as f64)
-        .unwrap_or(1.0);
-    let load = crate::machine_sample::load_average().map(|(one, _, _)| one / cores);
-    org_read_budget_for(load)
+    crate::bounded_cmd::load_scaled_budget_s(ORG_READ_BUDGET_S, ORG_READ_MAX_S)
 }
 
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -453,11 +437,26 @@ mod tests {
         assert!(!err.contains("fno config:"), "{err}");
         // The load-scaled budget: the floor idle, doubling per 2 jobs per
         // core, capped at half the 300s beat.
-        assert_eq!(org_read_budget_for(None), 30);
-        assert_eq!(org_read_budget_for(Some(0.0)), 30);
-        assert_eq!(org_read_budget_for(Some(2.0)), 30);
-        assert_eq!(org_read_budget_for(Some(4.0)), 60);
-        assert_eq!(org_read_budget_for(Some(41.6)), 150);
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(None, 30, 150),
+            30
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(0.0), 30, 150),
+            30
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(2.0), 30, 150),
+            30
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(4.0), 30, 150),
+            60
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(41.6), 30, 150),
+            150
+        );
     }
 
     #[test]
