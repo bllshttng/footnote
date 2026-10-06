@@ -294,11 +294,54 @@ pub fn delete_raw(connection: &Connection, id: &str) -> Result<(), String> {
 
 /// Raw-carried rows as (id, ordinal, body), ordinal order.
 pub fn raw_rows(connection: &Connection) -> Result<Vec<(String, i64, Value)>, String> {
+    raw_rows_where(connection, None)
+}
+
+pub(crate) fn raw_rows_where(
+    connection: &Connection,
+    ids: Option<&[String]>,
+) -> Result<Vec<(String, i64, Value)>, String> {
+    raw_rows_filter(connection, ids, false)
+}
+
+pub(crate) fn raw_children(
+    connection: &Connection,
+    parents: &[String],
+) -> Result<Vec<(String, i64, Value)>, String> {
+    raw_rows_filter(connection, Some(parents), true)
+}
+
+fn raw_rows_filter(
+    connection: &Connection,
+    ids: Option<&[String]>,
+    children: bool,
+) -> Result<Vec<(String, i64, Value)>, String> {
+    let mut params = Vec::new();
+    let clause = ids
+        .map(|ids| {
+            let slots = ids
+                .iter()
+                .map(|id| {
+                    params.push(id.clone());
+                    "?"
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            if children {
+                format!(" WHERE json_extract(body, '$.parent') IN ({slots})")
+            } else {
+                params.extend(ids.iter().cloned());
+                format!(" WHERE id COLLATE NOCASE IN ({slots}) OR json_extract(body, '$.slug') COLLATE NOCASE IN ({slots})")
+            }
+        })
+        .unwrap_or_default();
     let mut statement = connection
-        .prepare("SELECT id, ordinal, body FROM nodes_raw ORDER BY ordinal, id")
+        .prepare(&format!(
+            "SELECT id, ordinal, body FROM nodes_raw{clause} ORDER BY ordinal, id"
+        ))
         .map_err(|error| error.to_string())?;
     let found = statement
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -1162,15 +1205,23 @@ fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec
 /// One node with its mirrors and child aggregates, or None when the id is
 /// unknown.
 pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
-    load_with_claim(connection, id, None)
+    load_with_claim(connection, id, None, None)
 }
 
 pub(crate) fn load_with_claim(
     connection: &Connection,
     id: &str,
     claim: Option<NodeClaim>,
+    fields: Option<&[String]>,
 ) -> Result<Option<Node>, String> {
-    let stored_costs = costs::load(connection, id)?;
+    let wants = |names: &[&str]| {
+        fields.is_none_or(|fields| fields.iter().any(|field| names.contains(&field.as_str())))
+    };
+    let stored_costs = if wants(&["costs", "cost_sessions"]) {
+        costs::load(connection, id)?
+    } else {
+        Vec::new()
+    };
     let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
     let mut statement = connection
         .prepare_cached(&sql)
@@ -1191,96 +1242,115 @@ pub(crate) fn load_with_claim(
         None => claim_for_node(id)?,
     };
     set_node_claim(&mut node, claim);
-    let mut dispatch_statement = connection
-        .prepare_cached("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
-        .map_err(|error| error.to_string())?;
-    node.dispatch = dispatch_statement
-        .query_row(params![id], map_dispatch_row)
-        .optional()
-        .map_err(|error| error.to_string())?
-        .unwrap_or_default();
-    // The columns overlay what apply_residual parsed. request_origin and
-    // origin_evidence fall back to the extras keys a schema-3 writer left.
-    let mut provenance_statement = connection
-        .prepare_cached(
-            "SELECT source, source_kind, source_project, source_session_id, source_harness,
+    if fields.is_none_or(|fields| {
+        fields
+            .iter()
+            .any(|field| field.starts_with("dispatch_") || field == "model")
+    }) {
+        let mut dispatch_statement = connection
+            .prepare_cached("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
+            .map_err(|error| error.to_string())?;
+        node.dispatch = dispatch_statement
+            .query_row(params![id], map_dispatch_row)
+            .optional()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+    }
+    if fields.is_none_or(|fields| {
+        fields.iter().any(|field| {
+            field.starts_with("source")
+                || field.starts_with("spawned_by")
+                || field.starts_with("think_")
+                || ["request_origin", "origin_evidence"].contains(&field.as_str())
+        })
+    }) {
+        // The columns overlay what apply_residual parsed. request_origin and
+        // origin_evidence fall back to the extras keys a schema-3 writer left.
+        let mut provenance_statement = connection
+            .prepare_cached(
+                "SELECT source, source_kind, source_project, source_session_id, source_harness,
                     source_cwd, source_node_id, source_plan_path, source_inbox_msg,
                     spawned_by_session, spawned_by_harness, spawned_by_cwd, think_session_id,
                     think_output_path, request_origin, origin_evidence
              FROM node_provenance WHERE node_id = ?1",
-        )
-        .map_err(|error| error.to_string())?;
-    let provenance_row = provenance_statement
-        .query_row(params![id], map_provenance_parts)
-        .optional()
-        .map_err(|error| error.to_string())?;
-    apply_provenance(&mut node, provenance_row);
-    let mut supersession_statement = connection
-        .prepare_cached(
-            "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
+            )
+            .map_err(|error| error.to_string())?;
+        let provenance_row = provenance_statement
+            .query_row(params![id], map_provenance_parts)
+            .optional()
+            .map_err(|error| error.to_string())?;
+        apply_provenance(&mut node, provenance_row);
+    }
+    if wants(&["supersession", "superseded_by"]) {
+        let mut supersession_statement = connection
+            .prepare_cached(
+                "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
                     matched_surfaces
              FROM supersessions WHERE node_id = ?1",
-        )
-        .map_err(|error| error.to_string())?;
-    node.supersession = supersession_statement
-        .query_row(params![id], map_supersession_parts)
-        .optional()
-        .map_err(|error| error.to_string())?
-        .map(|parts| supersession_from_parts(parts, supersession_extras));
+            )
+            .map_err(|error| error.to_string())?;
+        node.supersession = supersession_statement
+            .query_row(params![id], map_supersession_parts)
+            .optional()
+            .map_err(|error| error.to_string())?
+            .map(|parts| supersession_from_parts(parts, supersession_extras));
+    }
     // Child aggregates. The tables cannot tell an empty list from an absent
     // key, so the "child_lists_present" marker decides Some vs None.
     let present = |name: &str| child_lists_present.iter().any(|listed| listed == name);
-    let loaded = sessions::load(connection, id)?;
-    node.sessions = if present("sessions") {
-        Some(loaded)
-    } else {
-        None
-    };
-    let loaded = comments::load(connection, id)?;
-    node.comments = if present("comments") {
-        Some(loaded)
-    } else {
-        None
-    };
-    let loaded = encounters::load(connection, id)?;
-    node.encounters = if present("encounters") {
-        Some(loaded)
-    } else {
-        None
-    };
-    let loaded = findings::load(connection, id)?;
-    node.findings = if present("findings") {
-        Some(loaded)
-    } else {
-        None
-    };
-    let pr_rows = pull_requests::load(connection, id)?;
-    let primary = if present("primary_pr") {
-        pr_rows.first().cloned()
-    } else {
-        None
-    };
-    let rest: Vec<PullRequest> = if primary.is_some() {
-        pr_rows.into_iter().skip(1).collect()
-    } else {
-        pr_rows
-    };
-    node.primary_pr = primary;
-    node.additional_prs = if present("additional_prs") {
-        Some(rest)
-    } else {
-        None
-    };
-    node.relations = relations::load_grouped(connection, id)?;
-    // An empty relation list leaves no rows; the marker restores presence.
-    if present("blocked_by") && node.relations.blocked_by.is_none() {
-        node.relations.blocked_by = Some(Vec::new());
+    if wants(&["sessions"]) {
+        let loaded = sessions::load(connection, id)?;
+        node.sessions = present("sessions").then_some(loaded);
     }
-    if present("related") && node.relations.related.is_none() {
-        node.relations.related = Some(Vec::new());
+    if wants(&["comments", "progress_notes"]) {
+        let loaded = comments::load(connection, id)?;
+        node.comments = present("comments").then_some(loaded);
     }
-    if present("supersedes") && node.relations.supersedes.is_none() {
-        node.relations.supersedes = Some(Vec::new());
+    if wants(&["encounters"]) {
+        let loaded = encounters::load(connection, id)?;
+        node.encounters = present("encounters").then_some(loaded);
+    }
+    if wants(&["findings"]) {
+        let loaded = findings::load(connection, id)?;
+        node.findings = present("findings").then_some(loaded);
+    }
+    if wants(&[
+        "primary_pr",
+        "additional_prs",
+        "pr_number",
+        "pr_url",
+        "merge_status",
+    ]) {
+        let pr_rows = pull_requests::load(connection, id)?;
+        let primary = if present("primary_pr") {
+            pr_rows.first().cloned()
+        } else {
+            None
+        };
+        let rest: Vec<PullRequest> = if primary.is_some() {
+            pr_rows.into_iter().skip(1).collect()
+        } else {
+            pr_rows
+        };
+        node.primary_pr = primary;
+        node.additional_prs = if present("additional_prs") {
+            Some(rest)
+        } else {
+            None
+        };
+    }
+    if wants(&["blocked_by", "related", "supersedes"]) {
+        node.relations = relations::load_grouped(connection, id)?;
+        // An empty relation list leaves no rows; the marker restores presence.
+        if present("blocked_by") && node.relations.blocked_by.is_none() {
+            node.relations.blocked_by = Some(Vec::new());
+        }
+        if present("related") && node.relations.related.is_none() {
+            node.relations.related = Some(Vec::new());
+        }
+        if present("supersedes") && node.relations.supersedes.is_none() {
+            node.relations.supersedes = Some(Vec::new());
+        }
     }
     Ok(Some(node))
 }

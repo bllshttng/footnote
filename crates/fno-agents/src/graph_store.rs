@@ -742,6 +742,8 @@ fn is_deferred_blocker(blocker: &Value) -> bool {
         || blocker.get("status").and_then(Value::as_str) == Some("deferred")
 }
 
+pub(crate) const MAX_CHAIN_HOPS: usize = 8;
+
 /// Follow a superseded blocker to the node that actually owns the work
 /// (the `superseded_by` chain, bounded so a cycle reads as an unknown dep
 /// instead of looping). `Ok` carries the effective entry and id; `Err`
@@ -752,7 +754,6 @@ fn effective_blocker<'a>(
     blocker_id: &str,
     by_id: &std::collections::HashMap<&str, &'a Value>,
 ) -> Result<(&'a Value, String), String> {
-    const MAX_CHAIN_HOPS: usize = 8;
     let mut current = blocker;
     let mut current_id = blocker_id;
     for _ in 0..MAX_CHAIN_HOPS {
@@ -2531,13 +2532,51 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// One rows reader for every writer plus the default pass. `api::read_rows`
-/// and `node_state::read_rows_for` were this same
-/// shape twice; both delegate here now.
+/// Fields used by live board and selection readers.
+pub const SLIM_FIELDS: &[&str] = &[
+    "id",
+    "slug",
+    "title",
+    "type",
+    "status",
+    "priority",
+    "rank",
+    "project",
+    "cwd",
+    "domain",
+    "difficulty",
+    "parent",
+    "blocked_by",
+    "plan_path",
+    "pr_number",
+    "archived_at",
+    "created_at",
+    "touched_at",
+    "completed_at",
+    "locked_by",
+    "locked_by_harness",
+    "locked_by_harness_session",
+    "locked_at",
+    "session_id",
+];
+
+/// The whole defaulted read shared by writers and unfiltered callers.
 pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
-    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
-    apply_defaults(&mut rows, false);
-    Ok(rows)
+    read_rows_where(path, &crate::backlog::RowQuery::default())
+}
+
+pub fn read_rows_where(
+    path: &Path,
+    query: &crate::backlog::RowQuery,
+) -> Result<Vec<Value>, StoreError> {
+    crate::backlog::read_entries_where_defaulted(path, query, false).map_err(StoreError::Sqlite)
+}
+
+pub fn read_rows_where_strict(
+    path: &Path,
+    query: &crate::backlog::RowQuery,
+) -> Result<Vec<Value>, StoreError> {
+    crate::backlog::read_entries_where_defaulted(path, query, true).map_err(StoreError::Sqlite)
 }
 
 #[doc(hidden)]
@@ -2573,9 +2612,7 @@ pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreErr
 /// A strict rows read for consumers whose boundary contract needs unreadable
 /// stores to remain unknown, never an empty list.
 pub fn read_rows_strict(path: &Path) -> Result<Vec<Value>, StoreError> {
-    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
-    apply_defaults(&mut rows, true);
-    Ok(rows)
+    read_rows_where_strict(path, &crate::backlog::RowQuery::default())
 }
 
 /// The optimistic mutation cycle every whole-graph writer shares: stamp a
