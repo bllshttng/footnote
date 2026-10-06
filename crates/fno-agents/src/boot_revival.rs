@@ -186,8 +186,27 @@ fn revive(home: &AgentsHome, name: &str) -> ReceiptRow {
 
 /// The nodes a revival must leave alone: done, superseded, or merged.
 fn closed_nodes() -> HashSet<String> {
-    let rows =
-        crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).unwrap_or_default();
+    let rows = crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "deferred_kind",
+                    "superseded_by",
+                    "completed_at",
+                    "id",
+                    "status",
+                    "merge_status",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
     rows.iter()
         .filter(|row| {
             crate::graph_store::is_terminal_entry(row)

@@ -9,12 +9,33 @@ use crate::backlog_view;
 use crate::server::CoreMsg;
 use crate::store_client;
 
+// Closed rows satisfy dependencies, mark epics underway, and retain PR drivers.
+pub(crate) const BOARD_FIELDS: &[&str] = &[
+    "id",
+    "status",
+    "_status",
+    "slug",
+    "priority",
+    "project",
+    "rank",
+    "created_at",
+    "type",
+    "completed_at",
+    "queued_at",
+    "blocked_by",
+    "parent",
+    "plan_path",
+    "pr_url",
+    "pr_number",
+    "locked_by_harness_session",
+    "sessions",
+];
+
 /// The off-loop work-queue reader: the same 1s change-gated shape as the
 /// registry reader, over the graph store. The gate is the keeper's mutation
 /// counter (`store_client::version`), which bumps on every backlog mutation
-/// (claim/close) and keeps moving after the SQLite flip, where a file mtime
-/// would freeze (Risk 5). The 4M document read is skipped whenever the stamp
-/// is unchanged.
+/// (claim/close). Projected board reads are skipped whenever the stamp is
+/// unchanged.
 ///
 /// External tracker backend: the graph store is not the authoritative
 /// backend there, so there is no counter to gate on. The reader instead
@@ -152,6 +173,7 @@ pub(crate) fn spawn(
                             None,
                             true,
                             None,
+                            Some(BOARD_FIELDS),
                         )
                         .ok()
                         .map(|conn| {

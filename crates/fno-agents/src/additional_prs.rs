@@ -341,7 +341,33 @@ pub(crate) fn stamp_pass(
 ) -> Vec<(String, String)> {
     let mut refusals = Vec::new();
     let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
-    let Ok(entries) = crate::backlog::api::rows(&store) else {
+    let Ok(entries) = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "deferred_kind",
+                    "id",
+                    "status",
+                    "cwd",
+                    "sessions",
+                    "pr_number",
+                    "pr_url",
+                    "merge_status",
+                    "additional_prs",
+                    "completed_at",
+                    "superseded_by",
+                    "deferred_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string())) else {
         return refusals;
     };
     for stamp in plan_stamps(&entries, read) {
@@ -411,7 +437,33 @@ pub(crate) fn plan_settle(
     read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
 ) -> (Vec<crate::gc_sweep::StaleDoRow>, Vec<PrStamp>) {
     let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
-    match crate::backlog::api::rows(&store) {
+    match crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "status",
+                    "cwd",
+                    "sessions",
+                    "pr_number",
+                    "pr_url",
+                    "merge_status",
+                    "additional_prs",
+                    "completed_at",
+                    "superseded_by",
+                    "deferred_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    {
         Ok(mut entries) => {
             let stamps = plan_stamps(&entries, read);
             apply_stamps(&mut entries, &stamps);

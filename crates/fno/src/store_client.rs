@@ -408,6 +408,7 @@ pub fn nodes(
     after: Option<&str>,
     include_archived: bool,
     order_by: Option<&str>,
+    fields: Option<&[&str]>,
 ) -> Result<NodeConnection, String> {
     let mut params = json!({ "op": "nodes", "filter": filter });
     if let Some(first) = first {
@@ -421,6 +422,9 @@ pub fn nodes(
     }
     if let Some(order_by) = order_by {
         params["order_by"] = json!(order_by);
+    }
+    if let Some(fields) = fields {
+        params["fields"] = json!(fields);
     }
     let reply = call(graph, "api", params)?;
     let nodes = reply
@@ -437,8 +441,19 @@ pub fn nodes(
 /// The total row fold: every stored row, typed or not, so a fold over the
 /// answer is total. A legacy row the model would reject still rides through
 /// (the `rows` wire op's contract); the typed `nodes` op would drop it.
-pub fn rows(graph: &Path) -> Result<Vec<Value>, String> {
-    let reply = call(graph, "api", json!({ "op": "rows" }))?;
+pub fn rows(
+    graph: &Path,
+    filter: Option<Value>,
+    fields: Option<&[&str]>,
+) -> Result<Vec<Value>, String> {
+    let mut params = json!({ "op": "rows" });
+    if let Some(filter) = filter {
+        params["filter"] = filter;
+    }
+    if let Some(fields) = fields {
+        params["fields"] = json!(fields);
+    }
+    let reply = call(graph, "api", params)?;
     Ok(reply
         .get("rows")
         .and_then(Value::as_array)

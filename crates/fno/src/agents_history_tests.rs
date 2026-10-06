@@ -122,7 +122,18 @@ fn agents_history_card_joins_transcript_stages_and_events() {
         .unwrap()
         .remove("requested_model");
     let (_dir, transcript) = transcript_fixture();
+    sources.graph.as_mut().unwrap()[0]["status"] = json!("done");
+    sources.graph.as_mut().unwrap()[0]["details"] = json!("unused prose");
+    sources.graph.as_mut().unwrap()[0]["progress_notes"] = json!([{"body": "unused note"}]);
     let lines = card(SID, &sources, Some(&transcript));
+    for row in sources.graph.as_mut().unwrap() {
+        row.as_object_mut()
+            .unwrap()
+            .retain(|key, _| sources::GRAPH_FIELDS.contains(&key.as_str()));
+        assert!(row.get("details").is_none() && row.get("progress_notes").is_none());
+    }
+    assert_eq!(resolve("x-3344", &sources).sessions, [SID]);
+    assert_eq!(card(SID, &sources, Some(&transcript)), lines);
     let card = lines.join("\n");
 
     assert!(card.contains(&format!("session:    {SID}")));
@@ -529,6 +540,19 @@ fn agents_history_pr_resolution_filters_repo_slug_and_keeps_both_when_unresolved
     let resolved = resolve("#44", &sources);
     assert_eq!(resolved.sessions.len(), 2);
     assert!(resolved.repo_slug_unresolved);
+
+    sources.ledger = Ok(Vec::new());
+    for row in sources.graph.as_mut().unwrap() {
+        row["status"] = json!("done");
+        row["details"] = json!("unused prose");
+        row.as_object_mut()
+            .unwrap()
+            .retain(|key, _| sources::GRAPH_FIELDS.contains(&key.as_str()));
+    }
+    sources.repo_slug = Some("acme/one".to_string());
+    assert_eq!(resolve("44", &sources).sessions, vec![SID.to_string()]);
+    sources.repo_slug = None;
+    assert_eq!(resolve("#44", &sources).sessions.len(), 2);
 }
 
 #[test]

@@ -254,12 +254,12 @@ def register_lifecycle_commands(
         Full contract: docs/architecture/backlog-graph-verb-contracts.md
         """
         from fno.graph._intake import _find_node
-        from fno.graph.store import read_graph_strict
+        from fno.graph.store import read_graph_strict, read_nodes_by_ids
 
-        # The door resolves id or slug (the read resolver's contract); the
-        # receipt names the canonical id either way.
-        entries = read_graph_strict(graph_path())
-        node = _find_node(entries, node_id)
+        fast = read_nodes_by_ids(graph_path(), [node_id])
+        node = _find_node([row for row in (fast or {}).get("entries") or [] if not row.get("archived_at")], node_id)
+        if node is None:
+            node = _find_node(read_graph_strict(graph_path()), node_id)
         if node is None:
             typer.echo(f"Error: node {node_id} not found", err=True)
             raise typer.Exit(code=1)

@@ -1554,7 +1554,9 @@ fn gather_blocking(
             ),
         }
     } else {
-        match store_client::rows(graph) {
+        // Shared rows also feed detail drawers and flow; keep closed rows, prose,
+        // decisions, progress notes, costs, PRs, and complete session records.
+        match store_client::rows(graph, None, None) {
             Ok(r) => (r, None, Vec::new()),
             Err(e) => (Vec::new(), Some(e), Vec::new()),
         }

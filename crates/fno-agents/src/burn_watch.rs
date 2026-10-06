@@ -922,7 +922,34 @@ fn run_pass(
 ) {
     let graph = crate::gc_sweep::graph_path(home);
     let store = crate::backlog::api::Store::new(&graph);
-    let Ok(rows) = crate::backlog::api::rows(&store) else {
+    let Ok(rows) = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "deferred_kind",
+                    "id",
+                    "type",
+                    "parent",
+                    "project",
+                    "cwd",
+                    "status",
+                    "touched_at",
+                    "sessions",
+                    "pr_number",
+                    "completed_at",
+                    "superseded_by",
+                    "deferred_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string())) else {
         return;
     };
     let scope = scope_sessions(&rows);

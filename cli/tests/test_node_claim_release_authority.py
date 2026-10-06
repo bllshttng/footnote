@@ -36,6 +36,8 @@ import ast
 import re
 from pathlib import Path
 
+from fno.lint_cli import _rust_cfg_test_lines
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # crates/ is in scope because the megawalk walker (the legitimate node-claim
@@ -199,6 +201,9 @@ _RS_BIND = re.compile(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=]+)?=\s*(.+)$
 
 def _rust_node_release_lines(text: str) -> list[int]:
     lines = text.splitlines()
+    test_lines = _rust_cfg_test_lines(lines)
+    lines = ["" if index in test_lines else line for index, line in enumerate(lines, 1)]
+    text = "\n".join(lines)
     node_vars: set[str] = set()
     for line in lines:
         if line.lstrip().startswith("//"):
@@ -420,6 +425,13 @@ def test_matcher_classifies_keys_by_prefix():
     assert _rust_node_release_lines(
         '// .args(["claim", "release", "node:foo", "--holder", &h])'
     ) == []
+    # Test bindings and releases do not hide or taint the following production scope.
+    assert _rust_node_release_lines(
+        '#[cfg(test)]\nmod tests {\nfn fixture() {\n'
+        'let key = "node:test";\nrelease(key, "test-holder");\n}\n}\n'
+        'fn production(key: &str) {\nrelease(key, "holder");\n'
+        'release("node:real", "holder");\n}\n'
+    ) == [10]
     # python: node f-string flagged; generic key param + session literal ignored
     assert _python_node_release_lines('release_claim(f"node:{i}", h)') == [1]
     assert _python_node_release_lines(
