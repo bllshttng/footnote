@@ -83,8 +83,9 @@ def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner) -> N
     assert receipt["subject"] == "schema freeze Friday"
     assert receipt["to"] == "acme-docs"
     assert "queued (durable)" in receipt["status"]
-    rows = [m for m in iter_messages() if m.kind == "send"]
-    assert rows and rows[-1].subject == "schema freeze Friday"
+    # The kind lane's durable row carries the inbox kind, not "send".
+    rows = [m for m in iter_messages() if m.subject == "schema freeze Friday"]
+    assert rows and rows[-1].to == "acme-docs"
     threads = read_unread_threads("acme-docs")
     assert len(threads) == 1
 
