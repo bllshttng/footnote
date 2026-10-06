@@ -151,8 +151,10 @@ pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Resu
     let mut duplicates: u64 = 0;
     for live in &lives {
         let receipt = crate::event_store::import_all(live)?;
-        let store = crate::event_store::open_read(&crate::event_store::store_path(live))?;
-        let rows = lead_rows(&store, scope)?;
+        let store_path = crate::event_store::store_path(live);
+        let store = crate::event_store::open_read(&store_path)?;
+        let rows =
+            lead_rows(&store, scope).map_err(|e| format!("{}: {e}", store_path.display()))?;
         let mut scanned = 0u64;
         let mut matched = 0u64;
         let mut rejected = 0u64;
@@ -2367,6 +2369,59 @@ mod tests {
         std::fs::create_dir(dir.path().join("events.db")).unwrap();
         let err = scan(std::slice::from_ref(&live), "x-aaaa").unwrap_err();
         assert!(err.contains("events.db"), "err: {err}");
+
+        for (index, append) in [
+            ("ingest_cursor", false),
+            ("events_type_ts", true),
+            ("events_scope_type_ts", false),
+        ] {
+            let (_dir, live) = journal(&[checkin(
+                "2026-09-10T12:00:00Z",
+                json!({"scope": "x-aaaa", "change": "beat"}),
+            )]);
+            let receipt = crate::event_store::import_all(&live).unwrap();
+            let conn = Connection::open(&receipt.store).unwrap();
+            let page: usize = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let page_size: usize = conn
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .unwrap();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            drop(conn);
+            let mut bytes = std::fs::read(&receipt.store).unwrap();
+            bytes[(page - 1) * page_size] = 0xff;
+            std::fs::write(&receipt.store, bytes).unwrap();
+            if append {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&live)
+                    .unwrap();
+                writeln!(
+                    file,
+                    "{}",
+                    checkin(
+                        "2026-09-10T12:01:00Z",
+                        json!({"scope": "x-aaaa", "change": "next beat"}),
+                    )
+                )
+                .unwrap();
+            }
+            let error = scan(std::slice::from_ref(&live), "x-aaaa").unwrap_err();
+            assert!(
+                error.contains("database disk image is malformed"),
+                "{error}"
+            );
+            assert!(
+                error.contains(&receipt.store.display().to_string()),
+                "{error}"
+            );
+        }
     }
 
     #[test]

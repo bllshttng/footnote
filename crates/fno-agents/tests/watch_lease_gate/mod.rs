@@ -120,12 +120,12 @@ fn watching_ignored_names_a_missing_claim_as_permanent() {
         "the refusal must name the way back, not only the dead end: {}",
         d.message
     );
+    assert!(!d.message.contains("Arm a harness-tracked watcher"));
+    assert!(d.message.contains("CI still running on PR #17"));
 }
 
-// The refusal above and the hint below it used to arrive in one message: no
-// watcher can help, now go arm a watcher. This session obeyed that three times.
 #[test]
-fn a_permanent_refusal_carries_no_arm_and_tag_hint() {
+fn watching_requires_durable_registration() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
@@ -133,47 +133,82 @@ fn a_permanent_refusal_carries_no_arm_and_tag_hint() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-watching-nohint", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
+    let key = "node:registration-fixture";
+    let holder = "registration-fixture";
+    assert!(matches!(
+        fno_agents::claims::acquire(
+            key,
+            holder,
+            fno_agents::claims::AcquireOpts {
+                root: Some(cwd.to_path_buf()),
+                events_dir: Some(cwd.to_path_buf()),
+                pid: Some(std::process::id()),
+                ttl_ms: Some(3_600_000),
+                ..Default::default()
+            }
+        ),
+        fno_agents::claims::AcquireOutcome::Acquired(_)
+    ));
+    fs::write(&manifest_path, format!(
+        "---\nsession_id: sess-registration\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\ntarget_claim_key: {key}\ntarget_claim_holder: {holder}\n---\n"
+    )).unwrap();
     fs::write(&transcript_path, transcript_with_watching()).unwrap();
 
     let mock = MockBins::ci_pending();
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        &format!("--gh-bin={}", mock.gh.display()),
-        &format!("--git-bin={}", mock.git.display()),
-        "--author-harness",
-        "claude",
-    ]);
-
-    assert_eq!(code, 0);
-    assert_eq!(d.decision, "block");
-    assert!(
-        d.message.contains("recorded no node claim at init"),
-        "the permanent cause must be named: {}",
-        d.message
-    );
-    assert!(
-        !d.message.contains("Arm a harness-tracked watcher"),
-        "the refused ritual must not be prescribed in the same message: {}",
-        d.message
-    );
-    assert!(
-        d.message.contains("CI still running on PR #17"),
-        "the actionable blocker must remain: {}",
-        d.message
-    );
+    let blocked_parent = cwd.join("blocked-parent");
+    fs::write(&blocked_parent, "not a directory").unwrap();
+    let blocked_journal = blocked_parent.join("events.jsonl");
+    let harness = "claude";
+    let durable_journal = cwd.join(format!("{harness}-events.jsonl"));
+    for (journal, expected) in [(&blocked_journal, "block"), (&durable_journal, "allow")] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+            .env("FNO_CLAIMS_ROOT", cwd)
+            .env("FNO_NUDGE_DISABLED", "1")
+            .env_remove("FNO_DRIVER_LIB")
+            .args([
+                "loop-check",
+                "--state",
+                manifest_path.to_str().unwrap(),
+                "--transcript",
+                transcript_path.to_str().unwrap(),
+                "--cwd",
+                cwd.to_str().unwrap(),
+                "--now",
+                "2026-06-05T00:30:00Z",
+                &format!("--gh-bin={}", mock.gh.display()),
+                &format!("--git-bin={}", mock.git.display()),
+                "--author-harness",
+                harness,
+                "--global-events",
+                journal.to_str().unwrap(),
+                "--global-settings",
+                "/nonexistent/global-settings.yaml",
+            ])
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(value["decision"], expected, "{harness}: {value}");
+        if expected == "block" {
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("watch registration"),
+                "{harness}: {value}"
+            );
+        } else {
+            assert!(
+                event_text(journal).lines().any(|line| {
+                    let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                    event["type"] == "loop_check_watch_idle"
+                        && event["data"]["session_id"] == "sess-registration"
+                        && event["data"]["harness"] == harness
+                }),
+                "{harness}: durable watch registration missing"
+            );
+        }
+    }
 }
 
 #[test]
