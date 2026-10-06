@@ -526,7 +526,9 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
 
     // The user's look: the same gate the preview carries, held so the user
     // answering the page clears it on the next read.
-    if let Some(blocker) = crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number) {
+    if let Some(blocker) =
+        crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number, &facts.head_sha)
+    {
         return Err(Outcome::Held {
             reason: blocker.detail,
         });
@@ -887,9 +889,12 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     }
 
     // (4b) the user's look: a PR touching the configured paint surface holds
-    // until an answered question page names it. Held, not refused: the user
-    // answering the page clears it on the next read.
-    if let Some(blocker) = crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number) {
+    // until an answered question page names it or a crown decision row
+    // attests the user's chat approval of this head. Held, not refused: the
+    // user answering the page clears it on the next read.
+    if let Some(blocker) =
+        crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number, &facts.head_sha)
+    {
         blockers.push(blocker);
     }
 
@@ -4750,7 +4755,9 @@ mod tests {
         .unwrap();
         let mut fake = clean();
         fake.gh_output = "crates/fno/src/client/theme.rs\nREADME.md\n".to_string();
-        let held = crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).expect("held");
+        let head: String = "a".repeat(40);
+        let held =
+            crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).expect("held");
         assert_eq!(held.code, "visual_approval");
         assert!(
             held.detail.contains("crates/fno/src/client/theme.rs"),
@@ -4766,19 +4773,19 @@ mod tests {
             "---\nquestion_id: q-xc129\nstatus: open\ntitle: May PR 7 merge?\n---\nbody\n",
         )
         .unwrap();
-        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_some());
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
         // The page answers, the hold clears.
         std::fs::write(
             &page,
             "---\nquestion_id: q-xc129\nstatus: answered\ntitle: May PR 7 merge?\n---\nbody\n",
         )
         .unwrap();
-        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_none());
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_none());
         // The page archives into done/; the approval must not lapse.
         let donedir = qdir.join("done");
         std::fs::create_dir_all(&donedir).unwrap();
         std::fs::rename(&page, donedir.join("q-xc129test.md")).unwrap();
-        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7).is_none());
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_none());
         // No paint paths in any candidate config: the gate is disarmed and
         // spends no gh read.
         let bare = std::env::temp_dir().join(format!("xc129-bare-{}", std::process::id()));
@@ -4786,9 +4793,111 @@ mod tests {
         std::fs::create_dir_all(&bare).unwrap();
         let mut off = clean();
         off.gh_output = "crates/fno/src/client/theme.rs\n".to_string();
-        assert!(crate::merge_gates::visual_approval_blocker(&off, &bare, 7).is_none());
+        assert!(crate::merge_gates::visual_approval_blocker(&off, &bare, 7, &head).is_none());
         assert!(off.gh_calls.borrow().is_empty());
         std::fs::remove_dir_all(&tmp).ok();
         std::fs::remove_dir_all(&bare).ok();
+    }
+
+    #[test]
+    fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
+        let tmp = std::env::temp_dir().join(format!("xc39f-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".fno")).unwrap();
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                    None => std::env::remove_var("FNO_SPACES_DIR"),
+                }
+            }
+        }
+        let spaces = std::env::temp_dir().join(format!("xc39f-spaces-{}", std::process::id()));
+        std::fs::create_dir_all(&spaces).unwrap();
+        let _env_lock = crate::pr_status::cache_env_lock();
+        let _env = {
+            let prior = std::env::var_os("FNO_SPACES_DIR");
+            std::env::set_var("FNO_SPACES_DIR", &spaces);
+            RestoreEnv(prior)
+        };
+        std::fs::write(
+            tmp.join(".fno/config.toml"),
+            "merge.visual_paint_paths = [\"crates/fno/src/client/**\"]\n",
+        )
+        .unwrap();
+        let head: String = "a".repeat(40);
+        let pushed: String = "b".repeat(40);
+        let row = |decision: &str, rationale: &str, authority: &str, lifecycle: &str| {
+            format!(
+                r#"{{"decisions":[{{"decision_id":"d-xc39f","authority_source":"{authority}","lifecycle":"{lifecycle}","decision":"{decision}","rationale":"{rationale}"}}]}}"#
+            )
+        };
+        let mut fake = clean();
+        fake.gh_output = "crates/fno/src/client/theme.rs\n".to_string();
+        // The lead's transcription, head-scoped: clears.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "superuser in chat: approved",
+                "crown",
+                "unscoped",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_none());
+        // A head push invalidates the approval: held again.
+        assert!(
+            crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &pushed).is_some(),
+            "an approval recorded for head a..a must not clear head b..b"
+        );
+        // No chat attestation in the rationale: held.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "lead judges it good",
+                "crown",
+                "unscoped",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // The row's authority is not crown: held.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "user in chat: approved",
+                "agent",
+                "unscoped",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // A retracted approval never clears: held.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "user in chat: approved",
+                "crown",
+                "retracted",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // The gate is closed again with the empty index the Fake serves by
+        // default; the head-scoped grant text stays out of a held detail.
+        fake.decisions_stdout = None;
+        let held =
+            crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).expect("held");
+        assert!(
+            held.detail.contains("crown-recorded decision"),
+            "{}",
+            held.detail
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
