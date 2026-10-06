@@ -3400,7 +3400,7 @@ fn run_reap(rest: &[String]) -> i32 {
     let mux = if no_mux {
         fno_agents::reap_render::MuxSweep::Skipped
     } else {
-        fno_agents::gc::mux_tab_sweep(dry_run, true)
+        fno_agents::gc::mux_tab_sweep(None, &cwd, dry_run, true)
     };
     print!(
         "{}",
