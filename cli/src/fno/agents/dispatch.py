@@ -2450,7 +2450,7 @@ def dispatch_spawn(
         if once or headless:
             raise DispatchAskError(
                 "--promote needs a session that outlives the grant; a one-shot "
-                "exits after one answer. Use the pane or bg substrate.",
+                "exits after one answer. Use --substrate pane or --substrate thread.",
                 exit_code=2,
             )
 

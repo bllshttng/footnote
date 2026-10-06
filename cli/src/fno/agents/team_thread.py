@@ -11,8 +11,13 @@ from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overl
 
 def lead_typed_message(message: str, level: Optional[int], scope: Optional[str],
                        revive: bool, harness: str = "claude") -> tuple[str, bool]:
-    answer = spawn_overlay_call({"kind": "spawn-team", "op": "seed", "message": message,
-                                 "level": level, "scope": scope, "revive": revive, "harness": harness})
+    from fno.agents.dispatch import DispatchAskError
+
+    try:
+        answer = spawn_overlay_call({"kind": "spawn-team", "op": "seed", "message": message,
+                                     "level": level, "scope": scope, "revive": revive, "harness": harness})
+    except SpawnOverlayUnavailable as exc:
+        raise DispatchAskError(f"--promote: {exc}", exit_code=2) from exc
     return answer["message"], answer["typed"]
 
 
@@ -24,10 +29,7 @@ def plan_thread_promotion(message: str, level: int, scope: Optional[str], succes
     refusal, plan = plan_spawn_crown(scope or "", caller, succession)
     if refusal is not None:
         raise DispatchAskError(f"--promote: {refusal}", exit_code=2)
-    try:
-        message, typed = lead_typed_message(message, level, scope, revive, harness)
-    except SpawnOverlayUnavailable as exc:
-        raise DispatchAskError(f"--promote: {exc}", exit_code=2) from exc
+    message, typed = lead_typed_message(message, level, scope, revive, harness)
     return {"message": message, "typed": typed, "plan": plan, "caller": getattr(caller, "name", None),
             "level": level, "scope": scope, "grantor": (parent_edge or _capture_parent_edge())[0] or "human",
             "harness": harness}
