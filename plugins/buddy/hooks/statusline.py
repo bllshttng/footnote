@@ -45,7 +45,7 @@ def bubble(text, room, widest=BUBBLE_W):
 
     Three rows or more get the outline; fewer get the bare words.
     """
-    # The outline needs its full width beside the user's rows; without it the words go bare.
+    # The outline needs its full width; a terminal too narrow for it gets the bare words.
     framed = room >= 3 and widest >= BUBBLE_W + 4
     rows = room - 2 if framed else room
     if rows < 1 or not text.strip():
@@ -148,7 +148,8 @@ def layout(left, frame, cols):
     labels = [""] * len(art)
     labels[-1] = fleet
     # The bubble may widen into the room the user's rows leave free beside the buddy.
-    widest = min(BUBBLE_W * 2, cols - max([width(l) for l in left] + [0]) - aw - 12)
+    # The bubble may take the whole width beside the buddy, over the user's rows, while it shows.
+    widest = min(BUBBLE_W * 2, cols - aw - 12)
     for i, line in enumerate(bubble(frame.get("speech") or "", len(art) - 1, widest)):
         labels[i] = line
 
@@ -159,10 +160,13 @@ def layout(left, frame, cols):
             out = lefts[:top]
             for i, a in enumerate(art):
                 l = lefts[top + i] or LEAD
-                free = cols - width(l) - aw - 3
-                label = cut(labels[i], free) if free > 3 else ""
+                label = cut(labels[i], cols - aw - 4)
                 # Only the buddy wears its rarity color; its words use the terminal's own text color.
                 words = label + " " if label else ""
+                # While the buddy talks, its bubble covers the user's row; the row comes back when it fades.
+                room = cols - width(words) - aw - 1
+                if width(l) > room:
+                    l = cut(ANSI.sub("", l), room) if room > 1 else LEAD
                 pad = cols - width(l) - width(words) - aw
                 out.append(l + " " * pad + words + color + a.ljust(aw) + "\x1b[0m")
             return out
