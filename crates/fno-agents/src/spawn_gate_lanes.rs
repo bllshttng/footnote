@@ -821,14 +821,14 @@ pub(crate) fn share_reading(
         // still stands, and dropping those teams read leads=0 and a share
         // of 1 for everyone.
         if let Some(session) = e.harness_session_id.as_deref() {
-            if e.crown_level.is_some()
+            if e.role_level.is_some()
                 && !session.is_empty()
                 && e.status != AgentStatus::PermanentDead
             {
                 teamed.insert(session.to_string());
             }
         }
-        if !status_is_liveish(&e.status) || e.crown_level.is_some() {
+        if !status_is_liveish(&e.status) || e.role_level.is_some() {
             continue;
         }
         match e.spawned_by_session.as_deref() {
@@ -1820,7 +1820,7 @@ mod tests {
             &reg,
             &[
                 format!(
-                    r#"{{"name":"lead-row","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"lead-session-uuid","spawned_by_session":null}}"#
+                    r#"{{"name":"lead-row","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","role_level":1,"harness_session_id":"lead-session-uuid","spawned_by_session":null}}"#
                 ),
                 format!(
                     r#"{{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"lead-session-uuid"}}"#
@@ -1889,7 +1889,7 @@ mod tests {
         let reg = dir.join("registry.json");
         let team = |name: &str, status: &str, sid: &str| {
             format!(
-                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","crown_level":1,"crown_scope":"{name}","harness_session_id":"{sid}"}}"#
+                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","role_level":1,"role_scope":"{name}","harness_session_id":"{sid}"}}"#
             )
         };
         write_registry(

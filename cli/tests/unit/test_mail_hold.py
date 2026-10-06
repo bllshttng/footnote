@@ -533,9 +533,9 @@ def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
 
 
 def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
-    """C17 evidence (x-9008, crown ruling d-9187ccf6).
+    """C17 evidence (x-9008, role ruling d-9187ccf6).
 
-    The crown's held-mail drain lost three messages when the raw door
+    The role's held-mail drain lost three messages when the raw door
     refused the multi-line digest with "an unframed payload must be a
     single line". That refusal's premise died with C17: the Rust typing
     layer flattens every payload into ONE submitted line (pinned by

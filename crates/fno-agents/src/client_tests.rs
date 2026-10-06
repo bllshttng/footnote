@@ -1690,34 +1690,34 @@ fn harness_flag_rows() {
         );
     }
 
-    // x-c5db: the crown halves the Python seam passes for a crowned codex
+    // x-c5db: the role halves the Python seam passes for a promoted codex
     // thread spawn parse into params in both spellings, and a level outside
     // the ladder refuses before any request is built.
     let (_m, space) = build_request(
         "spawn",
         &[
             "wk".to_string(),
-            "--crown".to_string(),
+            "--promote".to_string(),
             "2".to_string(),
-            "--crown-scope".to_string(),
+            "--role-scope".to_string(),
             "x-aaaa".to_string(),
         ],
     )
-    .expect("--crown must parse");
-    assert_eq!(space["crown_level"], 2);
-    assert_eq!(space["crown_scope"], "x-aaaa");
+    .expect("--promote must parse");
+    assert_eq!(space["role_level"], 2);
+    assert_eq!(space["role_scope"], "x-aaaa");
     let (_m2, equals) = build_request(
         "spawn",
         &[
             "wk".to_string(),
-            "--crown=1".to_string(),
-            "--crown-scope=x-bbbb".to_string(),
+            "--promote=1".to_string(),
+            "--role-scope=x-bbbb".to_string(),
         ],
     )
-    .expect("the crown equals forms must parse");
-    assert_eq!(equals["crown_level"], 1);
-    assert_eq!(equals["crown_scope"], "x-bbbb");
-    let err = build_request("spawn", &["wk".to_string(), "--crown=7".to_string()])
+    .expect("the role equals forms must parse");
+    assert_eq!(equals["role_level"], 1);
+    assert_eq!(equals["role_scope"], "x-bbbb");
+    let err = build_request("spawn", &["wk".to_string(), "--promote=7".to_string()])
         .expect_err("a level outside the ladder refuses");
     assert!(err.contains("level 0-2"), "got: {err}");
 }

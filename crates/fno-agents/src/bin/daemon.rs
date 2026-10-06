@@ -15,6 +15,10 @@ use fno_agents::paths::AgentsHome;
 use std::time::Duration;
 
 fn main() {
+    if let Err(error) = fno_agents::role_migration::run() {
+        eprintln!("role migration: {error}");
+        std::process::exit(2);
+    }
     // `version [--json]`: report the baked-in build rev so `fno doctor update` can
     // verify this bin is the SAME build as its triad siblings, not just present.
     // Execs cheaply and returns without touching a running daemon or the runtime.
@@ -174,8 +178,6 @@ fn main() {
     // subfolders BEFORE the daemon opens a store. Best effort; a refusal
     // retries on the daemon's reclaim lane.
     fno_agents::state_layout::run_at_daemon_start(&home);
-    // One-shot role-rename file move: crown_names.json -> team_names.json.
-    fno_agents::team_names::move_legacy_store(home.root());
 
     let outcome = rt.block_on(run(home, opts));
 

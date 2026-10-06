@@ -516,7 +516,7 @@ dispatch_hold:
   reason: Blocking review finding is unresolved
   release_when: The finding is fixed and re-reviewed
   review_on: 2099-08-20
-  set_by: king:119e3c52
+  set_by: lead:119e3c52
 ---
 
 # Held plan
@@ -534,7 +534,7 @@ for malformed in scalar partial invalid-date blank-setter; do
         scalar) awk '/^dispatch_hold:/{print "dispatch_hold: blocked"; skip=1; next} skip && /^---$/{skip=0} !skip{print}' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
         partial) sed '/  set_by:/d' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
         invalid-date) sed 's/review_on: 2099-08-20/review_on: soon/' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
-        blank-setter) sed 's/set_by: king:119e3c52/set_by: "   "/' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
+        blank-setter) sed 's/set_by: lead:119e3c52/set_by: "   "/' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
     esac
     OUTPUT=$(bash "$VALIDATE" "$TMPDIR_BASE/hold-$malformed.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
     if [[ $EXIT_CODE -eq 1 ]] && grep -q "malformed dispatch_hold" <<< "$OUTPUT"; then
@@ -1068,7 +1068,7 @@ if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
             d-b6cc1a2a)
                 printf '%s\n' '{"decisions":[{"decision_id":"d-b6cc1a2a","decision":"All new code lands in Rust under crates. No new Python in cli/src/fno. Existing Python is ported, never extended.","subject":"new-code-language","lifecycle":"live"}]}' ;;
             d-a9cddc93)
-                printf '%s\n' '{"decisions":[{"decision_id":"d-a9cddc93","decision":"A king may approve a repair to existing cli/src/fno Python that fixes a blocking bug.","subject":"python-repair","lifecycle":"live"}]}' ;;
+                printf '%s\n' '{"decisions":[{"decision_id":"d-a9cddc93","decision":"A lead may approve a repair to existing cli/src/fno Python that fixes a blocking bug.","subject":"python-repair","lifecycle":"live"}]}' ;;
             d-7e57a11a)
                 printf '%s\n' '{"decisions":[{"decision_id":"d-7e57a11a","decision":"approve the +2 repair","subject":"x-a1b2","lifecycle":"live"}]}' ;;
             d-5ca1ab1e)
@@ -1166,7 +1166,7 @@ code_index:
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/king/cli.py` | Grant d-f1cebabe +400 |
+| `cli/src/fno/lead/cli.py` | Grant d-f1cebabe +400 |
 
 ## Execution Strategy
 
@@ -1291,7 +1291,7 @@ fi
 
 # AC4-HP: every cited id is read, and a valid approval beside a general law passes.
 PLAN_SCOPE_4="$TMPDIR_BASE/nnpy_scope_4.md"
-sed 's/Grant d-b6cc1a2a +2/Grant d-a9cddc93 (king ruling d-7e57a11a) +2/' \
+sed 's/Grant d-b6cc1a2a +2/Grant d-a9cddc93 (lead ruling d-7e57a11a) +2/' \
     "$PLAN_SCOPE_1" > "$PLAN_SCOPE_4"
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_4" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")

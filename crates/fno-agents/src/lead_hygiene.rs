@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 static PATH_RE: OnceLock<Regex> = OnceLock::new();
 static CLAIM_RE: OnceLock<Regex> = OnceLock::new();
 static LINE_SUFFIX_RE: OnceLock<Regex> = OnceLock::new();
-static ABDICATION_RE: OnceLock<Regex> = OnceLock::new();
+static DEPARTURE_RE: OnceLock<Regex> = OnceLock::new();
 static RULING_TEXT_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_PROBE_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_ASK_RE: OnceLock<Regex> = OnceLock::new();
@@ -287,16 +287,16 @@ fn team_spawn_command(target: &str) -> bool {
                 arg == "--team"
                     || arg.starts_with("--team=")
                     // retired-ok: the daemon accepts the retired alias here
-                    || arg == "--crown"
-                    || arg.starts_with("--crown=")
+                    || arg == "--promote"
+                    || arg.starts_with("--promote=")
             })
     })
 }
 
-fn team_read_or_bestow_command(target: &str) -> bool {
+fn team_read_or_grant_command(target: &str) -> bool {
     shell_command_segments(target).iter().any(|args| {
         !has_help_flag(args)
-            && (args_start_with(args, &["fno", "agents", "crown"])
+            && (args_start_with(args, &["fno", "agents", "role"])
                 || args_start_with(args, &["fno", "agents", "org"])
                 || args_start_with(args, &["fno", "whoami"]))
     })
@@ -388,10 +388,10 @@ fn check1_claim_before_read(entries: &[Entry]) -> CheckResult {
     )
 }
 
-fn check2_spawn_abdicate_rule(entries: &[Entry], shape: Option<&str>) -> CheckResult {
+fn check2_spawn_step_down_rule(entries: &[Entry], shape: Option<&str>) -> CheckResult {
     if shape == Some("org") {
         return CheckResult::new(
-            "check2_spawn_abdicate_rule",
+            "check2_spawn_step_down_rule",
             false,
             "not-applicable",
             "org lead: the pass exit rule does not apply",
@@ -401,37 +401,41 @@ fn check2_spawn_abdicate_rule(entries: &[Entry], shape: Option<&str>) -> CheckRe
     let first_spawn = first(entries, is_spawn);
     let Some(first_spawn) = first_spawn else {
         return CheckResult::new(
-            "check2_spawn_abdicate_rule",
+            "check2_spawn_step_down_rule",
             false,
             "not-applicable",
-            "no spawn in lead; pass-shape abdicate rule does not apply",
+            "no spawn in lead; pass-shape step_down rule does not apply",
             None,
         );
     };
-    let first_abdication = first(entries, |entry| {
+    let first_departure = first(entries, |entry| {
         entry.kind == "assistant_text"
-            && compiled(&ABDICATION_RE, r"^\s*\**\s*Abdicat(?:ing|ed)\b").is_match(&entry.text)
+            && compiled(
+                &DEPARTURE_RE,
+                r"(?i)^\s*\**\s*(?:step(?:s|ped|ping)?[ _-]?down|depart(?:ure|ing|ed)?)\b",
+            )
+            .is_match(&entry.text)
     });
-    let Some(first_abdication) = first_abdication else {
+    let Some(first_departure) = first_departure else {
         return CheckResult::new(
-            "check2_spawn_abdicate_rule",
+            "check2_spawn_step_down_rule",
             true,
             "violation",
-            "spawned but never declared abdication",
+            "spawned but never declared departure",
             Some(first_spawn),
         );
     };
     for entry in entries {
-        if entry.index <= first_abdication || entry.kind != "tool_use" {
+        if entry.index <= first_departure || entry.kind != "tool_use" {
             continue;
         }
         if is_spawn(entry) || ruling_command(&entry.target) {
             return CheckResult::new(
-                "check2_spawn_abdicate_rule",
+                "check2_spawn_step_down_rule",
                 true,
                 "violation",
                 format!(
-                    "abdicated at index {first_abdication} then took orchestration action at index {} ('{}') - did not exit",
+                    "stepped_down at index {first_departure} then took orchestration action at index {} ('{}') - did not exit",
                     entry.index,
                     entry.target.chars().take(60).collect::<String>()
                 ),
@@ -440,10 +444,10 @@ fn check2_spawn_abdicate_rule(entries: &[Entry], shape: Option<&str>) -> CheckRe
         }
     }
     CheckResult::new(
-        "check2_spawn_abdicate_rule",
+        "check2_spawn_step_down_rule",
         true,
         "clean",
-        format!("spawned at {first_spawn}, abdicated at {first_abdication}, no later action"),
+        format!("spawned at {first_spawn}, stepped_down at {first_departure}, no later action"),
         None,
     )
 }
@@ -466,13 +470,13 @@ fn check3_team_before_ruling(entries: &[Entry]) -> CheckResult {
         if entry.kind != "tool_use" || entry.tool.as_deref() != Some("Bash") {
             continue;
         }
-        if team_read_or_bestow_command(&entry.target) || team_spawn_command(&entry.target) {
+        if team_read_or_grant_command(&entry.target) || team_spawn_command(&entry.target) {
             return CheckResult::new(
                 "check3_team_before_ruling",
                 true,
                 "clean",
                 format!(
-                    "team read or coronation at {} precedes first ruling at {first_ruling}",
+                    "team read or promotion at {} precedes first ruling at {first_ruling}",
                     entry.index
                 ),
                 None,
@@ -484,7 +488,7 @@ fn check3_team_before_ruling(entries: &[Entry]) -> CheckResult {
         true,
         "violation",
         format!(
-            "ruled at index {first_ruling} with no team read (fno agents org) or coronation before it"
+            "ruled at index {first_ruling} with no team read (fno agents org) or promotion before it"
         ),
         Some(first_ruling),
     )
@@ -576,7 +580,7 @@ fn check5_context_timing_heuristic(entries: &[Entry]) -> CheckResult {
 pub(crate) fn run_checks(entries: &[Entry], shape: Option<&str>) -> [CheckResult; 5] {
     [
         check1_claim_before_read(entries),
-        check2_spawn_abdicate_rule(entries, shape),
+        check2_spawn_step_down_rule(entries, shape),
         check3_team_before_ruling(entries),
         check4_prwatch_before_dispatch(entries),
         check5_context_timing_heuristic(entries),
@@ -904,7 +908,7 @@ mod tests {
 
     #[test]
     fn check2_fires_on_lead() {
-        let result = check2_spawn_abdicate_rule(&fixture(LEAD), None);
+        let result = check2_spawn_step_down_rule(&fixture(LEAD), None);
         result.assert_fires("lead-2026-08-05");
         assert_eq!(result.index, Some(65));
     }
@@ -925,7 +929,7 @@ mod tests {
 
     #[test]
     fn ac3_check2_not_applicable_when_no_spawn() {
-        let result = check2_spawn_abdicate_rule(&fixture(NO_SPAWN), None);
+        let result = check2_spawn_step_down_rule(&fixture(NO_SPAWN), None);
         assert!(!result.applicable);
         assert_eq!(result.status, "not-applicable");
     }
@@ -951,20 +955,20 @@ mod tests {
     }
 
     #[test]
-    fn check2_agent_spawn_after_abdication_fires() {
+    fn check2_agent_spawn_after_departure_fires() {
         let entries = vec![
             entry(
                 0,
                 "tool_use",
                 Some("Bash"),
-                "fno agents spawn w1 --crown level=0,scope=fno",
+                "fno agents spawn w1 --promote level=0,scope=fno",
                 "",
             ),
-            entry(1, "assistant_text", None, "", "Abdicating. Team expired."),
+            entry(1, "assistant_text", None, "", "SteppingDown. Team expired."),
             entry(2, "tool_use", Some("Agent"), "agent:archer", ""),
         ];
-        check2_spawn_abdicate_rule(&entries, None)
-            .assert_fires("synthetic-agent-spawn-after-abdication");
+        check2_spawn_step_down_rule(&entries, None)
+            .assert_fires("synthetic-agent-spawn-after-departure");
     }
 
     #[test]
@@ -1050,8 +1054,8 @@ mod tests {
         );
 
         for target in [
-            "fno agents crown --help",
-            "fno agents crown -h",
+            "fno agents role --help",
+            "fno agents role -h",
             "fno agents spawn worker --help --team x-root",
             "fno agents spawn worker -h --team x-root",
         ] {
@@ -1211,7 +1215,7 @@ mod tests {
             "fno agents spawn worker",
             "",
         )];
-        let result = check2_spawn_abdicate_rule(&entries, Some("org"));
+        let result = check2_spawn_step_down_rule(&entries, Some("org"));
         assert!(!result.applicable);
         assert_eq!(result.detail, "org lead: the pass exit rule does not apply");
     }

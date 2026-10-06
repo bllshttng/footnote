@@ -240,7 +240,7 @@ pub(crate) fn codex_resume_route(
         {
             // The not-loaded arm is the reboot gap: the daemon boot (or the
             // wake's own inject) resumes the thread from its rollout, a
-            // crowned row's turn re-asserts the recorded full-access policy,
+            // promoted row's turn re-asserts the recorded full-access policy,
             // and the viewport keeps the row on the mux - the terminal-exec
             // fallback would strand the thread outside the daemon with the
             // rollout's narrowed sandbox.
@@ -2216,12 +2216,12 @@ mod tests {
 
     /// The wake route answers whenever the daemon can reach the thread: the
     /// loaded arm (the original gate), the not-loaded arm once the daemon is
-    /// ensured (the reboot gap, where the crowned row's turn re-asserts the
+    /// ensured (the reboot gap, where the promoted row's turn re-asserts the
     /// recorded full-access policy), and the launch-failure arm rebinds the
     /// row to the thread lane. The terminal-exec fallback would strand the
     /// thread outside the daemon under the rollout's narrowed sandbox.
     #[test]
-    fn a_crowned_resume_wakes_over_the_daemon_whether_loaded_or_not() {
+    fn a_promoted_resume_wakes_over_the_daemon_whether_loaded_or_not() {
         let _guard = crate::path_test_guard();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -2281,7 +2281,7 @@ mod tests {
         std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
 
         // Arm B: the reboot gap - the pane is dead and the thread is NOT
-        // loaded, but the ensure arm answers. A crowned row's wake carries
+        // loaded, but the ensure arm answers. A promoted row's wake carries
         // the recorded dangerFullAccess policy, and the row keeps its mux.
         let home = tmp_home("wake-reboot");
         push_codex_pane_row(&home, "w1", "sess-1");
@@ -2335,7 +2335,7 @@ mod tests {
         assert_eq!(
             turn["sandboxPolicy"],
             serde_json::json!({"type": "dangerFullAccess"}),
-            "a crowned row's wake re-asserts the crowned policy"
+            "a promoted row's wake re-asserts the promoted policy"
         );
         {
             let launched = io.launched.lock().unwrap();

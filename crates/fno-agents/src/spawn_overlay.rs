@@ -21,7 +21,7 @@
 //!   rivalry through `loop_lead::team_rivals`.
 //! - kind `team-widen`: whether an agent can add an epic its own session
 //!   created to its own epic-set team (`team_widen::resolve`).
-//! - kind `team-rescope`: the crown re-scope's team-name effect
+//! - kind `team-rescope`: the role re-scope's team-name effect
 //!   (`team_rescope::resolve`), the promote-side carry that keeps a lead's
 //!   recorded name across an `org promote` scope move.
 
@@ -167,13 +167,13 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("pane-group") => resolve_pane_group(&payload),
         Some("fallback") => resolve_fallback(&payload),
         Some("codex-route") => resolve_codex_route_kind(&payload),
-        Some("crown-settle") => crate::team_settle::resolve(&payload),
-        Some("crown-identity") => crate::team_identity::resolve(&payload),
-        Some("crown-widen") => crate::team_widen::resolve(&payload),
-        Some("court-rivals") => crate::org_rivals::resolve(&payload),
+        Some("role-settle") => crate::team_settle::resolve(&payload),
+        Some("role-identity") => crate::team_identity::resolve(&payload),
+        Some("role-widen") => crate::team_widen::resolve(&payload),
+        Some("team-rivals") => crate::org_rivals::resolve(&payload),
         Some("team-rescope") => crate::team_rescope::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|crown-settle|crown-identity|crown-widen|court-rivals|team-rescope"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|role-settle|role-identity|role-widen|team-rivals|team-rescope"
         )),
     }
 }
@@ -1160,10 +1160,10 @@ mod tests {
         // Routing: kind team-widen reaches team_widen::resolve and the
         // unknown-kind refusal names it.
         let out = resolve(json!({
-            "kind": "crown-widen",
+            "kind": "role-widen",
             "requested": "e-1,e-2",
             "target": "lead-a",
-            "caller": {"name": "lead-a", "status": "idle", "crown_scope": "e-1",
+            "caller": {"name": "lead-a", "status": "idle", "role_scope": "e-1",
                        "harness_session_id": "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa",
                        "cc_session_id": null},
             "members": [{"id": "e-1", "type": "epic", "source_session_id": "human"},
@@ -1173,8 +1173,8 @@ mod tests {
         .unwrap();
         assert_eq!(out["widen"], true);
         assert_eq!(out["added"], json!(["e-2"]));
-        let error = resolve(json!({"kind": "crown-alias", "rows": []})).unwrap_err();
-        assert!(error.contains("crown-widen"), "{error}");
+        let error = resolve(json!({"kind": "role-alias", "rows": []})).unwrap_err();
+        assert!(error.contains("role-widen"), "{error}");
         // Routing: kind team-rescope reaches team_rescope::resolve. With no
         // declared agents home the module's own no-home answer comes back;
         // with one declared, the usage refusal names the kind. Either answer

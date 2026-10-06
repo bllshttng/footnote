@@ -18,7 +18,7 @@ use std::path::Path;
 pub const SETTLE_SENDER: &str = "fno/lead-settle";
 
 /// Live team holders for `scope`, by row name, sorted and deduped - the
-/// port of `resolve_to_lead` over the JSON rows: `crown_level` present, the
+/// port of `resolve_to_lead` over the JSON rows: `role_level` present, the
 /// held scope answers, status not terminal.
 fn lead_holders(
     registry: &[Value],
@@ -28,14 +28,10 @@ fn lead_holders(
     let mut names: Vec<String> = registry
         .iter()
         .filter(|row| !crate::row_verdict::finished_json(row))
-        .filter(|row| {
-            row.get("crown_level")
-                .map(|c| !c.is_null())
-                .unwrap_or(false)
-        })
+        .filter(|row| row.get("role_level").map(|c| !c.is_null()).unwrap_or(false))
         .filter(|row| {
             crate::announce::team_answers(
-                crate::announce::row_str(row, "crown_scope"),
+                crate::announce::row_str(row, "role_scope"),
                 scope,
                 projects,
             )
@@ -139,8 +135,8 @@ mod tests {
 
     fn team_row(name: &str, scope: &str, level: u8, status: &str) -> Value {
         json!({
-            "name": name, "status": status, "crown_scope": scope,
-            "crown_level": level, "cwd": "/repo", "harness": "claude",
+            "name": name, "status": status, "role_scope": scope,
+            "role_level": level, "cwd": "/repo", "harness": "claude",
             "harness_session_id": format!("sess-{name}"),
             "log_path": format!("/tmp/{name}.log"),
             "created_at": "2026-09-25T12:00:00Z",
@@ -239,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_and_uncrowned_rows_never_address() {
+    fn terminal_and_unpromoted_rows_never_address() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),

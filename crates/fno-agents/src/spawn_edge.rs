@@ -61,7 +61,7 @@ pub fn live_child_of<'a>(
                 .spawned_by_session
                 .as_deref()
                 .is_some_and(|s| s.trim().to_ascii_lowercase() == sid_lower)
-            && lineage_kind(&child.name, parent.crown_level.is_some()) == LineageKind::Child
+            && lineage_kind(&child.name, parent.role_level.is_some()) == LineageKind::Child
             && crate::spawn_gate::status_is_liveish(&child.status)
             && crate::row_truth::served_fresh_liveness(
                 child.liveness.as_deref(),
@@ -123,7 +123,7 @@ pub(crate) fn stamp_lineage_kinds(r: &mut crate::state::Registry) {
     let teamed: std::collections::HashSet<String> = r
         .entries
         .iter()
-        .filter(|e| e.crown_level.is_some())
+        .filter(|e| e.role_level.is_some())
         .filter_map(|e| {
             e.harness_session_id
                 .as_deref()
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn a_teamed_parent_reads_its_org_as_child() {
         let mut lead = row("lead-x-5", "s-lead", None);
-        lead.crown_level = Some(1);
+        lead.role_level = Some(1);
         let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
         org.status = crate::AgentStatus::Busy;
         let entries = vec![lead.clone(), org.clone()];
@@ -237,7 +237,7 @@ mod tests {
     fn stamp_writes_child_peer_and_leaves_edgeless_rows_silent() {
         let mut r = crate::state::Registry::default();
         let mut lead = row("lead-x-6", "s-lead", None);
-        lead.crown_level = Some(1);
+        lead.role_level = Some(1);
         let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
         org.status = crate::AgentStatus::Busy;
         let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-other"));

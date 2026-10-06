@@ -352,7 +352,7 @@ def test_agents_fold_move_table_matches_the_approved_work_order():
     expected = {
         "autonomy": "agents autonomy",
         "claim": "agents claim",
-        "king": "agents king",
+        "lead": "agents lead",
         "mcp": "agents mcp",
         "restart": "agents restart",
         "roles": "agents roles",

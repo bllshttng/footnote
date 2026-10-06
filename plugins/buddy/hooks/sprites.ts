@@ -110,7 +110,7 @@ const BODIES: Record<Species, string[][]> = {
 
 const HAT_LINES: Record<Hat, string> = {
   none: '',
-  crown: '   \\^^^/    ',
+  role: '   \\^^^/    ',
   tophat: '   [___]    ',
   propeller: '    -+-     ',
   halo: '   (   )    ',

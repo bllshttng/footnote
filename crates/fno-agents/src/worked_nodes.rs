@@ -11,15 +11,15 @@
 //! One JSON reply on stdout:
 //!   {"worked": {"<node-id>": ["<label>", ...]}}
 //!
-//! The gate this verb owns (the crown ruling on the dispatch false refusal):
-//!   - a crowned lead row is never a node worker (registry `crown_level`);
+//! The gate this verb owns (the role ruling on the dispatch false refusal):
+//!   - a promoted lead row is never a node worker (registry `role_level`);
 //!   - a seat record alone is a witness: a seated session joins its node
 //!     only when the row's own attribution names the node or the session
 //!     holds the live/suspect `node:<id>` claim (the gate the reap keep got
 //!     first);
 //!   - an attributed row joins through its attribution, never closed, never
-//!     crowned;
-//!   - the unmeasurable fold joins through attribution, never for a crown.
+//!     promoted;
+//!   - the unmeasurable fold joins through attribution, never for a role.
 //!
 //! Graph semantics ported byte-for-byte from the Python join: terminal rungs
 //! `done`/`superseded` skip; a ship row is a link event, never occupancy; a
@@ -158,13 +158,13 @@ fn node_seats(entry: &Value) -> Option<(String, NodeSeats)> {
     ))
 }
 
-/// The join: seat records, crown exclusion, provenance, attribution fold.
+/// The join: seat records, role exclusion, provenance, attribution fold.
 /// Deterministic: nodes in graph row order, seats in session-row order, the
 /// attribution fold in payload order, labels deduped per node.
 fn join_worked(
     rows: &[GateRow],
     graph: &[Value],
-    crowned: &HashSet<String>,
+    promoted: &HashSet<String>,
     claims: &HashMap<String, HashSet<String>>,
 ) -> BTreeMap<String, Vec<String>> {
     let by_session: HashMap<&str, &GateRow> = rows
@@ -191,8 +191,8 @@ fn join_worked(
             let Some(row) = by_session.get(sid.as_str()) else {
                 continue;
             };
-            if crowned.contains(&row.name) {
-                // A crowned lead row is never a node worker.
+            if promoted.contains(&row.name) {
+                // A promoted lead row is never a node worker.
                 continue;
             }
             let attributed = row.node.as_deref() == Some(node_id.as_str());
@@ -207,7 +207,7 @@ fn join_worked(
             if row.node.as_deref() != Some(node_id.as_str()) {
                 continue;
             }
-            if crowned.contains(&row.name) {
+            if promoted.contains(&row.name) {
                 continue;
             }
             if !row.session.is_empty() && seats.closed_minus_open.contains(&row.session) {
@@ -219,11 +219,11 @@ fn join_worked(
     worked
 }
 
-fn crowned_names(registry_path: &PathBuf) -> Result<HashSet<String>, String> {
+fn promoted_names(registry_path: &PathBuf) -> Result<HashSet<String>, String> {
     let entries = crate::client_verbs::load_registry_entries(registry_path)?;
     Ok(entries
         .iter()
-        .filter(|e| e.get("crown_level").map(|v| !v.is_null()).unwrap_or(false))
+        .filter(|e| e.get("role_level").map(|v| !v.is_null()).unwrap_or(false))
         .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
         .filter(|n| !n.is_empty())
         .map(|n| n.to_string())
@@ -306,7 +306,7 @@ pub fn run_worked_nodes(args: &[String]) -> i32 {
         return 3;
     };
     let registry_path = home.registry_json();
-    let crowned = match crowned_names(&registry_path) {
+    let promoted = match promoted_names(&registry_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("worked-nodes: {e}; refusing to answer free");
@@ -314,7 +314,7 @@ pub fn run_worked_nodes(args: &[String]) -> i32 {
         }
     };
     let claims = claim_sessions();
-    let worked = join_worked(&rows, &graph, &crowned, &claims);
+    let worked = join_worked(&rows, &graph, &promoted, &claims);
     let reply = serde_json::json!({ "worked": worked });
     println!("{}", reply);
     0
@@ -352,7 +352,7 @@ mod tests {
         })
     }
 
-    fn crowns(names: &[&str]) -> HashSet<String> {
+    fn roles(names: &[&str]) -> HashSet<String> {
         names.iter().map(|n| n.to_string()).collect()
     }
 
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seated_uncrowned_worker_with_attribution_joins() {
+    fn a_seated_unpromoted_worker_with_attribution_joins() {
         let graph = vec![node("x-1", "in_progress", serde_json::json!([open("s-1")]))];
         let rows = vec![row("t-w", "s-1", Some("x-1"))];
         let worked = join_worked(&rows, &graph, &HashSet::new(), &HashMap::new());
@@ -371,21 +371,21 @@ mod tests {
     }
 
     #[test]
-    fn a_crowned_lead_is_never_the_worker_at_any_fold() {
+    fn a_promoted_lead_is_never_the_worker_at_any_fold() {
         let graph = vec![node(
             "x-1",
             "in_progress",
-            serde_json::json!([open("crown-s"), open("s-2")]),
+            serde_json::json!([open("role-s"), open("s-2")]),
         )];
-        // The same crown at all three admissions: a seated attributed row,
+        // The same role at all three admissions: a seated attributed row,
         // an unseated attributed row, and the sessionless unmeasurable name.
         let rows = vec![
-            row("finch", "crown-s", Some("x-1")),
+            row("finch", "role-s", Some("x-1")),
             row("finch", "", Some("x-1")),
             row("finch", "", Some("x-1")),
             row("t-w", "s-2", Some("x-1")),
         ];
-        let worked = join_worked(&rows, &graph, &crowns(&["finch"]), &HashMap::new());
+        let worked = join_worked(&rows, &graph, &roles(&["finch"]), &HashMap::new());
         assert_eq!(worked.get("x-1").unwrap(), &vec!["t-w".to_string()]);
     }
 

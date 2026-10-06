@@ -2404,8 +2404,8 @@ def test_a_refresh_fills_an_origin_the_row_never_had(tmp_path, monkeypatch):
     assert register_existing_session(**kwargs, origin="operator").origin == "operator"
 
 
-def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
-    """x-2b6f: the manifest is the durable crown record; register is the
+def test_register_re_stamps_role_from_a_live_manifest(tmp_path, monkeypatch):
+    """x-2b6f: the manifest is the durable role record; register is the
     repair door for a row a restore stripped. A manifest naming the session
     stamps an unstamped row, a stamped row is never touched, and no manifest
     registers bare."""
@@ -2428,15 +2428,15 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
             f"harness_session_id: {session}\n"
             "owner_pid: 1\n"
             "created_at: 2026-09-01T00:00:00Z\n"
-            f"crown_scope: {scope}\n"
-            "crown_level: 2\n"
-            "crown_grantor: vellum\n"
+            f"role_scope: {scope}\n"
+            "role_level: 2\n"
+            "role_grantor: vellum\n"
             "---\n"
         )
 
-    kings = space_dir(Path(tmp_path)) / "kings"
-    kings.mkdir(parents=True, exist_ok=True)
-    (kings / "x-demo.md").write_text(manifest_body(sid, "x-demo"), encoding="utf-8")
+    leads = space_dir(Path(tmp_path)) / "leads"
+    leads.mkdir(parents=True, exist_ok=True)
+    (leads / "x-demo.md").write_text(manifest_body(sid, "x-demo"), encoding="utf-8")
 
     row = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2444,9 +2444,9 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
         cwd=str(tmp_path),
         name="quill2",
     )
-    assert row.crown_scope == "x-demo"
-    assert row.crown_level == 2
-    assert row.crown_grantor == "vellum"
+    assert row.role_scope == "x-demo"
+    assert row.role_level == 2
+    assert row.role_grantor == "vellum"
 
     # No manifest naming it: a fresh session registers bare.
     bare = register_existing_session(
@@ -2455,13 +2455,13 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
         cwd=str(tmp_path),
         name="bare",
     )
-    assert bare.crown_scope is None
+    assert bare.role_scope is None
 
-    # A malformed crown_level registers the row BARE instead of raising:
+    # A malformed role_level registers the row BARE instead of raising:
     # a junk stamp must never cost the session its row.
-    (kings / "x-junk.md").write_text(
+    (leads / "x-junk.md").write_text(
         manifest_body("88888888-0000-0000-0000-000000000000", "x-junk").replace(
-            "crown_level: 2", "crown_level: two"
+            "role_level: 2", "role_level: two"
         ),
         encoding="utf-8",
     )
@@ -2471,7 +2471,7 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
         cwd=str(tmp_path),
         name="junky",
     )
-    assert junky.crown_level is None
+    assert junky.role_level is None
 
     # A row already stamped is never touched by a manifest naming it.
     seeded = AgentEntry(
@@ -2481,9 +2481,9 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
         harness=CLAUDE_HARNESS,
         harness_session_id=sid,
     )
-    seeded.crown_scope = "x-kept"
-    seeded.crown_level = 1
-    seeded.crown_grantor = "human"
+    seeded.role_scope = "x-kept"
+    seeded.role_level = 1
+    seeded.role_grantor = "human"
     write_registry([seeded])
     kept = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2491,9 +2491,9 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
         cwd=str(tmp_path),
         name="quill2",
     )
-    assert kept.crown_scope == "x-kept"
-    assert kept.crown_level == 1
-    assert kept.crown_grantor == "human"
+    assert kept.role_scope == "x-kept"
+    assert kept.role_level == 1
+    assert kept.role_grantor == "human"
 
 
 def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):

@@ -76,16 +76,16 @@ pub fn row_is_unarmed(row: &ArmStatus) -> bool {
 }
 
 /// The permanent old->new spellings of the 2026-10 role-arm rename
-/// (king->lead, crown->team, reign->lead). Stored tick rows are never
+/// (lead->lead, role->team, term->lead). Stored tick rows are never
 /// rewritten, so the arms fold canonicalizes `data.arm` through this table
 /// and a renamed arm's history folds into its current row instead of
 /// surfacing forever as a second, dead arm reading STALE. This table never
 /// shrinks.
 pub const ARM_ALIASES: &[(&str, &str)] = &[
-    ("crown_ledger", "team_ledger"),
-    ("king_settle", "lead_settle"),
-    ("king_wake", "lead_wake"),
-    ("reign_eval", "lead_eval"),
+    ("role_ledger", "team_ledger"),
+    ("lead_settle", "lead_settle"),
+    ("lead_wake", "lead_wake"),
+    ("term_eval", "lead_eval"),
 ];
 
 /// The canonical (current) spelling of an arm name: an old stored spelling
@@ -874,7 +874,7 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 const FAILURE_SKIPS: &[&str] = &[
     "timeout",
     "grant_queue_timeout",
-    "court_read_incomplete",
+    "team_read_incomplete",
     "error",
     "failures",
     "next-error",
@@ -4200,8 +4200,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         // The 2026-10 role-arm rename renamed the arms but not the stored
-        // rows: a fold without the alias table surfaced king_settle/
-        // crown_ledger/reign_eval as separate arms reading STALE forever
+        // rows: a fold without the alias table surfaced lead_settle/
+        // role_ledger/term_eval as separate arms reading STALE forever
         // beside their live successors.
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
@@ -4210,7 +4210,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-22T04:00:00Z",
-                    "king_settle",
+                    "lead_settle",
                     SCHED_DAEMON,
                     0,
                     json!("clear"),
@@ -4218,7 +4218,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-22T04:00:00Z",
-                    "crown_ledger",
+                    "role_ledger",
                     SCHED_DAEMON,
                     1,
                     json!(null),
@@ -4226,7 +4226,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-22T04:00:00Z",
-                    "reign_eval",
+                    "term_eval",
                     SCHED_DAEMON,
                     0,
                     json!("not_due"),
@@ -4237,27 +4237,27 @@ mod tests {
         let now = parse_rfc3339_unix("2026-09-22T04:00:10Z").unwrap();
         let rows = read_arms(&[journal], now);
         assert!(
-            !rows.iter().any(|r| r.arm == "king_settle"),
+            !rows.iter().any(|r| r.arm == "lead_settle"),
             "old spelling must not surface as its own arm"
         );
         let settle = rows
             .iter()
             .find(|r| r.arm == "lead_settle")
-            .expect("king_settle folds into lead_settle");
+            .expect("lead_settle folds into lead_settle");
         assert_eq!(settle.age_s, Some(10));
         let ledger = rows
             .iter()
             .find(|r| r.arm == "team_ledger")
-            .expect("crown_ledger folds into team_ledger");
+            .expect("role_ledger folds into team_ledger");
         assert_eq!(ledger.acted, Some(1));
         let eval = rows
             .iter()
             .find(|r| r.arm == "lead_eval")
-            .expect("reign_eval folds into lead_eval");
+            .expect("term_eval folds into lead_eval");
         assert_eq!(eval.age_s, Some(10));
         std::fs::remove_dir_all(&dir).ok();
 
-        // king_wake's incomplete court read emitted no_crowned_target, a
+        // lead_wake's incomplete team read emitted no_promoted_target, a
         // healthy skip, so a dead read looked like an idle arm for 31
         // hours. The row must read FAIL and age failing_for.
         let dir = temp_dir();
@@ -4267,7 +4267,7 @@ mod tests {
             &[
                 tick_envelope(
                     "2026-09-22T03:00:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
                     json!(null),
@@ -4275,10 +4275,10 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-22T04:00:00Z",
-                    "king_wake",
+                    "lead_wake",
                     SCHED_LAUNCHD,
                     0,
-                    json!("court_read_incomplete"),
+                    json!("team_read_incomplete"),
                     900,
                 ),
             ],
@@ -4286,7 +4286,7 @@ mod tests {
         let now = parse_rfc3339_unix("2026-09-22T04:00:10Z").unwrap();
         let rows = read_arms(&[journal], now);
         let wake = rows.iter().find(|r| r.arm == "lead_wake").unwrap();
-        assert_eq!(wake.skip_reason.as_deref(), Some("court_read_incomplete"));
+        assert_eq!(wake.skip_reason.as_deref(), Some("team_read_incomplete"));
         assert!(wake.failing, "line: {}", wake.line);
         // The fold leaves the rendered line empty; the readout renders it.
         let line = render_row(wake);

@@ -190,7 +190,7 @@ def _sandbox_project_spaces(tmp_path, monkeypatch):
     """Keep project space state out of the developer's real ~/.fno/spaces.
 
     Since the spaces move, every project-relative accessor (events, plans,
-    inbox, kings, claims, status sinks, the target manifest) resolves under
+    inbox, leads, claims, status sinks, the target manifest) resolves under
     ``spaces_root()``. The pin rides the ``FNO_SPACES_DIR`` env var rather
     than patching the function so multiprocessing pool children (which re
     import fno fresh) resolve the SAME sandboxed root as the test process.

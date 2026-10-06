@@ -32,7 +32,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         phase: None,
         detail: None,
         reason: None,
-        crown: None,
+        role: None,
         holder: None,
         owner: None,
         parent: None,
@@ -60,7 +60,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         phase: None,
         detail: Some(resume.into()),
         reason: None,
-        crown: None,
+        role: None,
         holder: None,
         owner: None,
         parent: None,
@@ -121,9 +121,9 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -834,8 +834,8 @@ fn detail_field_rows() {
     row.harness_session_id = Some("s-9".into());
     row.portal = Some(0);
     row.spawned_by_session = Some("s-parent".into());
-    row.crown_scope = Some("e-0001".into());
-    row.crown_level = Some(1);
+    row.role_scope = Some("e-0001".into());
+    row.role_level = Some(1);
 
     let item = feed_item(Some("x-a"), Some("s-9"));
     let rows = [row];
@@ -901,7 +901,7 @@ fn detail_field_rows() {
     stamped.model = Some("glm-5.3-flash".into());
     stamped.effort = Some("high".into());
     stamped.parent = Some("s-parent".into());
-    stamped.crown = Some("L2 e-0001".into());
+    stamped.role = Some("L2 e-0001".into());
     let (popup, _, _) = feed_detail::build(&[], 0, &stamped);
     let by = |label: &str| -> String {
         popup_rows(&popup)
@@ -913,7 +913,7 @@ fn detail_field_rows() {
     assert_eq!(by("model"), "glm-5.3-flash");
     assert_eq!(by("effort"), "high");
     assert_eq!(by("parent"), "s-parent");
-    assert_eq!(by("crown"), "L2 e-0001");
+    assert_eq!(by("role"), "L2 e-0001");
 
     let item = feed_item(Some("x-a"), Some("s-1"));
     let mut child = joined_row("jn-t-x-1", None, None);

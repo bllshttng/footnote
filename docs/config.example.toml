@@ -246,7 +246,7 @@ enabled = true
 # Context-used %% that triggers a general-session compact nudge.
 used_pct_trigger = 50
 # Context-used %% that triggers an earlier lead compact nudge.
-king_used_pct_trigger = 40
+lead_used_pct_trigger = 40
 
 [target.blast]
 # Enable blast-radius routing.
@@ -718,7 +718,7 @@ http_timeout_secs = 5
 # Retry budget per webhook dispatch before drop/short-circuit.
 retries = 2
 
-[king]
+[lead]
 # Arm the lead loop: hold a lead session open while its board names work it can shrink. Defaults false.
 enabled = false
 # Let the lead merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the lead's own work.
@@ -739,8 +739,8 @@ implementation_guard = "refuse"
 write_roots = []
 # The /loop interval a lead self-injects on Claude (default 55m, under the one-hour prompt cache). Fail-safe: a value that is not <digits>[smhd] degrades to 55m at load, never raises.
 checkin_interval = "55m"
-# The /loop prompt text a lead self-injects at each check-in (default: run fno agents org checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle).
-checkin_text = "reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. "
+# The /loop prompt text a lead self-injects at each check-in (default: run fno agents org checkin, which gathers the readings, diffs the last beat, and journals lead_checkin; print 'no change' when idle).
+checkin_text = "lead check-in. Run fno agents org checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals lead_checkin. Then act on the printout per the term skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. "
 
 [accounts]
 # Name of the account record currently active for provider rotation.

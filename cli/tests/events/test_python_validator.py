@@ -520,10 +520,10 @@ def _seed_obligation_chain(tmp_path, events) -> None:
 
 
 
-def _reign_checkin(data: dict) -> dict:
+def _lead_checkin(data: dict) -> dict:
     return {
         "ts": "2026-09-10T12:00:00Z",
-        "type": "reign_checkin",
+        "type": "lead_checkin",
         "source": "loop",
         "data": data,
     }

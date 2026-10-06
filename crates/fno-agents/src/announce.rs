@@ -376,11 +376,8 @@ fn matches_scope_now(
                 .unwrap_or(false)
         })
         .any(|row| match scope {
-            "kings" => row
-                .get("crown_level")
-                .map(|c| !c.is_null())
-                .unwrap_or(false),
-            _ => team_answers(row_str(row, "crown_scope"), scope, projects),
+            "leads" => row.get("role_level").map(|c| !c.is_null()).unwrap_or(false),
+            _ => team_answers(row_str(row, "role_scope"), scope, projects),
         })
 }
 
@@ -397,11 +394,11 @@ fn resolve_audience(
         let Some(sid) = row_session_id(row) else {
             continue;
         };
-        if scope == "kings" && row.get("crown_level").map(|c| c.is_null()).unwrap_or(true) {
+        if scope == "leads" && row.get("role_level").map(|c| c.is_null()).unwrap_or(true) {
             continue;
         }
-        if scope != "all" && scope != "kings" {
-            let held = row_str(row, "crown_scope");
+        if scope != "all" && scope != "leads" {
+            let held = row_str(row, "role_scope");
             let team_ok = team_answers(held, scope, projects);
             // project:<p> also matches rows WORKING in that project (their cwd
             // names the repo), so an announcement reaches the team, not only a
@@ -496,9 +493,7 @@ fn send_usage() -> &'static str {
 
 fn team_row<'a>(rows: &'a [Value], sender: &str) -> Option<&'a Value> {
     rows.iter().filter(|row| !row_terminal(row)).find(|row| {
-        row.get("crown_level")
-            .map(|c| !c.is_null())
-            .unwrap_or(false)
+        row.get("role_level").map(|c| !c.is_null()).unwrap_or(false)
             && (row_str(row, "name") == Some(sender)
                 || row_session_id(row)
                     .map(|sid| {
@@ -1347,12 +1342,12 @@ mod tests {
             agent_row(
                 "lead-set",
                 "sess-set",
-                json!({"crown_level": 2, "crown_scope": "x-bbbb,x-cccc"}),
+                json!({"role_level": 2, "role_scope": "x-bbbb,x-cccc"}),
             ),
             agent_row(
                 "lead-folio",
                 "sess-folio",
-                json!({"crown_level": 0, "crown_scope": "alpha,beta"}),
+                json!({"role_level": 0, "role_scope": "alpha,beta"}),
             ),
         ];
         let projects: HashMap<String, String> = [("alpha", "alpha"), ("beta", "beta")]
@@ -1376,11 +1371,11 @@ mod tests {
         let row = agent_row(
             "lead",
             session,
-            json!({"short_id": "abcdef12", "crown_level": 1}),
+            json!({"short_id": "abcdef12", "role_level": 1}),
         );
 
         assert!(matches_scope_now(
-            "kings",
+            "leads",
             session,
             &[row],
             Some(&HashMap::new())
@@ -1477,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn uncrowned_agent_sender_is_refused_and_the_bus_is_unchanged() {
+    fn unpromoted_agent_sender_is_refused_and_the_bus_is_unchanged() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let f = fixture("authority");
         let rows = vec![agent_row(
@@ -1503,7 +1498,7 @@ mod tests {
             agent_row(
                 "lead",
                 "eeee5555-5555-5555-5555-555555555555",
-                json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+                json!({"role_level": 1, "role_scope": "epic/x-test"}),
             ),
             agent_row("other", "ffff5555-5555-5555-5555-555555555555", json!({})),
         ];
@@ -1526,15 +1521,15 @@ mod tests {
             agent_row(
                 "lead",
                 lead,
-                json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+                json!({"role_level": 1, "role_scope": "epic/x-test"}),
             ),
             agent_row(
                 "other",
                 other,
-                json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+                json!({"role_level": 1, "role_scope": "epic/x-test"}),
             ),
         ];
-        let mut flags = send_flags("kings");
+        let mut flags = send_flags("leads");
         flags[3] = "lead";
         flags[5] = "agent";
         let (code, id) = send_via(&f.paths, &flags, "from the team", &rows);
@@ -1559,9 +1554,9 @@ mod tests {
         let rows = vec![agent_row(
             "lead",
             "eeee5555-5555-5555-5555-555555555555",
-            json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+            json!({"role_level": 1, "role_scope": "epic/x-test"}),
         )];
-        let mut flags = send_flags("kings");
+        let mut flags = send_flags("leads");
         flags[3] = "lead";
         flags[5] = "agent";
         let (code, message) = send_via(&f.paths, &flags, "no audience", &rows);
@@ -1837,7 +1832,7 @@ mod tests {
         let rows = vec![agent_row(
             "lead",
             lead_session,
-            json!({"crown_level": 1, "crown_scope": "epic/x"}),
+            json!({"role_level": 1, "role_scope": "epic/x"}),
         )];
         let mut flags = send_flags("all");
         flags[3] = "lead";

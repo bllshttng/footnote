@@ -5,13 +5,13 @@
 //! A port of Python's `settle_spawn_team` (`cli/src/fno/agents/team.py`)
 //! with one new branch: a human caller with `succession` may transfer a
 //! team away from any live holder, the same authority `grant_error` already
-//! gives a human to bestow any scope (a human may grant what nobody above it
+//! gives a human to grant any scope (a human may grant what nobody above it
 //! could check). An agent caller may only succeed itself: every live holder
 //! of the scope must already be that agent.
 //!
 //! Rows arrive as plain JSON here, not a typed registry row. A row's
 //! terminal read answers through `row_verdict::finished_json`, the
-//! crown-vacancy door: the reversible word (Orphaned) re-answers on
+//! role-vacancy door: the reversible word (Orphaned) re-answers on
 //! process evidence, and every other status keeps the legacy
 //! `announce::TERMINAL_STATUSES` word list.
 //!
@@ -58,7 +58,7 @@ fn parse_caller(value: Option<&Value>) -> Option<Caller> {
 
 /// Decide occupancy for one teamed spawn over `scope`, then apply the
 /// team-name effect (a succeeded succession carries the name with a
-/// regnal bump; a fresh grant forgets it). See the module doc for the
+/// generation bump; a fresh grant forgets it). See the module doc for the
 /// caller/succession rules and the request/answer shapes.
 pub fn resolve(payload: &Value) -> Result<Value, String> {
     if payload.get("plan").is_none() {
@@ -101,31 +101,29 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
         Some("succeeded") => {
             let pending = succession_pending(payload);
             let result = crate::team_names::carry_succession(store, scope, pending.clone());
-            if result.is_ok() {
-                if let Some(p) = pending.as_ref() {
-                    crate::succession_txn::announce(scope, p);
-                    crate::succession_txn::transferred(scope, p);
-                }
+            if let Ok(Some(p)) = result.as_ref() {
+                crate::succession_txn::announce(scope, p);
+                crate::succession_txn::transferred(scope, p);
             }
-            result
+            result.map(|_| ())
         }
         Some("granted") => {
             let forgotten = crate::team_names::forget(store, scope);
-            let heir = payload
-                .get("heir")
+            let successor = payload
+                .get("successor")
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty());
-            // The heir's session rides `heir_identity` (dispatch plumbs the
+            // The successor's session rides `successor_identity` (dispatch plumbs the
             // row's own id); the carry is registry-free, so the apply path
             // never waits on the registry lock.
             let session = payload
-                .get("heir_identity")
+                .get("successor_identity")
                 .and_then(|i| i.get("session_id"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            match (forgotten, heir) {
+            match (forgotten, successor) {
                 (Ok(()), Some(name)) => {
-                    // A fresh grant carries the crowned row's own name, so
+                    // A fresh grant carries the promoted row's own name, so
                     // the team never lands anonymous.
                     crate::team_names::carry_holder_name(store, session, 2, scope, name).map(|_| ())
                 }
@@ -139,14 +137,14 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
     }
 }
 
-/// The pending-succession inputs for a succeeded settle: the heir from the
-/// payload's `heir` key (the spawned row's name, plumbed by dispatch), the
+/// The pending-succession inputs for a succeeded settle: the successor from the
+/// payload's `successor` key (the spawned row's name, plumbed by dispatch), the
 /// predecessor from the plan's first vacated holder_id. A payload without
-/// the heir key (an old caller) carries no pending record and keeps
+/// the successor key (an old caller) carries no pending record and keeps
 /// today's shape.
 fn succession_pending(payload: &Value) -> Option<crate::team_names::PendingSuccession> {
-    let heir = payload
-        .get("heir")
+    let successor = payload
+        .get("successor")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())?;
     let plan = payload.get("plan")?;
@@ -155,22 +153,27 @@ fn succession_pending(payload: &Value) -> Option<crate::team_names::PendingSucce
         .into_iter()
         .next()?;
     Some(crate::team_names::PendingSuccession {
-        heir_name: heir.to_string(),
-        heir_session: heir_session(heir),
+        successor_name: successor.to_string(),
+        successor_session: payload
+            .get("successor_identity")
+            .and_then(|i| i.get("session_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| successor_session(successor)),
         predecessor_name: name,
         predecessor_session: session,
         ts: crate::daemon::now_rfc3339_like(),
     })
 }
 
-/// The heir row's session id at settle time, so the succession revert's
+/// The successor row's session id at settle time, so the succession revert's
 /// join keys on identity. A row not yet in the registry (a settle racing
 /// the spawn row's write, or a test with no declared home) carries no
 /// session; the revert then falls back to the name join as before.
-fn heir_session(heir: &str) -> Option<String> {
+fn successor_session(successor: &str) -> Option<String> {
     let home = crate::paths::AgentsHome::from_env_opt()?;
     let registry = crate::state::try_load_registry(&home.registry_json()).ok()??;
-    match crate::lead_state::live_name_join(&registry.entries, heir) {
+    match crate::lead_state::live_name_join(&registry.entries, successor) {
         crate::lead_state::NameJoin::One(row) => row.harness_session_id.clone(),
         _ => None,
     }
@@ -200,7 +203,7 @@ fn occupancy(
     let mut rivals = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-        let row_scope = row.get("crown_scope").and_then(Value::as_str);
+        let row_scope = row.get("role_scope").and_then(Value::as_str);
         if row_scope == Some(scope) && crate::row_verdict::finished_json(row) {
             clear_terminal.push((index, name.to_string()));
             continue;
@@ -316,6 +319,25 @@ fn plan_with_projects(
     let occupancy = occupancy(rows, scope, &caller, exclude_name, projects);
     let caller_value = payload.get("caller").cloned().unwrap_or(Value::Null);
     let holders = holder_names(&occupancy.holders);
+    let proposed_name = payload
+        .get("proposed_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    if succession
+        && (!crate::team_names::valid_person_name(proposed_name)
+            || rows.iter().any(|row| {
+                !crate::row_verdict::finished_json(row)
+                    && row.get("role_scope").and_then(Value::as_str).is_some()
+                    && row
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case(proposed_name))
+            }))
+    {
+        return Ok(plan_answer("declined", occupancy, Vec::new(),
+            json!("--hand-off requires --name <Name>: the outgoing lead chooses a fresh person name, distinct from every live lead"), caller_value));
+    }
 
     if let Some((first, _)) = occupancy.rivals.first() {
         let listed = occupancy
@@ -378,7 +400,7 @@ fn plan_with_projects(
     let refusal = match &caller {
         Caller::Human => format!(
             "scope {scope:?} is held by live row(s) {holders:?}. This spawn would launch \
-             an heir with no team, so it refuses. Re-run with --hand-off to transfer the \
+             a successor with no team, so it refuses. Re-run with --hand-off to transfer the \
              team to the new session, or choose a scope nobody holds."
         ),
         Caller::Agent(_) => format!(
@@ -445,6 +467,21 @@ fn apply_with_projects(
         .and_then(Value::as_str)
         .filter(|outcome| matches!(*outcome, "granted" | "succeeded" | "declined"))
         .ok_or_else(|| "team-settle: plan needs valid outcome".to_string())?;
+    let successor = payload
+        .get("successor")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if outcome == "succeeded"
+        && (!crate::team_names::valid_person_name(successor)
+            || expected
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(successor)))
+    {
+        return Ok(
+            json!({"outcome":"declined", "clear_terminal_rows":[], "vacate_rows":[],
+            "reown_rows":[], "reown_owner":null, "refusal":"--hand-off requires a fresh person name"}),
+        );
+    }
     let exclude_name = payload.get("exclude_name").and_then(Value::as_str);
     let occupancy = occupancy(rows, scope, &caller, exclude_name, projects);
     let clear_terminal_rows = occupancy
@@ -496,7 +533,7 @@ fn apply_with_projects(
     };
     // Succession re-homes the org: every live child whose CURRENT owner
     // (the provenance owner, else the birth edge on a pre-v33 row) names a
-    // vacated holder's session follows the team to the heir. The birth edge
+    // vacated holder's session follows the team to the successor. The birth edge
     // itself stays history - ownership is what the sideline reads.
     let vacated_sessions: HashSet<String> = if outcome == "succeeded" {
         occupancy
@@ -535,17 +572,17 @@ fn apply_with_projects(
             .collect()
     };
     // The owner block the applier stamps onto each reowned child, composed
-    // here from the heir's own identity so the one session-id rule (the
-    // payload's `heir_identity`, read like every other field) writes the
+    // here from the successor's own identity so the one session-id rule (the
+    // payload's `successor_identity`, read like every other field) writes the
     // block and Python only assigns it. Blank session id answers null: an
-    // unaddressable heir re-creates the orphan the reown exists to prevent.
-    let identity = payload.get("heir_identity");
-    let heir_session = identity
+    // unaddressable successor re-creates the orphan the reown exists to prevent.
+    let identity = payload.get("successor_identity");
+    let successor_session = identity
         .and_then(|i| i.get("session_id"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let reown_owner = heir_session.map(|session_id| {
+    let reown_owner = successor_session.map(|session_id| {
         json!({
             "kind": "session",
             "harness": identity.and_then(|i| i.get("harness")).and_then(Value::as_str),
@@ -568,8 +605,42 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
+    #[test]
+    fn handoff_requires_an_explicit_new_person_name_before_any_transfer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut payload = json!({"scope":"scope", "succession":true,
+            "caller":{"kind":"agent", "name":"Jordan"},
+            "rows":[{"name":"Jordan", "status":"live", "role_scope":"scope",
+                "harness_session_id":"old-session"}]});
+        for candidate in [None, Some("warm-viper"), Some("Jordan")] {
+            payload["proposed_name"] = candidate.map(Value::from).unwrap_or(Value::Null);
+            let refused = resolve_at(&payload, &team_store(tmp.path())).unwrap();
+            assert_eq!(refused["outcome"], "declined");
+            assert!(refused["refusal"].as_str().unwrap().contains("--name"));
+            assert!(!team_store(tmp.path()).exists());
+        }
+        payload["proposed_name"] = json!("Avery");
+        let plan = resolve_at(&payload, &team_store(tmp.path())).unwrap();
+        assert_eq!(plan["outcome"], "succeeded");
+        payload["plan"] = plan;
+        payload["successor"] = json!("Avery");
+        payload["successor_identity"] = json!({"session_id":"new-session"});
+        let applied = resolve_at(&payload, &team_store(tmp.path())).unwrap();
+        assert_eq!(applied["outcome"], "succeeded");
+        let store = crate::team_names::snapshot(&team_store(tmp.path())).unwrap();
+        assert_eq!(store["teams"]["scope"]["name"], "Avery");
+        assert_eq!(
+            store["teams"]["scope"]["pending_succession"]["successor_name"],
+            "Avery"
+        );
+        assert_eq!(
+            store["teams"]["scope"]["pending_succession"]["successor_session"],
+            "new-session"
+        );
+    }
+
     fn row(name: &str, scope: &str, status: &str) -> Value {
-        json!({"name": name, "crown_scope": scope, "status": status})
+        json!({"name": name, "role_scope": scope, "status": status})
     }
 
     fn team_registry(tmp: &std::path::Path, agents: Value) -> std::path::PathBuf {
@@ -592,7 +663,7 @@ mod tests {
             serde_json::to_string(&json!({
                 "version": 1,
                 "teams": {"x-aaaa": {
-                    "name": "barnaby", "regnal": 1,
+                    "name": "barnaby", "generation": 1,
                     "holder_session": "sess-old",
                     "nodes": [], "updated_at": "2026-09-23T20:00:00Z"}},
             }))
@@ -603,12 +674,12 @@ mod tests {
 
     fn agents_with_succession_rows() -> Value {
         json!([
-            {"name": "lead-old", "status": "live", "crown_scope": "x-aaaa",
-             "crown_level": 2, "cwd": "/repo", "harness": "claude",
+            {"name": "lead-old", "status": "live", "role_scope": "x-aaaa",
+             "role_level": 2, "cwd": "/repo", "harness": "claude",
              "harness_session_id": "sess-old",
              "created_at": "2026-09-23T20:00:00Z"},
-            {"name": "lead-heir", "status": "live", "crown_scope": "x-aaaa",
-             "crown_level": 2, "cwd": "/repo", "harness": "claude",
+            {"name": "Avery", "status": "live", "role_scope": "x-aaaa",
+             "role_level": 2, "cwd": "/repo", "harness": "claude",
              "harness_session_id": "sess-new",
              "created_at": "2026-09-23T20:00:00Z"}
         ])
@@ -617,7 +688,7 @@ mod tests {
     #[test]
     fn grant_rows() {
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "kind": "role-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"}, "rows": [],
         }))
         .unwrap();
@@ -626,7 +697,7 @@ mod tests {
         assert!(out["refusal"].is_null());
 
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": true,
+            "kind": "role-settle", "scope": "fno", "succession": true, "proposed_name": "Taylor",
             "caller": {"kind": "agent", "name": "lead-a"},
             "rows": [row("lead-a", "fno", "busy")],
         }))
@@ -635,7 +706,7 @@ mod tests {
         assert_eq!(out["vacate"], json!(["lead-a"]));
 
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": true,
+            "kind": "role-settle", "scope": "fno", "succession": true, "proposed_name": "Taylor",
             "caller": {"kind": "human"},
             "rows": [row("lead-a", "fno", "busy")],
         }))
@@ -644,7 +715,7 @@ mod tests {
         assert_eq!(out["vacate"], json!(["lead-a"]));
 
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "kind": "role-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"},
             "rows": [row("dead-lead", "fno", "exited")],
         }))
@@ -652,15 +723,15 @@ mod tests {
         assert_eq!(out["clear_terminal"], json!(["dead-lead"]));
         assert_eq!(out["outcome"], "granted");
 
-        // The reversible word never hands a crown away: an Orphaned row
+        // The reversible word never hands a role away: an Orphaned row
         // with a live pid stays a holder, and the spawn declines naming it.
         let quiet = json!({
-            "name": "quiet-lead", "crown_scope": "fno", "status": "orphaned",
+            "name": "quiet-lead", "role_scope": "fno", "status": "orphaned",
             "pid": std::process::id(),
             "created_at": "2026-10-01T00:00:00Z",
         });
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "kind": "role-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"},
             "rows": [quiet],
         }))
@@ -670,7 +741,7 @@ mod tests {
         assert!(out["refusal"].as_str().unwrap().contains("quiet-lead"));
 
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "kind": "role-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"},
             "rows": [row("lead-a", "fno", "busy")],
         }))
@@ -686,7 +757,7 @@ mod tests {
         // the --succeed flag, the same fall-through arm a scope the caller
         // does not hold at all takes.
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": true,
+            "kind": "role-settle", "scope": "fno", "succession": true, "proposed_name": "Taylor",
             "caller": {"kind": "agent", "name": "lead-a"},
             "rows": [row("lead-a", "fno", "busy"), row("lead-b", "fno", "busy")],
         }))
@@ -701,16 +772,16 @@ mod tests {
     #[test]
     fn revive_rows() {
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "fno", "succession": false,
-            "caller": {"kind": "human"}, "exclude_name": "heir",
-            "rows": [row("heir", "fno", "busy")],
+            "kind": "role-settle", "scope": "fno", "succession": false,
+            "caller": {"kind": "human"}, "exclude_name": "successor",
+            "rows": [row("successor", "fno", "busy")],
         }))
         .unwrap();
         assert_eq!(out["holders"], json!([]));
         assert_eq!(out["outcome"], "granted");
 
         assert!(resolve(&json!({
-            "kind": "crown-settle", "caller": {"kind": "human"}, "rows": [],
+            "kind": "role-settle", "caller": {"kind": "human"}, "rows": [],
         }))
         .is_err());
     }
@@ -725,7 +796,7 @@ mod tests {
     fn rival_rows() {
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "epic-a", "succession": false,
+                "kind": "role-settle", "scope": "epic-a", "succession": false,
                 "caller": {"kind": "human"},
                 "rows": [row("lead-a", "epic-a,epic-b", "busy")],
             }),
@@ -745,7 +816,7 @@ mod tests {
         ] {
             let out = settle(
                 json!({
-                    "kind": "crown-settle", "scope": "epic-a,epic-b", "succession": false,
+                    "kind": "role-settle", "scope": "epic-a,epic-b", "succession": false,
                     "caller": caller, "rows": rows,
                 }),
                 Ok(HashMap::new()),
@@ -756,7 +827,7 @@ mod tests {
 
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "epic-a", "succession": true,
+                "kind": "role-settle", "scope": "epic-a", "succession": true, "proposed_name": "Taylor",
                 "caller": {"kind": "human"},
                 "rows": [row("lead-a", "epic-a,epic-b", "busy")],
             }),
@@ -771,7 +842,7 @@ mod tests {
 
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "epic-a", "succession": false,
+                "kind": "role-settle", "scope": "epic-a", "succession": false,
                 "caller": {"kind": "agent", "name": "lead-a"},
                 "rows": [row("lead-a", "epic-a,epic-b", "busy")],
             }),
@@ -786,7 +857,7 @@ mod tests {
         ]));
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "alpha", "succession": false,
+                "kind": "role-settle", "scope": "alpha", "succession": false,
                 "caller": {"kind": "human"},
                 "rows": [row("lead-p", "alpha,beta", "busy")],
             }),
@@ -797,7 +868,7 @@ mod tests {
 
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "alpha", "succession": false,
+                "kind": "role-settle", "scope": "alpha", "succession": false,
                 "caller": {"kind": "human"},
                 "rows": [row("lead-p", "alpha,beta", "busy")],
             }),
@@ -812,7 +883,7 @@ mod tests {
         ]));
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "alpha", "succession": false,
+                "kind": "role-settle", "scope": "alpha", "succession": false,
                 "caller": {"kind": "human"},
                 "rows": [row("lead-a", "a", "busy")],
             }),
@@ -823,7 +894,7 @@ mod tests {
 
         let out = settle(
             json!({
-                "kind": "crown-settle", "scope": "epic-a", "succession": false,
+                "kind": "role-settle", "scope": "epic-a", "succession": false,
                 "caller": {"kind": "human"},
                 "rows": [row("dead-lead", "epic-a,epic-b", "exited")],
             }),
@@ -840,7 +911,7 @@ mod tests {
         let mut holder = row("lead-a", "epic-a", "busy");
         holder["harness_session_id"] = json!("sess-a");
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "epic-a", "succession": true,
+            "kind": "role-settle", "scope": "epic-a", "succession": true, "proposed_name": "Taylor",
             "caller": caller, "rows": [holder],
         }))
         .unwrap();
@@ -858,15 +929,15 @@ mod tests {
         // names a vacated holder's session follows the team; a child already
         // owned by another session stays put; a terminal row never moves.
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "epic-a",
-            "heir_identity": {"harness": "codex", "session_id": "sess-heir", "cwd": "/w"},
+            "kind": "role-settle", "scope": "epic-a",
+            "successor_identity": {"harness": "codex", "session_id": "sess-successor", "cwd": "/w"},
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "lead-a", "harness_session_id": "sess-a"}],
                 "outcome": "succeeded", "vacate": ["lead-a"],
             },
             "rows": [
-                {"name": "lead-a", "crown_scope": "epic-a", "status": "busy",
+                {"name": "lead-a", "role_scope": "epic-a", "status": "busy",
                  "harness_session_id": "sess-a"},
                 {"name": "w5", "status": "busy",
                  "spawned_by_session": "sess-a",
@@ -886,17 +957,17 @@ mod tests {
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate_rows"], json!([0]));
         assert_eq!(out["reown_rows"], json!([1, 3]));
-        assert_eq!(out["reown_owner"]["session_id"], "sess-heir");
+        assert_eq!(out["reown_owner"]["session_id"], "sess-successor");
         assert_eq!(out["reown_owner"]["kind"], "session");
 
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "epic-a",
+            "kind": "role-settle", "scope": "epic-a",
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "lead-a", "harness_session_id": "sess-a"}],
                 "outcome": "succeeded", "vacate": ["lead-a"],
             },
-            "rows": [{"name": "lead-a", "crown_scope": "epic-a", "status": "busy",
+            "rows": [{"name": "lead-a", "role_scope": "epic-a", "status": "busy",
                       "harness_session_id": "sess-b"}],
         }))
         .unwrap();
@@ -904,15 +975,15 @@ mod tests {
         assert_eq!(out["vacate_rows"], json!([]));
 
         let out = resolve(&json!({
-            "kind": "crown-settle", "scope": "epic-a",
+            "kind": "role-settle", "scope": "epic-a",
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "lead-a", "harness_session_id": "sess-a"}],
                 "outcome": "succeeded", "vacate": ["lead-a"],
             },
             "rows": [
-                {"name": "other", "crown_scope": null, "status": "busy"},
-                {"name": "dead-lead", "crown_scope": "epic-a", "status": "exited"},
+                {"name": "other", "role_scope": null, "status": "busy"},
+                {"name": "dead-lead", "role_scope": "epic-a", "status": "exited"},
             ],
         }))
         .unwrap();
@@ -922,12 +993,12 @@ mod tests {
 
         let out = resolve_with_projects(
             &json!({
-                "kind": "crown-settle", "scope": "epic-a",
+                "kind": "role-settle", "scope": "epic-a",
                 "plan": {
                     "caller": {"kind": "human"}, "holder_ids": [],
                     "outcome": "granted", "vacate": [],
                 },
-                "rows": [{"name": "lead-b", "crown_scope": "epic-a,epic-b",
+                "rows": [{"name": "lead-b", "role_scope": "epic-a,epic-b",
                           "status": "busy", "harness_session_id": "sess-b"}],
             }),
             &Ok(HashMap::new()),
@@ -937,7 +1008,7 @@ mod tests {
         assert_eq!(out["vacate_rows"], json!([]));
 
         let rows = json!([{
-            "name": "lead-a", "crown_scope": "epic-a", "status": "busy",
+            "name": "lead-a", "role_scope": "epic-a", "status": "busy",
             "harness_session_id": "sess-a",
         }]);
         for (plan, key) in [
@@ -985,7 +1056,7 @@ mod tests {
             ),
         ] {
             let error = resolve(&json!({
-                "kind": "crown-settle", "scope": "epic-a", "rows": rows,
+                "kind": "role-settle", "scope": "epic-a", "rows": rows,
                 "plan": plan,
             }))
             .unwrap_err();
@@ -996,7 +1067,7 @@ mod tests {
     #[test]
     fn record_rows() {
         // The transaction receipts land under a pinned nested home for the
-        // heir settle; the lock keeps the env mutation off parallel tests.
+        // successor settle; the lock keeps the env mutation off parallel tests.
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1009,7 +1080,7 @@ mod tests {
             serde_json::to_string(&json!({
                 "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
                 "agents": [{
-                    "name": "lead-heir", "status": "live", "cwd": "/repo", "log_path": "/repo/lead-heir.log",
+                    "name": "Avery", "status": "live", "cwd": "/repo", "log_path": "/repo/lead-successor.log",
                     "harness": "claude", "harness_session_id": "sess-new",
                     "created_at": "2026-10-04T00:00:00Z",
                 }],
@@ -1022,14 +1093,14 @@ mod tests {
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-aaaa",
+                "kind": "role-settle", "scope": "x-aaaa",
                 "plan": {
-                    "caller": {"kind": "agent", "name": "lead-heir"},
+                    "caller": {"kind": "agent", "name": "Avery"},
                     "holder_ids": [{"name": "lead-old", "harness_session_id": "sess-old"}],
                     "outcome": "succeeded", "vacate": ["lead-old"],
                 },
                 "rows": [{
-                    "name": "lead-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "name": "lead-old", "role_scope": "x-aaaa", "status": "busy",
                     "harness_session_id": "sess-old",
                 }],
             }),
@@ -1039,21 +1110,21 @@ mod tests {
         assert_eq!(answer["outcome"], "succeeded");
         let store = std::fs::read_to_string(team_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
-        assert_eq!(doc["teams"]["x-aaaa"]["regnal"], json!(2));
+        assert_eq!(doc["teams"]["x-aaaa"]["generation"], json!(2));
         assert_eq!(doc["teams"]["x-aaaa"]["holder_session"], json!(null));
 
-        // A payload carrying the heir key pends the succession with the
+        // A payload carrying the successor key pends the succession with the
         // predecessor identity from the plan's holder_ids.
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-aaaa", "heir": "lead-heir",
+                "kind": "role-settle", "scope": "x-aaaa", "successor": "Avery",
                 "plan": {
-                    "caller": {"kind": "agent", "name": "lead-heir"},
+                    "caller": {"kind": "agent", "name": "Avery"},
                     "holder_ids": [{"name": "lead-old", "harness_session_id": "sess-old"}],
                     "outcome": "succeeded", "vacate": ["lead-old"],
                 },
                 "rows": [{
-                    "name": "lead-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "name": "lead-old", "role_scope": "x-aaaa", "status": "busy",
                     "harness_session_id": "sess-old",
                 }],
             }),
@@ -1064,7 +1135,7 @@ mod tests {
         let store = std::fs::read_to_string(team_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
         let pending = &doc["teams"]["x-aaaa"]["pending_succession"];
-        assert_eq!(pending["heir_name"], json!("lead-heir"));
+        assert_eq!(pending["successor_name"], json!("Avery"));
         assert_eq!(pending["predecessor_name"], json!("lead-old"));
         assert_eq!(pending["predecessor_session"], json!("sess-old"));
         assert!(pending["ts"].is_string());
@@ -1098,19 +1169,19 @@ mod tests {
             "one fleet announcement: {bus}"
         );
         std::env::remove_var("FNO_AGENTS_HOME");
-        // Without the heir key (an old caller) today's shape holds: no
+        // Without the successor key (an old caller) today's shape holds: no
         // pending record is written.
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-aaaa",
+                "kind": "role-settle", "scope": "x-aaaa",
                 "plan": {
-                    "caller": {"kind": "agent", "name": "lead-heir"},
+                    "caller": {"kind": "agent", "name": "Avery"},
                     "holder_ids": [{"name": "lead-old", "harness_session_id": "sess-old"}],
                     "outcome": "succeeded", "vacate": ["lead-old"],
                 },
                 "rows": [{
-                    "name": "lead-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "name": "lead-old", "role_scope": "x-aaaa", "status": "busy",
                     "harness_session_id": "sess-old",
                 }],
             }),
@@ -1127,7 +1198,7 @@ mod tests {
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-aaaa",
+                "kind": "role-settle", "scope": "x-aaaa",
                 "plan": {
                     "caller": {"kind": "human"},
                     "holder_ids": [],
@@ -1144,16 +1215,16 @@ mod tests {
         assert!(doc["teams"].get("x-aaaa").is_none(), "{store}");
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // A fresh grant carries the heir's own people-shaped row name: the
+        // A fresh grant carries the successor's own people-shaped row name: the
         // stale record from the dead predecessor team is forgotten, then the
-        // new team takes the row's name bound to the heir session the payload
+        // new team takes the row's name bound to the successor session the payload
         // plumbs. No registry read anywhere: the carry keys on the payload's
-        // heir_identity.
+        // successor_identity.
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-aaaa", "heir": "kestrel",
-                "heir_identity": {"harness": "claude", "session_id": "sess-new",
+                "kind": "role-settle", "scope": "x-aaaa", "successor": "kestrel",
+                "successor_identity": {"harness": "claude", "session_id": "sess-new",
                                    "cwd": "/repo"},
                 "plan": {
                     "caller": {"kind": "human"},
@@ -1169,7 +1240,10 @@ mod tests {
         let doc: Value =
             serde_json::from_str(&std::fs::read_to_string(team_store(tmp.path())).unwrap())
                 .unwrap();
-        assert_eq!(doc["teams"]["x-aaaa"]["name"], json!("kestrel"));
+        let person = doc["teams"]["x-aaaa"]["name"].as_str().unwrap();
+        assert!(person.chars().all(char::is_alphabetic));
+        assert_eq!(person, "kestrel");
+        assert_ne!(person, "barnaby");
         assert_eq!(doc["teams"]["x-aaaa"]["holder_session"], json!("sess-new"));
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1180,14 +1254,14 @@ mod tests {
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-aaaa",
+                "kind": "role-settle", "scope": "x-aaaa",
                 "plan": {
-                    "caller": {"kind": "agent", "name": "lead-heir"},
+                    "caller": {"kind": "agent", "name": "Avery"},
                     "holder_ids": [{"name": "lead-old", "harness_session_id": "sess-old"}],
                     "outcome": "succeeded", "vacate": ["lead-old"],
                 },
                 "rows": [{
-                    "name": "lead-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "name": "lead-old", "role_scope": "x-aaaa", "status": "busy",
                     "harness_session_id": "sess-old",
                 }],
             }),

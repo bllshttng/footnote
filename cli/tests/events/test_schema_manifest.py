@@ -48,18 +48,18 @@ def test_phase_transition_declares_gate_bearing() -> None:
     )
 
 
-def test_reign_checkin_declares_canonical_required_and_forbidden() -> None:
-    """reign_checkin is the one check-in shape a history reader can walk.
+def test_lead_checkin_declares_canonical_required_and_forbidden() -> None:
+    """lead_checkin is the one check-in shape a history reader can walk.
 
-    scope and change are required; crown_scope, crown, and result are the
-    synonyms five kings used before the contract and must stay refused, so
+    scope and change are required; role_scope, role, and result are the
+    synonyms five leads used before the contract and must stay refused, so
     no second key spelling can re-enter the journal.
     """
     data = _load()
-    rc = next((e for e in data["event_types"] if e["name"] == "reign_checkin"), None)
-    assert rc is not None, "reign_checkin event type missing"
+    rc = next((e for e in data["event_types"] if e["name"] == "lead_checkin"), None)
+    assert rc is not None, "lead_checkin event type missing"
     assert rc["data"]["required"] == ["scope", "change"]
-    assert sorted(rc["data"]["forbidden"]) == ["crown", "crown_scope", "result"]
+    assert sorted(rc["data"]["forbidden"]) == ["role", "role_scope", "result"]
 
 
 def test_source_enum_present() -> None:

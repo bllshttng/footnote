@@ -57,8 +57,8 @@ pub(crate) fn by_node(rows: &[Value]) -> Workers {
                 workers.sessions.insert((harness.clone(), id.into()));
             }
         }
-        if row.get("crown").is_some_and(|v| !v.is_null())
-            || row.get("crown_scope").is_some_and(|v| !v.is_null())
+        if row.get("role").is_some_and(|v| !v.is_null())
+            || row.get("role_scope").is_some_and(|v| !v.is_null())
         {
             continue;
         }

@@ -2332,7 +2332,7 @@ impl View {
                 (
                     a.name.as_str(),
                     yard_eye(a, need),
-                    a.crown_level.unwrap_or(0),
+                    a.role_level.unwrap_or(0),
                 )
             })
             .collect()
@@ -9097,7 +9097,7 @@ async fn dispatch_event(
         }
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
-        Event::OpenCourt => view.org.toggle(),
+        Event::OpenTeam => view.org.toggle(),
         Event::ToggleBell => bell::toggle(view),
         Event::OpenMessages => messages_view::open_from_chord(view),
         Event::TogglePanel => {

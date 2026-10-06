@@ -662,24 +662,24 @@ class TestParentEdgeNotice:
         assert null_row["spawned_by_session"] is None
 
 
-# --- the crown types the verb (x-7b36 change 11) ------------------------------
+# --- the role types the verb (x-7b36 change 11) ------------------------------
 
 
-class TestReignTyped:
-    def test_crowned_spawn_payload_opens_with_the_verb(self):
-        from fno.agents.dispatch import _reign_typed_message
+class TestTermTyped:
+    def test_promoted_spawn_payload_opens_with_the_verb(self):
+        from fno.agents.dispatch import _term_typed_message
 
-        message, typed = _reign_typed_message("run the territory", 2, "epic-x", False)
+        message, typed = _term_typed_message("run the territory", 2, "epic-x", False)
         assert typed is True
         assert message.splitlines()[0] == "/fno:lead epic-x"
         # The operator's brief follows the verb as the payload body.
         assert message.splitlines()[1] == "run the territory"
 
-    def test_uncrowned_and_revived_spawns_keep_their_payload(self):
-        from fno.agents.dispatch import _reign_typed_message
+    def test_unpromoted_and_revived_spawns_keep_their_payload(self):
+        from fno.agents.dispatch import _term_typed_message
 
-        assert _reign_typed_message("brief", None, None, False) == ("brief", False)
-        assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
+        assert _term_typed_message("brief", None, None, False) == ("brief", False)
+        assert _term_typed_message("brief", 2, "epic-x", True) == ("brief", False)
 
 
 # ---------------------------------------------------------------------------

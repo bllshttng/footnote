@@ -889,7 +889,7 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     }
 
     // (4b) the user's look: a PR touching the configured paint surface holds
-    // until an answered question page names it or a crown decision row
+    // until an answered question page names it or a role decision row
     // attests the user's chat approval of this head. Held, not refused: the
     // user answering the page clears it on the next read.
     if let Some(blocker) =
@@ -4800,7 +4800,7 @@ mod tests {
     }
 
     #[test]
-    fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
+    fn a_role_chat_approval_clears_the_paint_hold_only_at_its_head() {
         let tmp = std::env::temp_dir().join(format!("xc39f-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fno")).unwrap();
@@ -4840,7 +4840,7 @@ mod tests {
             row(
                 "Approved: PR 7 at <head> as built",
                 "superuser in chat: approved",
-                "crown",
+                "role",
                 "unscoped",
             )
             .replace("<head>", &head)
@@ -4857,14 +4857,14 @@ mod tests {
             row(
                 "Approved: PR 7 at <head> as built",
                 "lead judges it good",
-                "crown",
+                "role",
                 "unscoped",
             )
             .replace("<head>", &head)
             .into_bytes(),
         );
         assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
-        // The row's authority is not crown: held.
+        // The row's authority is not role: held.
         fake.decisions_stdout = Some(
             row(
                 "Approved: PR 7 at <head> as built",
@@ -4881,7 +4881,7 @@ mod tests {
             row(
                 "Approved: PR 7 at <head> as built",
                 "user in chat: approved",
-                "crown",
+                "role",
                 "retracted",
             )
             .replace("<head>", &head)
@@ -4894,7 +4894,7 @@ mod tests {
         let held =
             crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).expect("held");
         assert!(
-            held.detail.contains("crown-recorded decision"),
+            held.detail.contains("role-recorded decision"),
             "{}",
             held.detail
         );

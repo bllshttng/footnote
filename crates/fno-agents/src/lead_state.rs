@@ -96,7 +96,7 @@ pub struct LeadState {
     /// The manifest file's path, when it exists: the manifest is the
     /// durable team record, and org names where the record lives.
     pub manifest_path: Option<String>,
-    /// The manifest carries `crown_scope` equal to the scope: a durable team
+    /// The manifest carries `role_scope` equal to the scope: a durable team
     /// copy exists, not just identity (a pre-fields manifest holds the holder
     /// id but no team to restore). `None` when the manifest side is unreadable.
     pub team_on_manifest: Option<bool>,
@@ -118,7 +118,7 @@ pub(crate) fn manifest_path(root: &Path, scope: &str) -> Result<PathBuf, String>
     }
     // `root` is the state root itself (the repo's space), matching Python's
     // lead_manifest_path: leads sit at <root>/leads, NOT <root>/.fno/leads.
-    Ok(root.join("kings").join(format!("{scope}.md")))
+    Ok(root.join("leads").join(format!("{scope}.md")))
 }
 
 /// The row's canonical session id, tolerating legacy rows without one
@@ -132,7 +132,7 @@ fn row_session(row: &RegistryEntry) -> Option<String> {
 /// True when a lead manifest in the row's own space names the row's session
 /// as team holder. The manifest is team truth that survives registry
 /// damage: a restore or rewrite can strip the row's stamp, so a reaper that
-/// reads only `crown_level` sees an ordinary row where a live lead sits.
+/// reads only `role_level` sees an ordinary row where a live lead sits.
 /// Absence of a stamp is not absence of a team. Only
 /// `team_reap::sweep`'s holder verdict may vacate the manifest, so a manifest
 /// naming a session keeps the row - the fail-safe direction.
@@ -159,7 +159,7 @@ pub(crate) fn row_holds_manifest_live_team_cached(
     if cwd.as_os_str().is_empty() {
         return false;
     }
-    let leads = crate::paths::space_dir(&cwd).join("kings");
+    let leads = crate::paths::space_dir(&cwd).join("leads");
     cache
         .entry(leads.clone())
         .or_insert_with(|| manifest_team_sessions(&leads))
@@ -168,9 +168,9 @@ pub(crate) fn row_holds_manifest_live_team_cached(
 
 /// Per-pass cache for the sweep form: one map keyed by leads dir, so a
 /// registry-wide sweep reads each space's manifests once, not once per row.
-pub(crate) struct ManifestCrownCache(HashMap<PathBuf, HashSet<String>>);
+pub(crate) struct ManifestRoleCache(HashMap<PathBuf, HashSet<String>>);
 
-impl ManifestCrownCache {
+impl ManifestRoleCache {
     pub(crate) fn new() -> Self {
         Self(HashMap::new())
     }
@@ -254,7 +254,7 @@ fn read_manifest_identity(path: &Path) -> (Option<String>, Option<String>, Optio
     } else {
         m.shape
     };
-    let team = Some(crate::claude_adopt::manifest_field(&content, "crown_scope").is_some());
+    let team = Some(crate::claude_adopt::manifest_field(&content, "role_scope").is_some());
     (session, Some(shape), team)
 }
 
@@ -427,7 +427,7 @@ fn lead_state_with_projects(
                 };
             }
             let registry_session = row_session(row);
-            let Some(own) = row.crown_scope.clone().filter(|s| !s.trim().is_empty()) else {
+            let Some(own) = row.role_scope.clone().filter(|s| !s.trim().is_empty()) else {
                 return LeadState {
                     teamed: Some(false),
                     registry_session,
@@ -460,7 +460,7 @@ fn lead_state_with_projects(
         .iter()
         .filter(|r| {
             !is_terminal(r)
-                && r.crown_scope
+                && r.role_scope
                     .as_deref()
                     .is_some_and(|held| scopes_overlap(held, &scope, &projects))
         })
@@ -474,7 +474,7 @@ fn lead_state_with_projects(
             .iter()
             .filter(|r| {
                 !is_terminal(r)
-                    && r.crown_scope
+                    && r.role_scope
                         .as_deref()
                         .is_some_and(|s| !s.trim().is_empty())
             })
@@ -508,7 +508,7 @@ fn lead_state_with_projects(
     let primary = holders
         .iter()
         .find(|r| {
-            r.crown_scope
+            r.role_scope
                 .as_deref()
                 .is_some_and(|held| same_territory(held, &scope, &projects))
         })
@@ -528,10 +528,10 @@ fn lead_state_with_projects(
         .iter()
         .filter(|r| {
             crate::loop_lead::team_rivals_pub(
-                primary.crown_scope.as_deref().unwrap_or(""),
-                primary.crown_level,
-                r.crown_scope.as_deref().unwrap_or(""),
-                r.crown_level,
+                primary.role_scope.as_deref().unwrap_or(""),
+                primary.role_level,
+                r.role_scope.as_deref().unwrap_or(""),
+                r.role_level,
                 &projects,
             )
         })
@@ -544,7 +544,7 @@ fn lead_state_with_projects(
     // The manifest keys on the HOLDER's own scope: a holder found through one
     // member of its set arms the set's manifest, and a manifest named for the
     // member alone does not exist.
-    let holder_scope = primary.crown_scope.clone().unwrap_or_else(|| scope.clone());
+    let holder_scope = primary.role_scope.clone().unwrap_or_else(|| scope.clone());
     with_manifest(state, &holder_scope, root)
 }
 
@@ -662,9 +662,9 @@ pub fn set_manifest_shape(
     shape: &str,
     expect_session: Option<&str>,
 ) -> Result<String, String> {
-    // The manifest's stored value stays `court` this release; the renamed
+    // The manifest's stored value stays `team` this release; the renamed
     // spelling is accepted beside it.
-    if shape != "pass" && shape != "court" && shape != "org" {
+    if shape != "pass" && shape != "team" && shape != "org" {
         return Err(format!("shape must be pass or org, got {shape:?}"));
     }
     set_manifest_fields(root, scope, &[("shape", shape)], expect_session)?;
@@ -817,7 +817,7 @@ fn usage(verb: &str) -> String {
 /// One orphan team for the org sweep: a manifest that carries a team no
 /// live teamed row holds. Field names are the Python renderer's row keys.
 #[derive(Debug, Default, Serialize)]
-pub struct OrphanCrown {
+pub struct OrphanRole {
     pub scope: String,
     pub level: Option<u32>,
     pub grantor: Option<String>,
@@ -857,7 +857,7 @@ pub(crate) fn collect_lead_manifests(root: &Path) -> Vec<(PathBuf, String)> {
     };
     spaces.sort_by_key(|e| e.path());
     for space in spaces {
-        let leads = space.path().join("kings");
+        let leads = space.path().join("leads");
         let mut files: Vec<_> = match fs::read_dir(&leads) {
             Ok(rd) => rd.flatten().collect(),
             Err(_) => continue,
@@ -912,7 +912,7 @@ pub(crate) fn superseded_manifests(
 
 /// Teams whose registry row is gone but whose manifest still holds them
 /// scan every project space's `leads/` under `root`, keep manifests
-/// carrying `crown_scope` not among `held`. The sweep walks the spaces ROOT,
+/// carrying `role_scope` not among `held`. The sweep walks the spaces ROOT,
 /// not the rows' own projects - a vanished row names no cwd, and the
 /// vanished-row scope is exactly the case this read exists to surface. The
 /// holder verdict keys on `harness_session_id`, never on `owner_pid`, which
@@ -938,7 +938,7 @@ pub fn org_vacancies(
     transcript_age_s: &dyn Fn(&str) -> Option<i64>,
     window_s: i64,
     now: chrono::DateTime<chrono::Utc>,
-) -> Vec<OrphanCrown> {
+) -> Vec<OrphanRole> {
     let held_keys: std::collections::BTreeSet<String> =
         held.iter().map(|h| territory_key(h)).collect();
     let mut seen: std::collections::BTreeSet<String> = Default::default();
@@ -947,7 +947,7 @@ pub fn org_vacancies(
     let superseded = superseded_manifests(&manifests);
     let mut roster_read: Option<crate::claude_roster::ClaudeAgentsSnapshot> = None;
     for (path, content) in &manifests {
-        let Some(scope) = crate::claude_adopt::manifest_field(content, "crown_scope") else {
+        let Some(scope) = crate::claude_adopt::manifest_field(content, "role_scope") else {
             continue;
         };
         if superseded.contains(path) {
@@ -993,12 +993,12 @@ pub fn org_vacancies(
         if !young {
             seen.insert(key);
         }
-        let level = crate::claude_adopt::manifest_field(content, "crown_level")
-            .and_then(|v| v.parse().ok());
-        out.push(OrphanCrown {
+        let level =
+            crate::claude_adopt::manifest_field(content, "role_level").and_then(|v| v.parse().ok());
+        out.push(OrphanRole {
             scope,
             level,
-            grantor: crate::claude_adopt::manifest_field(content, "crown_grantor"),
+            grantor: crate::claude_adopt::manifest_field(content, "role_grantor"),
             manifest_session: crate::claude_adopt::manifest_field(content, "harness_session_id")
                 .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned())),
             manifest_path: path.display().to_string(),
@@ -1228,9 +1228,9 @@ mod tests {
             "created_at": "2026-09-04T00:00:00Z",
             "harness": "claude",
             "harness_session_id": session,
-            "crown_level": scope.map(|_| 2),
-            "crown_scope": scope,
-            "crown_grantor": scope.map(|_| "human"),
+            "role_level": scope.map(|_| 2),
+            "role_scope": scope,
+            "role_grantor": scope.map(|_| "human"),
         })
     }
 
@@ -1247,13 +1247,13 @@ mod tests {
     #[test]
     fn org_vacancies_matches_territory_and_dedups() {
         let root = tmp("orphans");
-        let leads = root.join("space-a").join("kings");
+        let leads = root.join("space-a").join("leads");
         fs::create_dir_all(&leads).unwrap();
         let team = |scope: &str, level: &str, file: &str| {
             let body = format!(
                 "---\nscope: x\nshape: pass\nharness: claude\n\
                  harness_session_id: sess-{file}\ncrown_scope: {scope}\n\
-                 crown_level: {level}\ncrown_grantor: operator\n---\n"
+                 role_level: {level}\ncrown_grantor: operator\n---\n"
             );
             fs::write(leads.join(file), body).unwrap();
         };
@@ -1313,13 +1313,13 @@ mod tests {
     /// Write a leads manifest with full field control for the org tests:
     /// scope, session, and the recency stamp the superseded read compares.
     fn write_org_manifest(root: &Path, scope: &str, session: &str, created_at: &str) -> PathBuf {
-        let leads = root.join("space-a").join("kings");
+        let leads = root.join("space-a").join("leads");
         let path = leads.join(format!("{scope}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = format!(
             "---\nscope: {scope}\nshape: pass\nharness: claude\n\
              harness_session_id: {session}\nowner_pid: 1\ncreated_at: {created_at}\n\
-             crown_scope: {scope}\ncrown_level: 2\ncrown_grantor: operator\n---\n"
+             role_scope: {scope}\ncrown_level: 2\ncrown_grantor: operator\n---\n"
         );
         fs::write(&path, body).unwrap();
         path
@@ -1434,7 +1434,7 @@ mod tests {
         // harness_session_id line. No group, no supersession: both list, each
         // with its file stem as manifest_session.
         let root = tmp("sessionless");
-        let leads = root.join("space-a").join("kings");
+        let leads = root.join("space-a").join("leads");
         fs::create_dir_all(&leads).unwrap();
         for scope in ["zzz-scope", "aaa-scope"] {
             fs::write(
@@ -1539,14 +1539,14 @@ mod tests {
         };
         let both = tmp("young-and-live");
         write_org_manifest(&both, "x-key", sess, &stamp(1));
-        let leads_b = both.join("space-b").join("kings");
+        let leads_b = both.join("space-b").join("leads");
         fs::create_dir_all(&leads_b).unwrap();
         fs::write(
             leads_b.join("x-key.md"),
             format!(
                 "---\nscope: x-key\nshape: pass\nharness: claude\n\
                  harness_session_id: {older_sess}\nowner_pid: 1\ncreated_at: {}\n\
-                 crown_scope: x-key\ncrown_level: 2\ncrown_grantor: operator\n---\n",
+                 role_scope: x-key\ncrown_level: 2\ncrown_grantor: operator\n---\n",
                 stamp(13)
             ),
         )
@@ -1645,14 +1645,14 @@ mod tests {
         // AC3-EDGE (second half): the verdict is claude-only. A codex
         // manifest whose short id the roster lists stopped still lists.
         let root = tmp("verdict-codex");
-        let path = root.join("space-a").join("kings").join("x-codex.md");
+        let path = root.join("space-a").join("leads").join("x-codex.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
             "---\nscope: x-codex\nshape: pass\nharness: codex\n\
              harness_session_id: cccc9999-0000-4000-8000-000000000009\n\
              owner_pid: 1\ncreated_at: 2026-09-18T21:00:00Z\n\
-             crown_scope: x-codex\ncrown_level: 2\n---\n",
+             role_scope: x-codex\ncrown_level: 2\n---\n",
         )
         .unwrap();
         let roster = || {
@@ -1771,7 +1771,7 @@ mod tests {
         let reg = registry_file(
             &root,
             &[row(
-                "heir",
+                "successor",
                 "bbbb2222-0000-4000-8000-000000000002",
                 Some("alpha"),
                 AgentStatus::Idle,
@@ -1805,8 +1805,8 @@ mod tests {
         quiet_live["pid"] = serde_json::json!(std::process::id());
         let dir = tmp("name-join");
         let rows = [
-            row("heir", "s-1", None, AgentStatus::Live),
-            row("heir", "s-2", None, AgentStatus::Exited),
+            row("successor", "s-1", None, AgentStatus::Live),
+            row("successor", "s-2", None, AgentStatus::Exited),
             orphan_dead,
             row("lead", "s-4", None, AgentStatus::Exited),
             quiet_live,
@@ -1814,7 +1814,7 @@ mod tests {
         registry_file(&dir, &rows);
         let reg = crate::state::load_registry(&dir.join("registry.json")).unwrap();
         assert!(matches!(
-            live_name_join(&reg.entries, "heir"),
+            live_name_join(&reg.entries, "successor"),
             NameJoin::One(_)
         ));
         assert!(matches!(
@@ -1822,7 +1822,7 @@ mod tests {
             NameJoin::None
         ));
         assert!(matches!(
-            terminal_name_join(&reg.entries, "heir"),
+            terminal_name_join(&reg.entries, "successor"),
             NameJoin::One(_)
         ));
         assert!(matches!(
@@ -2083,7 +2083,7 @@ mod tests {
                     AgentStatus::Busy,
                 ),
                 row(
-                    "heir",
+                    "successor",
                     "bbbb2222-0000-4000-8000-000000000002",
                     Some("alpha"),
                     AgentStatus::Idle,

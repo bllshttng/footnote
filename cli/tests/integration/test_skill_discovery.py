@@ -55,7 +55,7 @@ def repo(tmp_path: Path) -> Path:
         (root / "scripts" / "diagnostics" / d).write_bytes(
             (REPO_ROOT / "scripts" / "diagnostics" / d).read_bytes()
         )
-    for name in ("target", "reign", "growth-launch"):
+    for name in ("target", "term", "growth-launch"):
         _write_skill(root / "skills" / name, name, GOOD_DESC)
     # doctor.sh requires the soft-hook scripts; stub them executable.
     hooks = root / "scripts" / "hooks"
@@ -151,8 +151,8 @@ def test_setup_auto_with_plugin_picks_one_source(repo: Path, env: dict, tmp_path
     assert rows["target"].status == "ok"
     assert rows["blueprint"].status == "ok"
     assert rows["target"].alias is None
-    # reign is not shipped by the plugin: named, never silent.
-    assert "[gap] reign" in r.stdout
+    # term is not shipped by the plugin: named, never silent.
+    assert "[gap] term" in r.stdout
 
 
 def test_setup_auto_without_plugin_bootstraps_development(repo: Path, env: dict) -> None:

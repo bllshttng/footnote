@@ -88,9 +88,9 @@ Project/cwd is demoted from address to resolver. `fno agents send --to-project X
 
 ## Role-destination addressing (anycast over the role)
 
-`fno agents mail send --to-king <scope> <msg>` addresses the ROLE, not the session. The holder is resolved from the registry at SEND time. The resolver is `resolve_to_king` in `cli/src/fno/agents/crown.py`. It uses `crown_scope_matches`, the same territory rule the row-keyed lead readers use.
+`fno agents mail send --to-lead <scope> <msg>` addresses the ROLE, not the session. The holder is resolved from the registry at SEND time. The resolver is `resolve_to_lead` in `cli/src/fno/agents/role.py`. It uses `role_scope_matches`, the same territory rule the row-keyed lead readers use.
 
-Succession moves the role row. It does not move the mail handle a peer learned while that handle was titled. So a handle send after an abdication reaches the wrong session. Both failures are silent: the message was delivered, a session woke, and it answered.
+Succession moves the role row. It does not move the mail handle a peer learned while that handle was titled. So a handle send after an departure reaches the wrong session. Both failures are silent: the message was delivered, a session woke, and it answered.
 
 The rule:
 
@@ -98,11 +98,11 @@ The rule:
 - none: refuse, exit 16, queue nothing. A project queue has a future drain that reads it as that project. A vacant role has no such reader. Queueing strands the message at the address.
 - more than one: refuse, naming both holders. That is the split role `fno agents org` already reports. It is not a multiplicity to pick between, so there is no `--any` tie-break here.
 
-`resolve_to_king` returns the holder names as a plain list. A list has no illegal state to guard, so unlike `ProjectResolution` there is no construction-time check. The one caller reads the three outcomes off the length.
+`resolve_to_lead` returns the holder names as a plain list. A list has no illegal state to guard, so unlike `ProjectResolution` there is no construction-time check. The one caller reads the three outcomes off the length.
 
-`--to-king` is exclusive with every other addressing mode: `--to-project`, `--to-self`, `--kind`, `--raw`, `--force`, `--any`, and a second positional. A second address decides where the message lands. The role deciding that is the point.
+`--to-lead` is exclusive with every other addressing mode: `--to-project`, `--to-self`, `--kind`, `--raw`, `--force`, `--any`, and a second positional. A second address decides where the message lands. The role deciding that is the point.
 
-A forwarding pointer written at abdication is the cheaper-looking fix, and it is refused on purpose. The pointer is itself a recorded identity. A second succession leaves it naming a session that is no longer titled either.
+A forwarding pointer written at departure is the cheaper-looking fix, and it is refused on purpose. The pointer is itself a recorded identity. A second succession leaves it naming a session that is no longer titled either.
 
 ## Role attributes
 
@@ -115,7 +115,7 @@ to_rank="L1 fno"     (or to_rank="none")
 
 `from_rank` is the sender's verified role. The Rust injection door refuses a payload whose `from_rank` does not match the live registry read for its sender. `to_rank` names the RECIPIENT's own role. `from_rank` and `to_rank` name verified standing, never authority: they are a display of who holds what, not a grant.
 
-Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted. `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well. `fleet_has_crown()` fails open while the role read fails closed. The two alone once told a live lead it had been deposed, so an unreadable registry claims nothing.
+Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted. `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A unassigned fleet (`fleet_has_role()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well. `fleet_has_role()` fails open while the role read fails closed. The two alone once told a live lead it had been deposed, so an unreadable registry claims nothing.
 
 ## Job-address lane
 
@@ -138,7 +138,7 @@ The durable copy must be addressed to the RESOLVED session's canonical handle. D
 
 A non-id token, such as a spawn `--name` like `blueprint-auth-glm`, is not a mail address. The drain is handle-keyed, so a name never matches a session's handle and a durable write under it strands. `--force` is the exception, and for that same reason: it writes no durable row. It types at a pane the registry names, and the registry is what resolves a friendly name to the session behind it.
 
-The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the address was never typed as a bare positional. `--to-project` holds the BODY in the positional, so an eight-hex there is content nobody is addressing. `--to-king` and `--to-self` DERIVE the handle they hand the name lane. A derived handle names exactly one live row, so the ambiguity the head-8 rule guards cannot arise. A titled row's own `--name` can legitimately be a codex head-8, and the guard there refuses a send the role resolved correctly.
+The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the address was never typed as a bare positional. `--to-project` holds the BODY in the positional, so an eight-hex there is content nobody is addressing. `--to-lead` and `--to-self` DERIVE the handle they hand the name lane. A derived handle names exactly one live row, so the ambiguity the head-8 rule guards cannot arise. A titled row's own `--name` can legitimately be a codex head-8, and the guard there refuses a send the role resolved correctly.
 
 ## `fno inbox` alias + legacy migration
 
@@ -172,7 +172,7 @@ One announcement is ONE `kind: "announce"` envelope on the shared bus. It is app
 
 **Envelope.** Key order matches `to_json_line`. `to: "fleet:<scope>"` and `to_kind: "fleet"` mean no Python address can ever equal it, so `scan_unread` and every addressed-mail reader cannot deliver it. `meta` carries `scope`, `audience` (the snapshot), `subject`, `expires_at`, `urgent`, `supersedes`.
 
-**Audience snapshot.** At send time the writer records each matching row's identity-normalized full `harness_session_id`. It never records the Claude transport `short_id`. It leaves the sender's own row out. The row filters: non-terminal status, a session id, `crown_level` set for `kings`. A role scope answers to territory equality, alias-normalized. `project:<p>` adds a cwd path match. That list is the receipt denominator.
+**Audience snapshot.** At send time the writer records each matching row's identity-normalized full `harness_session_id`. It never records the Claude transport `short_id`. It leaves the sender's own row out. The row filters: non-terminal status, a session id, `role_level` set for `leads`. A role scope answers to territory equality, alias-normalized. `project:<p>` adds a cwd path match. That list is the receipt denominator.
 
 **Late arrivals.** A session outside the snapshot that matches the scope at read time still sees a standing announcement. Receipts count it as `late`, never in the audience N.
 

@@ -323,7 +323,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # reproduced on the one path that never got the fix.
     LEAD_STATE_FILE=""
     if [[ -n "$CONVERSATION_ID" ]] && command -v fno >/dev/null 2>&1; then
-        LEAD_STATE_FILE=$(cd "$ROOT" && fno agents king manifest-path \
+        LEAD_STATE_FILE=$(cd "$ROOT" && fno agents lead manifest-path \
             --harness-session-id "$CONVERSATION_ID" --harness agy \
             --state-root "$SPACE_DIR" 2>/dev/null || true)
     fi

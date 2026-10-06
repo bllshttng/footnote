@@ -203,21 +203,21 @@ def test_law_supersession_rule_matches_the_cli_guard():
 # ---- wave 2: harness and terminal routes -------------------------------------
 
 
-def test_reign_branches_on_harness_capability_before_arming():
+def test_term_branches_on_harness_capability_before_arming():
     text = _skill("skills/lead/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
-    assert "king_settle" in arm  # the daemon settle mail pushes on every harness
-    assert "arms no watch" in arm  # the king arms nothing; the daemon mails
+    assert "lead_settle" in arm  # the daemon settle mail pushes on every harness
+    assert "arms no watch" in arm  # the lead arms nothing; the daemon mails
     assert "Codex uses provider-backed goal actions" in arm
     assert "positive `provider_goal` receipt" in arm
     assert "separate positive `stop` receipt" in arm
     assert "Every Codex wake runs the check-in body" in arm
 
 
-def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
+def test_lead_checkin_binds_worker_age_to_the_top_json_payload():
     # x-bd3f: the check-in required a live-worker count and an oldest-worker
-    # stamp while naming no field a machine payload actually carries, so a king
+    # stamp while naming no field a machine payload actually carries, so a lead
     # following the skill reported both lines as unmeasurable while live workers
     # ran. The contract is the top view's served payload, and an unreadable
     # instrument prints a refusal, never a default that reads healthy.
@@ -231,9 +231,9 @@ def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
     assert "oldest worker last-seen stamp" not in checkin
 
 
-def test_reign_checkin_names_the_merge_finish_line():
+def test_lead_checkin_names_the_merge_finish_line():
     # The check-in printed open-PR indicators and a lever list that never
-    # merged, so a king following the skill read a ready PR as report-only and
+    # merged, so a lead following the skill read a ready PR as report-only and
     # escalated it instead of merging. The merge law makes the team the
     # merger, so the skill must carry the verb, the gate, and the merge rule
     # together: a lever the file cannot name is a law rediscovered by
@@ -246,9 +246,9 @@ def test_reign_checkin_names_the_merge_finish_line():
     assert "the team merges green" in checkin
 
 
-def test_reign_finding_starts_a_new_epic():
+def test_term_finding_starts_a_new_epic():
     # Law d-08ef1f90: new findings go into a new small epic, not a running
-    # one. The old lever told a king to parent a finding into an active
+    # one. The old lever told a lead to parent a finding into an active
     # mission scope, which grew running epics without bound.
     text = _skill("skills/lead/SKILL.md")
     assert "### A finding starts a new epic" in text
@@ -293,20 +293,20 @@ def test_review_lanes_names_retired_spawned_reviewer_law_not_the_recipe():
     assert "NO `--fix` remains the review contract" in text
 
 
-def test_king_rule_and_exit_name_the_king_channel_not_decide():
+def test_lead_rule_and_exit_name_the_lead_channel_not_decide():
     text = _skill("skills/lead/SKILL.md")
     rule = text[text.index("## Recording a ruling") :]
     assert "fno backlog note <node> <text>" in rule
-    assert "--authority crown" in rule
+    assert "--authority role" in rule
     assert "escalations directory" in rule
     assert "fno inbox decisions <subject> --lane law" in rule
     once = _skill("skills/lead/references/once.md")
-    exit_section = once[once.index("Before you abdicate") :]
+    exit_section = once[once.index("Before you step_down") :]
     assert "../SKILL.md#recording-a-ruling" in exit_section
     assert "fno agents org done" in exit_section
 
 
-def test_king_mailbox_addresses_full_session_ids():
+def test_lead_mailbox_addresses_full_session_ids():
     text = _skill("skills/lead/references/once.md")
     assert "the bare 8-hex session prefix, the same id" not in text
     assert "FULL session id" in text
@@ -344,7 +344,7 @@ def test_pr_create_and_using_fno_run_inline():
 # ---- wave 3: conditional recipes behind triggers, concrete drift --------------
 
 
-def test_agent_and_king_roots_route_to_workflow_routes_references():
+def test_agent_and_lead_roots_route_to_workflow_routes_references():
     for skill, trigger in (
         ("skills/agent/SKILL.md", "workflow-routes.md"),
         ("skills/lead/SKILL.md", "workflow-routes.md"),
@@ -445,7 +445,7 @@ def _grade_review_guard(text: str) -> bool:
     return 'if [ -z "$REVIEW_TARGET" ]' in text and "gh pr view" in text
 
 
-def _grade_reign_arm(text: str) -> bool:
+def _grade_term_arm(text: str) -> bool:
     """Supported harness wake: one capability branch; codex arms nothing native."""
     arm = text[text.index("## Arm the beat") :]
     return "Branch once on what the harness supports" in arm and "arm nothing native" in arm
@@ -468,7 +468,7 @@ def test_seeded_prohibited_cases_fail_the_graders():
     )
     assert not _grade_triage_fences(bad_triage)
     assert not _grade_review_guard("bare guard: plain diff check with no target branch")
-    assert not _grade_reign_arm("## Arm the beat\n\nArm six Monitors on every harness.")
+    assert not _grade_term_arm("## Arm the beat\n\nArm six Monitors on every harness.")
     assert not _grade_flat_verify("If any verification fails, stop and report what failed.")
 
 
@@ -487,7 +487,7 @@ def test_seeded_authorized_cases_pass_the_graders():
     assert _grade_review_guard(
         'if [ -z "$REVIEW_TARGET" ]; then gh pr view <n> --json headRefName; fi'
     )
-    assert _grade_reign_arm(
+    assert _grade_term_arm(
         "## Arm the beat\n\nBranch once on what the harness supports.\n"
         "Codex: arm nothing native; the wake arm is the beat.\n"
     )

@@ -95,7 +95,7 @@ def build_spawn_provenance(
 ) -> Optional[dict]:
     """The Python half of the one spawn door (v33): the validated origin+owner
     record. ``None`` when a session caller cannot be proven. Explicit producers
-    MUST name a mission/crown owner; ``cause`` speaks the vocabulary minus ``sob``."""
+    MUST name a mission/role owner; ``cause`` speaks the vocabulary minus ``sob``."""
     if explicit_origin is not None and explicit_owner is not None:
         _validate_explicit_provenance(explicit_origin, explicit_owner, cause)
         return {"origin": explicit_origin, "owner": explicit_owner}
@@ -142,9 +142,9 @@ def _validate_explicit_provenance(origin: dict, owner: dict, cause: Optional[str
         return
     if source.get("kind") not in ("daemon", "launch_agent"):
         return
-    if owner.get("kind") not in ("mission", "crown"):
+    if owner.get("kind") not in ("mission", "role"):
         raise ValueError(
-            "daemon/launch-agent origin requires a mission or crown owner; "
+            "daemon/launch-agent origin requires a mission or role owner; "
             "the daemon starter is never substituted"
         )
     declared = source.get("cause")

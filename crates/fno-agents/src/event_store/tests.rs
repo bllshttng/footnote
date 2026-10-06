@@ -189,10 +189,8 @@ fn rotation_overwrite_keeps_ingested_history() {
     // new-spelling query.
     append(
         &live,
-        &[
-            json!({"ts": "2026-09-12T08:00:00Z", "type": "reign_checkin",
-                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}}),
-        ],
+        &[json!({"ts": "2026-09-12T08:00:00Z", "type": "lead_checkin",
+                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}})],
     );
     sync(&live).unwrap();
     let hits = query_events(
@@ -647,10 +645,10 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
     append_envelope(&live, &visitor, None).unwrap();
     assert_eq!(count_type(&store_path(&live), "stop_decision"), 1);
 
-    // A session a manifest does not yet name - a fresh heir
+    // A session a manifest does not yet name - a fresh successor
     // whose only manifest is its predecessor's - journals the same way. The
     // correlated row is what lead admission reads; no manifest needed.
-    let heir = json!({
+    let successor = json!({
         "ts": "2026-09-17T12:00:00Z",
         "type": "stop_decision",
         "source": "hook",
@@ -670,7 +668,7 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
         }
     })
     .to_string();
-    append_envelope(&live, &heir, None).unwrap();
+    append_envelope(&live, &successor, None).unwrap();
     assert_eq!(count_type(&store_path(&live), "stop_decision"), 2);
 
     // A NON-empty scope still validates against the canonical form.

@@ -284,9 +284,9 @@ impl Core {
                                 pr_session_short: session_from_name(&a.name)
                                     .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                                 tail: self.compose_tail(a),
-                                crown_level: a.crown_level,
-                                crown_scope: a.crown_scope.clone(),
-                                crown_title: a.crown_title.clone(),
+                                role_level: a.role_level,
+                                role_scope: a.role_scope.clone(),
+                                role_title: a.role_title.clone(),
                                 basis: self.truth_basis(a),
                                 last_activity_age_s: self.truth_age(a),
                                 session_cost_cents: self.truth_cost(a).0,
@@ -382,9 +382,9 @@ impl Core {
                                 tail: None,
                                 // A bare shell pane has no registry entry, so
                                 // no team and no reachability probe either.
-                                crown_level: None,
-                                crown_scope: None,
-                                crown_title: None,
+                                role_level: None,
+                                role_scope: None,
+                                role_title: None,
                                 basis: None,
                                 resumable: false,
                                 no_pane_reason: None,
@@ -482,9 +482,9 @@ impl Core {
                         pr_session_short: session_from_name(&a.name)
                             .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                         tail: self.compose_tail(a),
-                        crown_level: a.crown_level,
-                        crown_scope: a.crown_scope.clone(),
-                        crown_title: a.crown_title.clone(),
+                        role_level: a.role_level,
+                        role_scope: a.role_scope.clone(),
+                        role_title: a.role_title.clone(),
                         basis: self.truth_basis(a),
                         last_activity_age_s: self.truth_age(a),
                         session_cost_cents: self.truth_cost(a).0,
@@ -570,9 +570,9 @@ impl Core {
                         pr_session_short: session_from_name(&a.name)
                             .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                         tail: self.compose_tail(a),
-                        crown_level: a.crown_level,
-                        crown_scope: a.crown_scope.clone(),
-                        crown_title: a.crown_title.clone(),
+                        role_level: a.role_level,
+                        role_scope: a.role_scope.clone(),
+                        role_title: a.role_title.clone(),
                         basis: self.truth_basis(a),
                         last_activity_age_s: self.truth_age(a),
                         session_cost_cents: self.truth_cost(a).0,
@@ -738,9 +738,9 @@ impl Core {
                 // An external-daemon row is not an fno-registry worker: no
                 // team, and its liveness lives in its own daemon, so no
                 // reachability reading either.
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,

@@ -94,19 +94,19 @@ pub fn is_gate_event(kind: &str) -> bool {
 /// readers canonicalize the row type through [`event_type_alias`]. This
 /// table never shrinks.
 pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[
-    ("agent_crown_vacated", "agent_team_vacated"),
-    ("crown_succession_reverted", "team_succession_reverted"),
-    ("king_action", "lead_action"),
-    ("king_context_nudge", "lead_context_nudge"),
-    ("king_drain_reserve", "lead_drain_reserve"),
-    ("king_goal_resumed", "lead_goal_resumed"),
-    ("king_loop_check", "lead_loop_check"),
-    ("king_orphan_block", "lead_orphan_block"),
-    ("king_term", "lead_term"),
-    ("king_wake", "lead_wake"),
-    ("reign_armed", "lead_armed"),
-    ("reign_checkin", "lead_checkin"),
-    ("reign_dispatch_exception", "lead_dispatch_exception"),
+    ("agent_role_vacated", "agent_team_vacated"),
+    ("team_succession_reverted", "team_succession_reverted"),
+    ("lead_action", "lead_action"),
+    ("lead_context_nudge", "lead_context_nudge"),
+    ("lead_drain_reserve", "lead_drain_reserve"),
+    ("lead_goal_resumed", "lead_goal_resumed"),
+    ("lead_loop_check", "lead_loop_check"),
+    ("lead_orphan_block", "lead_orphan_block"),
+    ("lead_term", "lead_term"),
+    ("lead_wake", "lead_wake"),
+    ("lead_armed", "lead_armed"),
+    ("lead_checkin", "lead_checkin"),
+    ("lead_dispatch_exception", "lead_dispatch_exception"),
 ];
 
 /// The canonical (new) spelling of an event kind: an old stored spelling
@@ -352,6 +352,10 @@ fn open_store(store: &Path) -> Result<Connection, String> {
 }
 
 /// Read-only handle for history readers; a failure names the store path.
+pub(crate) fn upgrade_role_store(store: &Path) -> Result<(), String> {
+    open_store(store).map(|_| ())
+}
+
 pub fn open_read(store: &Path) -> Result<Connection, String> {
     let conn = crate::store_conn::open_read(store)?;
     refuse_newer_schema(&conn, store)?;
@@ -413,6 +417,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
         migrate_caused_by(conn)?;
+        crate::role_migration::upgrade_event_store(conn)?;
         return stamp_coverage_epoch(conn, store);
     }
     let has_events: bool = conn
@@ -460,6 +465,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     tx.commit()
         .map_err(|e| format!("{}: migration: {e}", store.display()))?;
     migrate_caused_by(conn)?;
+    crate::role_migration::upgrade_event_store(conn)?;
     stamp_coverage_epoch(conn, store)
 }
 
@@ -866,7 +872,7 @@ fn is_valid_event_scope(event_type: &str, _data: &serde_json::Value, scope: &str
         return is_canonical_team_scope(scope);
     }
     // A stop_decision with no team scope remains an auditable event: the
-    // correlated session row is what lead admission reads, and a fresh heir
+    // correlated session row is what lead admission reads, and a fresh successor
     // journals exactly there - before init writes the manifest that would
     // carry its scope.
     event_type == "stop_decision"

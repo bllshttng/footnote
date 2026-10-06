@@ -415,14 +415,14 @@ describe("opencode native stop-hook bridge", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("session.created injects crown context when the resolver finds a manifest", async () => {
+  test("session.created injects role context when the resolver finds a manifest", async () => {
     const dir = makeProject()
     const client = fakeClient([])
     const { shell } = fakeShell({
       statePath: "",
       loopCheck: "{}",
     })
-    // The whoami fake must replay a crown line; route it through the map.
+    // The whoami fake must replay a role line; route it through the map.
     const whoami = fakeShell({ statePath: "", loopCheck: "{}" })
     const $ = (strings, ...values) => {
       const cmd = strings.reduce(
@@ -434,7 +434,7 @@ describe("opencode native stop-hook bridge", () => {
           quiet() {
             return this
           },
-          text: () => Promise.resolve("crown: opencode:x-4d9b scope=x-4d9b\nregistered: true\n"),
+          text: () => Promise.resolve("role: opencode:x-4d9b scope=x-4d9b\nregistered: true\n"),
         }
       }
       return whoami.shell(strings, ...values)
@@ -448,7 +448,7 @@ describe("opencode native stop-hook bridge", () => {
     })
     expect(client.prompts.length).toBe(1)
     expect(client.prompts[0].body.noReply).toBe(true)
-    expect(client.prompts[0].body.parts[0].text).toContain("You hold this crown")
+    expect(client.prompts[0].body.parts[0].text).toContain("You hold this role")
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -659,10 +659,10 @@ describe("opencode 2 setup arm", () => {
     },
   )
 
-  test("AC2-CROWN: a crowned Footnote session gets its crown line via ctx.session.synthetic; an uncrowned one gets no call", async () => {
-    // (a) crowned
+  test("AC2-ROLE: a promoted Footnote session gets its role line via ctx.session.synthetic; an unpromoted one gets no call", async () => {
+    // (a) promoted
     const dirA = makeProject()
-    const binA = stubBin(`if [ "$1" = "whoami" ]; then printf 'crown: opencode:t scope=t\\nregistered: true\\n'; fi`)
+    const binA = stubBin(`if [ "$1" = "whoami" ]; then printf 'role: opencode:t scope=t\\nregistered: true\\n'; fi`)
     const streamA = eventStream()
     const a = stubCtx([], { directory: dirA })
     a.ctx.event = { subscribe: streamA.subscribe }
@@ -672,13 +672,13 @@ describe("opencode 2 setup arm", () => {
       await until(() => a.synthetics.length > 0)
       cleanup()
       expect(a.synthetics[0].sessionID).toBe("ses_v2c")
-      expect(a.synthetics[0].text).toContain("crown: opencode:t")
-      expect(a.synthetics[0].text).toContain("You hold this crown")
+      expect(a.synthetics[0].text).toContain("role: opencode:t")
+      expect(a.synthetics[0].text).toContain("You hold this role")
       expect(a.prompts.length).toBe(0)
     })
     rmSync(dirA, { recursive: true, force: true })
 
-    // (b) uncrowned: whoami prints no crown line -> no send at all
+    // (b) unpromoted: whoami prints no role line -> no send at all
     const dirB = makeProject()
     const binB = stubBin('')
     const streamB = eventStream()

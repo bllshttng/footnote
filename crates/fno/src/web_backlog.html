@@ -81,7 +81,7 @@ button, select, input { font: inherit; }
 .card .cid { font-size: 11px; color: var(--subtext0); font-weight: 700; }
 .card .ct { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
 .card .cm { color: var(--overlay1); font-size: 11px; }
-.card .king { color: var(--yellow); font-size: 11px; }
+.card .lead { color: var(--yellow); font-size: 11px; }
 .card .chip { font-size: 10.5px; color: var(--yellow); }
 .card .chip::before, .ktag::before { content: "["; }
 .card .chip::after, .ktag::after { content: "]"; }
@@ -252,7 +252,7 @@ kbd { font: inherit; font-size: 10.5px; color: var(--overlay1); border: 1px soli
   <label>priority <select id="f-priority" multiple size="1"><option value="">any</option></select></label>
   <label>size <select id="f-size" multiple size="1"><option value="">any</option></select></label>
   <label>kind <select id="f-kind" multiple size="1"><option value="">any</option></select></label>
-  <label>lead <select id="f-king" multiple size="1"><option value="">any</option></select></label>
+  <label>lead <select id="f-lead" multiple size="1"><option value="">any</option></select></label>
   <label>date <select id="f-dfield">
     <option>created_at</option><option>updated_at</option><option>completed_at</option>
   </select>
@@ -398,8 +398,8 @@ function cardKeeps(card, nodes, state) {
   if (!inSet(state.size, card.size)) return false;
   if (!inSet(state.kind, card.kind)) return false;
   if (state.tag && state.tag.length && !(card.tags || []).some((t) => state.tag.includes(t))) return false;
-  if (state.king && state.king.length &&
-      !(card.king && state.king.includes(card.king.name))) return false;
+  if (state.lead && state.lead.length &&
+      !(card.lead && state.lead.includes(card.lead.name))) return false;
   if (state.epic && state.epic.length &&
       !(state.epic.includes(card.id) || state.epic.includes(card.parent))) return false;
   if (state.parsed && !searchKeeps(state.parsed, (state.search || {})[card.id] || {})) return false;
@@ -783,7 +783,7 @@ function sortCards(cards, sort) {
   const desc = sort.startsWith("-");
   const key = desc ? sort.slice(1) : sort;
   const rank = (card) => {
-    if (key === "lead") return card.king && card.king.name ? card.king.name : null;
+    if (key === "lead") return card.lead && card.lead.name ? card.lead.name : null;
     if (key === "size") return card.size ? (SIZE_RANK[card.size] ?? null) : null;
     const v = card[key];
     return v === undefined || v === null || v === "" ? null : v;
@@ -867,7 +867,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     status: initial.getAll("status").filter(Boolean),
     priority: initial.getAll("priority").filter(Boolean),
     size: initial.getAll("size").filter(Boolean),
-    king: initial.getAll("king").filter(Boolean),
+    lead: initial.getAll("lead").filter(Boolean),
     kind: initial.getAll("kind").filter(Boolean),
     q: initial.get("q") || "",
     search: (SNAPSHOT && snap.search) || {},
@@ -906,7 +906,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
   const searchInput = document.getElementById("f-q");
   const searchClear = document.getElementById("f-q-clear");
   const sheetEl = document.getElementById("sheet");
-  const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king", "kind"];
+  const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "lead", "kind"];
   // The remembered board: a bare URL (the usual open) comes back to the
   // last used filters, search, view, lanes and selection. A URL that
   // carries filters (shared, bookmarked) wins as-is, and a snapshot page
@@ -1125,7 +1125,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       b.classList.toggle("active", b.dataset.view === state.view);
     }
     const f = (board && board.facets) ||
-      { projects: [], epics: [], kings: [], priorities: [], sizes: [], statuses: [] };
+      { projects: [], epics: [], leads: [], priorities: [], sizes: [], statuses: [] };
     fillSelect("f-project", (f.projects || []).map((v) => ({ v: v, l: v })), state.project);
     fillSelect("f-epic", (f.epics || []).map((e) =>
       ({ v: e.id, l: e.title ? e.id + " " + e.title : e.id })), state.epic);
@@ -1133,7 +1133,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     fillSelect("f-priority", (f.priorities || []).map((v) => ({ v: v, l: v })), state.priority);
     fillSelect("f-size", (f.sizes || []).map((v) => ({ v: v, l: v })), state.size);
     fillSelect("f-kind", (f.kinds || []).map((v) => ({ v: v, l: v })), state.kind);
-    fillSelect("f-king", (f.kings || []).map((v) => ({ v: v, l: v })), state.king);
+    fillSelect("f-lead", (f.leads || []).map((v) => ({ v: v, l: v })), state.lead);
     document.getElementById("f-q").value = state.q;
     searchClear.hidden = !state.q;
     document.getElementById("f-all").checked = state.all;
@@ -1333,10 +1333,10 @@ function laneKeyOf(card, lanesBy, parents, byId) {
       chip.textContent = "blocked";
       b.appendChild(chip);
     }
-    if (card.king && card.king.name) {
+    if (card.lead && card.lead.name) {
       const k = document.createElement("span");
-      k.className = "king";
-      k.textContent = card.king.name;
+      k.className = "lead";
+      k.textContent = card.lead.name;
       b.appendChild(k);
     }
     if (card.live) {
@@ -1501,7 +1501,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     col("lstatus", statusLabel(card.status));
     col("lprio", card.priority || "");
     col("lsize", card.size || "");
-    col("lking", (card.king && card.king.name) || "");
+    col("lking", (card.lead && card.lead.name) || "");
     col("lcreated", card.created_at ? card.created_at.slice(0, 10) : "");
     col("lupdated", card.updated_at ? card.updated_at.slice(0, 10) : "");
     addKindTag(b, card.kind);
@@ -1865,7 +1865,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     const grid = document.createElement("div");
     grid.className = "fields";
     g.appendChild(grid);
-    const king = card.king && card.king.name;
+    const lead = card.lead && card.lead.name;
     addFieldRow(grid, "column", card.column);
     addFieldRow(grid, "status", card.status ? statusLabel(card.status) : null);
     addFieldRow(grid, "priority", card.priority);
@@ -1876,7 +1876,7 @@ function laneKeyOf(card, lanesBy, parents, byId) {
     addFieldRow(grid, "created_at", view.created_at);
     addFieldRow(grid, "completed_at", view.completed_at);
     addFieldRow(grid, "cwd", view.cwd);
-    addFieldRow(grid, "lead", king);
+    addFieldRow(grid, "lead", lead);
     addFieldRow(grid, "plan_path", view.plan_path);
     panelBody.appendChild(g);
     // Demand: the encounter count with the agent/operator split. The
