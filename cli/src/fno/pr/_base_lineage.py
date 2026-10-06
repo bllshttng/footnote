@@ -125,7 +125,8 @@ def _default_branch(slug: str, cwd: str) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def _base_ref(pr_number, slug: str, cwd: str) -> Optional[str]:
+def _base_ref_and_head(pr_number, slug: str, cwd: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(base_ref, head_sha)`` from one PR read; ``(None, None)`` on a miss."""
     selector = str(pr_number).rstrip("/").rsplit("/", 1)[-1]
     if selector.isdigit():
         endpoint = f"repos/{slug}/pulls/{selector}"
@@ -135,16 +136,18 @@ def _base_ref(pr_number, slug: str, cwd: str) -> Optional[str]:
         endpoint = f"repos/{slug}/pulls?state=all&head={head}&per_page=2"
     res = _probe(["gh", "api", endpoint], cwd)
     if res is None or not res.ok:
-        return None
+        return None, None
     try:
         payload = json.loads(res.stdout)
         if isinstance(payload, list):
             payload = payload[0] if payload else None
-        base = payload.get("base") if isinstance(payload, dict) else None
-        value = base.get("ref") if isinstance(base, dict) else None
+        base_row: Optional[dict] = payload.get("base") if isinstance(payload, dict) else None
+        head_row: Optional[dict] = payload.get("head") if isinstance(payload, dict) else None
+        ref: Optional[str] = base_row.get("ref") if isinstance(base_row, dict) else None
+        sha: Optional[str] = head_row.get("sha") if isinstance(head_row, dict) else None
     except (json.JSONDecodeError, AttributeError):
-        return None
-    return value if isinstance(value, str) and value else None
+        return None, None
+    return ref if isinstance(ref, str) and ref else None, sha if isinstance(sha, str) and sha else None
 
 
 def _merged_pr_for_head(base: str, slug: str, cwd: str) -> tuple:
@@ -299,12 +302,31 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     if default is None:
         return ("unknown", "could not read the repository default branch (REST read failed)")
 
-    base = _base_ref(pr_number, slug, cwd)
+    base, head_oid = _base_ref_and_head(pr_number, slug, cwd)
     if base is None:
         return ("unknown", f"could not read the base ref of PR #{pr_number} (REST read failed)")
 
     if base == default:
-        return ("ok", f"base is the default branch ({default})")
+        # A base that IS the default branch: the head must contain the tip. A
+        # behind head merges cleanly while landing code CI never ran on. Only a
+        # POSITIVE behind verdict blocks; failed probes answer unknown, proceed.
+        if not head_oid:
+            return ("unknown", f"could not read the head sha of PR #{pr_number} (REST read failed)")
+        tip = _rev(f"origin/{default}", cwd) if _fetch_ref(default, cwd) else ""
+        if not tip:
+            return ("unknown", f"could not refresh '{default}' to test the lineage")
+        res = _probe(["git", "merge-base", "--is-ancestor", tip, head_oid], cwd)
+        if res is None or res.returncode not in (0, 1):
+            return ("unknown", f"ancestry probe failed between '{default}' and the head (git merge-base)")
+        if res.returncode == 0:
+            return ("ok", f"head contains the '{default}' tip ({tip[:8]})")
+        return (
+            "stale",
+            f"PR #{pr_number} is behind '{default}': its head does not contain the '{default}' "
+            f"tip ({tip[:8]}), so merging now lands code CI never ran on; merge origin/{default} "
+            f"into the branch and push, then merge once CI is green on the updated head. "
+            f"Set {BYPASS_ENV}={BYPASS_VALUE} to acknowledge once.",
+        )
 
     merged, merged_head = _merged_pr_for_head(base, slug, cwd)
     fetched, base_current, base_gone = _fetch_refs(base, default, cwd)

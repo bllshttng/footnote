@@ -1708,10 +1708,16 @@ def test_opencode_bridge_carries_marker_before_the_message_fence(monkeypatch) ->
         from_name="k",
         model="m1",
         node="x-90a9",
+        # A profile-sourced effort must reach the serve lane, never the seed:
+        # the front door carries the axis on the opencode thread row, so
+        # dropping it here would silently seat the worker on the account
+        # default effort.
+        effort="high",
     )
     argv = captured["argv"]
     assert argv[1] == "spawn"
     assert argv[2].startswith("--defaults-applied=")
+    assert argv.index("--effort=high") < argv.index("--")
     tail = argv[argv.index("--") + 1 :]
     assert tail == ["/target x-90a9"]
 

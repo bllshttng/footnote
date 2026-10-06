@@ -1,12 +1,7 @@
 //! The retirement sweep : one pass, stop then drop.
 //!
 //! The pure row policy is `gc::gc_decide`; the pure tree policy is
-//! `gc::tree_action`. This module owns their I/O: the settle
-//! (`settle_stale_do_rows`) writes the graph first, the row pass reads what it
-//! wrote; then the graph read that feeds the reverse join, the served transcript mtime, the confirmed
-//! stop of a held process, the reap receipt every removal stages before the
-//! row drops, the registry write under its `created_at` TOCTOU guard, and the
-//! worktree prune for a clean-and-merged tree.
+//! `gc::tree_action`; this module owns their I/O.
 //!
 //! The settle (`settle_stale_do_rows`) writes the graph before the row pass:
 //! an open do row on a done, merged node with no open additional PR has
@@ -114,18 +109,18 @@ pub struct GcSummary {
     /// done; the first open one, and the provenance source that resolved it,
     /// so a sessions-join keep is distinguishable from a name-pattern keep.
     pub kept_open_work: Vec<(String, String, String, String)>,
-    /// `(id, node, status, reader)` (change 2): open work whose
-    /// transcript is quiet INSIDE the open-work window. The keep names the
-    /// stale node pinning the row; quiet past the window the row falls to
-    /// the grace gate and would retire, so a reader can tell an aging keep
-    /// from one with no clock.
+    /// `(id, node, status, reader)` (change 2): open work quiet INSIDE the
+    /// open-work window; past the window the row falls to the grace gate and
+    /// would retire, so a reader can tell an aging keep from one with no clock.
     pub kept_open_work_stale: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
-    /// `(id, detail)`: the fresh truth probe answered nothing
-    /// within its bound and the in-process quiet witness could not lift the
-    /// row either. An unread instrument is never reported as `active` and
-    /// never carries an invented age.
+    /// `(id, detail)`: a typed user turn inside the attended window - the
+    /// user is talking to this session; a done ledger never overrides it.
+    pub kept_attended: Vec<(String, String)>,
+    /// `(id, detail)`: the fresh truth probe answered nothing within its
+    /// bound and the in-process quiet witness could not lift the row either.
+    /// An unread instrument is never reported as `active`, never an invented age.
     pub kept_probe_unread: Vec<(String, String)>,
     /// The transcript could not be resolved through the row's own store.
     /// (change 3) Rows of `{ id, held_s, nodes_done }`: the hold
@@ -319,6 +314,7 @@ impl GcSummary {
             + self.kept_open_work.len()
             + self.kept_open_work_stale.len()
             + self.kept_active.len()
+            + self.kept_attended.len()
             + self.kept_probe_unread.len()
             + self.kept_transcript_unresolved.len()
             + self.kept_graph_unreadable.len()
@@ -354,10 +350,9 @@ pub struct StateReapEntry {
     pub age_s: u64,
 }
 
-/// (change 3) One transcript-unresolved hold: the row, how long it
-/// has sat unresolved (now minus `last_message_at`, else `created_at`), and
-/// whether every node the row names reads done. The hold is right; what it
-/// lacked was a clock.
+/// (change 3) One transcript-unresolved hold: the row, how long it has sat
+/// unresolved (now minus `last_message_at`, else `created_at`), and whether
+/// every node it names reads done. The hold is right; it lacked a clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnresolvedHold {
     pub id: String,
@@ -529,11 +524,10 @@ pub(crate) struct RetireOrder {
     pub(crate) created_at: String,
     pub(crate) tree: TreeAction,
     pub(crate) worktree: Option<String>,
-    /// The session-shaped release that let an OPEN-work row
-    /// retire: terminal state, live peer, parked node, or recorded merge.
-    /// The obligation re-checks yield to it - the released session's own
-    /// open do row is the stale record of work that moved on, not a live
-    /// assignment.
+    /// The session-shaped release that let an OPEN-work row retire:
+    /// terminal state, live peer, parked node, or recorded merge. The
+    /// released session's own open do row is the stale record of work that
+    /// moved on, not a live assignment.
     pub(crate) released: bool,
     /// A `reap --release` ruling applied to this row: the event
     /// names the release as the remover.
@@ -923,12 +917,9 @@ pub(crate) fn plan_stale_do_rows(home: &AgentsHome) -> Vec<StaleDoRow> {
 /// on its next pass. The stamp records `ended_by: "reap-sweep"` because the
 /// sweep INFERS the end instant rather than observing it.
 ///
-/// The read-apply-publish cycle retries a bounded few times before it
-/// refuses: `locked_mutate` refuses over ANY foreign write that landed
-/// between this read and this write (the guard that makes the write
-/// unclobberable), and on a fleet machine one write burst can eat the first
-/// attempt. The fill runs fill-if-absent over a fresh read each attempt, so
-/// a retry never overwrites an `ended_at` another writer just added.
+/// The read-apply-publish cycle retries a bounded few times: `locked_mutate`
+/// refuses over any foreign write between this read and this write, and the
+/// fill runs fill-if-absent over a fresh read each attempt.
 pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(String, String)>) {
     let mut read = crate::additional_prs::gh_pr_state_reader();
     settle_stale_do_rows_with(home, &mut read)
@@ -1499,12 +1490,10 @@ fn settle_blocker_detail(graph: &GraphRead, node: &str) -> String {
 /// sweep, lazily, only when a row actually reaches the stop gate - steady
 /// state keeps zero subprocesses on the hot path.
 ///
-/// `age_many` is the transcript-age seam: one batched call answers
-/// every candidate row's age in SECONDS, keyed by [`row_handle`]. The
-/// production default reads the newest timestamped transcript entry through
-/// the shared truth probe; a file stat was the retired instrument, because
-/// untimestamped trailing records keep a dead file reading fresh. A row the
-/// seam does not answer reads `None`, and `None` is never quiet.
+/// `age_many` is the transcript-age seam: one batched call answers every
+/// candidate row's age in SECONDS, keyed by [`row_handle`]. The production
+/// default reads the newest timestamped transcript entry through the shared
+/// truth probe. A row the seam does not answer reads `None`, never quiet.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     home: &AgentsHome,
@@ -1824,6 +1813,25 @@ pub(crate) fn run_with_release(
         // The hold clock: computed once per row, read by every hold
         // push below. A keep without an age is a reader that never ran.
         let (hold_age_s, hold_age_basis) = hold_clock(*age, &e.created_at, now);
+        // A typed user turn inside the attended window holds the
+        // row ahead of every doneness gate - the user is talking to this
+        // session, and a done ledger never overrides that.
+        if let Some(hold) = crate::attended::sweep_hold(
+            &id,
+            home,
+            store_matches(e),
+            sid,
+            matches!(age, Some(a) if *a <= grace_secs),
+            now,
+            hold_age_s,
+            hold_age_basis,
+        ) {
+            summary
+                .kept_attended
+                .push((hold.id.clone(), hold.detail.clone()));
+            summary.holds.push(hold);
+            continue;
+        }
         // The release's per-row state: the lifts and the note the
         // retire basis carries. `None` note after all gates ran means a
         // release named this row but matched none of its holds.
@@ -2048,13 +2056,11 @@ pub(crate) fn run_with_release(
         // change 8: the existence-specific probe on the row's own
         // pid. One kill(2) per row, no subprocess; only ESRCH counts.
         let pid_gone = e.pid.is_some_and(crate::daemon::pid_is_gone);
-        // change 9: a stale pre-death roster row on a claude row. The
-        // snapshot must answer Known with no warnings (a partial list
-        // proves nothing about absence), the row must be found, its
-        // process must be gone, and its state must be neither `done` nor
-        // `stopped` - those two take today's terminal paths whatever the
-        // pid says. Only `working`, `idle`, `blocked`, `failed` or no
-        // state qualify; non-claude rows never do.
+        // change 9: a stale pre-death roster row on a claude row. The snapshot
+        // must answer Known with no warnings (a partial list proves nothing
+        // about absence), the row must be found with a gone process, and its
+        // state must be neither `done` nor `stopped` (the terminal paths) nor
+        // a non-claude row.
         let process_gone = roster_known_clean
             && roster_row
                 .as_ref()

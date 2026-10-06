@@ -31,6 +31,7 @@ pub struct Opts {
 
 /// The dev build-dir export `fno-agents plugin-install` writes.
 const BUILD_DIR_KEY: &str = "CARGO_BUILD_BUILD_DIR";
+const SCCACHE_DIR_KEY: &str = "SCCACHE_DIR";
 const RC_MARK: &str = "# fno: cargo build-dir";
 /// The first line of the block `fno config setup cli-hooks` appends to codex.
 const CODEX_BLOCK_MARK: &str = "# Added by `fno config setup cli-hooks`";
@@ -343,8 +344,13 @@ pub(crate) fn strip_codex_toml(text: &str) -> Option<String> {
     (out.len() != text.lines().count()).then(|| join_lines(&out))
 }
 
-/// Drop the marked build-dir export pair from a shell rc file.
+/// Drop the marked build-dir export block from a shell rc file. The block is
+/// the mark plus every consecutive export of a key the installer owns
+/// (CARGO_BUILD_BUILD_DIR, SCCACHE_DIR). The first line outside that shape
+/// ends it, so a user's own exports right after the block survive.
 pub(crate) fn strip_rc(text: &str) -> Option<String> {
+    let build_dir = format!("export {BUILD_DIR_KEY}=");
+    let sccache = format!("export {SCCACHE_DIR_KEY}=");
     let mut out = Vec::new();
     let mut after_mark = false;
     for line in text.lines() {
@@ -352,9 +358,10 @@ pub(crate) fn strip_rc(text: &str) -> Option<String> {
             after_mark = true;
             continue;
         }
-        if std::mem::take(&mut after_mark) && line.starts_with("export CARGO_BUILD_BUILD_DIR=") {
+        if after_mark && (line.starts_with(&build_dir) || line.starts_with(&sccache)) {
             continue;
         }
+        after_mark = false;
         out.push(line);
     }
     (out.len() != text.lines().count()).then(|| join_lines(&out))
@@ -888,6 +895,14 @@ mod tests {
         let rc = "alias ll=ls\n# fno: cargo build-dir\nexport CARGO_BUILD_BUILD_DIR=\"/u/.fno/b\"\nexport KEEP=1\n";
         assert_eq!(
             strip_rc(rc).as_deref(),
+            Some("alias ll=ls\nexport KEEP=1\n")
+        );
+
+        // The current two-line block strips whole; a user's own export right
+        // after it survives.
+        let two = "alias ll=ls\n# fno: cargo build-dir\nexport CARGO_BUILD_BUILD_DIR=\"/u/.fno/b\"\nexport SCCACHE_DIR=\"/u/.fno/b/sccache\"\nexport KEEP=1\n";
+        assert_eq!(
+            strip_rc(two).as_deref(),
             Some("alias ll=ls\nexport KEEP=1\n")
         );
 

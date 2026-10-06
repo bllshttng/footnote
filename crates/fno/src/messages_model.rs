@@ -6,6 +6,97 @@
 
 use serde_json::Value;
 
+/// The last good projection for the process's lifetime: a reopened Messages
+/// tab paints it at once instead of an empty screen (item 1). One row, in a
+/// mutex; the first gather replaces it.
+static CACHE: std::sync::LazyLock<std::sync::Mutex<Option<Value>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// The cached projection, if a read ever landed in this process.
+pub fn cached() -> Option<Value> {
+    CACHE.lock().ok().and_then(|guard| guard.as_ref().cloned())
+}
+
+/// Cache a landed projection for the next open (item 1). Called by the
+/// view's apply_gather, never by the snapshot's own apply - tests apply
+/// fixtures freely without polluting the process-global cache.
+pub(crate) fn remember(projection: &Value) {
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some(projection.clone());
+    }
+}
+
+/// The mail store's change signal (item 1): the chats dir's entry count and
+/// its messages.jsonl files' total length and newest mtime, read every 5s by
+/// the open board. No change, no re-read.
+///
+/// The dir resolves through the same ladder `fno-agents chats::chats_dir`
+/// applies (a `paths.chats` config override, else `<state>/chats`); the
+/// mirror lives here because the client crate cannot call the agent crate.
+pub fn store_fingerprint() -> Option<(usize, u64, u64)> {
+    let dir = chats_dir()?;
+    let rd = std::fs::read_dir(dir).ok()?;
+    let mut count = 0usize;
+    let mut total_len = 0u64;
+    let mut newest = 0u64;
+    for entry in rd.flatten() {
+        count += 1;
+        let Ok(meta) = entry.path().join("messages.jsonl").metadata() else {
+            continue;
+        };
+        total_len += meta.len();
+        newest = newest.max(
+            meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        );
+    }
+    Some((count, total_len, newest))
+}
+
+/// `chats_dir` as the agent crate resolves it: the `paths.chats` override
+/// from `<cwd>/.fno/config.toml` then `~/.fno/config.toml`, else
+/// `<state_dir>/chats`.
+fn chats_dir() -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(".fno/config.toml"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join(".fno/config.toml"));
+    }
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = text.parse::<toml::Table>() else {
+            continue;
+        };
+        if let Some(raw) = value
+            .get("paths")
+            .and_then(|p| p.get("chats"))
+            .and_then(toml::Value::as_str)
+        {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                let expanded = trimmed
+                    .strip_prefix("~/")
+                    .map(|rest| {
+                        std::env::var_os("HOME")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_default()
+                            .join(rest)
+                    })
+                    .unwrap_or_else(|| std::path::PathBuf::from(trimmed));
+                return Some(expanded);
+            }
+        }
+    }
+    Some(crate::model_catalog::state_dir().join("chats"))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MessagesSnapshot {
     pub projection: Option<Value>,
@@ -14,6 +105,14 @@ pub struct MessagesSnapshot {
 }
 
 impl MessagesSnapshot {
+    /// A snapshot opening onto the cached last read, if any (item 1).
+    pub fn with_cache() -> Self {
+        Self {
+            projection: cached(),
+            error: None,
+            error_at: None,
+        }
+    }
     pub fn apply(&mut self, value: Value) {
         self.projection = Some(value);
         self.error = None;

@@ -19,7 +19,8 @@ use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSI
 
 const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
-[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] [--font <family>]";
+[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
+[--font <family>] [--message <fmail-id>]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
@@ -43,6 +44,11 @@ pub struct SnapshotArgs {
     /// The font family drawn first, ahead of the common monospace stack: an
     /// image has no terminal, so its font is named here or left to the stack.
     pub font: Option<String>,
+    /// Open the Messages tab on this fmail id: the paint gate's shots of a
+    /// client-local board (law d-9f18c4d5). The board gathers via a client
+    /// subprocess, so the snapshot runs one gather synchronously; the id
+    /// resolves to its thread and positions the cursor there.
+    pub message: Option<String>,
 }
 
 /// True when a `serve` tail asks for a snapshot rather than the web bridge.
@@ -60,6 +66,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
     let mut size = None;
     let mut fit = false;
     let mut font = None;
+    let mut message = None;
     let mut it = tail.iter();
     while let Some(a) = it.next() {
         let a = a.to_str().ok_or_else(|| USAGE.to_string())?;
@@ -82,6 +89,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
                 font = Some(f);
             }
             "--out" => out = Some(PathBuf::from(value()?)),
+            "--message" => message = Some(value()?),
             tok @ ("--server" | "--session") => {
                 crate::mux_cli::note_server_flag(tok);
                 server = Some(value()?)
@@ -147,6 +155,7 @@ session text, run scripts/ops/mux-demo-snapshot.sh"
         size,
         fit,
         font,
+        message,
     })
 }
 
@@ -170,6 +179,7 @@ pub fn run(args: SnapshotArgs) -> i32 {
         args.size,
         args.fit,
         chrome,
+        args.message.as_deref(),
     );
     match frame.and_then(|f| write(&f, &args)) {
         Ok(()) => {
@@ -267,6 +277,7 @@ fn live_frame(
     size: Option<(u16, u16)>,
     fit: bool,
     chrome: crate::theme::Theme,
+    message: Option<&str>,
 ) -> Result<Frame, String> {
     let socket = proto::socket_path(server)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
@@ -327,6 +338,20 @@ fn live_frame(
         }
     };
     runtime.block_on(super::backlog_board::fold_once(&mut view));
+    // The Messages board gathers via a client-side subprocess and the
+    // snapshot has no event loop, so the tab would paint empty. --message
+    // opens the board on that fmail id and runs one gather synchronously;
+    // the paint gate's shots come from here (law d-9f18c4d5).
+    if let Some(id) = message {
+        crate::client::messages_view::open_message(&mut view, id.to_string());
+        let gen = view
+            .messages_board
+            .as_ref()
+            .map(|b| b.gen)
+            .unwrap_or_default();
+        let mail = runtime.block_on(crate::messages_model::gather());
+        crate::client::messages_view::apply_gather(&mut view, gen, mail, Err("no org tree".into()));
+    }
     crate::lattice::freeze_spin();
     Ok(view.compose())
 }
