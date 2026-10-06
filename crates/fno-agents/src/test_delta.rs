@@ -603,10 +603,9 @@ mod tests {
             ]
         );
         assert_eq!(census.total_cuts(), 2);
-    }
-
-    #[test]
-    fn test_paths_recognize_conventions_but_inline_rust_stays_production() {
+        // Path conventions: a tests segment, a test_*.py / conftest.py
+        // basename, a *_test.rs name. Inline Rust tests stay production
+        // paths; the owner rule reaches them instead.
         assert!(is_test_path("cli/tests/unit/test_thing.py"));
         assert!(is_test_path("tests/conftest.py"));
         assert!(is_test_path("crates/x/tests/journey.rs"));
@@ -651,35 +650,27 @@ mod tests {
             owner_test_files("crates/x/src/plain.rs", &[], dir.path()),
             vec!["crates/x/tests/plain.rs".to_string()]
         );
-    }
-
-    #[test]
-    fn owners_report_shows_audit_evidence_or_the_unmet_obligation() {
-        let owners = vec!["t/a_test.py".to_string(), "t/b_test.py".to_string()];
-        assert_eq!(
-            owners_report(&owners, &["t/other.py".to_string()], &[]),
-            Some("Owner tests unaudited: t/a_test.py t/b_test.py".to_string())
-        );
+        // The report and the gate are one census contract: the diff touch
+        // or cut is audit evidence, else the body line or nothing.
         assert_eq!(
             owners_report(&owners, &[], &[("t/a_test.py".to_string(), 2)]),
             Some("Audited owners: t/a_test.py (cut 2), t/b_test.py (no cut)".to_string())
         );
+        assert_eq!(
+            owners_report(&owners, &["t/other.py".to_string()], &[]),
+            Some("Owner tests unaudited: t/a_test.py t/b_test.py".to_string())
+        );
         assert_eq!(owners_report(&[], &[], &[]), None);
-    }
-
-    #[test]
-    fn owners_gate_passes_on_cuts_or_the_line_and_names_owners_on_refusal() {
-        let owners = vec!["cli/tests/unit/test_pr_cli.py".to_string()];
         assert!(owners_gate("body", &owners, 1).is_ok());
         assert!(owners_gate("body", &[], 0).is_ok());
         assert!(owners_gate(
-            "x\nAudited owners: cli/tests/unit/test_pr_cli.py (no cut: kept, distinct contracts)\n",
+            "x\nAudited owners: t/a_test.py (no cut: kept, distinct contracts)\n",
             &owners,
             0
         )
         .is_ok());
         let err = owners_gate("no cuts, no line", &owners, 0).unwrap_err();
         assert!(err.contains("no test declaration was cut"), "{err}");
-        assert!(err.contains("cli/tests/unit/test_pr_cli.py"), "{err}");
+        assert!(err.contains("t/a_test.py"), "{err}");
     }
 }
