@@ -119,12 +119,12 @@ test('a finished turn shows the model reaction, with no canned line first', asyn
   await ui.unmount()
 
   const after = await $.ui.mount(band(8))
-  expect(await after.find({ type: 'Text', text: /Quip: that null check does zero work\.$/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /Quip: That null check does zero work\.$/ })).toBeDefined()
 })
 
 test('a shipped node in the fleet feed is told in the buddy voice', async ($, on) => {
   const { clock } = boot(on)
-  on('model.complete', (e: any) => ({ value: { isAnswered: true, text: /parser-fix shipped PR 42/.test(e.prompt) ? 'parser-fix shipped pr 42. took long enough.' : 'hm.', usage: null } }))
+  on('model.complete', (_: any, e: any) => ({ value: /parser-fix shipped PR 42/.test(JSON.stringify(e)) ? { isAnswered: true, text: 'parser-fix shipped pr 42. took long enough.', usage: null } : { isAnswered: false, text: '', usage: null } }))
   const row = { ts: new Date(60_000).toISOString(), kind: 'node_shipped', node: 'parser-fix', ref: '42', title: 'PR 42' }
   on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify([row]), stderr: '' } }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -154,4 +154,27 @@ test('petting a short sprite puts the hearts above it, not over its head', async
   expect(await ui.find({ type: 'Text', text: /\u2665/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '    __      ' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '♥' })).toBeDefined()
+})
+
+test('a fresh buddy hatches from the egg into the original card', async ($, on) => {
+  const { clock } = boot(on)
+  on('model.complete', (_: any, e: any) => ({ value: { isAnswered: true, text: /personality/i.test(JSON.stringify(e)) ? 'A ghost who haunts flaky tests and gloats when they pass on retry.' : '*drifts in* hello.', usage: null } }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
+  on('session.root', () => ({ value: '/work' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const out = await $.command.run({ command: 'buddy', args: '' })
+  const row = { plugin: 'fno', component: 'CommandOutput', requestId: 'm1', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { command: 'buddy', text: out.text } } as const
+
+  const egg = await $.ui.mount(row)
+  expect(await egg.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeDefined()
+  await egg.unmount()
+
+  // The crack starts on the first redraw after the soul is ready, then plays its frames.
+  await clock.advance(4_000)
+  await (await $.ui.mount(row)).unmount()
+  await clock.advance(2_000)
+  const shown = await $.ui.mount(row)
+  expect(await shown.find({ type: 'Text', text: /^★+ [A-Z]+$/ })).toBeDefined()
+  expect(await shown.find({ type: 'Text', text: /is here · it'll chime in as you code$/ })).toBeDefined()
+  expect(await shown.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeUndefined()
 })

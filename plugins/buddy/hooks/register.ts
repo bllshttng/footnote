@@ -1,8 +1,8 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, embody, hatch, restore } from './companion'
-import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
-import { type FeedRow, cleanPersonality, cleanReaction, idlePrompt, newsFact, newsPrompt, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
+import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, type StatName, embody, hatch, restore } from './companion'
+import { HATCH_FRAMES, HATCH_FRAME_MS, HATCH_MIN_ROUNDS, HATCH_WOBBLE, IDLE_SEQUENCE, PET_HEARTS, RAINBOW, renderFace, renderSprite } from './sprites'
+import { type FeedRow, addressedBy, cleanPersonality, cleanReaction, idlePrompt, lastPrompt, loudReason, type Reason, turnOutput, newsFact, newsPrompt, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
 const BUBBLE_MS = 30_000
@@ -10,8 +10,8 @@ const BUBBLE_MS = 30_000
 // Quiet this long, the buddy says something of its own: one model call, like a reaction.
 const IDLE_TALK_MS = 120_000
 const PET_MS = 2_500
-const MIN_TURN_MS = 5_000
-const REACT_GAP_MS = 10_000
+// The original's gap between ordinary turn reactions.
+const REACT_GAP_MS = 30_000
 const FEED_MS = 120_000
 const FEED_WINDOW_S = 600
 const FLEET_MS = 300_000
@@ -34,6 +34,17 @@ let drawnAt = -Infinity
 let paneDrawnAt = -Infinity
 let paneAsked = false
 let reactedAt = -Infinity
+let recent: string[] = []
+// The /buddy output row draws as the card; a fresh soul's first card plays the hatch first.
+const CARD_MARK = '\u2063'
+const HATCH_MARK = '\u2064'
+type Shown = { c: Companion; last: string; r: Rerolls; hatchAt?: number; crackAt?: number }
+const shown = new Map<string, Shown>()
+let pending: Shown | undefined
+let hatchUntil = -Infinity
+// False while a fresh soul waits for its model-written personality; the hatch holds on the wobble until then.
+let personalityDone = true
+let lastSaid = ''
 let feedSince = 0
 let feedOff = false
 let fleet = ''
@@ -74,7 +85,10 @@ async function load($: EngineInterface, now: number): Promise<void> {
   await $.store.set('soul', soul)
   buddy = embody(soul)
   say(welcome ?? `hi. i'm ${buddy.name}.`, now)
-  if (fresh) void givePersonality($)
+  if (fresh) {
+    personalityDone = false
+    void givePersonality($)
+  }
 }
 
 // An fno release from before the move still loads its own copy of the buddy, which stamps fno's
@@ -134,6 +148,8 @@ async function givePersonality($: EngineInterface): Promise<void> {
     buddy = embody(soul)
   } catch {
     // The placeholder personality stays; the buddy still talks.
+  } finally {
+    if (buddy?.seed === c.seed) personalityDone = true
   }
 }
 
@@ -177,6 +193,54 @@ async function rerolls($: EngineInterface, now: number, shippedAt: number[] = []
   const r = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now), shippedAt)
   await $.store.set('rerolls', r)
   return r
+}
+
+// The original card: rarity and species on top, the sprite, the name, the quoted personality,
+// the stat bars, and the last thing it said.
+function cardTree(ui: any, c: Companion, said: string, r: Rerolls): any {
+  const { Box, Text } = ui
+  const color = RARITY_THEME[c.rarity]
+  const stat = (s: StatName) => {
+    const v = c.stats[s]
+    const n = Math.round(v / 10)
+    return Text({ children: [`${s.padEnd(10)} `, '█'.repeat(n) + '░'.repeat(10 - n) + ' ', Text({ dimColor: true, children: [String(v).padStart(3)] })] })
+  }
+  return Box({
+    flexDirection: 'column',
+    borderStyle: 'round',
+    borderColor: color,
+    paddingX: 2,
+    paddingY: 1,
+    width: 40,
+    flexShrink: 0,
+    children: [
+      Box({ justifyContent: 'space-between', children: [Text({ bold: true, color, children: [`${RARITY_STARS[c.rarity]} ${c.rarity.toUpperCase()}`] }), Text({ color, children: [c.species.toUpperCase()] })] }),
+      ...(c.shiny ? [Text({ color: 'warning', bold: true, children: ['✨ SHINY ✨'] })] : []),
+      Box({ flexDirection: 'column', marginY: 1, children: renderSprite(c, 0).map(l => Text({ color, children: [l] })) }),
+      Text({ bold: true, children: [c.name] }),
+      Box({ marginY: 1, children: [Text({ dimColor: true, italic: true, children: [`"${c.personality}"`] })] }),
+      Box({ flexDirection: 'column', children: STAT_NAMES.map(stat) }),
+      ...(said
+        ? [Box({ flexDirection: 'column', marginTop: 1, children: [Text({ dimColor: true, children: ['last said'] }), Box({ borderStyle: 'round', borderColor: 'inactive', paddingX: 1, children: [Text({ dimColor: true, italic: true, children: [said] })] })] })]
+        : []),
+      Box({ marginTop: 1, children: [Text({ dimColor: true, children: [`rerolls ${r.bank}/${REROLL_BANK}`] })] }),
+    ],
+  })
+}
+
+// What a fresh buddy sees first, as the original read it: the package name and the last commits.
+async function projectContext($: EngineInterface): Promise<string> {
+  const root = await $.session.root().catch(() => '')
+  const parts: string[] = []
+  try {
+    const pkg = JSON.parse(await $.fs.read(`${root}/package.json`))
+    if (pkg.name) parts.push(`project: ${pkg.name}${pkg.description ? ' - ' + pkg.description : ''}`)
+  } catch {
+    // No package.json.
+  }
+  const log = await $.process.run(['git', '-C', root || '.', 'log', '--oneline', '-n', '3'], { timeoutMs: 5_000 }).catch(() => null)
+  if (log?.exitCode === 0 && log.stdout.trim()) parts.push(`recent commits:\n${log.stdout.trim()}`)
+  return parts.join('\n') || '(fresh project, nothing to see yet)'
 }
 
 function rerollLine(r: Rerolls): string {
@@ -282,19 +346,27 @@ async function statuslineOff($: EngineInterface): Promise<{ ok: boolean; text: s
   return { ok: true, text }
 }
 
-async function react($: EngineInterface, why: 'turn' | 'idle' = 'turn'): Promise<void> {
-  if (!buddy) return
-  const summary = summarizeTurn(await $.session.messages())
+// The original observer: one model call per reaction. Loud turns, a mention of the name, a pet,
+// and a hatch skip the quiet gap; an ordinary turn waits it out. The last three lines ride along
+// so the buddy does not repeat itself.
+async function react($: EngineInterface, why: Reason | 'idle' = 'turn', context?: string): Promise<void> {
+  const c = buddy
+  if (!c) return
+  const messages = await $.session.messages()
+  const summary = context ?? summarizeTurn(messages)
   if (why === 'turn' && !summary.trim()) return
   const reply = await $.model.complete({
     model: 'haiku',
-    system: systemPrompt(buddy),
-    prompt: why === 'idle' ? idlePrompt(summary) : reactionPrompt(summary),
-    maxTokens: 80,
+    system: systemPrompt(c),
+    prompt: why === 'idle' ? idlePrompt(summary) : reactionPrompt(summary, why, recent),
+    maxTokens: 100,
     timeoutMs: 20_000,
   })
   const line = reply.isAnswered ? cleanReaction(reply.text) : ''
-  if (line) say(line, await $.clock.now())
+  if (!line || buddy?.seed !== c.seed) return
+  recent = [...recent, line].slice(-3)
+  lastSaid = line
+  say(line, await $.clock.now())
   $.ui.invalidate('ui.render')
 }
 
@@ -468,6 +540,9 @@ export function register(on: On) {
         await writeFrame($, at).catch(() => {})
       } else if (at - drawnAt < SEEN_MS) $.ui.invalidate('ui.render')
     })
+    $.clock.every(HATCH_FRAME_MS, async () => {
+      if ((await $.clock.now()) < hatchUntil) $.ui.invalidate('ui.render')
+    })
     $.clock.every(FEED_MS, async () => readFeed($, await $.clock.now()))
     $.clock.every(FLEET_MS / 5, async () => readFleet($, await $.clock.now()))
     for (const name of COMMANDS) {
@@ -523,27 +598,108 @@ export function register(on: On) {
       const soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
-      say(`hi. i'm ${buddy.name}.`, now)
+      recent = []
+      lastSaid = ''
+      personalityDone = false
       void givePersonality($)
     }
     if (arg === 'pet') {
       pettedAt = now
-      say('♥', now)
+      reactedAt = now
+      react($, 'pet', '(you were just petted)').catch(() => {})
     }
+    const r = await rerolls($, now)
+    const fresh = (await $.store.get('hatchSeen')) !== buddy!.seed
+    if (fresh) {
+      await $.store.set('hatchSeen', buddy!.seed)
+      hatchUntil = now + 20_000
+      // Like the original, the hello comes once the soul is written, so it speaks as itself.
+      void (async () => {
+        for (let i = 0; i < 16 && !personalityDone; i++) await $.clock.sleep(500)
+        await react($, 'hatch', await projectContext($))
+      })().catch(() => {})
+    }
+    pending = { c: buddy!, last: lastSaid, r, ...(fresh ? { hatchAt: now } : {}) }
     $.ui.invalidate('ui.render')
-    return { text: card(buddy!, await rerolls($, now)) }
+    return { text: (fresh ? HATCH_MARK : CARD_MARK) + card(buddy!, r) }
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (buddy && !muted && !e.agentId && !e.isAborted && e.durationMs >= MIN_TURN_MS) {
+    if (buddy && !muted && !e.agentId && !e.isAborted) {
       const now = await $.clock.now()
-      if (now - reactedAt >= REACT_GAP_MS && now - drawnAt < SEEN_MS) {
-        reactedAt = now
-        // Not awaited: the next prompt must not wait on the buddy's model call.
-        react($).catch(() => {})
+      if (now - drawnAt < SEEN_MS) {
+        const messages = await $.session.messages()
+        const why: Reason = addressedBy(lastPrompt(messages), buddy.name) ? 'addressed' : loudReason(turnOutput(messages)) ?? 'turn'
+        if (why !== 'turn' || now - reactedAt >= REACT_GAP_MS) {
+          reactedAt = now
+          // Not awaited: the next prompt must not wait on the buddy's model call.
+          react($, why).catch(() => {})
+        }
       }
     }
     return next(e)
+  })
+
+  // The /buddy row: the card the original drew, or the hatch that leads into it.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    const text = String(e.props.text ?? '')
+    if (!text.startsWith(CARD_MARK) && !text.startsWith(HATCH_MARK)) return next(e)
+    let snap = shown.get(e.requestId)
+    if (!snap) {
+      if (!pending) return next(e)
+      snap = pending
+      pending = undefined
+      shown.set(e.requestId, snap)
+    }
+    const now = await $.clock.now()
+    const ui = $.ui.resolve(e)
+    if (snap.hatchAt === undefined) return cardTree(ui, snap.c, snap.last, snap.r)
+    const tick = Math.floor((now - snap.hatchAt) / HATCH_FRAME_MS)
+    // The soul is ready once the model wrote its personality, or after 8 s without one.
+    const ready = (buddy?.seed === snap.c.seed && personalityDone) || now - snap.hatchAt > 8_000
+    if (snap.crackAt === undefined && ready && tick >= HATCH_MIN_ROUNDS * HATCH_WOBBLE) snap.crackAt = tick
+    const frame = snap.crackAt === undefined ? tick % HATCH_WOBBLE : Math.min(HATCH_WOBBLE + tick - snap.crackAt, HATCH_FRAMES.length)
+    if (frame >= HATCH_FRAMES.length) {
+      const c = buddy?.seed === snap.c.seed ? buddy : snap.c
+      const said = lastSaid || snap.last
+      const { Box, Text } = ui
+      return Box({
+        flexDirection: 'column',
+        children: [
+          cardTree(ui, c, said, snap.r),
+          Box({
+            flexDirection: 'column',
+            marginTop: 1,
+            children: [
+              Text({ dimColor: true, children: [`${c.name} is here · it'll chime in as you code`] }),
+              Text({ dimColor: true, children: ['each line is one small model call on your plan'] }),
+              Text({ dimColor: true, children: ['say its name to get its take · /buddy pet · /buddy off'] }),
+            ],
+          }),
+        ],
+      })
+    }
+    const f = HATCH_FRAMES[frame]!
+    const { Box, Text } = ui
+    return Box({
+      flexDirection: 'column',
+      alignItems: 'center',
+      borderStyle: 'round',
+      borderColor: RAINBOW[tick % RAINBOW.length],
+      paddingY: 1,
+      children: [
+        ...f.lines.map(l => Text({ children: [' '.repeat(1 + f.offset) + l + ' '.repeat(1 - f.offset)] })),
+        Box({
+          flexDirection: 'column',
+          alignItems: 'center',
+          marginTop: 1,
+          children: [
+            Text({ dimColor: true, children: ['hatching a coding buddy…'] }),
+            Text({ dimColor: true, children: ["it'll watch you work and occasionally have opinions"] }),
+          ],
+        }),
+      ],
+    })
   })
 
   // The fallback when the status line is not wrapped: a narrow dock on the right,

@@ -13,7 +13,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## Start
 
 1. Install the plugin: `/plugin install buddy@footnote`. The buddy hatches at the next session start.
-2. Type `/buddy` to see its card.
+2. Type `/buddy` to see its card. The first time, you watch it hatch from an egg.
 3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
 4. If you want the buddy in a side pane, type `/buddy pane`.
 
@@ -21,7 +21,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 - **The sprite.** The buddy is one of 18 species. It has a rarity, eyes, and sometimes a hat. Five stats set its voice: debugging, patience, chaos, wisdom, and snark.
 - **Idle talk.** When nothing happens for 2 minutes, the buddy says something of its own. It is one model call, in its personality, about what the session is doing. The buddy has no canned lines.
-- **A model line.** When a turn of 5 seconds or more ends, one model call reads the last exchange and answers in the voice of the buddy. This call runs at most once each 10 seconds, and only while the buddy is on screen.
+- **Reactions.** After a turn, one model call reads the last exchange and answers in the voice of the buddy. Ordinary turns wait 30 seconds between reactions, as the original did. A turn that says the buddy's name, fails tests, hits an error, or lands a diff over 80 lines gets a reaction at once. Petting and hatching get one too. The last three lines go along, so the buddy does not repeat itself.
 - **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. It says the news in its own voice with one model call. If that call fails, it says the plain fact.
 - **The fno CLI is optional.** Fleet news and fleet counts need the `fno` CLI. Without it, the buddy still talks about your own session.
 - **Fleet counts.** Beside its name, the buddy shows live workers, questions that wait for you, and your open PRs. One read every 5 minutes serves every session.

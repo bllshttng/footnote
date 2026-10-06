@@ -75,7 +75,7 @@ Your personality is defined by 5 stats, each 0-100. These are a SPECTRUM, not on
 You are EXACTLY ${s.DEBUGGING} debugging, ${s.PATIENCE} patience, ${s.CHAOS} chaos, ${s.WISDOM} wisdom, ${s.SNARK} snark. Not rounded. Not averaged. Feel each number.
 
 Rules:
-- One or two punchy sentences. Under 120 characters. No quotes, no emoji.
+- One or two punchy sentences. Under 150 characters. No quotes, no emoji.
 - Reference the actual file, error, feature, or decision you just saw.
 - When the developer chose something in their prompt (an approach, a fix, a shortcut), judge THAT choice. Doubt it, back it, or roast it as your stats decide.
 - When the developer says your name, ${c.name}, they are talking to you. Answer them directly, in character.
@@ -84,7 +84,6 @@ Rules:
 - Good: "*adjusts hat* that error handler has no finally block"
 - Good: "*blinks slowly* you renamed it but not the three references"
 - Good: "*head tilts* are you sure that regex handles unicode?"
-- Lowercase. minimal punctuation.
 - You CAN be helpful if your stats support it. High debugging? Call out real bugs. High wisdom? Note architectural concerns. Low debugging? React to vibes instead.
 - ALWAYS in character. Never clinical. Never neutral. Never a status bar.
 - NEVER summarize what happened ("file edited", "test ran"). React, judge, riff.
@@ -117,19 +116,61 @@ export function summarizeTurn(messages: readonly TurnMessage[]): string {
     .slice(-800)
 }
 
-export function reactionPrompt(summary: string): string {
-  return `What just happened this turn:\n${summary}\n\nYour reaction (one or two punchy sentences, under 120 chars, lowercase, in character):`
+// Why the buddy speaks, as the original observer named it. Each reason changes what it reacts to.
+export type Reason = 'turn' | 'addressed' | 'error' | 'test-fail' | 'large-diff' | 'pet' | 'hatch'
+
+const TEST_FAIL = /\b[1-9]\d* (failed|failing)\b|\btests? failed\b|^FAIL(ED)?\b| ✗ | ✘ /im
+const ERROR = /\berror:|\bexception\b|\btraceback\b|\bpanicked at\b|\bfatal:|exit code [1-9]/i
+
+// A loud turn earns a reaction even inside the quiet gap: failing tests, an error, or a big diff.
+export function loudReason(output: string): Reason | null {
+  if (!output) return null
+  if (TEST_FAIL.test(output)) return 'test-fail'
+  if (ERROR.test(output)) return 'error'
+  if (/^(@@ |diff )/m.test(output) && (output.match(/^[+-](?![+-])/gm)?.length ?? 0) > 80) return 'large-diff'
+  return null
+}
+
+export function addressedBy(text: string, name: string): boolean {
+  return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)
+}
+
+const ASK: Record<Reason, string> = {
+  turn: 'React to what just happened.',
+  addressed: 'The developer said your name. Answer them directly.',
+  error: 'Something just errored. React.',
+  'test-fail': 'Tests just failed. React.',
+  'large-diff': 'A big diff just landed. React.',
+  pet: 'You were just petted. React.',
+  hatch: 'You just hatched into this project. Say hello.',
+}
+
+// The tool output of the newest exchange, where a failing test or an error shows.
+export function turnOutput(messages: readonly TurnMessage[]): string {
+  let start = messages.length - 1
+  while (start > 0 && messages[start]!.role !== 'user') start--
+  return messages.slice(Math.max(0, start)).flatMap(m => (m.toolResults ?? []).map(r => r.text)).join('\n').slice(-4000)
+}
+
+export function lastPrompt(messages: readonly TurnMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.role === 'user') return messages[i]!.text
+  return ''
+}
+
+export function reactionPrompt(context: string, reason: Reason = 'turn', recent: readonly string[] = []): string {
+  const said = recent.length ? `\n\nYou said these lately; do not repeat them:\n${recent.map(r => `- ${r}`).join('\n')}` : ''
+  return `${context}${said}\n\n${ASK[reason]} One or two short sentences, under 150 characters, in character. You may start with an *action in asterisks*.`
 }
 
 export function cleanReaction(raw: string): string {
-  const line = raw.trim().split('\n')[0]!.replace(/^["']|["']$/g, '').trim().toLowerCase()
-  return line.length > 120 ? line.slice(0, 117) + '...' : line
+  const line = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim()
+  return line.length > 150 ? line.slice(0, 147) + '...' : line
 }
 
 // Idle talk is written live, like a reaction: the buddy's own voice on whatever the session is doing.
 export function idlePrompt(summary: string): string {
   const now = summary.trim() ? `The latest exchange:\n${summary}\n\n` : ''
-  return `${now}The developer has gone quiet for a while. Say one thing, in character: a thought about their work, a question, a mood, whatever you would really say. Under 120 chars, lowercase.`
+  return `${now}The developer has gone quiet for a while. Say one thing, in character: a thought about their work, a question, a mood, whatever you would really say. Under 150 characters.`
 }
 
 export type FeedRow = {
@@ -157,5 +198,5 @@ export function newsFact(row: FeedRow): string | null {
 }
 
 export function newsPrompt(facts: string): string {
-  return `News from the developer's other agents: ${facts}. Tell the developer, in character. Keep the names and numbers exact. Under 120 chars, lowercase.`
+  return `News from the developer's other agents: ${facts}. Tell the developer, in character. Keep the names and numbers exact. Under 150 characters.`
 }
