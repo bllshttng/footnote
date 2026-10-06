@@ -286,7 +286,7 @@ fn fence_test_store(path: &Path) -> Result<(), String> {
     if !cfg!(test) {
         return Ok(());
     }
-    if path.ancestors().any(|a| a == std::env::temp_dir()) {
+    if crate::paths::under_temp_dir(path) {
         return Ok(());
     }
     Err(format!(
