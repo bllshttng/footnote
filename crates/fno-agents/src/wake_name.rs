@@ -35,27 +35,14 @@ pub(crate) fn record_at(file: &Path, session_id: &str, name: &str, now: i64) -> 
     if session_id.trim().is_empty() || name.trim().is_empty() {
         return Ok(());
     }
-    // One flock over the read-modify-write: two concurrent stops must not
-    // lose each other's stamp, and the stable sidecar keeps the rename from
-    // invalidating the lock (the rm tombstone's own pattern).
-    let _lock = crate::state::acquire_exclusive(&crate::state::lock_path(file))
-        .map_err(|e| e.to_string())?;
-    let mut entries: Vec<Value> = match std::fs::read_to_string(file) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| Vec::new()),
-        Err(_) => Vec::new(),
-    };
-    entries.retain(|row| row.get("session_id").and_then(Value::as_str) != Some(session_id));
-    entries.push(json!({ "session_id": session_id, "name": name, "at": now }));
-    while entries.len() > CAP {
-        entries.remove(0);
-    }
-    let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(
-        &tmp,
-        serde_json::to_string(&entries).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, file).map_err(|e| e.to_string())
+    crate::rm_tombstone::update_json_array(file, |mut entries| {
+        entries.retain(|row| row.get("session_id").and_then(Value::as_str) != Some(session_id));
+        entries.push(json!({ "session_id": session_id, "name": name, "at": now }));
+        while entries.len() > CAP {
+            entries.remove(0);
+        }
+        entries
+    })
 }
 
 /// The tombstoned name `session_id` held when its row stopped, read from the

@@ -610,7 +610,11 @@ pub fn wake_name_decide(ask: &Value) -> Value {
     let home = crate::paths::AgentsHome::from_env();
     let registry_path = home.registry_json();
     let name = crate::state::load_registry(&registry_path)
+        .ok()
         .map(|registry| crate::reentry::wake_spawn_name(&registry, &registry_path, session_id))
+        // An unreadable registry degrades through the tombstone before the
+        // alias: a stamped name is the better answer at every rung.
+        .or_else(|| crate::wake_name::lookup_beside(&registry_path, session_id))
         .unwrap_or(alias);
     serde_json::json!({ "name": name })
 }

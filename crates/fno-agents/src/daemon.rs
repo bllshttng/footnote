@@ -44,7 +44,7 @@ pub(crate) mod store_socket_sweep;
 pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
-use self::claude_stop::{end_survivors, stop_claude};
+use self::claude_stop::stop_claude;
 use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
